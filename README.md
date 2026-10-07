@@ -214,6 +214,10 @@ Kinds, rules, guidance, modes and `immutable` work as in the fleet profile. Key 
 
 Under the simple profile, commands name a key by its name alone: `status` and `fly plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
 
+One caveat for `run` under the simple profile: it hands `op run` references of the form `op://<vault>/<item>/KEY`, and `op` matches a field with that label in *any* section. Keep simple-profile keys only as unsectioned fields: a sectioned field with the same label can be picked up by `run` while `status` reports the key missing, and having both can make `op` report the reference as ambiguous.
+
+Changed in v0.2 for fleet files: `run` without `--product` is now an opv configuration error (still exit 2) rather than a usage error, and a bad `profile.kind` names both supported profiles.
+
 ## Workflow
 
 Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config`, the path is used exactly as given and no search is done. `<ENV>` is an environment name from the file.

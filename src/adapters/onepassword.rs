@@ -42,7 +42,7 @@ use serde::de::{self, Deserializer, Visitor};
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT};
+use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT, key_label};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
@@ -652,11 +652,15 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
     for (s, l, _) in missing {
         if existing.contains(&(s.clone(), l.clone())) {
             return Err(Error::Source(format!(
-                "skeleton: {s}/{l} already exists in the item; not modified"
+                "skeleton: {} already exists in the item; not modified",
+                key_label(s, l)
             )));
         }
-        if !listed.insert((s, l)) {
-            return Err(Error::Source(format!("skeleton: {s}/{l} listed twice")));
+        if !listed.insert((s.clone(), l.clone())) {
+            return Err(Error::Source(format!(
+                "skeleton: {} listed twice",
+                key_label(s, l)
+            )));
         }
     }
 
