@@ -86,7 +86,7 @@ export -p > "$p.env"
 printf '%s %s\n' "$FAKE_CHILD_STDERR" "$FAKE_STDERR_VALUE" >&2
 case "$1 $2" in
   "version "*) echo "flyctl v0.4.112 linux/amd64 Commit: fake"; exit 0 ;;
-  "auth whoami") echo "fake@example.invalid"; exit 0 ;;
+  "auth whoami") echo "S7MARKERVALUEfly@example.invalid"; exit "${FAKE_FLY_AUTH_EXIT:-0}" ;;
   "secrets list")
     l=0
     [ -f "$FAKE_REC/.lists" ] && read l < "$FAKE_REC/.lists"
@@ -626,13 +626,15 @@ fn failure_after_partial_plan_stages_nothing() {
         "{}",
         r.stderr
     );
-    // I6: a value-free command to re-run by hand (child stderr is discarded).
+    // FR-26: logged in (auth whoami succeeds), so the app is named with the token check;
+    // never "to see why" (child stderr is discarded).
     assert!(
         r.stderr
-            .contains(&format!("run `flyctl secrets list --app {APP}` to see why")),
+            .contains(&format!("check that this Fly token can access app {APP}")),
         "{}",
         r.stderr
     );
+    assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
     for sub in ["import", "unset", "deploy"] {
         assert_eq!(h.fly_calls(sub), 0, "{sub} after a failed list");
     }
@@ -846,6 +848,46 @@ fn clean_status_prints_summary_line() {
         r.stdout
     );
     assert_clean_output(&["status", "prod"], &r);
+}
+
+/// FR-26: a failed flyctl call while logged out of Fly is authentication (7) with
+/// `flyctl auth login`; under CI, "set FLY_API_TOKEN". The account named by
+/// `flyctl auth whoami` never appears, and nothing says "to see why".
+#[test]
+fn fly_logged_out_is_auth_with_next_step() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_FLY_AUTH_EXIT", "1");
+    for cmd in [
+        &["status", "prod"][..],
+        &["fly", "plan", "prod"],
+        &["fly", "sync", "prod"],
+    ] {
+        h.reset();
+        let r = h.run(cmd);
+        assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
+        assert!(
+            r.stderr
+                .starts_with("opv: authentication error: not logged in to Fly"),
+            "{cmd:?}: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("\n  log in: flyctl auth login\n"),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
+        assert_clean_output(cmd, &r);
+        assert_eq!(h.fly_calls("import"), 0);
+    }
+    h.set("CI", "true");
+    h.reset();
+    let r = h.run(&["fly", "sync", "prod"]);
+    assert_eq!(r.code, 7, "{}", r.all());
+    assert!(r.stderr.contains("set FLY_API_TOKEN"), "{}", r.stderr);
+    assert!(!r.stderr.contains("auth login"), "{}", r.stderr);
+    assert_clean_output(&["fly", "sync", "prod"], &r);
 }
 
 /// FR-10: stable exit codes per category, observed from the real binary (src/error.rs).

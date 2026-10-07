@@ -98,7 +98,7 @@ pub fn run_with(
     match fly_envs {
         Some((true, without)) => {
             line(out, "flyctl", flyctl_version(r, host))?;
-            line(out, "fly auth", fly_auth(r).map(Check::Ok))?;
+            line(out, "fly auth", fly_auth(r, host).map(Check::Ok))?;
             if !without.is_empty() {
                 writeln!(
                     out,
@@ -227,19 +227,23 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-/// `flyctl auth whoami`: exit status only. Its stdout names the account (an email), so it
-/// is dropped unread (zeroized with the `Output`).
-fn fly_auth(r: &dyn CommandRunner) -> Result<String, Error> {
-    let o = spawn(r, fly::PROGRAM, &["auth", "whoami"])?;
-    if o.status != 0 {
-        return Err(Error::Auth(format!(
-            "{} auth whoami failed (exit {}): not signed in to Fly (set FLY_API_TOKEN or run \
-             `flyctl auth login`)",
+/// `flyctl auth whoami`: exit status only, via the same check a failed flyctl call uses
+/// (FR-26). Its stdout names the account (an email), so it is dropped unread.
+fn fly_auth(r: &dyn CommandRunner, host: &Host) -> Result<String, Error> {
+    match fly::auth_whoami(r) {
+        Ok(true) => Ok("signed in".into()),
+        Ok(false) => Err(fly::not_logged_in(host, None)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
+            "{} not found on PATH\n  {}",
             fly::PROGRAM,
-            o.status
-        )));
+            host.install_hint(Tool::Flyctl)
+        ))),
+        Err(e) => Err(Error::Dependency(format!(
+            "failed to run {} ({})",
+            fly::PROGRAM,
+            e.kind()
+        ))),
     }
-    Ok("signed in".into())
 }
 
 /// The first whitespace-separated token that looks like a version (`2.40.0`, `v0.4.112`),

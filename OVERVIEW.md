@@ -436,6 +436,8 @@ Acceptance:
 
 Constraints kept: SR-1, SR-2, FR-9 (text, never a prompt), FR-10 (stable exit categories), FR-13.
 
+Limitation (v0.1.2): an `op` timeout and `opv run` (which passes the child's exit code through, FR-4) are not diagnosed.
+
 ---
 
 # 4. Security Requirements
