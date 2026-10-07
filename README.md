@@ -171,7 +171,7 @@ Nothing is deleted by default. `--prune` unsets only names that the template pro
 
 Rules go in a key's `rules = { ... }` table. A failure names the key and the rule, never the value.
 
-Always on, for every key: `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_surrounding_space`; `max_len` (59,000 bytes).
+Always on, for every key (after a `pem_private_key` transform, see below): `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_surrounding_space`; `max_len` (59,000 bytes).
 
 | Rule | Meaning |
 |---|---|
@@ -186,6 +186,7 @@ Always on, for every key: `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
 | `transform = "signoz_ingestion_header"` | accepts a bare SigNoz ingestion key or one already prefixed `signoz-ingestion-key=`, and stages it as `signoz-ingestion-key=<key>` |
+| `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 Fly import refusals are checked for every ready secret by `status` and `fly plan` as well as `fly sync`, so a green status means sync will not refuse the value:
 
