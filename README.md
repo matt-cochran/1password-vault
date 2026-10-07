@@ -38,6 +38,15 @@ cargo install --git https://github.com/matt-cochran/1password-vault --locked
 
 The minimum supported Rust version is 1.88.
 
+### npm
+
+```sh
+npm i -g opv
+npx opv --version
+```
+
+The npm package ships from v0.1.1. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
+
 Homebrew and crates.io packages arrive in v0.1.1.
 
 ## Verify a download
