@@ -1,5 +1,5 @@
 {
-  "name": "opv",
+  "name": "@matthew-cochran/opv",
   "version": "0.0.0",
   "description": "Sync secrets from 1Password to runtime targets (Fly.io) without ever printing, logging or writing secret values",
   "license": "MIT",
