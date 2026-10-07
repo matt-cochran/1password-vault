@@ -1,50 +1,255 @@
 //! Fly.io adapter wrapping `flyctl` (S4; FR-6, FR-7, FR-8, SR-1, SR-3, SR-4, §6.4).
 //!
-//! STUB: tests first; implementation follows in the next commit.
+//! Four operations, each exactly one `flyctl` call (none when there is nothing to do):
+//!
+//! | fn | argv |
+//! |---|---|
+//! | [`list`] | `secrets list --app <app> --json` |
+//! | [`stage`] | `secrets import --app <app> --stage` (values on stdin) |
+//! | [`unset_staged`] | `secrets unset <names...> --app <app> --stage` |
+//! | [`deploy`] | `secrets deploy --app <app>` |
+//!
+//! Fly digests are not computable locally (D0, `docs/spike-d0-findings.md` Q4), so change
+//! detection is stage-and-compare (P1, §6.4): S6 calls `list` (A), `stage`, `list` (B) and
+//! compares digests by name. `status` is deliberately ignored.
+//!
+//! # Stdin encoding (SR-3, SR-4)
+//!
+//! Values travel only on stdin, never in argv, env or files. Each value is one line
+//! `NAME="""VALUE"""\n`. Per flyctl v0.4.112 `parser.go` (findings "Follow-up 2a") the
+//! triple-quoted form stores VALUE byte-for-byte when VALUE has no newline and, if it
+//! contains `#`, an even number of `"` before its first `#`. Everything else that could be
+//! mangled is refused up front, for the whole batch, before any call ([`validate_import`]).
+//! The test module carries a Rust port of that parser and proves the round trip.
+//!
+//! # Errors (FR-10, SR-1)
+//!
+//! - `flyctl` missing from PATH: [`Error::Dependency`].
+//! - Any other spawn failure, a non-zero exit, or unparseable list JSON: [`Error::Target`]
+//!   with `"<subcommand> failed (exit N)"` or similar.
+//! - A refused value or name: [`Error::Policy`] naming the key and the rule, never the value.
+//!
+//! Child stderr is never captured or echoed (the runner discards it). flyctl exits 1 for
+//! every error, auth included, and gives no other value-free signal, so this adapter never
+//! returns [`Error::Auth`]: guessing would be nondeterministic. Auth problems surface as
+//! `Target` here; `doctor` is the place to diagnose them explicitly.
 
+use std::collections::BTreeSet;
+use std::io;
+
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::domain::SecretValue;
 use crate::domain::plan::FlySecret;
 use crate::error::Error;
-use crate::runner::CommandRunner;
+use crate::runner::{CommandRunner, Output};
 
 /// The Fly CLI binary.
 pub const PROGRAM: &str = "flyctl";
 
 /// Longest encoded stdin line (`NAME="""VALUE"""`, excluding the newline) we will send.
+///
+/// flyctl's `bufio.Scanner` silently drops everything from a line of 64 KiB onwards and
+/// still reports success, which digests could not reveal; 60 000 leaves a safe margin.
 pub const MAX_IMPORT_LINE: usize = 60_000;
 
-pub fn list(_r: &dyn CommandRunner, _app: &str) -> Result<Vec<FlySecret>, Error> {
-    todo!()
+const TRIPLE_QUOTE: &[u8] = b"\"\"\"";
+
+/// One `secrets list --json` entry. Unknown fields (`status`, future ones) are ignored.
+#[derive(Deserialize)]
+struct ListEntry {
+    name: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
+/// Every secret on `app` with its digest: one `flyctl secrets list --app <app> --json` call.
+pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
+    const WHAT: &str = "fly secrets list";
+    let out = run(r, WHAT, &["secrets", "list", "--app", app, "--json"], None)?;
+    // serde_json messages can quote input fragments, so report only the position.
+    let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
+        Error::Target(format!(
+            "{WHAT} returned unexpected JSON (line {}, column {})",
+            e.line(),
+            e.column()
+        ))
+    })?;
+    Ok(entries
+        .into_iter()
+        .map(|e| FlySecret {
+            name: e.name,
+            digest: e.digest,
+        })
+        .collect())
+}
+
+/// Stage every `(fly name, value)` with one `flyctl secrets import --app <app> --stage`
+/// call, values on stdin only. The whole batch is validated first; on any refusal nothing
+/// is staged. An empty batch makes no call.
 pub fn stage(
-    _r: &dyn CommandRunner,
-    _app: &str,
-    _values: &[(String, &SecretValue)],
+    r: &dyn CommandRunner,
+    app: &str,
+    values: &[(String, &SecretValue)],
 ) -> Result<(), Error> {
-    todo!()
+    if values.is_empty() {
+        return Ok(());
+    }
+    let input = encode_import(values)?;
+    run(
+        r,
+        "fly secrets import",
+        &["secrets", "import", "--app", app, "--stage"],
+        Some(&input),
+    )?;
+    Ok(())
 }
 
-pub fn unset_staged(_r: &dyn CommandRunner, _app: &str, _names: &[String]) -> Result<(), Error> {
-    todo!()
+/// Remove `names` from `app` as a staged change: one
+/// `flyctl secrets unset <names...> --app <app> --stage` call. Names are not secret, so
+/// they go in argv; each must be a valid Fly name (so none can be read as a flag). An
+/// empty list makes no call. Callers decide what may be pruned (FR-8).
+pub fn unset_staged(r: &dyn CommandRunner, app: &str, names: &[String]) -> Result<(), Error> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    if let Some(bad) = names.iter().find(|n| !valid_name(n)) {
+        return Err(refused(bad, "fly-name-invalid", "unset"));
+    }
+    let mut args = vec!["secrets", "unset"];
+    args.extend(names.iter().map(String::as_str));
+    args.extend(["--app", app, "--stage"]);
+    run(r, "fly secrets unset", &args, None)?;
+    Ok(())
 }
 
-pub fn deploy(_r: &dyn CommandRunner, _app: &str) -> Result<(), Error> {
-    todo!()
+/// Deploy staged secrets: one `flyctl secrets deploy --app <app>` call (FR-7; S6 calls it
+/// only with `--deploy`). On an app with no machines flyctl exits 1 (D0), which maps to
+/// `Error::Target("fly secrets deploy failed (exit 1)")`.
+pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
+    run(
+        r,
+        "fly secrets deploy",
+        &["secrets", "deploy", "--app", app],
+        None,
+    )?;
+    Ok(())
 }
 
-pub fn validate_import(_values: &[(String, &SecretValue)]) -> Result<(), Error> {
-    todo!()
+/// Check a batch against every import rule without running anything; S6 may call this
+/// before reading Fly so a bad value fails fast. Rules, checked per entry in order:
+///
+/// - `fly-name-invalid`: the name does not match `^[A-Z][A-Z0-9_]*$`;
+/// - `import-duplicate-name`: the name occurs twice in the batch;
+/// - `import-invalid-utf8`, `import-newline`, `import-hash-after-odd-quotes`: see
+///   [`import_refusal`];
+/// - `import-line-too-long`: the encoded line exceeds [`MAX_IMPORT_LINE`] bytes.
+pub fn validate_import(values: &[(String, &SecretValue)]) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    for (name, value) in values {
+        if !valid_name(name) {
+            return Err(refused(name, "fly-name-invalid", "import"));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(refused(name, "import-duplicate-name", "import"));
+        }
+        let v = value.expose().as_bytes();
+        if let Some(rule) = import_refusal(v) {
+            return Err(refused(name, rule, "import"));
+        }
+        if encoded_len(name, v) > MAX_IMPORT_LINE {
+            return Err(refused(name, "import-line-too-long", "import"));
+        }
+    }
+    Ok(())
 }
 
-pub fn import_refusal(_value: &[u8]) -> Option<&'static str> {
-    todo!()
+/// The first value rule `value` breaks, or `None` if flyctl stores it unchanged in the
+/// `NAME="""VALUE"""` form:
+///
+/// - `import-invalid-utf8`: flyctl sends values as JSON and Go replaces invalid bytes with
+///   U+FFFD. (A [`SecretValue`] is always UTF-8; the rule exists for byte callers.)
+/// - `import-newline`: contains `\n` or `\r`. Multiline values are out of scope (v0.1).
+/// - `import-hash-after-odd-quotes`: contains `#` with an odd number of `"` before the
+///   first one; flyctl would cut the value there (parser.go L37-40, where our leading `"""`
+///   makes the count even).
+pub fn import_refusal(value: &[u8]) -> Option<&'static str> {
+    if std::str::from_utf8(value).is_err() {
+        return Some("import-invalid-utf8");
+    }
+    if value.iter().any(|&b| b == b'\n' || b == b'\r') {
+        return Some("import-newline");
+    }
+    if let Some(i) = value.iter().position(|&b| b == b'#')
+        && value[..i].iter().filter(|&&b| b == b'"').count() % 2 == 1
+    {
+        return Some("import-hash-after-odd-quotes");
+    }
+    None
 }
 
-pub fn encode_import(_values: &[(String, &SecretValue)]) -> Result<Zeroizing<Vec<u8>>, Error> {
-    todo!()
+/// Validate (see [`validate_import`]) and encode the batch as flyctl import stdin, one
+/// `NAME="""VALUE"""\n` line per entry. The buffer is zeroized on drop and allocated once
+/// at its final size, so no reallocation leaves an unzeroized copy behind (SR-8).
+pub fn encode_import(values: &[(String, &SecretValue)]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    validate_import(values)?;
+    let total: usize = values
+        .iter()
+        .map(|(n, v)| encoded_len(n, v.expose().as_bytes()) + 1)
+        .sum();
+    let mut buf = Zeroizing::new(Vec::with_capacity(total));
+    for (name, value) in values {
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(b'=');
+        buf.extend_from_slice(TRIPLE_QUOTE);
+        buf.extend_from_slice(value.expose().as_bytes());
+        buf.extend_from_slice(TRIPLE_QUOTE);
+        buf.push(b'\n');
+    }
+    debug_assert_eq!(buf.len(), total);
+    Ok(buf)
+}
+
+/// Length of `NAME="""VALUE"""` without the newline.
+fn encoded_len(name: &str, value: &[u8]) -> usize {
+    name.len() + 1 + 2 * TRIPLE_QUOTE.len() + value.len()
+}
+
+/// `^[A-Z][A-Z0-9_]*$`, the Fly names secretctl renders (S1 validates the template).
+fn valid_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z'))
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A refusal names the key and the rule, never the value (FR-15, SR-1).
+fn refused(name: &str, rule: &str, op: &str) -> Error {
+    Error::Policy(format!(
+        "fly {op} refused for {name:?}: rule {rule}; nothing was sent to Fly"
+    ))
+}
+
+/// Run one flyctl subcommand and map failures to typed, value-free errors.
+fn run(
+    r: &dyn CommandRunner,
+    what: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<Output, Error> {
+    let out = r
+        .run(PROGRAM, args, stdin, &[])
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => Error::Dependency(format!("{PROGRAM} not found on PATH")),
+            kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
+        })?;
+    if out.status != 0 {
+        return Err(Error::Target(format!(
+            "{what} failed (exit {})",
+            out.status
+        )));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
