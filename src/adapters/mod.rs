@@ -2,3 +2,5 @@
 
 pub mod fly;
 pub mod onepassword;
+/// Dev-time title lookup and value-free item read, for `opv init` only (FR-23).
+pub(crate) mod onepassword_init;

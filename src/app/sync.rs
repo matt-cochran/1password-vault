@@ -15,11 +15,14 @@ use std::io::Write;
 
 use super::{
     is_blocking, managed_names, print_extras, print_rows, read_and_plan, row_names,
-    unmanaged_on_fly, write_err,
+    unmanaged_on_fly, write_err, write_json,
 };
 use crate::adapters::fly;
 use crate::domain::rules;
-use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan, TargetState};
+use crate::domain::{
+    Fleet, FlySecret, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, SyncPlan, TargetState,
+    key_label,
+};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -30,9 +33,11 @@ pub struct SyncOpts {
     pub deploy: bool,
     /// Unset managed names not desired in this environment (FR-8). Never implied.
     pub prune: bool,
-    /// `PRODUCT/KEY` entries: immutable keys to stage even though present on Fly (FR-16).
+    /// `PRODUCT/KEY` entries (`KEY` under the simple profile, FR-20): immutable keys to
+    /// stage even though present on Fly (FR-16).
     pub rotate: Vec<String>,
-    /// `PRODUCT/KEY` entries: immutable keys `--prune` may unset (FR-8, FR-16). Without an
+    /// `PRODUCT/KEY` entries (`KEY` under the simple profile): immutable keys `--prune` may
+    /// unset (FR-8, FR-16). Without an
     /// entry an immutable key is never pruned. Requires `prune`.
     pub prune_immutable: Vec<String>,
 }
@@ -106,7 +111,8 @@ pub fn run(
         p(
             out,
             format!(
-                "held (immutable), not pruned (pass --prune --prune-immutable PRODUCT/KEY to unset): {}",
+                "held (immutable), not pruned (pass --prune --prune-immutable {} to unset): {}",
+                key_ref_hint(fleet),
                 held_from_prune(&plan)
             ),
         )?;
@@ -163,16 +169,37 @@ pub fn plan(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    plan_with(fleet, env_name, r, out, false)
+}
+
+/// `fly plan <env> [--json]`. With `json`, stdout carries one FR-21 document and no table
+/// or counts; exit codes are unchanged (`Findings(n)` for blocking rows).
+pub fn plan_with(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
     fleet.fly_target(env_name)?;
     let none = BTreeSet::new();
     let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
+    if json {
+        write_json(out, fleet, env_name, &plan)?;
+        let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+        return if n > 0 {
+            Err(Error::Findings(n))
+        } else {
+            Ok(())
+        };
+    }
     let held: BTreeSet<(&str, &str)> = plan
         .held_immutable
         .iter()
         .map(|(p, k)| (p.as_str(), k.as_str()))
         .collect();
-    print_rows(out, &plan.rows, |row| {
+    print_rows(out, fleet, &plan.rows, |row| {
         plan_target(
             row,
             held.contains(&(row.product.as_str(), row.key.as_str())),
@@ -183,9 +210,10 @@ pub fn plan(
         writeln!(out, "to prune (with --prune): {n}").map_err(write_err)?;
     }
     for (product, key, n) in &plan.held_from_prune {
+        let label = key_label(product, key);
         writeln!(
             out,
-            "held (immutable), not pruned: {product}/{key} ({n}); unset only with --prune --prune-immutable {product}/{key}"
+            "held (immutable), not pruned: {label} ({n}); unset only with --prune --prune-immutable {label}"
         )
         .map_err(write_err)?;
     }
@@ -214,7 +242,7 @@ fn print_counts(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
 /// Target column of `fly plan`. Keys present on Fly cannot be compared locally, so a
 /// desired key there is "potentially changed" (FR-5, P1).
 fn plan_target(r: &Row, held: bool) -> String {
-    match (r.kind, r.target, r.state) {
+    match (r.kind, r.target, &r.state) {
         (Kind::Config, _, _) => "-",
         (Kind::Secret, TargetState::Absent, KeyState::Ready) => "absent (new)",
         (Kind::Secret, TargetState::Absent, _) => "absent",
@@ -226,11 +254,12 @@ fn plan_target(r: &Row, held: bool) -> String {
     .to_string()
 }
 
-/// `product/KEY (FLY_NAME)` for every immutable key held back from pruning.
+/// `product/KEY (FLY_NAME)` (`KEY (FLY_NAME)` under the simple profile) for every
+/// immutable key held back from pruning.
 fn held_from_prune(plan: &SyncPlan) -> String {
     plan.held_from_prune
         .iter()
-        .map(|(p, k, n)| format!("{p}/{k} ({n})"))
+        .map(|(p, k, n)| format!("{} ({n})", key_label(p, k)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -239,6 +268,35 @@ fn digest<'a>(list: &'a [FlySecret], name: &str) -> Option<&'a str> {
     list.iter()
         .find(|s| s.name == name)
         .and_then(|s| s.digest.as_deref())
+}
+
+/// `PRODUCT/KEY` under the fleet profile; `KEY` alone under the simple profile (FR-20),
+/// whose implicit product is [`SIMPLE_PRODUCT`]. `None` when the entry has the wrong shape.
+fn split_key_ref<'a>(fleet: &Fleet, entry: &'a str) -> Option<(&'a str, &'a str)> {
+    if fleet.is_simple() {
+        return (!entry.is_empty() && !entry.contains('/')).then_some((SIMPLE_PRODUCT, entry));
+    }
+    entry
+        .split_once('/')
+        .filter(|(p, k)| !p.is_empty() && !k.is_empty())
+}
+
+/// The expected shape of a `--rotate` / `--prune-immutable` entry, for errors.
+fn expected(fleet: &Fleet) -> String {
+    if fleet.is_simple() {
+        "expected KEY (the simple profile has no products)".into()
+    } else {
+        "expected PRODUCT/KEY".into()
+    }
+}
+
+/// The argument placeholder for `--prune-immutable` in hints.
+fn key_ref_hint(fleet: &Fleet) -> &'static str {
+    if fleet.is_simple() {
+        "KEY"
+    } else {
+        "PRODUCT/KEY"
+    }
 }
 
 /// Validate every `--rotate PRODUCT/KEY` before any call (FR-16): it must name a declared,
@@ -252,10 +310,7 @@ fn parse_rotate(
     let mut set = BTreeSet::new();
     for e in entries {
         let bad = |why: String| Error::Config(format!("--rotate {e:?}: {why}"));
-        let (product, key) = e
-            .split_once('/')
-            .filter(|(p, k)| !p.is_empty() && !k.is_empty())
-            .ok_or_else(|| bad("expected PRODUCT/KEY".into()))?;
+        let (product, key) = split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)))?;
         let spec = fleet
             .products
             .get(product)
@@ -293,10 +348,7 @@ fn parse_prune_immutable(
     let mut set = BTreeSet::new();
     for e in &opts.prune_immutable {
         let bad = |why: String| Error::Config(format!("--prune-immutable {e:?}: {why}"));
-        let (product, key) = e
-            .split_once('/')
-            .filter(|(p, k)| !p.is_empty() && !k.is_empty())
-            .ok_or_else(|| bad("expected PRODUCT/KEY".into()))?;
+        let (product, key) = split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)))?;
         let spec = fleet
             .products
             .get(product)
@@ -449,7 +501,7 @@ mod tests {
         assert_eq!(e.exit_code(), 6);
         assert!(
             e.to_string()
-                .contains("allumata/OPENAI_API_KEY (fails rule import-hash-after-odd-quotes)"),
+                .contains("allumata/OPENAI_API_KEY (failed import-hash-after-odd-quotes ("),
             "{e}"
         );
         assert_no_values(&e.to_string());
@@ -941,7 +993,7 @@ mod tests {
         assert!(matches!(e, Error::Findings(1)), "{e}");
         assert!(
             out.lines()
-                .any(|l| l.contains("SMTP_PASS") && l.contains("fails rule refuse_in")),
+                .any(|l| l.contains("SMTP_PASS") && l.contains("failed refuse_in (")),
             "{out}"
         );
         assert_no_values(&out);
@@ -951,7 +1003,7 @@ mod tests {
         assert!(matches!(e, Error::Policy(_)), "{e}");
         assert!(
             e.to_string()
-                .contains("allumata/SMTP_PASS (fails rule refuse_in)"),
+                .contains("allumata/SMTP_PASS (failed refuse_in ("),
             "{e}"
         );
         assert_no_values(&e.to_string());
@@ -985,7 +1037,7 @@ mod tests {
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
-                && l.contains("fails rule import-hash-after-odd-quotes")),
+                && l.contains("failed import-hash-after-odd-quotes (")),
             "{out}"
         );
         assert_no_values(&out);
@@ -1110,7 +1162,7 @@ mod tests {
         let (res, out) = plan_out(&r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Findings(1)), "{e}");
-        assert!(out.contains("fails rule not_prefix"), "{out}");
+        assert!(out.contains("failed not_prefix ("), "{out}");
         assert_no_values(&out);
         assert_no_values(&e.to_string());
     }

@@ -1,7 +1,11 @@
 //! Declarative rules engine (FR-14, FR-15). Generic: no product-specific code.
 //!
-//! `RuleFailure` names the key and the rule, never the value. Values are read with
-//! `expose()` only inside `check`; nothing value-bearing is formatted or retained.
+//! `RuleFailure` names the key, the rule and a [`Reason`], never the value. Values are read
+//! with `expose()` only inside `check`; nothing value-bearing is formatted or retained.
+//!
+//! FR-22: every reason comes from its rule's closed set below. A reason is a compile-time
+//! constant or is built only from configuration (a configured prefix, a mode, a byte count),
+//! never from the value: no length, position, character, actual prefix or label read from it.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -17,18 +21,118 @@ use crate::domain::secret::SecretValue;
 /// value ≤ 60 000 bytes) so a value that passes the rules also fits on an import line.
 pub const MAX_LEN: usize = 59_000;
 
-/// A failed rule. Holds the key and rule name only (FR-15).
+/// A failed rule. Holds the key, the rule name and why, never the value (FR-15, FR-22).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleFailure {
     pub key: String,
     pub rule: &'static str,
+    pub reason: Reason,
 }
 
 impl fmt::Display for RuleFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: failed {}", self.key, self.rule)
+        write!(f, "{}: failed {} ({})", self.key, self.rule, self.reason)
     }
 }
+
+/// Why a rule failed (FR-22). The rule name stays the stable identifier; a reason may be
+/// added or reworded in a minor release.
+///
+/// Closed by construction: [`Reason::Fixed`] holds only `&'static str` constants (the
+/// `REASON_*` and `PEM_*` constants below and the Fly import reasons), and every other
+/// variant carries only text or numbers taken from the configuration. Nothing here is ever
+/// built from a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// One constant from the rule's fixed set.
+    Fixed(&'static str),
+    /// `prefix`: the configured prefix the value does not start with.
+    ExpectedPrefix(String),
+    /// `prefix_by_mode`: the environment's mode value (from config) whose prefixes the
+    /// value does not start with.
+    WrongPrefixForMode(String),
+    /// `prefix_by_mode`: the configured mode name is not set (for the product, under the
+    /// fleet profile) in this environment. Worded to read under both profiles (FR-20).
+    ModeNotSet(String),
+    /// `prefix_by_mode`: the configured mode value has no prefix and is not skipped.
+    ModeUnmapped(String),
+    /// `base64_bytes` / `hex_bytes`: decodes, but not to the configured byte count.
+    NotBytes(usize),
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Reason::Fixed(s) => f.write_str(s),
+            Reason::ExpectedPrefix(p) => write!(f, "expected prefix {p}"),
+            Reason::WrongPrefixForMode(m) => write!(f, "wrong prefix for mode {m}"),
+            Reason::ModeNotSet(m) => write!(f, "mode {m} is not set in this environment"),
+            Reason::ModeUnmapped(m) => write!(f, "no prefix is configured for mode {m}"),
+            Reason::NotBytes(n) => write!(f, "does not decode to {n} bytes"),
+        }
+    }
+}
+
+/// `refuse_in`.
+pub const REASON_REFUSED: &str = "must not be set in this environment";
+/// `nonempty`.
+pub const REASON_EMPTY: &str = "empty";
+/// `single_line`.
+pub const REASON_MULTILINE: &str = "contains a line break or NUL";
+/// `no_surrounding_space`.
+pub const REASON_SURROUNDING_SPACE: &str = "leading or trailing whitespace";
+/// `max_len` (the limit is [`MAX_LEN`]; a unit test keeps the two in step).
+pub const REASON_TOO_LONG: &str = "longer than the 59000-byte limit";
+/// `not_prefix`. Never names which refused prefix matched: that would be the actual prefix.
+pub const REASON_REFUSED_PREFIX: &str = "starts with a refused prefix";
+/// `prefix_by_mode` and `regex`/`pattern` when the configured pattern does not compile.
+pub const REASON_BAD_PATTERN: &str = "configured pattern does not compile";
+/// `regex`.
+pub const REASON_NO_REGEX_MATCH: &str = "does not match the configured regex";
+/// `enum`.
+pub const REASON_NOT_ALLOWED: &str = "not one of the allowed values";
+/// `base64_bytes`.
+pub const REASON_NOT_BASE64: &str = "not standard base64";
+/// `hex_bytes`.
+pub const REASON_NOT_HEX: &str = "not hex";
+/// `email_list`.
+pub const REASON_NOT_EMAIL_LIST: &str = "not a comma-separated list of email addresses";
+/// `https_url`.
+pub const REASON_NOT_HTTPS: &str = "not an https:// URL";
+/// `https_url`.
+pub const REASON_URL_WHITESPACE: &str = "URL contains whitespace";
+/// `ensure_prefix`, and the deprecated SigNoz alias (rule `transform`).
+pub const REASON_NOTHING_AFTER_PREFIX: &str = "nothing after the prefix";
+/// `pattern`, and the deprecated SigNoz alias (rule `transform`).
+pub const REASON_NO_PATTERN_MATCH: &str = "text after the prefix does not match the pattern";
+/// `transform` with a name this version does not know.
+pub const REASON_UNKNOWN_TRANSFORM: &str = "unknown transform";
+
+/// `pem_private_key` (rule `transform`): no `-----BEGIN ...-----` / `-----END ...-----`.
+pub const PEM_NO_MARKERS: &str = "no BEGIN/END markers";
+/// `pem_private_key`: the END label is not the BEGIN label.
+pub const PEM_LABELS_DIFFER: &str = "BEGIN/END labels differ";
+/// `pem_private_key`: the label does not end in `PRIVATE KEY` (or is not upper case).
+pub const PEM_NOT_PRIVATE_KEY: &str = "not a private key";
+/// `pem_private_key`: `ENCRYPTED PRIVATE KEY`, or a `Proc-Type:` header.
+pub const PEM_ENCRYPTED: &str = "encrypted key";
+/// `pem_private_key`: another `-----` marker inside the block.
+pub const PEM_MORE_THAN_ONE_BLOCK: &str = "more than one PEM block";
+/// `pem_private_key`: the body does not decode as standard base64.
+pub const PEM_BODY_NOT_BASE64: &str = "body is not base64";
+/// `pem_private_key`: the body does not decode to a DER SEQUENCE.
+pub const PEM_NOT_KEY_STRUCTURE: &str = "not a key structure";
+
+/// The seven `pem_private_key` reasons (FR-22), in the order `pem_private_key` checks them.
+pub const PEM_REASONS: [&str; 7] = [
+    PEM_NO_MARKERS,
+    PEM_MORE_THAN_ONE_BLOCK,
+    PEM_LABELS_DIFFER,
+    PEM_NOT_PRIVATE_KEY,
+    PEM_ENCRYPTED,
+    PEM_BODY_NOT_BASE64,
+    PEM_NOT_KEY_STRUCTURE,
+];
 
 impl std::error::Error for RuleFailure {}
 
@@ -61,57 +165,98 @@ fn email_re() -> &'static Regex {
     re(&R, r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 }
 
-const SIGNOZ_BODY: &str = r"[A-Za-z0-9._~+/-]+={0,2}";
-const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
-
-fn signoz_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    re(&R, &format!("^{SIGNOZ_BODY}$"))
-}
+/// The generic `pattern` that reproduces the deprecated SigNoz body check (FR-24).
+pub const SIGNOZ_BODY: &str = r"[A-Za-z0-9._~+/-]+={0,2}";
+/// The prefix of the deprecated SigNoz ingestion header (FR-24).
+pub const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
+/// Deprecated transform name kept as an alias for `ensure_prefix` + `pattern` (FR-24).
+pub const SIGNOZ_INGESTION_HEADER: &str = "signoz_ingestion_header";
 
 /// Transform name: one PEM private key block, staged as a single line.
 pub const PEM_PRIVATE_KEY: &str = "pem_private_key";
+
+/// `ensure_prefix`/`pattern` normalisation (FR-24). Accepts the value with or without
+/// `prefix`, stages exactly one `prefix`, and (when given) requires the body after the
+/// prefix to fully match `pattern`. Returns the staged value or the failing rule name and
+/// its reason. Built at its final size: no reallocation leaves an unzeroized copy behind
+/// (SR-8).
+fn ensure_prefixed(
+    v: &str,
+    prefix: &str,
+    pattern: Option<&str>,
+) -> Result<SecretValue, (&'static str, &'static str)> {
+    let body = v.strip_prefix(prefix).unwrap_or(v);
+    if body.is_empty() {
+        return Err(("ensure_prefix", REASON_NOTHING_AFTER_PREFIX));
+    }
+    if let Some(pat) = pattern {
+        // Config validation guarantees the pattern compiles; fail closed otherwise.
+        let full =
+            Regex::new(&format!("^(?:{pat})$")).map_err(|_| ("pattern", REASON_BAD_PATTERN))?;
+        if !full.is_match(body) {
+            return Err(("pattern", REASON_NO_PATTERN_MATCH));
+        }
+    }
+    let mut out = String::with_capacity(prefix.len() + body.len());
+    out.push_str(prefix);
+    out.push_str(body);
+    Ok(SecretValue::new(out))
+}
 
 /// Normalise one PEM private key block to `-----BEGIN L-----<base64>-----END L-----`.
 ///
 /// Accepts the multi-line form (LF or CRLF, surrounding whitespace allowed, as a `.pem` file
 /// or a paste) and the already single-line form. `L` must end in `PRIVATE KEY` (PKCS#1
 /// `RSA PRIVATE KEY`, PKCS#8 `PRIVATE KEY`, `EC PRIVATE KEY`); the BEGIN and END labels must
-/// match; there are no PEM headers (an encrypted `Proc-Type` key is refused); the body is
-/// standard base64 of a DER SEQUENCE. Only whitespace is removed, so the output decodes to the
-/// same DER: RFC 7468 parsers that skip whitespace inside the body (Rust `pem` 3.x, used by
-/// journeeze's GitHub App client) read it unchanged. `None` on any failure; nothing value-
-/// bearing is returned or formatted on the error path.
-fn pem_private_key(v: &str) -> Option<Zeroizing<String>> {
+/// match; the key must not be encrypted (`ENCRYPTED PRIVATE KEY`, or a `Proc-Type` header);
+/// the body is standard base64 of a DER SEQUENCE. Only whitespace is removed, so the output
+/// decodes to the same DER: RFC 7468 parsers that skip whitespace inside the body (Rust
+/// `pem` 3.x, used by journeeze's GitHub App client) read it unchanged.
+///
+/// On failure returns one of [`PEM_REASONS`] (FR-22): a constant, never anything read from
+/// the value (no label, length or position).
+fn pem_private_key(v: &str) -> Result<Zeroizing<String>, &'static str> {
     let s = v.trim_matches(|c: char| c.is_ascii_whitespace());
-    let rest = s.strip_prefix("-----BEGIN ")?;
-    let (label, rest) = rest.split_once("-----")?;
+    let rest = s.strip_prefix("-----BEGIN ").ok_or(PEM_NO_MARKERS)?;
+    let (label, rest) = rest.split_once("-----").ok_or(PEM_NO_MARKERS)?;
+    // The last END marker closes the block; anything else that looks like a marker inside
+    // it is a second block.
+    let end_at = rest.rfind("-----END ").ok_or(PEM_NO_MARKERS)?;
+    let (body, end_marker) = rest.split_at(end_at);
+    let end_label = end_marker["-----END ".len()..]
+        .strip_suffix("-----")
+        .ok_or(PEM_NO_MARKERS)?;
+    if body.contains("-----") || end_label.contains("-----") {
+        return Err(PEM_MORE_THAN_ONE_BLOCK);
+    }
+    if end_label != label {
+        return Err(PEM_LABELS_DIFFER);
+    }
     if !label.ends_with("PRIVATE KEY")
         || !label.bytes().all(|b| b.is_ascii_uppercase() || b == b' ')
     {
-        return None;
+        return Err(PEM_NOT_PRIVATE_KEY);
     }
-    let end = format!("-----END {label}-----");
-    let body = rest.strip_suffix(end.as_str())?;
-    if body.contains("-----") {
-        return None;
+    if label.starts_with("ENCRYPTED ") || body.contains("Proc-Type:") {
+        return Err(PEM_ENCRYPTED);
     }
     let mut b64 = Zeroizing::new(String::with_capacity(body.len()));
     b64.extend(body.chars().filter(|c| !c.is_ascii_whitespace()));
     let der = base64::engine::general_purpose::STANDARD
         .decode(b64.as_bytes())
         .map(Zeroizing::new)
-        .ok()?;
+        .map_err(|_| PEM_BODY_NOT_BASE64)?;
     if der.first() != Some(&0x30) {
-        return None;
+        return Err(PEM_NOT_KEY_STRUCTURE);
     }
     // Built at its final size: no reallocation leaves an unzeroized copy behind (SR-8).
     let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
     let mut out = Zeroizing::new(String::with_capacity(begin.len() + b64.len() + end.len()));
     out.push_str(&begin);
     out.push_str(&b64);
     out.push_str(&end);
-    Some(out)
+    Ok(out)
 }
 
 /// Check one value against its key's rules.
@@ -122,7 +267,7 @@ fn pem_private_key(v: &str) -> Option<Zeroizing<String>> {
 /// - `Ok(None)`: the key does not apply (other environment, or skipped by mode), or it is
 ///   refused here and empty.
 /// - `Ok(Some(v))`: the value to stage (after any transform).
-/// - `Err`: the first failing rule, naming key and rule only.
+/// - `Err`: the first failing rule, naming key, rule and [`Reason`] only.
 pub fn check(
     product: &str,
     key: &str,
@@ -131,16 +276,18 @@ pub fn check(
     env: &Environment,
     value: &SecretValue,
 ) -> Result<Option<SecretValue>, RuleFailure> {
-    let fail = |rule: &'static str| RuleFailure {
+    let fail_with = |rule: &'static str, reason: Reason| RuleFailure {
         key: key.to_string(),
         rule,
+        reason,
     };
+    let fail = |rule: &'static str, reason: &'static str| fail_with(rule, Reason::Fixed(reason));
     let v = value.expose();
     if refused_in(spec, env_name) {
         return if v.is_empty() {
             Ok(None)
         } else {
-            Err(fail("refuse_in"))
+            Err(fail("refuse_in", REASON_REFUSED))
         };
     }
     if !applies(spec, env_name, env, product) {
@@ -149,97 +296,108 @@ pub fn check(
     let r = &spec.rules;
 
     if v.is_empty() {
-        return Err(fail("nonempty"));
+        return Err(fail("nonempty", REASON_EMPTY));
     }
     // A PEM private key is multi-line in 1Password (a concealed field holds it as pasted or
     // as the downloaded `.pem`). Normalise it to one line *before* the always-on rules so the
     // single-line Fly import format can carry it; every later rule sees the normalised value.
     let pem: Option<Zeroizing<String>> = match r.transform.as_deref() {
-        Some(PEM_PRIVATE_KEY) => Some(pem_private_key(v).ok_or_else(|| fail("transform"))?),
+        Some(PEM_PRIVATE_KEY) => Some(pem_private_key(v).map_err(|why| fail("transform", why))?),
         _ => None,
     };
     let v: &str = pem.as_deref().map_or(v, String::as_str);
     if v.contains(['\n', '\r', '\0']) {
-        return Err(fail("single_line"));
+        return Err(fail("single_line", REASON_MULTILINE));
     }
     if v.trim() != v {
-        return Err(fail("no_surrounding_space"));
+        return Err(fail("no_surrounding_space", REASON_SURROUNDING_SPACE));
     }
     if v.len() > MAX_LEN {
-        return Err(fail("max_len"));
+        return Err(fail("max_len", REASON_TOO_LONG));
     }
     if let Some(p) = &r.prefix
         && !v.starts_with(p.as_str())
     {
-        return Err(fail("prefix"));
+        return Err(fail_with("prefix", Reason::ExpectedPrefix(p.clone())));
     }
     if let Some(p) = &r.not_prefix
         && p.any_prefix_of(v)
     {
-        return Err(fail("not_prefix"));
+        return Err(fail("not_prefix", REASON_REFUSED_PREFIX));
     }
     if let Some(p) = &r.prefix_by_mode {
-        let ok = env
-            .modes
-            .get(product)
-            .and_then(|m| m.get(&p.mode))
-            .and_then(|mode| p.values.get(mode))
-            .is_some_and(|pre| pre.any_prefix_of(v));
-        if !ok {
-            return Err(fail("prefix_by_mode"));
+        let mode = env.modes.get(product).and_then(|m| m.get(&p.mode));
+        let why = match mode {
+            None => Some(Reason::ModeNotSet(p.mode.clone())),
+            Some(mode) => match p.values.get(mode) {
+                None => Some(Reason::ModeUnmapped(mode.clone())),
+                Some(pre) if !pre.any_prefix_of(v) => {
+                    Some(Reason::WrongPrefixForMode(mode.clone()))
+                }
+                Some(_) => None,
+            },
+        };
+        if let Some(why) = why {
+            return Err(fail_with("prefix_by_mode", why));
         }
     }
     if let Some(pat) = &r.regex {
         // Config validation guarantees the pattern compiles; fail closed otherwise.
-        let full = Regex::new(&format!("^(?:{pat})$")).map_err(|_| fail("regex"))?;
+        let full =
+            Regex::new(&format!("^(?:{pat})$")).map_err(|_| fail("regex", REASON_BAD_PATTERN))?;
         if !full.is_match(v) {
-            return Err(fail("regex"));
+            return Err(fail("regex", REASON_NO_REGEX_MATCH));
         }
     }
     if let Some(allowed) = &r.r#enum
         && !allowed.iter().any(|a| a == v)
     {
-        return Err(fail("enum"));
+        return Err(fail("enum", REASON_NOT_ALLOWED));
     }
     if let Some(n) = r.base64_bytes {
-        let ok = base64::engine::general_purpose::STANDARD
+        match base64::engine::general_purpose::STANDARD
             .decode(v)
             .map(Zeroizing::new)
-            .is_ok_and(|b| b.len() == n);
-        if !ok {
-            return Err(fail("base64_bytes"));
+        {
+            Err(_) => return Err(fail("base64_bytes", REASON_NOT_BASE64)),
+            Ok(b) if b.len() != n => return Err(fail_with("base64_bytes", Reason::NotBytes(n))),
+            Ok(_) => {}
         }
     }
     if let Some(n) = r.hex_bytes {
-        let ok = hex::decode(v)
-            .map(Zeroizing::new)
-            .is_ok_and(|b| b.len() == n);
-        if !ok {
-            return Err(fail("hex_bytes"));
+        match hex::decode(v).map(Zeroizing::new) {
+            Err(_) => return Err(fail("hex_bytes", REASON_NOT_HEX)),
+            Ok(b) if b.len() != n => return Err(fail_with("hex_bytes", Reason::NotBytes(n))),
+            Ok(_) => {}
         }
     }
     if r.email_list && !v.split(',').all(|e| email_re().is_match(e)) {
-        return Err(fail("email_list"));
+        return Err(fail("email_list", REASON_NOT_EMAIL_LIST));
     }
-    if r.https_url && !(v.starts_with("https://") && !v.contains(char::is_whitespace)) {
-        return Err(fail("https_url"));
+    if r.https_url {
+        if !v.starts_with("https://") {
+            return Err(fail("https_url", REASON_NOT_HTTPS));
+        }
+        if v.contains(char::is_whitespace) {
+            return Err(fail("https_url", REASON_URL_WHITESPACE));
+        }
+    }
+    if let Some(prefix) = &r.ensure_prefix {
+        return ensure_prefixed(v, prefix, r.pattern.as_deref())
+            .map(Some)
+            .map_err(|(rule, why)| fail(rule, why));
     }
     if let Some(t) = &r.transform {
         if t == PEM_PRIVATE_KEY {
             return Ok(Some(SecretValue::new(v.to_string())));
         }
-        if t != "signoz_ingestion_header" {
-            return Err(fail("transform"));
+        if t != SIGNOZ_INGESTION_HEADER {
+            return Err(fail("transform", REASON_UNKNOWN_TRANSFORM));
         }
-        let body = v.strip_prefix(SIGNOZ_PREFIX).unwrap_or(v);
-        if !signoz_re().is_match(body) {
-            return Err(fail("transform"));
-        }
-        // Built at its final size: no reallocation leaves an unzeroized copy behind (SR-8).
-        let mut out = String::with_capacity(SIGNOZ_PREFIX.len() + body.len());
-        out.push_str(SIGNOZ_PREFIX);
-        out.push_str(body);
-        return Ok(Some(SecretValue::new(out)));
+        // The deprecated alias: identical behaviour, failure rule name stays `transform`.
+        return ensure_prefixed(v, SIGNOZ_PREFIX, Some(SIGNOZ_BODY))
+            .map(Some)
+            .map_err(|(_, why)| fail("transform", why));
     }
     Ok(Some(SecretValue::new(v.to_string())))
 }
@@ -590,6 +748,74 @@ mod tests {
         };
         assert_eq!(rule_of(alt, "aax"), "regex");
     }
+    fn prefixed_rules(prefix: &str, pattern: Option<&str>) -> Rules {
+        Rules {
+            ensure_prefix: Some(prefix.into()),
+            pattern: pattern.map(Into::into),
+            ..Rules::default()
+        }
+    }
+    #[test]
+    fn ensure_prefix_prepends_a_missing_prefix() {
+        assert_eq!(
+            with(prefixed_rules("sk-", None), "abc").unwrap().unwrap(),
+            "sk-abc"
+        );
+    }
+    #[test]
+    fn ensure_prefix_keeps_an_existing_prefix_once() {
+        assert_eq!(
+            with(prefixed_rules("sk-", None), "sk-abc")
+                .unwrap()
+                .unwrap(),
+            "sk-abc"
+        );
+    }
+    #[test]
+    fn ensure_prefix_empty_body_fails_as_ensure_prefix() {
+        assert_eq!(rule_of(prefixed_rules("sk-", None), "sk-"), "ensure_prefix");
+    }
+    #[test]
+    fn pattern_rejects_a_body_that_does_not_match() {
+        assert_eq!(
+            rule_of(prefixed_rules("sk-", Some("[a-z]+")), "sk-ABC"),
+            "pattern"
+        );
+    }
+    #[test]
+    fn pattern_accepts_a_body_after_the_prefix_is_prepended() {
+        assert_eq!(
+            with(prefixed_rules("sk-", Some("[a-z]+")), "abc")
+                .unwrap()
+                .unwrap(),
+            "sk-abc"
+        );
+    }
+    #[test]
+    fn signoz_alias_and_its_ensure_prefix_pattern_equivalent_agree() {
+        fn outcomes(rules: fn() -> Rules) -> Vec<Result<Option<String>, ()>> {
+            [
+                "abc.DEF_1~+/-x==",
+                "signoz-ingestion-key=abc",
+                "signoz-ingestion-key=",
+                "a b",
+                "",
+            ]
+            .into_iter()
+            .map(|v| with(rules(), v).map_err(|_| ()))
+            .collect()
+        }
+        let alias = || Rules {
+            transform: Some("signoz_ingestion_header".into()),
+            ..Rules::default()
+        };
+        let generic = || Rules {
+            ensure_prefix: Some("signoz-ingestion-key=".into()),
+            pattern: Some("[A-Za-z0-9._~+/-]+={0,2}".into()),
+            ..Rules::default()
+        };
+        assert_eq!(outcomes(alias), outcomes(generic));
+    }
     #[test]
     fn signoz_transform_normalises_and_returns_transformed_value() {
         let r = || Rules {
@@ -670,8 +896,217 @@ mod tests {
         ] {
             let e = with(pem_rules(), bad).unwrap_err();
             assert_eq!(e.rule, "transform");
-            assert_eq!(e.to_string(), "K: failed transform");
+            assert!(e.to_string().starts_with("K: failed transform ("), "{e}");
         }
+    }
+    fn pem_reason(v: &str) -> (&'static str, Reason) {
+        let e = with(pem_rules(), v).unwrap_err();
+        (e.rule, e.reason)
+    }
+    fn pem_fails_with(v: &str, why: &'static str) {
+        assert_eq!(pem_reason(v), ("transform", Reason::Fixed(why)));
+    }
+    #[test]
+    fn pem_reason_no_markers() {
+        pem_fails_with("not a pem", PEM_NO_MARKERS);
+    }
+    #[test]
+    fn pem_reason_no_end_marker() {
+        let (multi, _) = pem("RSA PRIVATE KEY", "\n");
+        pem_fails_with(
+            &multi.replace("-----END RSA PRIVATE KEY-----", ""),
+            PEM_NO_MARKERS,
+        );
+    }
+    #[test]
+    fn pem_reason_labels_differ() {
+        let (multi, _) = pem("RSA PRIVATE KEY", "\n");
+        pem_fails_with(
+            &multi.replace("-----END RSA", "-----END EC"),
+            PEM_LABELS_DIFFER,
+        );
+    }
+    #[test]
+    fn pem_reason_not_a_private_key() {
+        let (cert, _) = pem("CERTIFICATE", "\n");
+        pem_fails_with(&cert, PEM_NOT_PRIVATE_KEY);
+    }
+    #[test]
+    fn pem_reason_encrypted_proc_type_header() {
+        let (multi, _) = pem("RSA PRIVATE KEY", "\n");
+        let encrypted = multi.replace(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\n",
+        );
+        pem_fails_with(&encrypted, PEM_ENCRYPTED);
+    }
+    #[test]
+    fn pem_reason_encrypted_pkcs8_label() {
+        let (enc, _) = pem("ENCRYPTED PRIVATE KEY", "\n");
+        pem_fails_with(&enc, PEM_ENCRYPTED);
+    }
+    #[test]
+    fn pem_reason_more_than_one_block() {
+        let (multi, _) = pem("RSA PRIVATE KEY", "\n");
+        pem_fails_with(&format!("{multi}{multi}"), PEM_MORE_THAN_ONE_BLOCK);
+    }
+    #[test]
+    fn pem_reason_body_not_base64() {
+        pem_fails_with(
+            "-----BEGIN PRIVATE KEY-----%%%-----END PRIVATE KEY-----",
+            PEM_BODY_NOT_BASE64,
+        );
+    }
+    #[test]
+    fn pem_reason_not_a_key_structure() {
+        pem_fails_with(
+            "-----BEGIN PRIVATE KEY-----QUJD-----END PRIVATE KEY-----",
+            PEM_NOT_KEY_STRUCTURE,
+        );
+    }
+    #[test]
+    fn pem_reasons_are_seven_distinct_constants() {
+        let set: std::collections::BTreeSet<&str> = PEM_REASONS.into_iter().collect();
+        assert_eq!(set.len(), 7);
+    }
+    #[test]
+    fn rule_failure_display_shows_rule_then_reason() {
+        let (multi, _) = pem("RSA PRIVATE KEY", "\n");
+        let e = with(pem_rules(), &multi.replace("-----END RSA", "-----END EC")).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "K: failed transform (BEGIN/END labels differ)"
+        );
+    }
+    fn reason_of(rules: Rules, v: &str) -> String {
+        with(rules, v).unwrap_err().reason.to_string()
+    }
+    #[test]
+    fn prefix_reason_names_the_configured_prefix() {
+        let r = Rules {
+            prefix: Some("sk-".into()),
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "pk-abc"), "expected prefix sk-");
+    }
+    #[test]
+    fn not_prefix_reason_never_names_the_matching_prefix() {
+        let r = Rules {
+            not_prefix: Some(OneOrMany::One("sk-or-".into())),
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "sk-or-x"), REASON_REFUSED_PREFIX);
+    }
+    #[test]
+    fn prefix_by_mode_reason_names_the_mode() {
+        assert_eq!(
+            chk("staging", "STRIPE_SECRET_KEY", "sk_live_1")
+                .unwrap_err()
+                .reason
+                .to_string(),
+            "wrong prefix for mode test"
+        );
+    }
+    #[test]
+    fn prefix_by_mode_reason_when_mode_is_not_set() {
+        let mut f = f();
+        let spec = f.products["allumata"].keys["STRIPE_SECRET_KEY"].clone();
+        f.environments.get_mut("staging").unwrap().modes.clear();
+        let v = SecretValue::new("sk_test_1".into());
+        let env = &f.environments["staging"];
+        let e = check("allumata", "STRIPE_SECRET_KEY", &spec, "staging", env, &v).unwrap_err();
+        assert_eq!(e.reason, Reason::ModeNotSet("payments".into()));
+    }
+    #[test]
+    fn prefix_by_mode_reason_when_mode_is_unmapped() {
+        let r = Rules {
+            prefix_by_mode: Some(PrefixByMode {
+                mode: "payments".into(),
+                values: BTreeMap::new(),
+                skip: vec![],
+            }),
+            ..Rules::default()
+        };
+        // prod has allumata.payments = "off", neither mapped nor skipped here.
+        assert_eq!(reason_of(r, "x"), "no prefix is configured for mode off");
+    }
+    #[test]
+    fn base64_bytes_reason_not_base64() {
+        let r = Rules {
+            base64_bytes: Some(32),
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "!!!"), REASON_NOT_BASE64);
+    }
+    #[test]
+    fn base64_bytes_reason_wrong_byte_count_names_configured_count() {
+        let r = Rules {
+            base64_bytes: Some(32),
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "QUJD"), "does not decode to 32 bytes");
+    }
+    #[test]
+    fn hex_bytes_reason_not_hex() {
+        let r = Rules {
+            hex_bytes: Some(4),
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "deadbeeg"), REASON_NOT_HEX);
+    }
+    #[test]
+    fn hex_bytes_reason_wrong_byte_count_names_configured_count() {
+        let r = Rules {
+            hex_bytes: Some(4),
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "dead"), "does not decode to 4 bytes");
+    }
+    #[test]
+    fn https_url_reason_not_https() {
+        let r = Rules {
+            https_url: true,
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "http://a"), REASON_NOT_HTTPS);
+    }
+    #[test]
+    fn https_url_reason_whitespace() {
+        let r = Rules {
+            https_url: true,
+            ..Rules::default()
+        };
+        assert_eq!(reason_of(r, "https://a b"), REASON_URL_WHITESPACE);
+    }
+    #[test]
+    fn ensure_prefix_reason_nothing_after_prefix() {
+        assert_eq!(
+            reason_of(prefixed_rules("sk-", None), "sk-"),
+            REASON_NOTHING_AFTER_PREFIX
+        );
+    }
+    #[test]
+    fn pattern_reason_body_does_not_match() {
+        assert_eq!(
+            reason_of(prefixed_rules("sk-", Some("[a-z]+")), "sk-ABC"),
+            REASON_NO_PATTERN_MATCH
+        );
+    }
+    #[test]
+    fn signoz_alias_keeps_rule_transform_with_pattern_reason() {
+        let r = Rules {
+            transform: Some(SIGNOZ_INGESTION_HEADER.into()),
+            ..Rules::default()
+        };
+        let e = with(r, "a$b").unwrap_err();
+        assert_eq!(
+            (e.rule, e.reason),
+            ("transform", Reason::Fixed(REASON_NO_PATTERN_MATCH))
+        );
+    }
+    #[test]
+    fn max_len_reason_states_the_limit() {
+        assert!(REASON_TOO_LONG.contains(&MAX_LEN.to_string()));
     }
     #[test]
     fn unknown_transform_fails_closed() {

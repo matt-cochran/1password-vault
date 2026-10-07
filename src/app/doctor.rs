@@ -17,6 +17,10 @@
 //!
 //! A failing check prints the next command for the detected platform and shell (FR-26):
 //! the sign-in command, `op account add`, or the install command.
+//!
+//! The output ends with one `Next step` line (FR-22): the first failing check and the safe
+//! command that addresses it (the first remediation line of that check), or `nothing
+//! pending`. Text only, never a prompt (FR-9).
 
 use std::io::{self, Write};
 
@@ -34,6 +38,9 @@ const OP: &str = "op";
 pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
 /// The `flyctl` release opv is tested with (its import parser is ported, see fly.rs).
 pub const FLYCTL_TESTED: (u64, u64, u64) = (0, 4, 112);
+
+/// Name of the configuration check (its message is parser output, see [`next_step`]).
+const CONFIG_CHECK: &str = "config";
 
 /// A check result: ok, ok with a warning, or failed.
 enum Check {
@@ -67,12 +74,14 @@ fn run_on(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
+    let mut next: Option<String> = None;
     let mut line = |out: &mut dyn Write, check: &str, res: Result<Check, Error>| {
         let text = match res {
             Ok(Check::Ok(detail)) => format!("ok    {check}: {detail}"),
             Ok(Check::Warn(detail)) => format!("warn  {check}: {detail}"),
             Err(e) => {
                 let t = format!("FAIL  {check}: {e}");
+                next.get_or_insert_with(|| next_step(check, &e));
                 first.get_or_insert(e);
                 t
             }
@@ -94,14 +103,8 @@ fn run_on(
     };
     line(
         out,
-        "config",
-        config.map(|f| {
-            Check::Ok(format!(
-                "valid ({} environment(s), {} product(s))",
-                f.environments.len(),
-                f.products.len()
-            ))
-        }),
+        CONFIG_CHECK,
+        config.map(|f| Check::Ok(config_summary(&f))),
     )?;
     line(out, "op", op_version(r, host))?;
     line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
@@ -131,9 +134,51 @@ fn run_on(
             }
         }
     }
+    let next = next.unwrap_or_else(|| "Next step: nothing pending".into());
+    writeln!(out, "{next}").map_err(write_err)?;
     match first {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// `valid (N environment(s), M product(s))`, or under the simple profile, whose one
+/// product is hidden (FR-20), `valid (N environment(s), M key(s))`.
+fn config_summary(f: &Fleet) -> String {
+    let envs = f.environments.len();
+    if f.is_simple() {
+        let keys: usize = f.products.values().map(|p| p.keys.len()).sum();
+        format!("valid ({envs} environment(s), {keys} key(s))")
+    } else {
+        format!(
+            "valid ({envs} environment(s), {} product(s))",
+            f.products.len()
+        )
+    }
+}
+
+/// The `Next step` line for the first failing check (FR-22).
+///
+/// A configuration failure gets a fixed step: its message is parser output (a TOML error
+/// carries a `  |` source gutter), not a layout opv controls. For doctor's own tool and auth
+/// checks, whose messages opv writes, the step is that check's first remediation line (the
+/// install, sign-in, `op account add` or log-in command the failure already prints, FR-26),
+/// or the fix-and-re-run hint when it has none. Never tool output or a value (SR-1).
+fn next_step(check: &str, e: &Error) -> String {
+    if check == CONFIG_CHECK {
+        return format!(
+            "Next step ({check}): fix secrets.toml (see the config line above) and re-run `opv doctor`"
+        );
+    }
+    let text = e.to_string();
+    let hint = text
+        .lines()
+        .skip(1)
+        .find_map(|l| l.strip_prefix("  "))
+        .map(|l| l.strip_prefix("next: ").unwrap_or(l).trim());
+    match hint {
+        Some(h) if !h.is_empty() => format!("Next step ({check}): {h}"),
+        _ => format!("Next step ({check}): fix the failure reported above and re-run `opv doctor`"),
     }
 }
 
@@ -317,9 +362,16 @@ mod tests {
         (res, text_of(&out))
     }
 
-    /// The check lines only (remediation lines under a check are indented).
+    /// The check lines only (remediation lines under a check are indented; the closing
+    /// `Next step` line is not a check).
     fn checks(out: &str) -> Vec<&str> {
-        out.lines().filter(|l| !l.starts_with("  ")).collect()
+        out.lines()
+            .filter(|l| !l.starts_with("  ") && !l.starts_with("Next step"))
+            .collect()
+    }
+
+    fn next_line(out: &str) -> &str {
+        out.lines().last().unwrap()
     }
 
     #[test]
@@ -327,7 +379,7 @@ mod tests {
         let r = FakeRunner::new(good());
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        let lines: Vec<&str> = out.lines().collect();
+        let lines = checks(&out);
         assert_eq!(lines.len(), 5, "{out}");
         assert!(
             lines[0].starts_with("ok") && lines[0].contains("config"),
@@ -441,7 +493,7 @@ mod tests {
         let (res, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Config(_)), "{e}");
-        let lines: Vec<&str> = out.lines().collect();
+        let lines = checks(&out);
         assert_eq!(lines.len(), 5, "{out}");
         assert!(
             lines[0].starts_with("FAIL") && lines[0].contains("boom"),
@@ -457,8 +509,8 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         assert_eq!(
-            out.lines().last().unwrap(),
-            "ok    fly auth: signed in",
+            checks(&out).last().unwrap(),
+            &"ok    fly auth: signed in",
             "{out}"
         );
         assert_no_values(&out);
@@ -577,6 +629,197 @@ mod tests {
         assert!(out.contains("ok    fly auth"), "{out}");
         assert!(
             out.contains("skip  fly: no fly section in environment(s) dev"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn simple_profile_config_line_counts_keys_not_products() {
+        let simple = crate::config::load("tests/fixtures/simple.toml").unwrap();
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Ok(simple), &r);
+        assert_eq!(
+            checks(&out)[0],
+            "ok    config: valid (2 environment(s), 5 key(s))",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn fleet_config_line_still_counts_products() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            checks(&out)[0],
+            "ok    config: valid (2 environment(s), 1 product(s))",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_is_the_last_line_when_all_checks_pass() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(next_line(&out), "Next step: nothing pending", "{out}");
+    }
+
+    #[test]
+    fn next_step_appears_exactly_once() {
+        let r = FakeRunner::new([]);
+        for _ in 0..4 {
+            r.push_io_error(io::ErrorKind::NotFound);
+        }
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("Next step")).count(),
+            1,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_install_command_when_op_is_missing() {
+        let r = FakeRunner::new([]);
+        r.push_io_error(io::ErrorKind::NotFound);
+        r.push_io_error(io::ErrorKind::NotFound);
+        r.responses.borrow_mut().push_back(Ok(good().remove(2)));
+        r.responses.borrow_mut().push_back(Ok(good().remove(3)));
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (op): install op from https://developer.1password.com/docs/cli/get-started/ \
+             (apt, dnf or the zip for this Linux distribution)",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_signin_command_when_op_is_not_signed_in() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (op auth): sign in: eval $(op signin)",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_account_add_when_no_account_exists() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(b"[]".to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert!(
+            next_line(&out).starts_with("Next step (op auth): add one: op account add"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_fly_login_when_fly_is_logged_out() {
+        let mut g = good();
+        g[3] = Output::failure(1);
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (fly auth): log in: flyctl auth login",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_the_first_failing_check() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g[4] = Output::failure(1); // fly auth fails too
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert!(next_line(&out).starts_with("Next step (op auth):"), "{out}");
+    }
+
+    const CONFIG_STEP: &str =
+        "Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor`";
+
+    #[test]
+    fn next_step_for_invalid_config_is_fix_and_rerun() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
+        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+    }
+
+    /// A real TOML syntax error carries a `  |` source gutter; it is never the step.
+    #[test]
+    fn next_step_for_toml_syntax_error_is_the_fixed_config_step() {
+        let e = crate::config::parse("[profile\nkind = \"fleet\"\n").unwrap_err();
+        assert!(e.to_string().contains("  |"), "{e}");
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Err(e), &r);
+        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+    }
+
+    #[test]
+    fn next_step_for_unknown_field_error_is_the_fixed_config_step() {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let e = crate::config::parse(&text.replace(
+            "guidance = \"OpenAI platform / API keys\"",
+            "guidance = \"OpenAI platform / API keys\"\nbogus = 1",
+        ))
+        .unwrap_err();
+        assert!(e.to_string().contains("bogus"), "{e}");
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Err(e), &r);
+        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+    }
+
+    #[test]
+    fn next_step_for_failing_version_check_is_fix_and_rerun() {
+        let mut g = good();
+        g[0] = Output::failure(2);
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (op): fix the failure reported above and re-run `opv doctor`",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_never_prompts() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        let next = next_line(&out);
+        assert!(
+            !next.contains('?') && !next.to_lowercase().contains("[y/n]"),
+            "{next}"
+        );
+    }
+
+    #[test]
+    fn next_step_under_ci_names_service_account_token() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        let r = FakeRunner::new(g);
+        let h = Host::from_env(
+            &crate::host::FakeEnv::new("linux")
+                .shell("/bin/bash")
+                .var("CI"),
+        );
+        let mut out = Vec::new();
+        let _ = run_with(Ok(fleet()), &r, &h, &mut out);
+        let out = text_of(&out);
+        assert!(
+            next_line(&out).starts_with("Next step (op auth): set OP_SERVICE_ACCOUNT_TOKEN"),
             "{out}"
         );
     }
