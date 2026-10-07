@@ -12,6 +12,8 @@ pub mod doctor;
 #[cfg(test)]
 mod guidance_tests;
 pub mod run;
+#[cfg(test)]
+mod simple_tests;
 pub mod skeleton;
 pub mod status;
 pub mod sync;
@@ -21,7 +23,10 @@ use std::io::{self, Write};
 
 use crate::adapters::{fly, onepassword};
 use crate::domain::plan;
-use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan, TargetState};
+use crate::domain::{
+    Fleet, FlySecret, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, SyncPlan, TargetState,
+    key_label,
+};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -53,7 +58,7 @@ pub(crate) fn read_and_plan(
     } else {
         None
     };
-    let item = onepassword::read_item(r, env)?;
+    let item = onepassword::read_item_as(r, env, fleet.profile)?;
     let on_fly = match app {
         Some(app) => fly::list(r, app)?,
         None => Vec::new(),
@@ -79,7 +84,16 @@ pub(crate) fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()))
 }
 
+/// The `product` of a JSON row: `None` (JSON `null`) for the simple profile's implicit
+/// product, which is never shown (FR-20).
+fn json_product(product: &str) -> Option<String> {
+    (product != SIMPLE_PRODUCT).then(|| product.to_string())
+}
+
 /// FR-21: one names-only JSON document for `status --json` and `fly plan --json`.
+///
+/// Under the simple profile (FR-20) `product` is `null` in rows, extras and held entries,
+/// matching the text table, which has no PRODUCT column there.
 ///
 /// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
 /// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
@@ -118,7 +132,7 @@ pub(crate) fn write_json(
                 &held_from_prune,
             );
             JsonRow {
-                product: r.product.clone(),
+                product: json_product(&r.product),
                 key: r.key.clone(),
                 kind: kind_label(r.kind),
                 state: json_state(r.state),
@@ -138,7 +152,7 @@ pub(crate) fn write_json(
             .extras
             .iter()
             .map(|(product, key)| JsonName {
-                product: product.clone(),
+                product: json_product(product),
                 key: key.clone(),
             })
             .collect(),
@@ -147,7 +161,7 @@ pub(crate) fn write_json(
             .held_immutable
             .iter()
             .map(|(product, key)| JsonHeld {
-                product: product.clone(),
+                product: json_product(product),
                 key: key.clone(),
                 fly_name: env.fly_name(product, key),
             })
@@ -181,7 +195,7 @@ struct JsonDoc {
 
 #[derive(serde::Serialize)]
 struct JsonRow {
-    product: String,
+    product: Option<String>,
     key: String,
     kind: &'static str,
     state: &'static str,
@@ -193,13 +207,13 @@ struct JsonRow {
 
 #[derive(serde::Serialize)]
 struct JsonName {
-    product: String,
+    product: Option<String>,
     key: String,
 }
 
 #[derive(serde::Serialize)]
 struct JsonHeld {
-    product: String,
+    product: Option<String>,
     key: String,
     fly_name: Option<String>,
 }
@@ -284,11 +298,18 @@ pub(crate) fn state_label(s: KeyState) -> String {
     }
 }
 
-/// `product/KEY` of every row in `rows` matching `pred`, for names-only messages.
+/// `product/KEY` (`KEY` under the simple profile) of every row in `rows` matching `pred`,
+/// for names-only messages.
 pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String> {
     rows.iter()
         .filter(|r| pred(r))
-        .map(|r| format!("{}/{} ({})", r.product, r.key, state_label(r.state)))
+        .map(|r| {
+            format!(
+                "{} ({})",
+                key_label(&r.product, &r.key),
+                state_label(r.state)
+            )
+        })
         .collect()
 }
 
@@ -307,14 +328,21 @@ fn wants_guidance(r: &Row) -> bool {
 }
 
 /// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, with guidance on the line after
-/// each missing row. `target` renders the last column. Rows hold names only.
+/// each missing row. `target` renders the last column. Rows hold names only. Under the
+/// simple profile (FR-20) there is no PRODUCT column: the table is `KEY KIND STATE TARGET`.
 pub(crate) fn print_rows(
     out: &mut dyn Write,
+    fleet: &Fleet,
     rows: &[Row],
     target: impl Fn(&Row) -> String,
 ) -> Result<(), Error> {
-    let header = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"].map(String::from);
-    let cells: Vec<[String; 5]> = rows
+    let skip = usize::from(fleet.is_simple());
+    let header: Vec<String> = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"]
+        .iter()
+        .skip(skip)
+        .map(|s| s.to_string())
+        .collect();
+    let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|r| {
             [
@@ -324,20 +352,24 @@ pub(crate) fn print_rows(
                 state_label(r.state),
                 target(r),
             ]
+            .into_iter()
+            .skip(skip)
+            .collect()
         })
         .collect();
-    let mut w = [0usize; 4];
+    let last = header.len() - 1;
+    let mut w = vec![0usize; last];
     for c in std::iter::once(&header).chain(&cells) {
         for (i, wi) in w.iter_mut().enumerate() {
             *wi = (*wi).max(c[i].len());
         }
     }
-    let line = |c: &[String; 5]| {
+    let line = |c: &[String]| {
         let mut s = String::new();
         for (i, wi) in w.iter().enumerate() {
             s.push_str(&format!("{:<wi$}  ", c[i]));
         }
-        s.push_str(&c[4]);
+        s.push_str(&c[last]);
         s.trim_end().to_string()
     };
     writeln!(out, "{}", line(&header)).map_err(write_err)?;
@@ -355,7 +387,8 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
     for (section, label) in &plan.extras {
         writeln!(
             out,
-            "warning: extra field {section}/{label} is in the 1Password item but not declared"
+            "warning: extra field {} is in the 1Password item but not declared",
+            key_label(section, label)
         )
         .map_err(write_err)?;
     }
@@ -450,15 +483,20 @@ pub(crate) mod testutil {
             "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain"
         })];
         for (s, l, ty, v) in fields {
-            if !sections.iter().any(|x| x["id"] == s.as_str()) {
-                sections.push(json!({"id": s, "label": s}));
-            }
-            let mut f = json!({
-                "id": format!("{s}_{}", l.to_lowercase()),
-                "section": {"id": s, "label": s},
-                "type": ty,
-                "label": l,
-            });
+            // An empty section is an unsectioned field (simple profile, FR-20).
+            let mut f = if s.is_empty() {
+                json!({"id": l.to_lowercase(), "type": ty, "label": l})
+            } else {
+                if !sections.iter().any(|x| x["id"] == s.as_str()) {
+                    sections.push(json!({"id": s, "label": s}));
+                }
+                json!({
+                    "id": format!("{s}_{}", l.to_lowercase()),
+                    "section": {"id": s, "label": s},
+                    "type": ty,
+                    "label": l,
+                })
+            };
             if let Some(v) = v {
                 f["value"] = json!(v);
             }

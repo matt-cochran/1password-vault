@@ -7,12 +7,36 @@
 use std::io;
 
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, rules};
+use crate::domain::{Fleet, SIMPLE_PRODUCT, rules};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
 const OP: &str = "op";
+
+/// `run <env> [--product <p>] -- <cmd>`: the fleet profile needs `--product`; the simple
+/// profile (FR-20) takes none and passes every declared key, referenced as an unsectioned
+/// field (`KEY=op://<vault_id>/<item_id>/<KEY>`). Both errors happen before any call.
+pub fn run_for(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    command: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
+    match (fleet.is_simple(), product) {
+        (false, Some(p)) => run(fleet, env_name, p, command, runner),
+        (false, None) => Err(Error::Config(
+            "--product is required under the fleet profile (usage: run <env> --product <p> \
+             -- <cmd>...)"
+                .into(),
+        )),
+        (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
+        (true, Some(_)) => Err(Error::Config(
+            "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
+        )),
+    }
+}
 
 /// Run `command` under `op run` with the product's references for `env_name` in its
 /// environment. Returns the child's exit code, which `main` uses as the process exit code.
@@ -46,9 +70,14 @@ pub fn run(
         .iter()
         .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
         .map(|(key, _)| {
+            let field = if product == SIMPLE_PRODUCT {
+                key.clone()
+            } else {
+                format!("{product}/{key}")
+            };
             (
                 key.as_str(),
-                format!("op://{}/{}/{product}/{key}", env.vault_id, env.item_id),
+                format!("op://{}/{}/{field}", env.vault_id, env.item_id),
             )
         })
         .collect();

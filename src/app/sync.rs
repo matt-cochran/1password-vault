@@ -19,7 +19,10 @@ use super::{
 };
 use crate::adapters::fly;
 use crate::domain::rules;
-use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan, TargetState};
+use crate::domain::{
+    Fleet, FlySecret, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, SyncPlan, TargetState,
+    key_label,
+};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -30,9 +33,11 @@ pub struct SyncOpts {
     pub deploy: bool,
     /// Unset managed names not desired in this environment (FR-8). Never implied.
     pub prune: bool,
-    /// `PRODUCT/KEY` entries: immutable keys to stage even though present on Fly (FR-16).
+    /// `PRODUCT/KEY` entries (`KEY` under the simple profile, FR-20): immutable keys to
+    /// stage even though present on Fly (FR-16).
     pub rotate: Vec<String>,
-    /// `PRODUCT/KEY` entries: immutable keys `--prune` may unset (FR-8, FR-16). Without an
+    /// `PRODUCT/KEY` entries (`KEY` under the simple profile): immutable keys `--prune` may
+    /// unset (FR-8, FR-16). Without an
     /// entry an immutable key is never pruned. Requires `prune`.
     pub prune_immutable: Vec<String>,
 }
@@ -106,7 +111,8 @@ pub fn run(
         p(
             out,
             format!(
-                "held (immutable), not pruned (pass --prune --prune-immutable PRODUCT/KEY to unset): {}",
+                "held (immutable), not pruned (pass --prune --prune-immutable {} to unset): {}",
+                key_ref_hint(fleet),
                 held_from_prune(&plan)
             ),
         )?;
@@ -193,7 +199,7 @@ pub fn plan_with(
         .iter()
         .map(|(p, k)| (p.as_str(), k.as_str()))
         .collect();
-    print_rows(out, &plan.rows, |row| {
+    print_rows(out, fleet, &plan.rows, |row| {
         plan_target(
             row,
             held.contains(&(row.product.as_str(), row.key.as_str())),
@@ -204,9 +210,10 @@ pub fn plan_with(
         writeln!(out, "to prune (with --prune): {n}").map_err(write_err)?;
     }
     for (product, key, n) in &plan.held_from_prune {
+        let label = key_label(product, key);
         writeln!(
             out,
-            "held (immutable), not pruned: {product}/{key} ({n}); unset only with --prune --prune-immutable {product}/{key}"
+            "held (immutable), not pruned: {label} ({n}); unset only with --prune --prune-immutable {label}"
         )
         .map_err(write_err)?;
     }
@@ -247,11 +254,12 @@ fn plan_target(r: &Row, held: bool) -> String {
     .to_string()
 }
 
-/// `product/KEY (FLY_NAME)` for every immutable key held back from pruning.
+/// `product/KEY (FLY_NAME)` (`KEY (FLY_NAME)` under the simple profile) for every
+/// immutable key held back from pruning.
 fn held_from_prune(plan: &SyncPlan) -> String {
     plan.held_from_prune
         .iter()
-        .map(|(p, k, n)| format!("{p}/{k} ({n})"))
+        .map(|(p, k, n)| format!("{} ({n})", key_label(p, k)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -260,6 +268,35 @@ fn digest<'a>(list: &'a [FlySecret], name: &str) -> Option<&'a str> {
     list.iter()
         .find(|s| s.name == name)
         .and_then(|s| s.digest.as_deref())
+}
+
+/// `PRODUCT/KEY` under the fleet profile; `KEY` alone under the simple profile (FR-20),
+/// whose implicit product is [`SIMPLE_PRODUCT`]. `None` when the entry has the wrong shape.
+fn split_key_ref<'a>(fleet: &Fleet, entry: &'a str) -> Option<(&'a str, &'a str)> {
+    if fleet.is_simple() {
+        return (!entry.is_empty() && !entry.contains('/')).then_some((SIMPLE_PRODUCT, entry));
+    }
+    entry
+        .split_once('/')
+        .filter(|(p, k)| !p.is_empty() && !k.is_empty())
+}
+
+/// The expected shape of a `--rotate` / `--prune-immutable` entry, for errors.
+fn expected(fleet: &Fleet) -> String {
+    if fleet.is_simple() {
+        "expected KEY (the simple profile has no products)".into()
+    } else {
+        "expected PRODUCT/KEY".into()
+    }
+}
+
+/// The argument placeholder for `--prune-immutable` in hints.
+fn key_ref_hint(fleet: &Fleet) -> &'static str {
+    if fleet.is_simple() {
+        "KEY"
+    } else {
+        "PRODUCT/KEY"
+    }
 }
 
 /// Validate every `--rotate PRODUCT/KEY` before any call (FR-16): it must name a declared,
@@ -273,10 +310,7 @@ fn parse_rotate(
     let mut set = BTreeSet::new();
     for e in entries {
         let bad = |why: String| Error::Config(format!("--rotate {e:?}: {why}"));
-        let (product, key) = e
-            .split_once('/')
-            .filter(|(p, k)| !p.is_empty() && !k.is_empty())
-            .ok_or_else(|| bad("expected PRODUCT/KEY".into()))?;
+        let (product, key) = split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)))?;
         let spec = fleet
             .products
             .get(product)
@@ -314,10 +348,7 @@ fn parse_prune_immutable(
     let mut set = BTreeSet::new();
     for e in &opts.prune_immutable {
         let bad = |why: String| Error::Config(format!("--prune-immutable {e:?}: {why}"));
-        let (product, key) = e
-            .split_once('/')
-            .filter(|(p, k)| !p.is_empty() && !k.is_empty())
-            .ok_or_else(|| bad("expected PRODUCT/KEY".into()))?;
+        let (product, key) = split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)))?;
         let spec = fleet
             .products
             .get(product)
