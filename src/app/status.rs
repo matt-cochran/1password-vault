@@ -2,14 +2,15 @@
 //!
 //! One row per product × key with its 1Password state and Fly state, guidance under each
 //! missing row, extras as warnings. Names only. Exits `Findings(n)` for the n rows that are
-//! missing, of the wrong kind or failing a rule; extras alone exit 0. Read-only: one `op`
-//! call and one `flyctl secrets list`.
+//! missing, of the wrong kind or failing a rule; extras alone exit 0. A clean run ends with
+//! a summary line on stdout (FR-26). Read-only: one `op item get` and one `flyctl secrets
+//! list` (plus the free `op whoami` diagnosis when the read fails).
 
 use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err};
-use crate::domain::{Fleet, Kind, Row, TargetState};
+use crate::domain::{Fleet, KeyState, Kind, Row, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -34,7 +35,23 @@ pub fn run(
         .map_err(write_err)?;
         return Err(Error::Findings(n));
     }
+    writeln!(out, "{}", summary(&plan.rows)).map_err(write_err)?;
     Ok(())
+}
+
+/// The clean-run summary line (FR-26): `N saved, M not yet on Fly (staged by the next fly
+/// sync), 0 findings`. N counts saved rows (secret and config); M counts saved secrets
+/// absent from Fly. Skipped rows count in neither. Names and counts only.
+fn summary(rows: &[Row]) -> String {
+    let saved = rows.iter().filter(|r| r.state == KeyState::Ready);
+    let pending = saved
+        .clone()
+        .filter(|r| r.kind == Kind::Secret && r.target == TargetState::Absent)
+        .count();
+    format!(
+        "{} saved, {pending} not yet on Fly (staged by the next fly sync), 0 findings",
+        saved.count()
+    )
 }
 
 /// Fly state of a row. Digests cannot be compared locally (P1), so a secret on Fly is
@@ -126,6 +143,24 @@ mod tests {
             .position(|l| l.contains("OPENAI_API_KEY") && l.contains("missing"))
             .unwrap();
         assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
+    }
+
+    /// FR-26: a value failing its rule shows the reason and, under it, the key's guidance.
+    #[test]
+    fn status_rule_failure_prints_guidance_on_next_line() {
+        let (res, out, _) = status_of(
+            complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE")),
+            fly_empty(),
+        );
+        assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+        let lines: Vec<&str> = out.lines().collect();
+        let i = lines
+            .iter()
+            .position(|l| l.contains("OPENAI_API_KEY") && l.contains("fails rule"))
+            .unwrap();
+        assert!(lines[i + 1].starts_with("    guidance: "), "{out}");
+        assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
+        assert_no_values(&out);
     }
 
     /// Review Focus 2: a missing product section reports every desired key missing.
@@ -255,10 +290,45 @@ mod tests {
 
     #[test]
     fn status_source_failure_is_typed_and_value_free() {
-        let r = FakeRunner::new([Output::failure(1)]);
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(
+                br#"{"email":"x-FIXTUREVALUE@example.com","user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
+            ),
+        ]);
         let mut out = Vec::new();
         let e = run(&fleet(), "prod", &r, &mut out).unwrap_err();
-        assert!(matches!(e, Error::Source(_) | Error::Auth(_)), "{e}");
-        assert_eq!(r.calls.borrow().len(), 1);
+        assert!(matches!(e, Error::Source(_)), "{e}");
+        assert_no_values(&e.to_string());
+        // One item read, then the free session check; no Fly call.
+        assert_eq!(
+            argvs(&r),
+            vec![
+                "op item get iprd --vault vprd --format json",
+                "op whoami --format json"
+            ]
+        );
+    }
+
+    /// FR-26: a clean run ends with the summary line; exit stays 0.
+    #[test]
+    fn status_clean_run_prints_summary_line() {
+        let (res, out, _) = status_of(complete_item(), fly(&[(OPENAI_FLY, "d1")]));
+        res.unwrap();
+        // prod: OPENAI_API_KEY (on Fly), INTEGRATION_ENC_KEY (absent), SIGNUP_POLICY
+        // (config); the Stripe key is skipped and counts in neither number.
+        assert_eq!(
+            out.lines().last().unwrap(),
+            "3 saved, 1 not yet on Fly (staged by the next fly sync), 0 findings",
+            "{out}"
+        );
+    }
+
+    /// Findings: no summary line (the findings line is last) and exit 8 unchanged.
+    #[test]
+    fn status_with_findings_prints_no_summary_line() {
+        let (res, out, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
+        assert_eq!(res.unwrap_err().exit_code(), 8);
+        assert!(!out.contains("0 findings"), "{out}");
     }
 }

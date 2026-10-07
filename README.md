@@ -45,7 +45,7 @@ npm i -g opv
 npx opv --version
 ```
 
-The npm package ships from v0.1.1. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
+The npm package is planned for v0.2.0 (not yet published); until then, use a GitHub release binary. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
 
 Homebrew and crates.io packages arrive in v0.1.1.
 
@@ -224,7 +224,17 @@ Fly import refusals are checked for every ready secret by `status` and `fly plan
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 
-Auth classification: when a failed `op item get` finds no 1Password credential in the environment (`OP_SERVICE_ACCOUNT_TOKEN`, `OP_CONNECT_TOKEN` or `OP_SESSION_*`), it is reported as authentication (7). The desktop-app integration leaves no environment signal, so a desktop user whose read fails for any other reason is also reported as 7; the message says to check that the app is unlocked. When a token is present but rejected or expired, the failure is a source error (4). Child stderr is suppressed on purpose, because it could echo a value, so errors carry a safe re-run hint, for example `run \`op item get <item_id> --vault <vault_id>\` to see why` (without `--reveal`) or `run \`flyctl secrets list --app <app>\` to see why`.
+Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) opv runs `op whoami`, and when that fails (with no service-account or Connect credential set, outside CI) `op account list`. These diagnosis calls are free under 1Password rate limits, have their own 15 s limit, and no item is read a second time.
+
+- Not signed in, with no non-interactive credential set (no session, an expired `OP_SESSION_*`, a locked desktop app), is authentication (7), with the sign-in command for your shell: `eval $(op signin)` for bash and zsh, `eval (op signin)` for fish, `Invoke-Expression $(op signin)` for PowerShell (the default on Windows), or "sign in with `op signin` (see `op signin --help` for your shell)" for any other shell, plus "if you are signed in, check network access to 1Password". Under CI (`CI` or `GITHUB_ACTIONS` truthy, so `CI=false` does not count) it says "set OP_SERVICE_ACCOUNT_TOKEN" and gives no interactive command.
+- No account on the machine (fresh WSL or Linux) gives the `op account add` command first.
+- With `OP_SERVICE_ACCOUNT_TOKEN` or Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`) set, a failing `op whoami` is ambiguous (rejected token or no network), so it stays a source error (4): "1Password rejected the service-account (or Connect) token or could not be reached: check the token in <variable> and network access". No interactive command is printed.
+- Signed in but the read still failed is a source error (4) naming the vault and item IDs and the identity type (USER or SERVICE_ACCOUNT, never the identity) and saying to grant that identity access to the vault.
+- A failed `flyctl` call with `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` set is a Fly target error (5): "flyctl failed for app <app>: check that the token in <variable> can access it, that the app exists, and, for a deploy, that it has at least one machine". `flyctl auth whoami` is not consulted there, because app-scoped deploy tokens fail it. With no Fly token set, opv runs `flyctl auth whoami` (exit status only; its output names the account and is never shown): logged out is authentication (7), "not logged in to Fly", with `flyctl auth login`, or "set FLY_API_TOKEN" under CI; logged in is a target error (5) with the same app wording.
+
+`doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. Child stderr is suppressed on purpose, because it could echo a value; a re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
+
+A clean `status` ends with a summary line, for example `49 saved, 13 not yet on Fly (staged by the next fly sync), 0 findings`.
 
 ## Security model and limits
 

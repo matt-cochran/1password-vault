@@ -4,6 +4,14 @@
 //!   call per environment, by ID only (FR-13). It returns the fields that live inside a
 //!   section, typed by field type (FR-14: CONCEALED = secret, STRING = config), plus the raw
 //!   item JSON so that [`write_skeleton`] needs no second read.
+//! - A failed `op` call is diagnosed with [`diagnose`] (FR-26): `op whoami`, then
+//!   `op account list` when it fails (both free under rate limits; never a second item
+//!   read; own 15 s limit). Not signed in, with no service-account or Connect credential
+//!   set, is `Auth` (exit 7) with the sign-in step for the detected shell
+//!   ([`crate::host`]); a set credential that fails whoami is `Source` (exit 4, ambiguous:
+//!   rejected or unreachable); signed in is `Source` (exit 4) naming the IDs and the
+//!   identity type. The host is detected only on failure. Only `user_type` is parsed from `whoami`, and only the entry count from
+//!   `account list`; identity is never printed or kept.
 //! - [`write_skeleton`] (FR-19, the only write) pipes the full current item, with the missing
 //!   sections and empty fields appended, to `op item edit <item_id> --vault <vault_id>
 //!   --format json` on stdin. This is the invocation the D0 spike proved (attempt 1). A
@@ -26,7 +34,6 @@
 //!   so it never reallocates.
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fmt;
 use std::io::{self, Write};
 
@@ -39,7 +46,8 @@ use crate::domain::model::{Environment, Kind};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
-use crate::runner::{CommandRunner, Output};
+use crate::host::{Host, OpCredential, Platform, Tool};
+use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
 
 const OP: &str = "op";
 
@@ -61,57 +69,212 @@ impl fmt::Debug for Item {
     }
 }
 
-/// Whether the environment carries an explicit 1Password credential. Used only to classify
-/// a failed `op item get` as [`Error::Auth`] instead of [`Error::Source`].
-///
-/// Rule (deterministic, value-free): `Present` if any of `OP_SERVICE_ACCOUNT_TOKEN`,
-/// `OP_CONNECT_TOKEN` or a variable starting with `OP_SESSION_` is set and non-empty;
-/// otherwise `Absent`. Only names and emptiness are inspected; values are never copied.
-/// The desktop-app integration leaves no environment signal, so a desktop user whose read
-/// fails for another reason is reported as `Auth`; the message says so.
+/// The identity `op` is signed in as: its type only, from `op whoami`'s `user_type`
+/// field. Identity details (email, account URL, UUIDs) are never parsed or kept (SR-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Credentials {
-    Present,
-    Absent,
+pub enum IdentityType {
+    User,
+    ServiceAccount,
+    /// `user_type` missing or not a plain upper-case word.
+    Unknown,
 }
 
-impl Credentials {
-    pub fn from_env() -> Self {
-        Self::from_vars(std::env::vars_os())
+impl fmt::Display for IdentityType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            IdentityType::User => "USER",
+            IdentityType::ServiceAccount => "SERVICE_ACCOUNT",
+            IdentityType::Unknown => "unknown type",
+        })
     }
+}
 
-    pub fn from_vars<K: AsRef<OsStr>, V: AsRef<OsStr>>(
-        vars: impl IntoIterator<Item = (K, V)>,
-    ) -> Self {
-        let present = vars.into_iter().any(|(k, v)| {
-            let named = k.as_ref().to_str().is_some_and(|k| {
-                k == "OP_SERVICE_ACCOUNT_TOKEN"
-                    || k == "OP_CONNECT_TOKEN"
-                    || k.starts_with("OP_SESSION_")
-            });
-            named && !v.as_ref().is_empty()
+/// The 1Password session state, found without reading any item (FR-26, FR-13): `op whoami`
+/// and, when it fails, `op account list` (both free under rate limits, D0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Session {
+    /// `op whoami` succeeded.
+    SignedIn(IdentityType),
+    /// `op whoami` failed with no non-interactive credential set: no session, an expired
+    /// `OP_SESSION_*`, a locked desktop app (or no network).
+    NotSignedIn,
+    /// `op whoami` failed while a service-account or Connect credential is set: rejected
+    /// or unreachable. Ambiguous, so it keeps the source category (exit 4, FR-10).
+    CredentialFailed(OpCredential),
+    /// `op whoami` failed and `op account list` is empty: no account on this machine.
+    NoAccount,
+    /// `op whoami` could not run to completion (spawn error or timeout); nothing known.
+    Unknown,
+}
+
+/// Classify the 1Password session (FR-26). Shared by `doctor` and every failed `op` call.
+///
+/// Calls: `op whoami --format json`; only if it fails, and only outside CI and without a
+/// non-interactive credential, `op account list --format json`. Both are diagnosis probes
+/// with their own [`PROBE_TIMEOUT`]. Never an item read (FR-13). From `whoami` only
+/// `user_type` is parsed; from `account list` only the number of entries. `op` missing is
+/// `Err(Dependency)` with the install hint. `host` is called only when needed.
+pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Session, Error> {
+    let who = match r.probe(OP, &["whoami", "--format", "json"], PROBE_TIMEOUT) {
+        Ok(o) => o,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(&host())),
+        Err(_) => return Ok(Session::Unknown),
+    };
+    if who.status == 0 {
+        return Ok(Session::SignedIn(identity_type(&who.stdout)));
+    }
+    let h = host();
+    if let Some(c) = h.op_credential {
+        return Ok(Session::CredentialFailed(c));
+    }
+    if h.ci {
+        return Ok(Session::NotSignedIn);
+    }
+    Ok(
+        match r.probe(OP, &["account", "list", "--format", "json"], PROBE_TIMEOUT) {
+            Ok(o) if o.status == 0 && account_count(&o.stdout) == Some(0) => Session::NoAccount,
+            _ => Session::NotSignedIn,
+        },
+    )
+}
+
+/// `user_type` from `op whoami --format json`, nothing else. Unknown fields (identity) are
+/// skipped by serde without being kept.
+fn identity_type(stdout: &[u8]) -> IdentityType {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        user_type: Option<String>,
+    }
+    let t = serde_json::from_slice::<Who>(stdout)
+        .ok()
+        .and_then(|w| w.user_type)
+        .filter(|t| {
+            !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
         });
-        if present {
-            Credentials::Present
-        } else {
-            Credentials::Absent
+    match t.as_deref() {
+        Some("SERVICE_ACCOUNT") => IdentityType::ServiceAccount,
+        Some(_) => IdentityType::User,
+        None => IdentityType::Unknown,
+    }
+}
+
+/// Number of accounts in `op account list --format json` (an array; empty output is none).
+/// Entries are skipped unread (they name the account).
+fn account_count(stdout: &[u8]) -> Option<usize> {
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        return Some(0);
+    }
+    serde_json::from_slice::<Vec<de::IgnoredAny>>(stdout)
+        .ok()
+        .map(|v| v.len())
+}
+
+/// The remediation for a session that is not usable, or `None` for `SignedIn` / `Unknown`.
+/// `failed` names what failed first, if anything before `op whoami` (e.g. `op item get
+/// failed (exit 1)`). Text only, never a prompt (FR-9); never asks for a secret anywhere
+/// but `op`'s own prompt.
+///
+/// - `NotSignedIn` / `NoAccount` (no non-interactive credential set): [`Error::Auth`]
+///   (exit 7) with the sign-in step for the shell, or "set OP_SERVICE_ACCOUNT_TOKEN" under
+///   CI.
+/// - `CredentialFailed`: [`Error::Source`] (exit 4, the pre-FR-26 category, FR-10): the
+///   token was rejected or 1Password could not be reached; no interactive command.
+pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Option<Error> {
+    let ctx = match failed {
+        Some(f) => format!("{f}; op whoami failed"),
+        None => "op whoami failed".to_string(),
+    };
+    let ci_token = "set OP_SERVICE_ACCOUNT_TOKEN to a service account token that can read \
+                    the vault (as a CI secret, never in the repository)";
+    let network = "if you are signed in, check network access to 1Password";
+    let m = match session {
+        Session::SignedIn(_) | Session::Unknown => return None,
+        Session::CredentialFailed(c) => {
+            return Some(Error::Source(format!(
+                "{ctx}\n  1Password rejected the {} token or could not be reached: check the \
+                 token in {} and network access",
+                c.label(),
+                c.var()
+            )));
         }
+        Session::NotSignedIn => match host.signin_line("sign in") {
+            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+            Some(step) => format!(
+                "not signed in to 1Password ({ctx})\n  {step}\n  (a session from op signin \
+                 expires after 30 minutes idle; with the desktop app integration, unlock the \
+                 1Password app instead)\n  {network}"
+            ),
+        },
+        Session::NoAccount => match host.signin_line("then sign in") {
+            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+            Some(step) => {
+                let wsl = if host.platform == Platform::Wsl {
+                    " (op in WSL does not share the Windows app's accounts)"
+                } else {
+                    ""
+                };
+                format!(
+                    "no 1Password account is set up for op on this machine{wsl} ({ctx} \
+                     and op account list is empty)\n  add one: op account \
+                     add --address <sign-in address> --email <email>\n  {step}\n  \
+                     type the Secret Key and password only at op's prompts, never into chat, \
+                     tickets or files"
+                )
+            }
+        },
+    };
+    Some(Error::Auth(format!("{m}\n  then run opv again")))
+}
+
+/// After a failed `op` call: diagnose the session and return the error to report. Not
+/// signed in → `Auth` (exit 7) with the sign-in step; a non-interactive credential that
+/// fails → `Source` (exit 4); signed in → `Source` (exit 4) naming the vault and item
+/// IDs, the identity type and `grant`; the session could not be determined → `Source`
+/// with a value-free re-run hint (the last resort).
+fn failed_op_error(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+    grant: &str,
+) -> Error {
+    let session = match diagnose(r, host) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match session {
+        Session::SignedIn(t) => Error::Source(format!(
+            "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not \
+             available to this identity\n  next: {grant} (vault {}), or check vault_id and \
+             item_id in the configuration",
+            env.item_id, env.vault_id, env.vault_id
+        )),
+        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env))),
+        s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
     }
 }
 
 /// Read the environment's item once, by vault ID and item ID (FR-13). See the module docs.
+/// The host is detected only if the read fails.
 pub fn read_item(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
-    read_item_with(r, env, Credentials::from_env())
+    read_item_on(r, env, &Host::detect)
 }
 
-/// [`read_item`] with the credential signal supplied by the caller (tests, or S6 if it
-/// already knows). A non-zero exit is `Source("op item get failed (exit N); run ...")` (a
-/// value-free re-run hint with the IDs) unless `creds`
-/// is `Absent`, in which case it is `Auth` with the same prefix.
+/// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
+/// [`diagnose`] (FR-26). No second item read is made (FR-13).
 pub fn read_item_with(
     r: &dyn CommandRunner,
     env: &Environment,
-    creds: Credentials,
+    host: &Host,
+) -> Result<Item, Error> {
+    read_item_on(r, env, &|| *host)
+}
+
+fn read_item_on(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
     let args = [
         "item",
@@ -122,17 +285,15 @@ pub fn read_item_with(
         "--format",
         "json",
     ];
-    let Output { status, stdout } = run_op(r, &args, None)?;
+    let Output { status, stdout } = run_op(r, &args, None, host)?;
     if status != 0 {
-        let m = format!("op item get failed (exit {status}){}", rerun_hint(env));
-        return Err(match creds {
-            Credentials::Present => Error::Source(m),
-            Credentials::Absent => Error::Auth(format!(
-                "{m}; no 1Password credentials in the environment (set \
-                 OP_SERVICE_ACCOUNT_TOKEN or run `op signin`; if you use the desktop app \
-                 integration, check that it is unlocked)"
-            )),
-        });
+        return Err(failed_op_error(
+            r,
+            env,
+            host,
+            &format!("op item get failed (exit {status})"),
+            "grant this identity access to the vault",
+        ));
     }
     let fields = parse_fields(&stdout)?;
     Ok(Item {
@@ -152,6 +313,28 @@ pub fn write_skeleton(
     item: &Item,
     missing: &[(String, String, Kind)],
 ) -> Result<(), Error> {
+    write_skeleton_on(r, env, item, missing, &Host::detect)
+}
+
+/// [`write_skeleton`] on a given host (tests). A failed edit is diagnosed like a failed
+/// read (FR-26).
+pub fn write_skeleton_with(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    item: &Item,
+    missing: &[(String, String, Kind)],
+    host: &Host,
+) -> Result<(), Error> {
+    write_skeleton_on(r, env, item, missing, &|| *host)
+}
+
+fn write_skeleton_on(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    item: &Item,
+    missing: &[(String, String, Kind)],
+    host: &dyn Fn() -> Host,
+) -> Result<(), Error> {
     if missing.is_empty() {
         return Ok(());
     }
@@ -170,20 +353,23 @@ pub fn write_skeleton(
         "json",
     ];
     // The edited item comes back on stdout (with values); it is dropped, zeroized, unread.
-    let out = run_op(r, &args, Some(&template))?;
+    let out = run_op(r, &args, Some(&template), host)?;
     if out.status != 0 {
-        return Err(Error::Source(format!(
-            "op item edit failed (exit {}){}",
-            out.status,
-            rerun_hint(env)
-        )));
+        return Err(failed_op_error(
+            r,
+            env,
+            host,
+            &format!("op item edit failed (exit {})", out.status),
+            "grant this identity write access to the vault",
+        ));
     }
     Ok(())
 }
 
-/// A value-free command to re-run by hand when `op` fails, since its stderr is discarded
-/// (SR-1). IDs only; without `--format json` and `--reveal`, `op` conceals secret fields.
-/// (`op item edit` cannot be re-run without its stdin, so the hint reads the item.)
+/// Last resort (FR-26), used only when the session could not be diagnosed: a value-free
+/// command to re-run by hand, since `op`'s stderr is discarded (SR-1). IDs only; without
+/// `--format json` and `--reveal`, `op` conceals secret fields. (`op item edit` cannot be
+/// re-run without its stdin, so the hint reads the item.)
 fn rerun_hint(env: &Environment) -> String {
     format!(
         "; run `{OP} item get {} --vault {}` to see why",
@@ -191,9 +377,22 @@ fn rerun_hint(env: &Environment) -> String {
     )
 }
 
-fn run_op(r: &dyn CommandRunner, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error> {
+/// `op` is not on PATH: a dependency error with the install hint for this platform.
+pub fn op_missing(host: &Host) -> Error {
+    Error::Dependency(format!(
+        "op CLI not found on PATH\n  {}",
+        host.install_hint(Tool::Op)
+    ))
+}
+
+fn run_op(
+    r: &dyn CommandRunner,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    host: &dyn Fn() -> Host,
+) -> Result<Output, Error> {
     r.run(OP, args, stdin, &[]).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency("op CLI not found on PATH".into()),
+        io::ErrorKind::NotFound => op_missing(&host()),
         // The runner's own message names the program and the limit (no child output).
         io::ErrorKind::TimedOut => {
             let sub: Vec<&str> = args.iter().take(2).copied().collect();
@@ -449,6 +648,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::host::FakeEnv;
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
 
@@ -456,6 +656,23 @@ mod tests {
     const EDIT_ARGS: [&str; 7] = [
         "item", "edit", "istg", "--vault", "vstg", "--format", "json",
     ];
+
+    fn linux() -> Host {
+        Host::from_env(&FakeEnv::new("linux").shell("/bin/bash"))
+    }
+
+    fn accounts(n: usize) -> Output {
+        let one = r#"{"url":"my.1password.com","email":"a@example.com"}"#;
+        Output::success(format!("[{}]", vec![one; n].join(",")))
+    }
+
+    fn argvs(r: &FakeRunner) -> Vec<String> {
+        r.calls
+            .borrow()
+            .iter()
+            .map(|c| format!("{} {}", c.program, c.args.join(" ")))
+            .collect()
+    }
 
     fn test_env() -> Environment {
         Environment {
@@ -531,12 +748,12 @@ mod tests {
 
     fn read(bytes: Vec<u8>) -> Item {
         let r = FakeRunner::new([Output::success(bytes)]);
-        read_item_with(&r, &test_env(), Credentials::Present).unwrap()
+        read_item_with(&r, &test_env(), &linux()).unwrap()
     }
 
     fn read_err(bytes: Vec<u8>) -> Error {
         let r = FakeRunner::new([Output::success(bytes)]);
-        read_item_with(&r, &test_env(), Credentials::Present).unwrap_err()
+        read_item_with(&r, &test_env(), &linux()).unwrap_err()
     }
 
     fn find<'a>(fields: &'a [ItemField], section: &str, label: &str) -> &'a ItemField {
@@ -551,7 +768,7 @@ mod tests {
     #[test]
     fn reads_whole_item_once_by_id() {
         let r = FakeRunner::new([Output::success(allumata_item())]);
-        let item = read_item_with(&r, &test_env(), Credentials::Present).unwrap();
+        let item = read_item_with(&r, &test_env(), &linux()).unwrap();
         let calls = r.calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].program, "op");
@@ -700,55 +917,125 @@ mod tests {
         }
     }
 
+    const WHOAMI_SA: &str = r#"{"url":"https://my.1password.com","email":"ci-OPHINTMARKER@example.com","user_uuid":"UOPHINTMARKER","account_uuid":"AOPHINTMARKER","user_type":"SERVICE_ACCOUNT"}"#;
+
+    /// FR-26: signed in (whoami succeeds) but the read fails → Source (exit 4) naming the
+    /// IDs and the identity type, with the grant instruction; never "to see why".
     #[test]
-    fn non_zero_exit_maps_to_source_error_without_stderr() {
+    fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
+        let r = FakeRunner::new([Output::failure(1), Output::success(WHOAMI_SA)]);
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let m = match &e {
+            Error::Source(m) => m.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(e.exit_code(), 4);
+        assert!(
+            m.starts_with("op item get failed (exit 1): signed in"),
+            "{m}"
+        );
+        assert!(m.contains("SERVICE_ACCOUNT"), "{m}");
+        assert!(m.contains("item istg in vault vstg"), "{m}");
+        assert!(m.contains("grant this identity access to the vault"), "{m}");
+        assert!(!m.contains("to see why"), "{m}");
+        assert!(
+            !m.contains("example.com") && !m.contains("OPHINTMARKER"),
+            "{m}"
+        );
+        assert_eq!(
+            argvs(&r),
+            vec![
+                "op item get istg --vault vstg --format json",
+                "op whoami --format json"
+            ]
+        );
+    }
+
+    /// FR-26: whoami fails → Auth (exit 7) with the sign-in command, whatever credential
+    /// variables are set (the motivating bug: an expired OP_SESSION_*).
+    #[test]
+    fn non_zero_exit_not_signed_in_is_auth_with_signin_command() {
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert_eq!(e.exit_code(), 7, "{e}");
+        let t = e.to_string();
+        assert!(t.contains("not signed in to 1Password"), "{t}");
+        assert!(t.contains("op item get failed (exit 1)"), "{t}");
+        assert!(t.contains("\n  sign in: eval $(op signin)\n"), "{t}");
+        assert!(!t.contains("to see why"), "{t}");
+    }
+
+    /// FR-13: diagnosis never reads the item a second time.
+    #[test]
+    fn diagnosis_makes_no_extra_item_read() {
+        for whoami in [Output::success(WHOAMI_SA), Output::failure(1)] {
+            let r = FakeRunner::new([Output::failure(1), whoami, accounts(0)]);
+            let _ = read_item_with(&r, &test_env(), &linux());
+            let reads = argvs(&r)
+                .iter()
+                .filter(|a| a.starts_with("op item"))
+                .count();
+            assert_eq!(reads, 1, "{:?}", argvs(&r));
+        }
+    }
+
+    /// The re-run hint survives only as the last resort: when whoami itself cannot run.
+    #[test]
+    fn rerun_hint_only_when_session_cannot_be_diagnosed() {
         let r = FakeRunner::new([Output::failure(1)]);
-        let e = read_item_with(&r, &test_env(), Credentials::Present).unwrap_err();
+        r.responses.borrow_mut().push_back(Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "op did not finish within 300 s and was killed",
+        )));
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
             "{e:?}"
         );
     }
 
+    /// I6: child stdout (which can carry values, and whoami's identity) never reaches the
+    /// message, for read and edit, signed in or not.
     #[test]
-    fn non_zero_exit_without_any_credentials_is_auth() {
-        let r = FakeRunner::new([Output::failure(1)]);
-        let e = read_item_with(&r, &test_env(), Credentials::Absent).unwrap_err();
-        match e {
-            Error::Auth(m) => assert!(m.starts_with("op item get failed (exit 1)"), "{m}"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// I6: the re-run hint names IDs only; child stdout (which can carry values) never
-    /// reaches the message, for read and edit, with and without credentials.
-    #[test]
-    fn failure_hint_is_value_free() {
+    fn failure_message_is_value_free() {
         const MARK: &str = "OPHINTMARKER";
         let leaky = || Output {
             status: 1,
             stdout: Zeroizing::new(format!("{{\"value\":\"{MARK}\"}}").into_bytes()),
         };
-        for creds in [Credentials::Present, Credentials::Absent] {
-            let r = FakeRunner::new([leaky()]);
-            let e = read_item_with(&r, &test_env(), creds).unwrap_err();
+        let sessions = || {
+            [
+                vec![Output::success(WHOAMI_SA)],
+                vec![leaky(), accounts(1)],
+                vec![leaky(), accounts(0)],
+            ]
+        };
+        for s in sessions() {
+            let r = FakeRunner::new(std::iter::once(leaky()).chain(s));
+            let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
             let t = format!("{e} {e:?}");
-            assert!(t.contains("run `op item get istg --vault vstg`"), "{t}");
             assert!(!t.contains(MARK) && !t.contains("--reveal"), "{t}");
+            assert!(
+                !t.contains("example.com") && !t.contains("to see why"),
+                "{t}"
+            );
         }
         let item_json = serde_json::to_vec(&json!({"fields": []})).unwrap();
-        let r = FakeRunner::new([Output::success(item_json), leaky()]);
-        let item = read_item_with(&r, &test_env(), Credentials::Present).unwrap();
-        let e = write_skeleton(
-            &r,
-            &test_env(),
-            &item,
-            &[("p".into(), format!("{MARK}K"), Kind::Secret)],
-        )
-        .unwrap_err();
-        let t = format!("{e} {e:?}");
-        assert!(t.contains("run `op item get istg --vault vstg`"), "{t}");
-        assert!(!t.contains(MARK), "{t}");
+        for s in sessions() {
+            let r = FakeRunner::new([Output::success(item_json.clone()), leaky()]);
+            r.responses.borrow_mut().extend(s.into_iter().map(Ok));
+            let item = read_item_with(&r, &test_env(), &linux()).unwrap();
+            let e = write_skeleton_with(
+                &r,
+                &test_env(),
+                &item,
+                &[("p".into(), format!("{MARK}K"), Kind::Secret)],
+                &linux(),
+            )
+            .unwrap_err();
+            let t = format!("{e} {e:?}");
+            assert!(!t.contains(MARK) && !t.contains("example.com"), "{t}");
+        }
     }
 
     #[test]
@@ -758,42 +1045,91 @@ mod tests {
             io::ErrorKind::TimedOut,
             "op did not finish within 300 s and was killed",
         )));
-        let e = read_item_with(&r, &test_env(), Credentials::Present).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m.starts_with("op item get: op did not finish")),
             "{e:?}"
         );
     }
 
+    /// FR-26: a successful read never detects the host; a failed one does.
     #[test]
-    fn credentials_rule_is_explicit_and_value_free() {
-        let none: [(&str, &str); 0] = [];
-        assert_eq!(Credentials::from_vars(none), Credentials::Absent);
+    fn host_is_detected_only_on_failure() {
+        let item_json = serde_json::to_vec(&json!({"fields": []})).unwrap();
+        let called = std::cell::Cell::new(0);
+        let host = || {
+            called.set(called.get() + 1);
+            linux()
+        };
+        let r = FakeRunner::new([Output::success(item_json)]);
+        read_item_on(&r, &test_env(), &host).unwrap();
+        assert_eq!(called.get(), 0);
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let _ = read_item_on(&r, &test_env(), &host);
+        assert!(called.get() > 0);
+    }
+
+    /// FR-26: whoami is a probe with its own 15 s limit; a timeout is Unknown and falls
+    /// back to the re-run hint.
+    #[test]
+    fn whoami_timeout_is_unknown() {
+        let r = FakeRunner::new([]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        assert_eq!(diagnose(&r, &linux).unwrap(), Session::Unknown);
+    }
+
+    /// Only `user_type` is used; identity fields are never kept.
+    #[test]
+    fn identity_type_parses_user_type_only() {
         assert_eq!(
-            Credentials::from_vars([("PATH", "/bin"), ("OP_SERVICE_ACCOUNT_TOKEN", "")]),
-            Credentials::Absent,
-            "empty token is no token"
+            identity_type(WHOAMI_SA.as_bytes()),
+            IdentityType::ServiceAccount
         );
-        for name in [
-            "OP_SERVICE_ACCOUNT_TOKEN",
-            "OP_CONNECT_TOKEN",
-            "OP_SESSION_my_team",
+        assert_eq!(
+            identity_type(br#"{"email":"a@b.c","user_type":"HUMAN"}"#),
+            IdentityType::User
+        );
+        assert_eq!(
+            identity_type(br#"{"user_type":"x@y"}"#),
+            IdentityType::Unknown
+        );
+        assert_eq!(identity_type(b"not json"), IdentityType::Unknown);
+        assert_eq!(identity_type(b"{}"), IdentityType::Unknown);
+    }
+
+    #[test]
+    fn account_count_cases() {
+        assert_eq!(account_count(b""), Some(0));
+        assert_eq!(account_count(b"[]\n"), Some(0));
+        assert_eq!(
+            account_count(br#"[{"url":"my.1password.com","email":"a@b.c"}]"#),
+            Some(1)
+        );
+        assert_eq!(account_count(b"oops"), None);
+    }
+
+    /// CI, a service account token or Connect: no `op account list` (it cannot help).
+    #[test]
+    fn diagnose_skips_account_list_under_ci_or_token() {
+        for env in [
+            FakeEnv::new("linux").var("CI"),
+            FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
+            FakeEnv::new("linux").var("OP_CONNECT_HOST"),
         ] {
-            assert_eq!(
-                Credentials::from_vars([(name, "tok")]),
-                Credentials::Present,
-                "{name}"
-            );
+            let r = FakeRunner::new([Output::failure(1)]);
+            let h = Host::from_env(&env);
+            diagnose(&r, &|| h).unwrap();
+            assert_eq!(argvs(&r), vec!["op whoami --format json"], "{env:?}");
         }
     }
 
     #[test]
-    fn missing_op_binary_is_dependency_error() {
+    fn missing_op_binary_is_dependency_error_with_install_hint() {
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
-        let e = read_item_with(&r, &test_env(), Credentials::Present).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
-            matches!(&e, Error::Dependency(m) if m.contains("op")),
+            matches!(&e, Error::Dependency(m) if m.contains("op CLI not found on PATH\n  install")),
             "{e:?}"
         );
     }
@@ -1010,14 +1346,26 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_edit_failure_is_source_error() {
+    fn skeleton_edit_failure_while_signed_in_is_source_asking_for_write_access() {
         let item = read(allumata_item());
-        let r = FakeRunner::new([Output::failure(2)]);
+        let r = FakeRunner::new([Output::failure(2), Output::success(WHOAMI_SA)]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
+        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert!(
-            matches!(&e, Error::Source(m) if m == "op item edit failed (exit 2); run `op item get istg --vault vstg` to see why"),
+            matches!(&e, Error::Source(m) if m.starts_with("op item edit failed (exit 2): signed in")
+                && m.contains("grant this identity write access to the vault")
+                && !m.contains("to see why")),
             "{e:?}"
         );
+    }
+
+    #[test]
+    fn skeleton_edit_failure_not_signed_in_is_auth() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::failure(2), Output::failure(1), accounts(1)]);
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        assert_eq!(e.exit_code(), 7, "{e}");
+        assert!(e.to_string().contains("eval $(op signin)"), "{e}");
     }
 }

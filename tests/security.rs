@@ -59,10 +59,16 @@ printf '%s %s\n' "$FAKE_CHILD_STDERR" "$FAKE_STDERR_VALUE" >&2
 case "$1" in
   --version) echo "2.30.0"; exit 0 ;;
   whoami)
-    [ -n "$FAKE_OP_EXIT" ] && exit "$FAKE_OP_EXIT"
-    printf '{"user_type":"SERVICE_ACCOUNT"}\n'; exit 0 ;;
+    e="${FAKE_OP_WHOAMI_EXIT:-$FAKE_OP_EXIT}"
+    [ -n "$e" ] && exit "$e"
+    printf '{"email":"S7MARKERVALUEwho@example.invalid","user_type":"SERVICE_ACCOUNT"}\n'; exit 0 ;;
+  account)
+    if [ -n "$FAKE_OP_NO_ACCOUNTS" ]; then printf '[]\n'
+    else printf '[{"url":"S7MARKERVALUE.example.invalid","email":"S7MARKERVALUE@example.invalid"}]\n'; fi
+    exit 0 ;;
   item)
-    [ -n "$FAKE_OP_EXIT" ] && exit "$FAKE_OP_EXIT"
+    e="${FAKE_OP_ITEM_EXIT:-$FAKE_OP_EXIT}"
+    [ -n "$e" ] && exit "$e"
     cat "$FAKE_FIX/item.json"; exit 0 ;;
 esac
 exit 97
@@ -80,7 +86,7 @@ export -p > "$p.env"
 printf '%s %s\n' "$FAKE_CHILD_STDERR" "$FAKE_STDERR_VALUE" >&2
 case "$1 $2" in
   "version "*) echo "flyctl v0.4.112 linux/amd64 Commit: fake"; exit 0 ;;
-  "auth whoami") echo "fake@example.invalid"; exit 0 ;;
+  "auth whoami") echo "S7MARKERVALUEfly@example.invalid"; exit "${FAKE_FLY_AUTH_EXIT:-0}" ;;
   "secrets list")
     l=0
     [ -f "$FAKE_REC/.lists" ] && read l < "$FAKE_REC/.lists"
@@ -514,11 +520,13 @@ fn drops_child_stderr() {
     }
 }
 
-/// Brief: fake `op` prints a value to stderr and exits 1 → Source (4), value not echoed.
+/// Brief: fake `op` prints a value to stderr and the item read exits 1 while signed in →
+/// Source (4), value not echoed. FR-26: names the IDs and the identity type (never the
+/// identity) and says to grant access; never "to see why".
 #[test]
 fn child_stderr_suppressed() {
     let mut h = Harness::new(&good_item());
-    h.set("FAKE_OP_EXIT", "1");
+    h.set("FAKE_OP_ITEM_EXIT", "1");
     for cmd in [
         &["status", "prod"][..],
         &["fly", "plan", "prod"],
@@ -535,6 +543,15 @@ fn child_stderr_suppressed() {
             "{cmd:?}: {}",
             r.stderr
         );
+        for want in [
+            "signed in to 1Password as SERVICE_ACCOUNT",
+            "item iprd in vault vprd",
+            "grant this identity access to the vault",
+        ] {
+            assert!(r.stderr.contains(want), "{cmd:?}: {want}: {}", r.stderr);
+        }
+        assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
+        assert!(!r.stderr.contains("example.invalid"), "{}", r.stderr);
         assert_clean_output(cmd, &r);
         assert_eq!(h.fly_calls("import"), 0);
     }
@@ -609,13 +626,16 @@ fn failure_after_partial_plan_stages_nothing() {
         "{}",
         r.stderr
     );
-    // I6: a value-free command to re-run by hand (child stderr is discarded).
+    // FR-26: logged in (auth whoami succeeds), so the app is named with the token check;
+    // never "to see why" (child stderr is discarded).
     assert!(
-        r.stderr
-            .contains(&format!("run `flyctl secrets list --app {APP}` to see why")),
+        r.stderr.contains(&format!(
+            "flyctl failed for app {APP}: check that the logged-in Fly account can access it"
+        )),
         "{}",
         r.stderr
     );
+    assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
     for sub in ["import", "unset", "deploy"] {
         assert_eq!(h.fly_calls(sub), 0, "{sub} after a failed list");
     }
@@ -706,6 +726,249 @@ fn rule_failure_names_key_not_value() {
     }
 }
 
+/// Commands that read the item (every `op item get` failure path).
+const READERS: &[&[&str]] = &[
+    &["status", "prod"],
+    &["fly", "plan", "prod"],
+    &["fly", "sync", "prod"],
+    &["config", "export", "prod", "--json"],
+    &["item", "skeleton", "prod"],
+];
+
+/// `op` calls of the last run, as `argv[0] argv[1]`.
+fn op_subcommands(h: &Harness) -> Vec<String> {
+    h.calls()
+        .iter()
+        .filter(|c| c.prog == "op")
+        .map(|c| c.argv.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// FR-26 regression (§8 item 25): `OP_SESSION_*` is present but expired, so `op item get`
+/// and `op whoami` both fail. Exit 7 with the sign-in command for the shell, never
+/// "run op item get ... to see why" and never exit 4. One item read only (FR-13).
+#[test]
+fn expired_session_is_auth_with_signin_command() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("OP_SESSION_my_team", "expired-dummy-session")
+        .set("SHELL", "/bin/bash")
+        .set("FAKE_OP_EXIT", "1");
+    for cmd in READERS {
+        h.reset();
+        let r = h.run(cmd);
+        assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
+        assert!(
+            r.stderr
+                .starts_with("opv: authentication error: not signed in to 1Password"),
+            "{cmd:?}: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("\n  sign in: eval $(op signin)\n"),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
+        assert!(!r.stderr.contains("expired-dummy-session"), "{}", r.stderr);
+        assert_clean_output(cmd, &r);
+        assert_eq!(
+            op_subcommands(&h),
+            vec!["item get", "whoami --format", "account list"],
+            "{cmd:?}"
+        );
+        assert_eq!(h.fly_calls("import"), 0);
+    }
+    // fish users get fish syntax.
+    h.set("SHELL", "/usr/bin/fish");
+    h.reset();
+    let r = h.run(&["status", "prod"]);
+    assert_eq!(r.code, 7, "{}", r.all());
+    assert!(
+        r.stderr.contains("\n  sign in: eval (op signin)\n"),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("$("), "{}", r.stderr);
+}
+
+/// FR-26: no account on this machine → `op account add`, then sign in; exit 7.
+#[test]
+fn no_account_is_auth_with_account_add() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("SHELL", "/bin/zsh")
+        .set("FAKE_OP_EXIT", "1")
+        .set("FAKE_OP_NO_ACCOUNTS", "1");
+    for cmd in [&["status", "prod"][..], &["doctor"]] {
+        h.reset();
+        let r = h.run(cmd);
+        assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
+        for want in [
+            "no 1Password account is set up for op on this machine",
+            "\n  add one: op account add --address <sign-in address> --email <email>\n",
+            "\n  then sign in: eval $(op signin)\n",
+            "type the Secret Key and password only at op's prompts",
+        ] {
+            assert!(r.all().contains(want), "{cmd:?}: {want}: {}", r.all());
+        }
+        assert_clean_output(cmd, &r);
+    }
+}
+
+/// FR-26 under CI: advise OP_SERVICE_ACCOUNT_TOKEN, print no interactive command, and do
+/// not run `op account list`.
+#[test]
+fn ci_not_signed_in_advises_service_account_token() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("CI", "true")
+        .set("FAKE_OP_EXIT", "1");
+    let r = h.run(&["fly", "sync", "prod"]);
+    assert_eq!(r.code, 7, "{}", r.all());
+    assert!(
+        r.stderr.contains("set OP_SERVICE_ACCOUNT_TOKEN"),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+    assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
+    assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
+}
+
+/// FR-26: a clean `status` ends with the summary line on stdout; exit 0.
+#[test]
+fn clean_status_prints_summary_line() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    let last = r.stdout.lines().last().unwrap();
+    assert!(
+        last.ends_with(" not yet on Fly (staged by the next fly sync), 0 findings"),
+        "{}",
+        r.stdout
+    );
+    assert_clean_output(&["status", "prod"], &r);
+}
+
+/// FR-26: a failed flyctl call while logged out of Fly is authentication (7) with
+/// `flyctl auth login`; under CI, "set FLY_API_TOKEN". The account named by
+/// `flyctl auth whoami` never appears, and nothing says "to see why".
+#[test]
+fn fly_logged_out_is_auth_with_next_step() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_FLY_AUTH_EXIT", "1");
+    for cmd in [
+        &["status", "prod"][..],
+        &["fly", "plan", "prod"],
+        &["fly", "sync", "prod"],
+    ] {
+        h.reset();
+        let r = h.run(cmd);
+        assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
+        assert!(
+            r.stderr
+                .starts_with("opv: authentication error: not logged in to Fly"),
+            "{cmd:?}: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("\n  log in: flyctl auth login\n"),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
+        assert_clean_output(cmd, &r);
+        assert_eq!(h.fly_calls("import"), 0);
+    }
+    h.set("CI", "true");
+    h.reset();
+    let r = h.run(&["fly", "sync", "prod"]);
+    assert_eq!(r.code, 7, "{}", r.all());
+    assert!(r.stderr.contains("set FLY_API_TOKEN"), "{}", r.stderr);
+    assert!(!r.stderr.contains("auth login"), "{}", r.stderr);
+    assert_clean_output(&["fly", "sync", "prod"], &r);
+}
+
+/// FR-26 / FR-10: with a non-interactive 1Password credential (service account or
+/// Connect) set, a read and whoami that both fail are ambiguous: Source (4) naming the
+/// variable, no interactive command, no `op account list`.
+#[test]
+fn rejected_credential_keeps_source_category() {
+    for (set, var) in [
+        (
+            &[("OP_SERVICE_ACCOUNT_TOKEN", "dummy-not-a-token")][..],
+            "OP_SERVICE_ACCOUNT_TOKEN",
+        ),
+        (
+            &[
+                ("OP_CONNECT_HOST", "http://connect.invalid"),
+                ("OP_CONNECT_TOKEN", "dummy-not-a-token"),
+            ][..],
+            "OP_CONNECT_TOKEN",
+        ),
+    ] {
+        let mut h = Harness::new(&good_item());
+        h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+            .set("SHELL", "/bin/bash")
+            .set("FAKE_OP_EXIT", "1");
+        for (k, v) in set {
+            h.set(k, v);
+        }
+        let r = h.run(&["status", "prod"]);
+        assert_eq!(r.code, 4, "{var}: {}", r.all());
+        assert!(
+            r.stderr
+                .contains(&format!("check the token in {var} and network access")),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+        assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
+        assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
+    }
+}
+
+/// FR-26: `CI=false` is not CI (interactive sign-in command shown).
+#[test]
+fn ci_false_is_not_ci() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("CI", "false")
+        .set("SHELL", "/bin/bash")
+        .set("FAKE_OP_EXIT", "1");
+    let r = h.run(&["status", "prod"]);
+    assert_eq!(r.code, 7, "{}", r.all());
+    assert!(
+        r.stderr.contains("sign in: eval $(op signin)"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// FR-26 / FR-10: with FLY_API_TOKEN set, a failed flyctl call is a target error (5) naming
+/// the app and the variable; `flyctl auth whoami` is not run (deploy tokens fail it).
+#[test]
+fn fly_token_failure_is_target_without_whoami() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_FLY_AUTH_EXIT", "1")
+        .set("FLY_API_TOKEN", "dummy-fly-token");
+    let r = h.run(&["fly", "sync", "prod"]);
+    assert_eq!(r.code, 5, "{}", r.all());
+    assert!(
+        r.stderr.contains(&format!(
+            "flyctl failed for app {APP}: check that the token in FLY_API_TOKEN can access it"
+        )),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("dummy-fly-token") && !r.stderr.contains("to see why"));
+    assert_eq!(h.fly_calls("whoami"), 0);
+    assert_clean_output(&["fly", "sync", "prod"], &r);
+}
+
 /// FR-10: stable exit codes per category, observed from the real binary (src/error.rs).
 #[test]
 fn exit_codes() {
@@ -763,7 +1026,7 @@ fn exit_codes() {
 
     // 4: source (op fails with credentials present; malformed item JSON).
     let mut h4 = Harness::new(&good_item());
-    h4.set("FAKE_OP_EXIT", "1");
+    h4.set("FAKE_OP_ITEM_EXIT", "1");
     assert_eq!(h4.run(&["fly", "sync", "prod"]).code, 4);
     let h4b = Harness::new("{\"fields\": [ not json");
     let r = h4b.run(&["fly", "sync", "prod"]);
