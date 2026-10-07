@@ -273,6 +273,8 @@ allumata/OPENAI_API_KEY in prod
   inspect:    op item get iprd --vault vprd
 ```
 
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
+
 It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
 
 ### Machine-readable status and plan
@@ -377,7 +379,7 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | `max_len` | `longer than the 59000-byte limit` |
 | `prefix` | `expected prefix <configured prefix>` |
 | `not_prefix` | `starts with a refused prefix` (never which one) |
-| `prefix_by_mode` | `wrong prefix for mode <mode>`, `mode <mode name> is not set for this product`, `no prefix is configured for mode <mode>` |
+| `prefix_by_mode` | `wrong prefix for mode <mode>`, `mode <mode name> is not set in this environment`, `no prefix is configured for mode <mode>` |
 | `regex` | `does not match the configured regex` |
 | `enum` | `not one of the allowed values` |
 | `base64_bytes` | `not standard base64`, `does not decode to <N> bytes` |

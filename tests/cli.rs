@@ -557,3 +557,46 @@ fn explain_undeclared_key_exits_2() {
     assert_eq!(code, 2, "{err}");
     assert!(err.starts_with("opv: configuration error"), "{err}");
 }
+
+/// FR-22, FR-20: under the simple profile `explain` takes the bare key.
+#[test]
+fn explain_simple_form_takes_the_bare_key() {
+    let (code, out, err) = opv(&[
+        "--config",
+        SIMPLE,
+        "explain",
+        "DATABASE_URL",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("DATABASE_URL in prod\n"), "{out}");
+}
+
+/// FR-22, FR-20: `<product>/<key>` under the simple profile is a configuration error.
+#[test]
+fn explain_product_form_under_simple_exits_2() {
+    let (code, _, err) = opv(&[
+        "--config",
+        SIMPLE,
+        "explain",
+        "app/DATABASE_URL",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 2, "{err}");
+}
+
+/// FR-22, FR-20: a bare key under the fleet profile is a configuration error.
+#[test]
+fn explain_bare_key_under_fleet_exits_2() {
+    let (code, _, err) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 2, "{err}");
+}

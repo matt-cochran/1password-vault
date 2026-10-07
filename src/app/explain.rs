@@ -1,4 +1,5 @@
-//! `explain <product>/<key> [--env <env>]` use case (FR-22).
+//! `explain <product>/<key> [--env <env>]` use case (FR-22); `explain <KEY>` under the
+//! simple profile (FR-20).
 //!
 //! Reads only the configuration: no 1Password or Fly call, so it takes no runner at all
 //! and cannot emit a value or a value fragment (SR-1, §5). It is not a `secret get`.
@@ -14,14 +15,14 @@
 use std::io::Write;
 
 use super::{kind_label, write_err};
-use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules};
+use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
 use crate::domain::{Fleet, rules};
 use crate::error::Error;
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
-/// Only the fleet form `<product>/<key>` exists today. The simple profile (FR-20) adds the
-/// bare `<key>` form by resolving it to its single product in [`resolve`]; everything after
+/// The fleet profile takes `<product>/<key>`; the simple profile (FR-20) takes the bare
+/// `<KEY>` and resolves it to its implicit product in [`resolve`]. Everything after
 /// resolution is shared.
 struct Target<'a> {
     product: &'a str,
@@ -40,8 +41,25 @@ pub fn run(
     explain_in(fleet, &t, env_name, out)
 }
 
-/// Resolve `<product>/<key>` to a declared key.
+/// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
+/// under the simple profile. The other profile's form is a configuration error.
 fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
+    if fleet.is_simple() {
+        if target.contains('/') {
+            return Err(Error::Config(format!(
+                "explain expects <KEY> under the simple profile, got {target:?}"
+            )));
+        }
+        let keys = fleet.products.get(SIMPLE_PRODUCT).map(|p| &p.keys);
+        let Some((key, spec)) = keys.and_then(|k| k.get_key_value(target)) else {
+            return Err(Error::Config(format!("undeclared key {target:?}")));
+        };
+        return Ok(Target {
+            product: SIMPLE_PRODUCT,
+            key,
+            spec,
+        });
+    }
     let Some((product, key)) = target.split_once('/') else {
         return Err(Error::Config(format!(
             "explain expects <product>/<key>, got {target:?}"
@@ -90,9 +108,8 @@ fn environment<'a>(
     };
     if !t.spec.environments.iter().any(|e| e == name) {
         return Err(Error::Config(format!(
-            "{}/{} is not declared for environment {name:?} (declared for: {})",
-            t.product,
-            t.key,
+            "{} is not declared for environment {name:?} (declared for: {})",
+            key_label(t.product, t.key),
             t.spec.environments.join(", ")
         )));
     }
@@ -122,10 +139,12 @@ fn explain_in(
     } else {
         spec.guidance.as_str()
     };
+    // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
+    let label = key_label(product, key);
     let mut lines = vec![
-        format!("{product}/{key} in {env_name}"),
+        format!("{label} in {env_name}"),
         format!(
-            "  reference:  op://{}/{}/{product}/{key}",
+            "  reference:  op://{}/{}/{label}",
             env.vault_id, env.item_id
         ),
         format!("  kind:       {} ({field})", kind_label(spec.kind)),
@@ -435,6 +454,74 @@ mod tests {
         let e = explain(&fleet(), "allumata/OPENAI_API_KEY", Some("staging")).unwrap_err();
         assert!(
             matches!(e, Error::Config(ref m) if m.contains("staging")),
+            "{e}"
+        );
+    }
+
+    fn simple() -> Fleet {
+        crate::config::load("tests/fixtures/simple.toml").unwrap()
+    }
+
+    #[test]
+    fn simple_form_prints_the_key_alone() {
+        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
+        assert!(out.starts_with("DATABASE_URL in prod\n"), "{out}");
+    }
+
+    #[test]
+    fn simple_form_reference_is_an_unsectioned_field() {
+        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
+        assert!(
+            out.contains("reference:  op://vprd/iprd/DATABASE_URL\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn simple_form_fly_name_is_the_key() {
+        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
+        assert!(out.contains("fly name:   DATABASE_URL\n"), "{out}");
+    }
+
+    #[test]
+    fn simple_form_prints_op_item_get_without_reveal() {
+        let out = explain(&simple(), "JWT_KEY", Some("staging")).unwrap();
+        assert!(
+            out.contains("inspect:    op item get istg --vault vstg") && !out.contains("--reveal"),
+            "{out}"
+        );
+    }
+
+    /// The hidden implicit product never shows: no empty `//` section and no leading `/`.
+    #[test]
+    fn simple_form_never_shows_the_hidden_product() {
+        let out = explain(&simple(), "JWT_KEY", Some("staging")).unwrap();
+        assert!(!out.contains("istg//") && !out.starts_with('/'), "{out}");
+    }
+
+    #[test]
+    fn simple_undeclared_key_is_config_error() {
+        let e = explain(&simple(), "NOPE", Some("prod")).unwrap_err();
+        assert!(
+            matches!(e, Error::Config(ref m) if m.contains("NOPE")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn product_form_under_simple_is_config_error() {
+        let e = explain(&simple(), "api/DATABASE_URL", Some("prod")).unwrap_err();
+        assert!(
+            matches!(e, Error::Config(ref m) if m.contains("<KEY>")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn simple_key_not_declared_for_env_names_the_key_alone() {
+        let e = explain(&simple(), "STAGING_DEBUG_TOKEN", Some("prod")).unwrap_err();
+        assert!(
+            matches!(e, Error::Config(ref m) if m.starts_with("STAGING_DEBUG_TOKEN is not declared")),
             "{e}"
         );
     }

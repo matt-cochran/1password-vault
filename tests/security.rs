@@ -1762,7 +1762,7 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             "MODE_UNSET",
             format!("{m}mode"),
             "prefix_by_mode",
-            "mode billing is not set for this product",
+            "mode billing is not set in this environment",
         ),
         (
             "MODE_UNMAPPED",
@@ -2000,4 +2000,43 @@ fn explain_makes_no_op_or_flyctl_call() {
     let r = h.run(&["explain", "allumata/OPENAI_API_KEY", "--env", "prod"]);
     assert_eq!(r.code, 0, "{}", r.all());
     assert!(h.calls().is_empty(), "{:?}", h.calls());
+}
+
+/// FR-22, FR-20, SR-1: under the simple profile a failing row's reason carries no marker,
+/// in text or JSON, and the JSON row keeps `product: null`.
+#[test]
+fn simple_profile_rule_failure_reason_carries_no_marker() {
+    let h = Harness::new(&item(vec![
+        field(
+            None,
+            "DATABASE_URL",
+            "CONCEALED",
+            Some("mysql://S7MARKERVALUEdb0016"),
+        ),
+        field(None, "JWT_KEY", "CONCEALED", Some(ENC)),
+        field(None, "LOG_LEVEL", "STRING", Some("info")),
+    ]));
+    let text = h.run_config(SIMPLE_CONFIG, &["status", "prod"]);
+    assert_eq!(text.code, 8, "{}", text.all());
+    assert!(
+        text.stdout
+            .contains("failed prefix (expected prefix postgres://)"),
+        "{}",
+        text.stdout
+    );
+    assert_clean_output(&["status", "prod"], &text);
+    let json = h.run_config(SIMPLE_CONFIG, &["status", "prod", "--json"]);
+    assert_clean_output(&["status", "prod", "--json"], &json);
+    let doc: Value = serde_json::from_str(&json.stdout).expect("one JSON document");
+    let row = doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["key"] == "DATABASE_URL")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (row["product"].clone(), row["reason"].clone()),
+        (Value::Null, json!("expected prefix postgres://"))
+    );
 }

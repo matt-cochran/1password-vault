@@ -51,7 +51,8 @@ pub enum Reason {
     /// `prefix_by_mode`: the environment's mode value (from config) whose prefixes the
     /// value does not start with.
     WrongPrefixForMode(String),
-    /// `prefix_by_mode`: the configured mode name is not set for the product here.
+    /// `prefix_by_mode`: the configured mode name is not set (for the product, under the
+    /// fleet profile) in this environment. Worded to read under both profiles (FR-20).
     ModeNotSet(String),
     /// `prefix_by_mode`: the configured mode value has no prefix and is not skipped.
     ModeUnmapped(String),
@@ -65,7 +66,7 @@ impl fmt::Display for Reason {
             Reason::Fixed(s) => f.write_str(s),
             Reason::ExpectedPrefix(p) => write!(f, "expected prefix {p}"),
             Reason::WrongPrefixForMode(m) => write!(f, "wrong prefix for mode {m}"),
-            Reason::ModeNotSet(m) => write!(f, "mode {m} is not set for this product"),
+            Reason::ModeNotSet(m) => write!(f, "mode {m} is not set in this environment"),
             Reason::ModeUnmapped(m) => write!(f, "no prefix is configured for mode {m}"),
             Reason::NotBytes(n) => write!(f, "does not decode to {n} bytes"),
         }

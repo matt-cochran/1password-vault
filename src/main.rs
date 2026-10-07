@@ -90,8 +90,8 @@ enum Cmd {
     /// Prints the op:// reference, kind, Fly name, rules, immutable and guidance, and the
     /// `op item get` command to inspect the item yourself. Makes no 1Password or Fly call.
     Explain {
-        /// The key as PRODUCT/KEY.
-        #[arg(value_name = "PRODUCT/KEY")]
+        /// The key: PRODUCT/KEY, or KEY under the simple profile.
+        #[arg(value_name = "[PRODUCT/]KEY")]
         target: String,
         /// Environment name; may be omitted when only one environment is declared.
         #[arg(long)]
