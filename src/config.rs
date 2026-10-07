@@ -4,7 +4,7 @@
 //! product, key or rule. The file holds IDs and rules only, never values.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -40,6 +40,22 @@ pub fn deprecation_warnings(fleet: &Fleet) -> Vec<String> {
         }
     }
     warnings
+}
+
+/// Walk up from `start`, returning the first directory that holds `secrets.toml`.
+///
+/// The start directory is an argument so the walk is testable with temp dirs, and only
+/// file existence is checked, never file contents (FR-25).
+pub fn discover(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        let candidate = d.join("secrets.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// Parse and validate configuration text.
@@ -805,6 +821,43 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         ));
         assert_eq!(f.environment("prod").unwrap().vault_id, "vprd");
         assert!(matches!(f.environment("qa"), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn discover_finds_secrets_toml_in_start_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secrets.toml");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(discover(dir.path()), Some(file));
+    }
+
+    #[test]
+    fn discover_finds_secrets_toml_in_ancestor_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secrets.toml");
+        std::fs::write(&file, "").unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(discover(&nested), Some(file));
+    }
+
+    #[test]
+    fn discover_prefers_the_nearest_secrets_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secrets.toml"), "").unwrap();
+        let nested = dir.path().join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+        let near = nested.join("secrets.toml");
+        std::fs::write(&near, "").unwrap();
+        assert_eq!(discover(&nested), Some(near));
+    }
+
+    #[test]
+    fn discover_returns_none_when_no_secrets_toml_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(discover(&nested), None);
     }
 
     #[test]

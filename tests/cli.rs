@@ -46,6 +46,106 @@ fn missing_config_file_exits_2() {
     assert!(err.starts_with("opv: configuration error"), "{err}");
 }
 
+/// Run opv with `dir` as the working directory and no `op` or `flyctl` on PATH.
+fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(args)
+        .current_dir(dir)
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// A temp dir with a valid `secrets.toml` at its root and a `nested` child to run from.
+fn dir_with_ancestor_config() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("secrets.toml"),
+        std::fs::read_to_string(CFG).unwrap(),
+    )
+    .unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    (dir, nested)
+}
+
+#[test]
+fn discovered_config_is_announced_once_on_stderr() {
+    let (_dir, nested) = dir_with_ancestor_config();
+    let (_, _, err) = opv_in(&nested, &["status", "qa"]);
+    let resolved = std::fs::canonicalize(&nested)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("secrets.toml");
+    assert_eq!(
+        err.matches(&format!("using {}", resolved.display()))
+            .count(),
+        1,
+        "{err}"
+    );
+}
+
+#[test]
+fn discovery_loads_the_ancestor_config_for_the_command() {
+    let (_dir, nested) = dir_with_ancestor_config();
+    let (_, _, err) = opv_in(&nested, &["status", "qa"]);
+    assert!(err.contains("undefined environment \"qa\""), "{err}");
+}
+
+#[test]
+fn doctor_without_any_config_still_runs_its_other_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, stdout, _) = opv_in(dir.path(), &["doctor"]);
+    assert!(stdout.contains("op auth"), "{stdout}");
+}
+
+#[test]
+fn missing_discovered_config_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (code, _, _) = opv_in(&nested, &["status", "prod"]);
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn missing_discovered_config_names_starting_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (_, _, err) = opv_in(&nested, &["status", "prod"]);
+    let start = std::fs::canonicalize(&nested).unwrap();
+    assert!(err.contains(&start.display().to_string()), "{err}");
+}
+
+#[test]
+fn missing_discovered_config_suggests_config_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (_, _, err) = opv_in(&nested, &["status", "prod"]);
+    assert!(err.contains("--config"), "{err}");
+}
+
+#[test]
+fn explicit_config_suppresses_using_line() {
+    let (_, _, err) = opv(&["--config", CFG, "status", "qa"]);
+    assert!(!err.contains("using "), "{err}");
+}
+
+#[test]
+fn top_level_help_describes_config_discovery() {
+    let (_, out, _) = opv(&["--help"]);
+    assert!(out.contains("parent"), "{out}");
+}
+
 #[test]
 fn usage_errors_exit_2() {
     for args in [

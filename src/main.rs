@@ -37,13 +37,11 @@ Exit codes:
 )]
 struct Cli {
     /// Path to the fleet configuration.
-    #[arg(
-        long,
-        global = true,
-        value_name = "PATH",
-        default_value = "secrets.toml"
-    )]
-    config: PathBuf,
+    ///
+    /// Without this option, `secrets.toml` is looked for in the current directory and
+    /// then each parent directory, and the first one found is used.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -204,7 +202,26 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
     let r = ProcessRunner::default();
-    let loaded = config::load(&cli.config);
+    // A missing config is a configuration error for the command, not an early exit, so
+    // `doctor` still runs its other checks on a fresh machine.
+    let loaded = match &cli.config {
+        Some(path) => config::load(path),
+        None => match std::env::current_dir() {
+            Err(e) => Err(Error::Config(format!(
+                "cannot read the current directory: {e}"
+            ))),
+            Ok(start) => match config::discover(&start) {
+                Some(found) => {
+                    let _ = writeln!(io::stderr(), "using {}", found.display());
+                    config::load(&found)
+                }
+                None => Err(Error::Config(format!(
+                    "no secrets.toml found in {} or any parent directory; pass --config <path>",
+                    start.display()
+                ))),
+            },
+        },
+    };
     if let Cmd::Run {
         env,
         product,

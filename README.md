@@ -176,7 +176,7 @@ Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A pr
 
 ## Workflow
 
-Global option: `--config <PATH>` (default `secrets.toml`). `<ENV>` is an environment name from the file.
+Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config`, the path is used exactly as given and no search is done. `<ENV>` is an environment name from the file.
 
 ```sh
 opv doctor                          # config, op and sign-in, flyctl and sign-in
