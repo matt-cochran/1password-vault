@@ -453,19 +453,19 @@ fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
 
 /// IDs and app names go into argv, so they must not start with `-` (read as a flag) and
 /// hold only `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
-fn is_id(s: &str) -> bool {
+pub(crate) fn is_id(s: &str) -> bool {
     let mut c = s.chars();
     c.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
         && c.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
 }
 
-fn is_env_name(s: &str) -> bool {
+pub(crate) fn is_env_name(s: &str) -> bool {
     let mut c = s.chars();
     matches!(c.next(), Some('A'..='Z'))
         && c.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
-fn is_product_name(s: &str) -> bool {
+pub(crate) fn is_product_name(s: &str) -> bool {
     let mut c = s.chars();
     matches!(c.next(), Some('a'..='z'))
         && c.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
