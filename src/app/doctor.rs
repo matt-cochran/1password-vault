@@ -1,7 +1,9 @@
 //! `doctor` use case (FR-3).
 //!
 //! Checks, one line each, always all of them: configuration valid; `op --version`;
-//! `op whoami` (authentication; free of rate-limit cost per D0); `flyctl version` and
+//! the 1Password session via [`onepassword::diagnose`] (`op whoami`, and `op account list`
+//! when it fails; free of rate-limit cost per D0), the same classification a failed item
+//! read uses (FR-26); `flyctl version` and
 //! `flyctl auth whoami` (exit status only) when some environment has a `fly` section.
 //! Environments without one are listed as skipped for Fly. Returns the error of the first
 //! failing check.
@@ -11,14 +13,18 @@
 //!
 //! Tool output is never echoed: only a version string that matches a strict pattern, and
 //! from `op whoami` only the account type (`SERVICE_ACCOUNT`, ...), never identity or
-//! tokens. No item is read.
+//! tokens; from `op account list` only the number of accounts. No item is read.
+//!
+//! A failing check prints the next command for the detected platform and shell (FR-26):
+//! the sign-in command, `op account add`, or the install command.
 
 use std::io::{self, Write};
 
 use super::write_err;
-use crate::adapters::fly;
+use crate::adapters::{fly, onepassword};
 use crate::domain::Fleet;
 use crate::error::Error;
+use crate::host::{Host, Tool};
 use crate::runner::{CommandRunner, Output};
 
 /// The 1Password CLI binary (same name the 1Password adapter runs).
@@ -38,6 +44,16 @@ enum Check {
 pub fn run(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    run_with(config, r, &Host::detect(), out)
+}
+
+/// [`run`] on a given host (tests).
+pub fn run_with(
+    config: Result<Fleet, Error>,
+    r: &dyn CommandRunner,
+    host: &Host,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
@@ -77,11 +93,11 @@ pub fn run(
             ))
         }),
     )?;
-    line(out, "op", op_version(r))?;
-    line(out, "op auth", op_whoami(r).map(Check::Ok))?;
+    line(out, "op", op_version(r, host))?;
+    line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
     match fly_envs {
         Some((true, without)) => {
-            line(out, "flyctl", flyctl_version(r))?;
+            line(out, "flyctl", flyctl_version(r, host))?;
             line(out, "fly auth", fly_auth(r).map(Check::Ok))?;
             if !without.is_empty() {
                 writeln!(
@@ -118,8 +134,27 @@ fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, 
     })
 }
 
-fn op_version(r: &dyn CommandRunner) -> Result<Check, Error> {
-    let o = spawn(r, OP, &["--version"])?;
+/// [`spawn`] whose "not found" names the install command for this platform (FR-26).
+fn spawn_tool(
+    r: &dyn CommandRunner,
+    tool: Tool,
+    host: &Host,
+    args: &[&str],
+) -> Result<Output, Error> {
+    let program = match tool {
+        Tool::Op => OP,
+        Tool::Flyctl => fly::PROGRAM,
+    };
+    spawn(r, program, args).map_err(|e| match e {
+        Error::Dependency(m) if m.ends_with("not found on PATH") => {
+            Error::Dependency(format!("{m}\n  {}", host.install_hint(tool)))
+        }
+        e => e,
+    })
+}
+
+fn op_version(r: &dyn CommandRunner, host: &Host) -> Result<Check, Error> {
+    let o = spawn_tool(r, Tool::Op, host, &["--version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
             "op --version failed (exit {})",
@@ -132,37 +167,31 @@ fn op_version(r: &dyn CommandRunner) -> Result<Check, Error> {
             Check::Ok(format!("version {v}"))
         }
         Some(v) => Check::Warn(format!(
-            "version {v}; opv is tested with op {a}.{b}.{c} or newer"
+            "version {v}; opv is tested with op {a}.{b}.{c} or newer\n  {}",
+            host.install_hint(Tool::Op)
         )),
         None => Check::Warn(format!(
-            "present, version not recognised; opv is tested with op {a}.{b}.{c} or newer"
+            "present, version not recognised; opv is tested with op {a}.{b}.{c} or newer\n  {}",
+            host.install_hint(Tool::Op)
         )),
     })
 }
 
-fn op_whoami(r: &dyn CommandRunner) -> Result<String, Error> {
-    let o = spawn(r, OP, &["whoami", "--format", "json"])?;
-    if o.status != 0 {
-        return Err(Error::Auth(format!(
-            "op whoami failed (exit {}): not signed in to 1Password (set \
-             OP_SERVICE_ACCOUNT_TOKEN or run `op signin`)",
-            o.status
-        )));
+/// The 1Password session, classified exactly as a failed item read is (FR-26).
+fn op_auth(r: &dyn CommandRunner, host: &Host) -> Result<String, Error> {
+    use onepassword::Session;
+    match onepassword::diagnose(r, host)? {
+        Session::SignedIn(t) => Ok(format!("signed in ({t})")),
+        Session::Unknown => Err(Error::Dependency(
+            "op whoami did not run to completion; the 1Password session could not be checked"
+                .into(),
+        )),
+        s => Err(onepassword::auth_error(s, host, None).expect("not signed in is an auth error")),
     }
-    let kind = serde_json::from_slice::<serde_json::Value>(&o.stdout)
-        .ok()
-        .and_then(|v| v.get("user_type")?.as_str().map(str::to_owned))
-        .filter(|t| {
-            !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
-        });
-    Ok(match kind {
-        Some(t) => format!("signed in ({t})"),
-        None => "signed in".into(),
-    })
 }
 
-fn flyctl_version(r: &dyn CommandRunner) -> Result<Check, Error> {
-    let o = spawn(r, fly::PROGRAM, &["version"])?;
+fn flyctl_version(r: &dyn CommandRunner, host: &Host) -> Result<Check, Error> {
+    let o = spawn_tool(r, Tool::Flyctl, host, &["version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
             "{} version failed (exit {})",
@@ -174,10 +203,12 @@ fn flyctl_version(r: &dyn CommandRunner) -> Result<Check, Error> {
     Ok(match version_in(&o.stdout) {
         Some(v) if parse_version(&v) == Some(FLYCTL_TESTED) => Check::Ok(format!("version {v}")),
         Some(v) => Check::Warn(format!(
-            "version {v}; opv is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)"
+            "version {v}; opv is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)\n  {}",
+            host.install_hint(Tool::Flyctl)
         )),
         None => Check::Warn(format!(
-            "present, version not recognised; opv is tested with flyctl {a}.{b}.{c}"
+            "present, version not recognised; opv is tested with flyctl {a}.{b}.{c}\n  {}",
+            host.install_hint(Tool::Flyctl)
         )),
     })
 }
@@ -250,10 +281,19 @@ mod tests {
         ]
     }
 
+    fn linux() -> Host {
+        Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
+    }
+
     fn doctor(config: Result<Fleet, Error>, r: &FakeRunner) -> (Result<(), Error>, String) {
         let mut out = Vec::new();
-        let res = run(config, r, &mut out);
+        let res = run_with(config, r, &linux(), &mut out);
         (res, text_of(&out))
+    }
+
+    /// The check lines only (remediation lines under a check are indented).
+    fn checks(out: &str) -> Vec<&str> {
+        out.lines().filter(|l| !l.starts_with("  ")).collect()
     }
 
     #[test]
@@ -319,22 +359,42 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Dependency(_)), "{e}");
-        assert_eq!(out.lines().count(), 5, "{out}");
-        assert!(out.lines().nth(3).unwrap().starts_with("ok"), "{out}");
-        assert!(out.lines().nth(1).unwrap().starts_with("FAIL"), "{out}");
+        let lines = checks(&out);
+        assert_eq!(lines.len(), 5, "{out}");
+        assert!(lines[3].starts_with("ok"), "{out}");
+        assert!(lines[1].starts_with("FAIL"), "{out}");
+        assert!(lines[2].starts_with("FAIL  op auth"), "{out}");
+        // FR-26: the install command for the detected OS, under the failing check.
+        assert!(
+            out.contains(
+                "op CLI not found on PATH\n  install op from https://developer.1password.com"
+            ),
+            "{out}"
+        );
     }
 
     #[test]
     fn op_not_signed_in_is_auth() {
         let mut g = good();
         g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Auth(_)), "{e}");
         assert_eq!(e.exit_code(), 7);
-        assert!(out.lines().nth(2).unwrap().starts_with("FAIL"), "{out}");
-        assert_eq!(out.lines().count(), 5, "{out}");
+        let lines = checks(&out);
+        assert!(
+            lines[2].starts_with("FAIL  op auth: authentication error: not signed in"),
+            "{out}"
+        );
+        assert!(out.contains("\n  sign in: eval $(op signin)\n"), "{out}");
+        assert_eq!(lines.len(), 5, "{out}");
+        // Doctor and the read path share one classification: whoami, then account list.
+        assert_eq!(
+            argvs(&r)[1..3],
+            ["op whoami --format json", "op account list --format json"]
+        );
     }
 
     #[test]
@@ -422,7 +482,7 @@ mod tests {
             let r = FakeRunner::new(g);
             let (res, out) = doctor(Ok(fleet()), &r);
             res.unwrap();
-            let lines: Vec<&str> = out.lines().collect();
+            let lines = checks(&out);
             assert_eq!(lines[1].starts_with("warn  op:"), warn_op, "{out}");
             assert_eq!(lines[3].starts_with("warn  flyctl:"), warn_fly, "{out}");
             if warn_op {

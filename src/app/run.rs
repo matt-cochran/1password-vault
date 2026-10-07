@@ -6,8 +6,10 @@
 
 use std::io;
 
+use crate::adapters::onepassword;
 use crate::domain::{Fleet, rules};
 use crate::error::Error;
+use crate::host::Host;
 use crate::runner::CommandRunner;
 
 const OP: &str = "op";
@@ -58,7 +60,7 @@ pub fn run(
     runner
         .run_inherited(OP, &args, &env_pairs)
         .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(format!("{OP} not found on PATH")),
+            io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
             k => Error::Dependency(format!("cannot run {OP} ({k})")),
         })
 }

@@ -46,6 +46,7 @@ use zeroize::Zeroizing;
 use crate::domain::SecretValue;
 use crate::domain::plan::FlySecret;
 use crate::error::Error;
+use crate::host::{Host, Tool};
 use crate::runner::{CommandRunner, Output};
 
 /// The Fly CLI binary.
@@ -273,7 +274,10 @@ fn run(
     let out = r
         .run(PROGRAM, args, stdin, &[])
         .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(format!("{PROGRAM} not found on PATH")),
+            io::ErrorKind::NotFound => Error::Dependency(format!(
+                "{PROGRAM} not found on PATH\n  {}",
+                Host::detect().install_hint(Tool::Flyctl)
+            )),
             // The runner's own message names the program and the limit (no child output).
             io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
             kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),

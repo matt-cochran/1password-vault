@@ -3,11 +3,14 @@
 //! Rules shared by every command:
 //! - The environment name is resolved with [`Fleet::environment`] before any subprocess
 //!   call, so an unknown name is `Error::Config` and `plan::build` never sees one.
-//! - A command that reads 1Password makes exactly one `op` call (FR-13).
+//! - A command that reads 1Password makes exactly one `op item get` (FR-13); a failed `op`
+//!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26).
 //! - Output names products, keys, kinds, rules and Fly names, never values (SR-1).
 
 pub mod config_export;
 pub mod doctor;
+#[cfg(test)]
+mod guidance_tests;
 pub mod run;
 pub mod skeleton;
 pub mod status;

@@ -272,11 +272,24 @@ mod tests {
 
     #[test]
     fn status_source_failure_is_typed_and_value_free() {
-        let r = FakeRunner::new([Output::failure(1)]);
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(
+                br#"{"email":"x-FIXTUREVALUE@example.com","user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
+            ),
+        ]);
         let mut out = Vec::new();
         let e = run(&fleet(), "prod", &r, &mut out).unwrap_err();
-        assert!(matches!(e, Error::Source(_) | Error::Auth(_)), "{e}");
-        assert_eq!(r.calls.borrow().len(), 1);
+        assert!(matches!(e, Error::Source(_)), "{e}");
+        assert_no_values(&e.to_string());
+        // One item read, then the free session check; no Fly call.
+        assert_eq!(
+            argvs(&r),
+            vec![
+                "op item get iprd --vault vprd --format json",
+                "op whoami --format json"
+            ]
+        );
     }
 
     /// FR-26: a clean run ends with the summary line; exit stays 0.
