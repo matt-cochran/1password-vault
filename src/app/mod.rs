@@ -184,7 +184,7 @@ pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<Str
 }
 
 /// Fly names on the app that the template does not render for any declared key: other
-/// tools' secrets, which secretctl never touches (FR-5 "unmanaged on Fly", §10.3).
+/// tools' secrets, which opv never touches (FR-5 "unmanaged on Fly", §10.3).
 pub(crate) fn unmanaged_on_fly<'a>(
     fleet: &Fleet,
     env_name: &str,

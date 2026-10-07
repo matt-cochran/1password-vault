@@ -31,7 +31,7 @@ The CLI sits between 1Password and consumers of secrets.
              op:// references
                     │
               ┌─────▼─────┐
-              │ secretctl │
+              │    opv    │
               │   Rust    │
               └─────┬─────┘
                     │
@@ -62,7 +62,7 @@ A developer wants to run an application locally using secrets stored in 1Passwor
 Example:
 
 ```bash
-secretctl run dev -- dotnet run
+opv run dev -- dotnet run
 ```
 
 The CLI validates configuration and delegates secret resolution to the 1Password CLI. The child process receives secrets through its environment.
@@ -72,7 +72,7 @@ The CLI validates configuration and delegates secret resolution to the 1Password
 An operator wants to inspect whether Fly.io secrets would change before applying them.
 
 ```bash
-secretctl fly plan prod
+opv fly plan prod
 ```
 
 No secret values are printed.
@@ -82,7 +82,7 @@ No secret values are printed.
 A deployment workflow uses a restricted 1Password service account and Fly API token.
 
 ```bash
-secretctl fly sync prod --deploy
+opv fly sync prod --deploy
 ```
 
 The command must:
@@ -127,7 +127,7 @@ Deletion must require explicit authorization.
 Example:
 
 ```bash
-secretctl fly sync prod --prune
+opv fly sync prod --prune
 ```
 
 Preferably, ownership is declared explicitly:
@@ -182,7 +182,7 @@ Validation failures shall occur before any target mutation.
 The CLI shall provide:
 
 ```bash
-secretctl doctor
+opv doctor
 ```
 
 The command shall verify:
@@ -201,7 +201,7 @@ The command shall not resolve or print secret values unless necessary to verify 
 The CLI shall provide:
 
 ```bash
-secretctl run <environment> -- <command> [args...]
+opv run <environment> -- <command> [args...]
 ```
 
 The command shall:
@@ -219,7 +219,7 @@ The CLI shall not write resolved secrets to disk.
 The CLI shall provide:
 
 ```bash
-secretctl fly plan <environment>
+opv fly plan <environment>
 ```
 
 The command shall produce a human-readable synchronization plan without exposing secret values.
@@ -241,7 +241,7 @@ Decided in v0.1.0: Fly digests cannot be computed locally, so a desired key that
 The CLI shall provide:
 
 ```bash
-secretctl fly sync <environment>
+opv fly sync <environment>
 ```
 
 The command shall:
@@ -260,7 +260,7 @@ The command shall be deterministic and suitable for CI.
 The CLI shall support:
 
 ```bash
-secretctl fly sync <environment> --deploy
+opv fly sync <environment> --deploy
 ```
 
 When `--deploy` is provided, the CLI shall deploy staged secret changes only when necessary.
@@ -383,7 +383,7 @@ Under stage-and-compare (§6.4) the value cannot be compared locally, so an immu
 The CLI shall provide:
 
 ```bash
-secretctl status <environment>
+opv status <environment>
 ```
 
 One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
@@ -393,7 +393,7 @@ One row per product × key: declared, saved, missing, extra (in the item but not
 The CLI shall provide:
 
 ```bash
-secretctl config export <environment> --json
+opv config export <environment> --json
 ```
 
 It prints the config-kind values only, as non-secret JSON for deployment tooling to render. It refuses to run if any declared config key is stored as a secret, or any secret as config. There is still no command that prints secret values.
@@ -403,7 +403,7 @@ It prints the config-kind values only, as non-secret JSON for deployment tooling
 The CLI shall provide:
 
 ```bash
-secretctl item skeleton <environment>
+opv item skeleton <environment>
 ```
 
 It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This is the only command that writes to 1Password, and it needs a write-capable identity; `fly sync`, `plan`, `status` and `config export` stay read-only.
@@ -492,13 +492,13 @@ Security-sensitive dependencies should be kept small and audited.
 The surface shipped in v0.1.0:
 
 ```text
-secretctl [--config <path>] doctor
-secretctl [--config <path>] status <environment>
-secretctl [--config <path>] run <environment> --product <product> -- <command>
-secretctl [--config <path>] fly plan <environment>
-secretctl [--config <path>] fly sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
-secretctl [--config <path>] config export <environment> --json
-secretctl [--config <path>] item skeleton <environment>
+opv [--config <path>] doctor
+opv [--config <path>] status <environment>
+opv [--config <path>] run <environment> --product <product> -- <command>
+opv [--config <path>] fly plan <environment>
+opv [--config <path>] fly sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
+opv [--config <path>] config export <environment> --json
+opv [--config <path>] item skeleton <environment>
 ```
 
 `--config` defaults to `secrets.toml`. `--json` exists only on `config export`; `--verbose` and `--quiet` are not implemented.
@@ -596,7 +596,7 @@ Advantages:
 - reduces security-sensitive code in this project;
 - preserves compatibility with `op://` references.
 
-For `secretctl run`, prefer delegating directly to `op run` where possible rather than resolving secrets into the parent process.
+For `opv run`, prefer delegating directly to `op run` where possible rather than resolving secrets into the parent process.
 
 ## 6.4 Fly Integration
 
@@ -770,10 +770,10 @@ Those concerns remain the responsibility of the secret source or runtime platfor
 
 Version 0.1 is acceptable when:
 
-1. `secretctl doctor` validates a developer/CI environment.
-2. `secretctl run dev -- <command>` runs without plaintext secret files.
-3. `secretctl fly plan prod` reports intended changes without exposing values.
-4. `secretctl fly sync prod` stages configured secrets safely.
+1. `opv doctor` validates a developer/CI environment.
+2. `opv run dev -- <command>` runs without plaintext secret files.
+3. `opv fly plan prod` reports intended changes without exposing values.
+4. `opv fly sync prod` stages configured secrets safely.
 5. `--deploy` deploys only when secret state changed.
 6. `--prune` can remove only explicitly managed secrets.
 7. CI operation is fully non-interactive.
@@ -843,13 +843,13 @@ environments = ["staging", "prod"]
 rules = { enum = ["open", "invite_only"] }
 ```
 
-The consumer may generate this file from its own catalog; secretctl reads only this file. Product names are upper-cased into the template (`allumata` → `ALLUMATA`).
+The consumer may generate this file from its own catalog; opv reads only this file. Product names are upper-cased into the template (`allumata` → `ALLUMATA`).
 
 The `fly` section is optional per environment: an environment used only for `run`, `config export` and `item skeleton` (for example `dev`) omits it, and `status` and the `fly` commands refuse it with a configuration error. `vault_id`, `item_id` and `fly.app` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
 ## 10.3 Coexistence with other automation
 
-Other tools stage names outside the managed set on the same Fly app (database URLs from Terraform state, generated keys). secretctl must:
+Other tools stage names outside the managed set on the same Fly app (database URLs from Terraform state, generated keys). opv must:
 
 - stage with `--stage` semantics and never deploy unless `--deploy` is passed, so one later deploy applies everything staged by every tool;
 - never read, compare or prune names outside its managed set.
@@ -862,7 +862,7 @@ Other tools stage names outside the managed set on the same Fly app (database UR
 
 # 11. Prior Art: `significa/1password-secrets`
 
-[significa/1password-secrets](https://github.com/significa/1password-secrets) (Python, MIT per `setup.py`) solves a similar problem: 1Password secure notes holding `.env` text, pulled locally or imported to Fly. secretctl borrows its workflow, not its code. If any code is ported, keep its MIT notice.
+[significa/1password-secrets](https://github.com/significa/1password-secrets) (Python, MIT per `setup.py`) solves a similar problem: 1Password secure notes holding `.env` text, pulled locally or imported to Fly. opv borrows its workflow, not its code. If any code is ported, keep its MIT notice.
 
 **Keep:**
 

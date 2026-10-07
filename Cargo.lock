@@ -229,6 +229,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "opv"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "clap",
+ "hex",
+ "regex",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "zeroize",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -300,23 +317,6 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "secretctl"
-version = "0.1.0"
-dependencies = [
- "base64",
- "clap",
- "hex",
- "regex",
- "secrecy",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
  "zeroize",
 ]
 

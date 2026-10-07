@@ -83,14 +83,14 @@ jobs:
         if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc' }}
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release/secretctl"
+          bin="target/${{ matrix.target }}/release/opv"
           if [[ "${{ matrix.target }}" == *windows* ]]; then bin="$bin.exe"; fi
           "$bin" --version
       - name: Rename binary
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release/secretctl"
-          out="dist/secretctl-${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/opv"
+          out="dist/opv-${{ matrix.target }}"
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             bin="$bin.exe"
             out="$out.exe"
@@ -99,8 +99,8 @@ jobs:
           cp "$bin" "$out"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: secretctl-${{ matrix.target }}
-          path: dist/secretctl-${{ matrix.target }}*
+          name: opv-${{ matrix.target }}
+          path: dist/opv-${{ matrix.target }}*
           if-no-files-found: error
 
   package:
@@ -117,8 +117,8 @@ jobs:
       - name: Create alias and checksums
         shell: bash
         run: |
-          cp dist/secretctl-x86_64-unknown-linux-musl dist/secretctl
-          (cd dist && sha256sum secretctl* > ../SHA256SUMS) && mv SHA256SUMS dist/
+          cp dist/opv-x86_64-unknown-linux-musl dist/opv
+          (cd dist && sha256sum opv* > ../SHA256SUMS) && mv SHA256SUMS dist/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets
@@ -141,7 +141,7 @@ jobs:
           path: dist
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: 'dist/secretctl*'
+          subject-path: 'dist/opv*'
       - name: Create GitHub release
         shell: bash
         env:

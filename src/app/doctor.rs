@@ -6,7 +6,7 @@
 //! Environments without one are listed as skipped for Fly. Returns the error of the first
 //! failing check.
 //!
-//! A tool version secretctl was not tested with (op older than 2.40.0, flyctl other than
+//! A tool version opv was not tested with (op older than 2.40.0, flyctl other than
 //! 0.4.112) is a `warn` line, never a failure.
 //!
 //! Tool output is never echoed: only a version string that matches a strict pattern, and
@@ -24,9 +24,9 @@ use crate::runner::{CommandRunner, Output};
 /// The 1Password CLI binary (same name the 1Password adapter runs).
 const OP: &str = "op";
 
-/// Oldest `op` release secretctl is tested with.
+/// Oldest `op` release opv is tested with.
 pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
-/// The `flyctl` release secretctl is tested with (its import parser is ported, see fly.rs).
+/// The `flyctl` release opv is tested with (its import parser is ported, see fly.rs).
 pub const FLYCTL_TESTED: (u64, u64, u64) = (0, 4, 112);
 
 /// A check result: ok, ok with a warning, or failed.
@@ -132,10 +132,10 @@ fn op_version(r: &dyn CommandRunner) -> Result<Check, Error> {
             Check::Ok(format!("version {v}"))
         }
         Some(v) => Check::Warn(format!(
-            "version {v}; secretctl is tested with op {a}.{b}.{c} or newer"
+            "version {v}; opv is tested with op {a}.{b}.{c} or newer"
         )),
         None => Check::Warn(format!(
-            "present, version not recognised; secretctl is tested with op {a}.{b}.{c} or newer"
+            "present, version not recognised; opv is tested with op {a}.{b}.{c} or newer"
         )),
     })
 }
@@ -174,10 +174,10 @@ fn flyctl_version(r: &dyn CommandRunner) -> Result<Check, Error> {
     Ok(match version_in(&o.stdout) {
         Some(v) if parse_version(&v) == Some(FLYCTL_TESTED) => Check::Ok(format!("version {v}")),
         Some(v) => Check::Warn(format!(
-            "version {v}; secretctl is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)"
+            "version {v}; opv is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)"
         )),
         None => Check::Warn(format!(
-            "present, version not recognised; secretctl is tested with flyctl {a}.{b}.{c}"
+            "present, version not recognised; opv is tested with flyctl {a}.{b}.{c}"
         )),
     })
 }

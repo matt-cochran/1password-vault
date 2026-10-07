@@ -3,18 +3,18 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use secretctl::Error;
-use secretctl::app::{config_export, doctor, run as run_cmd, skeleton, status, sync};
-use secretctl::config;
-use secretctl::runner::ProcessRunner;
+use opv::Error;
+use opv::app::{config_export, doctor, run as run_cmd, skeleton, status, sync};
+use opv::config;
+use opv::runner::ProcessRunner;
 
 const EXAMPLES: &str = "\
 Examples:
-  secretctl item skeleton staging          # add the missing (empty) fields to the 1Password item
-  secretctl status staging                 # one row per product and key; fill what is missing
-  secretctl fly plan staging               # what a sync would stage, hold and prune
-  secretctl fly sync staging --deploy      # stage on Fly, deploy only if something changed
-  secretctl run dev --product api -- cargo run   # local run with the product's secrets
+  opv item skeleton staging          # add the missing (empty) fields to the 1Password item
+  opv status staging                 # one row per product and key; fill what is missing
+  opv fly plan staging               # what a sync would stage, hold and prune
+  opv fly sync staging --deploy      # stage on Fly, deploy only if something changed
+  opv run dev --product api -- cargo run   # local run with the product's secrets
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or flyctl missing), 4 1Password,
@@ -23,13 +23,13 @@ Exit codes:
 
 /// Sync secrets from 1Password into runtime targets.
 ///
-/// Values live in 1Password and are consumed by the runtime; secretctl only connects the
+/// Values live in 1Password and are consumed by the runtime; opv only connects the
 /// two and never prints, logs or writes a secret value. <ENV> is the name of an
 /// environment defined in the configuration (for example staging or prod).
 #[derive(Parser)]
 #[command(
-    name = "secretctl",
-    bin_name = "secretctl",
+    name = "opv",
+    bin_name = "opv",
     version,
     about,
     long_about,
@@ -61,8 +61,8 @@ enum Cmd {
     },
     /// Run a command with the product's secrets in its environment, via `op run`.
     ///
-    /// Exits with the child's own exit code, so a child code can equal a secretctl
-    /// category code (for example 2); secretctl's own errors print `secretctl: ...` on
+    /// Exits with the child's own exit code, so a child code can equal an opv
+    /// category code (for example 2); opv's own errors print `opv: ...` on
     /// stderr.
     Run {
         /// Environment name from the configuration (for example dev or staging).
@@ -190,7 +190,7 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(exit_byte(code)),
         Err(e) => {
             // Error messages never contain secret values or child output (SR-1).
-            let _ = writeln!(io::stderr(), "secretctl: {e}");
+            let _ = writeln!(io::stderr(), "opv: {e}");
             ExitCode::from(exit_byte(e.exit_code()))
         }
     }
@@ -212,7 +212,7 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
 
 fn run_other(
     cmd: Cmd,
-    loaded: Result<secretctl::domain::Fleet, Error>,
+    loaded: Result<opv::domain::Fleet, Error>,
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -297,21 +297,17 @@ mod tests {
         assert!(writeln!(w, "a").is_err());
     }
 
-    /// Usage reads `secretctl` whatever argv[0] is (Windows passes `secretctl.exe`).
+    /// Usage reads `opv` whatever argv[0] is (Windows passes `opv.exe`).
     #[test]
     fn usage_uses_pinned_bin_name() {
-        for argv0 in [
-            "secretctl.exe",
-            r"C:\bin\secretctl.exe",
-            "/usr/bin/secretctl",
-        ] {
+        for argv0 in ["opv.exe", r"C:\bin\opv.exe", "/usr/bin/opv"] {
             let e = match Cli::try_parse_from([argv0, "run", "--help"]) {
                 Err(e) => e,
                 Ok(_) => panic!("--help must not parse"),
             };
             let t = e.render().to_string();
-            assert!(t.contains("Usage: secretctl run"), "{argv0}: {t}");
-            assert!(!t.contains("secretctl.exe"), "{argv0}: {t}");
+            assert!(t.contains("Usage: opv run"), "{argv0}: {t}");
+            assert!(!t.contains("opv.exe"), "{argv0}: {t}");
         }
     }
 
