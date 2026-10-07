@@ -376,21 +376,38 @@ fn simple_unknown_environment_exits_2_before_any_subprocess() {
 mod run_with_fake_op {
     use super::CFG;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::OnceLock;
 
-    /// Install a fake `op` that logs each invocation, then execs the args after `--`.
+    /// The fake `op`, written once per test binary and closed before any test here spawns
+    /// it. Writing an executable while another thread forks lets the child inherit the
+    /// write fd, and a later exec of it fails with ETXTBSY (exit 3, a flaky test). The fake
+    /// logs to `$FAKE_OP_LOG`, so one copy serves every test; each test gets a symlink.
+    fn shared_fake_op() -> &'static Path {
+        static FAKE: OnceLock<PathBuf> = OnceLock::new();
+        FAKE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("opv-cli-fake-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let op = dir.join("op");
+            std::fs::write(
+                &op,
+                "#!/bin/sh\necho called >> \"$FAKE_OP_LOG\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+            op
+        })
+    }
+
+    /// A per-test PATH dir holding a symlink to the shared fake `op`, and its call log.
     fn fake_op_dir(name: &str) -> (PathBuf, PathBuf) {
+        let op = shared_fake_op();
         let dir = std::env::temp_dir().join(format!("opv-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(op, dir.join("op")).unwrap();
         let log = dir.join("calls.log");
-        let script = format!(
-            "#!/bin/sh\necho called >> '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
-            log.display()
-        );
-        let op = dir.join("op");
-        std::fs::write(&op, script).unwrap();
-        std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
         (dir, log)
     }
 
@@ -399,6 +416,7 @@ mod run_with_fake_op {
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env("FAKE_OP_LOG", path.join("calls.log"))
             .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
             .output()
             .unwrap();

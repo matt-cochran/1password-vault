@@ -16,6 +16,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -215,12 +216,33 @@ fn write_exe(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The fake `op` and `flyctl`, written once per test binary and closed before any of its
+/// tests spawns a process; harnesses only symlink them.
+///
+/// Writing an executable while another thread forks lets the child inherit the open write
+/// fd, and an exec of that file then fails with ETXTBSY ("text file busy"), which opv
+/// correctly reports as a dependency error (exit 3): a flaky test, not a bug. The fakes
+/// read everything per-test from env vars (`FAKE_REC`, `FAKE_FIX`, ...), so one copy
+/// serves every harness. [`Harness::build`], which every spawn goes through, forces this.
+fn fakes() -> &'static Path {
+    static FAKES: OnceLock<TempDir> = OnceLock::new();
+    FAKES
+        .get_or_init(|| {
+            let dir = TempDir::new().unwrap();
+            write_exe(&dir.path().join("op"), FAKE_OP);
+            write_exe(&dir.path().join("flyctl"), FAKE_FLYCTL);
+            dir
+        })
+        .path()
+}
+
 impl Harness {
     fn new(item_json: &str) -> Self {
         Self::build(item_json, true, true)
     }
 
     fn build(item_json: &str, with_op: bool, with_flyctl: bool) -> Self {
+        let fakes = fakes();
         let root = TempDir::new().unwrap();
         let mk = |n: &str| {
             let p = root.path().join(n);
@@ -234,10 +256,10 @@ impl Harness {
             .expect("cat");
         std::os::unix::fs::symlink(cat, bin.join("cat")).unwrap();
         if with_op {
-            write_exe(&bin.join("op"), FAKE_OP);
+            std::os::unix::fs::symlink(fakes.join("op"), bin.join("op")).unwrap();
         }
         if with_flyctl {
-            write_exe(&bin.join("flyctl"), FAKE_FLYCTL);
+            std::os::unix::fs::symlink(fakes.join("flyctl"), bin.join("flyctl")).unwrap();
         }
         fs::write(fix.join("item.json"), item_json).unwrap();
         fs::write(fix.join("list_a.json"), list_a()).unwrap();
