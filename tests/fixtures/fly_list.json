@@ -1,0 +1,12 @@
+[
+  {
+    "name": "A",
+    "digest": "<digest-a>",
+    "status": "Staged"
+  },
+  {
+    "name": "B",
+    "digest": "<digest-b>",
+    "status": "Staged"
+  }
+]
