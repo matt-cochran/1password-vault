@@ -39,6 +39,9 @@ pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
 /// The `flyctl` release opv is tested with (its import parser is ported, see fly.rs).
 pub const FLYCTL_TESTED: (u64, u64, u64) = (0, 4, 112);
 
+/// Name of the configuration check (its message is parser output, see [`next_step`]).
+const CONFIG_CHECK: &str = "config";
+
 /// A check result: ok, ok with a warning, or failed.
 enum Check {
     Ok(String),
@@ -100,7 +103,7 @@ fn run_on(
     };
     line(
         out,
-        "config",
+        CONFIG_CHECK,
         config.map(|f| {
             Check::Ok(format!(
                 "valid ({} environment(s), {} product(s))",
@@ -145,11 +148,19 @@ fn run_on(
     }
 }
 
-/// The `Next step` line for the first failing check (FR-22): that check's first
-/// remediation line (the install, sign-in, `op account add` or log-in command the failure
-/// already prints, FR-26), or, when it has none, the fix-and-re-run hint. Built from opv's
-/// own messages only; never tool output or a value.
+/// The `Next step` line for the first failing check (FR-22).
+///
+/// A configuration failure gets a fixed step: its message is parser output (a TOML error
+/// carries a `  |` source gutter), not a layout opv controls. For doctor's own tool and auth
+/// checks, whose messages opv writes, the step is that check's first remediation line (the
+/// install, sign-in, `op account add` or log-in command the failure already prints, FR-26),
+/// or the fix-and-re-run hint when it has none. Never tool output or a value (SR-1).
 fn next_step(check: &str, e: &Error) -> String {
+    if check == CONFIG_CHECK {
+        return format!(
+            "Next step ({check}): fix secrets.toml (see the config line above) and re-run `opv doctor`"
+        );
+    }
     let text = e.to_string();
     let hint = text
         .lines()
@@ -158,12 +169,7 @@ fn next_step(check: &str, e: &Error) -> String {
         .map(|l| l.strip_prefix("next: ").unwrap_or(l).trim());
     match hint {
         Some(h) if !h.is_empty() => format!("Next step ({check}): {h}"),
-        _ if check == "config" => {
-            format!(
-                "Next step ({check}): fix the configuration as reported above, then run: opv doctor"
-            )
-        }
-        _ => format!("Next step ({check}): fix the failure reported above, then run: opv doctor"),
+        _ => format!("Next step ({check}): fix the failure reported above and re-run `opv doctor`"),
     }
 }
 
@@ -706,13 +712,49 @@ mod tests {
         assert!(next_line(&out).starts_with("Next step (op auth):"), "{out}");
     }
 
+    const CONFIG_STEP: &str =
+        "Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor`";
+
     #[test]
     fn next_step_for_invalid_config_is_fix_and_rerun() {
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
+        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+    }
+
+    /// A real TOML syntax error carries a `  |` source gutter; it is never the step.
+    #[test]
+    fn next_step_for_toml_syntax_error_is_the_fixed_config_step() {
+        let e = crate::config::parse("[profile\nkind = \"fleet\"\n").unwrap_err();
+        assert!(e.to_string().contains("  |"), "{e}");
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Err(e), &r);
+        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+    }
+
+    #[test]
+    fn next_step_for_unknown_field_error_is_the_fixed_config_step() {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let e = crate::config::parse(&text.replace(
+            "guidance = \"OpenAI platform / API keys\"",
+            "guidance = \"OpenAI platform / API keys\"\nbogus = 1",
+        ))
+        .unwrap_err();
+        assert!(e.to_string().contains("bogus"), "{e}");
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Err(e), &r);
+        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+    }
+
+    #[test]
+    fn next_step_for_failing_version_check_is_fix_and_rerun() {
+        let mut g = good();
+        g[0] = Output::failure(2);
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
             next_line(&out),
-            "Next step (config): fix the configuration as reported above, then run: opv doctor",
+            "Next step (op): fix the failure reported above and re-run `opv doctor`",
             "{out}"
         );
     }

@@ -252,7 +252,7 @@ opv run prod -- ./server            # simple profile: no --product
 Next step (op auth): sign in: eval $(op signin)
 ```
 
-A failure with no command of its own (an invalid configuration, for example) gets `fix ... as reported above, then run: opv doctor`. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
+An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
 
 ### Explain a key
 
