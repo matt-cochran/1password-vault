@@ -1,0 +1,76 @@
+{
+  "id": "<item-id>",
+  "title": "fleet",
+  "version": 2,
+  "vault": {
+    "id": "<vault-id>",
+    "name": "fleet-dev"
+  },
+  "category": "SECURE_NOTE",
+  "last_edited_by": "<user-id>",
+  "created_at": "2026-10-07T03:53:02Z",
+  "updated_at": "2026-10-07T07:02:46Z",
+  "sections": [
+    {
+      "id": "probe_a",
+      "label": "probe_a"
+    },
+    {
+      "id": "probe_b",
+      "label": "probe_b"
+    }
+  ],
+  "fields": [
+    {
+      "id": "notesPlain",
+      "type": "STRING",
+      "purpose": "NOTES",
+      "label": "notesPlain",
+      "reference": "op://<vault-id>/<item-id>/<field-ref>"
+    },
+    {
+      "id": "probe_a_api_key",
+      "section": {
+        "id": "probe_a",
+        "label": "probe_a"
+      },
+      "type": "CONCEALED",
+      "label": "API_KEY",
+      "value": "<v>",
+      "reference": "op://<vault-id>/<item-id>/<field-ref>"
+    },
+    {
+      "id": "probe_a_base_url",
+      "section": {
+        "id": "probe_a",
+        "label": "probe_a"
+      },
+      "type": "STRING",
+      "label": "BASE_URL",
+      "value": "<v>",
+      "reference": "op://<vault-id>/<item-id>/<field-ref>"
+    },
+    {
+      "id": "probe_b_api_key",
+      "section": {
+        "id": "probe_b",
+        "label": "probe_b"
+      },
+      "type": "CONCEALED",
+      "label": "API_KEY",
+      "value": "<v>",
+      "reference": "op://<vault-id>/<item-id>/<field-ref>"
+    },
+    {
+      "id": "probe_b_base_url",
+      "section": {
+        "id": "probe_b",
+        "label": "probe_b"
+      },
+      "type": "STRING",
+      "label": "BASE_URL",
+      "value": "<v>",
+      "reference": "op://<vault-id>/<item-id>/<field-ref>"
+    }
+  ]
+}

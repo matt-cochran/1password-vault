@@ -234,6 +234,8 @@ The plan should classify keys as:
 
 Where Fly exposes sufficient metadata or digests, the CLI should use that metadata to improve change detection.
 
+Decided in v0.1.0: Fly digests cannot be computed locally, so a desired key that is already on Fly is shown as "potentially changed"; real change detection happens in `fly sync` (§6.4). A key removed from the configuration is no longer declared, so it is neither reported nor pruned; unset it manually. Unmanaged names on Fly are only counted.
+
 ## FR-6 — Fly Synchronization
 
 The CLI shall provide:
@@ -281,6 +283,10 @@ If ownership is not declared, pruning should fail safely rather than infer owner
 
 In the fleet profile (§10) the managed set is derived from the declaration: every name produced by the target naming template for a declared key. Names outside that set (for example values staged by other automation) are never pruned.
 
+Decided in v0.1.0: every declared key's rendered name must be unique within an environment's template, whichever environments the keys are declared for (otherwise one run could stage and prune the same name); a name staged by a run is never pruned by it; and an immutable key (FR-16) is never pruned. It is reported as "held (immutable), not pruned", and releasing it takes `--prune --prune-immutable <product>/<key>` (repeatable, validated before any call). Two environments may not share the same Fly app and naming template.
+
+Prune scope: only template names of declared keys that are not desired in this environment. A key removed from the configuration is outside the managed set and is never pruned.
+
 ## FR-9 — Non-Interactive Operation
 
 Commands used by CI shall not prompt for input.
@@ -301,7 +307,20 @@ The CLI shall use stable exit codes for at least:
 - denied destructive operation;
 - child-process failure.
 
-Exact numeric assignments may be finalized during implementation.
+Final assignments (a public contract from v0.1.0):
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 2 | configuration error, and command-line usage error |
+| 3 | dependency (`op` or `flyctl` missing or unusable) |
+| 4 | source (1Password) |
+| 5 | target (Fly) |
+| 6 | policy: refused (blocking keys, a refused value, a denied destructive operation) |
+| 7 | authentication (1Password or Fly) |
+| 8 | findings (`status`, `fly plan` found blocking keys) |
+
+`run` exits with the child's own exit code. A closed stdout (`status | head`) does not change the result.
 
 ## FR-11 — Dry-Run Safety
 
@@ -329,6 +348,8 @@ In CI, the CLI shall read each configured 1Password item once per run, by vault 
 
 Reason: service-account rate limits. On 1Password Families/Teams a token gets 1,000 reads per hour and the whole account 1,000 (Families) or 5,000 (Teams) requests per 24 hours. A fleet release must cost a handful of requests, not one per key.
 
+Measured (D0 spike): a cold whole-item read by vault ID and item ID costs 2 requests; `op` caches by default on UNIX, so a repeat read costs 0. CI should set `OP_CACHE=false` to see the worst case.
+
 Local commands (`run`) may resolve per-reference through `op run`; they use the person's desktop-app session, not a service account.
 
 ## FR-14 — Field Kinds
@@ -344,14 +365,18 @@ Each declared key may carry rules, evaluated after resolution and before any tar
 - `base64_bytes = N`, `hex_bytes = N`;
 - `email_list`, `https_url`;
 - `prefix_by_mode` (for example Stripe `sk_test_` vs `sk_live_` chosen by a declared mode);
-- `refuse_in = [<environment>]` (a key that must not exist in an environment);
+- `refuse_in = [<environment>]` (a key that must not exist in an environment): evaluated before anything else, so a non-empty field in a refused environment is a blocking `refuse_in` failure even though the key is not otherwise expected there; the environments must be defined and must not also be listed in `environments`;
 - named transforms with a fixed output format (for example a SigNoz ingestion header).
 
 Rule failures name the key and the rule, never the value.
 
+Target limits count as rules too: `status` and `fly plan` check each ready secret against the Fly import rules (`fly-name-invalid`, `import-newline`, `import-hash-after-odd-quotes`, `import-line-too-long`, `import-invalid-utf8`, `import-duplicate-name`) and show a refusal as a failing rule, so they never show green for a value `fly sync` would refuse. The maximum length is 59 000 bytes, below the 60 000-byte import line limit.
+
 ## FR-16 — Immutable Keys
 
 A key may be declared `immutable` (encryption keys, session-signing keys: changing them makes data unreadable or signs everyone out). For an immutable key, `fly sync` stages a value only when the name is absent on the target. Changing it requires `--rotate <product>/<key>`; otherwise a difference is reported and not staged.
+
+Under stage-and-compare (§6.4) the value cannot be compared locally, so an immutable key present on Fly is reported as "held" and left alone; `--rotate` stages it.
 
 ## FR-17 — Status
 
@@ -361,7 +386,7 @@ The CLI shall provide:
 secretctl status <environment>
 ```
 
-One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent, would change). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
+One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
 
 ## FR-18 — Config Export
 
@@ -462,28 +487,21 @@ Security-sensitive dependencies should be kept small and audited.
 
 ---
 
-# 5. Initial CLI Surface
+# 5. CLI Surface
 
-The MVP should intentionally remain small.
-
-```text
-secretctl doctor
-
-secretctl run <environment> -- <command>
-
-secretctl fly plan <environment>
-
-secretctl fly sync <environment> [--deploy] [--prune]
-```
-
-Potential global options:
+The surface shipped in v0.1.0:
 
 ```text
---config <path>
---verbose
---quiet
---json
+secretctl [--config <path>] doctor
+secretctl [--config <path>] status <environment>
+secretctl [--config <path>] run <environment> --product <product> -- <command>
+secretctl [--config <path>] fly plan <environment>
+secretctl [--config <path>] fly sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
+secretctl [--config <path>] config export <environment> --json
+secretctl [--config <path>] item skeleton <environment>
 ```
+
+`--config` defaults to `secrets.toml`. `--json` exists only on `config export`; `--verbose` and `--quiet` are not implemented.
 
 There should be no generic `secret get` command in the initial release because printing raw values conflicts with the tool's primary safety goals.
 
@@ -608,6 +626,8 @@ else:
 
 Exact behavior should be verified against the current Fly CLI semantics during implementation.
 
+Decided in v0.1.0 (stage-and-compare): Fly digests cannot be computed locally, so `fly sync` stages, then compares the digests it read before and after. Names whose digest differs, or that had none before, count as changed. Deploy is gated: it runs only with `--deploy`, and only when something changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Otherwise sync reports "nothing pending". A deploy on an app with no machines fails with exit 5.
+
 ## 6.5 Plan Model
 
 Synchronization logic should produce a domain-level `SyncPlan` before mutation.
@@ -706,7 +726,7 @@ Structured JSON output may be provided for CI but must follow the same redaction
 
 ## 6.9 Distribution
 
-Initial distribution targets:
+Initial distribution targets (v0.1.0 ships GitHub Releases and `cargo install --git`; Homebrew and crates.io arrive in v0.1.1):
 
 - GitHub Releases;
 - Homebrew;
@@ -824,6 +844,8 @@ rules = { enum = ["open", "invite_only"] }
 ```
 
 The consumer may generate this file from its own catalog; secretctl reads only this file. Product names are upper-cased into the template (`allumata` → `ALLUMATA`).
+
+The `fly` section is optional per environment: an environment used only for `run`, `config export` and `item skeleton` (for example `dev`) omits it, and `status` and the `fly` commands refuse it with a configuration error. `vault_id`, `item_id` and `fly.app` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
 ## 10.3 Coexistence with other automation
 
