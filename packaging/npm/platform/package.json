@@ -1,0 +1,21 @@
+{
+  "name": "@opv/PLATFORM",
+  "version": "0.0.0",
+  "description": "Prebuilt opv binary for a single platform",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matt-cochran/1password-vault"
+  },
+  "homepage": "https://github.com/matt-cochran/1password-vault",
+  "os": [
+    "OS"
+  ],
+  "cpu": [
+    "CPU"
+  ],
+  "files": [
+    "bin"
+  ],
+  "preferUnplugged": true
+}

@@ -1,0 +1,30 @@
+{
+  "name": "opv",
+  "version": "0.0.0",
+  "description": "Sync secrets from 1Password to runtime targets (Fly.io) without ever printing, logging or writing secret values",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matt-cochran/1password-vault"
+  },
+  "homepage": "https://github.com/matt-cochran/1password-vault",
+  "keywords": [
+    "1password",
+    "secrets",
+    "fly",
+    "flyio",
+    "cli",
+    "devops",
+    "opv"
+  ],
+  "bin": {
+    "opv": "bin/opv.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {}
+}
