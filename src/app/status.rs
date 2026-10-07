@@ -145,6 +145,24 @@ mod tests {
         assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
     }
 
+    /// FR-26: a value failing its rule shows the reason and, under it, the key's guidance.
+    #[test]
+    fn status_rule_failure_prints_guidance_on_next_line() {
+        let (res, out, _) = status_of(
+            complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE")),
+            fly_empty(),
+        );
+        assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+        let lines: Vec<&str> = out.lines().collect();
+        let i = lines
+            .iter()
+            .position(|l| l.contains("OPENAI_API_KEY") && l.contains("fails rule"))
+            .unwrap();
+        assert!(lines[i + 1].starts_with("    guidance: "), "{out}");
+        assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
+        assert_no_values(&out);
+    }
+
     /// Review Focus 2: a missing product section reports every desired key missing.
     #[test]
     fn status_missing_section_reports_every_key_missing() {
