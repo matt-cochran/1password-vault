@@ -110,6 +110,7 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
           merge-multiple: true
@@ -119,6 +120,20 @@ jobs:
         run: |
           cp dist/opv-x86_64-unknown-linux-musl dist/opv
           (cd dist && sha256sum opv* > ../SHA256SUMS) && mv SHA256SUMS dist/
+      - name: Build npm packages and smoke test
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          node scripts/npm/build.mjs --version "$version" --assets dist --out npm-dist
+          mkdir -p npm-smoke/node_modules/opv npm-smoke/node_modules/@matthew-cochran/opv-linux-x64
+          cp -r npm-dist/opv/. npm-smoke/node_modules/opv/
+          cp -r npm-dist/@matthew-cochran/opv-linux-x64/. npm-smoke/node_modules/@matthew-cochran/opv-linux-x64/
+          out="$(node npm-smoke/node_modules/opv/bin/opv.js --version)"
+          echo "$out"
+          case "$out" in
+            'opv '*) ;;
+            *) echo "::error::npm smoke test output did not start with 'opv ': $out"; exit 1 ;;
+          esac
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets
@@ -148,3 +163,62 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME"
+
+  npm:
+    name: Publish npm packages
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: release-assets
+          path: dist
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Check for NPM_TOKEN
+        id: token
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "$NPM_TOKEN" ]]; then
+            echo "::notice::NPM_TOKEN is not set; skipping npm publish"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      # Note: pre-release tags (e.g. v0.1.1-rc1) are rejected by build.mjs by design.
+      - name: Build npm packages
+        if: steps.token.outputs.present == 'true'
+        run: node scripts/npm/build.mjs --version "${GITHUB_REF_NAME#v}" --assets dist --out npm-dist
+      - name: Publish npm packages
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Platform packages first, then the main package.
+          for pkg in npm-dist/@matthew-cochran/opv-* npm-dist/opv; do
+            name="$(node -p "require('./$pkg/package.json').name")"
+            version="$(node -p "require('./$pkg/package.json').version")"
+            set +e
+            published="$(npm view "${name}@${version}" version 2>&1)"
+            rc=$?
+            set -e
+            if [[ $rc -eq 0 && -n "$published" ]]; then
+              echo "::notice::${name}@${version} already published; skipping"
+              continue
+            fi
+            if [[ $rc -ne 0 ]] && ! grep -q 'E404' <<<"$published"; then
+              echo "$published" >&2
+              exit "$rc"
+            fi
+            npm publish "$pkg" --provenance --access public
+          done
