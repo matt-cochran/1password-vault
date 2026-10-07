@@ -27,7 +27,7 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --features fake -- -D warnings
       - name: Run tests
-        run: cargo test --features fake
+        run: cargo test --locked --features fake
 
   deny:
     name: cargo-deny

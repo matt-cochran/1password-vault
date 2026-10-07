@@ -19,8 +19,26 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compare tag and package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "$version" || "$tag" != "$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches Cargo.toml version $version"
+
   build:
     name: Build (${{ matrix.target }})
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -47,7 +65,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Run tests (host)
-        run: cargo test --features fake
+        run: cargo test --locked --features fake
       - name: Install ziglang
         if: contains(matrix.target, 'linux-musl')
         run: python3 -m pip install --user --break-system-packages ziglang==0.16.0

@@ -2,6 +2,8 @@
 name = "secretctl"
 version = "0.1.0"
 edition = "2024"
+# let-chains (`if let ... && let ...`) are stable from 1.88.
+rust-version = "1.88"
 license = "MIT"
 description = "Sync secrets from 1Password to runtime targets (Fly.io) without ever printing, logging or writing secret values"
 repository = "https://github.com/matt-cochran/1password-vault"
