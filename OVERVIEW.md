@@ -158,6 +158,7 @@ The configuration shall support:
 - secret-name to `op://` reference mappings;
 - Fly application name;
 - optional managed-secret ownership;
+- products, per-key kind, rules, guidance and immutability (fleet profile, §10);
 - future extension to additional secret sources and targets.
 
 Configuration shall never contain secret values.
@@ -244,7 +245,7 @@ secretctl fly sync <environment>
 The command shall:
 
 1. validate configuration and authentication;
-2. resolve the configured 1Password secret references;
+2. resolve the configured 1Password secret references (in CI, by reading each configured item once, by ID; see FR-13);
 3. transmit values to Fly without command-line arguments or plaintext files;
 4. stage the resulting Fly secrets;
 5. determine whether the effective Fly secret state changed;
@@ -277,6 +278,8 @@ Pruning shall require:
 Pruning shall apply only to secrets explicitly owned by the CLI.
 
 If ownership is not declared, pruning should fail safely rather than infer ownership.
+
+In the fleet profile (§10) the managed set is derived from the declaration: every name produced by the target naming template for a declared key. Names outside that set (for example values staged by other automation) are never pruned.
 
 ## FR-9 — Non-Interactive Operation
 
@@ -319,6 +322,66 @@ Possible future targets include:
 - other deployment platforms.
 
 Possible future sources may be supported only if they preserve the project's security model.
+
+## FR-13 — Whole-Item Reads
+
+In CI, the CLI shall read each configured 1Password item once per run, by vault ID and item ID, and serve every key from that in-memory copy. It shall not look items up by title or resolve one reference per key.
+
+Reason: service-account rate limits. On 1Password Families/Teams a token gets 1,000 reads per hour and the whole account 1,000 (Families) or 5,000 (Teams) requests per 24 hours. A fleet release must cost a handful of requests, not one per key.
+
+Local commands (`run`) may resolve per-reference through `op run`; they use the person's desktop-app session, not a service account.
+
+## FR-14 — Field Kinds
+
+Each declared key has a kind, `secret` or `config`. In 1Password the field type records it: concealed = secret, text = config. A key stored with the wrong type is an error reported by `status` and refused by `fly sync` and `config export`.
+
+## FR-15 — Declarative Validation Rules
+
+Each declared key may carry rules, evaluated after resolution and before any target mutation. Rules are generic and data-driven; the CLI has no product-specific code. Initial rule set:
+
+- `nonempty`, single line, maximum length (always on);
+- `prefix`, `not_prefix`, `regex`, `enum`;
+- `base64_bytes = N`, `hex_bytes = N`;
+- `email_list`, `https_url`;
+- `prefix_by_mode` (for example Stripe `sk_test_` vs `sk_live_` chosen by a declared mode);
+- `refuse_in = [<environment>]` (a key that must not exist in an environment);
+- named transforms with a fixed output format (for example a SigNoz ingestion header).
+
+Rule failures name the key and the rule, never the value.
+
+## FR-16 — Immutable Keys
+
+A key may be declared `immutable` (encryption keys, session-signing keys: changing them makes data unreadable or signs everyone out). For an immutable key, `fly sync` stages a value only when the name is absent on the target. Changing it requires `--rotate <product>/<key>`; otherwise a difference is reported and not staged.
+
+## FR-17 — Status
+
+The CLI shall provide:
+
+```bash
+secretctl status <environment>
+```
+
+One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent, would change). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
+
+## FR-18 — Config Export
+
+The CLI shall provide:
+
+```bash
+secretctl config export <environment> --json
+```
+
+It prints the config-kind values only, as non-secret JSON for deployment tooling to render. It refuses to run if any declared config key is stored as a secret, or any secret as config. There is still no command that prints secret values.
+
+## FR-19 — Item Skeleton
+
+The CLI shall provide:
+
+```bash
+secretctl item skeleton <environment>
+```
+
+It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This is the only command that writes to 1Password, and it needs a write-capable identity; `fly sync`, `plan`, `status` and `config export` stay read-only.
 
 ---
 
@@ -697,6 +760,10 @@ Version 0.1 is acceptable when:
 8. A read-only 1Password service account is sufficient.
 9. Secret values do not appear in logs, debug output, CLI arguments, or temporary files.
 10. Core planning and security behavior has automated test coverage.
+11. A full fleet `fly sync` (§10) costs at most 4 1Password requests per environment.
+12. `status` reports missing, extra, wrong-kind and rule-failing keys for every product without printing values.
+13. An immutable key that differs from the target is reported and not staged unless `--rotate` names it.
+14. `config export` never emits a secret-kind field.
 
 ---
 
@@ -707,3 +774,90 @@ The project should stay narrowly focused:
 > **1Password owns secrets. The runtime platform consumes secrets. The CLI safely connects the two.**
 
 If a feature requires the CLI to become a new source of truth, secrets database, identity provider, or secrets platform, it is probably outside the intended scope.
+
+---
+
+# 10. Fleet Profile (first consumer: `matt-cochran-products/infra`)
+
+The first deployment runs many products inside **one Fly app per environment**, each product a container whose launcher maps only its own names. The general model in §2–§3 is one environment ↔ one Fly app ↔ a flat list of keys. The fleet profile adds a product dimension without adding product-specific code.
+
+## 10.1 Store layout
+
+```text
+vault <name>-<environment>   item <name>   section <product>   field <KEY>
+                                                               concealed = secret, text = config
+```
+
+One vault per environment is the isolation boundary: service accounts are granted whole vaults, not items. One item per environment keeps a release to one read (FR-13).
+
+## 10.2 Configuration
+
+```toml
+[profile]
+kind = "fleet"
+
+[environments.prod]
+vault_id = "…"            # IDs, not names (FR-13)
+item_id  = "…"
+fly.app  = "mcproductlabs-portfolio-production"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"   # naming template; defines the managed set (FR-8)
+
+[environments.prod.modes]
+allumata.payments = "off"                      # inputs to prefix_by_mode rules
+
+[products.allumata.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["prod"]
+rules = { prefix = "sk-", not_prefix = "sk-or-" }
+guidance = "OpenAI platform / API keys …"
+
+[products.allumata.keys.INTEGRATION_ENC_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+
+[products.allumata.keys.SIGNUP_POLICY]
+kind = "config"
+environments = ["staging", "prod"]
+rules = { enum = ["open", "invite_only"] }
+```
+
+The consumer may generate this file from its own catalog; secretctl reads only this file. Product names are upper-cased into the template (`allumata` → `ALLUMATA`).
+
+## 10.3 Coexistence with other automation
+
+Other tools stage names outside the managed set on the same Fly app (database URLs from Terraform state, generated keys). secretctl must:
+
+- stage with `--stage` semantics and never deploy unless `--deploy` is passed, so one later deploy applies everything staged by every tool;
+- never read, compare or prune names outside its managed set.
+
+## 10.4 Local development
+
+`run` maps a product's keys to plain names for the child process (`OPENAI_API_KEY`, not the fleet name) and resolves `op://<vault>/<item>/<product>/<KEY>` references through `op run`.
+
+---
+
+# 11. Prior Art: `significa/1password-secrets`
+
+[significa/1password-secrets](https://github.com/significa/1password-secrets) (Python, MIT per `setup.py`) solves a similar problem: 1Password secure notes holding `.env` text, pulled locally or imported to Fly. secretctl borrows its workflow, not its code. If any code is ported, keep its MIT notice.
+
+**Keep:**
+
+- the flow: read item → compute change → stage on Fly → `fly secrets deploy`;
+- lookup by naming convention instead of a per-key mapping;
+- a diff before any write, showing names only;
+- share links for handing one item to someone.
+
+**Reject**, because each one breaks a requirement above:
+
+| Their behavior | Breaks |
+|---|---|
+| Debug log prints the parsed secrets (`logger.debug(f"Secrets loaded…{json.dumps(secrets)}")`) | SR-1 |
+| `op item create/edit … notesPlain=<all secrets>` passes values as command-line arguments | SR-3 |
+| `edit` writes secrets to a `NamedTemporaryFile` for the editor | SR-4 |
+| `local pull` writes `./.env` | FR-4 |
+| Deletes every Fly secret not in the note, after a y/n prompt | FR-8, FR-9, SR-6 |
+| Writes "last imported at" back to 1Password on every import | FR-11, SR-5 |
+| Finds items by `op item list` + title substring | FR-13 |
+| One `.env` text blob per Fly app | FR-14, §10.1 (one typo breaks every product; coarse history) |
