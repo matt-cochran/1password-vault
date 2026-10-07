@@ -152,7 +152,9 @@ Global option: `--config <PATH>` (default `secrets.toml`). `<ENV>` is an environ
 opv doctor                          # config, op and sign-in, flyctl and sign-in
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status staging                  # one row per product and key; exit 8 if any blocks
+opv status staging --json           # the same state as one machine-readable JSON document
 opv fly plan staging                # what a sync would stage, hold and prune; exit 8 if any blocks
+opv fly plan staging --json         # the same plan as one machine-readable JSON document
 opv fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv run dev --product allumata -- cargo run
@@ -165,6 +167,43 @@ opv run dev --product allumata -- cargo run
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
 7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file.
+
+### Machine-readable status and plan
+
+`status <ENV> --json` and `fly plan <ENV> --json` print exactly one JSON document on stdout
+and nothing else. It contains names, states and counts only: no value, no value fragment,
+no value length and no guidance. Exit codes are unchanged, and an error is still reported
+on stderr with no partial document on stdout. The top-level `schema_version` is `1`; adding
+a field keeps it, while renaming or removing a field, or changing its meaning, increments it.
+
+```json
+{
+  "schema_version": 1,
+  "environment": "prod",
+  "rows": [
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret",
+      "state": "saved",
+      "rule": null,
+      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "target": "absent",
+      "action": "would_stage"
+    }
+  ],
+  "extras": [],
+  "stage": ["FLEET__ALLUMATA__OPENAI_API_KEY"],
+  "held": [],
+  "prune": [],
+  "totals": { "rows": 1, "findings": 0, "extras": 0, "to_stage": 1, "held": 0, "to_prune": 0 }
+}
+```
+
+`state` is `saved`, `missing`, `wrong_kind`, `failing_rule` or `skipped`; `rule` names the
+failing rule when `state` is `failing_rule`; `target` is `present`, `absent` or
+`would_change` for a secret and `null` for a config key; `action` is `would_stage`,
+`would_prune`, `held` or `null`. The document is meant for the scheduled drift check.
 
 ### Change detection
 
@@ -243,7 +282,7 @@ A clean `status` ends with a summary line, for example `49 saved, 13 not yet on 
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
 - `run` hands secret values to the child process through `op run`; the child can read them.
-- No multiline values. Fleet profile only (a `simple` profile for one app per environment is planned for v0.2). No `--json` output other than `config export` (`--json` on `status` and `fly plan` is planned for v0.2).
+- No multiline values. Fleet profile only (a `simple` profile for one app per environment is planned for v0.2). `--json` on `status` and `fly plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
