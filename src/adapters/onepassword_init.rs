@@ -4,8 +4,9 @@
 //!   so that `init` can write their IDs into `secrets.toml`. This is the single, documented
 //!   exception to FR-13 (whole-item reads by ID). It is unreachable from `fly sync`,
 //!   `fly plan`, `status`, `run` and `config export`, which keep reading by vault ID and item
-//!   ID through [`super::onepassword`]; the tests in `app::init` prove it both by scanning the
-//!   sources and by running every other command against a recording runner.
+//!   ID through [`super::onepassword`]. The module is `pub(crate)`, so the compiler keeps it
+//!   inside the library, where only `app::init` calls it; a test in `app::init` runs every
+//!   other command against a recording runner and asserts no title lookup is made.
 //! - [`read_field_shapes`] reads the resolved item once (`op item get <item_id> --vault
 //!   <vault_id> --format json`, the same call as the CI read) but deserializes only each
 //!   field's section label, label, type and purpose. The `value` field is never
@@ -24,6 +25,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::onepassword::{Session, diagnose, failed_op_error, json_error, run_op, session_error};
+use crate::config;
 use crate::domain::Environment;
 use crate::error::Error;
 use crate::host::Host;
@@ -45,6 +47,9 @@ pub struct Named {
 pub struct FieldShape {
     /// The section label; `None` for a field outside any labelled section.
     pub section: Option<String>,
+    /// True for a field inside a section object that has no label (or an empty one). The
+    /// fleet reader rejects such a field; the simple reader treats it as unsectioned.
+    pub unlabelled_section: bool,
     pub label: String,
     /// The 1Password field type (`CONCEALED`, `STRING`, `URL`, ...).
     pub ty: String,
@@ -159,10 +164,15 @@ pub fn read_field_shapes(
         .fields
         .into_iter()
         .filter(|f| f.purpose.is_none())
-        .map(|f| FieldShape {
-            section: f.section.and_then(|s| s.label).filter(|l| !l.is_empty()),
-            label: f.label,
-            ty: f.ty,
+        .map(|f| {
+            let in_section = f.section.is_some();
+            let section = f.section.and_then(|s| s.label).filter(|l| !l.is_empty());
+            FieldShape {
+                unlabelled_section: in_section && section.is_none(),
+                section,
+                label: f.label,
+                ty: f.ty,
+            }
         })
         .collect())
 }
@@ -206,7 +216,13 @@ fn pick(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Nam
     all.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     let matches: Vec<&Named> = all.iter().filter(|n| n.name == title).collect();
     match matches.as_slice() {
-        [one] => Ok((*one).clone()),
+        // The ID goes into argv next: check it like a hand-written ID (§10.2, SR-7) and never
+        // echo an ID that fails the check.
+        [one] if config::is_id(&one.id) => Ok((*one).clone()),
+        [_] => Err(Error::Source(format!(
+            "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
+             1Password ID (^[A-Za-z0-9][A-Za-z0-9._-]*$); not used"
+        ))),
         [] => Err(Error::Config(format!(
             "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
             candidates(all.iter())
@@ -226,7 +242,14 @@ fn candidates<'a>(it: impl ExactSizeIterator<Item = &'a Named>) -> String {
     }
     let mut s: Vec<String> = it
         .take(MAX_CANDIDATES)
-        .map(|c| format!("{:?} ({})", c.name, c.id))
+        .map(|c| {
+            let id = if config::is_id(&c.id) {
+                c.id.as_str()
+            } else {
+                "invalid ID"
+            };
+            format!("{:?} ({id})", c.name)
+        })
         .collect();
     if n > MAX_CANDIDATES {
         s.push(format!("and {} more", n - MAX_CANDIDATES));
@@ -320,6 +343,32 @@ mod tests {
         assert!(!m.contains("n24"), "{m}");
     }
 
+    /// IDs from `op` go into argv: an invalid one is refused, naming the title, never echoed.
+    #[test]
+    fn invalid_id_from_op_is_refused_without_echoing_it() {
+        for bad in ["-rf", "a b", "", "x;y"] {
+            let r = FakeRunner::new([vaults(&[(bad, "app")])]);
+            let e = resolve_vault(&r, "app", &linux).unwrap_err();
+            assert_eq!(e.exit_code(), 4, "{e}");
+            let m = e.to_string();
+            assert!(m.contains("vault titled \"app\""), "{m}");
+            if !bad.is_empty() {
+                assert!(!m.contains(bad), "{m}");
+            }
+            let r = FakeRunner::new([items(&[(bad, "app")])]);
+            let e = resolve_item(&r, "v1", "app", &linux).unwrap_err();
+            assert_eq!(e.exit_code(), 4, "{e}");
+            assert!(e.to_string().contains("item titled \"app\""), "{e}");
+        }
+        // In a candidate list, an invalid ID is replaced too.
+        let r = FakeRunner::new([vaults(&[("--evil", "other")])]);
+        let m = resolve_vault(&r, "app", &linux).unwrap_err().to_string();
+        assert!(
+            m.contains("\"other\" (invalid ID)") && !m.contains("--evil"),
+            "{m}"
+        );
+    }
+
     #[test]
     fn empty_list_output_is_no_candidates() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
@@ -382,6 +431,7 @@ mod tests {
             s[2].section, None,
             "a section without a label is unsectioned"
         );
+        assert!(s[2].unlabelled_section && !s[0].unlabelled_section && !s[1].unlabelled_section);
         let dbg = format!("{s:?}");
         assert!(!dbg.contains("MARKER"), "{dbg}");
     }

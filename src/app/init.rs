@@ -117,11 +117,27 @@ fn run_on(
             decl.skipped
         ),
     )?;
+    if let Some(note) = ancestor_note(dir) {
+        w(out, note)?;
+    }
     w(
         out,
         "add rules and guidance by hand; see the README (Rules reference)".into(),
     )?;
     w(out, format!("Next step: opv fly plan {}", args.env))
+}
+
+/// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
+/// `dir`'s parent), a one-line note naming it: the new file takes precedence below `dir`.
+/// Never a refusal.
+pub fn ancestor_note(dir: &Path) -> Option<String> {
+    let found = config::discover(dir.parent()?)?;
+    Some(format!(
+        "note: {} also exists; the new {FILE_NAME} takes precedence for commands run from {} \
+         and below",
+        found.display(),
+        dir.display()
+    ))
 }
 
 /// Arguments that need no 1Password call: the environment name (a bare TOML key) and the
@@ -215,6 +231,7 @@ fn declare(
             )));
         }
     };
+    check_duplicates(fields, profile, item_title)?;
     let mut d = Declared {
         profile,
         keys: BTreeMap::new(),
@@ -225,8 +242,13 @@ fn declare(
         Profile::Simple => (unsectioned, sectioned, "simple"),
         Profile::Fleet => (sectioned, unsectioned, "fleet"),
     };
-    if !ignored.is_empty() {
-        let names: Vec<String> = ignored.iter().map(|f| display_name(f)).collect();
+    d.skipped += ignored.len();
+    // An ignored field the reader still rejects gets its own note; the rest are listed.
+    let (rejected, quiet): (Vec<&FieldShape>, Vec<&FieldShape>) = ignored
+        .into_iter()
+        .partition(|f| reader_rejects(f, profile).is_some());
+    if !quiet.is_empty() {
+        let names: Vec<String> = quiet.iter().map(|f| display_name(f)).collect();
         let shape = match profile {
             Profile::Simple => "sectioned",
             Profile::Fleet => "unsectioned",
@@ -236,7 +258,9 @@ fn declare(
             names.len(),
             names.join(", ")
         ));
-        d.skipped += ignored.len();
+    }
+    for f in rejected {
+        d.notes.push(skip_note(f, None, profile));
     }
     let mut bad_products: BTreeMap<&str, usize> = BTreeMap::new();
     for f in used {
@@ -244,44 +268,39 @@ fn declare(
         if profile == Profile::Fleet && !config::is_product_name(product) {
             *bad_products.entry(product).or_default() += 1;
             d.skipped += 1;
+            if reader_rejects(f, profile).is_some() {
+                d.notes
+                    .push(skip_note(f, Some("its section is skipped"), profile));
+            }
             continue;
         }
-        let name_ok = config::is_env_name(&f.label);
         let kind = match f.ty.as_str() {
             "CONCEALED" => Some(Kind::Secret),
             "STRING" => Some(Kind::Config),
             _ => None,
         };
-        match (name_ok, kind) {
-            (false, _) => {
-                d.notes.push(format!(
-                    "skipped {}: not a valid key name (^[A-Z][A-Z0-9_]*$); rename the field \
-                     in 1Password to manage it",
-                    display_name(f)
-                ));
-                d.skipped += 1;
-            }
-            (true, None) => {
-                d.notes.push(format!(
-                    "skipped {}: field type {:?} is neither concealed (secret) nor text \
-                     (config); status and fly sync will reject this field until its type is \
-                     changed",
-                    display_name(f),
-                    f.ty
-                ));
-                d.skipped += 1;
-            }
-            (true, Some(kind)) => {
-                let keys = d.keys.entry(product.to_string()).or_default();
-                if keys.insert(f.label.clone(), kind).is_some() {
-                    return Err(Error::Source(format!(
-                        "duplicate field {} in item {item_title:?}; rename one in 1Password \
-                         (nothing written)",
-                        display_name(f)
-                    )));
-                }
-            }
+        if !config::is_env_name(&f.label) {
+            d.notes.push(skip_note(
+                f,
+                Some(
+                    "not a valid key name (^[A-Z][A-Z0-9_]*$); rename the field in 1Password \
+                     to manage it",
+                ),
+                profile,
+            ));
+            d.skipped += 1;
+            continue;
         }
+        let Some(kind) = kind else {
+            d.notes.push(skip_note(f, None, profile));
+            d.skipped += 1;
+            continue;
+        };
+        // Duplicates were rejected above, before any key was declared.
+        d.keys
+            .entry(product.to_string())
+            .or_default()
+            .insert(f.label.clone(), kind);
     }
     for (product, n) in bad_products {
         d.notes.push(format!(
@@ -290,6 +309,68 @@ fn declare(
         ));
     }
     Ok(d)
+}
+
+/// The tail of every note on a field the later reader rejects.
+const REJECTED: &str = "status and fly sync will reject it until it is fixed in 1Password";
+
+/// Why `status` / `fly sync` (the item reader for `profile`) would reject this field, if
+/// they would; duplicates are checked separately ([`check_duplicates`]). Mirrors
+/// `onepassword::parse_fields` (fleet) and `parse_unsectioned_fields` (simple).
+fn reader_rejects(f: &FieldShape, profile: Profile) -> Option<String> {
+    let bad_type = !matches!(f.ty.as_str(), "CONCEALED" | "STRING");
+    let type_msg = || {
+        format!(
+            "field type {:?} is neither concealed (secret) nor text (config)",
+            f.ty
+        )
+    };
+    match profile {
+        Profile::Fleet if f.unlabelled_section => Some("it is in a section without a label".into()),
+        Profile::Fleet if f.section.is_none() => None,
+        Profile::Fleet if f.label.is_empty() => Some("it has no label".into()),
+        Profile::Fleet if bad_type => Some(type_msg()),
+        Profile::Fleet => None,
+        Profile::Simple if f.section.is_none() && config::is_env_name(&f.label) && bad_type => {
+            Some(type_msg())
+        }
+        Profile::Simple => None,
+    }
+}
+
+/// `skipped <name>: <why>[; <reader reason>; <REJECTED>]`. Names only.
+fn skip_note(f: &FieldShape, why: Option<&str>, profile: Profile) -> String {
+    let mut parts: Vec<String> = why.map(str::to_string).into_iter().collect();
+    if let Some(reason) = reader_rejects(f, profile) {
+        parts.push(reason);
+        parts.push(REJECTED.to_string());
+    }
+    format!("skipped {}: {}", display_name(f), parts.join("; "))
+}
+
+/// A label given twice where the reader for `profile` looks (every sectioned field under
+/// fleet, every unsectioned key-named field under simple), whatever its type: the reader
+/// rejects the item, so init writes nothing (`Source`, names only).
+fn check_duplicates(
+    fields: &[FieldShape],
+    profile: Profile,
+    item_title: &str,
+) -> Result<(), Error> {
+    let mut seen = std::collections::BTreeSet::new();
+    for f in fields {
+        let read = match profile {
+            Profile::Fleet => f.section.is_some() && !f.label.is_empty(),
+            Profile::Simple => f.section.is_none() && config::is_env_name(&f.label),
+        };
+        if read && !seen.insert((f.section.as_deref(), f.label.as_str())) {
+            return Err(Error::Source(format!(
+                "duplicate field {} in item {item_title:?}; rename one in 1Password \
+                 (nothing written)",
+                display_name(f)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `"section"/"label"` or `"label"`, quoted and escaped. A name, never a value.

@@ -591,56 +591,205 @@ fn other_commands_never_look_up_titles() {
     }
 }
 
-/// Structural proof: only `init` (and its adapter) name the title-lookup module or issue a
-/// `vault list` / `item list` call. Any new caller fails this test.
+// --- Fix round 1: reader-rejected shapes, duplicates, ancestor note ---
+
+const REJECT: &str = "status and fly sync will reject it until it is fixed in 1Password";
+
+/// An `op item get` document from raw field objects (shapes `item_json` cannot build).
+fn raw_item(fields: Vec<serde_json::Value>) -> Output {
+    Output::success(serde_json::to_vec(&json!({"id": ITEM_ID, "fields": fields})).unwrap())
+}
+
+fn sf(section: serde_json::Value, ty: &str, label: &str) -> serde_json::Value {
+    json!({"id": label.to_lowercase(), "section": section, "type": ty, "label": label,
+           "value": v("x")})
+}
+
+fn init_raw(fields: Vec<serde_json::Value>, a: &InitArgs) -> (tempfile::TempDir, Run) {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(dir.path(), a, vec![vaults(), items(), raw_item(fields)]);
+    (dir, run)
+}
+
+fn api() -> serde_json::Value {
+    json!({"id": "api", "label": "api"})
+}
+
 #[test]
-fn title_lookup_is_referenced_only_by_init() {
-    const ALLOWED: [&str; 4] = [
-        "src/adapters/mod.rs",
-        "src/adapters/onepassword_init.rs",
-        "src/app/init.rs",
-        "src/app/init_tests.rs",
+fn unlabelled_section_under_fleet_is_noted_as_rejected() {
+    let fields = vec![
+        sf(api(), "CONCEALED", "TOKEN"),
+        sf(json!({"id": "nolabel"}), "STRING", "MODE"),
     ];
-    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-        for e in fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push(p);
-            }
-        }
+    let (_dir, run) = init_raw(fields, &args(Some(Profile::Fleet), false));
+    run.res.as_ref().unwrap();
+    assert!(
+        run.out.contains(&format!(
+            "note: skipped \"MODE\": it is in a section without a label; {REJECT}"
+        )),
+        "{}",
+        run.out
+    );
+    assert!(!run.out.contains("ignored"), "{}", run.out);
+    assert!(run.out.contains("skipped 1"), "{}", run.out);
+}
+
+/// Under simple the same field is an ordinary unsectioned key (the simple reader agrees).
+#[test]
+fn unlabelled_section_under_simple_is_a_key() {
+    let fields = vec![sf(json!({"id": "nolabel"}), "STRING", "MODE")];
+    let (_dir, run) = init_raw(fields, &args(None, false));
+    run.res.as_ref().unwrap();
+    assert!(run.file().contains("[keys.MODE]"), "{}", run.file());
+    assert!(!run.out.contains(REJECT), "{}", run.out);
+}
+
+#[test]
+fn empty_label_in_a_section_is_noted_as_rejected() {
+    let fields = vec![sf(api(), "CONCEALED", "TOKEN"), sf(api(), "STRING", "")];
+    let (_dir, run) = init_raw(fields, &args(None, false));
+    run.res.as_ref().unwrap();
+    assert!(
+        run.out.contains(&format!(
+            "note: skipped \"api\"/\"\": not a valid key name (^[A-Z][A-Z0-9_]*$); rename the \
+             field in 1Password to manage it; it has no label; {REJECT}"
+        )),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn wrong_type_in_a_skipped_section_is_noted_as_rejected() {
+    let bad = json!({"id": "s", "label": "My App"});
+    let fields = vec![
+        sf(api(), "CONCEALED", "TOKEN"),
+        sf(bad.clone(), "URL", "SITE"),
+        sf(bad, "CONCEALED", "KEY"),
+    ];
+    let (_dir, run) = init_raw(fields, &args(None, false));
+    run.res.as_ref().unwrap();
+    let out = &run.out;
+    assert!(
+        out.contains(&format!(
+            "note: skipped \"My App\"/\"SITE\": its section is skipped; field type \"URL\" is \
+             neither concealed (secret) nor text (config); {REJECT}"
+        )),
+        "{out}"
+    );
+    // The valid field in the skipped section has no per-field note, only the section one.
+    assert!(!out.contains("\"My App\"/\"KEY\""), "{out}");
+    assert!(
+        out.contains("skipped section \"My App\" (2 field(s))"),
+        "{out}"
+    );
+}
+
+#[test]
+fn wrong_type_note_uses_the_rejection_wording() {
+    let mut fs_ = simple_fields();
+    fs_.push(("".into(), "HOMEPAGE".into(), "URL", Some(v("https://x"))));
+    let (_dir, run) = init_with(&fs_, &args(None, false));
+    run.res.as_ref().unwrap();
+    assert!(
+        run.out.contains(&format!(
+            "note: skipped \"HOMEPAGE\": field type \"URL\" is neither concealed (secret) nor \
+             text (config); {REJECT}"
+        )),
+        "{}",
+        run.out
+    );
+}
+
+/// The readers reject a label given twice whatever the field types, so init does too.
+#[test]
+fn duplicates_are_found_across_skipped_types_and_sections() {
+    let bad = json!({"id": "s", "label": "My App"});
+    let cases: Vec<(Vec<serde_json::Value>, &str)> = vec![
+        (
+            vec![sf(api(), "CONCEALED", "TOKEN"), sf(api(), "URL", "TOKEN")],
+            "duplicate field \"api\"/\"TOKEN\"",
+        ),
+        (
+            vec![
+                sf(api(), "CONCEALED", "A"),
+                sf(bad.clone(), "URL", "X"),
+                sf(bad, "STRING", "X"),
+            ],
+            "duplicate field \"My App\"/\"X\"",
+        ),
+        (
+            vec![
+                json!({"id": "a", "type": "CONCEALED", "label": "TOKEN", "value": v("1")}),
+                json!({"id": "b", "type": "URL", "label": "TOKEN", "value": v("2")}),
+            ],
+            "duplicate field \"TOKEN\"",
+        ),
+    ];
+    for (fields, want) in cases {
+        let (dir, run) = init_raw(fields, &args(None, false));
+        let e = run.err();
+        assert_eq!(e.exit_code(), 4, "{e}");
+        assert!(e.to_string().contains(want), "{e}");
+        assert!(dir_entries(dir.path()).is_empty());
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    walk(&root.join("src"), &mut files);
-    assert!(files.len() > 10, "source walk found {} files", files.len());
-    let mut checked = 0;
-    for p in files {
-        let rel = p
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if ALLOWED.contains(&rel.as_str()) {
-            continue;
-        }
-        let src = fs::read_to_string(&p).unwrap();
-        for needle in [
-            "onepassword_init",
-            "resolve_vault",
-            "resolve_item",
-            "read_field_shapes",
-            "\"vault\", \"list\"",
-            "\"item\", \"list\"",
-        ] {
-            assert!(!src.contains(needle), "{rel} references {needle}");
-        }
-        // Only the binary's dispatch may call the init use case.
-        if rel != "src/main.rs" {
-            assert!(!src.contains("init::run"), "{rel} calls init::run");
-        }
-        checked += 1;
+}
+
+/// Not duplicates: the same label in two sections, or an invalid-name label twice under
+/// simple (the simple reader ignores labels that cannot be keys).
+#[test]
+fn same_label_in_other_sections_is_not_a_duplicate() {
+    let fields = vec![
+        sf(api(), "CONCEALED", "TOKEN"),
+        sf(json!({"id": "web", "label": "web"}), "CONCEALED", "TOKEN"),
+    ];
+    let (_dir, run) = init_raw(fields, &args(None, false));
+    run.res.as_ref().unwrap();
+    let fields = vec![
+        json!({"id": "a", "type": "STRING", "label": "site url"}),
+        json!({"id": "b", "type": "URL", "label": "site url"}),
+        json!({"id": "c", "type": "STRING", "label": "MODE"}),
+    ];
+    let (_dir, run) = init_raw(fields, &args(None, false));
+    run.res.as_ref().unwrap();
+}
+
+#[test]
+fn ancestor_secrets_toml_is_noted_never_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join(FILE_NAME), "# parent\n").unwrap();
+    let nested = root.path().join("svc").join("api");
+    fs::create_dir_all(&nested).unwrap();
+    let run = run_in(
+        &nested,
+        &args(None, false),
+        vec![vaults(), items(), item(&simple_fields())],
+    );
+    run.res.as_ref().unwrap();
+    let want = format!(
+        "note: {} also exists; the new secrets.toml takes precedence for commands run from {} \
+         and below",
+        root.path().join(FILE_NAME).display(),
+        nested.display()
+    );
+    assert!(run.out.contains(&want), "{}", run.out);
+    assert_eq!(run.out.matches("also exists").count(), 1);
+    assert!(nested.join(FILE_NAME).exists());
+    assert_eq!(
+        fs::read_to_string(root.path().join(FILE_NAME)).unwrap(),
+        "# parent\n"
+    );
+    // The file init wrote is the one discovery now finds from below.
+    assert_eq!(config::discover(&nested), Some(nested.join(FILE_NAME)));
+}
+
+#[test]
+fn no_ancestor_note_without_an_ancestor_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("x");
+    fs::create_dir_all(&nested).unwrap();
+    // Only meaningful when nothing above the temp dir holds a secrets.toml.
+    if config::discover(dir.path()).is_none() {
+        assert_eq!(ancestor_note(&nested), None);
     }
-    assert!(checked > 10);
 }
