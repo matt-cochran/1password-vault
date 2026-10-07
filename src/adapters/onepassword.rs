@@ -42,7 +42,7 @@ use serde::de::{self, Deserializer, Visitor};
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::domain::model::{Environment, Kind};
+use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT, key_label};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
@@ -261,6 +261,18 @@ pub fn read_item(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error
     read_item_on(r, env, &Host::detect)
 }
 
+/// [`read_item`] for a configuration of the given profile. The call is the same single
+/// whole-item read by IDs (FR-13); only the fields returned differ: sectioned fields for
+/// the fleet profile, unsectioned fields (section [`SIMPLE_PRODUCT`]) for the simple
+/// profile (FR-20).
+pub fn read_item_as(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    profile: Profile,
+) -> Result<Item, Error> {
+    read_profile_on(r, env, profile, &Host::detect)
+}
+
 /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
 /// [`diagnose`] (FR-26). No second item read is made (FR-13).
 pub fn read_item_with(
@@ -274,6 +286,15 @@ pub fn read_item_with(
 fn read_item_on(
     r: &dyn CommandRunner,
     env: &Environment,
+    host: &dyn Fn() -> Host,
+) -> Result<Item, Error> {
+    read_profile_on(r, env, Profile::Fleet, host)
+}
+
+fn read_profile_on(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    profile: Profile,
     host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
     let args = [
@@ -295,7 +316,10 @@ fn read_item_on(
             "grant this identity access to the vault",
         ));
     }
-    let fields = parse_fields(&stdout)?;
+    let fields = match profile {
+        Profile::Fleet => parse_fields(&stdout)?,
+        Profile::Simple => parse_unsectioned_fields(&stdout)?,
+    };
     Ok(Item {
         fields,
         raw: stdout,
@@ -426,6 +450,9 @@ struct RawField {
     ty: String,
     #[serde(default)]
     label: String,
+    /// Set on built-in fields (`USERNAME`, `PASSWORD`, `NOTES`); never a declared key.
+    #[serde(default)]
+    purpose: Option<String>,
     #[serde(default)]
     value: Option<Concealed>,
 }
@@ -508,6 +535,67 @@ fn parse_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
     Ok(out)
 }
 
+/// Simple profile (FR-20): the fields outside any labelled section, keyed by section
+/// [`SIMPLE_PRODUCT`]. Sectioned fields are ignored, as are built-in fields (with a
+/// `purpose`) and fields whose label cannot be a key name (`^[A-Z][A-Z0-9_]*$`, e.g.
+/// `notesPlain` or `one-time password`), because they can never match a declared key. A
+/// field that could be a key but has an unsupported type, or a label given twice, is a
+/// `Source` error naming the label (FR-14).
+fn parse_unsectioned_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
+    let raw: RawItem = serde_json::from_slice(json).map_err(|e| json_error(&e))?;
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for f in raw.fields {
+        let sectioned = f
+            .section
+            .as_ref()
+            .and_then(|s| s.label.as_deref())
+            .is_some_and(|l| !l.is_empty());
+        if sectioned || f.purpose.is_some() || !is_key_name(&f.label) {
+            continue;
+        }
+        let kind = match f.ty.as_str() {
+            "CONCEALED" => Kind::Secret,
+            "STRING" => Kind::Config,
+            _ => {
+                return Err(Error::Source(format!(
+                    "unsupported field type on {}",
+                    f.label
+                )));
+            }
+        };
+        if !seen.insert(f.label.clone()) {
+            return Err(Error::Source(format!(
+                "duplicate field {} in item",
+                f.label
+            )));
+        }
+        out.push(ItemField {
+            section: SIMPLE_PRODUCT.to_string(),
+            label: f.label,
+            kind,
+            value: f
+                .value
+                .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
+        });
+    }
+    Ok(out)
+}
+
+fn is_key_name(s: &str) -> bool {
+    let mut c = s.chars();
+    matches!(c.next(), Some('A'..='Z'))
+        && c.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+/// A field outside any labelled section (no `section`, or one without a label).
+fn is_unsectioned(f: &Value) -> bool {
+    f.get("section")
+        .and_then(|s| s.get("label"))
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+}
+
 /// A JSON tree whose strings are zeroized when it is dropped.
 struct WipeOnDrop(Value);
 
@@ -551,6 +639,11 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
                 str_at(f, "label"),
             ) {
                 existing.insert((s, l));
+            } else if let Some(l) = str_at(f, "label")
+                && is_unsectioned(f)
+            {
+                // Simple profile (FR-20): unsectioned fields are keyed by SIMPLE_PRODUCT.
+                existing.insert((SIMPLE_PRODUCT.to_string(), l));
             }
         }
     }
@@ -559,17 +652,32 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
     for (s, l, _) in missing {
         if existing.contains(&(s.clone(), l.clone())) {
             return Err(Error::Source(format!(
-                "skeleton: {s}/{l} already exists in the item; not modified"
+                "skeleton: {} already exists in the item; not modified",
+                key_label(s, l)
             )));
         }
-        if !listed.insert((s, l)) {
-            return Err(Error::Source(format!("skeleton: {s}/{l} listed twice")));
+        if !listed.insert((s.clone(), l.clone())) {
+            return Err(Error::Source(format!(
+                "skeleton: {} listed twice",
+                key_label(s, l)
+            )));
         }
     }
 
     let mut new_sections = Vec::new();
     let mut new_fields = Vec::new();
     for (section, label, kind) in missing {
+        let ty = match kind {
+            Kind::Secret => "CONCEALED",
+            Kind::Config => "STRING",
+        };
+        if section == SIMPLE_PRODUCT {
+            // Simple profile (FR-20): a top-level field, outside any section.
+            let id = unique(label.to_lowercase(), |c| field_ids.contains(c));
+            field_ids.insert(id.clone());
+            new_fields.push(json!({"id": id, "type": ty, "label": label, "value": ""}));
+            continue;
+        }
         let section_id = match sections.iter().find(|(_, l)| l == section) {
             Some((id, _)) => id.clone(),
             None => {
@@ -583,10 +691,6 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             field_ids.contains(c)
         });
         field_ids.insert(id.clone());
-        let ty = match kind {
-            Kind::Secret => "CONCEALED",
-            Kind::Config => "STRING",
-        };
         new_fields.push(json!({
             "id": id,
             "section": {"id": section_id, "label": section},
@@ -1367,5 +1471,151 @@ mod tests {
         let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(e.to_string().contains("eval $(op signin)"), "{e}");
+    }
+
+    // ---------- simple profile (FR-20) ----------
+
+    /// An unsectioned field, as `op` returns a field added outside any section.
+    fn tf(id: &str, ty: &str, label: &str, value: &str) -> Value {
+        json!({"id": id, "type": ty, "label": label, "value": value,
+               "reference": format!("op://vstg/istg/{label}")})
+    }
+
+    fn simple_item() -> Vec<u8> {
+        item_json(
+            json!([{"id": "allumata", "label": "allumata"}]),
+            vec![
+                notes(),
+                json!({"id": "password", "type": "CONCEALED", "purpose": "PASSWORD",
+                       "label": "PASSWORD", "value": "pw-FIXTURE"}),
+                tf("f1", "CONCEALED", "JWT_KEY", "jwt-FIXTURE"),
+                tf("f2", "STRING", "LOG_LEVEL", "info"),
+                tf("f3", "OTP", "one-time password", "otpauth://FIXTURE"),
+                sf(
+                    "a1",
+                    "allumata",
+                    "allumata",
+                    "CONCEALED",
+                    "SECTIONED",
+                    "s-FIXTURE",
+                ),
+            ],
+        )
+    }
+
+    fn read_simple(bytes: Vec<u8>) -> Result<Item, Error> {
+        let r = FakeRunner::new([Output::success(bytes)]);
+        read_profile_on(&r, &test_env(), Profile::Simple, &linux)
+    }
+
+    fn labels(item: &Item) -> Vec<(&str, &str)> {
+        item.fields
+            .iter()
+            .map(|f| (f.section.as_str(), f.label.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn simple_read_is_one_whole_item_call_by_ids() {
+        let r = FakeRunner::new([Output::success(simple_item())]);
+        read_profile_on(&r, &test_env(), Profile::Simple, &linux).unwrap();
+        let calls = r.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].args, GET_ARGS);
+    }
+
+    #[test]
+    fn simple_read_returns_only_unsectioned_key_fields() {
+        let item = read_simple(simple_item()).unwrap();
+        assert_eq!(labels(&item), [("", "JWT_KEY"), ("", "LOG_LEVEL")]);
+    }
+
+    #[test]
+    fn simple_read_types_fields_by_field_type() {
+        let item = read_simple(simple_item()).unwrap();
+        assert_eq!(find(&item.fields, "", "JWT_KEY").kind, Kind::Secret);
+        assert_eq!(find(&item.fields, "", "LOG_LEVEL").kind, Kind::Config);
+    }
+
+    #[test]
+    fn simple_read_treats_a_section_without_label_as_unsectioned() {
+        let bytes = item_json(
+            json!([]),
+            vec![
+                json!({"id": "k", "section": {"id": "add more"}, "type": "CONCEALED",
+                        "label": "API_KEY", "value": "x-FIXTURE"}),
+            ],
+        );
+        let item = read_simple(bytes).unwrap();
+        assert_eq!(labels(&item), [("", "API_KEY")]);
+    }
+
+    #[test]
+    fn simple_read_unsupported_type_is_source_error_naming_label_only() {
+        let bytes = item_json(
+            json!([]),
+            vec![tf("k", "URL", "API_URL", "https://FIXTURE")],
+        );
+        let Err(Error::Source(m)) = read_simple(bytes) else {
+            panic!("expected Source error")
+        };
+        assert!(m.contains("API_URL") && !m.contains("FIXTURE"), "{m}");
+    }
+
+    #[test]
+    fn simple_read_duplicate_label_is_source_error() {
+        let bytes = item_json(
+            json!([]),
+            vec![
+                tf("a", "CONCEALED", "API_KEY", "a-FIXTURE"),
+                tf("b", "CONCEALED", "API_KEY", "b-FIXTURE"),
+            ],
+        );
+        let Err(Error::Source(m)) = read_simple(bytes) else {
+            panic!("expected Source error")
+        };
+        assert!(m.contains("duplicate") && m.contains("API_KEY"), "{m}");
+    }
+
+    #[test]
+    fn fleet_read_still_ignores_unsectioned_key_fields() {
+        let item = read(simple_item());
+        assert_eq!(labels(&item), [("allumata", "SECTIONED")]);
+    }
+
+    #[test]
+    fn simple_skeleton_adds_a_top_level_field_without_a_section() {
+        let item = read_simple(simple_item()).unwrap();
+        let r = FakeRunner::new([Output::success("{}")]);
+        let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Secret)];
+        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
+        let tpl = edit_stdin(&r);
+        let f = tpl["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["label"] == "DATABASE_URL")
+            .expect("new field");
+        assert_eq!(f.get("section"), None);
+        assert_eq!((&f["type"], &f["value"]), (&json!("CONCEALED"), &json!("")));
+    }
+
+    #[test]
+    fn simple_skeleton_creates_no_section() {
+        let item = read_simple(simple_item()).unwrap();
+        let r = FakeRunner::new([Output::success("{}")]);
+        let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Config)];
+        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
+        assert_eq!(edit_stdin(&r)["sections"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn simple_skeleton_refuses_an_existing_top_level_field() {
+        let item = read_simple(simple_item()).unwrap();
+        let r = FakeRunner::new([Output::success("{}")]);
+        let missing = [(String::new(), "JWT_KEY".to_string(), Kind::Secret)];
+        let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
+        assert!(matches!(e, Error::Source(m) if m.contains("JWT_KEY")));
+        assert!(r.calls.borrow().is_empty(), "nothing written");
     }
 }

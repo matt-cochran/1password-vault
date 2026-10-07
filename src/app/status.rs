@@ -45,7 +45,7 @@ pub fn run_with(
             Ok(())
         };
     }
-    print_rows(out, &plan.rows, target)?;
+    print_rows(out, fleet, &plan.rows, target)?;
     print_extras(out, &plan)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     if n > 0 {

@@ -68,9 +68,10 @@ enum Cmd {
     Run {
         /// Environment name from the configuration (for example dev or staging).
         env: String,
-        /// Product whose declared keys are passed to the command.
+        /// Product whose declared keys are passed to the command (fleet profile only;
+        /// a simple-profile file takes none and passes every declared key).
         #[arg(long)]
-        product: String,
+        product: Option<String>,
         /// Command and arguments, after `--`.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -228,7 +229,7 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
         command,
     } = &cli.cmd
     {
-        return run_cmd::run(&loaded?, env, product, command, &r);
+        return run_cmd::run_for(&loaded?, env, product.as_deref(), command, &r);
     }
     run_other(cli.cmd, loaded, &r, out).map(|()| 0)
 }

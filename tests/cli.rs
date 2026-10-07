@@ -326,6 +326,52 @@ fn deprecated_signoz_transform_prints_a_warning_on_stderr() {
     );
 }
 
+const SIMPLE: &str = "tests/fixtures/simple.toml";
+
+/// FR-20: doctor accepts a simple-profile file.
+#[test]
+fn doctor_reports_a_simple_profile_file_as_valid() {
+    let (_, out, err) = opv(&["--config", SIMPLE, "doctor"]);
+    assert!(
+        out.contains("ok    config: valid (2 environment(s)"),
+        "{out}{err}"
+    );
+}
+
+/// FR-20: `run` takes no --product under the simple profile.
+#[test]
+fn run_with_product_under_simple_exits_2() {
+    let (code, _, err) = opv(&[
+        "--config",
+        SIMPLE,
+        "run",
+        "prod",
+        "--product",
+        "api",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--product"), "{err}");
+}
+
+/// FR-20: a simple file with an unknown environment is still exit 2 before any call.
+#[test]
+fn simple_unknown_environment_exits_2_before_any_subprocess() {
+    for cmd in [
+        vec!["status", "qa"],
+        vec!["fly", "plan", "qa"],
+        vec!["fly", "sync", "qa"],
+        vec!["config", "export", "qa", "--json"],
+        vec!["item", "skeleton", "qa"],
+    ] {
+        let mut args = vec!["--config", SIMPLE];
+        args.extend(&cmd);
+        let (code, _, err) = opv(&args);
+        assert_eq!(code, 2, "{cmd:?}: {err}");
+    }
+}
+
 #[cfg(unix)]
 mod run_with_fake_op {
     use super::CFG;
@@ -414,6 +460,24 @@ mod run_with_fake_op {
         );
         assert_eq!(code, 0, "{err}");
         assert_eq!(out, "op://vstg/istg/allumata/INTEGRATION_ENC_KEY");
+    }
+
+    /// FR-20: under the simple profile the child sees unsectioned field references.
+    #[test]
+    fn simple_child_sees_unsectioned_op_references() {
+        let (dir, _) = fake_op_dir("simple-env");
+        let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .args(["--config", super::SIMPLE, "run", "prod", "--"])
+            .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
+            .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            "op://vprd/iprd/JWT_KEY"
+        );
     }
 
     #[test]

@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::domain::{Environment, Fleet, FlyTarget, Product};
+use crate::domain::{
+    Environment, Fleet, FlyTarget, KeySpec, Product, Profile, SIMPLE_PRODUCT, SIMPLE_TEMPLATE,
+    key_label,
+};
 use crate::error::Error;
 
 /// Read and validate the configuration at `path`.
@@ -33,8 +36,9 @@ pub fn deprecation_warnings(fleet: &Fleet) -> Vec<String> {
         for (key, spec) in &p.keys {
             if spec.rules.transform.as_deref() == Some(SIGNOZ_INGESTION_HEADER) {
                 warnings.push(format!(
-                    "{product}/{key}: transform = \"{SIGNOZ_INGESTION_HEADER}\" is deprecated; \
-                     use ensure_prefix = \"{SIGNOZ_PREFIX}\" with pattern = \"{SIGNOZ_BODY}\""
+                    "{}: transform = \"{SIGNOZ_INGESTION_HEADER}\" is deprecated; \
+                     use ensure_prefix = \"{SIGNOZ_PREFIX}\" with pattern = \"{SIGNOZ_BODY}\"",
+                    key_label(product, key)
                 ));
             }
         }
@@ -59,10 +63,66 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
 }
 
 /// Parse and validate configuration text.
+///
+/// `profile.kind = "simple"` selects the simple profile (FR-20). Anything else, including a
+/// file that does not parse, takes the fleet path exactly as in v0.1, which reports any
+/// other kind as a configuration error.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
+    if peek_kind(text).as_deref() == Some("simple") {
+        let raw: RawSimpleConfig = toml::from_str(text)
+            .map_err(|e| Error::Config(format!("invalid secrets.toml: {e}")))?;
+        return validate_simple(raw);
+    }
     let raw: RawConfig =
         toml::from_str(text).map_err(|e| Error::Config(format!("invalid secrets.toml: {e}")))?;
     validate(raw)
+}
+
+/// `profile.kind` when the text parses as TOML and holds it as a string.
+fn peek_kind(text: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Peek {
+        profile: Option<PeekProfile>,
+    }
+    #[derive(Deserialize)]
+    struct PeekProfile {
+        kind: Option<String>,
+    }
+    toml::from_str::<Peek>(text).ok()?.profile?.kind
+}
+
+/// A simple-profile file (FR-20). `products` and `fly.secret_name` are accepted by the
+/// parser only so that validation can reject them with a message naming the profile.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSimpleConfig {
+    #[allow(dead_code)]
+    profile: RawProfile,
+    environments: BTreeMap<String, RawSimpleEnvironment>,
+    #[serde(default)]
+    keys: BTreeMap<String, KeySpec>,
+    #[serde(default)]
+    products: Option<toml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSimpleEnvironment {
+    vault_id: String,
+    item_id: String,
+    #[serde(default)]
+    fly: Option<RawSimpleFly>,
+    /// Flat `mode name → mode value`: there is only one (implicit) product.
+    #[serde(default)]
+    modes: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSimpleFly {
+    app: String,
+    #[serde(default)]
+    secret_name: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -107,7 +167,7 @@ fn cfg(msg: String) -> Error {
 fn validate(raw: RawConfig) -> Result<Fleet, Error> {
     if raw.profile.kind != "fleet" {
         return Err(cfg(format!(
-            "profile.kind must be \"fleet\", got {:?}",
+            "profile.kind must be \"fleet\" or \"simple\", got {:?}",
             raw.profile.kind
         )));
     }
@@ -117,25 +177,12 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
 
     let mut environments = BTreeMap::new();
     for (name, e) in raw.environments {
-        let mut ids = vec![("vault_id", &e.vault_id), ("item_id", &e.item_id)];
-        if let Some(f) = &e.fly {
-            ids.push(("fly.app", &f.app));
-        }
-        for (field, value) in ids {
-            if value.trim().is_empty() {
-                return Err(cfg(format!("environment {name}: {field} is empty")));
-            }
-            if value.trim() != value.as_str() {
-                return Err(cfg(format!(
-                    "environment {name}: {field} has leading or trailing whitespace"
-                )));
-            }
-            if !is_id(value) {
-                return Err(cfg(format!(
-                    "environment {name}: {field} {value:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$"
-                )));
-            }
-        }
+        check_ids(
+            &name,
+            &e.vault_id,
+            &e.item_id,
+            e.fly.as_ref().map(|f| &f.app),
+        )?;
         let fly = match e.fly {
             None => None,
             Some(f) => {
@@ -170,84 +217,192 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
             )));
         }
         for (key, spec) in &p.keys {
-            if !is_env_name(key) {
-                return Err(cfg(format!(
-                    "{product}/{key}: key name must match ^[A-Z][A-Z0-9_]*$"
-                )));
-            }
-            for env in &spec.environments {
-                if !environments.contains_key(env) {
-                    return Err(cfg(format!(
-                        "{product}/{key}: undefined environment {env:?}"
-                    )));
-                }
-            }
-            for env in &spec.rules.refuse_in {
-                if !environments.contains_key(env) {
-                    return Err(cfg(format!(
-                        "{product}/{key}: rule refuse_in names undefined environment {env:?}"
-                    )));
-                }
-                if spec.environments.contains(env) {
-                    return Err(cfg(format!(
-                        "{product}/{key}: environment {env:?} is in both environments and refuse_in"
-                    )));
-                }
-            }
-            if spec.rules.prefix.as_deref() == Some("") {
-                return Err(cfg(format!(
-                    "{product}/{key}: rule prefix must be a non-empty string"
-                )));
-            }
-            if let Some(np) = &spec.rules.not_prefix
-                && !np.is_valid()
-            {
-                return Err(cfg(format!(
-                    "{product}/{key}: rule not_prefix must be a non-empty string or non-empty list of non-empty strings"
-                )));
-            }
-            if let Some(p) = &spec.rules.prefix_by_mode {
-                for (mode, v) in &p.values {
-                    if !v.is_valid() {
-                        return Err(cfg(format!(
-                            "{product}/{key}: rule prefix_by_mode value for {mode:?} must be a non-empty string or non-empty list of non-empty strings"
-                        )));
-                    }
-                }
-            }
-            if let Some(re) = &spec.rules.regex {
-                regex::Regex::new(re).map_err(|e| {
-                    cfg(format!("{product}/{key}: rule regex does not compile: {e}"))
-                })?;
-            }
-            if let Some(p) = &spec.rules.ensure_prefix
-                && p.is_empty()
-            {
-                return Err(cfg(format!(
-                    "{product}/{key}: rule ensure_prefix must be a non-empty string"
-                )));
-            }
-            if spec.rules.pattern.is_some() && spec.rules.ensure_prefix.is_none() {
-                return Err(cfg(format!(
-                    "{product}/{key}: rule pattern requires ensure_prefix"
-                )));
-            }
-            if let Some(re) = &spec.rules.pattern {
-                regex::Regex::new(re).map_err(|e| {
-                    cfg(format!(
-                        "{product}/{key}: rule pattern does not compile: {e}"
-                    ))
-                })?;
-            }
+            validate_key(&format!("{product}/{key}"), key, spec, &environments)?;
         }
     }
 
     let fleet = Fleet {
         environments,
         products: raw.products,
+        profile: Profile::Fleet,
     };
     check_fly_names(&fleet)?;
     Ok(fleet)
+}
+
+/// Validate a simple-profile file (FR-20) and desugar it into the shared model: one product
+/// named [`SIMPLE_PRODUCT`], the Fly template [`SIMPLE_TEMPLATE`], and modes under the
+/// implicit product. The managed set is therefore exactly the declared keys (FR-8, SR-6).
+fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
+    if raw.products.is_some() {
+        return Err(cfg(
+            "simple profile: [products] is not allowed; declare keys under [keys] (or use \
+             profile.kind = \"fleet\")"
+                .into(),
+        ));
+    }
+    if raw.environments.is_empty() {
+        return Err(cfg("no environments defined".into()));
+    }
+
+    let mut environments = BTreeMap::new();
+    for (name, e) in raw.environments {
+        check_ids(
+            &name,
+            &e.vault_id,
+            &e.item_id,
+            e.fly.as_ref().map(|f| &f.app),
+        )?;
+        let fly = match e.fly {
+            None => None,
+            Some(f) if f.secret_name.is_some() => {
+                return Err(cfg(format!(
+                    "environment {name}: fly.secret_name is not allowed under the simple \
+                     profile (the Fly name is the key name)"
+                )));
+            }
+            Some(f) => Some(FlyTarget {
+                app: f.app,
+                secret_name_template: SIMPLE_TEMPLATE.into(),
+            }),
+        };
+        let modes = if e.modes.is_empty() {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([(SIMPLE_PRODUCT.to_string(), e.modes)])
+        };
+        environments.insert(
+            name,
+            Environment {
+                vault_id: e.vault_id,
+                item_id: e.item_id,
+                fly,
+                modes,
+            },
+        );
+    }
+    // Every environment on one app would manage the same names (the declared keys), and
+    // each would prune what the other stages (FR-8).
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    for (name, env) in &environments {
+        if let Some(f) = &env.fly
+            && let Some(prev) = seen.insert(&f.app, name)
+        {
+            return Err(cfg(format!(
+                "environments {prev} and {name} both use Fly app {:?}; under the simple \
+                 profile each environment needs its own app",
+                f.app
+            )));
+        }
+    }
+
+    for (key, spec) in &raw.keys {
+        validate_key(key, key, spec, &environments)?;
+    }
+
+    let fleet = Fleet {
+        environments,
+        products: BTreeMap::from([(SIMPLE_PRODUCT.to_string(), Product { keys: raw.keys })]),
+        profile: Profile::Simple,
+    };
+    check_fly_names(&fleet)?;
+    Ok(fleet)
+}
+
+/// IDs and the app name are non-empty, unpadded and safe in argv.
+fn check_ids(name: &str, vault_id: &str, item_id: &str, app: Option<&String>) -> Result<(), Error> {
+    let mut ids = vec![("vault_id", vault_id), ("item_id", item_id)];
+    if let Some(a) = app {
+        ids.push(("fly.app", a.as_str()));
+    }
+    for (field, value) in ids {
+        if value.trim().is_empty() {
+            return Err(cfg(format!("environment {name}: {field} is empty")));
+        }
+        if value.trim() != value {
+            return Err(cfg(format!(
+                "environment {name}: {field} has leading or trailing whitespace"
+            )));
+        }
+        if !is_id(value) {
+            return Err(cfg(format!(
+                "environment {name}: {field} {value:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Per-key checks shared by both profiles (FR-14 to FR-16, FR-24). `owner` names the key in
+/// errors: `product/KEY` under the fleet profile, `KEY` under the simple profile.
+fn validate_key(
+    owner: &str,
+    key: &str,
+    spec: &KeySpec,
+    environments: &BTreeMap<String, Environment>,
+) -> Result<(), Error> {
+    if !is_env_name(key) {
+        return Err(cfg(format!(
+            "{owner}: key name must match ^[A-Z][A-Z0-9_]*$"
+        )));
+    }
+    for env in &spec.environments {
+        if !environments.contains_key(env) {
+            return Err(cfg(format!("{owner}: undefined environment {env:?}")));
+        }
+    }
+    for env in &spec.rules.refuse_in {
+        if !environments.contains_key(env) {
+            return Err(cfg(format!(
+                "{owner}: rule refuse_in names undefined environment {env:?}"
+            )));
+        }
+        if spec.environments.contains(env) {
+            return Err(cfg(format!(
+                "{owner}: environment {env:?} is in both environments and refuse_in"
+            )));
+        }
+    }
+    if spec.rules.prefix.as_deref() == Some("") {
+        return Err(cfg(format!(
+            "{owner}: rule prefix must be a non-empty string"
+        )));
+    }
+    if let Some(np) = &spec.rules.not_prefix
+        && !np.is_valid()
+    {
+        return Err(cfg(format!(
+            "{owner}: rule not_prefix must be a non-empty string or non-empty list of non-empty strings"
+        )));
+    }
+    if let Some(p) = &spec.rules.prefix_by_mode {
+        for (mode, v) in &p.values {
+            if !v.is_valid() {
+                return Err(cfg(format!(
+                    "{owner}: rule prefix_by_mode value for {mode:?} must be a non-empty string or non-empty list of non-empty strings"
+                )));
+            }
+        }
+    }
+    if let Some(re) = &spec.rules.regex {
+        regex::Regex::new(re)
+            .map_err(|e| cfg(format!("{owner}: rule regex does not compile: {e}")))?;
+    }
+    if let Some(p) = &spec.rules.ensure_prefix
+        && p.is_empty()
+    {
+        return Err(cfg(format!(
+            "{owner}: rule ensure_prefix must be a non-empty string"
+        )));
+    }
+    if spec.rules.pattern.is_some() && spec.rules.ensure_prefix.is_none() {
+        return Err(cfg(format!("{owner}: rule pattern requires ensure_prefix")));
+    }
+    if let Some(re) = &spec.rules.pattern {
+        regex::Regex::new(re)
+            .map_err(|e| cfg(format!("{owner}: rule pattern does not compile: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Two environments staging into the same Fly app with the same name template would manage
@@ -279,7 +434,7 @@ fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
         for (product, p) in &fleet.products {
             for key in p.keys.keys() {
                 let name = fly.fly_name(product, key);
-                let owner = format!("{product}/{key}");
+                let owner = key_label(product, key);
                 if !is_env_name(&name) {
                     return Err(cfg(format!(
                         "environment {env_name}: {owner} renders Fly name {name:?}, which must match ^[A-Z][A-Z0-9_]*$"
@@ -427,7 +582,8 @@ mod tests {
 
     #[test]
     fn rejects_non_fleet_profile() {
-        let m = config_err(&mutate(r#"kind = "fleet""#, r#"kind = "simple""#));
+        // "simple" is a valid profile since FR-20; any other kind is still rejected.
+        let m = config_err(&mutate(r#"kind = "fleet""#, r#"kind = "flat""#));
         assert!(m.contains("profile.kind"), "{m}");
     }
 
@@ -871,5 +1027,170 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         assert!(!is_product_name("") && !is_product_name("-a") && !is_product_name("App"));
         assert!(is_id("vprd") && is_id("a1.b_c-d") && is_id("9x"));
         assert!(!is_id("") && !is_id("-a") && !is_id(".a") && !is_id("a b") && !is_id("a/b"));
+    }
+
+    // ---------- simple profile (FR-20) ----------
+
+    const SIMPLE: &str = include_str!("../tests/fixtures/simple.toml");
+
+    fn simple() -> String {
+        SIMPLE.replace("\r\n", "\n")
+    }
+
+    /// The simple fixture with `from` replaced by `to`; panics if `from` does not occur.
+    fn simple_mutate(from: &str, to: &str) -> String {
+        let base = simple();
+        assert!(
+            base.contains(from),
+            "fixture mutation did not match: {from:?}"
+        );
+        base.replace(from, to)
+    }
+
+    #[test]
+    fn simple_profile_parses_as_simple() {
+        assert!(parse(&simple()).unwrap().is_simple());
+    }
+
+    #[test]
+    fn fleet_profile_parses_as_fleet() {
+        assert_eq!(parse(&ok()).unwrap().profile, Profile::Fleet);
+    }
+
+    #[test]
+    fn simple_keys_desugar_into_the_implicit_product() {
+        let f = parse(&simple()).unwrap();
+        assert_eq!(f.products.len(), 1);
+        assert_eq!(f.products[SIMPLE_PRODUCT].keys.len(), 5);
+    }
+
+    #[test]
+    fn simple_fly_name_is_the_key_name() {
+        let f = parse(&simple()).unwrap();
+        assert_eq!(f.fly_name("prod", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+    }
+
+    #[test]
+    fn simple_key_carries_kind_rules_immutable_and_guidance() {
+        let f = parse(&simple()).unwrap();
+        let jwt = &f.products[SIMPLE_PRODUCT].keys["JWT_KEY"];
+        assert!(jwt.immutable);
+        assert_eq!(jwt.rules.base64_bytes, Some(32));
+        assert_eq!(jwt.guidance, "32 random bytes, base64");
+        assert_eq!(
+            f.products[SIMPLE_PRODUCT].keys["LOG_LEVEL"].kind,
+            Kind::Config
+        );
+    }
+
+    #[test]
+    fn simple_modes_land_under_the_implicit_product() {
+        let f = parse(&simple()).unwrap();
+        assert_eq!(
+            f.environments["staging"].modes[SIMPLE_PRODUCT]["payments"],
+            "test"
+        );
+    }
+
+    #[test]
+    fn simple_rejects_products_table() {
+        let m = config_err(&format!(
+            "{}\n[products.api.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+            simple()
+        ));
+        assert!(m.contains("[products]") && m.contains("simple"), "{m}");
+    }
+
+    #[test]
+    fn simple_rejects_fly_secret_name() {
+        let m = config_err(&simple_mutate(
+            "fly.app = \"myapp-production\"",
+            "fly.app = \"myapp-production\"\nfly.secret_name = \"{KEY}\"",
+        ));
+        assert!(m.contains("prod") && m.contains("fly.secret_name"), "{m}");
+    }
+
+    #[test]
+    fn simple_rejects_key_name_not_matching_env_name_format() {
+        let m = config_err(&simple_mutate("[keys.JWT_KEY]", "[keys.jwt-key]"));
+        assert!(
+            m.contains("jwt-key") && m.contains("^[A-Z][A-Z0-9_]*$"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn simple_rejects_the_same_key_declared_twice() {
+        let m = config_err(&format!(
+            "{}\n[keys.JWT_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+            simple()
+        ));
+        assert!(m.contains("JWT_KEY"), "{m}");
+    }
+
+    #[test]
+    fn simple_rejects_two_environments_on_one_app() {
+        let m = config_err(&simple_mutate("myapp-staging", "myapp-production"));
+        assert!(
+            m.contains("prod") && m.contains("staging") && m.contains("myapp-production"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn simple_rejects_key_for_undefined_environment_naming_key() {
+        let m = config_err(&simple_mutate(
+            "environments = [\"staging\"]",
+            "environments = [\"qa\"]",
+        ));
+        assert!(m.contains("STAGING_DEBUG_TOKEN") && m.contains("qa"), "{m}");
+    }
+
+    #[test]
+    fn simple_rule_errors_name_the_key_without_a_product() {
+        let m = config_err(&simple_mutate(
+            "rules = { base64_bytes = 32 }",
+            "rules = { regex = \"([a-z\" }",
+        ));
+        assert!(m.starts_with("JWT_KEY: rule regex"), "{m}");
+    }
+
+    #[test]
+    fn simple_rejects_bad_ids() {
+        let m = config_err(&simple_mutate(
+            "vault_id = \"vprd\"",
+            "vault_id = \"-vprd\"",
+        ));
+        assert!(m.contains("prod") && m.contains("must match"), "{m}");
+    }
+
+    #[test]
+    fn simple_fly_section_is_optional() {
+        let f = parse(&format!(
+            "{}\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n",
+            simple()
+        ))
+        .unwrap();
+        assert!(matches!(
+            f.fly_target("dev"),
+            Err(Error::Config(m)) if m.contains("add fly.app") && !m.contains("secret_name")
+        ));
+    }
+
+    #[test]
+    fn simple_rejects_unknown_fields() {
+        config_err(&simple_mutate("immutable = true", "immutible = true"));
+    }
+
+    #[test]
+    fn simple_deprecation_warning_names_the_key_alone() {
+        let f = parse(&simple_mutate(
+            "rules = { base64_bytes = 32 }",
+            "rules = { transform = \"signoz_ingestion_header\" }",
+        ))
+        .unwrap();
+        let w = deprecation_warnings(&f);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("JWT_KEY: transform"), "{}", w[0]);
     }
 }

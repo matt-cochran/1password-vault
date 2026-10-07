@@ -8,7 +8,7 @@ use std::io::Write;
 
 use super::{kind_label, write_err};
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, Kind};
+use crate::domain::{Fleet, Kind, key_label};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -19,7 +19,7 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_item(r, env)?;
+    let item = onepassword::read_item_as(r, env, fleet.profile)?;
     let missing: Vec<(String, String, Kind)> = fleet
         .products
         .iter()
@@ -42,7 +42,13 @@ pub fn run(
     }
     onepassword::write_skeleton(r, env, &item, &missing)?;
     for (product, key, kind) in &missing {
-        writeln!(out, "added {product}/{key} ({}, empty)", kind_label(*kind)).map_err(write_err)?;
+        writeln!(
+            out,
+            "added {} ({}, empty)",
+            key_label(product, key),
+            kind_label(*kind)
+        )
+        .map_err(write_err)?;
     }
     writeln!(out, "{} field(s) added", missing.len()).map_err(write_err)
 }

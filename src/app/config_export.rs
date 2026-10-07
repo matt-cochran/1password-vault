@@ -5,11 +5,11 @@
 //! or when a secret key is stored as text: the kind check is S5's `WrongKind`. One `op`
 //! call; Fly is not contacted.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::{is_blocking, read_and_plan, row_names, write_err};
-use crate::domain::{Fleet, KeyState, Kind, Row};
+use crate::domain::{Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -30,8 +30,15 @@ pub fn run(
         )));
     }
     // Config values are not secret (FR-18); `plan.config` never holds a secret-kind value.
-    let json = serde_json::to_string_pretty(&plan.config)
-        .map_err(|_| Error::Config("cannot serialize config export".into()))?;
+    // Under the simple profile (FR-20) the export is a flat `KEY -> value` object, with no
+    // product level.
+    let empty = BTreeMap::new();
+    let json = if fleet.is_simple() {
+        serde_json::to_string_pretty(plan.config.get(SIMPLE_PRODUCT).unwrap_or(&empty))
+    } else {
+        serde_json::to_string_pretty(&plan.config)
+    }
+    .map_err(|_| Error::Config("cannot serialize config export".into()))?;
     writeln!(out, "{json}").map_err(write_err)
 }
 

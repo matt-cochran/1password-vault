@@ -452,6 +452,13 @@ Acceptance:
 
 Constraints kept: FR-8, FR-13, SR-1, SR-3, SR-6. No new 1Password or Fly call path.
 
+Decisions (implementation):
+
+- Simple keys are unsectioned item fields: a field with no section, or a section without a label. Under the simple profile, sectioned fields, built-in fields (with a `purpose`) and fields whose label cannot be a key name are ignored; an unsectioned key-named field of another type is an error (FR-14). `item skeleton` adds missing keys as top-level fields. `run` references them as `op://<vault_id>/<item_id>/<KEY>`.
+- Two environments may not share a Fly app under the simple profile: both would manage the same names (FR-8).
+- Environment `modes` are flat (`modes.payments = "test"`).
+- Output never shows a product: no PRODUCT column in `status` and `fly plan` tables, `"product": null` in their `--json` rows, extras and held entries (FR-21), the bare `KEY` in messages, `--rotate KEY` and `--prune-immutable KEY`, and a flat `{"KEY": "value"}` from `config export`.
+
 ## FR-21 — Machine-Readable Status and Plan
 
 The CLI shall accept `--json` on `status` and `fly plan`:
