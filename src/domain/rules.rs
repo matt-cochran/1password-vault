@@ -61,16 +61,41 @@ fn email_re() -> &'static Regex {
     re(&R, r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 }
 
-const SIGNOZ_BODY: &str = r"[A-Za-z0-9._~+/-]+={0,2}";
-const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
-
-fn signoz_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    re(&R, &format!("^{SIGNOZ_BODY}$"))
-}
+/// The generic `pattern` that reproduces the deprecated SigNoz body check (FR-24).
+pub const SIGNOZ_BODY: &str = r"[A-Za-z0-9._~+/-]+={0,2}";
+/// The prefix of the deprecated SigNoz ingestion header (FR-24).
+pub const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
+/// Deprecated transform name kept as an alias for `ensure_prefix` + `pattern` (FR-24).
+pub const SIGNOZ_INGESTION_HEADER: &str = "signoz_ingestion_header";
 
 /// Transform name: one PEM private key block, staged as a single line.
 pub const PEM_PRIVATE_KEY: &str = "pem_private_key";
+
+/// `ensure_prefix`/`pattern` normalisation (FR-24). Accepts the value with or without
+/// `prefix`, stages exactly one `prefix`, and (when given) requires the body after the
+/// prefix to fully match `pattern`. Returns the staged value or the failing rule name.
+/// Built at its final size: no reallocation leaves an unzeroized copy behind (SR-8).
+fn ensure_prefixed(
+    v: &str,
+    prefix: &str,
+    pattern: Option<&str>,
+) -> Result<SecretValue, &'static str> {
+    let body = v.strip_prefix(prefix).unwrap_or(v);
+    if body.is_empty() {
+        return Err("ensure_prefix");
+    }
+    if let Some(pat) = pattern {
+        // Config validation guarantees the pattern compiles; fail closed otherwise.
+        let full = Regex::new(&format!("^(?:{pat})$")).map_err(|_| "pattern")?;
+        if !full.is_match(body) {
+            return Err("pattern");
+        }
+    }
+    let mut out = String::with_capacity(prefix.len() + body.len());
+    out.push_str(prefix);
+    out.push_str(body);
+    Ok(SecretValue::new(out))
+}
 
 /// Normalise one PEM private key block to `-----BEGIN L-----<base64>-----END L-----`.
 ///
@@ -224,22 +249,22 @@ pub fn check(
     if r.https_url && !(v.starts_with("https://") && !v.contains(char::is_whitespace)) {
         return Err(fail("https_url"));
     }
+    if let Some(prefix) = &r.ensure_prefix {
+        return ensure_prefixed(v, prefix, r.pattern.as_deref())
+            .map(Some)
+            .map_err(fail);
+    }
     if let Some(t) = &r.transform {
         if t == PEM_PRIVATE_KEY {
             return Ok(Some(SecretValue::new(v.to_string())));
         }
-        if t != "signoz_ingestion_header" {
+        if t != SIGNOZ_INGESTION_HEADER {
             return Err(fail("transform"));
         }
-        let body = v.strip_prefix(SIGNOZ_PREFIX).unwrap_or(v);
-        if !signoz_re().is_match(body) {
-            return Err(fail("transform"));
-        }
-        // Built at its final size: no reallocation leaves an unzeroized copy behind (SR-8).
-        let mut out = String::with_capacity(SIGNOZ_PREFIX.len() + body.len());
-        out.push_str(SIGNOZ_PREFIX);
-        out.push_str(body);
-        return Ok(Some(SecretValue::new(out)));
+        // The deprecated alias: identical behaviour, failure rule name stays `transform`.
+        return ensure_prefixed(v, SIGNOZ_PREFIX, Some(SIGNOZ_BODY))
+            .map(Some)
+            .map_err(|_| fail("transform"));
     }
     Ok(Some(SecretValue::new(v.to_string())))
 }
@@ -589,6 +614,74 @@ mod tests {
             ..Rules::default()
         };
         assert_eq!(rule_of(alt, "aax"), "regex");
+    }
+    fn prefixed_rules(prefix: &str, pattern: Option<&str>) -> Rules {
+        Rules {
+            ensure_prefix: Some(prefix.into()),
+            pattern: pattern.map(Into::into),
+            ..Rules::default()
+        }
+    }
+    #[test]
+    fn ensure_prefix_prepends_a_missing_prefix() {
+        assert_eq!(
+            with(prefixed_rules("sk-", None), "abc").unwrap().unwrap(),
+            "sk-abc"
+        );
+    }
+    #[test]
+    fn ensure_prefix_keeps_an_existing_prefix_once() {
+        assert_eq!(
+            with(prefixed_rules("sk-", None), "sk-abc")
+                .unwrap()
+                .unwrap(),
+            "sk-abc"
+        );
+    }
+    #[test]
+    fn ensure_prefix_empty_body_fails_as_ensure_prefix() {
+        assert_eq!(rule_of(prefixed_rules("sk-", None), "sk-"), "ensure_prefix");
+    }
+    #[test]
+    fn pattern_rejects_a_body_that_does_not_match() {
+        assert_eq!(
+            rule_of(prefixed_rules("sk-", Some("[a-z]+")), "sk-ABC"),
+            "pattern"
+        );
+    }
+    #[test]
+    fn pattern_accepts_a_body_after_the_prefix_is_prepended() {
+        assert_eq!(
+            with(prefixed_rules("sk-", Some("[a-z]+")), "abc")
+                .unwrap()
+                .unwrap(),
+            "sk-abc"
+        );
+    }
+    #[test]
+    fn signoz_alias_and_its_ensure_prefix_pattern_equivalent_agree() {
+        fn outcomes(rules: fn() -> Rules) -> Vec<Result<Option<String>, ()>> {
+            [
+                "abc.DEF_1~+/-x==",
+                "signoz-ingestion-key=abc",
+                "signoz-ingestion-key=",
+                "a b",
+                "",
+            ]
+            .into_iter()
+            .map(|v| with(rules(), v).map_err(|_| ()))
+            .collect()
+        }
+        let alias = || Rules {
+            transform: Some("signoz_ingestion_header".into()),
+            ..Rules::default()
+        };
+        let generic = || Rules {
+            ensure_prefix: Some("signoz-ingestion-key=".into()),
+            pattern: Some("[A-Za-z0-9._~+/-]+={0,2}".into()),
+            ..Rules::default()
+        };
+        assert_eq!(outcomes(alias), outcomes(generic));
     }
     #[test]
     fn signoz_transform_normalises_and_returns_transformed_value() {

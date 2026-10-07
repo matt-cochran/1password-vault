@@ -193,6 +193,25 @@ fn run_requires_product_and_command() {
     }
 }
 
+#[test]
+fn deprecated_signoz_transform_prints_a_warning_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("secrets.toml");
+    let text = std::fs::read_to_string(CFG).unwrap();
+    std::fs::write(
+        &cfg,
+        format!(
+            "{text}\n[products.p.keys.TRACE]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ transform = \"signoz_ingestion_header\" }}\n"
+        ),
+    )
+    .unwrap();
+    let (_, _, err) = opv(&["--config", cfg.to_str().unwrap(), "status", "prod"]);
+    assert!(
+        err.contains("warning: p/TRACE: transform = \"signoz_ingestion_header\" is deprecated"),
+        "{err}"
+    );
+}
+
 #[cfg(unix)]
 mod run_with_fake_op {
     use super::CFG;
