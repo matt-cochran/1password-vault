@@ -283,9 +283,13 @@ impl Harness {
     }
 
     fn run(&self, args: &[&str]) -> Run {
+        self.run_config(CONFIG, args)
+    }
+
+    fn run_config(&self, config: &str, args: &[&str]) -> Run {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .arg("--config")
-            .arg(CONFIG)
+            .arg(config)
             .args(args)
             .env_clear()
             .env("PATH", &self.bin)
@@ -1347,4 +1351,101 @@ fn fly_plan_json_error_prints_no_document_on_stdout() {
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["fly", "plan", "prod", "--json"]);
     assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+}
+
+// ------------------------------------------------------------ simple profile (FR-20)
+
+const SIMPLE_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/simple.toml");
+const S_DB: &str = "postgres://S7MARKERVALUEdb0006";
+
+/// A simple-profile item: unsectioned fields, plus a notes value and a sectioned field
+/// that the simple profile ignores. Every secret value is a marker.
+fn simple_item() -> String {
+    item(vec![
+        field(None, "notesPlain", "STRING", Some(NOTES)),
+        field(None, "DATABASE_URL", "CONCEALED", Some(S_DB)),
+        field(None, "JWT_KEY", "CONCEALED", Some(ENC)),
+        field(None, "LOG_LEVEL", "STRING", Some("info")),
+        field(
+            Some("allumata"),
+            "OPENAI_API_KEY",
+            "CONCEALED",
+            Some(OPENAI),
+        ),
+    ])
+}
+
+/// A simple harness whose Fly app holds a declared key not desired in prod
+/// (`STAGING_DEBUG_TOKEN`) and a name the file never declares (`UNMANAGED_OTHER`).
+fn simple_harness() -> Harness {
+    let h = Harness::new(&simple_item());
+    let a = json!([
+        {"name": "STAGING_DEBUG_TOKEN", "digest": "d-s", "status": "Deployed"},
+        {"name": "UNMANAGED_OTHER", "digest": "d-other", "status": "Deployed"},
+    ]);
+    let b = json!([
+        {"name": "STAGING_DEBUG_TOKEN", "digest": "d-s", "status": "Deployed"},
+        {"name": "UNMANAGED_OTHER", "digest": "d-other", "status": "Deployed"},
+        {"name": "DATABASE_URL", "digest": "d-db", "status": "Staged"},
+        {"name": "JWT_KEY", "digest": "d-jwt", "status": "Staged"},
+    ]);
+    fs::write(h.fix.join("list_a.json"), a.to_string()).unwrap();
+    fs::write(h.fix.join("list_b.json"), b.to_string()).unwrap();
+    h
+}
+
+/// SR-1, SR-3: every command against a simple-profile file keeps values out of output,
+/// argv and child environments.
+#[test]
+fn simple_profile_commands_never_leak_values() {
+    let h = simple_harness();
+    for cmd in COMMANDS {
+        h.reset();
+        let r = h.run_config(SIMPLE_CONFIG, cmd);
+        assert_clean_output(cmd, &r);
+        assert_argv_and_env_clean(&h);
+    }
+}
+
+/// FR-13, §8 item 15: a simple `fly sync --prune --deploy` reads the item exactly once.
+#[test]
+fn simple_profile_sync_reads_one_item() {
+    let h = simple_harness();
+    let r = h.run_config(
+        SIMPLE_CONFIG,
+        &["fly", "sync", "prod", "--prune", "--deploy"],
+    );
+    assert_eq!(r.code, 0, "{}", r.all());
+    let gets = h
+        .calls()
+        .iter()
+        .filter(|c| c.prog == "op" && c.argv.first().map(String::as_str) == Some("item"))
+        .count();
+    assert_eq!(gets, 1);
+}
+
+/// FR-8, SR-6, §8 item 15: `--prune` under the simple profile unsets the declared key not
+/// desired here and never the undeclared name.
+#[test]
+fn simple_profile_prune_touches_only_declared_keys() {
+    let h = simple_harness();
+    let r = h.run_config(SIMPLE_CONFIG, &["fly", "sync", "prod", "--prune"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    let unset: Vec<Vec<String>> = h
+        .calls()
+        .into_iter()
+        .filter(|c| c.prog == "flyctl" && c.argv.get(1).map(String::as_str) == Some("unset"))
+        .map(|c| c.argv)
+        .collect();
+    assert_eq!(
+        unset,
+        vec![vec![
+            "secrets",
+            "unset",
+            "STAGING_DEBUG_TOKEN",
+            "--app",
+            "myapp-production",
+            "--stage"
+        ]]
+    );
 }
