@@ -1,0 +1,73 @@
+name: gitflow-guard
+
+# Enforce the branch topology feature → dev → staging → main.
+#
+# GitHub branch protection / rulesets can require a PR and passing checks, but
+# they cannot restrict which *source* branch a PR is allowed to come from. This
+# job supplies that missing constraint, so it is wired in as a required status
+# check on the `main`, `staging`, and `dev` rulesets.
+#
+# Rules:
+#   • main    ← staging ONLY. `main` is tagged only from a release candidate
+#               that has already landed on `staging`.
+#   • staging ← dev ONLY.
+#   • dev     ← any feature branch (not main, not staging, not dev).
+#   • PRs that target no mainline branch (e.g. feature-onto-feature stacks)
+#     never trigger this workflow, so stacking is unaffected.
+#
+# `staging` sits between dev and main as this project's release-candidate
+# branch: it is where a release is validated before `main` is tagged.
+
+on:
+  pull_request:
+    branches: [main, staging, dev]
+    types: [opened, synchronize, reopened, edited]
+
+# The base_ref of an in-flight PR is fixed for a given run; nothing here mutates
+# state, so no special permissions are needed.
+permissions:
+  contents: read
+
+jobs:
+  gitflow-guard:
+    name: gitflow-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce feature → dev → main topology
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          echo "Pull request: '$HEAD' → '$BASE'"
+          case "$BASE" in
+            main)
+              if [ "$HEAD" != "staging" ]; then
+                echo "::error::Protected topology — 'main' only accepts pull requests from 'staging'. Branch '$HEAD' must reach main via feature → dev → staging → main."
+                exit 1
+              fi
+              echo "OK: staging → main is the sanctioned release path."
+              ;;
+            staging)
+              if [ "$HEAD" != "dev" ]; then
+                echo "::error::Protected topology — 'staging' only accepts pull requests from 'dev'. Branch '$HEAD' must merge into 'dev' first."
+                exit 1
+              fi
+              echo "OK: dev → staging."
+              ;;
+            dev)
+              case "$HEAD" in
+                main|staging)
+                  echo "::error::'dev' cannot receive a pull request from '$HEAD' — that reverses the flow. Rebase or reset dev instead."
+                  exit 1
+                  ;;
+                dev)
+                  echo "::error::Head and base are both 'dev'."
+                  exit 1
+                  ;;
+              esac
+              echo "OK: feature branch '$HEAD' → dev."
+              ;;
+            *)
+              echo "PR does not target a protected mainline branch ('$BASE'); topology guard is not applicable."
+              ;;
+          esac
