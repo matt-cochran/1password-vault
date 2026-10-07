@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err};
+use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err, write_json};
 use crate::domain::{Fleet, KeyState, Kind, Row, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -20,10 +20,31 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_with(fleet, env_name, r, out, false)
+}
+
+/// `status <env> [--json]`. With `json`, stdout carries one FR-21 document and no table or
+/// summary line; exit codes are unchanged (`Findings(n)` for blocking rows).
+pub fn run_with(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
     fleet.fly_target(env_name)?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
+    if json {
+        write_json(out, fleet, env_name, &plan)?;
+        let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+        return if n > 0 {
+            Err(Error::Findings(n))
+        } else {
+            Ok(())
+        };
+    }
     print_rows(out, &plan.rows, target)?;
     print_extras(out, &plan)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();

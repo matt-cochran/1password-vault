@@ -21,7 +21,7 @@ use std::io::{self, Write};
 
 use crate::adapters::{fly, onepassword};
 use crate::domain::plan;
-use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan};
+use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -77,6 +77,194 @@ pub(crate) fn read_and_plan(
 /// `BrokenPipe` so the command still returns its own result (e.g. `status | head`).
 pub(crate) fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()))
+}
+
+/// FR-21: one names-only JSON document for `status --json` and `fly plan --json`.
+///
+/// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
+/// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
+/// before this point leave stdout empty, so a caller only gets a document on success.
+pub(crate) fn write_json(
+    out: &mut dyn Write,
+    fleet: &Fleet,
+    env_name: &str,
+    plan: &SyncPlan,
+) -> Result<(), Error> {
+    let env = fleet.environment(env_name)?;
+    let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
+    let pruned: HashSet<&str> = plan.prune.iter().map(String::as_str).collect();
+    let held_keys: HashSet<(&str, &str)> = plan
+        .held_immutable
+        .iter()
+        .map(|(p, k)| (p.as_str(), k.as_str()))
+        .collect();
+    let held_from_prune: HashSet<&str> = plan
+        .held_from_prune
+        .iter()
+        .map(|(_, _, n)| n.as_str())
+        .collect();
+
+    let rows: Vec<JsonRow> = plan
+        .rows
+        .iter()
+        .map(|r| {
+            let fly_name = env.fly_name(&r.product, &r.key);
+            let action = row_action(
+                r,
+                fly_name.as_deref(),
+                &staged,
+                &pruned,
+                &held_keys,
+                &held_from_prune,
+            );
+            JsonRow {
+                product: r.product.clone(),
+                key: r.key.clone(),
+                kind: kind_label(r.kind),
+                state: json_state(r.state),
+                rule: json_rule(r.state),
+                fly_name,
+                target: json_target(r.kind, r.target),
+                action,
+            }
+        })
+        .collect();
+
+    let doc = JsonDoc {
+        schema_version: 1,
+        environment: env_name.to_string(),
+        rows,
+        extras: plan
+            .extras
+            .iter()
+            .map(|(product, key)| JsonName {
+                product: product.clone(),
+                key: key.clone(),
+            })
+            .collect(),
+        stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
+        held: plan
+            .held_immutable
+            .iter()
+            .map(|(product, key)| JsonHeld {
+                product: product.clone(),
+                key: key.clone(),
+                fly_name: env.fly_name(product, key),
+            })
+            .collect(),
+        prune: plan.prune.clone(),
+        totals: JsonTotals {
+            rows: plan.rows.len(),
+            findings: plan.blocking(),
+            extras: plan.extras.len(),
+            to_stage: plan.stage.len(),
+            held: plan.held_immutable.len(),
+            to_prune: plan.prune.len(),
+        },
+    };
+    let text = serde_json::to_string(&doc)
+        .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})")))?;
+    writeln!(out, "{text}").map_err(write_err)
+}
+
+#[derive(serde::Serialize)]
+struct JsonDoc {
+    schema_version: u32,
+    environment: String,
+    rows: Vec<JsonRow>,
+    extras: Vec<JsonName>,
+    stage: Vec<String>,
+    held: Vec<JsonHeld>,
+    prune: Vec<String>,
+    totals: JsonTotals,
+}
+
+#[derive(serde::Serialize)]
+struct JsonRow {
+    product: String,
+    key: String,
+    kind: &'static str,
+    state: &'static str,
+    rule: Option<&'static str>,
+    fly_name: Option<String>,
+    target: Option<&'static str>,
+    action: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonName {
+    product: String,
+    key: String,
+}
+
+#[derive(serde::Serialize)]
+struct JsonHeld {
+    product: String,
+    key: String,
+    fly_name: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonTotals {
+    rows: usize,
+    findings: usize,
+    extras: usize,
+    to_stage: usize,
+    held: usize,
+    to_prune: usize,
+}
+
+/// Machine-readable row state, spelled with underscores (FR-21).
+fn json_state(s: KeyState) -> &'static str {
+    match s {
+        KeyState::Missing => "missing",
+        KeyState::WrongKind => "wrong_kind",
+        KeyState::RuleFailed(_) => "failing_rule",
+        KeyState::Ready => "saved",
+        KeyState::Skipped => "skipped",
+    }
+}
+
+/// The name of the failing rule, next to the state (FR-22).
+fn json_rule(s: KeyState) -> Option<&'static str> {
+    match s {
+        KeyState::RuleFailed(rule) => Some(rule),
+        _ => None,
+    }
+}
+
+/// Target presence: secrets are present/absent/would-change; config is not a Fly secret.
+fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
+    match (kind, target) {
+        (Kind::Config, _) => None,
+        (Kind::Secret, TargetState::Absent) => Some("absent"),
+        (Kind::Secret, TargetState::WouldChange) => Some("would_change"),
+        (Kind::Secret, _) => Some("present"),
+    }
+}
+
+/// What a `fly plan` would do with this row: stage, prune or hold it.
+fn row_action(
+    r: &Row,
+    fly_name: Option<&str>,
+    staged: &HashSet<&str>,
+    pruned: &HashSet<&str>,
+    held_keys: &HashSet<(&str, &str)>,
+    held_from_prune: &HashSet<&str>,
+) -> Option<&'static str> {
+    if held_keys.contains(&(r.product.as_str(), r.key.as_str())) {
+        return Some("held");
+    }
+    let name = fly_name?;
+    if staged.contains(name) {
+        Some("would_stage")
+    } else if pruned.contains(name) {
+        Some("would_prune")
+    } else if held_from_prune.contains(name) {
+        Some("held")
+    } else {
+        None
+    }
 }
 
 pub(crate) fn kind_label(k: Kind) -> &'static str {

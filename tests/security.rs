@@ -1160,3 +1160,191 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     }
     assert_clean_output(&["fly", "sync"], &r);
 }
+
+// ----------------------------------------------------------------- FR-21 (--json)
+
+/// An item missing one desired key (a blocking finding) for exit-code parity tests.
+fn item_without_enc() -> String {
+    item(
+        good_fields(OPENAI)
+            .into_iter()
+            .filter(|f| f["label"] != "INTEGRATION_ENC_KEY")
+            .collect(),
+    )
+}
+
+/// FR-21: `status --json` prints one parseable JSON document and nothing else on stdout.
+#[test]
+fn status_json_stdout_is_one_json_document() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod", "--json"]);
+    assert!(
+        serde_json::from_str::<Value>(&r.stdout).is_ok(),
+        "not one JSON document: {}",
+        r.all()
+    );
+}
+
+/// FR-21: `fly plan --json` prints one parseable JSON document and nothing else on stdout.
+#[test]
+fn fly_plan_json_stdout_is_one_json_document() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["fly", "plan", "prod", "--json"]);
+    assert!(
+        serde_json::from_str::<Value>(&r.stdout).is_ok(),
+        "not one JSON document: {}",
+        r.all()
+    );
+}
+
+/// FR-21: the document declares `schema_version: 1`.
+#[test]
+fn status_json_schema_version_is_one() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+}
+
+/// FR-21: the document names the environment and carries names-only totals.
+#[test]
+fn status_json_totals_are_names_and_counts() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(
+        (&doc["environment"], &doc["totals"]),
+        (
+            &json!("prod"),
+            &json!({
+                "rows": 4,
+                "findings": 0,
+                "extras": 1,
+                "to_stage": 2,
+                "held": 0,
+                "to_prune": 1,
+            })
+        ),
+        "{}",
+        r.all()
+    );
+}
+
+/// FR-21: each row object carries product, key, kind, state, failing rule, Fly name and
+/// target presence.
+#[test]
+fn status_json_row_carries_the_contract_fields() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    let row = doc["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .find(|x| x["key"] == "OPENAI_API_KEY")
+        .expect("OPENAI_API_KEY row");
+    assert_eq!(
+        row,
+        &json!({
+            "product": "allumata",
+            "key": "OPENAI_API_KEY",
+            "kind": "secret",
+            "state": "saved",
+            "rule": null,
+            "fly_name": N_OPENAI,
+            "target": "absent",
+            "action": "would_stage",
+        }),
+        "{}",
+        r.all()
+    );
+}
+
+/// FR-21: a failing row names its rule in `rule` and carries no value.
+#[test]
+fn status_json_row_names_failing_rule() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0012")));
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    let row = doc["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .find(|x| x["key"] == "OPENAI_API_KEY")
+        .expect("OPENAI_API_KEY row");
+    assert_eq!(
+        (row["state"].clone(), row["rule"].clone()),
+        (json!("failing_rule"), json!("prefix")),
+        "{}",
+        r.all()
+    );
+}
+
+/// FR-21 / SR-1: `status --json` contains no secret value marker (nor child stderr).
+#[test]
+fn status_json_omits_every_marker_value() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod", "--json"]);
+    serde_json::from_str::<Value>(&r.stdout).expect("one JSON document");
+    assert_no_marker("status --json stdout", &r.stdout);
+}
+
+/// FR-21 / SR-1: `fly plan --json` contains no secret value marker (nor child stderr).
+#[test]
+fn fly_plan_json_omits_every_marker_value() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["fly", "plan", "prod", "--json"]);
+    serde_json::from_str::<Value>(&r.stdout).expect("one JSON document");
+    assert_no_marker("fly plan --json stdout", &r.stdout);
+}
+
+/// FR-21: the document carries no guidance text (guidance belongs in `explain`).
+#[test]
+fn status_json_omits_guidance_text() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status", "prod", "--json"]);
+    assert!(
+        !r.stdout.contains("OpenAI platform / API keys"),
+        "guidance leaked: {}",
+        r.stdout
+    );
+}
+
+/// FR-10 / FR-21: `status` exits 8 for blocking findings with and without `--json`.
+#[test]
+fn status_json_exit_code_matches_text_on_findings() {
+    let h = Harness::new(&item_without_enc());
+    let text = h.run(&["status", "prod"]).code;
+    h.reset();
+    let json = h.run(&["status", "prod", "--json"]).code;
+    assert_eq!((text, json), (8, 8));
+}
+
+/// FR-10 / FR-21: `fly plan` exits 8 for blocking findings with and without `--json`.
+#[test]
+fn fly_plan_json_exit_code_matches_text_on_findings() {
+    let h = Harness::new(&item_without_enc());
+    let text = h.run(&["fly", "plan", "prod"]).code;
+    h.reset();
+    let json = h.run(&["fly", "plan", "prod", "--json"]).code;
+    assert_eq!((text, json), (8, 8));
+}
+
+/// FR-10 / FR-21: an error before the document is produced still exits 4 on stderr with
+/// no partial document on stdout.
+#[test]
+fn status_json_error_prints_no_document_on_stdout() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_OP_ITEM_EXIT", "1");
+    let r = h.run(&["status", "prod", "--json"]);
+    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+}
+
+/// FR-10 / FR-21: `fly plan --json` likewise reports errors on stderr only.
+#[test]
+fn fly_plan_json_error_prints_no_document_on_stdout() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_OP_ITEM_EXIT", "1");
+    let r = h.run(&["fly", "plan", "prod", "--json"]);
+    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+}

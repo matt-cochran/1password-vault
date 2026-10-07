@@ -15,7 +15,7 @@ use std::io::Write;
 
 use super::{
     is_blocking, managed_names, print_extras, print_rows, read_and_plan, row_names,
-    unmanaged_on_fly, write_err,
+    unmanaged_on_fly, write_err, write_json,
 };
 use crate::adapters::fly;
 use crate::domain::rules;
@@ -163,10 +163,31 @@ pub fn plan(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    plan_with(fleet, env_name, r, out, false)
+}
+
+/// `fly plan <env> [--json]`. With `json`, stdout carries one FR-21 document and no table
+/// or counts; exit codes are unchanged (`Findings(n)` for blocking rows).
+pub fn plan_with(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
     fleet.fly_target(env_name)?;
     let none = BTreeSet::new();
     let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
+    if json {
+        write_json(out, fleet, env_name, &plan)?;
+        let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+        return if n > 0 {
+            Err(Error::Findings(n))
+        } else {
+            Ok(())
+        };
+    }
     let held: BTreeSet<(&str, &str)> = plan
         .held_immutable
         .iter()

@@ -58,6 +58,9 @@ enum Cmd {
     Status {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
+        /// Print one machine-readable JSON document instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Run a command with the product's secrets in its environment, via `op run`.
     ///
@@ -93,6 +96,9 @@ enum FlyCmd {
     Plan {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
+        /// Print one machine-readable JSON document instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Stage the managed secrets on the environment's Fly app.
     ///
@@ -219,8 +225,8 @@ fn run_other(
     match cmd {
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Doctor => doctor::run(loaded, r, out),
-        Cmd::Status { env } => status::run(&loaded?, &env, r, out),
-        Cmd::Fly(FlyCmd::Plan { env }) => sync::plan(&loaded?, &env, r, out),
+        Cmd::Status { env, json } => status::run_with(&loaded?, &env, r, out, json),
+        Cmd::Fly(FlyCmd::Plan { env, json }) => sync::plan_with(&loaded?, &env, r, out, json),
         Cmd::Fly(FlyCmd::Sync {
             env,
             deploy,
