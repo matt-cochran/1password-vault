@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/matt-cochran/1password-vault"
+    "url": "git+https://github.com/matt-cochran/1password-vault.git"
   },
   "homepage": "https://github.com/matt-cochran/1password-vault",
   "os": [

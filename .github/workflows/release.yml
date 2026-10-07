@@ -110,6 +110,7 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
           merge-multiple: true
@@ -172,6 +173,7 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
           name: release-assets
@@ -192,20 +194,31 @@ jobs:
           else
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
+      # Note: pre-release tags (e.g. v0.1.1-rc1) are rejected by build.mjs by design.
       - name: Build npm packages
         if: steps.token.outputs.present == 'true'
         run: node scripts/npm/build.mjs --version "${GITHUB_REF_NAME#v}" --assets dist --out npm-dist
-      - name: Publish platform packages
+      - name: Publish npm packages
         if: steps.token.outputs.present == 'true'
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for pkg in npm-dist/@matthew-cochran/opv-*; do
+          # Platform packages first, then the main package.
+          for pkg in npm-dist/@matthew-cochran/opv-* npm-dist/opv; do
+            name="$(node -p "require('./$pkg/package.json').name")"
+            version="$(node -p "require('./$pkg/package.json').version")"
+            set +e
+            published="$(npm view "${name}@${version}" version 2>&1)"
+            rc=$?
+            set -e
+            if [[ $rc -eq 0 && -n "$published" ]]; then
+              echo "::notice::${name}@${version} already published; skipping"
+              continue
+            fi
+            if [[ $rc -ne 0 ]] && ! grep -q 'E404' <<<"$published"; then
+              echo "$published" >&2
+              exit "$rc"
+            fi
             npm publish "$pkg" --provenance --access public
           done
-      - name: Publish opv
-        if: steps.token.outputs.present == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish npm-dist/opv --provenance --access public
