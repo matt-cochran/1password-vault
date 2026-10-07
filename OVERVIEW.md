@@ -536,10 +536,10 @@ It is a dev-time helper that writes a starter `secrets.toml`. It resolves the va
 Acceptance:
 
 - Titles are resolved to IDs at dev time only. The FR-13 exception is limited to the `init` command: title lookup is unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export`, and from the CI read path, which stay by vault ID and item ID (FR-13).
-- `init` reads the item but writes only names and kinds. Values are discarded in memory, held in redacting types until dropped (SR-2, SR-8), and no value reaches disk or output (SR-1, SR-4).
+- `init` reads the item but writes only names and kinds. Values are never deserialized into opv types (the field struct has no `value` member; the raw `op` output stays in a zeroizing buffer, SR-2, SR-8), and no value reaches disk or output (SR-1, SR-4).
 - If the target file exists, `init` refuses (exit 2) unless `--force` is given. It never merges into an existing file.
 - `init` writes nothing to 1Password (FR-11, SR-5).
-- `--fly-app`, the IDs and the field names are validated as for a hand-written file (§10.2); a field name that is not a valid key name is reported by name and the file is not written.
+- `--fly-app`, the IDs and the field names are validated as for a hand-written file (§10.2), and the generated text is checked with the same loader before it is written. A field whose label is not a valid key name, a section whose label is not a valid product name, and a field of another type are skipped with a note that names them; nothing is ever renamed (ruling, v0.2: skipped with a note rather than failing the whole file, so one stray field does not block init).
 
 Constraints kept: FR-11, FR-13, SR-1, SR-2, SR-3, SR-4, SR-5, SR-7.
 
