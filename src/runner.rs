@@ -5,28 +5,30 @@
 //! invoked directly, never through a shell. `env` is for configuration such as tokens.
 
 use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
-/// Result of a finished process. `stdout` may contain secret values, so `Debug` prints only
-/// its length.
+use zeroize::{Zeroize, Zeroizing};
+
+/// Result of a finished process. `stdout` may contain secret values, so it is zeroized on
+/// drop (SR-8) and `Debug` prints only its length.
 pub struct Output {
     /// Exit status; `-1` when the process was terminated by a signal.
     pub status: i32,
-    pub stdout: Vec<u8>,
+    pub stdout: Zeroizing<Vec<u8>>,
 }
 
 impl Output {
     pub fn success(stdout: impl Into<Vec<u8>>) -> Self {
         Self {
             status: 0,
-            stdout: stdout.into(),
+            stdout: Zeroizing::new(stdout.into()),
         }
     }
 
     pub fn failure(status: i32) -> Self {
         Self {
             status,
-            stdout: Vec::new(),
+            stdout: Zeroizing::new(Vec::new()),
         }
     }
 }
@@ -49,6 +51,46 @@ pub trait CommandRunner {
         stdin: Option<&[u8]>,
         env: &[(&str, &str)],
     ) -> io::Result<Output>;
+
+    /// Run `program` with inherited stdin/stdout/stderr and the given extra `env`, wait, and
+    /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
+    /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
+    fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32>;
+}
+
+fn exit_code(status: ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    status.code().unwrap_or(-1)
+}
+
+/// Read to EOF into a buffer that is zeroized on drop. Growth copies into a fresh
+/// `Zeroizing` allocation, so no unzeroized copy of the data is left behind by `realloc`.
+fn read_to_end_zeroizing(mut r: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut out = Zeroizing::new(Vec::with_capacity(8 * 1024));
+    let mut chunk = [0u8; 8 * 1024];
+    let res = loop {
+        match r.read(&mut chunk) {
+            Ok(0) => break Ok(()),
+            Ok(n) => {
+                if out.len() + n > out.capacity() {
+                    let mut bigger = Zeroizing::new(Vec::with_capacity((out.len() + n) * 2));
+                    bigger.extend_from_slice(&out);
+                    out = bigger;
+                }
+                out.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => break Err(e),
+        }
+    };
+    chunk.zeroize();
+    res.map(|()| out)
 }
 
 /// Runs real processes with `std::process::Command`. Child stderr is discarded because it
@@ -91,16 +133,26 @@ impl CommandRunner for ProcessRunner {
                 drop(child_stdin); // close the pipe so the child sees EOF
                 Ok(())
             });
-            let mut out = Vec::new();
-            let read_res = child_stdout.read_to_end(&mut out).map(|_| out);
+            let read_res = read_to_end_zeroizing(&mut child_stdout);
             (writer.join().expect("stdin writer panicked"), read_res)
         });
         let status = child.wait()?;
         write_res?;
         Ok(Output {
-            status: status.code().unwrap_or(-1),
+            status: exit_code(status),
             stdout: read_res?,
         })
+    }
+
+    fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
+        let status = Command::new(program)
+            .args(args)
+            .envs(env.iter().copied())
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        Ok(exit_code(status))
     }
 }
 
@@ -114,12 +166,15 @@ pub mod fake {
 
     use super::{CommandRunner, Output};
 
-    /// One recorded invocation. `Debug` shows argv but redacts stdin and env values.
+    /// One recorded invocation, including env names and values so tests can assert what
+    /// reached env versus argv. `Debug` shows argv but redacts stdin and env values.
     pub struct Call {
         pub program: String,
         pub args: Vec<String>,
         pub stdin: Option<Vec<u8>>,
         pub env: Vec<(String, String)>,
+        /// True for `run_inherited` calls.
+        pub inherited: bool,
     }
 
     impl std::fmt::Debug for Call {
@@ -130,6 +185,7 @@ pub mod fake {
                 .field("args", &self.args)
                 .field("stdin_len", &self.stdin.as_ref().map(Vec::len))
                 .field("env_names", &env)
+                .field("inherited", &self.inherited)
                 .finish()
         }
     }
@@ -156,6 +212,30 @@ pub mod fake {
                 .push_back(Err(io::Error::from(kind)));
         }
 
+        fn record(
+            &self,
+            program: &str,
+            args: &[&str],
+            stdin: Option<&[u8]>,
+            env: &[(&str, &str)],
+            inherited: bool,
+        ) -> io::Result<Output> {
+            self.calls.borrow_mut().push(Call {
+                program: program.to_string(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                stdin: stdin.map(<[u8]>::to_vec),
+                env: env
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                inherited,
+            });
+            match self.responses.borrow_mut().pop_front() {
+                Some(r) => r,
+                None => panic!("FakeRunner: no response queued for call to {program}"),
+            }
+        }
+
         /// True if `needle` occurs in any recorded program name or argument (SR-3 checks).
         pub fn argv_contains(&self, needle: &str) -> bool {
             self.calls
@@ -173,19 +253,18 @@ pub mod fake {
             stdin: Option<&[u8]>,
             env: &[(&str, &str)],
         ) -> io::Result<Output> {
-            self.calls.borrow_mut().push(Call {
-                program: program.to_string(),
-                args: args.iter().map(|a| a.to_string()).collect(),
-                stdin: stdin.map(<[u8]>::to_vec),
-                env: env
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-            });
-            match self.responses.borrow_mut().pop_front() {
-                Some(r) => r,
-                None => panic!("FakeRunner: no response queued for call to {program}"),
-            }
+            self.record(program, args, stdin, env, false)
+        }
+
+        /// Returns the queued response's `status` as the exit code.
+        fn run_inherited(
+            &self,
+            program: &str,
+            args: &[&str],
+            env: &[(&str, &str)],
+        ) -> io::Result<i32> {
+            self.record(program, args, None, env, true)
+                .map(|o| o.status)
         }
     }
 }
@@ -249,7 +328,7 @@ mod tests {
     fn process_runner_pipes_stdin_to_stdout() {
         let o = ProcessRunner.run("cat", &[], Some(b"hello"), &[]).unwrap();
         assert_eq!(o.status, 0);
-        assert_eq!(o.stdout, b"hello");
+        assert_eq!(o.stdout.as_slice(), b"hello");
     }
 
     #[cfg(unix)]
@@ -279,6 +358,67 @@ mod tests {
             .unwrap();
         assert_eq!(o.status, 3);
         assert!(o.stdout.is_empty());
+    }
+
+    #[test]
+    fn read_to_end_zeroizing_reads_across_growth() {
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let out = read_to_end_zeroizing(&data[..]).unwrap();
+        assert_eq!(out.as_slice(), data.as_slice());
+        assert!(read_to_end_zeroizing(&b""[..]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fake_run_inherited_records_env_values_and_returns_status() {
+        let r = FakeRunner::new([Output::failure(9)]);
+        let code = r
+            .run_inherited(
+                "op",
+                &["run", "--", "server"],
+                &[("OPENAI_API_KEY", "op://vprd/iprd/allumata/OPENAI_API_KEY")],
+            )
+            .unwrap();
+        assert_eq!(code, 9);
+        let calls = r.calls.borrow();
+        assert!(calls[0].inherited && calls[0].stdin.is_none());
+        assert_eq!(calls[0].args, vec!["run", "--", "server"]);
+        assert_eq!(
+            calls[0].env,
+            vec![(
+                "OPENAI_API_KEY".to_string(),
+                "op://vprd/iprd/allumata/OPENAI_API_KEY".to_string()
+            )]
+        );
+        assert!(!format!("{:?}", calls[0]).contains("op://"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_run_inherited_returns_exit_code_and_applies_env() {
+        let code = ProcessRunner
+            .run_inherited("sh", &["-c", "exit 5"], &[])
+            .unwrap();
+        assert_eq!(code, 5);
+        let code = ProcessRunner
+            .run_inherited(
+                "sh",
+                &["-c", "test \"$SECRETCTL_TEST_VAR\" = v2"],
+                &[("SECRETCTL_TEST_VAR", "v2")],
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        let code = ProcessRunner
+            .run_inherited("sh", &["-c", "kill -TERM $$"], &[])
+            .unwrap();
+        assert_eq!(code, 128 + 15);
+    }
+
+    #[test]
+    fn process_runner_run_inherited_missing_binary_is_io_error() {
+        let e = ProcessRunner
+            .run_inherited("secretctl-definitely-not-installed", &[], &[])
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

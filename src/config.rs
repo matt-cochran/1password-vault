@@ -83,6 +83,11 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
             if value.trim().is_empty() {
                 return Err(cfg(format!("environment {name}: {field} is empty")));
             }
+            if value.trim() != value.as_str() {
+                return Err(cfg(format!(
+                    "environment {name}: {field} has leading or trailing whitespace"
+                )));
+            }
         }
         let t = &e.fly.secret_name;
         if !t.contains("{PRODUCT}") || !t.contains("{KEY}") {
@@ -129,10 +134,40 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
         }
     }
 
-    Ok(Fleet {
+    let fleet = Fleet {
         environments,
         products: raw.products,
-    })
+    };
+    check_fly_names(&fleet)?;
+    Ok(fleet)
+}
+
+/// Every rendered Fly name must be a valid env-var name and unique within its environment;
+/// otherwise two keys would silently share one Fly secret (FR-2, FR-8).
+fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for (product, p) in &fleet.products {
+            for (key, spec) in &p.keys {
+                if !spec.environments.iter().any(|e| e == env_name) {
+                    continue;
+                }
+                let name = env.fly_name(product, key);
+                let owner = format!("{product}/{key}");
+                if !is_env_name(&name) {
+                    return Err(cfg(format!(
+                        "environment {env_name}: {owner} renders Fly name {name:?}, which must match ^[A-Z][A-Z0-9_]*$"
+                    )));
+                }
+                if let Some(prev) = seen.insert(name.clone(), owner.clone()) {
+                    return Err(cfg(format!(
+                        "environment {env_name}: {prev} and {owner} both render Fly name {name}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_env_name(s: &str) -> bool {
@@ -282,6 +317,84 @@ mod tests {
         assert!(load(&p).is_ok());
         let missing = dir.path().join("nope.toml");
         assert!(matches!(load(&missing), Err(Error::Config(m)) if m.contains("nope.toml")));
+    }
+
+    /// Appends an extra key declaration to the fixture.
+    fn with_key(product: &str, key: &str, envs: &str) -> String {
+        format!("{OK}\n[products.{product}.keys.{key}]\nkind = \"secret\"\nenvironments = {envs}\n")
+    }
+
+    #[test]
+    fn rejects_fly_name_collision_from_product_normalization() {
+        let text = with_key("my-app", "K", r#"["prod"]"#);
+        let text = format!(
+            "{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+        );
+        let m = config_err(&text);
+        assert!(
+            m.contains("my-app/K") && m.contains("my_app/K") && m.contains("FLEET__MY_APP__K"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn rejects_fly_name_collision_across_double_underscore() {
+        let text = with_key("a__b", "C", r#"["staging"]"#);
+        let text = format!(
+            "{text}\n[products.a.keys.B__C]\nkind = \"secret\"\nenvironments = [\"staging\"]\n"
+        );
+        let m = config_err(&text);
+        assert!(
+            m.contains("a__b/C") && m.contains("a/B__C") && m.contains("staging"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn same_fly_name_in_different_environments_is_fine() {
+        let text = with_key("my-app", "K", r#"["prod"]"#);
+        let text = format!(
+            "{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"staging\"]\n"
+        );
+        assert!(parse(&text).is_ok());
+    }
+
+    #[test]
+    fn rejects_template_rendering_invalid_fly_names() {
+        let m = config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "fleet__{PRODUCT}__{KEY}"));
+        assert!(m.contains("fleet__ALLUMATA__"), "{m}");
+        config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "FLEET-{PRODUCT}-{KEY}"));
+        config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "{PRODUCT}{KEY} X"));
+    }
+
+    #[test]
+    fn rejects_whitespace_around_ids_and_app() {
+        let m = config_err(&OK.replace(r#"vault_id = "vprd""#, r#"vault_id = " vprd""#));
+        assert!(
+            m.contains("prod") && m.contains("vault_id") && m.contains("whitespace"),
+            "{m}"
+        );
+        config_err(&OK.replace(r#"item_id = "iprd""#, r#"item_id = "iprd\n""#));
+        config_err(&OK.replace(
+            r#"fly.app = "mcproductlabs-portfolio-production""#,
+            r#"fly.app = "mcproductlabs-portfolio-production ""#,
+        ));
+    }
+
+    #[test]
+    fn try_fly_name_reports_undefined_environment() {
+        let f = parse(OK).unwrap();
+        assert_eq!(
+            f.try_fly_name("staging", "allumata", "SIGNUP_POLICY")
+                .unwrap(),
+            "FLEET__ALLUMATA__SIGNUP_POLICY"
+        );
+        assert!(matches!(
+            f.try_fly_name("qa", "allumata", "SIGNUP_POLICY"),
+            Err(Error::Config(m)) if m.contains("qa")
+        ));
+        assert_eq!(f.environment("prod").unwrap().vault_id, "vprd");
+        assert!(matches!(f.environment("qa"), Err(Error::Config(_))));
     }
 
     #[test]

@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use crate::error::Error;
+
 /// Field kind. In 1Password a concealed field is a secret and a text field is config (FR-14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -94,6 +96,22 @@ pub struct Fleet {
 }
 
 impl Fleet {
+    /// Look up an environment by a (possibly user-supplied) name.
+    pub fn environment(&self, env: &str) -> Result<&Environment, Error> {
+        self.environments.get(env).ok_or_else(|| {
+            let known: Vec<&str> = self.environments.keys().map(String::as_str).collect();
+            Error::Config(format!(
+                "undefined environment {env:?} (defined: {})",
+                known.join(", ")
+            ))
+        })
+    }
+
+    /// Fly secret name for `product`/`key` in `env`; `Error::Config` if `env` is undefined.
+    pub fn try_fly_name(&self, env: &str, product: &str, key: &str) -> Result<String, Error> {
+        Ok(self.environment(env)?.fly_name(product, key))
+    }
+
     /// Fly secret name for `product`/`key` in `env`.
     ///
     /// # Panics
