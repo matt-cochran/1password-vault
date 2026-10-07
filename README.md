@@ -45,7 +45,7 @@ npm i -g opv
 npx opv --version
 ```
 
-The npm package ships from v0.1.1. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
+The npm package is planned for v0.2.0 (not yet published); until then, use a GitHub release binary. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
 
 Homebrew and crates.io packages arrive in v0.1.1.
 
