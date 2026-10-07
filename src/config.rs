@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::domain::{Environment, Fleet, Product};
+use crate::domain::{Environment, Fleet, FlyTarget, Product};
 use crate::error::Error;
 
 /// Read and validate the configuration at `path`.
@@ -46,7 +46,10 @@ struct RawProfile {
 struct RawEnvironment {
     vault_id: String,
     item_id: String,
-    fly: RawFly,
+    /// Optional: environments used only for `run`, `config export` and `item skeleton`
+    /// need no Fly app.
+    #[serde(default)]
+    fly: Option<RawFly>,
     #[serde(default)]
     modes: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -75,11 +78,11 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
 
     let mut environments = BTreeMap::new();
     for (name, e) in raw.environments {
-        for (field, value) in [
-            ("vault_id", &e.vault_id),
-            ("item_id", &e.item_id),
-            ("fly.app", &e.fly.app),
-        ] {
+        let mut ids = vec![("vault_id", &e.vault_id), ("item_id", &e.item_id)];
+        if let Some(f) = &e.fly {
+            ids.push(("fly.app", &f.app));
+        }
+        for (field, value) in ids {
             if value.trim().is_empty() {
                 return Err(cfg(format!("environment {name}: {field} is empty")));
             }
@@ -88,24 +91,38 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
                     "environment {name}: {field} has leading or trailing whitespace"
                 )));
             }
+            if !is_id(value) {
+                return Err(cfg(format!(
+                    "environment {name}: {field} {value:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                )));
+            }
         }
-        let t = &e.fly.secret_name;
-        if !t.contains("{PRODUCT}") || !t.contains("{KEY}") {
-            return Err(cfg(format!(
-                "environment {name}: fly.secret_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
-            )));
-        }
+        let fly = match e.fly {
+            None => None,
+            Some(f) => {
+                let t = &f.secret_name;
+                if !t.contains("{PRODUCT}") || !t.contains("{KEY}") {
+                    return Err(cfg(format!(
+                        "environment {name}: fly.secret_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
+                    )));
+                }
+                Some(FlyTarget {
+                    app: f.app,
+                    secret_name_template: f.secret_name,
+                })
+            }
+        };
         environments.insert(
             name,
             Environment {
                 vault_id: e.vault_id,
                 item_id: e.item_id,
-                fly_app: e.fly.app,
-                secret_name_template: e.fly.secret_name,
+                fly,
                 modes: e.modes,
             },
         );
     }
+    check_shared_fly_targets(&environments)?;
 
     for (product, p) in &raw.products {
         if !is_product_name(product) {
@@ -125,6 +142,23 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
                         "{product}/{key}: undefined environment {env:?}"
                     )));
                 }
+            }
+            for env in &spec.rules.refuse_in {
+                if !environments.contains_key(env) {
+                    return Err(cfg(format!(
+                        "{product}/{key}: rule refuse_in names undefined environment {env:?}"
+                    )));
+                }
+                if spec.environments.contains(env) {
+                    return Err(cfg(format!(
+                        "{product}/{key}: environment {env:?} is in both environments and refuse_in"
+                    )));
+                }
+            }
+            if spec.rules.prefix.as_deref() == Some("") {
+                return Err(cfg(format!(
+                    "{product}/{key}: rule prefix must be a non-empty string"
+                )));
             }
             if let Some(np) = &spec.rules.not_prefix
                 && !np.is_valid()
@@ -158,17 +192,35 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
     Ok(fleet)
 }
 
-/// Every rendered Fly name must be a valid env-var name and unique within its environment;
-/// otherwise two keys would silently share one Fly secret (FR-2, FR-8).
+/// Two environments staging into the same Fly app with the same name template would manage
+/// the same names, and each would prune what the other stages (FR-8).
+fn check_shared_fly_targets(environments: &BTreeMap<String, Environment>) -> Result<(), Error> {
+    let mut seen: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    for (name, env) in environments {
+        if let Some(f) = &env.fly
+            && let Some(prev) = seen.insert((&f.app, &f.secret_name_template), name)
+        {
+            return Err(cfg(format!(
+                "environments {prev} and {name} both use Fly app {:?} with fly.secret_name {:?}",
+                f.app, f.secret_name_template
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Every Fly name the template renders, for EVERY declared key (not only those desired in
+/// the environment), must be a valid env-var name and unique within the environment. The
+/// managed set is every rendered name, so a key desired here and another key declared only
+/// elsewhere that render the same name would otherwise be both staged and pruned in one
+/// run (FR-2, FR-8).
 fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
     for (env_name, env) in &fleet.environments {
+        let Some(fly) = &env.fly else { continue };
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
         for (product, p) in &fleet.products {
-            for (key, spec) in &p.keys {
-                if !spec.environments.iter().any(|e| e == env_name) {
-                    continue;
-                }
-                let name = env.fly_name(product, key);
+            for key in p.keys.keys() {
+                let name = fly.fly_name(product, key);
                 let owner = format!("{product}/{key}");
                 if !is_env_name(&name) {
                     return Err(cfg(format!(
@@ -184,6 +236,14 @@ fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// IDs and app names go into argv, so they must not start with `-` (read as a flag) and
+/// hold only `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
+fn is_id(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && c.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
 }
 
 fn is_env_name(s: &str) -> bool {
@@ -264,7 +324,10 @@ mod tests {
         let prod = &f.environments["prod"];
         assert_eq!(prod.vault_id, "vprd");
         assert_eq!(prod.item_id, "iprd");
-        assert_eq!(prod.fly_app, "mcproductlabs-portfolio-production");
+        assert_eq!(
+            prod.fly.as_ref().unwrap().app,
+            "mcproductlabs-portfolio-production"
+        );
         assert_eq!(prod.modes["allumata"]["payments"], "off");
         assert_eq!(
             f.environments["staging"].modes["allumata"]["payments"],
@@ -427,18 +490,140 @@ mod tests {
         );
         let m = config_err(&text);
         assert!(
-            m.contains("a__b/C") && m.contains("a/B__C") && m.contains("staging"),
+            // Every declared key is checked in every environment with a Fly target (C1), so
+            // the first environment checked (prod, in name order) reports it.
+            m.contains("a__b/C") && m.contains("a/B__C") && m.contains("environment prod"),
             "{m}"
         );
     }
 
+    /// C1: the managed set is every rendered name, so a collision is rejected even when the
+    /// two keys are desired in different environments: in prod `my-app/K` is staged while
+    /// `my_app/K` (staging only) is not desired there, and `--prune` would delete the very
+    /// name the same run staged.
     #[test]
-    fn same_fly_name_in_different_environments_is_fine() {
+    fn rejects_fly_name_collision_even_across_environments() {
         let text = with_key("my-app", "K", r#"["prod"]"#);
         let text = format!(
             "{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"staging\"]\n"
         );
-        assert!(parse(&text).is_ok());
+        let m = config_err(&text);
+        assert!(
+            m.contains("my-app/K") && m.contains("my_app/K") && m.contains("FLEET__MY_APP__K"),
+            "{m}"
+        );
+    }
+
+    /// The collision check covers keys declared for no environment of their own, too.
+    #[test]
+    fn rejects_fly_name_collision_with_key_declared_for_no_environment() {
+        let text = with_key("my-app", "K", r#"["prod"]"#);
+        let text =
+            format!("{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = []\n");
+        config_err(&text);
+    }
+
+    #[test]
+    fn rejects_ids_and_app_that_could_be_read_as_flags_or_hold_odd_characters() {
+        for (from, to) in [
+            (r#"vault_id = "vprd""#, r#"vault_id = "-vprd""#),
+            (r#"item_id = "iprd""#, r#"item_id = "--format""#),
+            (
+                r#"fly.app = "mcproductlabs-portfolio-production""#,
+                r#"fly.app = "-a""#,
+            ),
+            (r#"vault_id = "vprd""#, r#"vault_id = "v/prd""#),
+            (r#"item_id = "iprd""#, r#"item_id = "i prd""#),
+            (
+                r#"fly.app = "mcproductlabs-portfolio-production""#,
+                r#"fly.app = "app;rm""#,
+            ),
+        ] {
+            let m = config_err(&mutate(from, to));
+            assert!(m.contains("prod") && m.contains("must match"), "{to}: {m}");
+        }
+        // Dots, underscores and dashes after the first character are fine.
+        assert!(parse(&mutate(r#"vault_id = "vprd""#, r#"vault_id = "v.p_r-d9""#)).is_ok());
+    }
+
+    #[test]
+    fn rejects_two_environments_sharing_app_and_template() {
+        let m = config_err(&mutate(
+            r#"fly.app = "mcproductlabs-portfolio-staging""#,
+            r#"fly.app = "mcproductlabs-portfolio-production""#,
+        ));
+        assert!(
+            m.contains("prod") && m.contains("staging") && m.contains("production"),
+            "{m}"
+        );
+        // Same app with a different template manages disjoint names: allowed.
+        let t = mutate(
+            r#"fly.app = "mcproductlabs-portfolio-staging"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}""#,
+            r#"fly.app = "mcproductlabs-portfolio-production"
+fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
+        );
+        assert!(parse(&t).is_ok());
+    }
+
+    /// I5: `fly` is optional per environment.
+    #[test]
+    fn fly_section_is_optional() {
+        let t = format!(
+            "{}\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n",
+            ok()
+        );
+        let f = parse(&t).unwrap();
+        assert!(f.environments["dev"].fly.is_none());
+        assert!(matches!(
+            f.fly_target("dev"),
+            Err(Error::Config(m)) if m.contains("dev") && m.contains("no fly section")
+        ));
+        assert!(f.fly_target("prod").is_ok());
+        // `secret_name` stays required when `fly` is present.
+        let t = format!(
+            "{}\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\nfly.app = \"dev-app\"\n",
+            ok()
+        );
+        let m = config_err(&t);
+        assert!(m.contains("secret_name"), "{m}");
+    }
+
+    /// I1: refuse_in names must be defined, must not overlap `environments`.
+    #[test]
+    fn validates_refuse_in() {
+        let m = config_err(&mutate(
+            r#"rules = { prefix = "sk-", not_prefix = "sk-or-" }"#,
+            r#"rules = { prefix = "sk-", not_prefix = "sk-or-", refuse_in = ["qa"] }"#,
+        ));
+        assert!(
+            m.contains("allumata/OPENAI_API_KEY") && m.contains("qa"),
+            "{m}"
+        );
+        let m = config_err(&mutate(
+            r#"rules = { prefix = "sk-", not_prefix = "sk-or-" }"#,
+            r#"rules = { prefix = "sk-", not_prefix = "sk-or-", refuse_in = ["prod"] }"#,
+        ));
+        assert!(
+            m.contains("allumata/OPENAI_API_KEY") && m.contains("both"),
+            "{m}"
+        );
+        assert!(
+            parse(&mutate(
+                r#"rules = { prefix = "sk-", not_prefix = "sk-or-" }"#,
+                r#"rules = { prefix = "sk-", not_prefix = "sk-or-", refuse_in = ["staging"] }"#,
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_empty_prefix() {
+        let m = config_err(&mutate(r#"prefix = "sk-""#, r#"prefix = """#));
+        assert!(
+            m.contains("allumata/OPENAI_API_KEY") && m.contains("prefix"),
+            "{m}"
+        );
     }
 
     #[test]
@@ -491,5 +676,7 @@ mod tests {
         assert!(!is_env_name("Abc"));
         assert!(is_product_name("allumata") && is_product_name("my-app_2"));
         assert!(!is_product_name("") && !is_product_name("-a") && !is_product_name("App"));
+        assert!(is_id("vprd") && is_id("a1.b_c-d") && is_id("9x"));
+        assert!(!is_id("") && !is_id("-a") && !is_id(".a") && !is_id("a b") && !is_id("a/b"));
     }
 }

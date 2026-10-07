@@ -3,7 +3,9 @@
 pub mod model;
 pub mod secret;
 
-pub use model::{Environment, Fleet, KeySpec, Kind, OneOrMany, PrefixByMode, Product, Rules};
+pub use model::{
+    Environment, Fleet, FlyTarget, KeySpec, Kind, OneOrMany, PrefixByMode, Product, Rules,
+};
 pub use secret::SecretValue;
 pub mod plan;
 pub mod rules;

@@ -13,7 +13,7 @@ use crate::runner::CommandRunner;
 const OP: &str = "op";
 
 /// Run `command` under `op run` with the product's references for `env_name` in its
-/// environment. Returns the child's exit code; the caller maps it to `Error::Child`.
+/// environment. Returns the child's exit code, which `main` uses as the process exit code.
 ///
 /// Keys passed: every key of `product` declared for `env_name` whose rules apply
 /// ([`rules::applies`]). Keys skipped by a mode (e.g. `payments = "off"`) are left out,
@@ -156,6 +156,24 @@ mod tests {
             }
             assert!(r.calls.borrow().is_empty());
         }
+    }
+
+    /// I5: `run` needs no Fly app (no more placeholder apps for local-only environments).
+    #[test]
+    fn works_without_fly_section() {
+        let fl = fleet_with(
+            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+             [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+        );
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&fl, "dev", "allumata", &cmd(&["env"]), &r).unwrap();
+        assert_eq!(
+            env_of(&r),
+            vec![(
+                "DEV_KEY".to_string(),
+                "op://vdev/idev/allumata/DEV_KEY".to_string()
+            )]
+        );
     }
 
     #[test]

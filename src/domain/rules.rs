@@ -13,8 +13,9 @@ use zeroize::Zeroizing;
 use crate::domain::model::{Environment, KeySpec};
 use crate::domain::secret::SecretValue;
 
-/// Maximum accepted value size in bytes.
-pub const MAX_LEN: usize = 60_000;
+/// Maximum accepted value size in bytes. Kept below the Fly import line limit (name + 7 +
+/// value ≤ 60 000 bytes) so a value that passes the rules also fits on an import line.
+pub const MAX_LEN: usize = 59_000;
 
 /// A failed rule. Holds the key and rule name only (FR-15).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,11 @@ impl fmt::Display for RuleFailure {
 }
 
 impl std::error::Error for RuleFailure {}
+
+/// Whether `refuse_in` lists `env_name`: the key must not exist there at all (FR-15).
+pub fn refused_in(spec: &KeySpec, env_name: &str) -> bool {
+    spec.rules.refuse_in.iter().any(|e| e == env_name)
+}
 
 /// Whether the key is expected for this environment and not skipped by a payments-style
 /// mode. A missing mode does not skip (it fails in `check` instead).
@@ -65,7 +71,11 @@ fn signoz_re() -> &'static Regex {
 
 /// Check one value against its key's rules.
 ///
-/// - `Ok(None)`: the key does not apply (other environment, or skipped by mode).
+/// - `Err(refuse_in)`: the environment is listed in `refuse_in` and the value is non-empty.
+///   Checked first, before [`applies`], because a refused environment is never one the key
+///   is declared for (config validation guarantees it).
+/// - `Ok(None)`: the key does not apply (other environment, or skipped by mode), or it is
+///   refused here and empty.
 /// - `Ok(Some(v))`: the value to stage (after any transform).
 /// - `Err`: the first failing rule, naming key and rule only.
 pub fn check(
@@ -76,14 +86,21 @@ pub fn check(
     env: &Environment,
     value: &SecretValue,
 ) -> Result<Option<SecretValue>, RuleFailure> {
-    if !applies(spec, env_name, env, product) {
-        return Ok(None);
-    }
     let fail = |rule: &'static str| RuleFailure {
         key: key.to_string(),
         rule,
     };
     let v = value.expose();
+    if refused_in(spec, env_name) {
+        return if v.is_empty() {
+            Ok(None)
+        } else {
+            Err(fail("refuse_in"))
+        };
+    }
+    if !applies(spec, env_name, env, product) {
+        return Ok(None);
+    }
     let r = &spec.rules;
 
     if v.is_empty() {
@@ -97,9 +114,6 @@ pub fn check(
     }
     if v.len() > MAX_LEN {
         return Err(fail("max_len"));
-    }
-    if r.refuse_in.iter().any(|e| e == env_name) {
-        return Err(fail("refuse_in"));
     }
     if let Some(p) = &r.prefix
         && !v.starts_with(p.as_str())
@@ -165,7 +179,11 @@ pub fn check(
         if !signoz_re().is_match(body) {
             return Err(fail("transform"));
         }
-        return Ok(Some(SecretValue::new(format!("{SIGNOZ_PREFIX}{body}"))));
+        // Built at its final size: no reallocation leaves an unzeroized copy behind (SR-8).
+        let mut out = String::with_capacity(SIGNOZ_PREFIX.len() + body.len());
+        out.push_str(SIGNOZ_PREFIX);
+        out.push_str(body);
+        return Ok(Some(SecretValue::new(out)));
     }
     Ok(Some(SecretValue::new(v.to_string())))
 }
@@ -414,6 +432,49 @@ mod tests {
             ..Rules::default()
         };
         assert!(with(r2, "x").unwrap().is_some());
+    }
+
+    /// I1: refuse_in is evaluated before `applies`. A key declared for prod only and refused
+    /// in staging: a non-empty value in staging fails `refuse_in` even though the key does
+    /// not apply there; an empty (or absent) one is fine.
+    #[test]
+    fn refuse_in_fires_where_the_key_does_not_apply() {
+        let f = f();
+        let spec = KeySpec {
+            kind: Kind::Secret,
+            environments: vec!["prod".into()],
+            rules: Rules {
+                refuse_in: vec!["staging".into()],
+                ..Rules::default()
+            },
+            immutable: false,
+            guidance: String::new(),
+        };
+        let env = &f.environments["staging"];
+        assert!(!applies(&spec, "staging", env, "allumata"));
+        let e = check(
+            "allumata",
+            "SMTP_PASS",
+            &spec,
+            "staging",
+            env,
+            &SecretValue::new("hunter2".into()),
+        )
+        .unwrap_err();
+        assert_eq!((e.key.as_str(), e.rule), ("SMTP_PASS", "refuse_in"));
+        let empty = SecretValue::new(String::new());
+        assert_eq!(
+            check("allumata", "SMTP_PASS", &spec, "staging", env, &empty).map(|o| o.is_none()),
+            Ok(true)
+        );
+        // Whitespace is not empty: still refused.
+        let ws = SecretValue::new(" ".into());
+        assert_eq!(
+            check("allumata", "SMTP_PASS", &spec, "staging", env, &ws)
+                .unwrap_err()
+                .rule,
+            "refuse_in"
+        );
     }
     #[test]
     fn hex_bytes_rule() {

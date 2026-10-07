@@ -105,7 +105,8 @@ pub fn read_item(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error
 }
 
 /// [`read_item`] with the credential signal supplied by the caller (tests, or S6 if it
-/// already knows). A non-zero exit is `Source("op item get failed (exit N)")` unless `creds`
+/// already knows). A non-zero exit is `Source("op item get failed (exit N); run ...")` (a
+/// value-free re-run hint with the IDs) unless `creds`
 /// is `Absent`, in which case it is `Auth` with the same prefix.
 pub fn read_item_with(
     r: &dyn CommandRunner,
@@ -123,7 +124,7 @@ pub fn read_item_with(
     ];
     let Output { status, stdout } = run_op(r, &args, None)?;
     if status != 0 {
-        let m = format!("op item get failed (exit {status})");
+        let m = format!("op item get failed (exit {status}){}", rerun_hint(env));
         return Err(match creds {
             Credentials::Present => Error::Source(m),
             Credentials::Absent => Error::Auth(format!(
@@ -172,16 +173,32 @@ pub fn write_skeleton(
     let out = run_op(r, &args, Some(&template))?;
     if out.status != 0 {
         return Err(Error::Source(format!(
-            "op item edit failed (exit {})",
-            out.status
+            "op item edit failed (exit {}){}",
+            out.status,
+            rerun_hint(env)
         )));
     }
     Ok(())
 }
 
+/// A value-free command to re-run by hand when `op` fails, since its stderr is discarded
+/// (SR-1). IDs only; without `--format json` and `--reveal`, `op` conceals secret fields.
+/// (`op item edit` cannot be re-run without its stdin, so the hint reads the item.)
+fn rerun_hint(env: &Environment) -> String {
+    format!(
+        "; run `{OP} item get {} --vault {}` to see why",
+        env.item_id, env.vault_id
+    )
+}
+
 fn run_op(r: &dyn CommandRunner, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error> {
     r.run(OP, args, stdin, &[]).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => Error::Dependency("op CLI not found on PATH".into()),
+        // The runner's own message names the program and the limit (no child output).
+        io::ErrorKind::TimedOut => {
+            let sub: Vec<&str> = args.iter().take(2).copied().collect();
+            Error::Source(format!("op {}: {e}", sub.join(" ")))
+        }
         kind => Error::Dependency(format!("failed to run op: {kind}")),
     })
 }
@@ -444,8 +461,10 @@ mod tests {
         Environment {
             vault_id: "vstg".into(),
             item_id: "istg".into(),
-            fly_app: "fleet-staging".into(),
-            secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
+            fly: Some(crate::domain::FlyTarget {
+                app: "fleet-staging".into(),
+                secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
+            }),
             modes: BTreeMap::new(),
         }
     }
@@ -686,7 +705,7 @@ mod tests {
         let r = FakeRunner::new([Output::failure(1)]);
         let e = read_item_with(&r, &test_env(), Credentials::Present).unwrap_err();
         assert!(
-            matches!(&e, Error::Source(m) if m == "op item get failed (exit 1)"),
+            matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
             "{e:?}"
         );
     }
@@ -699,6 +718,51 @@ mod tests {
             Error::Auth(m) => assert!(m.starts_with("op item get failed (exit 1)"), "{m}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// I6: the re-run hint names IDs only; child stdout (which can carry values) never
+    /// reaches the message, for read and edit, with and without credentials.
+    #[test]
+    fn failure_hint_is_value_free() {
+        const MARK: &str = "OPHINTMARKER";
+        let leaky = || Output {
+            status: 1,
+            stdout: Zeroizing::new(format!("{{\"value\":\"{MARK}\"}}").into_bytes()),
+        };
+        for creds in [Credentials::Present, Credentials::Absent] {
+            let r = FakeRunner::new([leaky()]);
+            let e = read_item_with(&r, &test_env(), creds).unwrap_err();
+            let t = format!("{e} {e:?}");
+            assert!(t.contains("run `op item get istg --vault vstg`"), "{t}");
+            assert!(!t.contains(MARK) && !t.contains("--reveal"), "{t}");
+        }
+        let item_json = serde_json::to_vec(&json!({"fields": []})).unwrap();
+        let r = FakeRunner::new([Output::success(item_json), leaky()]);
+        let item = read_item_with(&r, &test_env(), Credentials::Present).unwrap();
+        let e = write_skeleton(
+            &r,
+            &test_env(),
+            &item,
+            &[("p".into(), format!("{MARK}K"), Kind::Secret)],
+        )
+        .unwrap_err();
+        let t = format!("{e} {e:?}");
+        assert!(t.contains("run `op item get istg --vault vstg`"), "{t}");
+        assert!(!t.contains(MARK), "{t}");
+    }
+
+    #[test]
+    fn timeout_is_source_error_naming_op() {
+        let r = FakeRunner::default();
+        r.responses.borrow_mut().push_back(Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "op did not finish within 300 s and was killed",
+        )));
+        let e = read_item_with(&r, &test_env(), Credentials::Present).unwrap_err();
+        assert!(
+            matches!(&e, Error::Source(m) if m.starts_with("op item get: op did not finish")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -952,7 +1016,7 @@ mod tests {
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
         let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
         assert!(
-            matches!(&e, Error::Source(m) if m == "op item edit failed (exit 2)"),
+            matches!(&e, Error::Source(m) if m == "op item edit failed (exit 2); run `op item get istg --vault vstg` to see why"),
             "{e:?}"
         );
     }

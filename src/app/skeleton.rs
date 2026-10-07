@@ -157,6 +157,30 @@ mod tests {
         assert!(field(&t, "allumata", "INTEGRATION_ENC_KEY").is_some());
     }
 
+    /// I5: item skeleton works for an environment without a `fly` section.
+    #[test]
+    fn works_without_fly_section() {
+        let fl = fleet_with(
+            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+             [products.allumata.keys.DEV_FLAG]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
+        );
+        let r = FakeRunner::new([item(&[]), ok()]);
+        let mut out = Vec::new();
+        run(&fl, "dev", &r, &mut out).unwrap();
+        assert!(
+            text_of(&out).contains("added allumata/DEV_FLAG"),
+            "{}",
+            text_of(&out)
+        );
+        assert_eq!(
+            argvs(&r),
+            vec![
+                "op item get idev --vault vdev --format json",
+                "op item edit idev --vault vdev --format json",
+            ]
+        );
+    }
+
     #[test]
     fn unknown_env_is_config_error_before_any_call() {
         let r = FakeRunner::new([]);

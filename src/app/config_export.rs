@@ -20,7 +20,8 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     fleet.environment(env_name)?;
-    let (plan, _) = read_and_plan(fleet, env_name, r, false, &BTreeSet::new())?;
+    let none = BTreeSet::new();
+    let (plan, _) = read_and_plan(fleet, env_name, r, false, &none, &none)?;
     let refused = row_names(&plan.rows, refuses);
     if !refused.is_empty() {
         return Err(Error::Policy(format!(
@@ -121,6 +122,24 @@ mod tests {
         res.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["allumata"]["SIGNUP_POLICY"], "invite_only");
+    }
+
+    /// I5: config export works for an environment without a `fly` section.
+    #[test]
+    fn works_without_fly_section() {
+        let fl = fleet_with(
+            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+             [products.allumata.keys.DEV_FLAG]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
+        );
+        let r = FakeRunner::new([item(&[text("allumata", "DEV_FLAG", "on")])]);
+        let mut out = Vec::new();
+        run(&fl, "dev", &r, &mut out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["allumata"]["DEV_FLAG"], "on");
+        assert_eq!(
+            argvs(&r),
+            vec!["op item get idev --vault vdev --format json"]
+        );
     }
 
     #[test]

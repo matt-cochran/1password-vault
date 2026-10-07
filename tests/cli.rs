@@ -83,6 +83,98 @@ fn missing_op_exits_3() {
 }
 
 #[test]
+fn invalid_prune_immutable_entry_exits_2() {
+    for extra in [
+        &["--prune", "--prune-immutable", "allumata/OPENAI_API_KEY"][..], // not immutable
+        &["--prune-immutable", "allumata/INTEGRATION_ENC_KEY"],           // without --prune
+    ] {
+        let mut args = vec!["--config", CFG, "fly", "sync", "prod"];
+        args.extend(extra);
+        let (code, _, err) = secretctl(&args);
+        assert_eq!(code, 2, "{extra:?}: {err}");
+        assert!(err.contains("--prune-immutable"), "{err}");
+    }
+}
+
+#[test]
+fn expect_no_change_is_not_a_flag() {
+    let (code, _, err) = secretctl(&["--config", CFG, "fly", "sync", "prod", "--expect-no-change"]);
+    assert_eq!(code, 2, "{err}");
+}
+
+/// I5: an environment without a `fly` section works for run-only use; the Fly commands and
+/// status exit 2 naming it, before any subprocess (PATH is empty).
+#[test]
+fn env_without_fly_section_exits_2_for_fly_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("secrets.toml");
+    let text = std::fs::read_to_string(CFG).unwrap();
+    std::fs::write(
+        &cfg,
+        format!("{text}\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n"),
+    )
+    .unwrap();
+    let cfg = cfg.to_str().unwrap();
+    for cmd in [
+        vec!["status", "dev"],
+        vec!["fly", "plan", "dev"],
+        vec!["fly", "sync", "dev"],
+    ] {
+        let mut args = vec!["--config", cfg];
+        args.extend(&cmd);
+        let (code, _, err) = secretctl(&args);
+        assert_eq!(code, 2, "{cmd:?}: {err}");
+        assert!(
+            err.contains("environment \"dev\" has no fly section"),
+            "{cmd:?}: {err}"
+        );
+    }
+    // config export and item skeleton get past config to the 1Password read (op missing: 3).
+    for cmd in [
+        vec!["config", "export", "dev", "--json"],
+        vec!["item", "skeleton", "dev"],
+    ] {
+        let mut args = vec!["--config", cfg];
+        args.extend(&cmd);
+        let (code, _, err) = secretctl(&args);
+        assert_eq!(code, 3, "{cmd:?}: {err}");
+    }
+}
+
+/// I7: top-level help has examples and the exit codes; no requirement IDs anywhere.
+#[test]
+fn help_has_examples_and_no_requirement_ids() {
+    let (code, out, err) = secretctl(&["--help"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Examples:"), "{out}");
+    assert!(out.contains("secretctl item skeleton staging"), "{out}");
+    assert!(out.contains("7 authentication"), "{out}");
+    assert!(
+        out.contains("<ENV>") || out.contains("environment defined"),
+        "{out}"
+    );
+    for args in [
+        vec!["--help"],
+        vec!["status", "--help"],
+        vec!["fly", "sync", "--help"],
+        vec!["fly", "plan", "--help"],
+        vec!["run", "--help"],
+        vec!["doctor", "--help"],
+        vec!["item", "skeleton", "--help"],
+        vec!["config", "export", "--help"],
+    ] {
+        let (_, out, _) = secretctl(&args);
+        assert!(
+            !out.contains("(FR-") && !out.contains("FR-1"),
+            "{args:?}: {out}"
+        );
+        assert!(!out.contains("expect-no-change"), "{args:?}: {out}");
+    }
+    let (_, out, _) = secretctl(&["status", "--help"]);
+    assert!(out.contains("Environment name"), "{out}");
+}
+
+#[test]
 fn run_help_shows_usage() {
     let (code, out, err) = secretctl(&["run", "--help"]);
     assert_eq!(code, 0, "{err}");

@@ -82,8 +82,12 @@ pub struct SyncPlan {
     pub held_immutable: Vec<(String, String)>,
     /// Fly names rendered from the template for declared secret keys of this fleet that are
     /// on Fly but not desired in this environment (key not declared for it, or skipped by
-    /// mode). Names the template does not produce for a declared key are never pruned.
+    /// mode). Names the template does not produce for a declared key are never pruned, a
+    /// name in `stage` is never pruned, and an immutable key is never pruned unless listed
+    /// in [`PlanOptions::prune_immutable`] (FR-8, FR-16).
     pub prune: Vec<String>,
+    /// (product, key, fly name): immutable keys that would otherwise be pruned. Held.
+    pub held_from_prune: Vec<(String, String, String)>,
     /// product -> key -> value, config keys only.
     pub config: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -103,6 +107,7 @@ impl fmt::Debug for SyncPlan {
             .field("stage", &stage)
             .field("held_immutable", &self.held_immutable)
             .field("prune", &self.prune)
+            .field("held_from_prune", &self.held_from_prune)
             .field("config_keys", &config)
             .finish()
     }
@@ -123,7 +128,22 @@ impl SyncPlan {
     }
 }
 
-/// Plan a sync of `item` into the Fly app for `env_name`.
+/// Target-specific inputs to [`build_with`]. The planner stays target-agnostic (FR-12):
+/// the application layer supplies the digest function and the value check.
+pub struct PlanOptions<'a> {
+    /// Immutable keys to stage even though present on the target (FR-16).
+    pub rotate: &'a BTreeSet<(String, String)>,
+    /// Immutable keys that may be pruned (otherwise immutable keys are never pruned).
+    pub prune_immutable: &'a BTreeSet<(String, String)>,
+    /// Computes the target's digest of a value locally (`None` = not computable).
+    pub digest: &'a dyn Fn(&SecretValue) -> Option<String>,
+    /// The first rule the target would refuse for (target name, value), e.g. a value the
+    /// Fly import cannot carry. A refusal makes the row `RuleFailed(rule)`; not staged.
+    pub target_check: &'a dyn Fn(&str, &SecretValue) -> Option<&'static str>,
+}
+
+/// Plan a sync of `item` into the Fly app for `env_name`, with no prune overrides and no
+/// target value check. See [`build_with`].
 ///
 /// `digest` computes Fly's digest of a value locally (`None` = not computable).
 /// Panics if `env_name` is not a defined environment.
@@ -134,6 +154,32 @@ pub fn build(
     fly: &[FlySecret],
     rotate: &BTreeSet<(String, String)>,
     digest: &dyn Fn(&SecretValue) -> Option<String>,
+) -> SyncPlan {
+    let none = BTreeSet::new();
+    build_with(
+        fleet,
+        env_name,
+        item,
+        fly,
+        &PlanOptions {
+            rotate,
+            prune_immutable: &none,
+            digest,
+            target_check: &|_, _| None,
+        },
+    )
+}
+
+/// Plan a sync of `item` into the target for `env_name`.
+///
+/// Without a Fly target in the environment nothing is staged or pruned; rows and config
+/// are still produced (for `config export`). Panics if `env_name` is not defined.
+pub fn build_with(
+    fleet: &Fleet,
+    env_name: &str,
+    item: Vec<ItemField>,
+    fly: &[FlySecret],
+    opts: &PlanOptions<'_>,
 ) -> SyncPlan {
     let env = fleet
         .environments
@@ -157,18 +203,25 @@ pub fn build(
         stage: Vec::new(),
         held_immutable: Vec::new(),
         prune: Vec::new(),
+        held_from_prune: Vec::new(),
         config: BTreeMap::new(),
     };
 
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
             let fly_name = env.fly_name(product, key);
-            let fly_entry = on_fly.get(fly_name.as_str()).copied();
+            let fly_entry = fly_name.as_deref().and_then(|n| on_fly.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
+            let declared_here = spec.environments.iter().any(|e| e == env_name);
 
-            // `Ok(None)` means the key is not desired here. `rules::applies` is evaluated
-            // exactly once per key: inside `check`, or directly when there is nothing to check.
+            // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
+            // whatever the field's kind: a non-empty field in a refused environment blocks
+            // even though the key is not otherwise desired there (FR-15). `rules::applies`
+            // is evaluated exactly once per key otherwise.
+            let refused = rules::refused_in(spec, env_name)
+                && field.is_some_and(|f| !f.value.expose().is_empty());
             let outcome: Result<Option<SecretValue>, KeyState> = match field {
+                _ if refused => Err(KeyState::RuleFailed("refuse_in")),
                 Some(f) if f.kind == spec.kind => {
                     rules::check(product, key, spec, env_name, env, &f.value)
                         .map_err(|e| KeyState::RuleFailed(e.rule))
@@ -185,6 +238,15 @@ pub fn build(
                     }
                 }
             };
+            // A ready secret the target cannot carry is a failing rule, in plan and status
+            // exactly as in sync.
+            let outcome = match (outcome, spec.kind, fly_name.as_deref()) {
+                (Ok(Some(v)), Kind::Secret, Some(name)) => match (opts.target_check)(name, &v) {
+                    Some(rule) => Err(KeyState::RuleFailed(rule)),
+                    None => Ok(Some(v)),
+                },
+                (o, _, _) => o,
+            };
 
             let mut row = Row {
                 product: product.clone(),
@@ -200,11 +262,17 @@ pub fn build(
 
             match outcome {
                 Ok(None) => {
-                    // Not desired in this environment: prune if it is a managed Fly name.
-                    if spec.kind == Kind::Secret && fly_entry.is_some() {
-                        plan.prune.push(fly_name);
+                    // Not desired in this environment: prune if it is a managed Fly name,
+                    // unless it is immutable and not explicitly released.
+                    if let (Kind::Secret, Some(_), Some(name)) = (spec.kind, fly_entry, fly_name) {
+                        let pair = (product.clone(), key.clone());
+                        if spec.immutable && !opts.prune_immutable.contains(&pair) {
+                            plan.held_from_prune.push((pair.0, pair.1, name));
+                        } else {
+                            plan.prune.push(name);
+                        }
                     }
-                    if spec.environments.iter().any(|e| e == env_name) {
+                    if declared_here {
                         plan.rows.push(row); // mode-skipped
                     }
                     continue;
@@ -221,7 +289,7 @@ pub fn build(
                         }
                         Kind::Secret => {
                             if let Some(fly_digest) = fly_entry {
-                                row.target = match (digest(&value), fly_digest) {
+                                row.target = match ((opts.digest)(&value), fly_digest) {
                                     (Some(local), Some(remote)) if local == remote => {
                                         TargetState::Present
                                     }
@@ -229,11 +297,13 @@ pub fn build(
                                     _ => TargetState::Unknown,
                                 };
                             }
-                            let rotated = rotate.contains(&(product.clone(), key.clone()));
+                            let rotated = opts.rotate.contains(&(product.clone(), key.clone()));
                             if spec.immutable && fly_entry.is_some() && !rotated {
                                 plan.held_immutable.push((product.clone(), key.clone()));
-                            } else if row.target != TargetState::Present || rotated {
-                                plan.stage.push((fly_name, value));
+                            } else if let Some(name) = fly_name
+                                && (row.target != TargetState::Present || rotated)
+                            {
+                                plan.stage.push((name, value));
                             }
                         }
                     }
@@ -242,6 +312,13 @@ pub fn build(
             plan.rows.push(row);
         }
     }
+
+    // Defence in depth (config validation already rejects colliding names): a name staged
+    // by this run is never pruned by it.
+    let staged: BTreeSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
+    plan.prune.retain(|n| !staged.contains(n.as_str()));
+    plan.held_from_prune
+        .retain(|(_, _, n)| !staged.contains(n.as_str()));
 
     for field in &item {
         let declared = fleet
@@ -583,6 +660,173 @@ rules = { transform = "signoz_ingestion_header" }
             &d,
         );
         assert_eq!(*seen.borrow(), vec!["signoz-ingestion-key=abc123"]);
+    }
+
+    fn opts_with<'a>(
+        rotate: &'a BTreeSet<(String, String)>,
+        prune_immutable: &'a BTreeSet<(String, String)>,
+        target_check: &'a dyn Fn(&str, &SecretValue) -> Option<&'static str>,
+    ) -> PlanOptions<'a> {
+        PlanOptions {
+            rotate,
+            prune_immutable,
+            digest: &none,
+            target_check,
+        }
+    }
+
+    /// C1 defence in depth: even a fleet that bypassed config validation (two keys
+    /// rendering one Fly name, one desired here and one not) never has a name in both
+    /// `stage` and `prune`.
+    #[test]
+    fn a_staged_name_is_never_pruned_even_if_validation_was_bypassed() {
+        let mut fleet = config::parse(TWO_KEYS).unwrap();
+        // q/BOTH is declared for staging only; p/BOTH is desired in prod.
+        let mut q = fleet.products["p"].clone();
+        let spec = q.keys.remove("STAGING_ONLY").unwrap();
+        q.keys.clear();
+        q.keys.insert("BOTH".into(), spec);
+        fleet.products.insert("q".into(), q);
+        for env in fleet.environments.values_mut() {
+            // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
+            env.fly.as_mut().unwrap().secret_name_template = "FLEET__{KEY}".into();
+        }
+        let fly = [fly_secret("FLEET__BOTH", None)];
+        let item = vec![secret("p", "BOTH", "v1")];
+        let p = build(&fleet, "prod", item, &fly, &no_rotate(), &none);
+        let staged: Vec<&str> = p.stage.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(staged, vec!["FLEET__BOTH"]);
+        assert!(
+            p.prune.iter().all(|n| !staged.contains(&n.as_str())),
+            "{:?}",
+            p.prune
+        );
+    }
+
+    /// C2: an immutable key not desired here but present on Fly is held, never pruned,
+    /// unless listed in `prune_immutable`.
+    #[test]
+    fn immutable_key_is_held_from_prune_unless_released() {
+        let fleet = config::parse(&TWO_KEYS.replace(
+            "environments = [\"staging\"]",
+            "environments = [\"staging\"]\nimmutable = true",
+        ))
+        .unwrap();
+        assert!(fleet.products["p"].keys["STAGING_ONLY"].immutable);
+        let fly = [fly_secret("FLEET__P__STAGING_ONLY", None)];
+        let p = build(&fleet, "prod", vec![], &fly, &no_rotate(), &none);
+        assert!(p.prune.is_empty(), "{:?}", p.prune);
+        assert_eq!(
+            p.held_from_prune,
+            vec![(
+                "p".to_string(),
+                "STAGING_ONLY".to_string(),
+                "FLEET__P__STAGING_ONLY".to_string()
+            )]
+        );
+        let release = BTreeSet::from([("p".to_string(), "STAGING_ONLY".to_string())]);
+        let p = build_with(
+            &fleet,
+            "prod",
+            vec![],
+            &fly,
+            &opts_with(&no_rotate(), &release, &|_, _| None),
+        );
+        assert_eq!(p.prune, vec!["FLEET__P__STAGING_ONLY".to_string()]);
+        assert!(p.held_from_prune.is_empty());
+    }
+
+    /// I1: refuse_in produces a blocking row where the key is otherwise not desired, for
+    /// a non-empty field of either kind; an empty field produces nothing.
+    #[test]
+    fn refuse_in_row_in_refused_env() {
+        let fleet = config::parse(&format!(
+            "{TWO_KEYS}\n[products.p.keys.SMTP_PASS]\nkind = \"secret\"\n\
+             environments = [\"prod\"]\nrules = {{ refuse_in = [\"staging\"] }}\n"
+        ))
+        .unwrap();
+        for f in [
+            secret("p", "SMTP_PASS", "x"),
+            config_field("p", "SMTP_PASS", "x"),
+        ] {
+            let p = build(&fleet, "staging", vec![f], &[], &no_rotate(), &none);
+            assert_eq!(
+                row(&p, "SMTP_PASS").state,
+                KeyState::RuleFailed("refuse_in")
+            );
+            assert!(p.blocking() > 0);
+            assert!(p.stage.iter().all(|(n, _)| n != "FLEET__P__SMTP_PASS"));
+        }
+        let p = build(
+            &fleet,
+            "staging",
+            vec![secret("p", "SMTP_PASS", "")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert!(p.rows.iter().all(|r| r.key != "SMTP_PASS"));
+        // In prod the key is simply desired.
+        let p = build(
+            &fleet,
+            "prod",
+            vec![secret("p", "SMTP_PASS", "x")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert_eq!(row(&p, "SMTP_PASS").state, KeyState::Ready);
+    }
+
+    /// I2: the target check turns a ready secret into a failing rule; config keys and
+    /// non-ready rows are not checked.
+    #[test]
+    fn target_check_marks_ready_secret_as_failing_rule() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let check = |name: &str, _: &SecretValue| {
+            seen.borrow_mut().push(name.to_string());
+            (name == "FLEET__ALLUMATA__OPENAI_API_KEY").then_some("import-something")
+        };
+        let item = vec![
+            secret("allumata", "OPENAI_API_KEY", "sk-proj-1"),
+            secret("allumata", "INTEGRATION_ENC_KEY", &b64_32()),
+            config_field("allumata", "SIGNUP_POLICY", "invite_only"),
+        ];
+        let p = build_with(
+            &f(),
+            "prod",
+            item,
+            &[],
+            &opts_with(&no_rotate(), &no_rotate(), &check),
+        );
+        assert_eq!(
+            row(&p, "OPENAI_API_KEY").state,
+            KeyState::RuleFailed("import-something")
+        );
+        assert_eq!(row(&p, "INTEGRATION_ENC_KEY").state, KeyState::Ready);
+        assert_eq!(p.stage.len(), 1);
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "FLEET__ALLUMATA__INTEGRATION_ENC_KEY".to_string(),
+                "FLEET__ALLUMATA__OPENAI_API_KEY".to_string()
+            ]
+        );
+    }
+
+    /// I5: without a Fly target nothing is staged or pruned; rows and config still are.
+    #[test]
+    fn env_without_fly_plans_rows_and_config_only() {
+        let mut fleet = f();
+        fleet.environments.get_mut("prod").unwrap().fly = None;
+        let item = vec![
+            secret("allumata", "OPENAI_API_KEY", "sk-proj-1"),
+            config_field("allumata", "SIGNUP_POLICY", "invite_only"),
+        ];
+        let p = build(&fleet, "prod", item, &[], &no_rotate(), &none);
+        assert!(p.stage.is_empty() && p.prune.is_empty());
+        assert_eq!(row(&p, "OPENAI_API_KEY").state, KeyState::Ready);
+        assert_eq!(p.config["allumata"]["SIGNUP_POLICY"], "invite_only");
     }
 
     #[test]

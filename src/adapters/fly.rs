@@ -27,7 +27,9 @@
 //!
 //! - `flyctl` missing from PATH: [`Error::Dependency`].
 //! - Any other spawn failure, a non-zero exit, or unparseable list JSON: [`Error::Target`]
-//!   with `"<subcommand> failed (exit N)"` or similar.
+//!   with `"<subcommand> failed (exit N); run `flyctl ...` to see why"` (the hint holds
+//!   program, subcommand, names and the app only, never values or stdin) or similar.
+//! - A captured call that exceeds the runner's timeout: [`Error::Target`] naming `flyctl`.
 //! - A refused value or name: [`Error::Policy`] naming the key and the rule, never the value.
 //!
 //! Child stderr is never captured or echoed (the runner discards it). flyctl exits 1 for
@@ -70,7 +72,13 @@ struct ListEntry {
 /// Every secret on `app` with its digest: one `flyctl secrets list --app <app> --json` call.
 pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
     const WHAT: &str = "fly secrets list";
-    let out = run(r, WHAT, &["secrets", "list", "--app", app, "--json"], None)?;
+    let out = run(
+        r,
+        WHAT,
+        &["secrets", "list", "--app", app, "--json"],
+        None,
+        &["secrets", "list", "--app", app],
+    )?;
     // serde_json messages can quote input fragments, so report only the position.
     let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
         Error::Target(format!(
@@ -101,11 +109,14 @@ pub fn stage(
         return Ok(());
     }
     let input = encode_import(values)?;
+    // The import itself cannot be re-run by hand without the values; listing the app shows
+    // whether access and authentication work.
     run(
         r,
         "fly secrets import",
         &["secrets", "import", "--app", app, "--stage"],
         Some(&input),
+        &["secrets", "list", "--app", app],
     )?;
     Ok(())
 }
@@ -124,7 +135,7 @@ pub fn unset_staged(r: &dyn CommandRunner, app: &str, names: &[String]) -> Resul
     let mut args = vec!["secrets", "unset"];
     args.extend(names.iter().map(String::as_str));
     args.extend(["--app", app, "--stage"]);
-    run(r, "fly secrets unset", &args, None)?;
+    run(r, "fly secrets unset", &args, None, &args)?;
     Ok(())
 }
 
@@ -137,6 +148,7 @@ pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
         "fly secrets deploy",
         &["secrets", "deploy", "--app", app],
         None,
+        &["secrets", "deploy", "--app", app],
     )?;
     Ok(())
 }
@@ -158,15 +170,29 @@ pub fn validate_import(values: &[(String, &SecretValue)]) -> Result<(), Error> {
         if !seen.insert(name.as_str()) {
             return Err(refused(name, "import-duplicate-name", "import"));
         }
-        let v = value.expose().as_bytes();
-        if let Some(rule) = import_refusal(v) {
+        if let Some(rule) = entry_refusal(name, value) {
             return Err(refused(name, rule, "import"));
-        }
-        if encoded_len(name, v) > MAX_IMPORT_LINE {
-            return Err(refused(name, "import-line-too-long", "import"));
         }
     }
     Ok(())
+}
+
+/// The first per-entry import rule `(name, value)` breaks, or `None`: `fly-name-invalid`,
+/// the [`import_refusal`] value rules, then `import-line-too-long`. Everything
+/// [`validate_import`] checks except duplicates across a batch. `status` and `fly plan` run
+/// it on every ready secret so they cannot show green for a value `fly sync` would refuse.
+pub fn entry_refusal(name: &str, value: &SecretValue) -> Option<&'static str> {
+    if !valid_name(name) {
+        return Some("fly-name-invalid");
+    }
+    let v = value.expose().as_bytes();
+    if let Some(rule) = import_refusal(v) {
+        return Some(rule);
+    }
+    if encoded_len(name, v) > MAX_IMPORT_LINE {
+        return Some("import-line-too-long");
+    }
+    None
 }
 
 /// The first value rule `value` breaks, or `None` if flyctl stores it unchanged in the
@@ -234,23 +260,29 @@ fn refused(name: &str, rule: &str, op: &str) -> Error {
     ))
 }
 
-/// Run one flyctl subcommand and map failures to typed, value-free errors.
+/// Run one flyctl subcommand and map failures to typed, value-free errors. A non-zero exit
+/// carries a hint with a command to re-run by hand (`hint` args: names and IDs only, never
+/// values or stdin), because child stderr is discarded (SR-1).
 fn run(
     r: &dyn CommandRunner,
     what: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
+    hint: &[&str],
 ) -> Result<Output, Error> {
     let out = r
         .run(PROGRAM, args, stdin, &[])
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => Error::Dependency(format!("{PROGRAM} not found on PATH")),
+            // The runner's own message names the program and the limit (no child output).
+            io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
             kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
         })?;
     if out.status != 0 {
         return Err(Error::Target(format!(
-            "{what} failed (exit {})",
-            out.status
+            "{what} failed (exit {}); run `{PROGRAM} {}` to see why",
+            out.status,
+            hint.join(" ")
         )));
     }
     Ok(out)
@@ -448,7 +480,10 @@ mod tests {
         let v = sv(MARK);
         let e = stage(&r, "app", &[("K".into(), &v)]).unwrap_err();
         match &e {
-            Error::Target(m) => assert_eq!(m, "fly secrets import failed (exit 1)"),
+            Error::Target(m) => assert_eq!(
+                m,
+                "fly secrets import failed (exit 1); run `flyctl secrets list --app app` to see why"
+            ),
             other => panic!("{other:?}"),
         }
         assert!(!err_text(&e).contains(MARK));
@@ -548,7 +583,10 @@ mod tests {
     fn failure_is_target_error() {
         let r = FakeRunner::new([Output::failure(1)]);
         match list(&r, "app") {
-            Err(Error::Target(m)) => assert_eq!(m, "fly secrets list failed (exit 1)"),
+            Err(Error::Target(m)) => assert_eq!(
+                m,
+                "fly secrets list failed (exit 1); run `flyctl secrets list --app app` to see why"
+            ),
             other => panic!("{other:?}"),
         }
     }
@@ -593,7 +631,10 @@ mod tests {
     fn unset_failure_is_target_error() {
         let r = FakeRunner::new([Output::failure(2)]);
         match unset_staged(&r, "app", &["X".into()]) {
-            Err(Error::Target(m)) => assert_eq!(m, "fly secrets unset failed (exit 2)"),
+            Err(Error::Target(m)) => assert_eq!(
+                m,
+                "fly secrets unset failed (exit 2); run `flyctl secrets unset X --app app --stage` to see why"
+            ),
             other => panic!("{other:?}"),
         }
     }
@@ -611,7 +652,10 @@ mod tests {
         // D0: `fly secrets deploy` on an app with no machines exits 1.
         let r = FakeRunner::new([Output::failure(1)]);
         match deploy(&r, "app") {
-            Err(Error::Target(m)) => assert_eq!(m, "fly secrets deploy failed (exit 1)"),
+            Err(Error::Target(m)) => assert_eq!(
+                m,
+                "fly secrets deploy failed (exit 1); run `flyctl secrets deploy --app app` to see why"
+            ),
             other => panic!("{other:?}"),
         }
     }
@@ -640,6 +684,72 @@ mod tests {
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
         assert!(matches!(deploy(&r, "app"), Err(Error::Dependency(_))));
+    }
+
+    /// I6: the re-run hint is built from program, subcommand, names and IDs only.
+    #[test]
+    fn failure_hint_never_contains_a_value_or_stdin() {
+        let v = sv(MARK);
+        type Call<'a> = &'a dyn Fn(&FakeRunner) -> Result<(), Error>;
+        let calls: [Call; 4] = [
+            &|r| list(r, "fleet-prod").map(|_| ()),
+            &|r| stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)]),
+            &|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()]),
+            &|r| deploy(r, "fleet-prod"),
+        ];
+        for call in calls {
+            let r = FakeRunner::new([Output {
+                status: 1,
+                stdout: zeroize::Zeroizing::new(MARK.as_bytes().to_vec()),
+            }]);
+            let e = call(&r).unwrap_err();
+            let t = err_text(&e);
+            assert!(t.contains("run `flyctl secrets "), "{t}");
+            assert!(t.contains("--app fleet-prod"), "{t}");
+            assert!(!t.contains(MARK), "value in hint: {t}");
+            assert!(!t.contains("--json"), "{t}");
+        }
+    }
+
+    #[test]
+    fn timeout_is_target_error_naming_the_program() {
+        let r = FakeRunner::default();
+        r.responses.borrow_mut().push_back(Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "flyctl did not finish within 300 s and was killed",
+        )));
+        match list(&r, "app") {
+            Err(Error::Target(m)) => {
+                assert!(
+                    m.starts_with("fly secrets list: flyctl did not finish"),
+                    "{m}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_refusal_matches_validate_import_per_entry() {
+        let name = "FLEET__P__K";
+        let overhead = name.len() + 7;
+        assert_eq!(entry_refusal(name, &sv("fine")), None);
+        assert_eq!(
+            entry_refusal("bad-name", &sv("fine")),
+            Some("fly-name-invalid")
+        );
+        assert_eq!(
+            entry_refusal(name, &sv("a\"#b")),
+            Some("import-hash-after-odd-quotes")
+        );
+        assert_eq!(entry_refusal(name, &sv("a\nb")), Some("import-newline"));
+        let at = sv(&"v".repeat(MAX_IMPORT_LINE - overhead));
+        assert_eq!(entry_refusal(name, &at), None);
+        let over = sv(&"v".repeat(MAX_IMPORT_LINE - overhead + 1));
+        assert_eq!(entry_refusal(name, &over), Some("import-line-too-long"));
+        // The rules' MAX_LEN fits on an import line for any realistic Fly name (< 900 bytes).
+        let max = sv(&"v".repeat(crate::domain::rules::MAX_LEN));
+        assert_eq!(entry_refusal(&"N".repeat(900), &max), None);
     }
 
     #[test]

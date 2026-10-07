@@ -19,8 +19,10 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    fleet.environment(env_name)?;
-    let (plan, _) = read_and_plan(fleet, env_name, r, true, &BTreeSet::new())?;
+    // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
+    fleet.fly_target(env_name)?;
+    let none = BTreeSet::new();
+    let (plan, _) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
     print_rows(out, &plan.rows, target)?;
     print_extras(out, &plan)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -181,6 +183,66 @@ mod tests {
                 "flyctl secrets list --app mcproductlabs-portfolio-production --json",
             ]
         );
+    }
+
+    /// I1: a prod-only SMTP_PASS present (non-empty) in the staging item is a blocking
+    /// `refuse_in` row in staging status, naming product and key.
+    #[test]
+    fn status_refuse_in_is_blocking_in_refused_env() {
+        let fl = fleet_with(
+            "[products.allumata.keys.SMTP_PASS]\nkind = \"secret\"\n\
+             environments = [\"prod\"]\nrules = { refuse_in = [\"staging\"] }\n",
+        );
+        let fields = vec![
+            secret("allumata", "INTEGRATION_ENC_KEY", &enc()),
+            secret("allumata", "STRIPE_SECRET_KEY", "sk_test_FIXTUREVALUE"),
+            text("allumata", "SIGNUP_POLICY", POLICY),
+            secret("allumata", "SMTP_PASS", "FIXTUREVALUE-smtp"),
+        ];
+        let r = FakeRunner::new([item(&fields), fly_empty()]);
+        let mut out = Vec::new();
+        let res = run(&fl, "staging", &r, &mut out);
+        let out = text_of(&out);
+        assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+        assert!(
+            out.lines().any(|l| l.starts_with("allumata")
+                && l.contains("SMTP_PASS")
+                && l.contains("fails rule refuse_in")),
+            "{out}"
+        );
+        assert_no_values(&out);
+    }
+
+    /// I2: a value that passes the rules but cannot travel on a Fly import line shows as a
+    /// failing rule (exit 8), not green.
+    #[test]
+    fn status_shows_import_refusal_as_failing_rule() {
+        let (res, out, _) = status_of(
+            complete_with(secret("allumata", "OPENAI_API_KEY", "sk-a\"#FIXTUREVALUE")),
+            fly_empty(),
+        );
+        let e = res.unwrap_err();
+        assert!(matches!(e, Error::Findings(1)), "{e}");
+        assert_eq!(e.exit_code(), 8);
+        assert!(
+            out.lines().any(|l| l.contains("OPENAI_API_KEY")
+                && l.contains("fails rule import-hash-after-odd-quotes")),
+            "{out}"
+        );
+        assert_no_values(&out);
+    }
+
+    /// I5: status needs a Fly target; Config naming the environment, before any call.
+    #[test]
+    fn status_env_without_fly_is_config_error_before_any_call() {
+        let fl = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let r = FakeRunner::new([]);
+        let e = run(&fl, "dev", &r, &mut Vec::new()).unwrap_err();
+        assert!(
+            matches!(&e, Error::Config(m) if m.contains("\"dev\"") && m.contains("no fly section")),
+            "{e}"
+        );
+        assert!(r.calls.borrow().is_empty());
     }
 
     #[test]

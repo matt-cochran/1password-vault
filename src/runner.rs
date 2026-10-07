@@ -6,6 +6,8 @@
 
 use std::io::{self, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -95,7 +97,41 @@ fn read_to_end_zeroizing(mut r: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
 
 /// Runs real processes with `std::process::Command`. Child stderr is discarded because it
 /// may echo values (SR-1); callers map a non-zero status to a typed error.
-pub struct ProcessRunner;
+///
+/// A captured call ([`CommandRunner::run`]) that does not finish within `timeout` is killed
+/// and reported as an `io::ErrorKind::TimedOut` error naming the program (default
+/// [`ProcessRunner::DEFAULT_TIMEOUT`]). `run_inherited` (the user's own command under
+/// `op run`) has no timeout.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessRunner {
+    timeout: Duration,
+}
+
+impl ProcessRunner {
+    /// Limit for one captured `op` / `flyctl` call.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// A runner with a custom limit for captured calls (tests use a short one).
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl Default for ProcessRunner {
+    fn default() -> Self {
+        Self::with_timeout(Self::DEFAULT_TIMEOUT)
+    }
+}
+
+fn timed_out(program: &str, limit: Duration) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "{program} did not finish within {} s and was killed",
+            limit.as_secs_f64()
+        ),
+    )
+}
 
 impl CommandRunner for ProcessRunner {
     fn run(
@@ -105,6 +141,7 @@ impl CommandRunner for ProcessRunner {
         stdin: Option<&[u8]>,
         env: &[(&str, &str)],
     ) -> io::Result<Output> {
+        let deadline = Instant::now() + self.timeout;
         let mut cmd = Command::new(program);
         cmd.args(args)
             .envs(env.iter().copied())
@@ -116,31 +153,56 @@ impl CommandRunner for ProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = cmd.spawn()?;
-        let mut child_stdin = child.stdin.take();
-        let mut child_stdout = child.stdout.take().expect("stdout is piped");
+        let child_stdin = child.stdin.take();
+        let child_stdout = child.stdout.take().expect("stdout is piped");
 
-        // Write stdin on a scoped thread while reading stdout, so neither pipe can fill up
-        // and deadlock; the borrowed input is never copied.
-        let (write_res, read_res) = std::thread::scope(|s| {
-            let writer = s.spawn(move || -> io::Result<()> {
-                if let (Some(pipe), Some(data)) = (child_stdin.as_mut(), stdin) {
-                    match pipe.write_all(data) {
-                        // The child may exit without reading all input; that is its call.
-                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-                        other => other?,
-                    }
-                }
-                drop(child_stdin); // close the pipe so the child sees EOF
-                Ok(())
-            });
-            let read_res = read_to_end_zeroizing(&mut child_stdout);
-            (writer.join().expect("stdin writer panicked"), read_res)
+        // stdin is written and stdout read on their own threads, so neither pipe can fill up
+        // and deadlock, and so a hung child can be killed on time. The threads own their
+        // data (stdin is copied into a zeroizing buffer, SR-8) and report over channels, so
+        // a pipe kept open by a grandchild can never block this call past the deadline.
+        let (wtx, wrx) = mpsc::channel::<io::Result<()>>();
+        let input = stdin.map(|d| Zeroizing::new(d.to_vec()));
+        std::thread::spawn(move || {
+            let mut pipe = child_stdin;
+            let res = match (pipe.as_mut(), input.as_ref()) {
+                (Some(p), Some(data)) => match p.write_all(data) {
+                    // The child may exit without reading all input; that is its call.
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                    other => other,
+                },
+                _ => Ok(()),
+            };
+            drop(pipe); // close the pipe so the child sees EOF
+            let _ = wtx.send(res);
         });
-        let status = child.wait()?;
-        write_res?;
+        let (rtx, rrx) = mpsc::channel::<io::Result<Zeroizing<Vec<u8>>>>();
+        std::thread::spawn(move || {
+            let _ = rtx.send(read_to_end_zeroizing(child_stdout));
+        });
+
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(timed_out(program, self.timeout));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let remaining = || deadline.saturating_duration_since(Instant::now());
+        let stdout = match rrx.recv_timeout(remaining()) {
+            Ok(r) => r?,
+            Err(_) => return Err(timed_out(program, self.timeout)),
+        };
+        match wrx.recv_timeout(remaining()) {
+            Ok(r) => r?,
+            Err(_) => return Err(timed_out(program, self.timeout)),
+        }
         Ok(Output {
             status: exit_code(status),
-            stdout: read_res?,
+            stdout,
         })
     }
 
@@ -326,7 +388,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn process_runner_pipes_stdin_to_stdout() {
-        let o = ProcessRunner.run("cat", &[], Some(b"hello"), &[]).unwrap();
+        let o = ProcessRunner::default()
+            .run("cat", &[], Some(b"hello"), &[])
+            .unwrap();
         assert_eq!(o.status, 0);
         assert_eq!(o.stdout.as_slice(), b"hello");
     }
@@ -335,14 +399,16 @@ mod tests {
     #[test]
     fn process_runner_handles_large_stdin_without_deadlock() {
         let big = vec![b'x'; 4 * 1024 * 1024];
-        let o = ProcessRunner.run("cat", &[], Some(&big), &[]).unwrap();
+        let o = ProcessRunner::default()
+            .run("cat", &[], Some(&big), &[])
+            .unwrap();
         assert_eq!(o.stdout.len(), big.len());
     }
 
     #[cfg(unix)]
     #[test]
     fn process_runner_passes_env_and_reports_status_and_drops_stderr() {
-        let o = ProcessRunner
+        let o = ProcessRunner::default()
             .run(
                 "printenv",
                 &["SECRETCTL_TEST_VAR"],
@@ -353,7 +419,7 @@ mod tests {
         assert_eq!((o.status, o.stdout.as_slice()), (0, &b"v1\n"[..]));
 
         // A child that writes to stderr and fails: status propagated, stderr not captured.
-        let o = ProcessRunner
+        let o = ProcessRunner::default()
             .run("sh", &["-c", "echo leaked-value >&2; exit 3"], None, &[])
             .unwrap();
         assert_eq!(o.status, 3);
@@ -395,11 +461,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn process_runner_run_inherited_returns_exit_code_and_applies_env() {
-        let code = ProcessRunner
+        let code = ProcessRunner::default()
             .run_inherited("sh", &["-c", "exit 5"], &[])
             .unwrap();
         assert_eq!(code, 5);
-        let code = ProcessRunner
+        let code = ProcessRunner::default()
             .run_inherited(
                 "sh",
                 &["-c", "test \"$SECRETCTL_TEST_VAR\" = v2"],
@@ -407,7 +473,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 0);
-        let code = ProcessRunner
+        let code = ProcessRunner::default()
             .run_inherited("sh", &["-c", "kill -TERM $$"], &[])
             .unwrap();
         assert_eq!(code, 128 + 15);
@@ -415,15 +481,52 @@ mod tests {
 
     #[test]
     fn process_runner_run_inherited_missing_binary_is_io_error() {
-        let e = ProcessRunner
+        let e = ProcessRunner::default()
             .run_inherited("secretctl-definitely-not-installed", &[], &[])
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
+    /// A captured call that outlives the timeout is killed and reported as `TimedOut`,
+    /// naming the program; the call returns promptly.
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_kills_a_hung_child_at_the_timeout() {
+        let r = ProcessRunner::with_timeout(Duration::from_millis(200));
+        let t = Instant::now();
+        let e = r.run("sleep", &["30"], None, &[]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            e.to_string().starts_with("sleep did not finish within"),
+            "{e}"
+        );
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        // With stdin too (the writer must not hold the call open).
+        let e = r
+            .run("sleep", &["30"], Some(&vec![b'x'; 1 << 20]), &[])
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        // A grandchild holding stdout open cannot keep the call past the deadline.
+        let t = Instant::now();
+        let e = r
+            .run("sh", &["-c", "sleep 30 & exit 0"], None, &[])
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn default_timeout_is_300_s() {
+        assert_eq!(ProcessRunner::DEFAULT_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(
+            ProcessRunner::default().timeout,
+            ProcessRunner::DEFAULT_TIMEOUT
+        );
+    }
+
     #[test]
     fn process_runner_missing_binary_is_io_error() {
-        let e = ProcessRunner
+        let e = ProcessRunner::default()
             .run("secretctl-definitely-not-installed", &[], None, &[])
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);

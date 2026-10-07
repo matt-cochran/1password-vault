@@ -2,8 +2,12 @@
 //!
 //! Checks, one line each, always all of them: configuration valid; `op --version`;
 //! `op whoami` (authentication; free of rate-limit cost per D0); `flyctl version` and
-//! `flyctl auth whoami` (exit status only) when the configuration declares a Fly app.
-//! Returns the error of the first failing check.
+//! `flyctl auth whoami` (exit status only) when some environment has a `fly` section.
+//! Environments without one are listed as skipped for Fly. Returns the error of the first
+//! failing check.
+//!
+//! A tool version secretctl was not tested with (op older than 2.40.0, flyctl other than
+//! 0.4.112) is a `warn` line, never a failure.
 //!
 //! Tool output is never echoed: only a version string that matches a strict pattern, and
 //! from `op whoami` only the account type (`SERVICE_ACCOUNT`, ...), never identity or
@@ -20,15 +24,27 @@ use crate::runner::{CommandRunner, Output};
 /// The 1Password CLI binary (same name the 1Password adapter runs).
 const OP: &str = "op";
 
+/// Oldest `op` release secretctl is tested with.
+pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
+/// The `flyctl` release secretctl is tested with (its import parser is ported, see fly.rs).
+pub const FLYCTL_TESTED: (u64, u64, u64) = (0, 4, 112);
+
+/// A check result: ok, ok with a warning, or failed.
+enum Check {
+    Ok(String),
+    Warn(String),
+}
+
 pub fn run(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
-    let mut line = |out: &mut dyn Write, check: &str, res: Result<String, Error>| {
+    let mut line = |out: &mut dyn Write, check: &str, res: Result<Check, Error>| {
         let text = match res {
-            Ok(detail) => format!("ok    {check}: {detail}"),
+            Ok(Check::Ok(detail)) => format!("ok    {check}: {detail}"),
+            Ok(Check::Warn(detail)) => format!("warn  {check}: {detail}"),
             Err(e) => {
                 let t = format!("FAIL  {check}: {e}");
                 first.get_or_insert(e);
@@ -38,31 +54,48 @@ pub fn run(
         writeln!(out, "{text}").map_err(write_err)
     };
 
-    let wants_fly = match &config {
-        Ok(f) => Some(f.environments.values().any(|e| !e.fly_app.is_empty())),
+    // (any environment has fly, environments without fly)
+    let fly_envs = match &config {
+        Ok(f) => Some((
+            f.environments.values().any(|e| e.fly.is_some()),
+            f.environments
+                .iter()
+                .filter(|(_, e)| e.fly.is_none())
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+        )),
         Err(_) => None,
     };
     line(
         out,
         "config",
         config.map(|f| {
-            format!(
+            Check::Ok(format!(
                 "valid ({} environment(s), {} product(s))",
                 f.environments.len(),
                 f.products.len()
-            )
+            ))
         }),
     )?;
     line(out, "op", op_version(r))?;
-    line(out, "op auth", op_whoami(r))?;
-    match wants_fly {
-        Some(true) => {
+    line(out, "op auth", op_whoami(r).map(Check::Ok))?;
+    match fly_envs {
+        Some((true, without)) => {
             line(out, "flyctl", flyctl_version(r))?;
-            line(out, "fly auth", fly_auth(r))?;
+            line(out, "fly auth", fly_auth(r).map(Check::Ok))?;
+            if !without.is_empty() {
+                writeln!(
+                    out,
+                    "skip  fly: no fly section in environment(s) {} (run, config export and item skeleton only)",
+                    without.join(", ")
+                )
+                .map_err(write_err)?;
+            }
         }
-        Some(false) => {
+        Some((false, _)) => {
             for check in ["flyctl", "fly auth"] {
-                writeln!(out, "skip  {check}: no Fly app configured").map_err(write_err)?;
+                writeln!(out, "skip  {check}: no environment has a fly section")
+                    .map_err(write_err)?;
             }
         }
         None => {
@@ -85,7 +118,7 @@ fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, 
     })
 }
 
-fn op_version(r: &dyn CommandRunner) -> Result<String, Error> {
+fn op_version(r: &dyn CommandRunner) -> Result<Check, Error> {
     let o = spawn(r, OP, &["--version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
@@ -93,7 +126,18 @@ fn op_version(r: &dyn CommandRunner) -> Result<String, Error> {
             o.status
         )));
     }
-    Ok(version_in(&o.stdout).map_or_else(|| "present".into(), |v| format!("version {v}")))
+    let (a, b, c) = OP_TESTED_MIN;
+    Ok(match version_in(&o.stdout) {
+        Some(v) if parse_version(&v).is_some_and(|n| n >= OP_TESTED_MIN) => {
+            Check::Ok(format!("version {v}"))
+        }
+        Some(v) => Check::Warn(format!(
+            "version {v}; secretctl is tested with op {a}.{b}.{c} or newer"
+        )),
+        None => Check::Warn(format!(
+            "present, version not recognised; secretctl is tested with op {a}.{b}.{c} or newer"
+        )),
+    })
 }
 
 fn op_whoami(r: &dyn CommandRunner) -> Result<String, Error> {
@@ -117,7 +161,7 @@ fn op_whoami(r: &dyn CommandRunner) -> Result<String, Error> {
     })
 }
 
-fn flyctl_version(r: &dyn CommandRunner) -> Result<String, Error> {
+fn flyctl_version(r: &dyn CommandRunner) -> Result<Check, Error> {
     let o = spawn(r, fly::PROGRAM, &["version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
@@ -126,7 +170,30 @@ fn flyctl_version(r: &dyn CommandRunner) -> Result<String, Error> {
             o.status
         )));
     }
-    Ok(version_in(&o.stdout).map_or_else(|| "present".into(), |v| format!("version {v}")))
+    let (a, b, c) = FLYCTL_TESTED;
+    Ok(match version_in(&o.stdout) {
+        Some(v) if parse_version(&v) == Some(FLYCTL_TESTED) => Check::Ok(format!("version {v}")),
+        Some(v) => Check::Warn(format!(
+            "version {v}; secretctl is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)"
+        )),
+        None => Check::Warn(format!(
+            "present, version not recognised; secretctl is tested with flyctl {a}.{b}.{c}"
+        )),
+    })
+}
+
+/// `2.40.0` / `v0.4.112` → (major, minor, patch). Missing parts count as 0; anything else
+/// (more than three parts, non-digits) is `None`.
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let v = v.strip_prefix('v').unwrap_or(v);
+    let mut parts = v.split('.').map(|p| p.parse::<u64>().ok());
+    let major = parts.next()??;
+    let minor = parts.next().unwrap_or(Some(0))?;
+    let patch = parts.next().unwrap_or(Some(0))?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 /// `flyctl auth whoami`: exit status only. Its stdout names the account (an email), so it
@@ -265,7 +332,7 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Auth(_)), "{e}");
-        assert_eq!(e.exit_code(), 3);
+        assert_eq!(e.exit_code(), 7);
         assert!(out.lines().nth(2).unwrap().starts_with("FAIL"), "{out}");
         assert_eq!(out.lines().count(), 5, "{out}");
     }
@@ -329,6 +396,80 @@ mod tests {
         );
         assert_no_values(&out);
         assert_no_values(&e.to_string());
+    }
+
+    /// I8: tested versions print no warning.
+    #[test]
+    fn tested_versions_do_not_warn() {
+        let r = FakeRunner::new(good());
+        let (res, out) = doctor(Ok(fleet()), &r);
+        res.unwrap();
+        assert!(!out.contains("warn"), "{out}");
+    }
+
+    /// I8: an older op or a different flyctl warns but does not fail.
+    #[test]
+    fn untested_versions_warn_but_pass() {
+        for (op, fly, warn_op, warn_fly) in [
+            ("2.39.9\n", "flyctl v0.4.112 linux/amd64\n", true, false),
+            ("2.30.0\n", "flyctl v0.4.113 linux/amd64\n", true, true),
+            ("2.41.0\n", "flyctl v0.3.0 linux/amd64\n", false, true),
+            ("3.0.0\n", "flyctl v0.4.112\n", false, false),
+        ] {
+            let mut g = good();
+            g[0] = Output::success(op.as_bytes().to_vec());
+            g[2] = Output::success(fly.as_bytes().to_vec());
+            let r = FakeRunner::new(g);
+            let (res, out) = doctor(Ok(fleet()), &r);
+            res.unwrap();
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(lines[1].starts_with("warn  op:"), warn_op, "{out}");
+            assert_eq!(lines[3].starts_with("warn  flyctl:"), warn_fly, "{out}");
+            if warn_op {
+                assert!(lines[1].contains("2.40.0"), "{out}");
+            }
+            if warn_fly {
+                assert!(lines[3].contains("0.4.112"), "{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_version_cases() {
+        assert_eq!(parse_version("2.40.0"), Some((2, 40, 0)));
+        assert_eq!(parse_version("v0.4.112"), Some((0, 4, 112)));
+        assert_eq!(parse_version("2.40"), Some((2, 40, 0)));
+        assert_eq!(parse_version("1.2.3.4"), None);
+        assert_eq!(parse_version("x"), None);
+        assert!(parse_version("2.9.0") < Some(OP_TESTED_MIN));
+    }
+
+    /// I5: Fly checks are skipped when no environment has a fly section, and environments
+    /// without one are named when others have it.
+    #[test]
+    fn fly_checks_follow_fly_sections() {
+        let no_fly = crate::config::parse(
+            "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n",
+        )
+        .unwrap();
+        let r = FakeRunner::new(good().into_iter().take(2));
+        let (res, out) = doctor(Ok(no_fly), &r);
+        res.unwrap();
+        assert!(
+            out.contains("skip  flyctl: no environment has a fly section"),
+            "{out}"
+        );
+        assert_eq!(r.calls.borrow().len(), 2, "{:?}", argvs(&r));
+
+        let mixed = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let r = FakeRunner::new(good());
+        let (res, out) = doctor(Ok(mixed), &r);
+        res.unwrap();
+        assert!(out.contains("ok    fly auth"), "{out}");
+        assert!(
+            out.contains("skip  fly: no fly section in environment(s) dev"),
+            "{out}"
+        );
     }
 
     /// Unparseable tool output is not echoed (it could be anything).

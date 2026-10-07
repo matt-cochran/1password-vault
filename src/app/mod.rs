@@ -29,26 +29,49 @@ fn no_digest(_: &SecretValue) -> Option<String> {
 }
 
 /// Read the environment's item once (FR-13), list the Fly app once when `with_fly`, and
-/// build the plan. `env_name` must already be resolved (callers do it first).
+/// build the plan. `env_name` must already be resolved (callers do it first); with
+/// `with_fly` the environment must have a Fly target (`Error::Config` otherwise, before
+/// any call).
+///
+/// When the environment has a Fly target, every ready secret is also checked against the
+/// Fly import rules ([`fly::entry_refusal`]), so `status` and `fly plan` show a value
+/// `fly sync` would refuse as a failing rule naming product/KEY.
 pub(crate) fn read_and_plan(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
     with_fly: bool,
     rotate: &BTreeSet<(String, String)>,
+    prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<FlySecret>), Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_item(r, env)?;
-    let on_fly = if with_fly {
-        fly::list(r, &env.fly_app)?
+    let app = if with_fly {
+        Some(fleet.fly_target(env_name)?.1.app.as_str())
     } else {
-        Vec::new()
+        None
     };
-    let p = plan::build(fleet, env_name, item.fields, &on_fly, rotate, &no_digest);
+    let item = onepassword::read_item(r, env)?;
+    let on_fly = match app {
+        Some(app) => fly::list(r, app)?,
+        None => Vec::new(),
+    };
+    let p = plan::build_with(
+        fleet,
+        env_name,
+        item.fields,
+        &on_fly,
+        &plan::PlanOptions {
+            rotate,
+            prune_immutable,
+            digest: &no_digest,
+            target_check: &fly::entry_refusal,
+        },
+    );
     Ok((p, on_fly))
 }
 
-/// A failed write to the output stream (closed pipe and the like).
+/// A failed write to the output stream. A closed pipe never gets here: `main` swallows
+/// `BrokenPipe` so the command still returns its own result (e.g. `status | head`).
 pub(crate) fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()))
 }
@@ -152,11 +175,11 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
 
 /// Every Fly name the template renders for a declared key: the managed set (FR-8, §10).
 pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<String>, Error> {
-    let env = fleet.environment(env_name)?;
+    let (_, target) = fleet.fly_target(env_name)?;
     Ok(fleet
         .products
         .iter()
-        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| env.fly_name(p, k)))
+        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| target.fly_name(p, k)))
         .collect())
 }
 

@@ -541,7 +541,7 @@ fn child_stderr_suppressed() {
 }
 
 /// Ruling 3 (S3's rule): with no OP_SERVICE_ACCOUNT_TOKEN / OP_SESSION_* an op failure is
-/// an authentication error (3), not a source error.
+/// an authentication error (7, its own code since the final fix wave), not a source error.
 #[test]
 fn op_failure_without_credentials_is_auth() {
     let mut h = Harness::new(&good_item());
@@ -553,7 +553,7 @@ fn op_failure_without_credentials_is_auth() {
     ] {
         h.reset();
         let r = h.run(cmd);
-        assert_eq!(r.code, 3, "{cmd:?}: {}", r.all());
+        assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         assert!(
             r.all().contains("authentication error"),
             "{cmd:?}: {}",
@@ -606,6 +606,13 @@ fn failure_after_partial_plan_stages_nothing() {
     assert!(
         r.stderr
             .starts_with("secretctl: target error: fly secrets list failed (exit 1)"),
+        "{}",
+        r.stderr
+    );
+    // I6: a value-free command to re-run by hand (child stderr is discarded).
+    assert!(
+        r.stderr
+            .contains(&format!("run `flyctl secrets list --app {APP}` to see why")),
         "{}",
         r.stderr
     );
@@ -784,12 +791,109 @@ fn exit_codes() {
     );
     assert_eq!(h6.fly_calls("import"), 0);
 
-    // 8: findings (status / plan with a missing key; sync --expect-no-change that changed).
+    // 7: authentication (op fails with no credentials in the environment).
+    let mut h7 = Harness::new(&good_item());
+    h7.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("FAKE_OP_EXIT", "1");
+    for cmd in [
+        &["fly", "sync", "prod"][..],
+        &["status", "prod"],
+        &["doctor"],
+    ] {
+        h7.reset();
+        let r = h7.run(cmd);
+        assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
+        assert!(r.stderr.contains("authentication error"), "{}", r.stderr);
+    }
+
+    // 8: findings (status / plan with a missing key).
     h6.reset();
     assert_eq!(h6.run(&["status", "prod"]).code, 8);
     assert_eq!(h6.run(&["fly", "plan", "prod"]).code, 8);
-    h.reset();
+}
+
+/// I3: `--expect-no-change` is gone (usage error, exit 2, nothing spawned).
+#[test]
+fn expect_no_change_flag_is_removed() {
+    let h = Harness::new(&good_item());
     let r = h.run(&["fly", "sync", "prod", "--expect-no-change"]);
-    assert_eq!(r.code, 8, "{}", r.all());
+    assert_eq!(r.code, 2, "{}", r.all());
+    assert!(h.calls().is_empty());
+}
+
+/// I4: a closed stdout (`status | head`) stops output and the command still returns its
+/// own result: 8 with a missing key, 0 when complete; never a dependency error (3).
+#[test]
+fn broken_stdout_returns_the_command_result() {
+    let missing = item(
+        good_fields(OPENAI)
+            .into_iter()
+            .filter(|f| f["label"] != "INTEGRATION_ENC_KEY")
+            .collect(),
+    );
+    for (item_json, cmd, want) in [
+        (missing.clone(), &["status", "prod"][..], 8),
+        (missing, &["fly", "plan", "prod"], 8),
+        (good_item(), &["status", "prod"], 0),
+        (good_item(), &["fly", "sync", "prod"], 0),
+    ] {
+        let h = Harness::new(&item_json);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+            .arg("--config")
+            .arg(CONFIG)
+            .args(cmd)
+            .env_clear()
+            .env("PATH", &h.bin)
+            .env("TMPDIR", &h.tmp)
+            .env("FAKE_REC", &h.rec)
+            .env("FAKE_FIX", &h.fix)
+            .envs(h.env.iter().map(|(k, v)| (k, v)))
+            .current_dir(&h.cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close the read end before secretctl writes anything (the fakes take a while).
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(want), "{cmd:?}: {stderr}");
+        assert!(!stderr.contains("dependency error"), "{cmd:?}: {stderr}");
+        assert_no_marker(&format!("{cmd:?} stderr"), &stderr);
+    }
+}
+
+/// I2: a value that passes the rules but cannot travel on a Fly import line fails a rule
+/// named after the import rule in `status` and `fly plan` (8), and `fly sync` refuses it
+/// (6) naming product/KEY; nothing is staged.
+#[test]
+fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
+    let h = Harness::new(&item(good_fields("sk-proj-S7MARKERVALUE\"#frag0011")));
+    let rule = "import-hash-after-odd-quotes";
+    for cmd in [&["status", "prod"][..], &["fly", "plan", "prod"]] {
+        h.reset();
+        let r = h.run(cmd);
+        assert_eq!(r.code, 8, "{cmd:?}: {}", r.all());
+        assert!(
+            r.stdout
+                .lines()
+                .any(|l| l.contains("OPENAI_API_KEY") && l.contains(&format!("fails rule {rule}"))),
+            "{}",
+            r.stdout
+        );
+        assert_clean_output(cmd, &r);
+    }
+    h.reset();
+    let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+    assert_eq!(r.code, 6, "{}", r.all());
+    assert!(
+        r.stderr
+            .contains(&format!("allumata/OPENAI_API_KEY (fails rule {rule})")),
+        "{}",
+        r.stderr
+    );
+    for sub in ["import", "unset", "deploy"] {
+        assert_eq!(h.fly_calls(sub), 0, "{sub}");
+    }
     assert_clean_output(&["fly", "sync"], &r);
 }

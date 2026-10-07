@@ -3,7 +3,8 @@
 //! Fly digests cannot be computed locally (D0 Q4), so `fly sync` is stage-and-compare
 //! (ruling P1): read the item once → list A → plan → refuse if anything blocks (nothing
 //! staged) → validate the import batch → stage → list B → report each staged key as
-//! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged) →
+//! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged; never
+//! an immutable key unless named with `--prune-immutable`) →
 //! `--deploy`: deploy when a staged digest changed, a prune happened, or a managed name is
 //! still `Staged`/`Partial` on Fly from an earlier run (FR-7). Without `--deploy`
 //! nothing is ever deployed. `fly plan` reads the item once and lists once; it mutates
@@ -31,8 +32,9 @@ pub struct SyncOpts {
     pub prune: bool,
     /// `PRODUCT/KEY` entries: immutable keys to stage even though present on Fly (FR-16).
     pub rotate: Vec<String>,
-    /// Fail with `Findings` if staging changed any digest (the migration gate, P1).
-    pub expect_no_change: bool,
+    /// `PRODUCT/KEY` entries: immutable keys `--prune` may unset (FR-8, FR-16). Without an
+    /// entry an immutable key is never pruned. Requires `prune`.
+    pub prune_immutable: Vec<String>,
 }
 
 pub fn run(
@@ -42,9 +44,12 @@ pub fn run(
     out: &mut dyn Write,
     opts: &SyncOpts,
 ) -> Result<(), Error> {
-    let env = fleet.environment(env_name)?;
+    // Every check below happens before any subprocess call.
+    let (_, target) = fleet.fly_target(env_name)?;
+    let app = target.app.as_str();
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
-    let (plan, list_a) = read_and_plan(fleet, env_name, r, true, &rotate)?;
+    let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
+    let (plan, list_a) = read_and_plan(fleet, env_name, r, true, &rotate, &prune_immutable)?;
 
     let blocking = row_names(&plan.rows, is_blocking);
     if !blocking.is_empty() {
@@ -65,8 +70,8 @@ pub fn run(
     let list_b = if batch.is_empty() {
         list_a.clone()
     } else {
-        fly::stage(r, &env.fly_app, &batch)?;
-        fly::list(r, &env.fly_app)?
+        fly::stage(r, app, &batch)?;
+        fly::list(r, app)?
     };
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -79,26 +84,12 @@ pub fn run(
     }
 
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
-    if opts.expect_no_change && !changed.is_empty() {
-        // The gate result wins over output: a failed write must not turn Findings into a
-        // dependency error, so these writes are best effort and the result line comes first.
-        let _ = p(
-            out,
-            format!(
-                "expected no change, but {} staged key(s) changed: {}",
-                changed.len(),
-                changed.join(", ")
-            ),
-        );
-        let _ = print_changes(out, &changed, &unchanged);
-        return Err(Error::Findings(changed.len()));
-    }
     print_changes(out, &changed, &unchanged)?;
 
     let pruned = if plan.prune.is_empty() {
         false
     } else if opts.prune {
-        fly::unset_staged(r, &env.fly_app, &plan.prune)?;
+        fly::unset_staged(r, app, &plan.prune)?;
         p(out, format!("pruned (staged): {}", plan.prune.join(", ")))?;
         true
     } else {
@@ -111,6 +102,15 @@ pub fn run(
         )?;
         false
     };
+    if !plan.held_from_prune.is_empty() {
+        p(
+            out,
+            format!(
+                "held (immutable), not pruned (pass --prune --prune-immutable PRODUCT/KEY to unset): {}",
+                held_from_prune(&plan)
+            ),
+        )?;
+    }
 
     // Managed names still staged from an earlier run (e.g. a sync without --deploy, or a
     // failed deploy). Status is only an extra deploy trigger, never change detection.
@@ -130,7 +130,7 @@ pub fn run(
         (false, true) => p(out, "nothing pending; not deploying".into()),
         (false, false) => p(out, "nothing pending".into()),
         (true, true) => {
-            fly::deploy(r, &env.fly_app)?;
+            fly::deploy(r, app)?;
             p(out, "deployed staged secrets".into())
         }
         (true, false) => p(out, "staged changes not deployed (no --deploy)".into()),
@@ -163,8 +163,10 @@ pub fn plan(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    fleet.environment(env_name)?;
-    let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &BTreeSet::new())?;
+    // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
+    fleet.fly_target(env_name)?;
+    let none = BTreeSet::new();
+    let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
     let held: BTreeSet<(&str, &str)> = plan
         .held_immutable
         .iter()
@@ -179,6 +181,13 @@ pub fn plan(
     print_extras(out, &plan)?;
     for n in &plan.prune {
         writeln!(out, "to prune (with --prune): {n}").map_err(write_err)?;
+    }
+    for (product, key, n) in &plan.held_from_prune {
+        writeln!(
+            out,
+            "held (immutable), not pruned: {product}/{key} ({n}); unset only with --prune --prune-immutable {product}/{key}"
+        )
+        .map_err(write_err)?;
     }
     let unmanaged = unmanaged_on_fly(fleet, env_name, &on_fly)?;
     print_counts(out, &plan)?;
@@ -217,6 +226,15 @@ fn plan_target(r: &Row, held: bool) -> String {
     .to_string()
 }
 
+/// `product/KEY (FLY_NAME)` for every immutable key held back from pruning.
+fn held_from_prune(plan: &SyncPlan) -> String {
+    plan.held_from_prune
+        .iter()
+        .map(|(p, k, n)| format!("{p}/{k} ({n})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn digest<'a>(list: &'a [FlySecret], name: &str) -> Option<&'a str> {
     list.iter()
         .find(|s| s.name == name)
@@ -251,6 +269,47 @@ fn parse_rotate(
         if !rules::applies(spec, env_name, env, product) {
             return Err(bad(format!(
                 "key is not desired in environment {env_name:?}"
+            )));
+        }
+        set.insert((product.to_string(), key.to_string()));
+    }
+    Ok(set)
+}
+
+/// Validate every `--prune-immutable PRODUCT/KEY` before any call: it must name a declared,
+/// immutable key that is not desired in `env_name` (a desired key is never pruned, so the
+/// entry would be a silent no-op), and `--prune` must be passed too.
+fn parse_prune_immutable(
+    fleet: &Fleet,
+    env_name: &str,
+    opts: &SyncOpts,
+) -> Result<BTreeSet<(String, String)>, Error> {
+    let env = fleet.environment(env_name)?;
+    if !opts.prune_immutable.is_empty() && !opts.prune {
+        return Err(Error::Config(
+            "--prune-immutable requires --prune (nothing is pruned without it)".into(),
+        ));
+    }
+    let mut set = BTreeSet::new();
+    for e in &opts.prune_immutable {
+        let bad = |why: String| Error::Config(format!("--prune-immutable {e:?}: {why}"));
+        let (product, key) = e
+            .split_once('/')
+            .filter(|(p, k)| !p.is_empty() && !k.is_empty())
+            .ok_or_else(|| bad("expected PRODUCT/KEY".into()))?;
+        let spec = fleet
+            .products
+            .get(product)
+            .and_then(|p| p.keys.get(key))
+            .ok_or_else(|| bad("not a declared key".into()))?;
+        if !spec.immutable {
+            return Err(bad(
+                "key is not immutable (other keys are pruned by --prune alone)".into(),
+            ));
+        }
+        if rules::applies(spec, env_name, env, product) {
+            return Err(bad(format!(
+                "key is desired in environment {env_name:?}, so it is never pruned"
             )));
         }
         set.insert((product.to_string(), key.to_string()));
@@ -305,7 +364,7 @@ mod tests {
             deploy: true,
             prune: true,
             rotate: vec!["allumata/INTEGRATION_ENC_KEY".into()],
-            expect_no_change: false,
+            prune_immutable: vec![],
         }
     }
     fn assert_nothing_mutated(r: &FakeRunner) {
@@ -376,7 +435,8 @@ mod tests {
         }
     }
 
-    /// A value Fly's import parser would mangle is refused before anything is staged.
+    /// A value Fly's import parser would mangle is refused before anything is staged, as a
+    /// blocking row naming product/KEY and the import rule (I2).
     #[test]
     fn sync_validates_import_before_staging() {
         let r = fake_with(
@@ -386,7 +446,12 @@ mod tests {
         let (res, out) = sync_out(&f(), &r, &all_flags());
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Policy(_)), "{e}");
-        assert!(e.to_string().contains(OPENAI_FLY), "{e}");
+        assert_eq!(e.exit_code(), 6);
+        assert!(
+            e.to_string()
+                .contains("allumata/OPENAI_API_KEY (fails rule import-hash-after-odd-quotes)"),
+            "{e}"
+        );
         assert_no_values(&e.to_string());
         assert_no_values(&out);
         assert_nothing_mutated(&r);
@@ -608,73 +673,8 @@ mod tests {
         assert!(called(&r, "flyctl", &["secrets", "deploy"]));
     }
 
-    #[test]
-    fn expect_no_change_fails_when_a_digest_changed() {
-        // ENC is immutable and present, so held; only OPENAI is staged, and it changed.
-        // The Stripe name is prunable in prod, and --prune/--deploy are passed: the gate
-        // must stop before either happens.
-        let r = fake_sync(
-            complete_item(),
-            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (STRIPE_FLY, "d3")]),
-            fly(&[(OPENAI_FLY, "d1-new"), (ENC_FLY, "d2"), (STRIPE_FLY, "d3")]),
-        );
-        let o = SyncOpts {
-            expect_no_change: true,
-            deploy: true,
-            prune: true,
-            ..opts()
-        };
-        let (res, out) = sync_out(&f(), &r, &o);
-        let e = res.unwrap_err();
-        assert!(matches!(e, Error::Findings(1)), "{e}");
-        assert!(out.contains(OPENAI_FLY), "{out}");
-        assert!(!called(&r, "flyctl", &["secrets", "deploy"]));
-        assert!(!called(&r, "flyctl", &["secrets", "unset"]));
-        assert_no_values(&out);
-    }
-
-    /// M3: a broken stdout must not turn the gate's Findings into a dependency error.
-    #[test]
-    fn expect_no_change_findings_survive_broken_stdout() {
-        struct Broken;
-        impl std::io::Write for Broken {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let r = fake_sync(
-            complete_item(),
-            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
-            fly(&[(OPENAI_FLY, "d1-new"), (ENC_FLY, "d2")]),
-        );
-        // Output before staging (counts) must succeed; every write after list B fails.
-        struct FailAfterStage<'a>(&'a FakeRunner, Vec<u8>);
-        impl std::io::Write for FailAfterStage<'_> {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                if self.0.calls.borrow().len() >= 4 {
-                    return Broken.write(b);
-                }
-                self.1.extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let o = SyncOpts {
-            expect_no_change: true,
-            ..opts()
-        };
-        let mut w = FailAfterStage(&r, Vec::new());
-        let e = run(&f(), "prod", &r, &mut w, &o).unwrap_err();
-        assert!(matches!(e, Error::Findings(1)), "{e}");
-    }
-
-    /// A staged key Fly reports without a digest is unknown, so it counts as changed: the
-    /// gate must not pass and a deploy must not be skipped on missing evidence.
+    /// A staged key Fly reports without a digest is unknown, so it counts as changed: a
+    /// deploy must not be skipped on missing evidence.
     #[test]
     fn staged_key_without_digest_after_staging_counts_as_changed() {
         let r = fake_sync(
@@ -683,22 +683,13 @@ mod tests {
             fly(&[(ENC_FLY, "d2")]),
         );
         let o = SyncOpts {
-            expect_no_change: true,
+            deploy: true,
             ..opts()
         };
-        let e = sync_out(&f(), &r, &o).0.unwrap_err();
-        assert!(matches!(e, Error::Findings(1)), "{e}");
-    }
-
-    #[test]
-    fn expect_no_change_passes_when_digests_equal() {
-        let same = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]);
-        let r = fake_sync(complete_item(), same(), same());
-        let o = SyncOpts {
-            expect_no_change: true,
-            ..opts()
-        };
-        sync_out(&f(), &r, &o).0.unwrap();
+        let (res, out) = sync_out(&f(), &r, &o);
+        res.unwrap();
+        assert!(out.contains("1 changed, 0 unchanged"), "{out}");
+        assert!(called(&r, "flyctl", &["secrets", "deploy"]));
     }
 
     // ---- immutable and --rotate -----------------------------------------------------
@@ -820,6 +811,203 @@ mod tests {
         sync_out(&f(), &r, &o).0.unwrap();
         assert!(called(&r, "flyctl", &["secrets", "unset"]));
         assert!(called(&r, "flyctl", &["secrets", "deploy"]));
+    }
+
+    // ---- immutable keys are never pruned unless released (C2) ------------------------
+
+    /// An immutable key declared for staging only, present on the prod Fly app.
+    fn fleet_old_immutable() -> Fleet {
+        fleet_with(
+            "[products.allumata.keys.OLD_ENC]\nkind = \"secret\"\n\
+             environments = [\"staging\"]\nimmutable = true\n",
+        )
+    }
+    const OLD_FLY: &str = "FLEET__ALLUMATA__OLD_ENC";
+
+    #[test]
+    fn immutable_key_not_desired_is_held_from_prune() {
+        let a = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (OLD_FLY, "d3")]);
+        let r = fake_sync(complete_item(), a(), a());
+        let o = SyncOpts {
+            prune: true,
+            deploy: true,
+            ..opts()
+        };
+        let (res, out) = sync_out(&fleet_old_immutable(), &r, &o);
+        res.unwrap();
+        assert!(
+            !called(&r, "flyctl", &["secrets", "unset"]),
+            "{:?}",
+            argvs(&r)
+        );
+        assert!(!r.argv_contains(OLD_FLY));
+        assert!(
+            out.contains(&format!(
+                "held (immutable), not pruned (pass --prune --prune-immutable PRODUCT/KEY to unset): allumata/OLD_ENC ({OLD_FLY})"
+            )),
+            "{out}"
+        );
+        assert_no_values(&out);
+    }
+
+    #[test]
+    fn prune_immutable_releases_the_named_key() {
+        let a = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (OLD_FLY, "d3")]);
+        let r = fake_sync(complete_item(), a(), a());
+        let o = SyncOpts {
+            prune: true,
+            prune_immutable: vec!["allumata/OLD_ENC".into()],
+            ..opts()
+        };
+        let (res, out) = sync_out(&fleet_old_immutable(), &r, &o);
+        res.unwrap();
+        assert!(
+            argvs(&r).contains(&format!(
+                "flyctl secrets unset {OLD_FLY} --app mcproductlabs-portfolio-production --stage"
+            )),
+            "{:?}",
+            argvs(&r)
+        );
+        assert!(!out.contains("held (immutable), not pruned"), "{out}");
+    }
+
+    #[test]
+    fn plan_shows_immutable_key_held_from_prune() {
+        let r = FakeRunner::new([
+            complete_item(),
+            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (OLD_FLY, "d3")]),
+        ]);
+        let mut out = Vec::new();
+        plan(&fleet_old_immutable(), "prod", &r, &mut out).unwrap();
+        let out = text_of(&out);
+        assert!(
+            out.contains(&format!(
+                "held (immutable), not pruned: allumata/OLD_ENC ({OLD_FLY})"
+            )),
+            "{out}"
+        );
+        assert!(out.contains("0 to prune"), "{out}");
+        assert!(!out.contains("to prune (with --prune)"), "{out}");
+    }
+
+    #[test]
+    fn prune_immutable_entries_are_validated_before_any_call() {
+        for (bad, prune) in [
+            ("allumata/OPENAI_API_KEY", true),      // not immutable
+            ("allumata/NOPE", true),                // undeclared
+            ("nosuch/OLD_ENC", true),               // undeclared product
+            ("allumata/INTEGRATION_ENC_KEY", true), // desired in prod: never pruned
+            ("allumata-OLD_ENC", true),             // malformed
+            ("allumata/OLD_ENC", false),            // without --prune
+        ] {
+            let r = FakeRunner::new([]);
+            let o = SyncOpts {
+                prune,
+                prune_immutable: vec![bad.into()],
+                ..opts()
+            };
+            let e = run(&fleet_old_immutable(), "prod", &r, &mut Vec::new(), &o).unwrap_err();
+            assert!(matches!(e, Error::Config(_)), "{bad}: {e}");
+            assert!(e.to_string().contains("--prune-immutable"), "{bad}: {e}");
+            assert!(r.calls.borrow().is_empty(), "{bad}: calls made");
+        }
+    }
+
+    // ---- refuse_in (I1) and import refusals in plan (I2) ---------------------------
+
+    /// SMTP_PASS is prod-only and refused in staging (the shape infra generates).
+    fn fleet_smtp() -> Fleet {
+        fleet_with(
+            "[products.allumata.keys.SMTP_PASS]\nkind = \"secret\"\n\
+             environments = [\"prod\"]\nrules = { refuse_in = [\"staging\"] }\n",
+        )
+    }
+    fn staging_fields() -> Vec<Field> {
+        vec![
+            secret("allumata", "INTEGRATION_ENC_KEY", &enc()),
+            secret("allumata", "STRIPE_SECRET_KEY", "sk_test_FIXTUREVALUE"),
+            text("allumata", "SIGNUP_POLICY", POLICY),
+        ]
+    }
+
+    #[test]
+    fn refuse_in_blocks_plan_and_sync_in_the_refused_env() {
+        let mut fs = staging_fields();
+        fs.push(secret("allumata", "SMTP_PASS", "FIXTUREVALUE-smtp"));
+        let r = FakeRunner::new([item(&fs), fly_empty()]);
+        let mut out = Vec::new();
+        let e = plan(&fleet_smtp(), "staging", &r, &mut out).unwrap_err();
+        let out = text_of(&out);
+        assert!(matches!(e, Error::Findings(1)), "{e}");
+        assert!(
+            out.lines()
+                .any(|l| l.contains("SMTP_PASS") && l.contains("fails rule refuse_in")),
+            "{out}"
+        );
+        assert_no_values(&out);
+
+        let r = FakeRunner::new([item(&fs), fly_empty(), ok(), ok()]);
+        let e = run(&fleet_smtp(), "staging", &r, &mut Vec::new(), &opts()).unwrap_err();
+        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert!(
+            e.to_string()
+                .contains("allumata/SMTP_PASS (fails rule refuse_in)"),
+            "{e}"
+        );
+        assert_no_values(&e.to_string());
+        assert_nothing_mutated(&r);
+
+        // Empty (a skeleton field nobody filled) or absent: fine, no row.
+        for fs in [
+            {
+                let mut v = staging_fields();
+                v.push(("allumata".into(), "SMTP_PASS".into(), "CONCEALED", None));
+                v
+            },
+            staging_fields(),
+        ] {
+            let r = FakeRunner::new([item(&fs), fly_empty()]);
+            let mut out = Vec::new();
+            plan(&fleet_smtp(), "staging", &r, &mut out).unwrap();
+            assert!(!text_of(&out).contains("SMTP_PASS"), "{}", text_of(&out));
+        }
+    }
+
+    #[test]
+    fn plan_shows_import_refusal_as_failing_rule() {
+        let r = FakeRunner::new([
+            complete_with(secret("allumata", "OPENAI_API_KEY", "sk-a\"#FIXTUREVALUE")),
+            fly_empty(),
+        ]);
+        let (res, out) = plan_out(&r);
+        let e = res.unwrap_err();
+        assert!(matches!(e, Error::Findings(1)), "{e}");
+        assert_eq!(e.exit_code(), 8);
+        assert!(
+            out.lines().any(|l| l.contains("OPENAI_API_KEY")
+                && l.contains("fails rule import-hash-after-odd-quotes")),
+            "{out}"
+        );
+        assert_no_values(&out);
+    }
+
+    // ---- environments without fly (I5) ----------------------------------------------
+
+    #[test]
+    fn env_without_fly_is_config_error_before_any_call() {
+        let fl = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let r = FakeRunner::new([]);
+        let e = run(&fl, "dev", &r, &mut Vec::new(), &opts()).unwrap_err();
+        assert!(
+            matches!(&e, Error::Config(m) if m.contains("\"dev\"") && m.contains("fly")),
+            "{e}"
+        );
+        let e = plan(&fl, "dev", &r, &mut Vec::new()).unwrap_err();
+        assert!(
+            matches!(&e, Error::Config(m) if m.contains("\"dev\"")),
+            "{e}"
+        );
+        assert!(r.calls.borrow().is_empty());
     }
 
     // ---- failures -------------------------------------------------------------------
