@@ -600,3 +600,56 @@ fn explain_bare_key_under_fleet_exits_2() {
     ]);
     assert_eq!(code, 2, "{err}");
 }
+
+// --- init (FR-23) ---
+
+const INIT: [&str; 8] = [
+    "init",
+    "staging",
+    "--vault",
+    "v",
+    "--item",
+    "i",
+    "--fly-app",
+    "app",
+];
+
+#[test]
+fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(&path, "# mine\n").unwrap();
+    let (code, out, err) = opv_in(dir.path(), &INIT);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("secrets.toml already exists"), "{err}");
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+}
+
+/// init reads no configuration: an ancestor secrets.toml is neither announced nor loaded,
+/// and without op on PATH it fails as a dependency error, writing nothing.
+#[test]
+fn init_ignores_discovery_and_writes_nothing_when_op_is_missing() {
+    let (dir, nested) = dir_with_ancestor_config();
+    let (code, _, err) = opv_in(&nested, &INIT);
+    assert_eq!(code, 3, "{err}");
+    assert!(!err.contains("using "), "{err}");
+    assert!(!nested.join("secrets.toml").exists());
+    drop(dir);
+}
+
+#[test]
+fn init_rejects_config_flag_and_bad_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = vec!["--config", "x.toml"];
+    a.extend(INIT);
+    let (code, _, err) = opv_in(dir.path(), &a);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--config is not used"), "{err}");
+    let mut a = INIT.to_vec();
+    a.extend(["--profile", "both"]);
+    let (code, _, err) = opv_in(dir.path(), &a);
+    assert_eq!(code, 2, "{err}");
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
