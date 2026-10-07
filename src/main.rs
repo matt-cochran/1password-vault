@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use secretctl::Error;
-use secretctl::app::{config_export, doctor, skeleton, status, sync};
+use secretctl::app::{config_export, doctor, run as run_cmd, skeleton, status, sync};
 use secretctl::config;
 use secretctl::runner::ProcessRunner;
 
@@ -33,6 +33,19 @@ enum Cmd {
     Doctor,
     /// One row per product × key with 1Password and Fly state; names only (FR-17).
     Status { env: String },
+    /// Run a command with the product's secrets in its environment via `op run` (FR-4).
+    ///
+    /// Exits with the child's own exit code, so a child code can equal a secretctl
+    /// category code (for example 2); secretctl errors print `secretctl: ...` on stderr.
+    Run {
+        env: String,
+        /// Product whose declared keys are passed to the command.
+        #[arg(long)]
+        product: String,
+        /// Command and arguments, after `--`.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Fly.io target commands.
     #[command(subcommand)]
     Fly(FlyCmd),
@@ -93,7 +106,9 @@ fn main() -> ExitCode {
     let res = run(cli, &mut stdout);
     let _ = stdout.flush();
     match res {
-        Ok(()) => ExitCode::SUCCESS,
+        // `run` reports the child's exit code verbatim (FR-4); everything else yields 0.
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(exit_byte(code)),
         Err(e) => {
             // Error messages never contain secret values or child output (SR-1).
             eprintln!("secretctl: {e}");
@@ -102,13 +117,31 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, out: &mut dyn Write) -> Result<(), Error> {
+fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
     let r = ProcessRunner;
     let loaded = config::load(&cli.config);
-    match cli.cmd {
-        Cmd::Doctor => doctor::run(loaded, &r, out),
-        Cmd::Status { env } => status::run(&loaded?, &env, &r, out),
-        Cmd::Fly(FlyCmd::Plan { env }) => sync::plan(&loaded?, &env, &r, out),
+    if let Cmd::Run {
+        env,
+        product,
+        command,
+    } = &cli.cmd
+    {
+        return run_cmd::run(&loaded?, env, product, command, &r);
+    }
+    run_other(cli.cmd, loaded, &r, out).map(|()| 0)
+}
+
+fn run_other(
+    cmd: Cmd,
+    loaded: Result<secretctl::domain::Fleet, Error>,
+    r: &ProcessRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    match cmd {
+        Cmd::Run { .. } => unreachable!("handled by run"),
+        Cmd::Doctor => doctor::run(loaded, r, out),
+        Cmd::Status { env } => status::run(&loaded?, &env, r, out),
+        Cmd::Fly(FlyCmd::Plan { env }) => sync::plan(&loaded?, &env, r, out),
         Cmd::Fly(FlyCmd::Sync {
             env,
             deploy,
@@ -122,12 +155,12 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<(), Error> {
                 rotate,
                 expect_no_change,
             };
-            sync::run(&loaded?, &env, &r, out, &opts)
+            sync::run(&loaded?, &env, r, out, &opts)
         }
         Cmd::Config(ConfigCmd::Export { env, json: _ }) => {
-            config_export::run(&loaded?, &env, &r, out)
+            config_export::run(&loaded?, &env, r, out)
         }
-        Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, &r, out),
+        Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
     }
 }
 

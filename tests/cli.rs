@@ -81,3 +81,135 @@ fn missing_op_exits_3() {
     assert!(out.is_empty());
     assert!(err.starts_with("secretctl: dependency error"), "{err}");
 }
+
+#[test]
+fn run_help_shows_usage() {
+    let (code, out, err) = secretctl(&["run", "--help"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Usage: secretctl run"), "{out}");
+    assert!(out.contains("--product"), "{out}");
+}
+
+#[test]
+fn run_requires_product_and_command() {
+    for args in [
+        vec!["--config", CFG, "run", "staging", "--", "true"],
+        vec!["--config", CFG, "run", "staging", "--product", "allumata"],
+    ] {
+        let (code, _, err) = secretctl(&args);
+        assert_eq!(code, 2, "{args:?}: {err}");
+    }
+}
+
+#[cfg(unix)]
+mod run_with_fake_op {
+    use super::CFG;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// Install a fake `op` that logs each invocation, then execs the args after `--`.
+    fn fake_op_dir(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("secretctl-cli-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let script = format!(
+            "#!/bin/sh\necho called >> '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+            log.display()
+        );
+        let op = dir.join("op");
+        std::fs::write(&op, script).unwrap();
+        std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, log)
+    }
+
+    fn run(path: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+            .args(["--config", CFG])
+            .args(args)
+            .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    }
+
+    #[test]
+    fn unknown_env_exits_2_without_calling_op() {
+        let (dir, log) = fake_op_dir("unknown");
+        let (code, _, err) = run(&dir, &["run", "qa", "--product", "allumata", "--", "true"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.starts_with("secretctl: configuration error: undefined environment \"qa\""),
+            "{err}"
+        );
+        assert!(!log.exists(), "op must not be invoked");
+    }
+
+    #[test]
+    fn child_exit_code_is_propagated_exactly() {
+        let (dir, log) = fake_op_dir("exit7");
+        let (code, _, err) = run(
+            &dir,
+            &[
+                "run",
+                "staging",
+                "--product",
+                "allumata",
+                "--",
+                "sh",
+                "-c",
+                "exit 7",
+            ],
+        );
+        assert_eq!(code, 7, "{err}");
+        assert!(
+            err.is_empty(),
+            "no secretctl message for a child exit: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn child_sees_op_references_not_values() {
+        let (dir, _) = fake_op_dir("env");
+        let (code, out, err) = run(
+            &dir,
+            &[
+                "run",
+                "staging",
+                "--product",
+                "allumata",
+                "--",
+                "sh",
+                "-c",
+                "printf %s \"$INTEGRATION_ENC_KEY\"",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, "op://vstg/istg/allumata/INTEGRATION_ENC_KEY");
+    }
+
+    #[test]
+    fn missing_op_exits_3() {
+        let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+            .args([
+                "--config",
+                CFG,
+                "run",
+                "staging",
+                "--product",
+                "allumata",
+                "--",
+                "true",
+            ])
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3));
+    }
+}
