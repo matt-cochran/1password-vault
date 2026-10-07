@@ -69,6 +69,51 @@ fn signoz_re() -> &'static Regex {
     re(&R, &format!("^{SIGNOZ_BODY}$"))
 }
 
+/// Transform name: one PEM private key block, staged as a single line.
+pub const PEM_PRIVATE_KEY: &str = "pem_private_key";
+
+/// Normalise one PEM private key block to `-----BEGIN L-----<base64>-----END L-----`.
+///
+/// Accepts the multi-line form (LF or CRLF, surrounding whitespace allowed, as a `.pem` file
+/// or a paste) and the already single-line form. `L` must end in `PRIVATE KEY` (PKCS#1
+/// `RSA PRIVATE KEY`, PKCS#8 `PRIVATE KEY`, `EC PRIVATE KEY`); the BEGIN and END labels must
+/// match; there are no PEM headers (an encrypted `Proc-Type` key is refused); the body is
+/// standard base64 of a DER SEQUENCE. Only whitespace is removed, so the output decodes to the
+/// same DER: RFC 7468 parsers that skip whitespace inside the body (Rust `pem` 3.x, used by
+/// journeeze's GitHub App client) read it unchanged. `None` on any failure; nothing value-
+/// bearing is returned or formatted on the error path.
+fn pem_private_key(v: &str) -> Option<Zeroizing<String>> {
+    let s = v.trim_matches(|c: char| c.is_ascii_whitespace());
+    let rest = s.strip_prefix("-----BEGIN ")?;
+    let (label, rest) = rest.split_once("-----")?;
+    if !label.ends_with("PRIVATE KEY")
+        || !label.bytes().all(|b| b.is_ascii_uppercase() || b == b' ')
+    {
+        return None;
+    }
+    let end = format!("-----END {label}-----");
+    let body = rest.strip_suffix(end.as_str())?;
+    if body.contains("-----") {
+        return None;
+    }
+    let mut b64 = Zeroizing::new(String::with_capacity(body.len()));
+    b64.extend(body.chars().filter(|c| !c.is_ascii_whitespace()));
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map(Zeroizing::new)
+        .ok()?;
+    if der.first() != Some(&0x30) {
+        return None;
+    }
+    // Built at its final size: no reallocation leaves an unzeroized copy behind (SR-8).
+    let begin = format!("-----BEGIN {label}-----");
+    let mut out = Zeroizing::new(String::with_capacity(begin.len() + b64.len() + end.len()));
+    out.push_str(&begin);
+    out.push_str(&b64);
+    out.push_str(&end);
+    Some(out)
+}
+
 /// Check one value against its key's rules.
 ///
 /// - `Err(refuse_in)`: the environment is listed in `refuse_in` and the value is non-empty.
@@ -106,6 +151,14 @@ pub fn check(
     if v.is_empty() {
         return Err(fail("nonempty"));
     }
+    // A PEM private key is multi-line in 1Password (a concealed field holds it as pasted or
+    // as the downloaded `.pem`). Normalise it to one line *before* the always-on rules so the
+    // single-line Fly import format can carry it; every later rule sees the normalised value.
+    let pem: Option<Zeroizing<String>> = match r.transform.as_deref() {
+        Some(PEM_PRIVATE_KEY) => Some(pem_private_key(v).ok_or_else(|| fail("transform"))?),
+        _ => None,
+    };
+    let v: &str = pem.as_deref().map_or(v, String::as_str);
     if v.contains(['\n', '\r', '\0']) {
         return Err(fail("single_line"));
     }
@@ -172,6 +225,9 @@ pub fn check(
         return Err(fail("https_url"));
     }
     if let Some(t) = &r.transform {
+        if t == PEM_PRIVATE_KEY {
+            return Ok(Some(SecretValue::new(v.to_string())));
+        }
         if t != "signoz_ingestion_header" {
             return Err(fail("transform"));
         }
@@ -551,6 +607,70 @@ mod tests {
             "signoz-ingestion-key=a b",
         ] {
             assert_eq!(rule_of(r(), bad), "transform", "{bad}");
+        }
+    }
+    fn pem(label: &str, eol: &str) -> (String, String) {
+        let der: Vec<u8> = std::iter::once(0x30u8)
+            .chain((0..150u8).map(|i| i.wrapping_mul(7)))
+            .collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let lines: Vec<&str> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let multi = format!(
+            "-----BEGIN {label}-----{eol}{}{eol}-----END {label}-----{eol}",
+            lines.join(eol)
+        );
+        let single = format!("-----BEGIN {label}-----{b64}-----END {label}-----");
+        (multi, single)
+    }
+    fn pem_rules() -> Rules {
+        Rules {
+            transform: Some(PEM_PRIVATE_KEY.into()),
+            ..Rules::default()
+        }
+    }
+    #[test]
+    fn pem_private_key_multiline_is_staged_as_one_line() {
+        for label in ["RSA PRIVATE KEY", "PRIVATE KEY", "EC PRIVATE KEY"] {
+            for eol in ["\n", "\r\n"] {
+                let (multi, single) = pem(label, eol);
+                assert_eq!(
+                    with(pem_rules(), &multi).unwrap().unwrap(),
+                    single,
+                    "{label}"
+                );
+                // Already single-line (a bundle-migrated value) passes unchanged.
+                assert_eq!(with(pem_rules(), &single).unwrap().unwrap(), single);
+                assert!(!single.contains(['\n', '\r']));
+            }
+        }
+    }
+    #[test]
+    fn pem_private_key_refusals_name_the_rule_only() {
+        let (multi, _) = pem("RSA PRIVATE KEY", "\n");
+        let (cert, _) = pem("CERTIFICATE", "\n");
+        let mismatched = multi.replace("-----END RSA", "-----END EC");
+        let encrypted = multi.replace(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\n",
+        );
+        let not_der = "-----BEGIN PRIVATE KEY-----QUJD-----END PRIVATE KEY-----";
+        let two = format!("{multi}{multi}");
+        for bad in [
+            cert.as_str(),
+            mismatched.as_str(),
+            encrypted.as_str(),
+            not_der,
+            two.as_str(),
+            "-----BEGIN PRIVATE KEY-----%%%-----END PRIVATE KEY-----",
+            "not a pem",
+        ] {
+            let e = with(pem_rules(), bad).unwrap_err();
+            assert_eq!(e.rule, "transform");
+            assert_eq!(e.to_string(), "K: failed transform");
         }
     }
     #[test]
