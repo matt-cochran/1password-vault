@@ -127,7 +127,7 @@ vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY 
 
 ```toml
 [profile]
-kind = "fleet"                       # the only profile in v0.1; "simple" is planned for v0.2
+kind = "fleet"                       # or "simple" (one app per environment, below)
 
 [environments.staging]
 vault_id = "vstg1234example"         # IDs, not names; [A-Za-z0-9][A-Za-z0-9._-]*
@@ -174,6 +174,46 @@ rules = { enum = ["open", "invite_only"] }
 
 Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A product name is upper-cased into the template (`allumata` becomes `ALLUMATA`), so `OPENAI_API_KEY` is staged on Fly as `FLEET__ALLUMATA__OPENAI_API_KEY`. The template must contain `{PRODUCT}` and `{KEY}`.
 
+### Simple profile (one app per environment)
+
+For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item (a field outside any section) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
+
+```text
+vault myapp-prod   item myapp   field DATABASE_URL   (concealed)
+                                field JWT_KEY        (concealed)
+                                field LOG_LEVEL      (text)
+```
+
+```toml
+[profile]
+kind = "simple"
+
+[environments.prod]
+vault_id = "vprd1234example"
+item_id  = "iprd1234example"
+fly.app  = "myapp-production"        # one app per environment; two environments may not share it
+modes.payments = "live"              # input to prefix_by_mode rules; flat, no product level
+
+[keys.DATABASE_URL]
+kind = "secret"
+environments = ["prod"]
+
+[keys.JWT_KEY]
+kind = "secret"
+environments = ["prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+
+[keys.LOG_LEVEL]
+kind = "config"
+environments = ["prod"]
+rules = { enum = ["debug", "info", "warn"] }
+```
+
+Kinds, rules, guidance, modes and `immutable` work as in the fleet profile. Key names match `^[A-Z][A-Z0-9_]*$`. The managed set is exactly the declared keys: `--prune` unsets only a declared key that is not desired in the environment, and any other name on the Fly app is reported as unmanaged and never touched. Every command reads the item once, by vault ID and item ID.
+
+Under the simple profile, commands name a key by its name alone: `status` and `fly plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
+
 ## Workflow
 
 Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config`, the path is used exactly as given and no search is done. `<ENV>` is an environment name from the file.
@@ -188,6 +228,7 @@ opv fly plan staging --json         # the same plan as one machine-readable JSON
 opv fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv run dev --product allumata -- cargo run
+opv run prod -- ./server            # simple profile: no --product
 ```
 
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
@@ -314,7 +355,7 @@ A clean `status` ends with a summary line, for example `49 saved, 13 not yet on 
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
 - `run` hands secret values to the child process through `op run`; the child can read them.
-- No multiline values. Fleet profile only (a `simple` profile for one app per environment is planned for v0.2). `--json` on `status` and `fly plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
+- No multiline values. Two profiles: `fleet` (products, sections, a naming template) and `simple` (one app per environment, unsectioned fields, Fly name = key name). `--json` on `status` and `fly plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
