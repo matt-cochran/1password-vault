@@ -600,6 +600,46 @@ Constraints kept: SR-1, SR-2, FR-9 (text, never a prompt), FR-10 (stable exit ca
 
 Limitation (v0.1.2): an `op` timeout and `opv run` (which passes the child's exit code through, FR-4) are not diagnosed.
 
+## FR-27 — Install and Update Script
+
+The repository shall ship `install.sh`, a POSIX `sh` script that installs or updates opv from
+GitHub releases without npm, Homebrew or Rust:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
+sh install.sh [--version vX.Y.Z] [--dir <path>] [--check]
+```
+
+- **Platform detection:** `uname -s` and `uname -m` select the release asset: Linux `x86_64` /
+  `aarch64` (`arm64`) → the static `*-unknown-linux-musl` binaries (this covers WSL); macOS
+  `x86_64` / `arm64` → `*-apple-darwin`. On macOS, a shell running under Rosetta
+  (`sysctl -n sysctl.proc_translated` = 1) gets the `arm64` binary. Anything else fails with
+  the platform it detected and a link to the releases page; it never guesses. Windows is out
+  of scope for `install.sh`: use the release `.exe` (or npm from v0.2.0).
+- **Version:** the latest release by default, or exactly `--version`. A requested version
+  that has no asset for this platform fails naming both.
+- **Update:** when opv is already installed in the target directory, the script compares
+  `opv --version` with the target version. It replaces the binary only when they differ,
+  and prints `opv <old> → <new>`, or `opv <version> is already installed`. `--check` reports
+  what would happen and changes nothing.
+- **Integrity:** the binary is verified against the release's `SHA256SUMS` before anything is
+  installed. When `gh` is available, it additionally runs
+  `gh attestation verify <file> --repo matt-cochran/1password-vault` and fails on a mismatch.
+  A checksum mismatch, or a missing `sha256sum`/`shasum`, fails closed.
+- **Placement:** the default directory is `~/.local/bin`, with no `sudo`. The binary is
+  downloaded to a temporary file in the target directory and moved into place only after
+  verification, so an interrupted run never leaves a broken `opv`. If the directory is not
+  on `PATH`, the script prints the line to add.
+- It handles no secrets and never reads 1Password. Its output names versions and paths only.
+
+Acceptance:
+
+- A test matrix (CI, with fake `uname` and a local fixture release) covers each supported
+  platform/architecture pair, Rosetta, unsupported platforms, latest versus a pinned version,
+  update versus already current, `--check`, and checksum mismatch (fails, leaves any existing
+  binary untouched).
+- `shellcheck` passes, and the script runs under `dash` and `bash`.
+
 ## SR-1 — No Secret Logging
 
 Secret values shall never appear in:
@@ -998,6 +1038,7 @@ Version 0.2 is acceptable when, in addition to 1–14:
 23. Items 9 and 10 hold for every new command and flag.
 24. Every rule failure carries a reason from its rule's fixed set (FR-22); a marker-value test proves no reason contains any byte of the value, and `pem_private_key` reports each of its seven reasons.
 25. Each FR-26 situation, simulated with a fake `op`, prints its platform-specific next command and exits with its category; an expired session reports exit 7 and the sign-in command, never "run op item get to see why".
+26. `install.sh` installs, updates and pins versions on Linux (x86_64, aarch64, WSL) and macOS (x86_64, arm64, Rosetta), verifies the checksum before replacing anything, and fails closed on an unknown platform or a mismatch (FR-27).
 
 ## v0.2 scope
 
