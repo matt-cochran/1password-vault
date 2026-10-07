@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err};
+use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err, write_json};
 use crate::domain::{Fleet, KeyState, Kind, Row, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -20,11 +20,32 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_with(fleet, env_name, r, out, false)
+}
+
+/// `status <env> [--json]`. With `json`, stdout carries one FR-21 document and no table or
+/// summary line; exit codes are unchanged (`Findings(n)` for blocking rows).
+pub fn run_with(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
     fleet.fly_target(env_name)?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
-    print_rows(out, &plan.rows, target)?;
+    if json {
+        write_json(out, fleet, env_name, &plan)?;
+        let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+        return if n > 0 {
+            Err(Error::Findings(n))
+        } else {
+            Ok(())
+        };
+    }
+    print_rows(out, fleet, &plan.rows, target)?;
     print_extras(out, &plan)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     if n > 0 {
@@ -93,7 +114,7 @@ mod tests {
                     secret("allumata", "INTEGRATION_ENC_KEY", &enc()),
                     text("allumata", "SIGNUP_POLICY", "FIXTUREVALUE"),
                 ],
-                "fails rule",
+                "failed ",
             ),
             (
                 vec![
@@ -118,7 +139,7 @@ mod tests {
                     text("allumata", "SIGNUP_POLICY", POLICY),
                     extra.clone(),
                 ],
-                "fails rule",
+                "failed ",
             ),
         ];
         for (fields, expect) in cases {
@@ -156,7 +177,7 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         let i = lines
             .iter()
-            .position(|l| l.contains("OPENAI_API_KEY") && l.contains("fails rule"))
+            .position(|l| l.contains("OPENAI_API_KEY") && l.contains("failed "))
             .unwrap();
         assert!(lines[i + 1].starts_with("    guidance: "), "{out}");
         assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
@@ -242,7 +263,7 @@ mod tests {
         assert!(
             out.lines().any(|l| l.starts_with("allumata")
                 && l.contains("SMTP_PASS")
-                && l.contains("fails rule refuse_in")),
+                && l.contains("failed refuse_in (")),
             "{out}"
         );
         assert_no_values(&out);
@@ -261,7 +282,7 @@ mod tests {
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
-                && l.contains("fails rule import-hash-after-odd-quotes")),
+                && l.contains("failed import-hash-after-odd-quotes (")),
             "{out}"
         );
         assert_no_values(&out);

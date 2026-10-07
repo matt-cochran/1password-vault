@@ -21,6 +21,10 @@ pub enum Kind {
 pub struct Rules {
     pub prefix: Option<String>,
     pub not_prefix: Option<OneOrMany>,
+    /// Accept the value with or without this prefix and stage exactly one occurrence (FR-24).
+    pub ensure_prefix: Option<String>,
+    /// Full match required of the text after `ensure_prefix`; valid only with it (FR-24).
+    pub pattern: Option<String>,
     pub regex: Option<String>,
     #[serde(rename = "enum")]
     pub r#enum: Option<Vec<String>>,
@@ -131,14 +135,54 @@ impl Environment {
     }
 }
 
-/// A validated fleet configuration. Build it with `config::load` or `config::parse`.
+/// Which `profile.kind` the configuration declared (§10.2, FR-20).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Profile {
+    /// Products with sections in the item and a Fly name template (§10.2). The default.
+    #[default]
+    Fleet,
+    /// A flat `[keys]` map (FR-20): unsectioned item fields, Fly name = key name.
+    Simple,
+}
+
+/// Name of the one implicit product a simple-profile file desugars into (FR-20). Empty, so
+/// it can never collide with a fleet product name (`^[a-z][a-z0-9_-]*$`) or a 1Password
+/// section label (always non-empty), and it is never shown to the user: see
+/// [`key_label`].
+pub const SIMPLE_PRODUCT: &str = "";
+
+/// Fly name template of a simple-profile environment: the key name itself (FR-20).
+pub const SIMPLE_TEMPLATE: &str = "{KEY}";
+
+/// The user-facing name of `product`/`key`: `product/KEY` under the fleet profile, `KEY`
+/// under the simple profile (whose implicit product is [`SIMPLE_PRODUCT`]).
+pub fn key_label(product: &str, key: &str) -> String {
+    if product == SIMPLE_PRODUCT {
+        key.to_string()
+    } else {
+        format!("{product}/{key}")
+    }
+}
+
+/// A validated configuration. Build it with `config::load` or `config::parse`.
+///
+/// A simple-profile file (FR-20) is desugared into the same model: one product named
+/// [`SIMPLE_PRODUCT`] holding every key, unsectioned item fields (section
+/// [`SIMPLE_PRODUCT`]), and a Fly template of [`SIMPLE_TEMPLATE`], so the planner, rules,
+/// stage-and-compare and prune logic are shared unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fleet {
     pub environments: BTreeMap<String, Environment>,
     pub products: BTreeMap<String, Product>,
+    pub profile: Profile,
 }
 
 impl Fleet {
+    /// True for a `profile.kind = "simple"` file (FR-20).
+    pub fn is_simple(&self) -> bool {
+        self.profile == Profile::Simple
+    }
+
     /// Look up an environment by a (possibly user-supplied) name.
     pub fn environment(&self, env: &str) -> Result<&Environment, Error> {
         self.environments.get(env).ok_or_else(|| {
@@ -156,6 +200,10 @@ impl Fleet {
         let e = self.environment(env)?;
         match &e.fly {
             Some(f) => Ok((e, f)),
+            None if self.is_simple() => Err(Error::Config(format!(
+                "environment {env:?} has no fly section (add fly.app to use status and the \
+                 fly commands)"
+            ))),
             None => Err(Error::Config(format!(
                 "environment {env:?} has no fly section (add fly.app and fly.secret_name to \
                  use status and the fly commands)"
@@ -202,5 +250,20 @@ mod tests {
         );
         let no_fly = Environment { fly: None, ..e };
         assert_eq!(no_fly.fly_name("my-app", "API_KEY"), None);
+    }
+
+    #[test]
+    fn simple_template_renders_the_key_name_itself() {
+        let t = FlyTarget {
+            app: "a".into(),
+            secret_name_template: SIMPLE_TEMPLATE.into(),
+        };
+        assert_eq!(t.fly_name(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+    }
+
+    #[test]
+    fn key_label_hides_the_implicit_product() {
+        assert_eq!(key_label(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+        assert_eq!(key_label("api", "JWT_KEY"), "api/JWT_KEY");
     }
 }

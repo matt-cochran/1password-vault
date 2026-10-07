@@ -46,6 +46,120 @@ fn missing_config_file_exits_2() {
     assert!(err.starts_with("opv: configuration error"), "{err}");
 }
 
+/// Run opv with `dir` as the working directory and no `op` or `flyctl` on PATH.
+fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(args)
+        .current_dir(dir)
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// A temp dir with a valid `secrets.toml` at its root and a `nested` child to run from.
+fn dir_with_ancestor_config() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("secrets.toml"),
+        std::fs::read_to_string(CFG).unwrap(),
+    )
+    .unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    (dir, nested)
+}
+
+#[test]
+fn discovered_config_is_announced_once_on_stderr() {
+    let (_dir, nested) = dir_with_ancestor_config();
+    let (_, _, err) = opv_in(&nested, &["status", "qa"]);
+    let announced: Vec<&str> = err
+        .lines()
+        .filter_map(|l| l.strip_prefix("using "))
+        .collect();
+    let expected = nested.parent().unwrap().join("secrets.toml");
+    assert!(
+        announced.len() == 1 && same_file(announced[0], &expected),
+        "{err}"
+    );
+}
+
+/// Paths compared as filesystem locations: on Windows the same directory can appear in
+/// short (8.3) and long form, and `canonicalize` adds a `\\?\` prefix.
+fn same_file(printed: &str, expected: &std::path::Path) -> bool {
+    match (
+        std::fs::canonicalize(printed),
+        std::fs::canonicalize(expected),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[test]
+fn discovery_loads_the_ancestor_config_for_the_command() {
+    let (_dir, nested) = dir_with_ancestor_config();
+    let (_, _, err) = opv_in(&nested, &["status", "qa"]);
+    assert!(err.contains("undefined environment \"qa\""), "{err}");
+}
+
+#[test]
+fn doctor_without_any_config_still_runs_its_other_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, stdout, _) = opv_in(dir.path(), &["doctor"]);
+    assert!(stdout.contains("op auth"), "{stdout}");
+}
+
+#[test]
+fn missing_discovered_config_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (code, _, _) = opv_in(&nested, &["status", "prod"]);
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn missing_discovered_config_names_starting_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (_, _, err) = opv_in(&nested, &["status", "prod"]);
+    let named = err
+        .split("no secrets.toml found in ")
+        .nth(1)
+        .and_then(|rest| rest.split(" or any parent directory").next())
+        .unwrap_or("");
+    assert!(same_file(named, &nested), "{err}");
+}
+
+#[test]
+fn missing_discovered_config_suggests_config_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (_, _, err) = opv_in(&nested, &["status", "prod"]);
+    assert!(err.contains("--config"), "{err}");
+}
+
+#[test]
+fn explicit_config_suppresses_using_line() {
+    let (_, _, err) = opv(&["--config", CFG, "status", "qa"]);
+    assert!(!err.contains("using "), "{err}");
+}
+
+#[test]
+fn top_level_help_describes_config_discovery() {
+    let (_, out, _) = opv(&["--help"]);
+    assert!(out.contains("parent"), "{out}");
+}
+
 #[test]
 fn usage_errors_exit_2() {
     for args in [
@@ -193,25 +307,107 @@ fn run_requires_product_and_command() {
     }
 }
 
+#[test]
+fn deprecated_signoz_transform_prints_a_warning_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("secrets.toml");
+    let text = std::fs::read_to_string(CFG).unwrap();
+    std::fs::write(
+        &cfg,
+        format!(
+            "{text}\n[products.p.keys.TRACE]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ transform = \"signoz_ingestion_header\" }}\n"
+        ),
+    )
+    .unwrap();
+    let (_, _, err) = opv(&["--config", cfg.to_str().unwrap(), "status", "prod"]);
+    assert!(
+        err.contains("warning: p/TRACE: transform = \"signoz_ingestion_header\" is deprecated"),
+        "{err}"
+    );
+}
+
+const SIMPLE: &str = "tests/fixtures/simple.toml";
+
+/// FR-20: doctor accepts a simple-profile file.
+#[test]
+fn doctor_reports_a_simple_profile_file_as_valid() {
+    let (_, out, err) = opv(&["--config", SIMPLE, "doctor"]);
+    assert!(
+        out.contains("ok    config: valid (2 environment(s), 5 key(s))"),
+        "{out}{err}"
+    );
+}
+
+/// FR-20: `run` takes no --product under the simple profile.
+#[test]
+fn run_with_product_under_simple_exits_2() {
+    let (code, _, err) = opv(&[
+        "--config",
+        SIMPLE,
+        "run",
+        "prod",
+        "--product",
+        "api",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--product"), "{err}");
+}
+
+/// FR-20: a simple file with an unknown environment is still exit 2 before any call.
+#[test]
+fn simple_unknown_environment_exits_2_before_any_subprocess() {
+    for cmd in [
+        vec!["status", "qa"],
+        vec!["fly", "plan", "qa"],
+        vec!["fly", "sync", "qa"],
+        vec!["config", "export", "qa", "--json"],
+        vec!["item", "skeleton", "qa"],
+    ] {
+        let mut args = vec!["--config", SIMPLE];
+        args.extend(&cmd);
+        let (code, _, err) = opv(&args);
+        assert_eq!(code, 2, "{cmd:?}: {err}");
+    }
+}
+
 #[cfg(unix)]
 mod run_with_fake_op {
     use super::CFG;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::OnceLock;
 
-    /// Install a fake `op` that logs each invocation, then execs the args after `--`.
+    /// The fake `op`, written once per test binary and closed before any test here spawns
+    /// it. Writing an executable while another thread forks lets the child inherit the
+    /// write fd, and a later exec of it fails with ETXTBSY (exit 3, a flaky test). The fake
+    /// logs to `$FAKE_OP_LOG`, so one copy serves every test; each test gets a symlink.
+    fn shared_fake_op() -> &'static Path {
+        static FAKE: OnceLock<PathBuf> = OnceLock::new();
+        FAKE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("opv-cli-fake-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let op = dir.join("op");
+            std::fs::write(
+                &op,
+                "#!/bin/sh\necho called >> \"$FAKE_OP_LOG\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+            op
+        })
+    }
+
+    /// A per-test PATH dir holding a symlink to the shared fake `op`, and its call log.
     fn fake_op_dir(name: &str) -> (PathBuf, PathBuf) {
+        let op = shared_fake_op();
         let dir = std::env::temp_dir().join(format!("opv-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(op, dir.join("op")).unwrap();
         let log = dir.join("calls.log");
-        let script = format!(
-            "#!/bin/sh\necho called >> '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
-            log.display()
-        );
-        let op = dir.join("op");
-        std::fs::write(&op, script).unwrap();
-        std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
         (dir, log)
     }
 
@@ -220,6 +416,7 @@ mod run_with_fake_op {
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env("FAKE_OP_LOG", path.join("calls.log"))
             .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
             .output()
             .unwrap();
@@ -283,6 +480,24 @@ mod run_with_fake_op {
         assert_eq!(out, "op://vstg/istg/allumata/INTEGRATION_ENC_KEY");
     }
 
+    /// FR-20: under the simple profile the child sees unsectioned field references.
+    #[test]
+    fn simple_child_sees_unsectioned_op_references() {
+        let (dir, _) = fake_op_dir("simple-env");
+        let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .args(["--config", super::SIMPLE, "run", "prod", "--"])
+            .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
+            .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            "op://vprd/iprd/JWT_KEY"
+        );
+    }
+
     #[test]
     fn missing_op_exits_3() {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
@@ -301,4 +516,140 @@ mod run_with_fake_op {
             .unwrap();
         assert_eq!(out.status.code(), Some(3));
     }
+}
+
+/// FR-22: `explain` reads only the configuration, so it succeeds with no `op` or `flyctl`.
+#[test]
+fn explain_runs_without_op_or_flyctl() {
+    let (code, out, err) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("op item get iprd --vault vprd"), "{out}");
+}
+
+/// FR-22: the printed `op` command never contains `--reveal`.
+#[test]
+fn explain_never_prints_reveal() {
+    let (_, out, err) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert!(
+        !out.contains("--reveal") && !err.contains("--reveal"),
+        "{out}{err}"
+    );
+}
+
+/// FR-22: an undeclared key is a configuration error (exit 2).
+#[test]
+fn explain_undeclared_key_exits_2() {
+    let (code, _, err) = opv(&["--config", CFG, "explain", "allumata/NOPE", "--env", "prod"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.starts_with("opv: configuration error"), "{err}");
+}
+
+/// FR-22, FR-20: under the simple profile `explain` takes the bare key.
+#[test]
+fn explain_simple_form_takes_the_bare_key() {
+    let (code, out, err) = opv(&[
+        "--config",
+        SIMPLE,
+        "explain",
+        "DATABASE_URL",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("DATABASE_URL in prod\n"), "{out}");
+}
+
+/// FR-22, FR-20: `<product>/<key>` under the simple profile is a configuration error.
+#[test]
+fn explain_product_form_under_simple_exits_2() {
+    let (code, _, err) = opv(&[
+        "--config",
+        SIMPLE,
+        "explain",
+        "app/DATABASE_URL",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 2, "{err}");
+}
+
+/// FR-22, FR-20: a bare key under the fleet profile is a configuration error.
+#[test]
+fn explain_bare_key_under_fleet_exits_2() {
+    let (code, _, err) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 2, "{err}");
+}
+
+// --- init (FR-23) ---
+
+const INIT: [&str; 8] = [
+    "init",
+    "staging",
+    "--vault",
+    "v",
+    "--item",
+    "i",
+    "--fly-app",
+    "app",
+];
+
+#[test]
+fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(&path, "# mine\n").unwrap();
+    let (code, out, err) = opv_in(dir.path(), &INIT);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("secrets.toml already exists"), "{err}");
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+}
+
+/// init reads no configuration: an ancestor secrets.toml is neither announced nor loaded,
+/// and without op on PATH it fails as a dependency error, writing nothing.
+#[test]
+fn init_ignores_discovery_and_writes_nothing_when_op_is_missing() {
+    let (dir, nested) = dir_with_ancestor_config();
+    let (code, _, err) = opv_in(&nested, &INIT);
+    assert_eq!(code, 3, "{err}");
+    assert!(!err.contains("using "), "{err}");
+    assert!(!nested.join("secrets.toml").exists());
+    drop(dir);
+}
+
+#[test]
+fn init_rejects_config_flag_and_bad_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = vec!["--config", "x.toml"];
+    a.extend(INIT);
+    let (code, _, err) = opv_in(dir.path(), &a);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--config is not used"), "{err}");
+    let mut a = INIT.to_vec();
+    a.extend(["--profile", "both"]);
+    let (code, _, err) = opv_in(dir.path(), &a);
+    assert_eq!(code, 2, "{err}");
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }

@@ -1,0 +1,41 @@
+[profile]
+kind = "simple"
+
+[environments.staging]
+vault_id = "vstg"
+item_id = "istg"
+fly.app = "myapp-staging"
+modes.payments = "test"
+
+[environments.prod]
+vault_id = "vprd"
+item_id = "iprd"
+fly.app = "myapp-production"
+modes.payments = "off"
+
+[keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging", "prod"]
+rules = { prefix = "postgres://" }
+guidance = "Fly Postgres / connection string"
+
+[keys.JWT_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+guidance = "32 random bytes, base64"
+
+[keys.STRIPE_SECRET_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_", live = "sk_live_" }, skip = ["off"] } }
+
+[keys.STAGING_DEBUG_TOKEN]
+kind = "secret"
+environments = ["staging"]
+
+[keys.LOG_LEVEL]
+kind = "config"
+environments = ["staging", "prod"]
+rules = { enum = ["debug", "info", "warn"] }

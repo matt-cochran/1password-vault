@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use opv::Error;
-use opv::app::{config_export, doctor, run as run_cmd, skeleton, status, sync};
+use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
 use opv::config;
 use opv::runner::ProcessRunner;
 
@@ -37,13 +37,11 @@ Exit codes:
 )]
 struct Cli {
     /// Path to the fleet configuration.
-    #[arg(
-        long,
-        global = true,
-        value_name = "PATH",
-        default_value = "secrets.toml"
-    )]
-    config: PathBuf,
+    ///
+    /// Without this option, `secrets.toml` is looked for in the current directory and
+    /// then each parent directory, and the first one found is used.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -58,6 +56,9 @@ enum Cmd {
     Status {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
+        /// Print one machine-readable JSON document instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Run a command with the product's secrets in its environment, via `op run`.
     ///
@@ -67,9 +68,10 @@ enum Cmd {
     Run {
         /// Environment name from the configuration (for example dev or staging).
         env: String,
-        /// Product whose declared keys are passed to the command.
+        /// Product whose declared keys are passed to the command (fleet profile only;
+        /// a simple-profile file takes none and passes every declared key).
         #[arg(long)]
-        product: String,
+        product: Option<String>,
         /// Command and arguments, after `--`.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -83,6 +85,41 @@ enum Cmd {
     /// 1Password item commands.
     #[command(subcommand)]
     Item(ItemCmd),
+    /// Explain one declared key from the configuration alone; never reads a value.
+    ///
+    /// Prints the op:// reference, kind, Fly name, rules, immutable and guidance, and the
+    /// `op item get` command to inspect the item yourself. Makes no 1Password or Fly call.
+    Explain {
+        /// The key: PRODUCT/KEY, or KEY under the simple profile.
+        #[arg(value_name = "[PRODUCT/]KEY")]
+        target: String,
+        /// Environment name; may be omitted when only one environment is declared.
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Write a starter secrets.toml in the current directory from an existing item.
+    ///
+    /// Looks the vault and item up by title once, reads the item's field names and types
+    /// (never its values) and writes IDs, key names and kinds. Writes nothing to 1Password.
+    Init {
+        /// Environment name to declare (for example staging or prod).
+        env: String,
+        /// Vault title, matched exactly.
+        #[arg(long)]
+        vault: String,
+        /// Item title in that vault, matched exactly.
+        #[arg(long)]
+        item: String,
+        /// Fly app of the environment (not looked up; flyctl is not called).
+        #[arg(long, value_name = "APP")]
+        fly_app: String,
+        /// Profile to write; without it, it follows the item's shape.
+        #[arg(long, value_parser = ["simple", "fleet"])]
+        profile: Option<String>,
+        /// Overwrite an existing secrets.toml.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -93,6 +130,9 @@ enum FlyCmd {
     Plan {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
+        /// Print one machine-readable JSON document instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Stage the managed secrets on the environment's Fly app.
     ///
@@ -198,14 +238,36 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
     let r = ProcessRunner::default();
-    let loaded = config::load(&cli.config);
+    if let Cmd::Init { .. } = &cli.cmd {
+        return run_init(cli, &r, out).map(|()| 0);
+    }
+    // A missing config is a configuration error for the command, not an early exit, so
+    // `doctor` still runs its other checks on a fresh machine.
+    let loaded = match &cli.config {
+        Some(path) => config::load(path),
+        None => match std::env::current_dir() {
+            Err(e) => Err(Error::Config(format!(
+                "cannot read the current directory: {e}"
+            ))),
+            Ok(start) => match config::discover(&start) {
+                Some(found) => {
+                    let _ = writeln!(io::stderr(), "using {}", found.display());
+                    config::load(&found)
+                }
+                None => Err(Error::Config(format!(
+                    "no secrets.toml found in {} or any parent directory; pass --config <path>",
+                    start.display()
+                ))),
+            },
+        },
+    };
     if let Cmd::Run {
         env,
         product,
         command,
     } = &cli.cmd
     {
-        return run_cmd::run(&loaded?, env, product, command, &r);
+        return run_cmd::run_for(&loaded?, env, product.as_deref(), command, &r);
     }
     run_other(cli.cmd, loaded, &r, out).map(|()| 0)
 }
@@ -218,9 +280,10 @@ fn run_other(
 ) -> Result<(), Error> {
     match cmd {
         Cmd::Run { .. } => unreachable!("handled by run"),
+        Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Doctor => doctor::run(loaded, r, out),
-        Cmd::Status { env } => status::run(&loaded?, &env, r, out),
-        Cmd::Fly(FlyCmd::Plan { env }) => sync::plan(&loaded?, &env, r, out),
+        Cmd::Status { env, json } => status::run_with(&loaded?, &env, r, out, json),
+        Cmd::Fly(FlyCmd::Plan { env, json }) => sync::plan_with(&loaded?, &env, r, out, json),
         Cmd::Fly(FlyCmd::Sync {
             env,
             deploy,
@@ -240,7 +303,39 @@ fn run_other(
             config_export::run(&loaded?, &env, r, out)
         }
         Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
+        Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
     }
+}
+
+/// `init` writes `./secrets.toml`; it reads no configuration, so it runs before discovery.
+fn run_init(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
+    let Cmd::Init {
+        env,
+        vault,
+        item,
+        fly_app,
+        profile,
+        force,
+    } = cli.cmd
+    else {
+        unreachable!("called for init only")
+    };
+    if cli.config.is_some() {
+        return Err(Error::Config(
+            "init writes secrets.toml in the current directory; --config is not used".into(),
+        ));
+    }
+    let dir = std::env::current_dir()
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}")))?;
+    let args = init::InitArgs {
+        env,
+        vault,
+        item,
+        fly_app,
+        profile: profile.as_deref().map(init::parse_profile).transpose()?,
+        force,
+    };
+    init::run(&args, &dir, r, out)
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

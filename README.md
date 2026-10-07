@@ -6,6 +6,36 @@ The repository is named `1password-vault` for historical reasons; the tool is `o
 
 ## Install
 
+### Install script (Linux and macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
+```
+
+`install.sh` installs or updates `opv` into `~/.local/bin` without `sudo` and without
+npm, Homebrew or Rust. It picks the release asset for your OS and CPU (including
+WSL and macOS under Rosetta), verifies the download against the release's
+`SHA256SUMS`, and, when `gh` is available, runs
+`gh attestation verify <file> --repo matt-cochran/1password-vault`. An unknown
+platform, a missing checksum tool or a checksum mismatch fails closed.
+
+```sh
+sh install.sh --version v0.1.2   # install exactly this release (default: latest)
+sh install.sh --dir /usr/local/bin
+sh install.sh --check            # report what would happen, change nothing
+```
+
+When `opv` is already present in the target directory, the script compares
+`opv --version` with the target version: it prints `opv <old> → <new>` when it
+replaces the binary and `opv <version> is already installed` when it is already
+current. `--check` prints the same intent without downloading or writing
+anything. The binary is downloaded to a temporary file in the target directory
+and moved into place only after verification, so an interrupted run never
+leaves a broken `opv`. If the directory is not on `PATH`, the script prints the
+`export PATH=...` line to add.
+
+`OPV_INSTALL_BASE_URL` overrides the release base URL for the test harness only.
+
 ### Release binaries
 
 Download the asset for your platform from the [latest release](https://github.com/matt-cochran/1password-vault/releases/latest), together with `SHA256SUMS`, and [verify it](#verify-a-download).
@@ -97,7 +127,7 @@ vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY 
 
 ```toml
 [profile]
-kind = "fleet"                       # the only profile in v0.1
+kind = "fleet"                       # or "simple" (one app per environment, below)
 
 [environments.staging]
 vault_id = "vstg1234example"         # IDs, not names; [A-Za-z0-9][A-Za-z0-9._-]*
@@ -144,18 +174,85 @@ rules = { enum = ["open", "invite_only"] }
 
 Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A product name is upper-cased into the template (`allumata` becomes `ALLUMATA`), so `OPENAI_API_KEY` is staged on Fly as `FLEET__ALLUMATA__OPENAI_API_KEY`. The template must contain `{PRODUCT}` and `{KEY}`.
 
+### Simple profile (one app per environment)
+
+For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item (a field outside any section) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
+
+```text
+vault myapp-prod   item myapp   field DATABASE_URL   (concealed)
+                                field JWT_KEY        (concealed)
+                                field LOG_LEVEL      (text)
+```
+
+```toml
+[profile]
+kind = "simple"
+
+[environments.prod]
+vault_id = "vprd1234example"
+item_id  = "iprd1234example"
+fly.app  = "myapp-production"        # one app per environment; two environments may not share it
+modes.payments = "live"              # input to prefix_by_mode rules; flat, no product level
+
+[keys.DATABASE_URL]
+kind = "secret"
+environments = ["prod"]
+
+[keys.JWT_KEY]
+kind = "secret"
+environments = ["prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+
+[keys.LOG_LEVEL]
+kind = "config"
+environments = ["prod"]
+rules = { enum = ["debug", "info", "warn"] }
+```
+
+Kinds, rules, guidance, modes and `immutable` work as in the fleet profile. Key names match `^[A-Z][A-Z0-9_]*$`. The managed set is exactly the declared keys: `--prune` unsets only a declared key that is not desired in the environment, and any other name on the Fly app is reported as unmanaged and never touched. Every command reads the item once, by vault ID and item ID.
+
+Under the simple profile, commands name a key by its name alone: `status` and `fly plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
+
+One caveat for `run` under the simple profile: it hands `op run` references of the form `op://<vault>/<item>/KEY`, and `op` matches a field with that label in *any* section. Keep simple-profile keys only as unsectioned fields: a sectioned field with the same label can be picked up by `run` while `status` reports the key missing, and having both can make `op` report the reference as ambiguous.
+
+Changed in v0.2 for fleet files: `run` without `--product` is now an opv configuration error (still exit 2) rather than a usage error, and a bad `profile.kind` names both supported profiles.
+
+### Start from an existing item: `opv init`
+
+If the 1Password item already exists, `init` writes a starter `secrets.toml` from it instead of writing one by hand:
+
+```sh
+opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--profile simple|fleet] [--force]
+```
+
+- It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs. No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
+- It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
+- The profile follows the item's shape: only unsectioned fields gives a simple file, only sectioned fields gives a fleet file (one product per section, `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"`). An item with both is an error naming both shapes; `--profile` then decides, and the fields of the other shape are ignored with a note.
+- A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed: rename the field in 1Password and run `init --force` again. When `status` and `fly sync` would reject such a field (a wrong type, a field in a section without a label, a sectioned field without a label), the note says so. A label given twice where opv reads the item is an error and nothing is written.
+- `--fly-app` is required; `flyctl` is not called.
+- It writes `./secrets.toml` in the current directory (`--config` is not accepted). If the file exists, it refuses (exit 2) unless `--force` is given; it never merges. If a parent directory already holds a `secrets.toml`, a note names it: the new file takes precedence for commands run from here down. The file is validated like a hand-written one and written atomically (a temporary file in the same directory, then a rename).
+- It writes nothing to 1Password. It costs three 1Password requests (`op vault list`, `op item list`, `op item get`), at dev time only.
+
+It ends with the path, the counts (`N secret, M config, skipped K`) and `Next step: opv fly plan <env>`.
+
 ## Workflow
 
-Global option: `--config <PATH>` (default `secrets.toml`). `<ENV>` is an environment name from the file.
+Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config`, the path is used exactly as given and no search is done. `<ENV>` is an environment name from the file.
 
 ```sh
 opv doctor                          # config, op and sign-in, flyctl and sign-in
+opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status staging                  # one row per product and key; exit 8 if any blocks
+opv status staging --json           # the same state as one machine-readable JSON document
 opv fly plan staging                # what a sync would stage, hold and prune; exit 8 if any blocks
+opv fly plan staging --json         # the same plan as one machine-readable JSON document
 opv fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
+opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
 opv run dev --product allumata -- cargo run
+opv run prod -- ./server            # simple profile: no --product
 ```
 
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
@@ -165,6 +262,78 @@ opv run dev --product allumata -- cargo run
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
 7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file.
+
+### Next step
+
+`doctor` ends with one `Next step` line. When a check fails it names the first failing check and the safe command that addresses it, the same command the failure prints under it:
+
+```text
+Next step (op auth): sign in: eval $(op signin)
+```
+
+An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
+
+### Explain a key
+
+```sh
+opv explain <product>/<key> [--env <environment>]
+```
+
+`explain` prints what the configuration declares for one key in one environment: the `op://` reference, the field kind, the Fly name, the declared rules, `immutable` and `guidance`, plus an `op item get <item_id> --vault <vault_id>` command you can run in your own terminal to look at the item. That command never contains `--reveal`.
+
+```text
+allumata/OPENAI_API_KEY in prod
+  reference:  op://vprd/iprd/allumata/OPENAI_API_KEY
+  kind:       secret (concealed field)
+  fly name:   FLEET__ALLUMATA__OPENAI_API_KEY
+  rules:      prefix = "sk-", not_prefix = "sk-or-"
+  immutable:  no
+  guidance:   OpenAI platform / API keys
+  inspect:    op item get iprd --vault vprd
+```
+
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
+
+It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
+
+### Machine-readable status and plan
+
+`status <ENV> --json` and `fly plan <ENV> --json` print exactly one JSON document on stdout
+and nothing else. It contains names, states and counts only: no value, no value fragment,
+no value length and no guidance. Exit codes are unchanged, and an error is still reported
+on stderr with no partial document on stdout. The top-level `schema_version` is `1`; adding
+a field keeps it, while renaming or removing a field, or changing its meaning, increments it.
+
+```json
+{
+  "schema_version": 1,
+  "environment": "prod",
+  "rows": [
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret",
+      "state": "saved",
+      "rule": null,
+      "reason": null,
+      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "target": "absent",
+      "action": "would_stage"
+    }
+  ],
+  "extras": [],
+  "stage": ["FLEET__ALLUMATA__OPENAI_API_KEY"],
+  "held": [],
+  "prune": [],
+  "totals": { "rows": 1, "findings": 0, "extras": 0, "to_stage": 1, "held": 0, "to_prune": 0 }
+}
+```
+
+`state` is `saved`, `missing`, `wrong_kind`, `failing_rule` or `skipped`; `rule` names the
+failing rule when `state` is `failing_rule`, and `reason` says why (see
+[Failure reasons](#failure-reasons)); `target` is `present`, `absent` or
+`would_change` for a secret and `null` for a config key; `action` is `would_stage`,
+`would_prune`, `held` or `null`. The document is meant for the scheduled drift check.
 
 ### Change detection
 
@@ -178,7 +347,7 @@ Nothing is deleted by default. `--prune` unsets only names that the template pro
 
 ## Rules reference
 
-Rules go in a key's `rules = { ... }` table. A failure names the key and the rule, never the value.
+Rules go in a key's `rules = { ... }` table. A failure names the key, the rule and a reason, never the value.
 
 Always on, for every key (after a `pem_private_key` transform, see below): `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_surrounding_space`; `max_len` (59,000 bytes).
 
@@ -187,6 +356,8 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `prefix = "sk-"` | value starts with the prefix |
 | `not_prefix = "sk-or-"` or a list | value starts with none of them |
 | `regex = "..."` | the whole value matches (full match) |
+| `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
+| `pattern = "..."` | only with `ensure_prefix`: the text after the prefix fully matches (full match) |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
 | `hex_bytes = N` | valid hex that decodes to N bytes |
@@ -194,8 +365,8 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `https_url = true` | an `https://` URL |
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
-| `transform = "signoz_ingestion_header"` | accepts a bare SigNoz ingestion key or one already prefixed `signoz-ingestion-key=`, and stages it as `signoz-ingestion-key=<key>` |
-| `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
+| `transform = "signoz_ingestion_header"` | **deprecated**: kept for one release as an alias for `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`; loading a configuration that uses it prints a deprecation warning naming the product and key. Use the generic rules instead |
+| `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, not encrypted, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 Fly import refusals are checked for every ready secret by `status` and `fly plan` as well as `fly sync`, so a green status means sync will not refuse the value:
 
@@ -207,6 +378,41 @@ Fly import refusals are checked for every ready secret by `status` and `fly plan
 | `import-line-too-long` | an encoded import line over 60,000 bytes |
 | `import-invalid-utf8` | a value that is not valid UTF-8 |
 | `import-duplicate-name` | the same Fly name twice in one batch |
+
+### Failure reasons
+
+Every rule failure carries a reason. `status`, `fly plan` and `fly sync` print it after the rule name, and `--json` carries it in a separate `reason` field next to `rule`:
+
+```text
+journeeze/GITHUB_APP_PRIVATE_KEY: failed transform (BEGIN/END labels differ)
+```
+
+The rule name is the stable identifier to match on; a reason may be added or reworded in a minor release. Each reason comes from a fixed set per rule, or is built only from the configuration (a configured prefix, mode or byte count). It never contains anything read from the value: no length, position, character, actual prefix or label.
+
+| Rule | Reasons |
+|---|---|
+| `refuse_in` | `must not be set in this environment` |
+| `nonempty` | `empty` |
+| `single_line` | `contains a line break or NUL` |
+| `no_surrounding_space` | `leading or trailing whitespace` |
+| `max_len` | `longer than the 59000-byte limit` |
+| `prefix` | `expected prefix <configured prefix>` |
+| `not_prefix` | `starts with a refused prefix` (never which one) |
+| `prefix_by_mode` | `wrong prefix for mode <mode>`, `mode <mode name> is not set in this environment`, `no prefix is configured for mode <mode>` |
+| `regex` | `does not match the configured regex` |
+| `enum` | `not one of the allowed values` |
+| `base64_bytes` | `not standard base64`, `does not decode to <N> bytes` |
+| `hex_bytes` | `not hex`, `does not decode to <N> bytes` |
+| `email_list` | `not a comma-separated list of email addresses` |
+| `https_url` | `not an https:// URL`, `URL contains whitespace` |
+| `ensure_prefix` | `nothing after the prefix` |
+| `pattern` | `text after the prefix does not match the pattern` |
+| `transform` (`pem_private_key`) | `no BEGIN/END markers`, `BEGIN/END labels differ`, `not a private key`, `encrypted key`, `more than one PEM block`, `body is not base64`, `not a key structure` |
+| `transform` (deprecated SigNoz alias) | the `ensure_prefix` and `pattern` reasons; the rule name stays `transform` |
+| `transform` (other name) | `unknown transform` |
+| Fly import rules | `not a valid Fly secret name`, `contains a line break`, `a # follows an odd number of double quotes`, `too long for one Fly import line`, `not valid UTF-8`, `name occurs twice in one import` |
+
+`pem_private_key` refuses an encrypted key, whether it has a `Proc-Type` header or the PKCS#8 `ENCRYPTED PRIVATE KEY` label.
 
 ## Exit codes
 
@@ -243,7 +449,7 @@ A clean `status` ends with a summary line, for example `49 saved, 13 not yet on 
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
 - `run` hands secret values to the child process through `op run`; the child can read them.
-- No multiline values. Fleet profile only. No `--json` output other than `config export`.
+- No multiline values. Two profiles: `fleet` (products, sections, a naming template) and `simple` (one app per environment, unsectioned fields, Fly name = key name). `--json` on `status` and `fly plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
