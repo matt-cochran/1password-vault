@@ -104,13 +104,7 @@ fn run_on(
     line(
         out,
         CONFIG_CHECK,
-        config.map(|f| {
-            Check::Ok(format!(
-                "valid ({} environment(s), {} product(s))",
-                f.environments.len(),
-                f.products.len()
-            ))
-        }),
+        config.map(|f| Check::Ok(config_summary(&f))),
     )?;
     line(out, "op", op_version(r, host))?;
     line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
@@ -145,6 +139,21 @@ fn run_on(
     match first {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// `valid (N environment(s), M product(s))`, or under the simple profile, whose one
+/// product is hidden (FR-20), `valid (N environment(s), M key(s))`.
+fn config_summary(f: &Fleet) -> String {
+    let envs = f.environments.len();
+    if f.is_simple() {
+        let keys: usize = f.products.values().map(|p| p.keys.len()).sum();
+        format!("valid ({envs} environment(s), {keys} key(s))")
+    } else {
+        format!(
+            "valid ({envs} environment(s), {} product(s))",
+            f.products.len()
+        )
     }
 }
 
@@ -620,6 +629,29 @@ mod tests {
         assert!(out.contains("ok    fly auth"), "{out}");
         assert!(
             out.contains("skip  fly: no fly section in environment(s) dev"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn simple_profile_config_line_counts_keys_not_products() {
+        let simple = crate::config::load("tests/fixtures/simple.toml").unwrap();
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Ok(simple), &r);
+        assert_eq!(
+            checks(&out)[0],
+            "ok    config: valid (2 environment(s), 5 key(s))",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn fleet_config_line_still_counts_products() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            checks(&out)[0],
+            "ok    config: valid (2 environment(s), 1 product(s))",
             "{out}"
         );
     }

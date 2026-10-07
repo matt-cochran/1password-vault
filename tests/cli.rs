@@ -333,7 +333,7 @@ const SIMPLE: &str = "tests/fixtures/simple.toml";
 fn doctor_reports_a_simple_profile_file_as_valid() {
     let (_, out, err) = opv(&["--config", SIMPLE, "doctor"]);
     assert!(
-        out.contains("ok    config: valid (2 environment(s)"),
+        out.contains("ok    config: valid (2 environment(s), 5 key(s))"),
         "{out}{err}"
     );
 }
