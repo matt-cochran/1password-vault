@@ -1038,7 +1038,10 @@ mod tests {
         };
         let e = run(&f(), "prod", &r, &mut Vec::new(), &o).unwrap_err();
         assert!(matches!(e, Error::Target(_)), "{e}");
-        assert_eq!(r.calls.borrow().len(), 3);
+        // The failed import is followed only by the login check (FR-26): no list B, no
+        // unset, no deploy.
+        assert_eq!(r.calls.borrow().len(), 4);
+        assert_eq!(r.calls.borrow()[3].args, vec!["auth", "whoami"]);
     }
 
     // ---- fly plan -------------------------------------------------------------------
