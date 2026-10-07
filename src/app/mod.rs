@@ -1,4 +1,10 @@
 //! Application use cases, one module per command (§6.2).
+//!
+//! Rules shared by every command:
+//! - The environment name is resolved with [`Fleet::environment`] before any subprocess
+//!   call, so an unknown name is `Error::Config` and `plan::build` never sees one.
+//! - A command that reads 1Password makes exactly one `op` call (FR-13).
+//! - Output names products, keys, kinds, rules and Fly names, never values (SR-1).
 
 pub mod config_export;
 pub mod doctor;
@@ -6,6 +12,163 @@ pub mod run;
 pub mod skeleton;
 pub mod status;
 pub mod sync;
+
+use std::collections::{BTreeSet, HashSet};
+use std::io::{self, Write};
+
+use crate::adapters::{fly, onepassword};
+use crate::domain::plan;
+use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan};
+use crate::error::Error;
+use crate::runner::CommandRunner;
+
+/// Fly digests are not computable locally (D0 Q4, ruling P1): every key present on Fly is
+/// `Unknown` to the planner, and change detection is stage-and-compare in `fly sync`.
+fn no_digest(_: &SecretValue) -> Option<String> {
+    None
+}
+
+/// Read the environment's item once (FR-13), list the Fly app once when `with_fly`, and
+/// build the plan. `env_name` must already be resolved (callers do it first).
+pub(crate) fn read_and_plan(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    with_fly: bool,
+    rotate: &BTreeSet<(String, String)>,
+) -> Result<(SyncPlan, Vec<FlySecret>), Error> {
+    let env = fleet.environment(env_name)?;
+    let item = onepassword::read_item(r, env)?;
+    let on_fly = if with_fly {
+        fly::list(r, &env.fly_app)?
+    } else {
+        Vec::new()
+    };
+    let p = plan::build(fleet, env_name, item.fields, &on_fly, rotate, &no_digest);
+    Ok((p, on_fly))
+}
+
+/// A failed write to the output stream (closed pipe and the like).
+pub(crate) fn write_err(e: io::Error) -> Error {
+    Error::Dependency(format!("cannot write output ({})", e.kind()))
+}
+
+pub(crate) fn kind_label(k: Kind) -> &'static str {
+    match k {
+        Kind::Secret => "secret",
+        Kind::Config => "config",
+    }
+}
+
+pub(crate) fn state_label(s: KeyState) -> String {
+    match s {
+        KeyState::Missing => "missing".into(),
+        KeyState::WrongKind => "wrong kind".into(),
+        KeyState::RuleFailed(rule) => format!("fails rule {rule}"),
+        KeyState::Ready => "saved".into(),
+        KeyState::Skipped => "skipped".into(),
+    }
+}
+
+/// `product/KEY` of every row in `rows` matching `pred`, for names-only messages.
+pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String> {
+    rows.iter()
+        .filter(|r| pred(r))
+        .map(|r| format!("{}/{} ({})", r.product, r.key, state_label(r.state)))
+        .collect()
+}
+
+pub(crate) fn is_blocking(r: &Row) -> bool {
+    matches!(
+        r.state,
+        KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(_)
+    )
+}
+
+/// Missing keys, and keys that exist but are empty (a skeleton field nobody filled in),
+/// get their declared guidance printed under the row (FR-17, spec §7.4).
+fn wants_guidance(r: &Row) -> bool {
+    matches!(
+        r.state,
+        KeyState::Missing | KeyState::RuleFailed("nonempty")
+    ) && !r.guidance.is_empty()
+}
+
+/// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, with guidance on the line after
+/// each missing row. `target` renders the last column. Rows hold names only.
+pub(crate) fn print_rows(
+    out: &mut dyn Write,
+    rows: &[Row],
+    target: impl Fn(&Row) -> String,
+) -> Result<(), Error> {
+    let header = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"].map(String::from);
+    let cells: Vec<[String; 5]> = rows
+        .iter()
+        .map(|r| {
+            [
+                r.product.clone(),
+                r.key.clone(),
+                kind_label(r.kind).to_string(),
+                state_label(r.state),
+                target(r),
+            ]
+        })
+        .collect();
+    let mut w = [0usize; 4];
+    for c in std::iter::once(&header).chain(&cells) {
+        for (i, wi) in w.iter_mut().enumerate() {
+            *wi = (*wi).max(c[i].len());
+        }
+    }
+    let line = |c: &[String; 5]| {
+        let mut s = String::new();
+        for (i, wi) in w.iter().enumerate() {
+            s.push_str(&format!("{:<wi$}  ", c[i]));
+        }
+        s.push_str(&c[4]);
+        s.trim_end().to_string()
+    };
+    writeln!(out, "{}", line(&header)).map_err(write_err)?;
+    for (r, c) in rows.iter().zip(&cells) {
+        writeln!(out, "{}", line(c)).map_err(write_err)?;
+        if wants_guidance(r) {
+            writeln!(out, "    guidance: {}", r.guidance).map_err(write_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// Print each undeclared item field as a warning; extras are never staged or pruned.
+pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
+    for (section, label) in &plan.extras {
+        writeln!(
+            out,
+            "warning: extra field {section}/{label} is in the 1Password item but not declared"
+        )
+        .map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// Fly names on the app that the template does not render for any declared key: other
+/// tools' secrets, which secretctl never touches (FR-5 "unmanaged on Fly", §10.3).
+pub(crate) fn unmanaged_on_fly<'a>(
+    fleet: &Fleet,
+    env_name: &str,
+    on_fly: &'a [FlySecret],
+) -> Result<Vec<&'a str>, Error> {
+    let env = fleet.environment(env_name)?;
+    let managed: HashSet<String> = fleet
+        .products
+        .iter()
+        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| env.fly_name(p, k)))
+        .collect();
+    Ok(on_fly
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| !managed.contains(*n))
+        .collect())
+}
 
 #[cfg(test)]
 pub(crate) mod testutil {

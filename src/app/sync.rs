@@ -1,37 +1,234 @@
-//! `fly plan` / `fly sync` use cases (FR-5..FR-8).
+//! `fly plan` / `fly sync` use cases (FR-5..FR-8, FR-16, §6.4).
+//!
+//! Fly digests cannot be computed locally (D0 Q4), so `fly sync` is stage-and-compare
+//! (ruling P1): read the item once → list A → plan → refuse if anything blocks (nothing
+//! staged) → validate the import batch → stage → list B → report each staged key as
+//! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged) →
+//! `--deploy`: deploy, only when something effectively changed (FR-7). Without `--deploy`
+//! nothing is ever deployed. `fly plan` reads the item once and lists once; it mutates
+//! nothing (FR-11).
 
+use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::domain::Fleet;
+use super::{
+    is_blocking, print_extras, print_rows, read_and_plan, row_names, unmanaged_on_fly, write_err,
+};
+use crate::adapters::fly;
+use crate::domain::rules;
+use crate::domain::{Fleet, FlySecret, KeyState, Kind, Row, SecretValue, SyncPlan, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
 /// Flags of `fly sync`.
 #[derive(Debug, Default, Clone)]
 pub struct SyncOpts {
+    /// Deploy staged changes (FR-7). Never implied.
     pub deploy: bool,
+    /// Unset managed names not desired in this environment (FR-8). Never implied.
     pub prune: bool,
+    /// `PRODUCT/KEY` entries: immutable keys to stage even though present on Fly (FR-16).
     pub rotate: Vec<String>,
+    /// Fail with `Findings` if staging changed any digest (the migration gate, P1).
     pub expect_no_change: bool,
 }
 
 pub fn run(
-    _fleet: &Fleet,
-    _env_name: &str,
-    _r: &dyn CommandRunner,
-    _out: &mut dyn Write,
-    _opts: &SyncOpts,
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    opts: &SyncOpts,
 ) -> Result<(), Error> {
-    todo!()
+    let env = fleet.environment(env_name)?;
+    let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
+    let (plan, list_a) = read_and_plan(fleet, env_name, r, true, &rotate)?;
+
+    let blocking = row_names(&plan.rows, is_blocking);
+    if !blocking.is_empty() {
+        return Err(Error::Policy(format!(
+            "fly sync refused, nothing staged: {}",
+            blocking.join(", ")
+        )));
+    }
+    let batch: Vec<(String, &SecretValue)> =
+        plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
+    fly::validate_import(&batch)?;
+    print_extras(out, &plan)?;
+    print_counts(out, &plan)?;
+
+    let mut changed = Vec::new();
+    let mut unchanged = Vec::new();
+    if !batch.is_empty() {
+        fly::stage(r, &env.fly_app, &batch)?;
+        let list_b = fly::list(r, &env.fly_app)?;
+        for (name, _) in &batch {
+            let (a, b) = (digest(&list_a, name), digest(&list_b, name));
+            // A staged key with no digest after staging is unknown: count it as changed.
+            if b.is_none() || a != b {
+                changed.push(name.as_str());
+            } else {
+                unchanged.push(name.as_str());
+            }
+        }
+    }
+    let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+    p(
+        out,
+        format!(
+            "staged: {} changed, {} unchanged",
+            changed.len(),
+            unchanged.len()
+        ),
+    )?;
+    for n in &changed {
+        p(out, format!("  changed: {n}"))?;
+    }
+    for n in &unchanged {
+        p(out, format!("  unchanged: {n}"))?;
+    }
+    if opts.expect_no_change && !changed.is_empty() {
+        p(
+            out,
+            format!(
+                "expected no change, but {} staged key(s) changed: {}",
+                changed.len(),
+                changed.join(", ")
+            ),
+        )?;
+        return Err(Error::Findings(changed.len()));
+    }
+
+    let pruned = if plan.prune.is_empty() {
+        false
+    } else if opts.prune {
+        fly::unset_staged(r, &env.fly_app, &plan.prune)?;
+        p(out, format!("pruned (staged): {}", plan.prune.join(", ")))?;
+        true
+    } else {
+        p(
+            out,
+            format!(
+                "not desired here, kept (pass --prune to unset): {}",
+                plan.prune.join(", ")
+            ),
+        )?;
+        false
+    };
+
+    let effective = !changed.is_empty() || pruned;
+    match (effective, opts.deploy) {
+        (false, true) => p(out, "no effective change; not deploying".into()),
+        (false, false) => p(out, "no effective change".into()),
+        (true, true) => {
+            fly::deploy(r, &env.fly_app)?;
+            p(out, "deployed staged secrets".into())
+        }
+        (true, false) => p(out, "staged changes not deployed (no --deploy)".into()),
+    }
 }
 
+/// `fly plan <env>`: rows, prune list and counts; no mutation. Exits `Findings(n)` when
+/// n rows would block a sync.
 pub fn plan(
-    _fleet: &Fleet,
-    _env_name: &str,
-    _r: &dyn CommandRunner,
-    _out: &mut dyn Write,
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
 ) -> Result<(), Error> {
-    todo!()
+    fleet.environment(env_name)?;
+    let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &BTreeSet::new())?;
+    let held: BTreeSet<(&str, &str)> = plan
+        .held_immutable
+        .iter()
+        .map(|(p, k)| (p.as_str(), k.as_str()))
+        .collect();
+    print_rows(out, &plan.rows, |row| {
+        plan_target(
+            row,
+            held.contains(&(row.product.as_str(), row.key.as_str())),
+        )
+    })?;
+    print_extras(out, &plan)?;
+    for n in &plan.prune {
+        writeln!(out, "to prune (with --prune): {n}").map_err(write_err)?;
+    }
+    let unmanaged = unmanaged_on_fly(fleet, env_name, &on_fly)?;
+    print_counts(out, &plan)?;
+    writeln!(out, "{} unmanaged on Fly (never touched)", unmanaged.len()).map_err(write_err)?;
+    let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+    if n > 0 {
+        writeln!(out, "{n} key(s) block a sync").map_err(write_err)?;
+        return Err(Error::Findings(n));
+    }
+    Ok(())
+}
+
+fn print_counts(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
+    writeln!(
+        out,
+        "{} to stage, {} held (immutable), {} to prune",
+        plan.stage.len(),
+        plan.held_immutable.len(),
+        plan.prune.len()
+    )
+    .map_err(write_err)
+}
+
+/// Target column of `fly plan`. Keys present on Fly cannot be compared locally, so a
+/// desired key there is "potentially changed" (FR-5, P1).
+fn plan_target(r: &Row, held: bool) -> String {
+    match (r.kind, r.target, r.state) {
+        (Kind::Config, _, _) => "-",
+        (Kind::Secret, TargetState::Absent, KeyState::Ready) => "absent (new)",
+        (Kind::Secret, TargetState::Absent, _) => "absent",
+        (Kind::Secret, _, _) if held => "present (immutable, held)",
+        (Kind::Secret, _, KeyState::Ready) => "potentially changed",
+        (Kind::Secret, _, KeyState::Skipped) => "present (not desired)",
+        (Kind::Secret, _, _) => "present",
+    }
+    .to_string()
+}
+
+fn digest<'a>(list: &'a [FlySecret], name: &str) -> Option<&'a str> {
+    list.iter()
+        .find(|s| s.name == name)
+        .and_then(|s| s.digest.as_deref())
+}
+
+/// Validate every `--rotate PRODUCT/KEY` before any call (FR-16): it must name a declared,
+/// immutable key desired in `env_name`. An unmatched entry is never a silent no-op.
+fn parse_rotate(
+    fleet: &Fleet,
+    env_name: &str,
+    entries: &[String],
+) -> Result<BTreeSet<(String, String)>, Error> {
+    let env = fleet.environment(env_name)?;
+    let mut set = BTreeSet::new();
+    for e in entries {
+        let bad = |why: String| Error::Config(format!("--rotate {e:?}: {why}"));
+        let (product, key) = e
+            .split_once('/')
+            .filter(|(p, k)| !p.is_empty() && !k.is_empty())
+            .ok_or_else(|| bad("expected PRODUCT/KEY".into()))?;
+        let spec = fleet
+            .products
+            .get(product)
+            .and_then(|p| p.keys.get(key))
+            .ok_or_else(|| bad("not a declared key".into()))?;
+        if !spec.immutable {
+            return Err(bad(
+                "key is not immutable (other keys are staged on every sync)".into(),
+            ));
+        }
+        if !rules::applies(spec, env_name, env, product) {
+            return Err(bad(format!(
+                "key is not desired in environment {env_name:?}"
+            )));
+        }
+        set.insert((product.to_string(), key.to_string()));
+    }
+    Ok(set)
 }
 
 #[cfg(test)]
@@ -267,10 +464,11 @@ mod tests {
 
     #[test]
     fn expect_no_change_fails_when_a_digest_changed() {
+        // ENC is immutable and present, so held; only OPENAI is staged, and it changed.
         let r = fake_sync(
             complete_item(),
-            fly(&[(OPENAI_FLY, "d1")]),
-            fly(&[(OPENAI_FLY, "d1-new")]),
+            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
+            fly(&[(OPENAI_FLY, "d1-new"), (ENC_FLY, "d2")]),
         );
         let o = SyncOpts {
             expect_no_change: true,
@@ -279,11 +477,27 @@ mod tests {
         };
         let (res, out) = sync_out(&f(), &r, &o);
         let e = res.unwrap_err();
-        // OPENAI changed and ENC was absent in A and B (counts as unchanged digest: none).
         assert!(matches!(e, Error::Findings(1)), "{e}");
         assert!(out.contains(OPENAI_FLY), "{out}");
         assert!(!called(&r, "flyctl", &["secrets", "deploy"]));
         assert_no_values(&out);
+    }
+
+    /// A staged key Fly reports without a digest is unknown, so it counts as changed: the
+    /// gate must not pass and a deploy must not be skipped on missing evidence.
+    #[test]
+    fn staged_key_without_digest_after_staging_counts_as_changed() {
+        let r = fake_sync(
+            complete_item(),
+            fly(&[(ENC_FLY, "d2")]),
+            fly(&[(ENC_FLY, "d2")]),
+        );
+        let o = SyncOpts {
+            expect_no_change: true,
+            ..opts()
+        };
+        let e = sync_out(&f(), &r, &o).0.unwrap_err();
+        assert!(matches!(e, Error::Findings(1)), "{e}");
     }
 
     #[test]

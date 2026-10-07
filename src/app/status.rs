@@ -1,18 +1,50 @@
-//! `status <env>` use case (FR-17).
+//! `status <env>` use case (FR-17, spec §7.3, ruling P17).
+//!
+//! One row per product × key with its 1Password state and Fly state, guidance under each
+//! missing row, extras as warnings. Names only. Exits `Findings(n)` for the n rows that are
+//! missing, of the wrong kind or failing a rule; extras alone exit 0. Read-only: one `op`
+//! call and one `flyctl secrets list`.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::domain::Fleet;
+use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err};
+use crate::domain::{Fleet, Kind, Row, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
 pub fn run(
-    _fleet: &Fleet,
-    _env_name: &str,
-    _r: &dyn CommandRunner,
-    _out: &mut dyn Write,
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
 ) -> Result<(), Error> {
-    todo!()
+    fleet.environment(env_name)?;
+    let (plan, _) = read_and_plan(fleet, env_name, r, true, &BTreeSet::new())?;
+    print_rows(out, &plan.rows, target)?;
+    print_extras(out, &plan)?;
+    let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+    if n > 0 {
+        writeln!(
+            out,
+            "{n} key(s) missing, of the wrong kind or failing a rule"
+        )
+        .map_err(write_err)?;
+        return Err(Error::Findings(n));
+    }
+    Ok(())
+}
+
+/// Fly state of a row. Digests cannot be compared locally (P1), so a secret on Fly is
+/// "present"; `fly sync` reports whether staging changed it.
+fn target(r: &Row) -> String {
+    match (r.kind, r.target) {
+        (Kind::Config, _) => "-",
+        (Kind::Secret, TargetState::Absent) => "absent",
+        (Kind::Secret, TargetState::WouldChange) => "would change",
+        (Kind::Secret, _) => "present",
+    }
+    .to_string()
 }
 
 #[cfg(test)]

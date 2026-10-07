@@ -1,18 +1,50 @@
-//! `item skeleton <env>` use case (FR-19).
+//! `item skeleton <env>` use case (FR-19), the only 1Password write.
+//!
+//! One read of the item, then at most one edit adding every key declared for `env` (all
+//! products, mode-skipped keys included) that has no field yet, as an empty field of the
+//! declared kind. Existing fields are never touched, whatever their kind or value.
 
 use std::io::Write;
 
-use crate::domain::Fleet;
+use super::{kind_label, write_err};
+use crate::adapters::onepassword;
+use crate::domain::{Fleet, Kind};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
 pub fn run(
-    _fleet: &Fleet,
-    _env_name: &str,
-    _r: &dyn CommandRunner,
-    _out: &mut dyn Write,
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
 ) -> Result<(), Error> {
-    todo!()
+    let env = fleet.environment(env_name)?;
+    let item = onepassword::read_item(r, env)?;
+    let missing: Vec<(String, String, Kind)> = fleet
+        .products
+        .iter()
+        .flat_map(|(product, p)| {
+            p.keys
+                .iter()
+                .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
+                .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
+        })
+        .filter(|(product, key, _)| {
+            !item
+                .fields
+                .iter()
+                .any(|f| f.section == *product && f.label == *key)
+        })
+        .collect();
+    if missing.is_empty() {
+        writeln!(out, "nothing to add: every declared field exists").map_err(write_err)?;
+        return Ok(());
+    }
+    onepassword::write_skeleton(r, env, &item, &missing)?;
+    for (product, key, kind) in &missing {
+        writeln!(out, "added {product}/{key} ({}, empty)", kind_label(*kind)).map_err(write_err)?;
+    }
+    writeln!(out, "{} field(s) added", missing.len()).map_err(write_err)
 }
 
 #[cfg(test)]

@@ -1,18 +1,44 @@
-//! `config export <env> --json` use case (FR-18).
+//! `config export <env> --json` use case (FR-18, spec §7.2).
+//!
+//! Prints `plan.config` (config-kind values only) as JSON. Refuses with `Error::Policy`,
+//! printing nothing, when a config key is missing, fails a rule or is stored as a secret,
+//! or when a secret key is stored as text: the kind check is S5's `WrongKind`. One `op`
+//! call; Fly is not contacted.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::domain::Fleet;
+use super::{is_blocking, read_and_plan, row_names, write_err};
+use crate::domain::{Fleet, KeyState, Kind, Row};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
 pub fn run(
-    _fleet: &Fleet,
-    _env_name: &str,
-    _r: &dyn CommandRunner,
-    _out: &mut dyn Write,
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
 ) -> Result<(), Error> {
-    todo!()
+    fleet.environment(env_name)?;
+    let (plan, _) = read_and_plan(fleet, env_name, r, false, &BTreeSet::new())?;
+    let refused = row_names(&plan.rows, refuses);
+    if !refused.is_empty() {
+        return Err(Error::Policy(format!(
+            "config export refused: {}",
+            refused.join(", ")
+        )));
+    }
+    // Config values are not secret (FR-18); `plan.config` never holds a secret-kind value.
+    let json = serde_json::to_string_pretty(&plan.config)
+        .map_err(|_| Error::Config("cannot serialize config export".into()))?;
+    writeln!(out, "{json}").map_err(write_err)
+}
+
+fn refuses(r: &Row) -> bool {
+    match r.kind {
+        Kind::Config => is_blocking(r),
+        Kind::Secret => r.state == KeyState::WrongKind,
+    }
 }
 
 #[cfg(test)]

@@ -1,17 +1,136 @@
 //! `doctor` use case (FR-3).
+//!
+//! Checks, one line each, always all of them: configuration valid; `op --version`;
+//! `op whoami` (authentication; free of rate-limit cost per D0); `flyctl version` when the
+//! configuration declares a Fly app. Returns the error of the first failing check.
+//!
+//! Tool output is never echoed: only a version string that matches a strict pattern, and
+//! from `op whoami` only the account type (`SERVICE_ACCOUNT`, ...), never identity or
+//! tokens. No item is read.
 
-use std::io::Write;
+use std::io::{self, Write};
 
+use super::write_err;
+use crate::adapters::fly;
 use crate::domain::Fleet;
 use crate::error::Error;
-use crate::runner::CommandRunner;
+use crate::runner::{CommandRunner, Output};
+
+/// The 1Password CLI binary (same name the 1Password adapter runs).
+const OP: &str = "op";
 
 pub fn run(
-    _config: Result<Fleet, Error>,
-    _r: &dyn CommandRunner,
-    _out: &mut dyn Write,
+    config: Result<Fleet, Error>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
 ) -> Result<(), Error> {
-    todo!()
+    let mut first: Option<Error> = None;
+    let mut line = |out: &mut dyn Write, check: &str, res: Result<String, Error>| {
+        let text = match res {
+            Ok(detail) => format!("ok    {check}: {detail}"),
+            Err(e) => {
+                let t = format!("FAIL  {check}: {e}");
+                first.get_or_insert(e);
+                t
+            }
+        };
+        writeln!(out, "{text}").map_err(write_err)
+    };
+
+    let wants_fly = match &config {
+        Ok(f) => Some(f.environments.values().any(|e| !e.fly_app.is_empty())),
+        Err(_) => None,
+    };
+    line(
+        out,
+        "config",
+        config.map(|f| {
+            format!(
+                "valid ({} environment(s), {} product(s))",
+                f.environments.len(),
+                f.products.len()
+            )
+        }),
+    )?;
+    line(out, "op", op_version(r))?;
+    line(out, "op auth", op_whoami(r))?;
+    match wants_fly {
+        Some(true) => line(out, "flyctl", flyctl_version(r))?,
+        Some(false) => writeln!(out, "skip  flyctl: no Fly app configured").map_err(write_err)?,
+        None => {
+            writeln!(out, "skip  flyctl: not checked (configuration invalid)").map_err(write_err)?
+        }
+    }
+    match first {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, Error> {
+    r.run(program, args, None, &[]).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH")),
+        kind => Error::Dependency(format!("failed to run {program} ({kind})")),
+    })
+}
+
+fn op_version(r: &dyn CommandRunner) -> Result<String, Error> {
+    let o = spawn(r, OP, &["--version"])?;
+    if o.status != 0 {
+        return Err(Error::Dependency(format!(
+            "op --version failed (exit {})",
+            o.status
+        )));
+    }
+    Ok(version_in(&o.stdout).map_or_else(|| "present".into(), |v| format!("version {v}")))
+}
+
+fn op_whoami(r: &dyn CommandRunner) -> Result<String, Error> {
+    let o = spawn(r, OP, &["whoami", "--format", "json"])?;
+    if o.status != 0 {
+        return Err(Error::Auth(format!(
+            "op whoami failed (exit {}): not signed in to 1Password (set \
+             OP_SERVICE_ACCOUNT_TOKEN or run `op signin`)",
+            o.status
+        )));
+    }
+    let kind = serde_json::from_slice::<serde_json::Value>(&o.stdout)
+        .ok()
+        .and_then(|v| v.get("user_type")?.as_str().map(str::to_owned))
+        .filter(|t| {
+            !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+        });
+    Ok(match kind {
+        Some(t) => format!("signed in ({t})"),
+        None => "signed in".into(),
+    })
+}
+
+fn flyctl_version(r: &dyn CommandRunner) -> Result<String, Error> {
+    let o = spawn(r, fly::PROGRAM, &["version"])?;
+    if o.status != 0 {
+        return Err(Error::Dependency(format!(
+            "{} version failed (exit {})",
+            fly::PROGRAM,
+            o.status
+        )));
+    }
+    Ok(version_in(&o.stdout).map_or_else(|| "present".into(), |v| format!("version {v}")))
+}
+
+/// The first whitespace-separated token that looks like a version (`2.40.0`, `v0.4.112`),
+/// or `None`. Nothing else from tool output is ever printed.
+fn version_in(stdout: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(stdout).ok()?;
+    s.split_whitespace()
+        .find(|t| {
+            let digits = t.strip_prefix('v').unwrap_or(t);
+            digits.len() <= 32
+                && digits.starts_with(|c: char| c.is_ascii_digit())
+                && digits.contains('.')
+                && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
