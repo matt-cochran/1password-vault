@@ -108,13 +108,11 @@ pub(crate) fn is_blocking(r: &Row) -> bool {
     )
 }
 
-/// Missing keys, and keys that exist but are empty (a skeleton field nobody filled in),
-/// get their declared guidance printed under the row (FR-17, spec §7.4).
+/// Missing keys, and keys whose value fails a rule (including an empty skeleton field
+/// nobody filled in), get their declared guidance printed under the row (FR-17, spec §7.4;
+/// FR-26: the reason, in the STATE column, plus the key's guidance).
 fn wants_guidance(r: &Row) -> bool {
-    matches!(
-        r.state,
-        KeyState::Missing | KeyState::RuleFailed("nonempty")
-    ) && !r.guidance.is_empty()
+    matches!(r.state, KeyState::Missing | KeyState::RuleFailed(_)) && !r.guidance.is_empty()
 }
 
 /// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, with guidance on the line after
