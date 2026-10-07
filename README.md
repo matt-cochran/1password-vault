@@ -97,7 +97,7 @@ vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY 
 
 ```toml
 [profile]
-kind = "fleet"                       # the only profile in v0.1
+kind = "fleet"                       # the only profile in v0.1; "simple" is planned for v0.2
 
 [environments.staging]
 vault_id = "vstg1234example"         # IDs, not names; [A-Za-z0-9][A-Za-z0-9._-]*
@@ -194,7 +194,7 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `https_url = true` | an `https://` URL |
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
-| `transform = "signoz_ingestion_header"` | accepts a bare SigNoz ingestion key or one already prefixed `signoz-ingestion-key=`, and stages it as `signoz-ingestion-key=<key>` |
+| `transform = "signoz_ingestion_header"` | accepts a bare SigNoz ingestion key or one already prefixed `signoz-ingestion-key=`, and stages it as `signoz-ingestion-key=<key>`. Planned for v0.2: replaced by generic `ensure_prefix` and `pattern` rules, with this name kept as a deprecated alias for one release |
 | `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 Fly import refusals are checked for every ready secret by `status` and `fly plan` as well as `fly sync`, so a green status means sync will not refuse the value:
@@ -243,7 +243,7 @@ A clean `status` ends with a summary line, for example `49 saved, 13 not yet on 
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
 - `run` hands secret values to the child process through `op run`; the child can read them.
-- No multiline values. Fleet profile only. No `--json` output other than `config export`.
+- No multiline values. Fleet profile only (a `simple` profile for one app per environment is planned for v0.2). No `--json` output other than `config export` (`--json` on `status` and `fly plan` is planned for v0.2).
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.

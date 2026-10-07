@@ -159,7 +159,10 @@ The configuration shall support:
 - Fly application name;
 - optional managed-secret ownership;
 - products, per-key kind, rules, guidance and immutability (fleet profile, §10);
+- a flat key map with no products (simple profile, planned for v0.2, FR-20);
 - future extension to additional secret sources and targets.
+
+Planned for v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25).
 
 Configuration shall never contain secret values.
 
@@ -352,6 +355,8 @@ Measured (D0 spike): a cold whole-item read by vault ID and item ID costs 2 requ
 
 Local commands (`run`) may resolve per-reference through `op run`; they use the person's desktop-app session, not a service account.
 
+Planned for v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev time, to write their IDs into `secrets.toml`. The exception is limited to the `init` command: title lookup must be unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export` (and `explain`, which reads only the configuration).
+
 ## FR-14 — Field Kinds
 
 Each declared key has a kind, `secret` or `config`. In 1Password the field type records it: concealed = secret, text = config. A key stored with the wrong type is an error reported by `status` and refused by `fly sync` and `config export`.
@@ -366,7 +371,7 @@ Each declared key may carry rules, evaluated after resolution and before any tar
 - `email_list`, `https_url`;
 - `prefix_by_mode` (for example Stripe `sk_test_` vs `sk_live_` chosen by a declared mode);
 - `refuse_in = [<environment>]` (a key that must not exist in an environment): evaluated before anything else, so a non-empty field in a refused environment is a blocking `refuse_in` failure even though the key is not otherwise expected there; the environments must be defined and must not also be listed in `environments`;
-- named transforms with a fixed output format (for example a SigNoz ingestion header).
+- named transforms with a fixed output format (for example a SigNoz ingestion header). v0.1.0 ships `transform = "signoz_ingestion_header"`; planned for v0.2, it is replaced by the generic `ensure_prefix` and `pattern` rules, with the old name kept as a deprecated alias for one release (FR-24). v0.1.1 adds `transform = "pem_private_key"`, which stays: it validates and normalises a standard format (any PEM private key), not one vendor's convention.
 
 Rule failures name the key and the rule, never the value.
 
@@ -408,6 +413,163 @@ opv item skeleton <environment>
 
 It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This is the only command that writes to 1Password, and it needs a write-capable identity; `fly sync`, `plan`, `status` and `config export` stay read-only.
 
+## v0.2 ergonomics (FR-20 to FR-25)
+
+The requirements below are planned for v0.2 and are not shipped in v0.1.0. They make opv usable by a single-app adopter and easier to start with, without weakening any FR or SR above. The owner adopted them on 2026-10-07. Rejected and deferred proposals are listed in §8 under "v0.2 scope".
+
+## FR-20 — Simple Profile
+
+The CLI shall accept `profile.kind = "simple"`, a flat key map for one app per environment with no products:
+
+```toml
+[profile]
+kind = "simple"
+
+[environments.prod]
+vault_id = "…"
+item_id  = "…"
+fly.app  = "myapp-production"
+
+[keys.DATABASE_URL]
+kind = "secret"
+environments = ["prod"]
+
+[keys.JWT_KEY]
+kind = "secret"
+environments = ["prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+```
+
+The 1Password field name is the Fly name: `[keys.JWT_KEY]` reads field `JWT_KEY` of the environment's item and stages it as `JWT_KEY`. There is no naming template and no `[products]` table; a file that mixes `[keys]` and `[products]`, or sets `fly.secret_name` under the simple profile, is a configuration error. Per-key kind, rules, guidance and `immutable` work as in the fleet profile (FR-14 to FR-16). `run <environment> -- <command>` takes no `--product`. Fleet stays as it is (§10.2).
+
+Acceptance:
+
+- The managed set is exactly the declared keys. Prune scope is the declared keys that are not desired in this environment (FR-8); prune never touches an undeclared name on the Fly app.
+- `fly sync`, `fly plan` and `status` read one whole item per environment, by vault ID and item ID (FR-13); the request budget of §8.11 applies.
+- The same key name declared twice, or a key name that does not match `^[A-Z][A-Z0-9_]*$`, is a configuration error.
+- Every command behaves the same for a fleet file as in v0.1.0.
+
+Constraints kept: FR-8, FR-13, SR-1, SR-3, SR-6. No new 1Password or Fly call path.
+
+## FR-21 — Machine-Readable Status and Plan
+
+The CLI shall accept `--json` on `status` and `fly plan`:
+
+```bash
+opv status <environment> --json
+opv fly plan <environment> --json
+```
+
+stdout carries one JSON document with a top-level integer `schema_version` (1 in v0.2). Adding a field keeps the version; renaming or removing a field, or changing its meaning, increments it. The document is meant for the scheduled drift check (FR-17).
+
+Acceptance:
+
+- The document contains names, states and counts only (value lengths are metadata about values, and guidance belongs in `explain`, FR-22): environment, product and key names, kind, row state (saved, missing, extra, wrong kind, failing rule, held, present, absent, would stage, would prune), the name of a failing rule, Fly names, and totals. It contains no value, no value fragment, no value length and no guidance text.
+- Exit codes are unchanged (FR-10): with blocking findings the command still exits 8, and an error still exits with its category. An error before the document is produced is reported on stderr as text; stdout then carries no partial document.
+- Without `--json` the human output is unchanged.
+
+Constraints kept: SR-1, SR-2, FR-10, FR-11 (both commands stay read-only), §6.8.
+
+## FR-22 — Next Step and Explain
+
+`doctor` shall end with one "Next step" line that names the first failing check and the exact safe command that addresses it (for example `opv item skeleton staging`, or the existing re-run hint), or says that nothing is pending. It is text, never a prompt (FR-9).
+
+The CLI shall provide:
+
+```bash
+opv explain <product>/<key> [--env <environment>]
+```
+
+(`opv explain <key>` under the simple profile.) `--env` may be omitted when the configuration declares exactly one environment. For each environment the key is declared for, or only the one named by `--env`, it prints the `op://` reference, the field kind, the Fly name, the declared rules, `immutable`, and `guidance`, plus the `op` command a person can run to inspect the field in their own terminal: `op item get <item_id> --vault <vault_id>`, without `--reveal`.
+
+Acceptance:
+
+- `explain` never emits a value or a value fragment, including length, prefix or position. It reads only the configuration; it makes no 1Password or Fly call.
+- The printed `op` command never contains `--reveal`.
+- An undeclared key, product or environment is a configuration error (exit 2).
+- `explain` is not a `secret get` (§5).
+
+Constraints kept: SR-1, SR-2, §5 (no command prints secret values), FR-9, FR-11.
+
+### Failure reasons
+
+A rule failure (FR-15) shall also carry a **reason**: one string from a fixed, closed set defined
+per rule in code, describing the value's shape and never its content. `status`, `fly plan`,
+`fly sync` and `--json` (FR-21) print it after the rule name, for example
+`journeeze/GITHUB_APP_PRIVATE_KEY: failed transform (BEGIN/END labels differ)`. For
+`pem_private_key` the set is: `no BEGIN/END markers`, `BEGIN/END labels differ`,
+`not a private key`, `encrypted key`, `more than one PEM block`, `body is not base64`,
+`not a key structure`. Other rules get reasons where useful (for example `prefix`:
+`wrong prefix for mode <mode>`, naming the expected prefix from the configuration and never the
+actual one).
+
+Acceptance:
+
+- Every reason is a compile-time constant or is built only from configuration, never from the value.
+  A test feeds marker values through every failure path and asserts no marker byte appears in
+  any output.
+- No reason includes a length, a position, a character, an actual prefix or a label read from
+  the value.
+- The rule name stays the stable identifier: a reason may be added or reworded in a minor release;
+  `--json` carries it as a separate `reason` field next to `rule`.
+
+## FR-23 — Init
+
+The CLI shall provide:
+
+```bash
+opv init <environment> --vault <name> --item <name> --fly-app <app> [--profile simple|fleet] [--force]
+```
+
+It is a dev-time helper that writes a starter `secrets.toml`. It resolves the vault and item titles to IDs (exact title match; zero or several matches is an error), reads the item once, and writes the configuration: the environment with `vault_id`, `item_id` and `fly.app`, and one declared key per field, with its kind taken from the field type (concealed = secret, text = config, FR-14). A sectioned item produces a fleet file (section = product, with the default template `FLEET__{PRODUCT}__{KEY}`); an unsectioned item produces a simple file (FR-20), whose fields are unsectioned. `--profile simple|fleet` overrides this detection. Without `--profile`, an item that mixes sectioned and unsectioned fields is an error that names both shapes; `init` never guesses. Rules and guidance are left for the person to add.
+
+`init` is the second 1Password-adjacent command after `item skeleton` (FR-19), and unlike it, it is read-only against 1Password.
+
+Acceptance:
+
+- Titles are resolved to IDs at dev time only. The FR-13 exception is limited to the `init` command: title lookup is unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export`, and from the CI read path, which stay by vault ID and item ID (FR-13).
+- `init` reads the item but writes only names and kinds. Values are discarded in memory, held in redacting types until dropped (SR-2, SR-8), and no value reaches disk or output (SR-1, SR-4).
+- If the target file exists, `init` refuses (exit 2) unless `--force` is given. It never merges into an existing file.
+- `init` writes nothing to 1Password (FR-11, SR-5).
+- `--fly-app`, the IDs and the field names are validated as for a hand-written file (§10.2); a field name that is not a valid key name is reported by name and the file is not written.
+
+Constraints kept: FR-11, FR-13, SR-1, SR-2, SR-3, SR-4, SR-5, SR-7.
+
+## FR-24 — Generic Prefix Normalisation
+
+The rule set (FR-15) shall gain:
+
+- `ensure_prefix = "<p>"`: accepts a value with or without the prefix `<p>` and stages it with exactly one `<p>`;
+- `pattern = "<regex>"` (optional, only with `ensure_prefix`): the part after the prefix must fully match the regex; a value that is only the prefix fails.
+
+They replace `transform = "signoz_ingestion_header"`, which becomes a deprecated alias for one release (v0.2) with identical behaviour: it is equivalent to `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`. Identical behaviour includes the failure rule name: a value refused through the alias fails as `transform`, as in v0.1.0. Using the alias prints a deprecation warning naming the key, not the value. The infra catalog's OTEL entries migrate to the new rules.
+
+Acceptance:
+
+- For every input, the alias and its `ensure_prefix` + `pattern` equivalent accept and refuse the same values and stage the same output.
+- A failure names the key and the rule, never the value: the new rules fail as `ensure_prefix` or `pattern`, the alias as `transform`.
+- The staged value is built at its final size (SR-8). After the alias is removed, the only named transform left is `pem_private_key` (a standard format, not a vendor convention).
+
+Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, SR-8.
+
+## FR-25 — Config Discovery
+
+When `--config` is not given, the CLI shall look for `secrets.toml` in the current directory and then in each parent directory, and use the first one found.
+
+Acceptance:
+
+- The resolved path is always printed on stderr, whether found by discovery or given with `--config`.
+- `--config <path>` overrides discovery; no search is done.
+- Files are never merged; a `secrets.toml` further up is ignored once one is found.
+- No file found is a configuration error (exit 2) naming the directory the search started from.
+
+Constraints kept: FR-1, FR-2, FR-9. stdout is unchanged, so `config export --json` and FR-21 output stay parseable.
+
+---
+
+# 4. Security Requirements
+
 ## FR-26 — Diagnose and Guide
 
 When opv cannot finish, it shall say **what is wrong and the exact next command for this platform**,
@@ -437,10 +599,6 @@ Acceptance:
 Constraints kept: SR-1, SR-2, FR-9 (text, never a prompt), FR-10 (stable exit categories), FR-13.
 
 Limitation (v0.1.2): an `op` timeout and `opv run` (which passes the child's exit code through, FR-4) are not diagnosed.
-
----
-
-# 4. Security Requirements
 
 ## SR-1 — No Secret Logging
 
@@ -532,6 +690,18 @@ opv [--config <path>] item skeleton <environment>
 ```
 
 `--config` defaults to `secrets.toml`. `--json` exists only on `config export`; `--verbose` and `--quiet` are not implemented.
+
+Planned for v0.2 (FR-20 to FR-25), in addition to the above:
+
+```text
+opv [--config <path>] status <environment> [--json]
+opv [--config <path>] fly plan <environment> [--json]
+opv [--config <path>] explain <product>/<key> [--env <environment>]
+opv [--config <path>] init <environment> --vault <name> --item <name> --fly-app <app> [--profile simple|fleet] [--force]
+opv [--config <path>] run <environment> -- <command>        # simple profile: no --product
+```
+
+In v0.2, `--json` is on `status`, `fly plan` and `config export`, and `status` and `fly plan` print text without it. Without `--config`, `secrets.toml` is found by walking up parent directories, and the resolved path is printed on stderr (FR-25). `doctor` ends with a "Next step" line (FR-22). `--verbose` and `--quiet` stay unimplemented.
 
 There should be no generic `secret get` command in the initial release because printing raw values conflicts with the tool's primary safety goals.
 
@@ -815,6 +985,30 @@ Version 0.1 is acceptable when:
 13. An immutable key that differs from the target is reported and not staged unless `--rotate` names it.
 14. `config export` never emits a secret-kind field.
 
+Version 0.2 is acceptable when, in addition to 1–14:
+
+15. A simple-profile file (FR-20) passes `status`, `fly plan` and `fly sync` against one item per environment, within the request budget of item 11, and `--prune` touches only declared keys.
+16. Every fleet file accepted by v0.1.0 behaves the same in v0.2.
+17. `status --json` and `fly plan --json` carry `schema_version`, contain no value (checked by a test that plants known values and searches the output), and exit with the same codes as the text output.
+18. `opv explain` prints the reference, kind, Fly name, rules and guidance, and an `op item get` command without `--reveal`; it makes no 1Password or Fly call and emits no value or value fragment.
+19. `doctor` ends with a "Next step" line naming a safe command, and never prompts.
+20. `opv init` writes a `secrets.toml` with IDs, names and kinds only, refuses to overwrite without `--force`, writes nothing to 1Password, and no title lookup is reachable from `fly sync`, `fly plan`, `status` or `config export`.
+21. `ensure_prefix` + `pattern` reproduce `transform = "signoz_ingestion_header"` exactly, and the alias still works with a deprecation warning.
+22. Without `--config`, `secrets.toml` is found in a parent directory and its path is printed on stderr; `--config` overrides; files are never merged.
+23. Items 9 and 10 hold for every new command and flag.
+24. Every rule failure carries a reason from its rule's fixed set (FR-22); a marker-value test proves no reason contains any byte of the value, and `pem_private_key` reports each of its seven reasons.
+25. Each FR-26 situation, simulated with a fake `op`, prints its platform-specific next command and exits with its category; an expired session reports exit 7 and the sign-in command, never "run op item get to see why".
+
+## v0.2 scope
+
+Rejected or deferred from the 2026-10-07 ergonomics review:
+
+- **Pre-declared sync policy** (deploy or prune by configuration): rejected, because it replaces explicit per-run intent (FR-8, FR-9, SR-6).
+- **Rotation epoch** (rotate immutable keys by bumping a counter): rejected, because rotation must stay a per-key explicit act (FR-16, SR-6).
+- **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded; FR-12 stays the design intent.
+- **Exact change detection in `fly plan`**: deferred, because Fly digests cannot be computed locally and `plan` must not stage (FR-5, FR-11, §6.4).
+- **Merging `pattern` into `regex`**: deferred. In v0.2 `pattern` is allowed only alongside `ensure_prefix` and applies to the text after the prefix, which `regex` does not do (FR-24).
+
 ---
 
 # 9. Guiding Principle
@@ -876,6 +1070,8 @@ rules = { enum = ["open", "invite_only"] }
 The consumer may generate this file from its own catalog; opv reads only this file. Product names are upper-cased into the template (`allumata` → `ALLUMATA`).
 
 The `fly` section is optional per environment: an environment used only for `run`, `config export` and `item skeleton` (for example `dev`) omits it, and `status` and the `fly` commands refuse it with a configuration error. `vault_id`, `item_id` and `fly.app` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
+
+Planned for v0.2: fleet stays the default profile and is unchanged; every v0.1.0 fleet file keeps working. A second profile, `kind = "simple"` (FR-20), serves one app per environment with a flat `[keys]` map: no products, no template, and the field name is the Fly name. `profile.kind` stays required, so a file always says which profile it uses. Both profiles share the environment table, the rules, the one-item read (FR-13) and the managed-set rule (FR-8).
 
 ## 10.3 Coexistence with other automation
 
