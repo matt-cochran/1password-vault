@@ -1,10 +1,10 @@
 //! Security and failure-mode tests (S7; SR-1..SR-4, FR-10, Review Focus 4).
 //!
-//! Every test runs the real `secretctl` binary against fake `op` and `flyctl` executables:
+//! Every test runs the real `opv` binary against fake `op` and `flyctl` executables:
 //! small `#!/bin/sh` scripts in a temp `bin` dir that is the ONLY entry on `PATH` (so the
 //! real tools can never run; `cat` is symlinked in for the fakes). Each fake records its
 //! argv (one arg per line), stdin and exported environment into a separate record dir,
-//! always writes a stderr canary that must never reach secretctl's output, and prints
+//! always writes a stderr canary that must never reach opv's output, and prints
 //! fixture JSON or fails as the scenario's env vars say. The item JSON has the real
 //! `op item get` shape (D0) and carries obviously fake marker values that all contain
 //! `S7MARKER`, so one substring check finds any of them anywhere.
@@ -52,7 +52,7 @@ for a in "$@"; do printf '%s\n' "$a"; done > "$p.argv"
 cat > "$p.stdin"
 export -p > "$p.env"
 if [ "$1" = "run" ]; then
-  # `secretctl run` inherits stdio by design (FR-4): no canary, and do not exec.
+  # `opv run` inherits stdio by design (FR-4): no canary, and do not exec.
   exit "${FAKE_OP_RUN_EXIT:-0}"
 fi
 printf '%s %s\n' "$FAKE_CHILD_STDERR" "$FAKE_STDERR_VALUE" >&2
@@ -277,7 +277,7 @@ impl Harness {
     }
 
     fn run(&self, args: &[&str]) -> Run {
-        let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+        let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .arg("--config")
             .arg(CONFIG)
             .args(args)
@@ -426,7 +426,7 @@ fn no_secret_in_any_argv() {
 }
 
 /// SR-3: the import stdin is the one channel that carries values; it carries exactly the
-/// staged ones, and every argv file and secretctl's own output lack them.
+/// staged ones, and every argv file and opv's own output lack them.
 #[test]
 fn stdin_only_channel() {
     let h = Harness::new(&good_item());
@@ -465,7 +465,7 @@ fn stdin_only_channel() {
     assert_argv_and_env_clean(&h);
 }
 
-/// SR-1: no value reaches secretctl's stdout or stderr for any command, success or
+/// SR-1: no value reaches opv's stdout or stderr for any command, success or
 /// failure (forced rule failures included).
 #[test]
 fn no_secret_in_stdout_or_stderr() {
@@ -491,7 +491,7 @@ fn no_secret_in_stdout_or_stderr() {
 }
 
 /// Carried from S1-M5: every fake writes a canary plus a value to stderr on every call;
-/// neither appears in secretctl's stdout or stderr for any command, including failures.
+/// neither appears in opv's stdout or stderr for any command, including failures.
 #[test]
 fn drops_child_stderr() {
     let mut h = Harness::new(&good_item());
@@ -531,7 +531,7 @@ fn child_stderr_suppressed() {
         assert_eq!(r.code, 4, "{cmd:?}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("secretctl: source error: op item get failed (exit 1)"),
+                .starts_with("opv: source error: op item get failed (exit 1)"),
             "{cmd:?}: {}",
             r.stderr
         );
@@ -605,7 +605,7 @@ fn failure_after_partial_plan_stages_nothing() {
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
         r.stderr
-            .starts_with("secretctl: target error: fly secrets list failed (exit 1)"),
+            .starts_with("opv: target error: fly secrets list failed (exit 1)"),
         "{}",
         r.stderr
     );
@@ -632,7 +632,7 @@ fn list_b_failure_after_staging() {
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
         r.stderr
-            .starts_with("secretctl: target error: fly secrets list failed (exit 1)"),
+            .starts_with("opv: target error: fly secrets list failed (exit 1)"),
         "{}",
         r.stderr
     );
@@ -681,7 +681,7 @@ fn rule_failure_names_key_not_value() {
         assert_eq!(r.code, 6, "{rule}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("secretctl: policy denied: fly sync refused, nothing staged"),
+                .starts_with("opv: policy denied: fly sync refused, nothing staged"),
             "{rule}: {}",
             r.stderr
         );
@@ -719,7 +719,7 @@ fn exit_codes() {
     let bad = h.fix.join("bad.toml");
     fs::write(&bad, "[profile]\nkind = 42\n").unwrap();
     h.reset();
-    let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(["--config", bad.to_str().unwrap(), "fly", "sync", "prod"])
         .env_clear()
         .env("PATH", &h.bin)
@@ -838,7 +838,7 @@ fn broken_stdout_returns_the_command_result() {
         (good_item(), &["fly", "sync", "prod"], 0),
     ] {
         let h = Harness::new(&item_json);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
             .arg("--config")
             .arg(CONFIG)
             .args(cmd)
@@ -853,7 +853,7 @@ fn broken_stdout_returns_the_command_result() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        // Close the read end before secretctl writes anything (the fakes take a while).
+        // Close the read end before opv writes anything (the fakes take a while).
         drop(child.stdout.take());
         let out = child.wait_with_output().unwrap();
         let stderr = String::from_utf8(out.stderr).unwrap();

@@ -1,0 +1,38 @@
+class Opv < Formula
+  desc "Sync secrets from 1Password to runtime targets (Fly.io) without printing secret values"
+  homepage "https://github.com/matt-cochran/1password-vault"
+  version "{{version}}"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/matt-cochran/1password-vault/releases/download/v{{version}}/opv-aarch64-apple-darwin"
+      sha256 "{{sha256_aarch64_apple_darwin}}"
+    end
+
+    on_intel do
+      url "https://github.com/matt-cochran/1password-vault/releases/download/v{{version}}/opv-x86_64-apple-darwin"
+      sha256 "{{sha256_x86_64_apple_darwin}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/matt-cochran/1password-vault/releases/download/v{{version}}/opv-aarch64-unknown-linux-musl"
+      sha256 "{{sha256_aarch64_unknown_linux_musl}}"
+    end
+
+    on_intel do
+      url "https://github.com/matt-cochran/1password-vault/releases/download/v{{version}}/opv-x86_64-unknown-linux-musl"
+      sha256 "{{sha256_x86_64_unknown_linux_musl}}"
+    end
+  end
+
+  def install
+    bin.install Dir["opv-*"].first => "opv"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/opv --version")
+  end
+end

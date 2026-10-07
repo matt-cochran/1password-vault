@@ -632,7 +632,7 @@ mod tests {
         );
     }
 
-    /// Another tool's staged secret is not secretctl's to deploy.
+    /// Another tool's staged secret is not opv's to deploy.
     #[test]
     fn unmanaged_staged_name_does_not_trigger_deploy() {
         let same = || {

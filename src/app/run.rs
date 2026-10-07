@@ -1,8 +1,8 @@
 //! `run <env> --product <p> -- <cmd>` use case, delegating to `op run` (FR-4, §10.4).
 //!
-//! secretctl never resolves values. It hands `op run` a child environment of `op://`
+//! opv never resolves values. It hands `op run` a child environment of `op://`
 //! references (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`); `op run` resolves them and
-//! execs the command. No values pass through secretctl, argv or files (SR-1, SR-3, SR-4).
+//! execs the command. No values pass through opv, argv or files (SR-1, SR-3, SR-4).
 
 use std::io;
 

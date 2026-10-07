@@ -3,7 +3,7 @@
 This doc answers the four D0 questions, plus two follow-ups: how `fly secrets import` parses stdin, and why the rate-limit deltas came out as zero.
 
 - **Tool versions:** op 2.40.0 (Linux, service account `spike-fleet`) and flyctl v0.4.112 (commit `ca63052e`).
-- **Targets:** vault `fleet-dev`, item `fleet` (Secure Note), Fly app `secretctl-test` (no machines).
+- **Targets:** vault `fleet-dev`, item `fleet` (Secure Note), Fly app `secretctl-test` (no machines). The Fly app keeps its original name `secretctl-test` although the CLI is now `opv`.
 - **Runs:** the owner ran `spike/d0-probe.sh` twice on 2026-10-07. Run 1 did the stdin edit and then stopped in step 4 because of a script bug that was later fixed. Run 2 completed every step.
 - **Evidence:** file names below are in `spike/out/`, which is git-ignored. All values in it are redacted to `"<v>"` and stderr is scrubbed. The leak grep was clean after both runs.
 - **Copy:** this file is committed as `docs/spike-d0-findings.md`. The redacted fixtures are `tests/fixtures/op_item.json` and `tests/fixtures/fly_list.json`.
@@ -75,7 +75,7 @@ Evidence: `fly_list-{0,1,2,3,dotenv,4}.json`, `q4_digest.json`, `fly_import_*.ou
 - **Not computable locally.** None of the candidates matched: sha256, sha1, md5 and sha512 of `value`, `value\n`, `NAME=value` and `NAMEvalue`, each compared as a full hash, a 16-character prefix and a suffix (`computable_locally: false`, `matches_*: []`). The digest is presumably keyed or salted server-side.
 - **`fly secrets import --stage` reading stdin:** rc=0 with "Secrets have been staged, but not set on VMs". `--stage` is accepted.
 - **`fly secrets unset A B --app <app> --stage`:** rc=0, and the names were gone from the next list (`fly_list-4.json` = `[]`). `--stage` is accepted.
-- **`fly secrets deploy` with no machines:** rc=1, with "Error: no machines available to deploy … Try 'fly deploy' first" (`fly_deploy.stderr.txt`). secretctl must map this to a distinct, typed error (FR-10). It must not be reported as a sync failure of the secrets themselves.
+- **`fly secrets deploy` with no machines:** rc=1, with "Error: no machines available to deploy … Try 'fly deploy' first" (`fly_deploy.stderr.txt`). opv must map this to a distinct, typed error (FR-10). It must not be reported as a sync failure of the secrets themselves.
 - **No JSON import form exists.** `fly secrets import --help` documents only NAME=VALUE on stdin.
 
 ### Consequences (controller ruling P1)

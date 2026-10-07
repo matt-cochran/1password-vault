@@ -1,8 +1,8 @@
-# secretctl
+# opv
 
-`secretctl` is a Rust CLI that syncs secrets from 1Password into runtime targets, with Fly.io as the first target. 1Password owns the values, Fly consumes them, and secretctl only connects the two: it keeps no state, runs no server, does no encryption of its own, and has no command that prints a secret. Configuration lives in a committed `secrets.toml` that holds `op://`-style IDs and rules, never values.
+`opv` is a Rust CLI that syncs secrets from 1Password into runtime targets, with Fly.io as the first target. 1Password owns the values, Fly consumes them, and opv only connects the two: it keeps no state, runs no server, does no encryption of its own, and has no command that prints a secret. Configuration lives in a committed `secrets.toml` that holds `op://`-style IDs and rules, never values.
 
-The repository is named `1password-vault` for historical reasons; the tool is `secretctl`. The design document is [OVERVIEW.md](OVERVIEW.md).
+The repository is named `1password-vault` for historical reasons; the tool is `opv`. The design document is [OVERVIEW.md](OVERVIEW.md).
 
 ## Install
 
@@ -12,23 +12,23 @@ Download the asset for your platform from the [latest release](https://github.co
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 (musl) | `secretctl-x86_64-unknown-linux-musl` (also published as `secretctl`, an alias of this file) |
-| Linux aarch64 (musl) | `secretctl-aarch64-unknown-linux-musl` |
-| macOS Intel | `secretctl-x86_64-apple-darwin` |
-| macOS Apple Silicon | `secretctl-aarch64-apple-darwin` |
-| Windows x86_64 | `secretctl-x86_64-pc-windows-msvc.exe` |
-| Windows ARM64 | `secretctl-aarch64-pc-windows-msvc.exe` |
+| Linux x86_64 (musl) | `opv-x86_64-unknown-linux-musl` (also published as `opv`, an alias of this file) |
+| Linux aarch64 (musl) | `opv-aarch64-unknown-linux-musl` |
+| macOS Intel | `opv-x86_64-apple-darwin` |
+| macOS Apple Silicon | `opv-aarch64-apple-darwin` |
+| Windows x86_64 | `opv-x86_64-pc-windows-msvc.exe` |
+| Windows ARM64 | `opv-aarch64-pc-windows-msvc.exe` |
 
 Linux and macOS:
 
 ```sh
-chmod +x secretctl-aarch64-apple-darwin
+chmod +x opv-aarch64-apple-darwin
 # macOS only: remove the quarantine flag set on downloaded files
-xattr -d com.apple.quarantine secretctl-aarch64-apple-darwin
-mv secretctl-aarch64-apple-darwin /usr/local/bin/secretctl
+xattr -d com.apple.quarantine opv-aarch64-apple-darwin
+mv opv-aarch64-apple-darwin /usr/local/bin/opv
 ```
 
-Windows: rename the `.exe` to `secretctl.exe` and put it on your `PATH`.
+Windows: rename the `.exe` to `opv.exe` and put it on your `PATH`.
 
 ### From source
 
@@ -53,24 +53,24 @@ sha256sum -c SHA256SUMS --ignore-missing
 macOS (the `--ignore-missing` flag does not exist in `shasum`, so check the one line):
 
 ```sh
-grep secretctl-aarch64-apple-darwin SHA256SUMS | shasum -a 256 -c
+grep opv-aarch64-apple-darwin SHA256SUMS | shasum -a 256 -c
 ```
 
 Windows PowerShell (compare the output with the matching line in `SHA256SUMS`):
 
 ```powershell
-Get-FileHash .\secretctl-x86_64-pc-windows-msvc.exe -Algorithm SHA256
+Get-FileHash .\opv-x86_64-pc-windows-msvc.exe -Algorithm SHA256
 ```
 
 Provenance, on any platform with the GitHub CLI:
 
 ```sh
-gh attestation verify secretctl-x86_64-unknown-linux-musl --repo matt-cochran/1password-vault
+gh attestation verify opv-x86_64-unknown-linux-musl --repo matt-cochran/1password-vault
 ```
 
 ## Prerequisites
 
-- The 1Password CLI `op`, tested with 2.40.0. The Fly CLI `flyctl`, tested with 0.4.112. `secretctl doctor` warns (exit code unchanged) when a version differs.
+- The 1Password CLI `op`, tested with 2.40.0. The Fly CLI `flyctl`, tested with 0.4.112. `opv doctor` warns (exit code unchanged) when a version differs.
 - For CI: a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, and `FLY_API_TOKEN`.
 - Locally: the 1Password desktop app integration or `op signin`, and `fly auth login`.
 - `item skeleton` is the only command that writes to 1Password; it needs a write-capable identity.
@@ -140,13 +140,13 @@ Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A pr
 Global option: `--config <PATH>` (default `secrets.toml`). `<ENV>` is an environment name from the file.
 
 ```sh
-secretctl doctor                          # config, op and sign-in, flyctl and sign-in
-secretctl item skeleton staging           # add every missing declared field, empty; the only 1Password write
-secretctl status staging                  # one row per product and key; exit 8 if any blocks
-secretctl fly plan staging                # what a sync would stage, hold and prune; exit 8 if any blocks
-secretctl fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
-secretctl config export staging --json    # config-kind values as JSON
-secretctl run dev --product allumata -- cargo run
+opv doctor                          # config, op and sign-in, flyctl and sign-in
+opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
+opv status staging                  # one row per product and key; exit 8 if any blocks
+opv fly plan staging                # what a sync would stage, hold and prune; exit 8 if any blocks
+opv fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
+opv config export staging --json    # config-kind values as JSON
+opv run dev --product allumata -- cargo run
 ```
 
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
@@ -159,7 +159,7 @@ secretctl run dev --product allumata -- cargo run
 
 ### Change detection
 
-Fly digests cannot be computed locally, so secretctl cannot tell in advance whether a value changed. `fly sync` reads Fly's secret metadata, stages, reads it again and compares the digests. `fly plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it.
+Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `fly sync` reads Fly's secret metadata, stages, reads it again and compares the digests. `fly plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Deploying an app that has no machines exits 5.
 
@@ -212,7 +212,7 @@ Fly import refusals are checked for every ready secret by `status` and `fly plan
 | 8 | findings: `status` or `fly plan` found blocking keys |
 | 101 | internal panic (Rust default) |
 
-`run` exits with the child's own exit code, which can equal one of the codes above; secretctl's own errors print `secretctl: ...` on stderr. A closed stdout (`status | head`) does not change the result.
+`run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 
 Auth classification: when a failed `op item get` finds no 1Password credential in the environment (`OP_SERVICE_ACCOUNT_TOKEN`, `OP_CONNECT_TOKEN` or `OP_SESSION_*`), it is reported as authentication (7). The desktop-app integration leaves no environment signal, so a desktop user whose read fails for any other reason is also reported as 7; the message says to check that the app is unlocked. When a token is present but rejected or expired, the failure is a source error (4). Child stderr is suppressed on purpose, because it could echo a value, so errors carry a safe re-run hint, for example `run \`op item get <item_id> --vault <vault_id>\` to see why` (without `--reveal`) or `run \`flyctl secrets list --app <app>\` to see why`.
 
@@ -220,7 +220,7 @@ Auth classification: when a failed `op item get` finds no 1Password credential i
 
 - Values travel only on stdin or in the environment of a child process. They never appear in argv, files, logs, errors, `Debug` or `Display` output.
 - The stderr of `op` and `flyctl` is suppressed so it cannot leak a value.
-- `serde` can leave transient scratch copies of values in memory while parsing `op` output; secretctl wraps values in redacting, zeroizing types but cannot control those copies.
+- `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
 - `run` hands secret values to the child process through `op run`; the child can read them.
 - No multiline values. Fleet profile only. No `--json` output other than `config export`.
@@ -240,26 +240,26 @@ jobs:
       OP_CACHE: "false"
     steps:
       - uses: actions/checkout@v4
-      - name: Install secretctl
+      - name: Install opv
         run: |
           base=https://github.com/matt-cochran/1password-vault/releases/download/v0.1.0
-          curl -fsSLO "$base/secretctl-x86_64-unknown-linux-musl"
+          curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
           curl -fsSLO "$base/SHA256SUMS"
           sha256sum -c SHA256SUMS --ignore-missing
-          install -m 0755 secretctl-x86_64-unknown-linux-musl /usr/local/bin/secretctl
+          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
       - name: Stage secrets on Fly
-        run: secretctl fly sync prod
+        run: opv fly sync prod
 ```
 
-This stages without deploying; a later `fly deploy` (or `secretctl fly sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
+This stages without deploying; a later `fly deploy` (or `opv fly sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
 
 ## Prior art
 
-[significa/1password-secrets](https://github.com/significa/1password-secrets) (Python, MIT) solves a similar problem. secretctl borrows its workflow (read the item, compute a diff, stage on Fly, deploy) and none of its code. It deliberately rejects:
+[significa/1password-secrets](https://github.com/significa/1password-secrets) (Python, MIT) solves a similar problem. opv borrows its workflow (read the item, compute a diff, stage on Fly, deploy) and none of its code. It deliberately rejects:
 
-| Their behavior | secretctl instead |
+| Their behavior | opv instead |
 |---|---|
 | Debug log prints the parsed secrets | values are never logged |
 | `op item create/edit` with values as arguments | values only on stdin |

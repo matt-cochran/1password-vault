@@ -246,7 +246,7 @@ fn encoded_len(name: &str, value: &[u8]) -> usize {
     name.len() + 1 + 2 * TRIPLE_QUOTE.len() + value.len()
 }
 
-/// `^[A-Z][A-Z0-9_]*$`, the Fly names secretctl renders (S1 validates the template).
+/// `^[A-Z][A-Z0-9_]*$`, the Fly names opv renders (S1 validates the template).
 fn valid_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     matches!(bytes.next(), Some(b'A'..=b'Z'))

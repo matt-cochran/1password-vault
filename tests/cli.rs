@@ -2,8 +2,8 @@
 
 use std::process::Command;
 
-fn secretctl(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+fn opv(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         // An empty PATH guarantees no real `op` or `flyctl` can run from these tests.
@@ -30,10 +30,10 @@ fn unknown_environment_exits_2_before_any_subprocess() {
     ] {
         let mut args = vec!["--config", CFG];
         args.extend(&cmd);
-        let (code, _, err) = secretctl(&args);
+        let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.starts_with("secretctl: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: configuration error: undefined environment \"qa\""),
             "{cmd:?}: {err}"
         );
     }
@@ -41,9 +41,9 @@ fn unknown_environment_exits_2_before_any_subprocess() {
 
 #[test]
 fn missing_config_file_exits_2() {
-    let (code, _, err) = secretctl(&["--config", "does-not-exist.toml", "status", "prod"]);
+    let (code, _, err) = opv(&["--config", "does-not-exist.toml", "status", "prod"]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.starts_with("secretctl: configuration error"), "{err}");
+    assert!(err.starts_with("opv: configuration error"), "{err}");
 }
 
 #[test]
@@ -53,14 +53,14 @@ fn usage_errors_exit_2() {
         vec!["--config", CFG, "fly", "sync"],
         vec!["nonsense"],
     ] {
-        let (code, _, err) = secretctl(&args);
+        let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{args:?}: {err}");
     }
 }
 
 #[test]
 fn invalid_rotate_entry_exits_2() {
-    let (code, _, err) = secretctl(&[
+    let (code, _, err) = opv(&[
         "--config",
         CFG,
         "fly",
@@ -76,10 +76,10 @@ fn invalid_rotate_entry_exits_2() {
 /// With no `op` on PATH the read fails cleanly as a dependency error (exit 3).
 #[test]
 fn missing_op_exits_3() {
-    let (code, out, err) = secretctl(&["--config", CFG, "fly", "plan", "prod"]);
+    let (code, out, err) = opv(&["--config", CFG, "fly", "plan", "prod"]);
     assert_eq!(code, 3, "{err}");
     assert!(out.is_empty());
-    assert!(err.starts_with("secretctl: dependency error"), "{err}");
+    assert!(err.starts_with("opv: dependency error"), "{err}");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn invalid_prune_immutable_entry_exits_2() {
     ] {
         let mut args = vec!["--config", CFG, "fly", "sync", "prod"];
         args.extend(extra);
-        let (code, _, err) = secretctl(&args);
+        let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{extra:?}: {err}");
         assert!(err.contains("--prune-immutable"), "{err}");
     }
@@ -98,7 +98,7 @@ fn invalid_prune_immutable_entry_exits_2() {
 
 #[test]
 fn expect_no_change_is_not_a_flag() {
-    let (code, _, err) = secretctl(&["--config", CFG, "fly", "sync", "prod", "--expect-no-change"]);
+    let (code, _, err) = opv(&["--config", CFG, "fly", "sync", "prod", "--expect-no-change"]);
     assert_eq!(code, 2, "{err}");
 }
 
@@ -122,7 +122,7 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
     ] {
         let mut args = vec!["--config", cfg];
         args.extend(&cmd);
-        let (code, _, err) = secretctl(&args);
+        let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
             err.contains("environment \"dev\" has no fly section"),
@@ -136,7 +136,7 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
     ] {
         let mut args = vec!["--config", cfg];
         args.extend(&cmd);
-        let (code, _, err) = secretctl(&args);
+        let (code, _, err) = opv(&args);
         assert_eq!(code, 3, "{cmd:?}: {err}");
     }
 }
@@ -144,10 +144,10 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
 /// I7: top-level help has examples and the exit codes; no requirement IDs anywhere.
 #[test]
 fn help_has_examples_and_no_requirement_ids() {
-    let (code, out, err) = secretctl(&["--help"]);
+    let (code, out, err) = opv(&["--help"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Examples:"), "{out}");
-    assert!(out.contains("secretctl item skeleton staging"), "{out}");
+    assert!(out.contains("opv item skeleton staging"), "{out}");
     assert!(out.contains("7 authentication"), "{out}");
     assert!(
         out.contains("<ENV>") || out.contains("environment defined"),
@@ -163,22 +163,22 @@ fn help_has_examples_and_no_requirement_ids() {
         vec!["item", "skeleton", "--help"],
         vec!["config", "export", "--help"],
     ] {
-        let (_, out, _) = secretctl(&args);
+        let (_, out, _) = opv(&args);
         assert!(
             !out.contains("(FR-") && !out.contains("FR-1"),
             "{args:?}: {out}"
         );
         assert!(!out.contains("expect-no-change"), "{args:?}: {out}");
     }
-    let (_, out, _) = secretctl(&["status", "--help"]);
+    let (_, out, _) = opv(&["status", "--help"]);
     assert!(out.contains("Environment name"), "{out}");
 }
 
 #[test]
 fn run_help_shows_usage() {
-    let (code, out, err) = secretctl(&["run", "--help"]);
+    let (code, out, err) = opv(&["run", "--help"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("Usage: secretctl run"), "{out}");
+    assert!(out.contains("Usage: opv run"), "{out}");
     assert!(out.contains("--product"), "{out}");
 }
 
@@ -188,7 +188,7 @@ fn run_requires_product_and_command() {
         vec!["--config", CFG, "run", "staging", "--", "true"],
         vec!["--config", CFG, "run", "staging", "--product", "allumata"],
     ] {
-        let (code, _, err) = secretctl(&args);
+        let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{args:?}: {err}");
     }
 }
@@ -202,7 +202,7 @@ mod run_with_fake_op {
 
     /// Install a fake `op` that logs each invocation, then execs the args after `--`.
     fn fake_op_dir(name: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("secretctl-cli-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("opv-cli-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("calls.log");
         let script = format!(
@@ -216,7 +216,7 @@ mod run_with_fake_op {
     }
 
     fn run(path: &std::path::Path, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+        let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -236,7 +236,7 @@ mod run_with_fake_op {
         let (code, _, err) = run(&dir, &["run", "qa", "--product", "allumata", "--", "true"]);
         assert_eq!(code, 2, "{err}");
         assert!(
-            err.starts_with("secretctl: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: configuration error: undefined environment \"qa\""),
             "{err}"
         );
         assert!(!log.exists(), "op must not be invoked");
@@ -259,10 +259,7 @@ mod run_with_fake_op {
             ],
         );
         assert_eq!(code, 7, "{err}");
-        assert!(
-            err.is_empty(),
-            "no secretctl message for a child exit: {err}"
-        );
+        assert!(err.is_empty(), "no opv message for a child exit: {err}");
         assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 1);
     }
 
@@ -288,7 +285,7 @@ mod run_with_fake_op {
 
     #[test]
     fn missing_op_exits_3() {
-        let out = Command::new(env!("CARGO_BIN_EXE_secretctl"))
+        let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .args([
                 "--config",
                 CFG,

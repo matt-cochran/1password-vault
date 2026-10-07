@@ -411,9 +411,9 @@ mod tests {
         let o = ProcessRunner::default()
             .run(
                 "printenv",
-                &["SECRETCTL_TEST_VAR"],
+                &["OPV_TEST_VAR"],
                 None,
-                &[("SECRETCTL_TEST_VAR", "v1")],
+                &[("OPV_TEST_VAR", "v1")],
             )
             .unwrap();
         assert_eq!((o.status, o.stdout.as_slice()), (0, &b"v1\n"[..]));
@@ -468,8 +468,8 @@ mod tests {
         let code = ProcessRunner::default()
             .run_inherited(
                 "sh",
-                &["-c", "test \"$SECRETCTL_TEST_VAR\" = v2"],
-                &[("SECRETCTL_TEST_VAR", "v2")],
+                &["-c", "test \"$OPV_TEST_VAR\" = v2"],
+                &[("OPV_TEST_VAR", "v2")],
             )
             .unwrap();
         assert_eq!(code, 0);
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn process_runner_run_inherited_missing_binary_is_io_error() {
         let e = ProcessRunner::default()
-            .run_inherited("secretctl-definitely-not-installed", &[], &[])
+            .run_inherited("opv-definitely-not-installed", &[], &[])
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn process_runner_missing_binary_is_io_error() {
         let e = ProcessRunner::default()
-            .run("secretctl-definitely-not-installed", &[], None, &[])
+            .run("opv-definitely-not-installed", &[], None, &[])
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }

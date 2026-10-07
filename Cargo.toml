@@ -1,5 +1,5 @@
 [package]
-name = "secretctl"
+name = "opv"
 version = "0.1.0"
 edition = "2024"
 # let-chains (`if let ... && let ...`) are stable from 1.88.

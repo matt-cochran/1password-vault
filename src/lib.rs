@@ -1,4 +1,4 @@
-//! secretctl: orchestrates secrets from 1Password into runtime targets (Fly.io first).
+//! opv: orchestrates secrets from 1Password into runtime targets (Fly.io first).
 //!
 //! It never stores, encrypts or serves secret values; see `OVERVIEW.md` §7 and §9.
 
