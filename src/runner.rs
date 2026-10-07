@@ -58,7 +58,18 @@ pub trait CommandRunner {
     /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32>;
+
+    /// A short read-only diagnosis call (`op whoami`, `op account list`, `flyctl auth
+    /// whoami`; FR-26): no stdin, no extra env, killed after `limit` (a `TimedOut` error).
+    /// The default delegates to [`CommandRunner::run`], so fakes record it like any call.
+    fn probe(&self, program: &str, args: &[&str], limit: Duration) -> io::Result<Output> {
+        let _ = limit;
+        self.run(program, args, None, &[])
+    }
 }
+
+/// Limit for one diagnosis call ([`CommandRunner::probe`]).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn exit_code(status: ExitStatus) -> i32 {
     #[cfg(unix)]
@@ -204,6 +215,10 @@ impl CommandRunner for ProcessRunner {
             status: exit_code(status),
             stdout,
         })
+    }
+
+    fn probe(&self, program: &str, args: &[&str], limit: Duration) -> io::Result<Output> {
+        ProcessRunner::with_timeout(limit.min(self.timeout)).run(program, args, None, &[])
     }
 
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
@@ -513,6 +528,23 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::TimedOut);
         assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    /// FR-26: a diagnosis call has its own short limit and is killed at it.
+    #[cfg(unix)]
+    #[test]
+    fn probe_is_killed_at_its_own_limit() {
+        assert_eq!(PROBE_TIMEOUT, Duration::from_secs(15));
+        let t = Instant::now();
+        let e = ProcessRunner::default()
+            .probe("sleep", &["30"], Duration::from_millis(200))
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        let o = ProcessRunner::default()
+            .probe("sh", &["-c", "exit 3"], PROBE_TIMEOUT)
+            .unwrap();
+        assert_eq!(o.status, 3);
     }
 
     #[test]

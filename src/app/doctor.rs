@@ -46,7 +46,7 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_with(config, r, &Host::detect(), out)
+    run_on(config, r, &Host::detect, out)
 }
 
 /// [`run`] on a given host (tests).
@@ -54,6 +54,16 @@ pub fn run_with(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
     host: &Host,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    run_on(config, r, &|| *host, out)
+}
+
+/// The host is detected only when a check needs it (a failure or a credential decision).
+fn run_on(
+    config: Result<Fleet, Error>,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
@@ -98,7 +108,7 @@ pub fn run_with(
     match fly_envs {
         Some((true, without)) => {
             line(out, "flyctl", flyctl_version(r, host))?;
-            line(out, "fly auth", fly_auth(r, host).map(Check::Ok))?;
+            line(out, "fly auth", fly_auth(r, host))?;
             if !without.is_empty() {
                 writeln!(
                     out,
@@ -138,7 +148,7 @@ fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, 
 fn spawn_tool(
     r: &dyn CommandRunner,
     tool: Tool,
-    host: &Host,
+    host: &dyn Fn() -> Host,
     args: &[&str],
 ) -> Result<Output, Error> {
     let program = match tool {
@@ -147,13 +157,13 @@ fn spawn_tool(
     };
     spawn(r, program, args).map_err(|e| match e {
         Error::Dependency(m) if m.ends_with("not found on PATH") => {
-            Error::Dependency(format!("{m}\n  {}", host.install_hint(tool)))
+            Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)))
         }
         e => e,
     })
 }
 
-fn op_version(r: &dyn CommandRunner, host: &Host) -> Result<Check, Error> {
+fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
     let o = spawn_tool(r, Tool::Op, host, &["--version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
@@ -168,17 +178,17 @@ fn op_version(r: &dyn CommandRunner, host: &Host) -> Result<Check, Error> {
         }
         Some(v) => Check::Warn(format!(
             "version {v}; opv is tested with op {a}.{b}.{c} or newer\n  {}",
-            host.install_hint(Tool::Op)
+            host().install_hint(Tool::Op)
         )),
         None => Check::Warn(format!(
             "present, version not recognised; opv is tested with op {a}.{b}.{c} or newer\n  {}",
-            host.install_hint(Tool::Op)
+            host().install_hint(Tool::Op)
         )),
     })
 }
 
 /// The 1Password session, classified exactly as a failed item read is (FR-26).
-fn op_auth(r: &dyn CommandRunner, host: &Host) -> Result<String, Error> {
+fn op_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<String, Error> {
     use onepassword::Session;
     match onepassword::diagnose(r, host)? {
         Session::SignedIn(t) => Ok(format!("signed in ({t})")),
@@ -186,11 +196,14 @@ fn op_auth(r: &dyn CommandRunner, host: &Host) -> Result<String, Error> {
             "op whoami did not run to completion; the 1Password session could not be checked"
                 .into(),
         )),
-        s => Err(onepassword::auth_error(s, host, None).expect("not signed in is an auth error")),
+        s => {
+            Err(onepassword::session_error(s, &host(), None)
+                .expect("every other session is an error"))
+        }
     }
 }
 
-fn flyctl_version(r: &dyn CommandRunner, host: &Host) -> Result<Check, Error> {
+fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
     let o = spawn_tool(r, Tool::Flyctl, host, &["version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
@@ -204,11 +217,11 @@ fn flyctl_version(r: &dyn CommandRunner, host: &Host) -> Result<Check, Error> {
         Some(v) if parse_version(&v) == Some(FLYCTL_TESTED) => Check::Ok(format!("version {v}")),
         Some(v) => Check::Warn(format!(
             "version {v}; opv is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)\n  {}",
-            host.install_hint(Tool::Flyctl)
+            host().install_hint(Tool::Flyctl)
         )),
         None => Check::Warn(format!(
             "present, version not recognised; opv is tested with flyctl {a}.{b}.{c}\n  {}",
-            host.install_hint(Tool::Flyctl)
+            host().install_hint(Tool::Flyctl)
         )),
     })
 }
@@ -229,14 +242,23 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 
 /// `flyctl auth whoami`: exit status only, via the same check a failed flyctl call uses
 /// (FR-26). Its stdout names the account (an email), so it is dropped unread.
-fn fly_auth(r: &dyn CommandRunner, host: &Host) -> Result<String, Error> {
+fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
     match fly::auth_whoami(r) {
-        Ok(true) => Ok("signed in".into()),
-        Ok(false) => Err(fly::not_logged_in(host, None)),
+        Ok(true) => Ok(Check::Ok("signed in".into())),
+        // FR-26: app-scoped deploy tokens cannot run `auth whoami`, so with a Fly token in
+        // the environment a failure here is not proof of being logged out.
+        Ok(false) => match host().fly_token {
+            Some(var) => Ok(Check::Warn(format!(
+                "{} auth whoami failed with {var} set (an app-scoped deploy token cannot \
+                 run it); fly commands will show whether the token can access the app",
+                fly::PROGRAM
+            ))),
+            None => Err(fly::not_logged_in(&host(), None)),
+        },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
             "{} not found on PATH\n  {}",
             fly::PROGRAM,
-            host.install_hint(Tool::Flyctl)
+            host().install_hint(Tool::Flyctl)
         ))),
         Err(e) => Err(Error::Dependency(format!(
             "failed to run {} ({})",
@@ -460,6 +482,29 @@ mod tests {
         );
         assert_no_values(&out);
         assert_no_values(&e.to_string());
+    }
+
+    /// FR-26: with a Fly token set, a failing `flyctl auth whoami` is a warning (app-scoped
+    /// deploy tokens cannot run it), not an authentication failure.
+    #[test]
+    fn fly_auth_failure_with_fly_token_is_a_warning() {
+        let mut g = good();
+        g[3] = Output::failure(1);
+        let r = FakeRunner::new(g);
+        let h = Host::from_env(
+            &crate::host::FakeEnv::new("linux")
+                .shell("/bin/bash")
+                .var("FLY_API_TOKEN"),
+        );
+        let mut out = Vec::new();
+        run_with(Ok(fleet()), &r, &h, &mut out).unwrap();
+        let out = text_of(&out);
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("warn  fly auth:") && l.contains("FLY_API_TOKEN")),
+            "{out}"
+        );
+        assert!(!out.contains("auth login"), "{out}");
     }
 
     /// I8: tested versions print no warning.

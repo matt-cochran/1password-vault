@@ -4,17 +4,22 @@
 //! to know the platform, the user's shell, and whether it runs under CI. Detection is
 //! deterministic and goes through the [`HostEnv`] seam so every case can be tested:
 //!
-//! 1. CI: `CI` or `GITHUB_ACTIONS` set and non-empty. Remediation names
-//!    `OP_SERVICE_ACCOUNT_TOKEN` and never an interactive command.
+//! 1. CI: `CI` or `GITHUB_ACTIONS` truthy (set, and not empty, `false` or `0`, any case).
+//!    Remediation names `OP_SERVICE_ACCOUNT_TOKEN` and never an interactive command.
 //! 2. Platform: `windows` / `macos` by the compile-time OS; on Linux, WSL when
 //!    `/proc/sys/kernel/osrelease` contains `microsoft` or `WSL` (any case), or
 //!    `WSL_DISTRO_NAME` is set.
 //! 3. Shell: the basename of `$SHELL` (`.exe` stripped): `fish`, `pwsh`/`powershell`, or a
-//!    POSIX shell (`bash`, `zsh`, `sh`, `dash`, `ksh`). Unset or unknown: PowerShell on
-//!    Windows, POSIX elsewhere.
+//!    POSIX shell (`bash`, `zsh`, `sh`, `dash`, `ksh`). Unset: PowerShell on Windows, POSIX
+//!    elsewhere. Any other shell (nu, tcsh, csh, ...): PowerShell on Windows (its default),
+//!    [`Shell::Other`] elsewhere, which gets a generic `op signin` hint, never POSIX syntax.
+//! 4. Non-interactive credentials, by name only: 1Password `OP_SERVICE_ACCOUNT_TOKEN`, or
+//!    Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`); Fly `FLY_API_TOKEN` /
+//!    `FLY_ACCESS_TOKEN`. With one set, failures are never answered with an interactive
+//!    sign-in command.
 //!
-//! Only variable names are tested for credentials (`OP_SERVICE_ACCOUNT_TOKEN`); their values
-//! are never read (SR-1). Messages are text, never prompts (FR-9).
+//! Credential variables are tested by name only; their values are never read (SR-1).
+//! Messages are text, never prompts (FR-9). Detection runs only on failure paths.
 
 use std::fmt;
 
@@ -25,6 +30,9 @@ pub trait HostEnv {
     fn os(&self) -> &str;
     /// True when the variable is set and non-empty. Implementations must not keep the value.
     fn is_set(&self, name: &str) -> bool;
+    /// The value of a non-secret flag variable (`CI`, `GITHUB_ACTIONS`). Never called for a
+    /// credential variable.
+    fn flag(&self, name: &str) -> Option<String>;
     /// `$SHELL`, if set (a path, not a secret).
     fn shell(&self) -> Option<String>;
     /// Contents of `/proc/sys/kernel/osrelease`, if readable.
@@ -44,6 +52,10 @@ impl HostEnv for ProcessEnv {
         std::env::var_os(name).is_some_and(|v| !v.is_empty())
     }
 
+    fn flag(&self, name: &str) -> Option<String> {
+        std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+    }
+
     fn shell(&self) -> Option<String> {
         std::env::var_os("SHELL").map(|v| v.to_string_lossy().into_owned())
     }
@@ -58,7 +70,8 @@ impl HostEnv for ProcessEnv {
 #[derive(Debug, Clone, Default)]
 pub struct FakeEnv {
     pub os: String,
-    pub set: Vec<String>,
+    /// (name, value): credential values in tests are dummies.
+    pub set: Vec<(String, String)>,
     pub shell: Option<String>,
     pub osrelease: Option<String>,
 }
@@ -77,8 +90,14 @@ impl FakeEnv {
         self
     }
 
+    /// Set `name` to `true`.
     pub fn var(mut self, name: &str) -> Self {
-        self.set.push(name.into());
+        self.set.push((name.into(), "true".into()));
+        self
+    }
+
+    pub fn var_val(mut self, name: &str, value: &str) -> Self {
+        self.set.push((name.into(), value.into()));
         self
     }
 
@@ -94,7 +113,13 @@ impl HostEnv for FakeEnv {
         &self.os
     }
     fn is_set(&self, name: &str) -> bool {
-        self.set.iter().any(|n| n == name)
+        self.set.iter().any(|(n, v)| n == name && !v.is_empty())
+    }
+    fn flag(&self, name: &str) -> Option<String> {
+        self.set
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
     }
     fn shell(&self) -> Option<String> {
         self.shell.clone()
@@ -121,6 +146,8 @@ pub enum Shell {
     /// fish: `(...)` command substitution, no `$(`.
     Fish,
     PowerShell,
+    /// A shell opv has no syntax for (nu, tcsh, csh, ...): generic guidance only.
+    Other,
 }
 
 /// A tool opv runs, for install guidance.
@@ -130,25 +157,83 @@ pub enum Tool {
     Flyctl,
 }
 
-/// The detected host: platform, shell, CI, and whether a service account token is set.
+/// A non-interactive 1Password credential in the environment (by name; value never read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpCredential {
+    /// `OP_SERVICE_ACCOUNT_TOKEN`.
+    ServiceAccount,
+    /// `OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`.
+    Connect,
+}
+
+impl OpCredential {
+    /// The variable holding the token.
+    pub fn var(self) -> &'static str {
+        match self {
+            OpCredential::ServiceAccount => "OP_SERVICE_ACCOUNT_TOKEN",
+            OpCredential::Connect => "OP_CONNECT_TOKEN",
+        }
+    }
+
+    /// `service-account` / `Connect`, for messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            OpCredential::ServiceAccount => "service-account",
+            OpCredential::Connect => "Connect",
+        }
+    }
+}
+
+/// How the user can sign `op` in from this shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignIn {
+    /// The exact command for this shell.
+    Command(&'static str),
+    /// A shell opv has no syntax for: point at `op signin` and its help.
+    Generic,
+}
+
+/// The detected host: platform, shell, CI, and which non-interactive credentials are set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Host {
     pub platform: Platform,
     pub shell: Shell,
     pub ci: bool,
-    /// `OP_SERVICE_ACCOUNT_TOKEN` is set and non-empty (its value is never read).
-    pub service_account_token: bool,
+    /// A non-interactive 1Password credential, if set (service account wins over Connect).
+    pub op_credential: Option<OpCredential>,
+    /// `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN`, whichever is set (that order), by name.
+    pub fly_token: Option<&'static str>,
 }
 
 impl Host {
-    /// Detect from the running process.
+    /// Detect from the running process. Callers do this only on failure paths.
+    ///
+    /// In this crate's unit tests it returns a fixed host instead (Linux, bash, no CI, no
+    /// credentials; or the one set with [`with_test_host`]), so no test depends on the
+    /// developer's or the CI runner's environment.
     pub fn detect() -> Self {
-        Self::from_env(&ProcessEnv)
+        #[cfg(test)]
+        {
+            TEST_HOST.with(|h| {
+                h.get()
+                    .unwrap_or_else(|| Self::from_env(&FakeEnv::new("linux").shell("/bin/bash")))
+            })
+        }
+        #[cfg(not(test))]
+        {
+            Self::from_env(&ProcessEnv)
+        }
     }
 
     /// Detect from `env` (the testable seam). See the module docs for the rules.
     pub fn from_env(env: &dyn HostEnv) -> Self {
-        let ci = env.is_set("CI") || env.is_set("GITHUB_ACTIONS");
+        let truthy = |name: &str| {
+            env.flag(name).is_some_and(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !v.is_empty() && v != "false" && v != "0"
+            })
+        };
+        let ci = truthy("CI") || truthy("GITHUB_ACTIONS");
         let platform = match env.os() {
             "windows" => Platform::Windows,
             "macos" => Platform::MacOs,
@@ -165,7 +250,8 @@ impl Host {
             }
             _ => Platform::Other,
         };
-        let named = env.shell().and_then(|s| {
+        // An empty `$SHELL` counts as unset.
+        let named = env.shell().filter(|s| !s.trim().is_empty()).map(|s| {
             let base = s
                 .rsplit(['/', '\\'])
                 .next()
@@ -173,34 +259,67 @@ impl Host {
                 .to_ascii_lowercase();
             let base = base.strip_suffix(".exe").unwrap_or(&base).to_string();
             match base.as_str() {
-                "fish" => Some(Shell::Fish),
-                "pwsh" | "powershell" => Some(Shell::PowerShell),
-                "bash" | "zsh" | "sh" | "dash" | "ksh" => Some(Shell::Posix),
-                _ => None,
+                "fish" => Shell::Fish,
+                "pwsh" | "powershell" => Shell::PowerShell,
+                "bash" | "zsh" | "sh" | "dash" | "ksh" => Shell::Posix,
+                _ if platform == Platform::Windows => Shell::PowerShell,
+                _ => Shell::Other,
             }
         });
         let shell = named.unwrap_or(match platform {
             Platform::Windows => Shell::PowerShell,
             _ => Shell::Posix,
         });
+        let op_credential = if env.is_set("OP_SERVICE_ACCOUNT_TOKEN") {
+            Some(OpCredential::ServiceAccount)
+        } else if env.is_set("OP_CONNECT_HOST") || env.is_set("OP_CONNECT_TOKEN") {
+            Some(OpCredential::Connect)
+        } else {
+            None
+        };
+        let fly_token = ["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"]
+            .into_iter()
+            .find(|n| env.is_set(n));
         Host {
             platform,
             shell,
             ci,
-            service_account_token: env.is_set("OP_SERVICE_ACCOUNT_TOKEN"),
+            op_credential,
+            fly_token,
         }
     }
 
-    /// The command that signs `op` in and exports the session into this shell, or `None`
-    /// under CI (no interactive sign-in there).
-    pub fn signin_command(&self) -> Option<&'static str> {
-        if self.ci {
+    /// How to sign `op` in from this shell, or `None` when no interactive sign-in applies
+    /// (under CI, or with a non-interactive 1Password credential set).
+    pub fn signin(&self) -> Option<SignIn> {
+        if self.ci || self.op_credential.is_some() {
             return None;
         }
         Some(match self.shell {
-            Shell::Posix => "eval $(op signin)",
-            Shell::Fish => "eval (op signin)",
-            Shell::PowerShell => "Invoke-Expression $(op signin)",
+            Shell::Posix => SignIn::Command("eval $(op signin)"),
+            Shell::Fish => SignIn::Command("eval (op signin)"),
+            Shell::PowerShell => SignIn::Command("Invoke-Expression $(op signin)"),
+            Shell::Other => SignIn::Generic,
+        })
+    }
+
+    /// The exact sign-in command, when there is one for this shell.
+    pub fn signin_command(&self) -> Option<&'static str> {
+        match self.signin()? {
+            SignIn::Command(c) => Some(c),
+            SignIn::Generic => None,
+        }
+    }
+
+    /// The sign-in step as a message line led by `lead` (`sign in`, `then sign in`):
+    /// `sign in: eval $(op signin)`, or for an unknown shell
+    /// ``sign in with `op signin` (see `op signin --help` for your shell)``.
+    pub fn signin_line(&self, lead: &str) -> Option<String> {
+        Some(match self.signin()? {
+            SignIn::Command(c) => format!("{lead}: {c}"),
+            SignIn::Generic => {
+                format!("{lead} with `op signin` (see `op signin --help` for your shell)")
+            }
         })
     }
 
@@ -232,6 +351,20 @@ impl Host {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_HOST: std::cell::Cell<Option<Host>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with [`Host::detect`] returning `host` on this thread (unit tests only).
+#[cfg(test)]
+pub(crate) fn with_test_host<T>(host: Host, f: impl FnOnce() -> T) -> T {
+    TEST_HOST.with(|h| h.set(Some(host)));
+    let out = f();
+    TEST_HOST.with(|h| h.set(None));
+    out
+}
+
 impl fmt::Display for Platform {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -250,6 +383,13 @@ mod tests {
 
     fn host(env: FakeEnv) -> Host {
         Host::from_env(&env)
+    }
+
+    /// The real environment seam runs without panicking (its result depends on the host).
+    #[test]
+    fn process_env_detection_runs() {
+        let _ = Host::from_env(&ProcessEnv);
+        assert!(!ProcessEnv.os().is_empty());
     }
 
     #[test]
@@ -291,7 +431,14 @@ mod tests {
             ("macos", Some("/opt/homebrew/bin/fish"), Shell::Fish),
             ("linux", Some("/usr/bin/pwsh"), Shell::PowerShell),
             ("linux", None, Shell::Posix),
-            ("linux", Some("/usr/bin/nu"), Shell::Posix),
+            ("linux", Some("/usr/bin/nu"), Shell::Other),
+            ("macos", Some("/bin/tcsh"), Shell::Other),
+            ("linux", Some("/bin/csh"), Shell::Other),
+            (
+                "windows",
+                Some(r"C:\Windows\System32\cmd.exe"),
+                Shell::PowerShell,
+            ),
             ("windows", None, Shell::PowerShell),
             (
                 "windows",
@@ -318,9 +465,94 @@ mod tests {
     }
 
     #[test]
-    fn service_account_token_presence_only() {
-        assert!(host(FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN")).service_account_token);
-        assert!(!host(FakeEnv::new("linux")).service_account_token);
+    fn op_credential_by_name_service_account_then_connect() {
+        let h = |e: FakeEnv| host(e).op_credential;
+        assert_eq!(h(FakeEnv::new("linux")), None);
+        assert_eq!(
+            h(FakeEnv::new("linux").var_val("OP_SERVICE_ACCOUNT_TOKEN", "")),
+            None,
+            "empty is unset"
+        );
+        assert_eq!(
+            h(FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN")),
+            Some(OpCredential::ServiceAccount)
+        );
+        for v in ["OP_CONNECT_HOST", "OP_CONNECT_TOKEN"] {
+            assert_eq!(
+                h(FakeEnv::new("linux").var(v)),
+                Some(OpCredential::Connect),
+                "{v}"
+            );
+        }
+        assert_eq!(
+            h(FakeEnv::new("linux")
+                .var("OP_CONNECT_HOST")
+                .var("OP_SERVICE_ACCOUNT_TOKEN")),
+            Some(OpCredential::ServiceAccount)
+        );
+    }
+
+    /// A non-interactive credential means no interactive sign-in command, ever.
+    #[test]
+    fn no_signin_command_with_a_non_interactive_credential() {
+        for v in [
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "OP_CONNECT_HOST",
+            "OP_CONNECT_TOKEN",
+        ] {
+            let h = host(FakeEnv::new("linux").shell("/bin/bash").var(v));
+            assert_eq!(h.signin(), None, "{v}");
+            assert_eq!(h.signin_line("sign in"), None, "{v}");
+        }
+    }
+
+    #[test]
+    fn fly_token_by_name() {
+        assert_eq!(host(FakeEnv::new("linux")).fly_token, None);
+        assert_eq!(
+            host(FakeEnv::new("linux").var("FLY_ACCESS_TOKEN")).fly_token,
+            Some("FLY_ACCESS_TOKEN")
+        );
+        assert_eq!(
+            host(
+                FakeEnv::new("linux")
+                    .var("FLY_ACCESS_TOKEN")
+                    .var("FLY_API_TOKEN")
+            )
+            .fly_token,
+            Some("FLY_API_TOKEN")
+        );
+    }
+
+    /// `CI` counts only when truthy; `GITHUB_ACTIONS=true` counts.
+    #[test]
+    fn ci_requires_a_truthy_value() {
+        for v in ["", "false", "FALSE", "0", " 0 "] {
+            let h = host(FakeEnv::new("linux").var_val("CI", v));
+            assert!(!h.ci, "CI={v:?}");
+        }
+        for v in ["true", "1", "yes", "TRUE"] {
+            let h = host(FakeEnv::new("linux").var_val("CI", v));
+            assert!(h.ci, "CI={v:?}");
+        }
+        assert!(host(FakeEnv::new("linux").var_val("GITHUB_ACTIONS", "true")).ci);
+        assert!(!host(FakeEnv::new("linux").var_val("GITHUB_ACTIONS", "false")).ci);
+    }
+
+    /// Unknown shells get no POSIX syntax, only the generic `op signin` pointer.
+    #[test]
+    fn unknown_shell_gets_generic_signin_hint() {
+        for sh in ["/usr/bin/nu", "/bin/tcsh", "/bin/csh", "/usr/bin/xonsh"] {
+            let h = host(FakeEnv::new("linux").shell(sh));
+            assert_eq!(h.signin(), Some(SignIn::Generic), "{sh}");
+            assert_eq!(h.signin_command(), None, "{sh}");
+            let l = h.signin_line("sign in").unwrap();
+            assert_eq!(
+                l,
+                "sign in with `op signin` (see `op signin --help` for your shell)"
+            );
+            assert!(!l.contains("$(") && !l.contains("eval"), "{l}");
+        }
     }
 
     #[test]

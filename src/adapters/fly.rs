@@ -29,8 +29,10 @@
 //! - A non-zero exit is diagnosed (FR-26) with `flyctl auth whoami`, exit status only (its
 //!   stdout names the account and is dropped unread, SR-1): failing → [`Error::Auth`]
 //!   "not logged in to Fly" with `flyctl auth login` (or "set FLY_API_TOKEN" under CI);
-//!   succeeding → [`Error::Target`] naming the app and saying to check that this token
-//!   can access it. Only when `auth whoami` itself cannot run does the error keep the
+//!   succeeding → [`Error::Target`] naming the app (access, existence, machines for a
+//!   deploy). With `FLY_API_TOKEN` / `FLY_ACCESS_TOKEN` set, `auth whoami` is not consulted
+//!   (app-scoped deploy tokens fail it): [`Error::Target`] naming the app and the
+//!   variable. Only when `auth whoami` itself cannot run does the error keep the
 //!   last-resort hint `"...; run `flyctl ...` to see why"` (program, subcommand, names and
 //!   the app only, never values or stdin).
 //! - Any other spawn failure or unparseable list JSON: [`Error::Target`].
@@ -51,7 +53,7 @@ use crate::domain::SecretValue;
 use crate::domain::plan::FlySecret;
 use crate::error::Error;
 use crate::host::{Host, Tool};
-use crate::runner::{CommandRunner, Output};
+use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
 
 /// The Fly CLI binary.
 pub const PROGRAM: &str = "flyctl";
@@ -268,11 +270,12 @@ fn refused(name: &str, rule: &str, op: &str) -> Error {
     ))
 }
 
-/// `flyctl auth whoami`, exit status only: `Ok(true)` logged in, `Ok(false)` not. Its
-/// stdout names the account (an email), so it is dropped unread (zeroized with the
-/// `Output`, SR-1). Shared by `doctor` and the failure diagnosis (FR-26).
+/// `flyctl auth whoami`, exit status only: `Ok(true)` logged in, `Ok(false)` not. A
+/// diagnosis probe with its own short limit ([`PROBE_TIMEOUT`]). Its stdout names the
+/// account (an email), so it is dropped unread (zeroized with the `Output`, SR-1). Shared
+/// by `doctor` and the failure diagnosis (FR-26).
 pub fn auth_whoami(r: &dyn CommandRunner) -> io::Result<bool> {
-    r.run(PROGRAM, &["auth", "whoami"], None, &[])
+    r.probe(PROGRAM, &["auth", "whoami"], PROBE_TIMEOUT)
         .map(|o| o.status == 0)
 }
 
@@ -289,33 +292,52 @@ pub fn not_logged_in(host: &Host, failed: Option<&str>) -> Error {
          never in the repository)"
             .to_string()
     } else {
-        format!(
-            "log in: {PROGRAM} auth login\n  (if FLY_API_TOKEN is set, it is invalid or \
-             expired: replace it, or remove it and log in)"
-        )
+        format!("log in: {PROGRAM} auth login")
     };
     Error::Auth(format!(
         "not logged in to Fly ({ctx})\n  {next}\n  then run opv again"
     ))
 }
 
-/// The error for a flyctl call that exited `status` (FR-26), after diagnosing the login
-/// with [`auth_whoami`]. `hint` (names and the app only) is used only when that check
-/// cannot run.
+/// The value-free next step for a failed call on `app` whose cause opv cannot tell apart:
+/// access, a missing app, or (for a deploy) an app with no machines (D0).
+fn check_app(app: &str, who: &str) -> String {
+    format!(
+        "{PROGRAM} failed for app {app}: check that {who} can access it, that the app \
+         exists, and, for a deploy, that it has at least one machine"
+    )
+}
+
+/// The error for a flyctl call that exited `status` (FR-26, FR-10). Host detection happens
+/// here, on the failure path only.
+///
+/// - A Fly token in the environment (`FLY_API_TOKEN` / `FLY_ACCESS_TOKEN`): `Target`
+///   (exit 5) naming the app and the variable. `auth whoami` is not consulted, because
+///   app-scoped deploy tokens fail it.
+/// - Otherwise [`auth_whoami`]: failing → `Auth` (exit 7, [`not_logged_in`]); succeeding →
+///   `Target` (exit 5) naming the app; unable to run (spawn error, timeout) → `Target` with
+///   the last-resort re-run `hint` (names and the app only).
 fn failure(
     r: &dyn CommandRunner,
-    host: &Host,
+    host: &dyn Fn() -> Host,
     what: &str,
     app: &str,
     status: i32,
     hint: &[&str],
 ) -> Error {
     let failed = format!("{what} failed (exit {status})");
+    let h = host();
+    if let Some(var) = h.fly_token {
+        return Error::Target(format!(
+            "{failed}\n  {}",
+            check_app(app, &format!("the token in {var}"))
+        ));
+    }
     match auth_whoami(r) {
-        Ok(false) => not_logged_in(host, Some(&failed)),
+        Ok(false) => not_logged_in(&h, Some(&failed)),
         Ok(true) => Error::Target(format!(
-            "{failed}: logged in to Fly, but the call on app {app} did not succeed\n  next: \
-             check that this Fly token can access app {app} and that the app exists"
+            "{failed}: logged in to Fly\n  {}",
+            check_app(app, "the logged-in Fly account")
         )),
         Err(_) => Error::Target(format!(
             "{failed}; run `{PROGRAM} {}` to see why",
@@ -325,7 +347,8 @@ fn failure(
 }
 
 /// Run one flyctl subcommand and map failures to typed, value-free errors. A non-zero exit
-/// is diagnosed by [`failure`] (child stderr is discarded, SR-1).
+/// is diagnosed by [`failure`] (child stderr is discarded, SR-1). The host is detected
+/// only on failure.
 fn run(
     r: &dyn CommandRunner,
     what: &str,
@@ -334,12 +357,12 @@ fn run(
     stdin: Option<&[u8]>,
     hint: &[&str],
 ) -> Result<Output, Error> {
-    run_on(r, &Host::detect(), what, app, args, stdin, hint)
+    run_on(r, &Host::detect, what, app, args, stdin, hint)
 }
 
 fn run_on(
     r: &dyn CommandRunner,
-    host: &Host,
+    host: &dyn Fn() -> Host,
     what: &str,
     app: &str,
     args: &[&str],
@@ -351,7 +374,7 @@ fn run_on(
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => Error::Dependency(format!(
                 "{PROGRAM} not found on PATH\n  {}",
-                host.install_hint(Tool::Flyctl)
+                host().install_hint(Tool::Flyctl)
             )),
             // The runner's own message names the program and the limit (no child output).
             io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
@@ -789,9 +812,9 @@ mod tests {
 
     fn logged_in_msg(what: &str, code: i32) -> String {
         format!(
-            "{what} failed (exit {code}): logged in to Fly, but the call on app app did not \
-             succeed\n  next: check that this Fly token can access app app and that the app \
-             exists"
+            "{what} failed (exit {code}): logged in to Fly\n  flyctl failed for app app: \
+             check that the logged-in Fly account can access it, that the app exists, and, \
+             for a deploy, that it has at least one machine"
         )
     }
 
@@ -813,21 +836,26 @@ mod tests {
         Host::from_env(&env)
     }
 
-    /// Logged out: Auth (exit 7), "not logged in to Fly", `flyctl auth login`.
+    fn bash() -> Host {
+        host(crate::host::FakeEnv::new("linux").shell("/bin/bash"))
+    }
+
+    /// `run_on` for a failing `secrets <sub>` on `app` with `host`.
+    fn fail_on(h: Host, sub: &str, app: &str, whoami: Option<Output>) -> (Error, FakeRunner) {
+        let r = FakeRunner::new([Output::failure(1)]);
+        if let Some(w) = whoami {
+            r.responses.borrow_mut().push_back(Ok(w));
+        }
+        let what = format!("fly secrets {sub}");
+        let e = run_on(&r, &|| h, &what, app, &["secrets", sub], None, &[]).unwrap_err();
+        (e, r)
+    }
+
+    /// Logged out (no Fly token set): Auth (exit 7), "not logged in to Fly",
+    /// `flyctl auth login`.
     #[test]
     fn logged_out_is_auth_exit_7_with_login_command() {
-        let h = host(crate::host::FakeEnv::new("linux").shell("/bin/bash"));
-        let r = FakeRunner::new([Output::failure(1), logged_out()]);
-        let e = run_on(
-            &r,
-            &h,
-            "fly secrets list",
-            "app",
-            &["secrets", "list"],
-            None,
-            &[],
-        )
-        .unwrap_err();
+        let (e, _) = fail_on(bash(), "list", "app", Some(logged_out()));
         assert_eq!(e.exit_code(), 7, "{e}");
         let t = e.to_string();
         assert!(
@@ -844,7 +872,7 @@ mod tests {
         );
     }
 
-    /// Logged out on Windows and macOS: the same `flyctl auth login` (one syntax).
+    /// Logged out on Windows, macOS, WSL, fish: the same `flyctl auth login` (one syntax).
     #[test]
     fn logged_out_login_command_is_the_same_on_every_interactive_platform() {
         for env in [
@@ -862,21 +890,11 @@ mod tests {
         }
     }
 
-    /// CI: set FLY_API_TOKEN, no interactive command; still exit 7.
+    /// CI without a Fly token: set FLY_API_TOKEN, no interactive command; exit 7.
     #[test]
     fn logged_out_under_ci_advises_fly_api_token() {
         let h = host(crate::host::FakeEnv::new("linux").var("GITHUB_ACTIONS"));
-        let r = FakeRunner::new([Output::failure(1), logged_out()]);
-        let e = run_on(
-            &r,
-            &h,
-            "fly secrets deploy",
-            "app",
-            &["secrets", "deploy"],
-            None,
-            &[],
-        )
-        .unwrap_err();
+        let (e, _) = fail_on(h, "deploy", "app", Some(logged_out()));
         assert_eq!(e.exit_code(), 7, "{e}");
         let t = e.to_string();
         assert!(t.contains("not logged in to Fly"), "{t}");
@@ -887,30 +905,101 @@ mod tests {
         );
     }
 
-    /// Logged in but the call failed: Target (exit 5) naming the app and the token check.
+    /// Logged in but the call failed: Target (exit 5) naming the app, access, existence
+    /// and (for a deploy) machines, so a deploy on an app without machines is not
+    /// misdirected.
     #[test]
     fn logged_in_but_failed_is_target_exit_5_naming_the_app() {
-        let h = host(crate::host::FakeEnv::new("linux").shell("/bin/bash"));
-        let r = FakeRunner::new([Output::failure(1), logged_in()]);
-        let e = run_on(
-            &r,
-            &h,
-            "fly secrets list",
-            "fleet-prod",
-            &["secrets", "list"],
-            None,
-            &[],
-        )
-        .unwrap_err();
+        let (e, _) = fail_on(bash(), "deploy", "fleet-prod", Some(logged_in()));
         assert_eq!(e.exit_code(), 5, "{e}");
         let t = e.to_string();
         assert!(
-            t.contains("check that this Fly token can access app fleet-prod"),
+            t.contains(
+                "flyctl failed for app fleet-prod: check that the logged-in Fly account can \
+                 access it, that the app exists, and, for a deploy, that it has at least one \
+                 machine"
+            ),
             "{t}"
         );
         assert!(
             !t.contains("to see why") && !t.contains("FLYIDENTITY"),
             "{t}"
+        );
+    }
+
+    /// FR-26 / FR-10: with FLY_API_TOKEN or FLY_ACCESS_TOKEN set, `auth whoami` is not
+    /// consulted (app-scoped deploy tokens fail it): Target (exit 5) naming the app and
+    /// the variable, logged-in check skipped, CI or not.
+    #[test]
+    fn fly_token_set_is_target_exit_5_without_whoami() {
+        for (env, var) in [
+            (
+                crate::host::FakeEnv::new("linux")
+                    .shell("/bin/bash")
+                    .var("FLY_API_TOKEN"),
+                "FLY_API_TOKEN",
+            ),
+            (
+                crate::host::FakeEnv::new("linux")
+                    .var("CI")
+                    .var("FLY_ACCESS_TOKEN"),
+                "FLY_ACCESS_TOKEN",
+            ),
+        ] {
+            let (e, r) = fail_on(host(env), "deploy", "fleet-prod", None);
+            assert_eq!(e.exit_code(), 5, "{e}");
+            let t = e.to_string();
+            assert!(
+                t.contains(&format!(
+                    "flyctl failed for app fleet-prod: check that the token in {var} can \
+                     access it, that the app exists, and, for a deploy, that it has at least \
+                     one machine"
+                )),
+                "{t}"
+            );
+            assert!(
+                !t.contains("auth login") && !t.contains("to see why"),
+                "{t}"
+            );
+            assert_eq!(r.calls.borrow().len(), 1, "no auth whoami with a Fly token");
+        }
+    }
+
+    /// The public calls detect the host on failure: with a Fly token, no `auth whoami`.
+    #[test]
+    fn public_calls_with_fly_token_skip_whoami() {
+        let h = host(crate::host::FakeEnv::new("linux").var("FLY_API_TOKEN"));
+        for call in four_calls() {
+            let r = FakeRunner::new([Output::failure(1)]);
+            let e = crate::host::with_test_host(h, || call(&r)).unwrap_err();
+            assert_eq!(e.exit_code(), 5, "{e}");
+            assert!(
+                err_text(&e).contains("flyctl failed for app fleet-prod"),
+                "{e}"
+            );
+            assert_eq!(r.calls.borrow().len(), 1);
+        }
+    }
+
+    /// FR-26: a diagnosis probe that times out is Unknown → the last-resort re-run hint.
+    #[test]
+    fn whoami_timeout_falls_back_to_rerun_hint() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        let h = bash();
+        let e = run_on(
+            &r,
+            &|| h,
+            "fly secrets list",
+            "app",
+            &["secrets", "list"],
+            None,
+            &["secrets", "list", "--app", "app"],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, Error::Target(m) if m == "fly secrets list failed (exit 1); run `flyctl secrets list --app app` to see why"),
+            "{e:?}"
         );
     }
 
@@ -931,6 +1020,28 @@ mod tests {
                 assert_eq!(calls[1].args, vec!["auth", "whoami"]);
             }
         }
+    }
+
+    /// FR-26: host detection happens only on the failure path.
+    #[test]
+    fn successful_call_never_detects_the_host() {
+        let r = FakeRunner::new([Output::success("[]")]);
+        let called = std::cell::Cell::new(false);
+        let host = || {
+            called.set(true);
+            bash()
+        };
+        run_on(
+            &r,
+            &host,
+            "fly secrets list",
+            "app",
+            &["secrets", "list"],
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(!called.get());
     }
 
     #[test]

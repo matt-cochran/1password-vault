@@ -145,6 +145,7 @@ fn assert_signin_syntax(p: P, text: &str) {
             assert!(line.starts_with("eval (") && line.ends_with(')'), "{line}");
             parses_with("fish", &["--no-execute", "-c", line]);
         }
+        Shell::Other => unreachable!("every matrix platform has a known shell"),
         Shell::PowerShell => {
             assert!(line.starts_with("Invoke-Expression "), "{line}");
             assert!(!line.starts_with("eval"), "{line}");
@@ -162,7 +163,9 @@ fn assert_signin_syntax(p: P, text: &str) {
     }
 }
 
-/// When `shell` is installed, it must accept `args` (a parse-only invocation).
+/// When `shell` is installed, it must accept `args` (a parse-only invocation). With
+/// `OPV_REQUIRE_SHELLS=1` (set on the Ubuntu CI job) a missing shell fails the test, so
+/// the check is never vacuous there.
 fn parses_with(shell: &str, args: &[&str]) {
     match std::process::Command::new(shell)
         .args(args)
@@ -170,7 +173,12 @@ fn parses_with(shell: &str, args: &[&str]) {
         .output()
     {
         Ok(o) => assert!(o.status.success(), "{shell} rejects {args:?}"),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var("OPV_REQUIRE_SHELLS").as_deref() != Ok("1"),
+                "{shell} is not installed but OPV_REQUIRE_SHELLS=1"
+            );
+        }
         Err(e) => panic!("{shell}: {e}"),
     }
 }
@@ -191,23 +199,20 @@ fn no_account(p: P) {
     assert_eq!(e.exit_code(), 7, "{p:?}: {t}");
     assert!(!t.contains("to see why"), "{t}");
     assert_signin_syntax(p, &t);
-    if host(p).ci {
-        assert!(!t.contains("op account add"), "{t}");
-    } else {
-        assert!(
-            t.contains("\n  add one: op account add --address <sign-in address> --email <email>\n"),
-            "{t}"
-        );
-        assert!(
-            t.contains(
-                "type the Secret Key and password only at op's prompts, never into chat, \
-                 tickets or files"
-            ),
-            "{t}"
-        );
-        // `op account add` comes first, then the sign-in command.
-        assert!(t.find("op account add").unwrap() < t.find("then sign in").unwrap());
-    }
+    // NoAccount is unreachable under CI (no `op account list` there), so no CI case.
+    assert!(
+        t.contains("\n  add one: op account add --address <sign-in address> --email <email>\n"),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "type the Secret Key and password only at op's prompts, never into chat, \
+             tickets or files"
+        ),
+        "{t}"
+    );
+    // `op account add` comes first, then the sign-in command.
+    assert!(t.find("op account add").unwrap() < t.find("then sign in").unwrap());
     if matches!(p, P::Wsl) {
         assert!(t.contains("WSL"), "{t}");
     }
@@ -295,7 +300,6 @@ cases! {
     no_account_macos: no_account(P::MacOs);
     no_account_windows_powershell: no_account(P::WindowsPowerShell);
     no_account_fish: no_account(P::Fish);
-    no_account_ci: no_account(P::Ci);
 
     not_visible_linux: not_visible(P::Linux);
     not_visible_wsl: not_visible(P::Wsl);
@@ -319,21 +323,115 @@ cases! {
     doctor_expired_ci: doctor_expired(P::Ci);
 }
 
-/// A rejected service account token: Auth, says the token is the problem, and still gives
-/// the interactive alternative outside CI only.
+/// FR-26 / FR-10: a non-interactive credential (service account or Connect) whose read and
+/// whoami both fail is ambiguous (rejected token or no network): Source (exit 4) naming the
+/// variable, no interactive command, no `op account list`; CI or not.
 #[test]
-fn rejected_service_account_token() {
-    for (fake, interactive) in [
-        (FakeEnv::new("linux").shell("/bin/bash"), true),
-        (FakeEnv::new("linux").var("CI"), false),
+fn rejected_or_unreachable_credential_is_source_exit_4() {
+    for (fake, var, label) in [
+        (
+            FakeEnv::new("linux")
+                .shell("/bin/bash")
+                .var("OP_SERVICE_ACCOUNT_TOKEN"),
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "service-account",
+        ),
+        (
+            FakeEnv::new("linux")
+                .var("CI")
+                .var("OP_SERVICE_ACCOUNT_TOKEN"),
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "service-account",
+        ),
+        (
+            FakeEnv::new("linux")
+                .shell("/bin/bash")
+                .var("OP_CONNECT_HOST")
+                .var("OP_CONNECT_TOKEN"),
+            "OP_CONNECT_TOKEN",
+            "Connect",
+        ),
+        (
+            FakeEnv::new("windows").var("OP_CONNECT_TOKEN"),
+            "OP_CONNECT_TOKEN",
+            "Connect",
+        ),
     ] {
-        let h = Host::from_env(&fake.var("OP_SERVICE_ACCOUNT_TOKEN"));
+        let h = Host::from_env(&fake);
         let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
         let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
         let t = e.to_string();
+        assert_eq!(e.exit_code(), 4, "{t}");
+        assert!(
+            t.contains(&format!(
+                "1Password rejected the {label} token or could not be reached: check the \
+                 token in {var} and network access"
+            )),
+            "{t}"
+        );
+        assert!(!t.contains("op signin") && !t.contains("to see why"), "{t}");
+        assert_eq!(
+            r.calls.borrow().len(),
+            2,
+            "no account list with a credential"
+        );
+    }
+}
+
+/// Connect: item not found while whoami succeeds → Source (exit 4) naming the IDs.
+#[test]
+fn connect_item_not_found_is_source_exit_4() {
+    let h = Host::from_env(
+        &FakeEnv::new("linux")
+            .shell("/bin/bash")
+            .var("OP_CONNECT_HOST")
+            .var("OP_CONNECT_TOKEN"),
+    );
+    let r = FakeRunner::new([Output::failure(1), Output::success(WHOAMI_USER)]);
+    let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+    let t = e.to_string();
+    assert_eq!(e.exit_code(), 4, "{t}");
+    assert!(t.contains("item iprd in vault vprd"), "{t}");
+    assert!(!t.contains("op signin"), "{t}");
+}
+
+/// Connect: whoami failing is never exit 7 with an interactive command.
+#[test]
+fn connect_whoami_failing_is_not_auth_with_interactive_command() {
+    for shell in ["/bin/bash", "/usr/bin/fish"] {
+        let h = Host::from_env(&FakeEnv::new("linux").shell(shell).var("OP_CONNECT_HOST"));
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
+        let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+        let t = e.to_string();
+        assert_ne!(e.exit_code(), 7, "{t}");
+        assert!(!t.contains("op signin") && !t.contains("eval"), "{t}");
+    }
+}
+
+/// Not signed in (no credential): the sign-in step plus the network fallback line.
+#[test]
+fn not_signed_in_mentions_network_access() {
+    let (e, t, _) = read_fails(P::Linux, S::Expired);
+    assert_eq!(e.exit_code(), 7, "{t}");
+    assert!(
+        t.contains("\n  if you are signed in, check network access to 1Password\n"),
+        "{t}"
+    );
+}
+
+/// An unrecognised `$SHELL` gets the generic `op signin` pointer, never POSIX syntax.
+#[test]
+fn unknown_shell_gets_generic_signin_hint() {
+    for sh in ["/usr/bin/nu", "/bin/tcsh", "/bin/csh"] {
+        let h = Host::from_env(&FakeEnv::new("linux").shell(sh));
+        let r = fake_op(S::Expired, false);
+        let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+        let t = e.to_string();
         assert_eq!(e.exit_code(), 7, "{t}");
-        assert!(t.contains("OP_SERVICE_ACCOUNT_TOKEN set"), "{t}");
-        assert_eq!(t.contains("eval $(op signin)"), interactive, "{t}");
-        assert_eq!(r.calls.borrow().len(), 2, "no account list with a token");
+        assert!(
+            t.contains("\n  sign in with `op signin` (see `op signin --help` for your shell)\n"),
+            "{sh}: {t}"
+        );
+        assert!(!t.contains("$(") && !t.contains("eval"), "{sh}: {t}");
     }
 }

@@ -22,12 +22,20 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # FR-26: the shell-syntax tests parse each suggested sign-in command with the real
+      # shell; on Ubuntu every shell must be present (OPV_REQUIRE_SHELLS below). pwsh, bash
+      # and sh ship with the runner image.
+      - name: Install shells for the syntax tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh fish
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run clippy
         run: cargo clippy --all-targets --features fake -- -D warnings
       - name: Run tests
         run: cargo test --locked --features fake
+        env:
+          OPV_REQUIRE_SHELLS: ${{ runner.os == 'Linux' && '1' || '' }}
 
   deny:
     name: cargo-deny

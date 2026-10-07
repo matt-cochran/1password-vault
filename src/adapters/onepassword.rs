@@ -6,9 +6,11 @@
 //!   item JSON so that [`write_skeleton`] needs no second read.
 //! - A failed `op` call is diagnosed with [`diagnose`] (FR-26): `op whoami`, then
 //!   `op account list` when it fails (both free under rate limits; never a second item
-//!   read). Not signed in is `Auth` (exit 7) with the sign-in command for the detected
-//!   shell ([`crate::host`]); signed in is `Source` (exit 4) naming the IDs and the identity
-//!   type. Only `user_type` is parsed from `whoami`, and only the entry count from
+//!   read; own 15 s limit). Not signed in, with no service-account or Connect credential
+//!   set, is `Auth` (exit 7) with the sign-in step for the detected shell
+//!   ([`crate::host`]); a set credential that fails whoami is `Source` (exit 4, ambiguous:
+//!   rejected or unreachable); signed in is `Source` (exit 4) naming the IDs and the
+//!   identity type. The host is detected only on failure. Only `user_type` is parsed from `whoami`, and only the entry count from
 //!   `account list`; identity is never printed or kept.
 //! - [`write_skeleton`] (FR-19, the only write) pipes the full current item, with the missing
 //!   sections and empty fields appended, to `op item edit <item_id> --vault <vault_id>
@@ -44,8 +46,8 @@ use crate::domain::model::{Environment, Kind};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
-use crate::host::{Host, Platform, Tool};
-use crate::runner::{CommandRunner, Output};
+use crate::host::{Host, OpCredential, Platform, Tool};
+use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
 
 const OP: &str = "op";
 
@@ -93,10 +95,12 @@ impl fmt::Display for IdentityType {
 pub enum Session {
     /// `op whoami` succeeded.
     SignedIn(IdentityType),
-    /// `op whoami` failed: no session, an expired `OP_SESSION_*`, or a locked desktop app.
+    /// `op whoami` failed with no non-interactive credential set: no session, an expired
+    /// `OP_SESSION_*`, a locked desktop app (or no network).
     NotSignedIn,
-    /// `op whoami` failed while `OP_SERVICE_ACCOUNT_TOKEN` is set: the token is rejected.
-    TokenRejected,
+    /// `op whoami` failed while a service-account or Connect credential is set: rejected
+    /// or unreachable. Ambiguous, so it keeps the source category (exit 4, FR-10).
+    CredentialFailed(OpCredential),
     /// `op whoami` failed and `op account list` is empty: no account on this machine.
     NoAccount,
     /// `op whoami` could not run to completion (spawn error or timeout); nothing known.
@@ -106,26 +110,28 @@ pub enum Session {
 /// Classify the 1Password session (FR-26). Shared by `doctor` and every failed `op` call.
 ///
 /// Calls: `op whoami --format json`; only if it fails, and only outside CI and without a
-/// service account token, `op account list --format json`. Never an item read (FR-13).
-/// From `whoami` only `user_type` is parsed; from `account list` only the number of
-/// entries. `op` missing is `Err(Dependency)` with the install hint for `host`.
-pub fn diagnose(r: &dyn CommandRunner, host: &Host) -> Result<Session, Error> {
-    let who = match r.run(OP, &["whoami", "--format", "json"], None, &[]) {
+/// non-interactive credential, `op account list --format json`. Both are diagnosis probes
+/// with their own [`PROBE_TIMEOUT`]. Never an item read (FR-13). From `whoami` only
+/// `user_type` is parsed; from `account list` only the number of entries. `op` missing is
+/// `Err(Dependency)` with the install hint. `host` is called only when needed.
+pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Session, Error> {
+    let who = match r.probe(OP, &["whoami", "--format", "json"], PROBE_TIMEOUT) {
         Ok(o) => o,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(host)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(&host())),
         Err(_) => return Ok(Session::Unknown),
     };
     if who.status == 0 {
         return Ok(Session::SignedIn(identity_type(&who.stdout)));
     }
-    if host.service_account_token {
-        return Ok(Session::TokenRejected);
+    let h = host();
+    if let Some(c) = h.op_credential {
+        return Ok(Session::CredentialFailed(c));
     }
-    if host.ci {
+    if h.ci {
         return Ok(Session::NotSignedIn);
     }
     Ok(
-        match r.run(OP, &["account", "list", "--format", "json"], None, &[]) {
+        match r.probe(OP, &["account", "list", "--format", "json"], PROBE_TIMEOUT) {
             Ok(o) if o.status == 0 && account_count(&o.stdout) == Some(0) => Session::NoAccount,
             _ => Session::NotSignedIn,
         },
@@ -164,72 +170,72 @@ fn account_count(stdout: &[u8]) -> Option<usize> {
         .map(|v| v.len())
 }
 
-/// The remediation for a session that is not usable, as an [`Error::Auth`] (exit 7), or
-/// `None` for `SignedIn` / `Unknown`. `failed` names what failed first, if anything
-/// before `op whoami` (e.g. `op item get failed (exit 1)`). Text only, never a prompt (FR-9); never asks for a
-/// secret anywhere but `op`'s own prompt.
-pub fn auth_error(session: Session, host: &Host, failed: Option<&str>) -> Option<Error> {
+/// The remediation for a session that is not usable, or `None` for `SignedIn` / `Unknown`.
+/// `failed` names what failed first, if anything before `op whoami` (e.g. `op item get
+/// failed (exit 1)`). Text only, never a prompt (FR-9); never asks for a secret anywhere
+/// but `op`'s own prompt.
+///
+/// - `NotSignedIn` / `NoAccount` (no non-interactive credential set): [`Error::Auth`]
+///   (exit 7) with the sign-in step for the shell, or "set OP_SERVICE_ACCOUNT_TOKEN" under
+///   CI.
+/// - `CredentialFailed`: [`Error::Source`] (exit 4, the pre-FR-26 category, FR-10): the
+///   token was rejected or 1Password could not be reached; no interactive command.
+pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Option<Error> {
     let ctx = match failed {
         Some(f) => format!("{f}; op whoami failed"),
         None => "op whoami failed".to_string(),
     };
-    let mut m = String::from("not signed in to 1Password");
     let ci_token = "set OP_SERVICE_ACCOUNT_TOKEN to a service account token that can read \
                     the vault (as a CI secret, never in the repository)";
-    match session {
+    let network = "if you are signed in, check network access to 1Password";
+    let m = match session {
         Session::SignedIn(_) | Session::Unknown => return None,
-        Session::TokenRejected => {
-            m.push_str(&format!(
-                " ({ctx} with OP_SERVICE_ACCOUNT_TOKEN set: the token \
-                 is invalid, expired or revoked)\n  next: set OP_SERVICE_ACCOUNT_TOKEN to a \
-                 valid service account token"
-            ));
-            if let Some(cmd) = host.signin_command() {
-                m.push_str(&format!(
-                    "\n  or remove OP_SERVICE_ACCOUNT_TOKEN from the environment and sign in: {cmd}"
-                ));
-            }
+        Session::CredentialFailed(c) => {
+            return Some(Error::Source(format!(
+                "{ctx}\n  1Password rejected the {} token or could not be reached: check the \
+                 token in {} and network access",
+                c.label(),
+                c.var()
+            )));
         }
-        Session::NotSignedIn => {
-            m.push_str(&format!(" ({ctx})"));
-            match host.signin_command() {
-                None => m.push_str(&format!("\n  next: {ci_token}")),
-                Some(cmd) => m.push_str(&format!(
-                    "\n  sign in: {cmd}\n  (a session from op signin expires after 30 minutes \
-                     idle; with the desktop app integration, unlock the 1Password app instead)"
-                )),
-            }
-        }
-        Session::NoAccount => match host.signin_command() {
-            None => m.push_str(&format!(" ({ctx})\n  next: {ci_token}")),
-            Some(cmd) => {
+        Session::NotSignedIn => match host.signin_line("sign in") {
+            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+            Some(step) => format!(
+                "not signed in to 1Password ({ctx})\n  {step}\n  (a session from op signin \
+                 expires after 30 minutes idle; with the desktop app integration, unlock the \
+                 1Password app instead)\n  {network}"
+            ),
+        },
+        Session::NoAccount => match host.signin_line("then sign in") {
+            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+            Some(step) => {
                 let wsl = if host.platform == Platform::Wsl {
                     " (op in WSL does not share the Windows app's accounts)"
                 } else {
                     ""
                 };
-                m = format!(
+                format!(
                     "no 1Password account is set up for op on this machine{wsl} ({ctx} \
                      and op account list is empty)\n  add one: op account \
-                     add --address <sign-in address> --email <email>\n  then sign in: {cmd}\n  \
+                     add --address <sign-in address> --email <email>\n  {step}\n  \
                      type the Secret Key and password only at op's prompts, never into chat, \
                      tickets or files"
-                );
+                )
             }
         },
-    }
-    m.push_str("\n  then run opv again");
-    Some(Error::Auth(m))
+    };
+    Some(Error::Auth(format!("{m}\n  then run opv again")))
 }
 
 /// After a failed `op` call: diagnose the session and return the error to report. Not
-/// signed in → `Auth` (exit 7) with the sign-in command; signed in → `Source` (exit 4)
-/// naming the vault and item IDs, the identity type and `grant`; the session could not
-/// be determined → `Source` with a value-free re-run hint (the last resort).
+/// signed in → `Auth` (exit 7) with the sign-in step; a non-interactive credential that
+/// fails → `Source` (exit 4); signed in → `Source` (exit 4) naming the vault and item
+/// IDs, the identity type and `grant`; the session could not be determined → `Source`
+/// with a value-free re-run hint (the last resort).
 fn failed_op_error(
     r: &dyn CommandRunner,
     env: &Environment,
-    host: &Host,
+    host: &dyn Fn() -> Host,
     failed: &str,
     grant: &str,
 ) -> Error {
@@ -237,9 +243,6 @@ fn failed_op_error(
         Ok(s) => s,
         Err(e) => return e,
     };
-    if let Some(e) = auth_error(session, host, Some(failed)) {
-        return e;
-    }
     match session {
         Session::SignedIn(t) => Error::Source(format!(
             "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not \
@@ -247,22 +250,31 @@ fn failed_op_error(
              item_id in the configuration",
             env.item_id, env.vault_id, env.vault_id
         )),
-        _ => Error::Source(format!("{failed}{}", rerun_hint(env))),
+        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env))),
+        s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
     }
 }
 
 /// Read the environment's item once, by vault ID and item ID (FR-13). See the module docs.
+/// The host is detected only if the read fails.
 pub fn read_item(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
-    read_item_with(r, env, &Host::detect())
+    read_item_on(r, env, &Host::detect)
 }
 
 /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
-/// [`diagnose`] (FR-26): `Auth` when not signed in, `Source` naming the IDs and the
-/// identity type when signed in. No second item read is made (FR-13).
+/// [`diagnose`] (FR-26). No second item read is made (FR-13).
 pub fn read_item_with(
     r: &dyn CommandRunner,
     env: &Environment,
     host: &Host,
+) -> Result<Item, Error> {
+    read_item_on(r, env, &|| *host)
+}
+
+fn read_item_on(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
     let args = [
         "item",
@@ -301,7 +313,7 @@ pub fn write_skeleton(
     item: &Item,
     missing: &[(String, String, Kind)],
 ) -> Result<(), Error> {
-    write_skeleton_with(r, env, item, missing, &Host::detect())
+    write_skeleton_on(r, env, item, missing, &Host::detect)
 }
 
 /// [`write_skeleton`] on a given host (tests). A failed edit is diagnosed like a failed
@@ -312,6 +324,16 @@ pub fn write_skeleton_with(
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &Host,
+) -> Result<(), Error> {
+    write_skeleton_on(r, env, item, missing, &|| *host)
+}
+
+fn write_skeleton_on(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    item: &Item,
+    missing: &[(String, String, Kind)],
+    host: &dyn Fn() -> Host,
 ) -> Result<(), Error> {
     if missing.is_empty() {
         return Ok(());
@@ -367,10 +389,10 @@ fn run_op(
     r: &dyn CommandRunner,
     args: &[&str],
     stdin: Option<&[u8]>,
-    host: &Host,
+    host: &dyn Fn() -> Host,
 ) -> Result<Output, Error> {
     r.run(OP, args, stdin, &[]).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => op_missing(host),
+        io::ErrorKind::NotFound => op_missing(&host()),
         // The runner's own message names the program and the limit (no child output).
         io::ErrorKind::TimedOut => {
             let sub: Vec<&str> = args.iter().take(2).copied().collect();
@@ -1030,6 +1052,32 @@ mod tests {
         );
     }
 
+    /// FR-26: a successful read never detects the host; a failed one does.
+    #[test]
+    fn host_is_detected_only_on_failure() {
+        let item_json = serde_json::to_vec(&json!({"fields": []})).unwrap();
+        let called = std::cell::Cell::new(0);
+        let host = || {
+            called.set(called.get() + 1);
+            linux()
+        };
+        let r = FakeRunner::new([Output::success(item_json)]);
+        read_item_on(&r, &test_env(), &host).unwrap();
+        assert_eq!(called.get(), 0);
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let _ = read_item_on(&r, &test_env(), &host);
+        assert!(called.get() > 0);
+    }
+
+    /// FR-26: whoami is a probe with its own 15 s limit; a timeout is Unknown and falls
+    /// back to the re-run hint.
+    #[test]
+    fn whoami_timeout_is_unknown() {
+        let r = FakeRunner::new([]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        assert_eq!(diagnose(&r, &linux).unwrap(), Session::Unknown);
+    }
+
     /// Only `user_type` is used; identity fields are never kept.
     #[test]
     fn identity_type_parses_user_type_only() {
@@ -1060,15 +1108,17 @@ mod tests {
         assert_eq!(account_count(b"oops"), None);
     }
 
-    /// CI or a service account token: no `op account list` (it cannot help there).
+    /// CI, a service account token or Connect: no `op account list` (it cannot help).
     #[test]
     fn diagnose_skips_account_list_under_ci_or_token() {
         for env in [
             FakeEnv::new("linux").var("CI"),
             FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
+            FakeEnv::new("linux").var("OP_CONNECT_HOST"),
         ] {
             let r = FakeRunner::new([Output::failure(1)]);
-            diagnose(&r, &Host::from_env(&env)).unwrap();
+            let h = Host::from_env(&env);
+            diagnose(&r, &|| h).unwrap();
             assert_eq!(argvs(&r), vec!["op whoami --format json"], "{env:?}");
         }
     }

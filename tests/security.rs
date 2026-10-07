@@ -629,8 +629,9 @@ fn failure_after_partial_plan_stages_nothing() {
     // FR-26: logged in (auth whoami succeeds), so the app is named with the token check;
     // never "to see why" (child stderr is discarded).
     assert!(
-        r.stderr
-            .contains(&format!("check that this Fly token can access app {APP}")),
+        r.stderr.contains(&format!(
+            "flyctl failed for app {APP}: check that the logged-in Fly account can access it"
+        )),
         "{}",
         r.stderr
     );
@@ -887,6 +888,84 @@ fn fly_logged_out_is_auth_with_next_step() {
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(r.stderr.contains("set FLY_API_TOKEN"), "{}", r.stderr);
     assert!(!r.stderr.contains("auth login"), "{}", r.stderr);
+    assert_clean_output(&["fly", "sync", "prod"], &r);
+}
+
+/// FR-26 / FR-10: with a non-interactive 1Password credential (service account or
+/// Connect) set, a read and whoami that both fail are ambiguous: Source (4) naming the
+/// variable, no interactive command, no `op account list`.
+#[test]
+fn rejected_credential_keeps_source_category() {
+    for (set, var) in [
+        (
+            &[("OP_SERVICE_ACCOUNT_TOKEN", "dummy-not-a-token")][..],
+            "OP_SERVICE_ACCOUNT_TOKEN",
+        ),
+        (
+            &[
+                ("OP_CONNECT_HOST", "http://connect.invalid"),
+                ("OP_CONNECT_TOKEN", "dummy-not-a-token"),
+            ][..],
+            "OP_CONNECT_TOKEN",
+        ),
+    ] {
+        let mut h = Harness::new(&good_item());
+        h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+            .set("SHELL", "/bin/bash")
+            .set("FAKE_OP_EXIT", "1");
+        for (k, v) in set {
+            h.set(k, v);
+        }
+        let r = h.run(&["status", "prod"]);
+        assert_eq!(r.code, 4, "{var}: {}", r.all());
+        assert!(
+            r.stderr
+                .contains(&format!("check the token in {var} and network access")),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+        assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
+        assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
+    }
+}
+
+/// FR-26: `CI=false` is not CI (interactive sign-in command shown).
+#[test]
+fn ci_false_is_not_ci() {
+    let mut h = Harness::new(&good_item());
+    h.unset("OP_SERVICE_ACCOUNT_TOKEN")
+        .set("CI", "false")
+        .set("SHELL", "/bin/bash")
+        .set("FAKE_OP_EXIT", "1");
+    let r = h.run(&["status", "prod"]);
+    assert_eq!(r.code, 7, "{}", r.all());
+    assert!(
+        r.stderr.contains("sign in: eval $(op signin)"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// FR-26 / FR-10: with FLY_API_TOKEN set, a failed flyctl call is a target error (5) naming
+/// the app and the variable; `flyctl auth whoami` is not run (deploy tokens fail it).
+#[test]
+fn fly_token_failure_is_target_without_whoami() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_FLY_AUTH_EXIT", "1")
+        .set("FLY_API_TOKEN", "dummy-fly-token");
+    let r = h.run(&["fly", "sync", "prod"]);
+    assert_eq!(r.code, 5, "{}", r.all());
+    assert!(
+        r.stderr.contains(&format!(
+            "flyctl failed for app {APP}: check that the token in FLY_API_TOKEN can access it"
+        )),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("dummy-fly-token") && !r.stderr.contains("to see why"));
+    assert_eq!(h.fly_calls("whoami"), 0);
     assert_clean_output(&["fly", "sync", "prod"], &r);
 }
 
