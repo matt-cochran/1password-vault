@@ -698,7 +698,7 @@ fn rule_failure_names_key_not_value() {
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
     ] {
         h.set_item(&item(good_fields(value)));
-        let named = format!("allumata/OPENAI_API_KEY (fails rule {rule})");
+        let named = format!("allumata/OPENAI_API_KEY (failed {rule} (");
 
         h.reset();
         let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
@@ -721,7 +721,7 @@ fn rule_failure_names_key_not_value() {
             assert_eq!(r.code, 8, "{rule} {cmd:?}: {}", r.all());
             assert!(r.stdout.contains("OPENAI_API_KEY"), "{}", r.stdout);
             assert!(
-                r.stdout.contains(&format!("fails rule {rule}")),
+                r.stdout.contains(&format!("failed {rule} (")),
                 "{}",
                 r.stdout
             );
@@ -1144,7 +1144,7 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
         assert!(
             r.stdout
                 .lines()
-                .any(|l| l.contains("OPENAI_API_KEY") && l.contains(&format!("fails rule {rule}"))),
+                .any(|l| l.contains("OPENAI_API_KEY") && l.contains(&format!("failed {rule} ("))),
             "{}",
             r.stdout
         );
@@ -1155,7 +1155,7 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     assert_eq!(r.code, 6, "{}", r.all());
     assert!(
         r.stderr
-            .contains(&format!("allumata/OPENAI_API_KEY (fails rule {rule})")),
+            .contains(&format!("allumata/OPENAI_API_KEY (failed {rule} (")),
         "{}",
         r.stderr
     );
@@ -1255,6 +1255,7 @@ fn status_json_row_carries_the_contract_fields() {
             "kind": "secret",
             "state": "saved",
             "rule": null,
+            "reason": null,
             "fly_name": N_OPENAI,
             "target": "absent",
             "action": "would_stage",
@@ -1282,6 +1283,47 @@ fn status_json_row_names_failing_rule() {
         "{}",
         r.all()
     );
+}
+
+/// FR-22: a failing row carries its reason in a separate `reason` field next to `rule`,
+/// built from the configuration (the expected prefix), never from the value.
+#[test]
+fn status_json_row_carries_failing_reason() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0013")));
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    let row = doc["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .find(|x| x["key"] == "OPENAI_API_KEY")
+        .expect("OPENAI_API_KEY row");
+    assert_eq!(row["reason"], json!("expected prefix sk-"), "{}", r.all());
+}
+
+/// FR-22: the JSON document keeps schema_version 1 when `reason` is added.
+#[test]
+fn status_json_reason_keeps_schema_version_one() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+}
+
+/// FR-22: text output shows `failed <rule> (<reason>)`.
+#[test]
+fn status_text_shows_rule_and_reason() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0015")));
+    let r = h.run(&["status", "prod"]);
+    assert!(
+        r.stdout
+            .lines()
+            .any(|l| l.contains("OPENAI_API_KEY")
+                && l.contains("failed prefix (expected prefix sk-)")),
+        "{}",
+        r.stdout
+    );
+    assert_clean_output(&["status"], &r);
 }
 
 /// FR-21 / SR-1: `status --json` contains no secret value marker (nor child stderr).

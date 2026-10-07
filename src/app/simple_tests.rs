@@ -188,8 +188,8 @@ fn status_mode_rule_failure_names_the_key_alone() {
     let (res, out) = out_of(|o| status::run(&simple(), "staging", &r, o));
     assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
     assert!(
-        out.lines()
-            .any(|l| l.starts_with("STRIPE_SECRET_KEY") && l.contains("fails rule prefix_by_mode")),
+        out.lines().any(|l| l.starts_with("STRIPE_SECRET_KEY")
+            && l.contains("failed prefix_by_mode (wrong prefix for mode test)")),
         "{out}"
     );
 }

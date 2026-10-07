@@ -114,7 +114,7 @@ mod tests {
                     secret("allumata", "INTEGRATION_ENC_KEY", &enc()),
                     text("allumata", "SIGNUP_POLICY", "FIXTUREVALUE"),
                 ],
-                "fails rule",
+                "failed ",
             ),
             (
                 vec![
@@ -139,7 +139,7 @@ mod tests {
                     text("allumata", "SIGNUP_POLICY", POLICY),
                     extra.clone(),
                 ],
-                "fails rule",
+                "failed ",
             ),
         ];
         for (fields, expect) in cases {
@@ -177,7 +177,7 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         let i = lines
             .iter()
-            .position(|l| l.contains("OPENAI_API_KEY") && l.contains("fails rule"))
+            .position(|l| l.contains("OPENAI_API_KEY") && l.contains("failed "))
             .unwrap();
         assert!(lines[i + 1].starts_with("    guidance: "), "{out}");
         assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
@@ -263,7 +263,7 @@ mod tests {
         assert!(
             out.lines().any(|l| l.starts_with("allumata")
                 && l.contains("SMTP_PASS")
-                && l.contains("fails rule refuse_in")),
+                && l.contains("failed refuse_in (")),
             "{out}"
         );
         assert_no_values(&out);
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
-                && l.contains("fails rule import-hash-after-odd-quotes")),
+                && l.contains("failed import-hash-after-odd-quotes (")),
             "{out}"
         );
         assert_no_values(&out);
