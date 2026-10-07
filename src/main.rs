@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use opv::Error;
-use opv::app::{config_export, doctor, explain, run as run_cmd, skeleton, status, sync};
+use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
 use opv::config;
 use opv::runner::ProcessRunner;
 
@@ -96,6 +96,29 @@ enum Cmd {
         /// Environment name; may be omitted when only one environment is declared.
         #[arg(long)]
         env: Option<String>,
+    },
+    /// Write a starter secrets.toml in the current directory from an existing item.
+    ///
+    /// Looks the vault and item up by title once, reads the item's field names and types
+    /// (never its values) and writes IDs, key names and kinds. Writes nothing to 1Password.
+    Init {
+        /// Environment name to declare (for example staging or prod).
+        env: String,
+        /// Vault title, matched exactly.
+        #[arg(long)]
+        vault: String,
+        /// Item title in that vault, matched exactly.
+        #[arg(long)]
+        item: String,
+        /// Fly app of the environment (not looked up; flyctl is not called).
+        #[arg(long, value_name = "APP")]
+        fly_app: String,
+        /// Profile to write; without it, it follows the item's shape.
+        #[arg(long, value_parser = ["simple", "fleet"])]
+        profile: Option<String>,
+        /// Overwrite an existing secrets.toml.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -215,6 +238,9 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
     let r = ProcessRunner::default();
+    if let Cmd::Init { .. } = &cli.cmd {
+        return run_init(cli, &r, out).map(|()| 0);
+    }
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
     let loaded = match &cli.config {
@@ -254,6 +280,7 @@ fn run_other(
 ) -> Result<(), Error> {
     match cmd {
         Cmd::Run { .. } => unreachable!("handled by run"),
+        Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Doctor => doctor::run(loaded, r, out),
         Cmd::Status { env, json } => status::run_with(&loaded?, &env, r, out, json),
         Cmd::Fly(FlyCmd::Plan { env, json }) => sync::plan_with(&loaded?, &env, r, out, json),
@@ -278,6 +305,37 @@ fn run_other(
         Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
         Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
     }
+}
+
+/// `init` writes `./secrets.toml`; it reads no configuration, so it runs before discovery.
+fn run_init(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
+    let Cmd::Init {
+        env,
+        vault,
+        item,
+        fly_app,
+        profile,
+        force,
+    } = cli.cmd
+    else {
+        unreachable!("called for init only")
+    };
+    if cli.config.is_some() {
+        return Err(Error::Config(
+            "init writes secrets.toml in the current directory; --config is not used".into(),
+        ));
+    }
+    let dir = std::env::current_dir()
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}")))?;
+    let args = init::InitArgs {
+        env,
+        vault,
+        item,
+        fly_app,
+        profile: profile.as_deref().map(init::parse_profile).transpose()?,
+        force,
+    };
+    init::run(&args, &dir, r, out)
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

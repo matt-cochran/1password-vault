@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
+pub mod init;
 pub mod run;
 #[cfg(test)]
 mod simple_tests;
