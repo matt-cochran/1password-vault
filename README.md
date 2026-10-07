@@ -6,6 +6,36 @@ The repository is named `1password-vault` for historical reasons; the tool is `o
 
 ## Install
 
+### Install script (Linux and macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
+```
+
+`install.sh` installs or updates `opv` into `~/.local/bin` without `sudo` and without
+npm, Homebrew or Rust. It picks the release asset for your OS and CPU (including
+WSL and macOS under Rosetta), verifies the download against the release's
+`SHA256SUMS`, and, when `gh` is available, runs
+`gh attestation verify <file> --repo matt-cochran/1password-vault`. An unknown
+platform, a missing checksum tool or a checksum mismatch fails closed.
+
+```sh
+sh install.sh --version v0.1.2   # install exactly this release (default: latest)
+sh install.sh --dir /usr/local/bin
+sh install.sh --check            # report what would happen, change nothing
+```
+
+When `opv` is already present in the target directory, the script compares
+`opv --version` with the target version: it prints `opv <old> → <new>` when it
+replaces the binary and `opv <version> is already installed` when it is already
+current. `--check` prints the same intent without downloading or writing
+anything. The binary is downloaded to a temporary file in the target directory
+and moved into place only after verification, so an interrupted run never
+leaves a broken `opv`. If the directory is not on `PATH`, the script prints the
+`export PATH=...` line to add.
+
+`OPV_INSTALL_BASE_URL` overrides the release base URL for the test harness only.
+
 ### Release binaries
 
 Download the asset for your platform from the [latest release](https://github.com/matt-cochran/1password-vault/releases/latest), together with `SHA256SUMS`, and [verify it](#verify-a-download).
