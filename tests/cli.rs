@@ -79,17 +79,27 @@ fn dir_with_ancestor_config() -> (tempfile::TempDir, std::path::PathBuf) {
 fn discovered_config_is_announced_once_on_stderr() {
     let (_dir, nested) = dir_with_ancestor_config();
     let (_, _, err) = opv_in(&nested, &["status", "qa"]);
-    let resolved = std::fs::canonicalize(&nested)
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("secrets.toml");
-    assert_eq!(
-        err.matches(&format!("using {}", resolved.display()))
-            .count(),
-        1,
+    let announced: Vec<&str> = err
+        .lines()
+        .filter_map(|l| l.strip_prefix("using "))
+        .collect();
+    let expected = nested.parent().unwrap().join("secrets.toml");
+    assert!(
+        announced.len() == 1 && same_file(announced[0], &expected),
         "{err}"
     );
+}
+
+/// Paths compared as filesystem locations: on Windows the same directory can appear in
+/// short (8.3) and long form, and `canonicalize` adds a `\\?\` prefix.
+fn same_file(printed: &str, expected: &std::path::Path) -> bool {
+    match (
+        std::fs::canonicalize(printed),
+        std::fs::canonicalize(expected),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 #[test]
@@ -121,8 +131,12 @@ fn missing_discovered_config_names_starting_directory() {
     let nested = dir.path().join("nested");
     std::fs::create_dir_all(&nested).unwrap();
     let (_, _, err) = opv_in(&nested, &["status", "prod"]);
-    let start = std::fs::canonicalize(&nested).unwrap();
-    assert!(err.contains(&start.display().to_string()), "{err}");
+    let named = err
+        .split("no secrets.toml found in ")
+        .nth(1)
+        .and_then(|rest| rest.split(" or any parent directory").next())
+        .unwrap_or("");
+    assert!(same_file(named, &nested), "{err}");
 }
 
 #[test]
