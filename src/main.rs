@@ -27,7 +27,14 @@ Exit codes:
 /// two and never prints, logs or writes a secret value. <ENV> is the name of an
 /// environment defined in the configuration (for example staging or prod).
 #[derive(Parser)]
-#[command(name = "secretctl", version, about, long_about, after_long_help = EXAMPLES)]
+#[command(
+    name = "secretctl",
+    bin_name = "secretctl",
+    version,
+    about,
+    long_about,
+    after_long_help = EXAMPLES
+)]
 struct Cli {
     /// Path to the fleet configuration.
     #[arg(
@@ -288,6 +295,24 @@ mod tests {
             closed: false,
         };
         assert!(writeln!(w, "a").is_err());
+    }
+
+    /// Usage reads `secretctl` whatever argv[0] is (Windows passes `secretctl.exe`).
+    #[test]
+    fn usage_uses_pinned_bin_name() {
+        for argv0 in [
+            "secretctl.exe",
+            r"C:\bin\secretctl.exe",
+            "/usr/bin/secretctl",
+        ] {
+            let e = match Cli::try_parse_from([argv0, "run", "--help"]) {
+                Err(e) => e,
+                Ok(_) => panic!("--help must not parse"),
+            };
+            let t = e.render().to_string();
+            assert!(t.contains("Usage: secretctl run"), "{argv0}: {t}");
+            assert!(!t.contains("secretctl.exe"), "{argv0}: {t}");
+        }
     }
 
     #[test]
