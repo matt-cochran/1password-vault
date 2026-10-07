@@ -9,6 +9,7 @@
 
 pub mod config_export;
 pub mod doctor;
+pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
 pub mod run;

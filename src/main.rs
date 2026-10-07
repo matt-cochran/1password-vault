@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use opv::Error;
-use opv::app::{config_export, doctor, run as run_cmd, skeleton, status, sync};
+use opv::app::{config_export, doctor, explain, run as run_cmd, skeleton, status, sync};
 use opv::config;
 use opv::runner::ProcessRunner;
 
@@ -85,6 +85,18 @@ enum Cmd {
     /// 1Password item commands.
     #[command(subcommand)]
     Item(ItemCmd),
+    /// Explain one declared key from the configuration alone; never reads a value.
+    ///
+    /// Prints the op:// reference, kind, Fly name, rules, immutable and guidance, and the
+    /// `op item get` command to inspect the item yourself. Makes no 1Password or Fly call.
+    Explain {
+        /// The key as PRODUCT/KEY.
+        #[arg(value_name = "PRODUCT/KEY")]
+        target: String,
+        /// Environment name; may be omitted when only one environment is declared.
+        #[arg(long)]
+        env: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -264,6 +276,7 @@ fn run_other(
             config_export::run(&loaded?, &env, r, out)
         }
         Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
+        Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
     }
 }
 

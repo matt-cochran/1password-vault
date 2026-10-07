@@ -499,3 +499,43 @@ mod run_with_fake_op {
         assert_eq!(out.status.code(), Some(3));
     }
 }
+
+/// FR-22: `explain` reads only the configuration, so it succeeds with no `op` or `flyctl`.
+#[test]
+fn explain_runs_without_op_or_flyctl() {
+    let (code, out, err) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("op item get iprd --vault vprd"), "{out}");
+}
+
+/// FR-22: the printed `op` command never contains `--reveal`.
+#[test]
+fn explain_never_prints_reveal() {
+    let (_, out, err) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert!(
+        !out.contains("--reveal") && !err.contains("--reveal"),
+        "{out}{err}"
+    );
+}
+
+/// FR-22: an undeclared key is a configuration error (exit 2).
+#[test]
+fn explain_undeclared_key_exits_2() {
+    let (code, _, err) = opv(&["--config", CFG, "explain", "allumata/NOPE", "--env", "prod"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.starts_with("opv: configuration error"), "{err}");
+}

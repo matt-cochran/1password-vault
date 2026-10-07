@@ -1970,3 +1970,12 @@ fn pem_private_key_reports_each_of_its_seven_reasons() {
         );
     }
 }
+
+/// FR-22 / FR-13: `explain` makes no 1Password or Fly call at all.
+#[test]
+fn explain_makes_no_op_or_flyctl_call() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["explain", "allumata/OPENAI_API_KEY", "--env", "prod"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    assert!(h.calls().is_empty(), "{:?}", h.calls());
+}
