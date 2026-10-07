@@ -186,10 +186,26 @@ fn is_product_name(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::domain::Kind;
-    const OK: &str = include_str!("../tests/fixtures/secrets.toml");
+    const RAW: &str = include_str!("../tests/fixtures/secrets.toml");
+
+    /// The fixture with LF line endings, whatever the checkout did (Windows may give CRLF).
+    fn ok() -> String {
+        RAW.replace("\r\n", "\n")
+    }
+
+    /// The fixture with `from` replaced by `to`. Panics if `from` does not occur, so a
+    /// mutation that silently fails to apply can never make a rejection test pass.
+    fn mutate(from: &str, to: &str) -> String {
+        let base = ok();
+        assert!(
+            base.contains(from),
+            "fixture mutation did not match: {from:?}"
+        );
+        base.replace(from, to)
+    }
     #[test]
     fn loads_fleet_profile_and_builds_fly_names() {
-        let f = parse(OK).unwrap();
+        let f = parse(&ok()).unwrap();
         assert_eq!(
             f.fly_name("prod", "allumata", "OPENAI_API_KEY"),
             "FLEET__ALLUMATA__OPENAI_API_KEY"
@@ -202,17 +218,17 @@ mod tests {
     }
     #[test]
     fn rejects_key_for_undefined_environment() {
-        let bad = OK.replace(r#"environments = ["prod"]"#, r#"environments = ["qa"]"#);
+        let bad = mutate(r#"environments = ["prod"]"#, r#"environments = ["qa"]"#);
         assert!(matches!(parse(&bad), Err(Error::Config(m)) if m.contains("qa")));
     }
     #[test]
     fn rejects_template_without_placeholders() {
-        let bad = OK.replace("FLEET__{PRODUCT}__{KEY}", "FLEET_STATIC");
+        let bad = mutate("FLEET__{PRODUCT}__{KEY}", "FLEET_STATIC");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
     #[test]
     fn rejects_non_env_name_keys() {
-        let bad = OK.replace(
+        let bad = mutate(
             "[products.allumata.keys.OPENAI_API_KEY]",
             "[products.allumata.keys.openai-key]",
         );
@@ -228,7 +244,7 @@ mod tests {
 
     #[test]
     fn parses_full_model() {
-        let f = parse(OK).unwrap();
+        let f = parse(&ok()).unwrap();
         let prod = &f.environments["prod"];
         assert_eq!(prod.vault_id, "vprd");
         assert_eq!(prod.item_id, "iprd");
@@ -265,44 +281,50 @@ mod tests {
 
     #[test]
     fn rejects_non_fleet_profile() {
-        let m = config_err(&OK.replace(r#"kind = "fleet""#, r#"kind = "simple""#));
+        let m = config_err(&mutate(r#"kind = "fleet""#, r#"kind = "simple""#));
         assert!(m.contains("profile.kind"), "{m}");
     }
 
     #[test]
     fn rejects_unknown_fields_and_rules() {
-        config_err(&OK.replace("immutable = true", "immutible = true"));
-        config_err(&OK.replace("base64_bytes = 32", "base64_len = 32"));
-        config_err(&OK.replace("vault_id = \"vprd\"", "vault_id = \"vprd\"\nvault = \"x\""));
+        config_err(&mutate("immutable = true", "immutible = true"));
+        config_err(&mutate("base64_bytes = 32", "base64_len = 32"));
+        config_err(&mutate(
+            "vault_id = \"vprd\"",
+            "vault_id = \"vprd\"\nvault = \"x\"",
+        ));
     }
 
     #[test]
     fn rejects_unknown_kind() {
-        config_err(&OK.replace(r#"kind = "config""#, r#"kind = "text""#));
+        config_err(&mutate(r#"kind = "config""#, r#"kind = "text""#));
     }
 
     #[test]
     fn rejects_bad_product_name() {
-        let m = config_err(&OK.replace("products.allumata.", "products.Allumata."));
+        let m = config_err(&mutate("products.allumata.", "products.Allumata."));
         assert!(m.contains("Allumata"), "{m}");
     }
 
     #[test]
     fn rejects_missing_or_empty_fly_config() {
-        let m = config_err(&OK.replace(r#"item_id = "iprd""#, r#"item_id = """#));
+        let m = config_err(&mutate(r#"item_id = "iprd""#, r#"item_id = """#));
         assert!(m.contains("prod") && m.contains("item_id"), "{m}");
-        config_err(&OK.replace("fly.app = \"mcproductlabs-portfolio-production\"\n", ""));
+        config_err(&mutate(
+            "fly.app = \"mcproductlabs-portfolio-production\"\n",
+            "",
+        ));
     }
 
     #[test]
     fn rejects_template_missing_one_placeholder() {
-        config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "FLEET__{KEY}"));
-        config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "FLEET__{PRODUCT}"));
+        config_err(&mutate("FLEET__{PRODUCT}__{KEY}", "FLEET__{KEY}"));
+        config_err(&mutate("FLEET__{PRODUCT}__{KEY}", "FLEET__{PRODUCT}"));
     }
 
     #[test]
     fn rejects_regex_that_does_not_compile_naming_key() {
-        let m = config_err(&OK.replace(
+        let m = config_err(&mutate(
             r#"rules = { base64_bytes = 32 }"#,
             r#"rules = { regex = "([a-z" }"#,
         ));
@@ -313,7 +335,7 @@ mod tests {
     fn load_reads_file_and_reports_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("secrets.toml");
-        std::fs::write(&p, OK).unwrap();
+        std::fs::write(&p, RAW).unwrap();
         assert!(load(&p).is_ok());
         let missing = dir.path().join("nope.toml");
         assert!(matches!(load(&missing), Err(Error::Config(m)) if m.contains("nope.toml")));
@@ -321,7 +343,10 @@ mod tests {
 
     /// Appends an extra key declaration to the fixture.
     fn with_key(product: &str, key: &str, envs: &str) -> String {
-        format!("{OK}\n[products.{product}.keys.{key}]\nkind = \"secret\"\nenvironments = {envs}\n")
+        format!(
+            "{}\n[products.{product}.keys.{key}]\nkind = \"secret\"\nenvironments = {envs}\n",
+            ok()
+        )
     }
 
     #[test]
@@ -361,21 +386,24 @@ mod tests {
 
     #[test]
     fn rejects_template_rendering_invalid_fly_names() {
-        let m = config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "fleet__{PRODUCT}__{KEY}"));
+        let m = config_err(&mutate(
+            "FLEET__{PRODUCT}__{KEY}",
+            "fleet__{PRODUCT}__{KEY}",
+        ));
         assert!(m.contains("fleet__ALLUMATA__"), "{m}");
-        config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "FLEET-{PRODUCT}-{KEY}"));
-        config_err(&OK.replace("FLEET__{PRODUCT}__{KEY}", "{PRODUCT}{KEY} X"));
+        config_err(&mutate("FLEET__{PRODUCT}__{KEY}", "FLEET-{PRODUCT}-{KEY}"));
+        config_err(&mutate("FLEET__{PRODUCT}__{KEY}", "{PRODUCT}{KEY} X"));
     }
 
     #[test]
     fn rejects_whitespace_around_ids_and_app() {
-        let m = config_err(&OK.replace(r#"vault_id = "vprd""#, r#"vault_id = " vprd""#));
+        let m = config_err(&mutate(r#"vault_id = "vprd""#, r#"vault_id = " vprd""#));
         assert!(
             m.contains("prod") && m.contains("vault_id") && m.contains("whitespace"),
             "{m}"
         );
-        config_err(&OK.replace(r#"item_id = "iprd""#, r#"item_id = "iprd\n""#));
-        config_err(&OK.replace(
+        config_err(&mutate(r#"item_id = "iprd""#, r#"item_id = "iprd\n""#));
+        config_err(&mutate(
             r#"fly.app = "mcproductlabs-portfolio-production""#,
             r#"fly.app = "mcproductlabs-portfolio-production ""#,
         ));
@@ -383,7 +411,7 @@ mod tests {
 
     #[test]
     fn try_fly_name_reports_undefined_environment() {
-        let f = parse(OK).unwrap();
+        let f = parse(&ok()).unwrap();
         assert_eq!(
             f.try_fly_name("staging", "allumata", "SIGNUP_POLICY")
                 .unwrap(),
