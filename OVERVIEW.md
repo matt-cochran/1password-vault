@@ -408,6 +408,34 @@ opv item skeleton <environment>
 
 It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This is the only command that writes to 1Password, and it needs a write-capable identity; `fly sync`, `plan`, `status` and `config export` stay read-only.
 
+## FR-26 — Diagnose and Guide
+
+When opv cannot finish, it shall say **what is wrong and the exact next command for this platform**,
+instead of pointing at a tool to re-run. Each case below was hit during the first fleet
+rollout (2026-10-07); each has a test.
+
+| Situation | Detection (no value is read) | Message and exit |
+|---|---|---|
+| 1Password session expired or never started | after any failed `op` call, run `op whoami` (free under rate limits, D0) | "not signed in to 1Password", then the sign-in command for the detected shell (bash/zsh: `eval $(op signin)`; PowerShell: `Invoke-Expression $(op signin)`), or "set OP_SERVICE_ACCOUNT_TOKEN" under CI; exit 7 (auth), not 4 |
+| No 1Password account on this machine (fresh WSL or Linux) | `op account list --format json` is empty | `op account add --address <sign-in address> --email <email>`, then sign in; "type the Secret Key and password only at op's prompts, never into chat, tickets or files"; exit 7 |
+| Signed in, but the item or vault is not visible to this identity | `op whoami` succeeds and the item read fails | names the vault and item IDs and the identity type (user or service account, never the identity itself) and says to grant that identity access to the vault; exit 4 |
+| `op` or `flyctl` missing or untested version | existing `doctor` checks | the install command for the detected OS |
+| A value fails its rule | FR-22 reasons | the reason plus the key's `guidance` |
+| Clean run | n/a | a summary line: `N saved, M not yet on <target> (staged by the next fly sync), 0 findings` |
+
+Acceptance:
+
+- No failure message tells the user to run another tool "to see why" when opv can find out
+  itself without reading a value.
+- Every remediation string is covered by a test per detected platform (Linux, WSL, macOS,
+  Windows PowerShell, CI), and each suggested command is checked to be the correct syntax
+  for that shell.
+- Remediation text never asks for a secret to be pasted anywhere but the owning tool's own prompt.
+- Detection makes no extra 1Password item reads (FR-13). `op whoami` and `op account list`
+  have no rate-limit cost.
+
+Constraints kept: SR-1, SR-2, FR-9 (text, never a prompt), FR-10 (stable exit categories), FR-13.
+
 ---
 
 # 4. Security Requirements
