@@ -171,14 +171,31 @@ fn describe_rules(r: &Rules) -> Vec<String> {
             OneOrMany::Many(_) => format!("[{}]", items.join(", ")),
         }
     }
+    // Exhaustive on purpose (no `..`): a new rule field fails to compile here until
+    // explain shows it.
+    let Rules {
+        prefix,
+        not_prefix,
+        ensure_prefix,
+        pattern,
+        regex,
+        r#enum,
+        base64_bytes,
+        hex_bytes,
+        email_list,
+        https_url,
+        prefix_by_mode,
+        refuse_in,
+        transform,
+    } = r;
     let mut out = Vec::new();
-    if let Some(p) = &r.prefix {
+    if let Some(p) = prefix {
         out.push(format!("prefix = {p:?}"));
     }
-    if let Some(p) = &r.not_prefix {
+    if let Some(p) = not_prefix {
         out.push(format!("not_prefix = {}", list(p)));
     }
-    if let Some(p) = &r.prefix_by_mode {
+    if let Some(p) = prefix_by_mode {
         let values: Vec<String> = p
             .values
             .iter()
@@ -195,34 +212,34 @@ fn describe_rules(r: &Rules) -> Vec<String> {
         s.push_str(" }");
         out.push(s);
     }
-    if let Some(p) = &r.ensure_prefix {
+    if let Some(p) = ensure_prefix {
         out.push(format!("ensure_prefix = {p:?}"));
     }
-    if let Some(p) = &r.pattern {
+    if let Some(p) = pattern {
         out.push(format!("pattern = {p:?}"));
     }
-    if let Some(p) = &r.regex {
+    if let Some(p) = regex {
         out.push(format!("regex = {p:?}"));
     }
-    if let Some(v) = &r.r#enum {
+    if let Some(v) = r#enum {
         out.push(format!("enum = {v:?}"));
     }
-    if let Some(n) = r.base64_bytes {
+    if let Some(n) = *base64_bytes {
         out.push(format!("base64_bytes = {n}"));
     }
-    if let Some(n) = r.hex_bytes {
+    if let Some(n) = *hex_bytes {
         out.push(format!("hex_bytes = {n}"));
     }
-    if r.email_list {
+    if *email_list {
         out.push("email_list = true".into());
     }
-    if r.https_url {
+    if *https_url {
         out.push("https_url = true".into());
     }
-    if !r.refuse_in.is_empty() {
-        out.push(format!("refuse_in = {:?}", r.refuse_in));
+    if !refuse_in.is_empty() {
+        out.push(format!("refuse_in = {:?}", refuse_in));
     }
-    if let Some(t) = &r.transform {
+    if let Some(t) = transform {
         out.push(format!("transform = {t:?}"));
     }
     out
@@ -278,6 +295,59 @@ mod tests {
             "{}",
             openai_prod()
         );
+    }
+
+    fn rules_line(extra: &str) -> String {
+        let f = fleet_with(&format!(
+            "[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ {extra} }}\n"
+        ));
+        let out = explain(&f, "extra/K", Some("prod")).unwrap();
+        out.lines()
+            .find_map(|l| l.strip_prefix("  rules:      "))
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn prints_ensure_prefix_and_pattern() {
+        assert_eq!(
+            rules_line(r#"ensure_prefix = "sk-", pattern = "[a-z]+""#),
+            r#"ensure_prefix = "sk-", pattern = "[a-z]+""#
+        );
+    }
+
+    #[test]
+    fn prints_prefix_by_mode() {
+        assert_eq!(
+            rules_line(
+                r#"prefix_by_mode = { mode = "payments", values = { live = ["sk_live_", "rk_live_"], test = "sk_test_" }, skip = ["off"] }"#
+            ),
+            r#"prefix_by_mode = { mode = "payments", values = { live = ["sk_live_", "rk_live_"], test = "sk_test_" }, skip = ["off"] }"#
+        );
+    }
+
+    #[test]
+    fn prints_transform() {
+        assert_eq!(
+            rules_line(r#"transform = "pem_private_key""#),
+            r#"transform = "pem_private_key""#
+        );
+    }
+
+    #[test]
+    fn prints_value_shape_rules() {
+        assert_eq!(
+            rules_line(r#"base64_bytes = 32, email_list = true, https_url = true, enum = ["a"]"#),
+            r#"enum = ["a"], base64_bytes = 32, email_list = true, https_url = true"#
+        );
+    }
+
+    #[test]
+    fn prints_no_rules_as_dash() {
+        let f =
+            fleet_with("[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n");
+        let out = explain(&f, "extra/K", Some("prod")).unwrap();
+        assert!(out.contains("\n  rules:      -\n"), "{out}");
     }
 
     #[test]

@@ -1935,16 +1935,16 @@ fn assert_no_reason_marker(what: &str, text: &str) {
 #[test]
 fn rule_failure_reasons_never_carry_a_marker() {
     let h = reasons_harness();
-    for cmd in [
-        &["status", "prod"][..],
-        &["status", "prod", "--json"],
-        &["fly", "plan", "prod"],
-        &["fly", "plan", "prod", "--json"],
-        &["fly", "sync", "prod", "--prune", "--deploy"],
+    for (cmd, want) in [
+        (&["status", "prod"][..], 8),
+        (&["status", "prod", "--json"], 8),
+        (&["fly", "plan", "prod"], 8),
+        (&["fly", "plan", "prod", "--json"], 8),
+        (&["fly", "sync", "prod", "--prune", "--deploy"], 6),
     ] {
         h.reset();
         let r = h.run(cmd);
-        assert_ne!(r.code, 0, "{cmd:?}: {}", r.all());
+        assert_eq!(r.code, want, "{cmd:?}: {}", r.all());
         assert_no_reason_marker(&format!("{cmd:?} stdout"), &r.stdout);
         assert_no_reason_marker(&format!("{cmd:?} stderr"), &r.stderr);
     }
