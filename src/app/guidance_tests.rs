@@ -163,7 +163,8 @@ fn assert_signin_syntax(p: P, text: &str) {
     }
 }
 
-/// When `shell` is installed, it must accept `args` (a parse-only invocation). With
+/// When `shell` is installed, it must accept `args` (a parse-only invocation; POSIX shells
+/// are skipped on Windows). With
 /// `OPV_REQUIRE_SHELLS=1` (set on the Ubuntu CI job) a missing shell fails the test, so
 /// the check is never vacuous there.
 fn parses_with(shell: &str, args: &[&str]) {
