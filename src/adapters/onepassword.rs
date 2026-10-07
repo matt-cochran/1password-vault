@@ -232,7 +232,7 @@ pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Opt
 /// fails → `Source` (exit 4); signed in → `Source` (exit 4) naming the vault and item
 /// IDs, the identity type and `grant`; the session could not be determined → `Source`
 /// with a value-free re-run hint (the last resort).
-fn failed_op_error(
+pub(crate) fn failed_op_error(
     r: &dyn CommandRunner,
     env: &Environment,
     host: &dyn Fn() -> Host,
@@ -409,7 +409,7 @@ pub fn op_missing(host: &Host) -> Error {
     ))
 }
 
-fn run_op(
+pub(crate) fn run_op(
     r: &dyn CommandRunner,
     args: &[&str],
     stdin: Option<&[u8]>,
@@ -427,7 +427,7 @@ fn run_op(
 }
 
 /// serde_json's Display can quote input (values), so report only position and category.
-fn json_error(e: &serde_json::Error) -> Error {
+pub(crate) fn json_error(e: &serde_json::Error) -> Error {
     Error::Source(format!(
         "op returned malformed item JSON ({:?} error at line {}, column {})",
         e.classify(),
