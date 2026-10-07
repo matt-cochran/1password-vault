@@ -187,6 +187,8 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `prefix = "sk-"` | value starts with the prefix |
 | `not_prefix = "sk-or-"` or a list | value starts with none of them |
 | `regex = "..."` | the whole value matches (full match) |
+| `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
+| `pattern = "..."` | only with `ensure_prefix`: the text after the prefix fully matches (full match) |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
 | `hex_bytes = N` | valid hex that decodes to N bytes |
@@ -194,7 +196,7 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `https_url = true` | an `https://` URL |
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
-| `transform = "signoz_ingestion_header"` | accepts a bare SigNoz ingestion key or one already prefixed `signoz-ingestion-key=`, and stages it as `signoz-ingestion-key=<key>`. Planned for v0.2: replaced by generic `ensure_prefix` and `pattern` rules, with this name kept as a deprecated alias for one release |
+| `transform = "signoz_ingestion_header"` | **deprecated**: kept for one release as an alias for `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`; loading a configuration that uses it prints a deprecation warning naming the product and key. Use the generic rules instead |
 | `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 Fly import refusals are checked for every ready secret by `status` and `fly plan` as well as `fly sync`, so a green status means sync will not refuse the value:

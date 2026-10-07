@@ -21,6 +21,10 @@ pub enum Kind {
 pub struct Rules {
     pub prefix: Option<String>,
     pub not_prefix: Option<OneOrMany>,
+    /// Accept the value with or without this prefix and stage exactly one occurrence (FR-24).
+    pub ensure_prefix: Option<String>,
+    /// Full match required of the text after `ensure_prefix`; valid only with it (FR-24).
+    pub pattern: Option<String>,
     pub regex: Option<String>,
     #[serde(rename = "enum")]
     pub r#enum: Option<Vec<String>>,
