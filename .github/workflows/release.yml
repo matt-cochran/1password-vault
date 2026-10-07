@@ -124,9 +124,9 @@ jobs:
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           node scripts/npm/build.mjs --version "$version" --assets dist --out npm-dist
-          mkdir -p npm-smoke/node_modules/opv npm-smoke/node_modules/@opv/linux-x64
+          mkdir -p npm-smoke/node_modules/opv npm-smoke/node_modules/@matthew-cochran/opv-linux-x64
           cp -r npm-dist/opv/. npm-smoke/node_modules/opv/
-          cp -r npm-dist/@opv/linux-x64/. npm-smoke/node_modules/@opv/linux-x64/
+          cp -r npm-dist/@matthew-cochran/opv-linux-x64/. npm-smoke/node_modules/@matthew-cochran/opv-linux-x64/
           out="$(node npm-smoke/node_modules/opv/bin/opv.js --version)"
           echo "$out"
           case "$out" in
@@ -201,7 +201,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for pkg in npm-dist/@opv/*; do
+          for pkg in npm-dist/@matthew-cochran/opv-*; do
             npm publish "$pkg" --provenance --access public
           done
       - name: Publish opv

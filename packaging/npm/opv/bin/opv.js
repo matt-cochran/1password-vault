@@ -14,7 +14,7 @@ const SUPPORTED = [
 ];
 
 const platform = `${process.platform}-${process.arch}`;
-const pkg = `@opv/${platform}`;
+const pkg = `@matthew-cochran/opv-${platform}`;
 
 let pkgJson;
 try {

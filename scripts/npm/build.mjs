@@ -6,7 +6,7 @@
 //
 // Writes:
 //   <out>/opv/                    the unscoped "opv" package (shim + README)
-//   <out>/@opv/<platform>/        one package per platform, carrying the binary
+//   <out>/@matthew-cochran/opv-<platform>/  one package per platform, carrying the binary
 //
 // No dependencies: only Node's standard library.
 
@@ -99,7 +99,7 @@ for (const entry of TARGETS) {
 const mainPackage = JSON.parse(readFileSync(join(opvPackageDir, 'package.json'), 'utf8'));
 mainPackage.version = version;
 mainPackage.optionalDependencies = Object.fromEntries(
-  TARGETS.map((entry) => [`@opv/${entry.platform}`, version]),
+  TARGETS.map((entry) => [`@matthew-cochran/opv-${entry.platform}`, version]),
 );
 writeJson(join(outDir, 'opv', 'package.json'), mainPackage);
 
@@ -113,10 +113,10 @@ copyFileSync(join(opvPackageDir, 'README.md'), join(outDir, 'opv', 'README.md'))
 // One package per platform, each carrying its prebuilt binary.
 const platformPackage = JSON.parse(readFileSync(platformTemplate, 'utf8'));
 for (const entry of TARGETS) {
-  const pkgDir = join(outDir, '@opv', entry.platform);
+  const pkgDir = join(outDir, '@matthew-cochran', `opv-${entry.platform}`);
   const pkg = {
     ...platformPackage,
-    name: `@opv/${entry.platform}`,
+    name: `@matthew-cochran/opv-${entry.platform}`,
     version,
     os: [entry.os],
     cpu: [entry.cpu],
