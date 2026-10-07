@@ -164,10 +164,14 @@ fn assert_signin_syntax(p: P, text: &str) {
 }
 
 /// When `shell` is installed, it must accept `args` (a parse-only invocation; POSIX shells
-/// are skipped on Windows). With
-/// `OPV_REQUIRE_SHELLS=1` (set on the Ubuntu CI job) a missing shell fails the test, so
-/// the check is never vacuous there.
+/// are skipped on Windows). With `OPV_REQUIRE_SHELLS=1` (set on the Ubuntu CI job) a
+/// missing shell fails the test, so the check is never vacuous there.
 fn parses_with(shell: &str, args: &[&str]) {
+    // On Windows a `bash` on PATH is often the WSL launcher stub, which cannot run a
+    // script; POSIX shells are checked on Linux (required in CI) and macOS instead.
+    if cfg!(windows) && shell != "pwsh" {
+        return;
+    }
     match std::process::Command::new(shell)
         .args(args)
         .stdin(std::process::Stdio::null())
