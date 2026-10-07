@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::domain::model::{Fleet, Kind};
-use crate::domain::rules;
+use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
 
 /// One field of the 1Password item, as produced by the source adapter.
@@ -41,11 +41,12 @@ pub struct FlySecret {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyState {
     Missing,
     WrongKind,
-    RuleFailed(&'static str),
+    /// The failing rule's stable name and why it failed (FR-15, FR-22). Never the value.
+    RuleFailed(&'static str, Reason),
     Ready,
     Skipped,
 }
@@ -121,12 +122,16 @@ impl SyncPlan {
             .filter(|r| {
                 matches!(
                     r.state,
-                    KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(_)
+                    KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(..)
                 )
             })
             .count()
     }
 }
+
+/// The target's value check: for (target name, value), the first rule the target would
+/// refuse and that rule's fixed reason (FR-22), or `None`.
+pub type TargetCheck<'a> = dyn Fn(&str, &SecretValue) -> Option<(&'static str, &'static str)> + 'a;
 
 /// Target-specific inputs to [`build_with`]. The planner stays target-agnostic (FR-12):
 /// the application layer supplies the digest function and the value check.
@@ -137,9 +142,10 @@ pub struct PlanOptions<'a> {
     pub prune_immutable: &'a BTreeSet<(String, String)>,
     /// Computes the target's digest of a value locally (`None` = not computable).
     pub digest: &'a dyn Fn(&SecretValue) -> Option<String>,
-    /// The first rule the target would refuse for (target name, value), e.g. a value the
-    /// Fly import cannot carry. A refusal makes the row `RuleFailed(rule)`; not staged.
-    pub target_check: &'a dyn Fn(&str, &SecretValue) -> Option<&'static str>,
+    /// The first rule the target would refuse for (target name, value) and its fixed
+    /// reason, e.g. a value the Fly import cannot carry. A refusal makes the row
+    /// `RuleFailed(rule, reason)`; not staged.
+    pub target_check: &'a TargetCheck<'a>,
 }
 
 /// Plan a sync of `item` into the Fly app for `env_name`, with no prune overrides and no
@@ -221,10 +227,13 @@ pub fn build_with(
             let refused = rules::refused_in(spec, env_name)
                 && field.is_some_and(|f| !f.value.expose().is_empty());
             let outcome: Result<Option<SecretValue>, KeyState> = match field {
-                _ if refused => Err(KeyState::RuleFailed("refuse_in")),
+                _ if refused => Err(KeyState::RuleFailed(
+                    "refuse_in",
+                    Reason::Fixed(rules::REASON_REFUSED),
+                )),
                 Some(f) if f.kind == spec.kind => {
                     rules::check(product, key, spec, env_name, env, &f.value)
-                        .map_err(|e| KeyState::RuleFailed(e.rule))
+                        .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
                 }
                 other => {
                     if rules::applies(spec, env_name, env, product) {
@@ -242,7 +251,7 @@ pub fn build_with(
             // exactly as in sync.
             let outcome = match (outcome, spec.kind, fly_name.as_deref()) {
                 (Ok(Some(v)), Kind::Secret, Some(name)) => match (opts.target_check)(name, &v) {
-                    Some(rule) => Err(KeyState::RuleFailed(rule)),
+                    Some((rule, why)) => Err(KeyState::RuleFailed(rule, Reason::Fixed(why))),
                     None => Ok(Some(v)),
                 },
                 (o, _, _) => o,
@@ -450,7 +459,7 @@ mod tests {
         let p = plan(vec![secret("allumata", "OPENAI_API_KEY", "sk-or-abc")], &[]);
         assert_eq!(
             row(&p, "OPENAI_API_KEY").state,
-            KeyState::RuleFailed("not_prefix")
+            KeyState::RuleFailed("not_prefix", Reason::Fixed(rules::REASON_REFUSED_PREFIX))
         );
         assert!(p.blocking() > 0);
         assert!(p.stage.is_empty());
@@ -665,7 +674,7 @@ rules = { transform = "signoz_ingestion_header" }
     fn opts_with<'a>(
         rotate: &'a BTreeSet<(String, String)>,
         prune_immutable: &'a BTreeSet<(String, String)>,
-        target_check: &'a dyn Fn(&str, &SecretValue) -> Option<&'static str>,
+        target_check: &'a TargetCheck<'a>,
     ) -> PlanOptions<'a> {
         PlanOptions {
             rotate,
@@ -752,7 +761,7 @@ rules = { transform = "signoz_ingestion_header" }
             let p = build(&fleet, "staging", vec![f], &[], &no_rotate(), &none);
             assert_eq!(
                 row(&p, "SMTP_PASS").state,
-                KeyState::RuleFailed("refuse_in")
+                KeyState::RuleFailed("refuse_in", Reason::Fixed(rules::REASON_REFUSED))
             );
             assert!(p.blocking() > 0);
             assert!(p.stage.iter().all(|(n, _)| n != "FLEET__P__SMTP_PASS"));
@@ -785,7 +794,7 @@ rules = { transform = "signoz_ingestion_header" }
         let seen = std::cell::RefCell::new(Vec::new());
         let check = |name: &str, _: &SecretValue| {
             seen.borrow_mut().push(name.to_string());
-            (name == "FLEET__ALLUMATA__OPENAI_API_KEY").then_some("import-something")
+            (name == "FLEET__ALLUMATA__OPENAI_API_KEY").then_some(("import-something", "why"))
         };
         let item = vec![
             secret("allumata", "OPENAI_API_KEY", "sk-proj-1"),
@@ -801,7 +810,7 @@ rules = { transform = "signoz_ingestion_header" }
         );
         assert_eq!(
             row(&p, "OPENAI_API_KEY").state,
-            KeyState::RuleFailed("import-something")
+            KeyState::RuleFailed("import-something", Reason::Fixed("why"))
         );
         assert_eq!(row(&p, "INTEGRATION_ENC_KEY").state, KeyState::Ready);
         assert_eq!(p.stage.len(), 1);

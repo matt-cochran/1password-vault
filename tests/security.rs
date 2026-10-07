@@ -16,6 +16,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -186,6 +187,8 @@ struct Harness {
     tmp: PathBuf,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    /// The `--config` every run passes; the shared fixture unless replaced.
+    config: PathBuf,
 }
 
 #[derive(Debug)]
@@ -213,12 +216,33 @@ fn write_exe(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The fake `op` and `flyctl`, written once per test binary and closed before any of its
+/// tests spawns a process; harnesses only symlink them.
+///
+/// Writing an executable while another thread forks lets the child inherit the open write
+/// fd, and an exec of that file then fails with ETXTBSY ("text file busy"), which opv
+/// correctly reports as a dependency error (exit 3): a flaky test, not a bug. The fakes
+/// read everything per-test from env vars (`FAKE_REC`, `FAKE_FIX`, ...), so one copy
+/// serves every harness. [`Harness::build`], which every spawn goes through, forces this.
+fn fakes() -> &'static Path {
+    static FAKES: OnceLock<TempDir> = OnceLock::new();
+    FAKES
+        .get_or_init(|| {
+            let dir = TempDir::new().unwrap();
+            write_exe(&dir.path().join("op"), FAKE_OP);
+            write_exe(&dir.path().join("flyctl"), FAKE_FLYCTL);
+            dir
+        })
+        .path()
+}
+
 impl Harness {
     fn new(item_json: &str) -> Self {
         Self::build(item_json, true, true)
     }
 
     fn build(item_json: &str, with_op: bool, with_flyctl: bool) -> Self {
+        let fakes = fakes();
         let root = TempDir::new().unwrap();
         let mk = |n: &str| {
             let p = root.path().join(n);
@@ -232,10 +256,10 @@ impl Harness {
             .expect("cat");
         std::os::unix::fs::symlink(cat, bin.join("cat")).unwrap();
         if with_op {
-            write_exe(&bin.join("op"), FAKE_OP);
+            std::os::unix::fs::symlink(fakes.join("op"), bin.join("op")).unwrap();
         }
         if with_flyctl {
-            write_exe(&bin.join("flyctl"), FAKE_FLYCTL);
+            std::os::unix::fs::symlink(fakes.join("flyctl"), bin.join("flyctl")).unwrap();
         }
         fs::write(fix.join("item.json"), item_json).unwrap();
         fs::write(fix.join("list_a.json"), list_a()).unwrap();
@@ -257,7 +281,16 @@ impl Harness {
             tmp,
             cwd,
             env,
+            config: PathBuf::from(CONFIG),
         }
+    }
+
+    /// Run every later command against `toml` instead of the shared fixture.
+    fn use_config(&mut self, toml: &str) -> &mut Self {
+        let p = self.fix.join("secrets.toml");
+        fs::write(&p, toml).unwrap();
+        self.config = p;
+        self
     }
 
     fn set(&mut self, k: &str, v: &str) -> &mut Self {
@@ -283,13 +316,13 @@ impl Harness {
     }
 
     fn run(&self, args: &[&str]) -> Run {
-        self.run_config(CONFIG, args)
+        self.run_config(&self.config, args)
     }
 
-    fn run_config(&self, config: &str, args: &[&str]) -> Run {
+    fn run_config(&self, config: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Run {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .arg("--config")
-            .arg(config)
+            .arg(config.as_ref())
             .args(args)
             .env_clear()
             .env("PATH", &self.bin)
@@ -698,7 +731,7 @@ fn rule_failure_names_key_not_value() {
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
     ] {
         h.set_item(&item(good_fields(value)));
-        let named = format!("allumata/OPENAI_API_KEY (fails rule {rule})");
+        let named = format!("allumata/OPENAI_API_KEY (failed {rule} (");
 
         h.reset();
         let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
@@ -721,7 +754,7 @@ fn rule_failure_names_key_not_value() {
             assert_eq!(r.code, 8, "{rule} {cmd:?}: {}", r.all());
             assert!(r.stdout.contains("OPENAI_API_KEY"), "{}", r.stdout);
             assert!(
-                r.stdout.contains(&format!("fails rule {rule}")),
+                r.stdout.contains(&format!("failed {rule} (")),
                 "{}",
                 r.stdout
             );
@@ -1144,7 +1177,7 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
         assert!(
             r.stdout
                 .lines()
-                .any(|l| l.contains("OPENAI_API_KEY") && l.contains(&format!("fails rule {rule}"))),
+                .any(|l| l.contains("OPENAI_API_KEY") && l.contains(&format!("failed {rule} ("))),
             "{}",
             r.stdout
         );
@@ -1155,7 +1188,7 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     assert_eq!(r.code, 6, "{}", r.all());
     assert!(
         r.stderr
-            .contains(&format!("allumata/OPENAI_API_KEY (fails rule {rule})")),
+            .contains(&format!("allumata/OPENAI_API_KEY (failed {rule} (")),
         "{}",
         r.stderr
     );
@@ -1255,6 +1288,7 @@ fn status_json_row_carries_the_contract_fields() {
             "kind": "secret",
             "state": "saved",
             "rule": null,
+            "reason": null,
             "fly_name": N_OPENAI,
             "target": "absent",
             "action": "would_stage",
@@ -1282,6 +1316,47 @@ fn status_json_row_names_failing_rule() {
         "{}",
         r.all()
     );
+}
+
+/// FR-22: a failing row carries its reason in a separate `reason` field next to `rule`,
+/// built from the configuration (the expected prefix), never from the value.
+#[test]
+fn status_json_row_carries_failing_reason() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0013")));
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    let row = doc["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .find(|x| x["key"] == "OPENAI_API_KEY")
+        .expect("OPENAI_API_KEY row");
+    assert_eq!(row["reason"], json!("expected prefix sk-"), "{}", r.all());
+}
+
+/// FR-22: the JSON document keeps schema_version 1 when `reason` is added.
+#[test]
+fn status_json_reason_keeps_schema_version_one() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0014")));
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["schema_version"], json!(1), "{}", r.all());
+}
+
+/// FR-22: text output shows `failed <rule> (<reason>)`.
+#[test]
+fn status_text_shows_rule_and_reason() {
+    let h = Harness::new(&item(good_fields("pk-S7MARKERVALUEbadprefix0015")));
+    let r = h.run(&["status", "prod"]);
+    assert!(
+        r.stdout
+            .lines()
+            .any(|l| l.contains("OPENAI_API_KEY")
+                && l.contains("failed prefix (expected prefix sk-)")),
+        "{}",
+        r.stdout
+    );
+    assert_clean_output(&["status"], &r);
 }
 
 /// FR-21 / SR-1: `status --json` contains no secret value marker (nor child stderr).
@@ -1447,5 +1522,521 @@ fn simple_profile_prune_touches_only_declared_keys() {
             "myapp-production",
             "--stage"
         ]]
+    );
+}
+
+// ------------------------------------------------------------- FR-22 failure reasons
+
+/// A hex marker (hex values cannot carry `S7MARKER`); must never appear either.
+const HEX_MARK: &str = "f22dec0de5";
+
+/// One key per rule failure path (FR-15, FR-22), every rule in its own key so each row
+/// fails exactly one way. Config text holds no marker.
+const REASONS_CONFIG: &str = r#"
+[profile]
+kind = "fleet"
+
+[environments.staging]
+vault_id = "vstg"
+item_id = "istg"
+fly.app = "reasons-staging"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+
+[environments.prod]
+vault_id = "vprd"
+item_id = "iprd"
+fly.app = "mcproductlabs-portfolio-production"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+modes.allumata.payments = "test"
+modes.allumata.region = "weird"
+
+[products.allumata.keys.REFUSED]
+kind = "secret"
+environments = ["staging"]
+rules = { refuse_in = ["prod"] }
+
+[products.allumata.keys.EMPTY]
+kind = "secret"
+environments = ["prod"]
+
+[products.allumata.keys.MULTILINE]
+kind = "secret"
+environments = ["prod"]
+
+[products.allumata.keys.SPACED]
+kind = "secret"
+environments = ["prod"]
+
+[products.allumata.keys.TOO_LONG]
+kind = "secret"
+environments = ["prod"]
+
+[products.allumata.keys.PREFIX]
+kind = "secret"
+environments = ["prod"]
+rules = { prefix = "sk-" }
+
+[products.allumata.keys.NOT_PREFIX]
+kind = "secret"
+environments = ["prod"]
+rules = { not_prefix = "zz-" }
+
+[products.allumata.keys.MODE_WRONG]
+kind = "secret"
+environments = ["prod"]
+rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_" } } }
+
+[products.allumata.keys.MODE_UNSET]
+kind = "secret"
+environments = ["prod"]
+rules = { prefix_by_mode = { mode = "billing", values = { on = "b_" } } }
+
+[products.allumata.keys.MODE_UNMAPPED]
+kind = "secret"
+environments = ["prod"]
+rules = { prefix_by_mode = { mode = "region", values = { eu = "eu_" } } }
+
+[products.allumata.keys.REGEX]
+kind = "secret"
+environments = ["prod"]
+rules = { regex = "[a-z]+" }
+
+[products.allumata.keys.ENUM]
+kind = "secret"
+environments = ["prod"]
+rules = { enum = ["a", "b"] }
+
+[products.allumata.keys.B64_NOT]
+kind = "secret"
+environments = ["prod"]
+rules = { base64_bytes = 32 }
+
+[products.allumata.keys.B64_COUNT]
+kind = "secret"
+environments = ["prod"]
+rules = { base64_bytes = 32 }
+
+[products.allumata.keys.HEX_NOT]
+kind = "secret"
+environments = ["prod"]
+rules = { hex_bytes = 4 }
+
+[products.allumata.keys.HEX_COUNT]
+kind = "secret"
+environments = ["prod"]
+rules = { hex_bytes = 4 }
+
+[products.allumata.keys.EMAILS]
+kind = "secret"
+environments = ["prod"]
+rules = { email_list = true }
+
+[products.allumata.keys.URL_SCHEME]
+kind = "secret"
+environments = ["prod"]
+rules = { https_url = true }
+
+[products.allumata.keys.URL_SPACE]
+kind = "secret"
+environments = ["prod"]
+rules = { https_url = true }
+
+[products.allumata.keys.ENSURE_EMPTY]
+kind = "secret"
+environments = ["prod"]
+rules = { ensure_prefix = "pre_" }
+
+[products.allumata.keys.PATTERN]
+kind = "secret"
+environments = ["prod"]
+rules = { ensure_prefix = "pre_", pattern = "[a-z]+" }
+
+[products.allumata.keys.UNKNOWN_TRANSFORM]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "nope" }
+
+[products.allumata.keys.SIGNOZ_EMPTY]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "signoz_ingestion_header" }
+
+[products.allumata.keys.SIGNOZ_PATTERN]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "signoz_ingestion_header" }
+
+[products.allumata.keys.FLY_IMPORT]
+kind = "secret"
+environments = ["prod"]
+
+[products.allumata.keys.PEM_NO_MARKERS]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_LABELS]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_NOT_PRIVATE]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_ENCRYPTED]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_PROC_TYPE]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_TWO_BLOCKS]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_NOT_BASE64]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+
+[products.allumata.keys.PEM_NOT_KEY]
+kind = "secret"
+environments = ["prod"]
+rules = { transform = "pem_private_key" }
+"#;
+
+/// (key, marker value, expected rule, expected reason). Every value but the three that
+/// cannot hold one (empty, exactly the prefix) carries `S7MARKER` or [`HEX_MARK`].
+fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
+    let m = MARK;
+    let one_pem =
+        format!("-----BEGIN RSA PRIVATE KEY-----\n{m}AA\n-----END RSA PRIVATE KEY-----\n");
+    let long = format!("{m}{}", "a".repeat(59_000));
+    let too_long_reason = "longer than the 59000-byte limit";
+    vec![
+        (
+            "REFUSED",
+            format!("{m}refused"),
+            "refuse_in",
+            "must not be set in this environment",
+        ),
+        ("EMPTY", String::new(), "nonempty", "empty"),
+        (
+            "MULTILINE",
+            format!("{m}\nline"),
+            "single_line",
+            "contains a line break or NUL",
+        ),
+        (
+            "SPACED",
+            format!(" {m}"),
+            "no_surrounding_space",
+            "leading or trailing whitespace",
+        ),
+        ("TOO_LONG", long, "max_len", too_long_reason),
+        (
+            "PREFIX",
+            format!("{m}prefix"),
+            "prefix",
+            "expected prefix sk-",
+        ),
+        (
+            "NOT_PREFIX",
+            format!("zz-{m}"),
+            "not_prefix",
+            "starts with a refused prefix",
+        ),
+        (
+            "MODE_WRONG",
+            format!("{m}mode"),
+            "prefix_by_mode",
+            "wrong prefix for mode test",
+        ),
+        (
+            "MODE_UNSET",
+            format!("{m}mode"),
+            "prefix_by_mode",
+            "mode billing is not set in this environment",
+        ),
+        (
+            "MODE_UNMAPPED",
+            format!("{m}mode"),
+            "prefix_by_mode",
+            "no prefix is configured for mode weird",
+        ),
+        (
+            "REGEX",
+            format!("{m}regex"),
+            "regex",
+            "does not match the configured regex",
+        ),
+        (
+            "ENUM",
+            format!("{m}enum"),
+            "enum",
+            "not one of the allowed values",
+        ),
+        (
+            "B64_NOT",
+            format!("{m}!!"),
+            "base64_bytes",
+            "not standard base64",
+        ),
+        (
+            "B64_COUNT",
+            format!("{m}AAAA"),
+            "base64_bytes",
+            "does not decode to 32 bytes",
+        ),
+        ("HEX_NOT", format!("{m}zz"), "hex_bytes", "not hex"),
+        (
+            "HEX_COUNT",
+            HEX_MARK.to_string(),
+            "hex_bytes",
+            "does not decode to 4 bytes",
+        ),
+        (
+            "EMAILS",
+            format!("{m}@nowhere"),
+            "email_list",
+            "not a comma-separated list of email addresses",
+        ),
+        (
+            "URL_SCHEME",
+            format!("http://{m}"),
+            "https_url",
+            "not an https:// URL",
+        ),
+        (
+            "URL_SPACE",
+            format!("https://{m} x"),
+            "https_url",
+            "URL contains whitespace",
+        ),
+        (
+            "ENSURE_EMPTY",
+            "pre_".to_string(),
+            "ensure_prefix",
+            "nothing after the prefix",
+        ),
+        (
+            "PATTERN",
+            format!("pre_{m}"),
+            "pattern",
+            "text after the prefix does not match the pattern",
+        ),
+        (
+            "UNKNOWN_TRANSFORM",
+            format!("{m}t"),
+            "transform",
+            "unknown transform",
+        ),
+        (
+            "SIGNOZ_EMPTY",
+            "signoz-ingestion-key=".to_string(),
+            "transform",
+            "nothing after the prefix",
+        ),
+        (
+            "SIGNOZ_PATTERN",
+            format!("{m}$"),
+            "transform",
+            "text after the prefix does not match the pattern",
+        ),
+        (
+            "FLY_IMPORT",
+            format!("{m}\"#x"),
+            "import-hash-after-odd-quotes",
+            "a # follows an odd number of double quotes",
+        ),
+        (
+            "PEM_NO_MARKERS",
+            format!("{m} is no pem"),
+            "transform",
+            "no BEGIN/END markers",
+        ),
+        (
+            "PEM_LABELS",
+            format!("-----BEGIN RSA PRIVATE KEY-----\n{m}AA\n-----END {m} PRIVATE KEY-----\n"),
+            "transform",
+            "BEGIN/END labels differ",
+        ),
+        (
+            "PEM_NOT_PRIVATE",
+            format!("-----BEGIN {m} PUBLIC KEY-----\n{m}AA\n-----END {m} PUBLIC KEY-----\n"),
+            "transform",
+            "not a private key",
+        ),
+        (
+            "PEM_ENCRYPTED",
+            format!(
+                "-----BEGIN ENCRYPTED PRIVATE KEY-----\n{m}AA\n-----END ENCRYPTED PRIVATE KEY-----\n"
+            ),
+            "transform",
+            "encrypted key",
+        ),
+        (
+            "PEM_PROC_TYPE",
+            one_pem.replacen(
+                "KEY-----\n",
+                &format!("KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,{m}\n\n"),
+                1,
+            ),
+            "transform",
+            "encrypted key",
+        ),
+        (
+            "PEM_TWO_BLOCKS",
+            format!("{one_pem}{one_pem}"),
+            "transform",
+            "more than one PEM block",
+        ),
+        (
+            "PEM_NOT_BASE64",
+            format!("-----BEGIN PRIVATE KEY-----\n{m}%%\n-----END PRIVATE KEY-----\n"),
+            "transform",
+            "body is not base64",
+        ),
+        // `S7MARKER` decodes to bytes that do not start a DER SEQUENCE.
+        (
+            "PEM_NOT_KEY",
+            format!("-----BEGIN PRIVATE KEY-----\n{m}\n-----END PRIVATE KEY-----\n"),
+            "transform",
+            "not a key structure",
+        ),
+    ]
+}
+
+fn reasons_harness() -> Harness {
+    let fields = reason_cases()
+        .into_iter()
+        .map(|(key, value, _, _)| field(Some("allumata"), key, "CONCEALED", Some(&value)))
+        .collect();
+    let mut h = Harness::new(&item(fields));
+    h.use_config(REASONS_CONFIG);
+    h
+}
+
+fn assert_no_reason_marker(what: &str, text: &str) {
+    for m in [MARK, HEX_MARK, CHILD_STDERR] {
+        assert!(!text.contains(m), "{what} contains {m}:\n{text}");
+    }
+}
+
+/// FR-22 / SR-1: marker values driven through every rule failure path (every rule, every
+/// reason, all seven `pem_private_key` reasons, the FR-24 rules, the SigNoz alias and a
+/// Fly import refusal) leave no marker byte sequence in text or JSON output.
+#[test]
+fn rule_failure_reasons_never_carry_a_marker() {
+    let h = reasons_harness();
+    for (cmd, want) in [
+        (&["status", "prod"][..], 8),
+        (&["status", "prod", "--json"], 8),
+        (&["fly", "plan", "prod"], 8),
+        (&["fly", "plan", "prod", "--json"], 8),
+        (&["fly", "sync", "prod", "--prune", "--deploy"], 6),
+    ] {
+        h.reset();
+        let r = h.run(cmd);
+        assert_eq!(r.code, want, "{cmd:?}: {}", r.all());
+        assert_no_reason_marker(&format!("{cmd:?} stdout"), &r.stdout);
+        assert_no_reason_marker(&format!("{cmd:?} stderr"), &r.stderr);
+    }
+}
+
+/// FR-22: every failure path in [`reason_cases`] is really reached, with its rule and
+/// reason in the JSON row (so the marker test above covers each path).
+#[test]
+fn every_rule_failure_path_reports_its_rule_and_reason() {
+    let h = reasons_harness();
+    let r = h.run(&["status", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    let rows = doc["rows"].as_array().expect("rows array");
+    for (key, _, rule, reason) in reason_cases() {
+        let row = rows
+            .iter()
+            .find(|x| x["key"] == key)
+            .unwrap_or_else(|| panic!("{key} row: {}", r.stdout));
+        assert_eq!(
+            (row["rule"].clone(), row["reason"].clone()),
+            (json!(rule), json!(reason)),
+            "{key}"
+        );
+    }
+}
+
+/// FR-22: `pem_private_key` reports each of its seven reasons.
+#[test]
+fn pem_private_key_reports_each_of_its_seven_reasons() {
+    let h = reasons_harness();
+    let r = h.run(&["status", "prod"]);
+    for reason in [
+        "no BEGIN/END markers",
+        "BEGIN/END labels differ",
+        "not a private key",
+        "encrypted key",
+        "more than one PEM block",
+        "body is not base64",
+        "not a key structure",
+    ] {
+        assert!(
+            r.stdout.contains(&format!("failed transform ({reason})")),
+            "{reason}: {}",
+            r.stdout
+        );
+    }
+}
+
+/// FR-22 / FR-13: `explain` makes no 1Password or Fly call at all.
+#[test]
+fn explain_makes_no_op_or_flyctl_call() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["explain", "allumata/OPENAI_API_KEY", "--env", "prod"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    assert!(h.calls().is_empty(), "{:?}", h.calls());
+}
+
+/// FR-22, FR-20, SR-1: under the simple profile a failing row's reason carries no marker,
+/// in text or JSON, and the JSON row keeps `product: null`.
+#[test]
+fn simple_profile_rule_failure_reason_carries_no_marker() {
+    let h = Harness::new(&item(vec![
+        field(
+            None,
+            "DATABASE_URL",
+            "CONCEALED",
+            Some("mysql://S7MARKERVALUEdb0016"),
+        ),
+        field(None, "JWT_KEY", "CONCEALED", Some(ENC)),
+        field(None, "LOG_LEVEL", "STRING", Some("info")),
+    ]));
+    let text = h.run_config(SIMPLE_CONFIG, &["status", "prod"]);
+    assert_eq!(text.code, 8, "{}", text.all());
+    assert!(
+        text.stdout
+            .contains("failed prefix (expected prefix postgres://)"),
+        "{}",
+        text.stdout
+    );
+    assert_clean_output(&["status", "prod"], &text);
+    let json = h.run_config(SIMPLE_CONFIG, &["status", "prod", "--json"]);
+    assert_clean_output(&["status", "prod", "--json"], &json);
+    let doc: Value = serde_json::from_str(&json.stdout).expect("one JSON document");
+    let row = doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["key"] == "DATABASE_URL")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (row["product"].clone(), row["reason"].clone()),
+        (Value::Null, json!("expected prefix postgres://"))
     );
 }

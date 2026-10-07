@@ -231,6 +231,7 @@ opv fly plan staging                # what a sync would stage, hold and prune; e
 opv fly plan staging --json         # the same plan as one machine-readable JSON document
 opv fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
+opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
 opv run dev --product allumata -- cargo run
 opv run prod -- ./server            # simple profile: no --product
 ```
@@ -242,6 +243,39 @@ opv run prod -- ./server            # simple profile: no --product
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
 7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file.
+
+### Next step
+
+`doctor` ends with one `Next step` line. When a check fails it names the first failing check and the safe command that addresses it, the same command the failure prints under it:
+
+```text
+Next step (op auth): sign in: eval $(op signin)
+```
+
+An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
+
+### Explain a key
+
+```sh
+opv explain <product>/<key> [--env <environment>]
+```
+
+`explain` prints what the configuration declares for one key in one environment: the `op://` reference, the field kind, the Fly name, the declared rules, `immutable` and `guidance`, plus an `op item get <item_id> --vault <vault_id>` command you can run in your own terminal to look at the item. That command never contains `--reveal`.
+
+```text
+allumata/OPENAI_API_KEY in prod
+  reference:  op://vprd/iprd/allumata/OPENAI_API_KEY
+  kind:       secret (concealed field)
+  fly name:   FLEET__ALLUMATA__OPENAI_API_KEY
+  rules:      prefix = "sk-", not_prefix = "sk-or-"
+  immutable:  no
+  guidance:   OpenAI platform / API keys
+  inspect:    op item get iprd --vault vprd
+```
+
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
+
+It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
 
 ### Machine-readable status and plan
 
@@ -262,6 +296,7 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
       "kind": "secret",
       "state": "saved",
       "rule": null,
+      "reason": null,
       "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target": "absent",
       "action": "would_stage"
@@ -276,7 +311,8 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
 ```
 
 `state` is `saved`, `missing`, `wrong_kind`, `failing_rule` or `skipped`; `rule` names the
-failing rule when `state` is `failing_rule`; `target` is `present`, `absent` or
+failing rule when `state` is `failing_rule`, and `reason` says why (see
+[Failure reasons](#failure-reasons)); `target` is `present`, `absent` or
 `would_change` for a secret and `null` for a config key; `action` is `would_stage`,
 `would_prune`, `held` or `null`. The document is meant for the scheduled drift check.
 
@@ -292,7 +328,7 @@ Nothing is deleted by default. `--prune` unsets only names that the template pro
 
 ## Rules reference
 
-Rules go in a key's `rules = { ... }` table. A failure names the key and the rule, never the value.
+Rules go in a key's `rules = { ... }` table. A failure names the key, the rule and a reason, never the value.
 
 Always on, for every key (after a `pem_private_key` transform, see below): `nonempty`; `single_line` (no `\n`, `\r` or NUL); `no_surrounding_space`; `max_len` (59,000 bytes).
 
@@ -311,7 +347,7 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
 | `transform = "signoz_ingestion_header"` | **deprecated**: kept for one release as an alias for `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`; loading a configuration that uses it prints a deprecation warning naming the product and key. Use the generic rules instead |
-| `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
+| `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, not encrypted, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 Fly import refusals are checked for every ready secret by `status` and `fly plan` as well as `fly sync`, so a green status means sync will not refuse the value:
 
@@ -323,6 +359,41 @@ Fly import refusals are checked for every ready secret by `status` and `fly plan
 | `import-line-too-long` | an encoded import line over 60,000 bytes |
 | `import-invalid-utf8` | a value that is not valid UTF-8 |
 | `import-duplicate-name` | the same Fly name twice in one batch |
+
+### Failure reasons
+
+Every rule failure carries a reason. `status`, `fly plan` and `fly sync` print it after the rule name, and `--json` carries it in a separate `reason` field next to `rule`:
+
+```text
+journeeze/GITHUB_APP_PRIVATE_KEY: failed transform (BEGIN/END labels differ)
+```
+
+The rule name is the stable identifier to match on; a reason may be added or reworded in a minor release. Each reason comes from a fixed set per rule, or is built only from the configuration (a configured prefix, mode or byte count). It never contains anything read from the value: no length, position, character, actual prefix or label.
+
+| Rule | Reasons |
+|---|---|
+| `refuse_in` | `must not be set in this environment` |
+| `nonempty` | `empty` |
+| `single_line` | `contains a line break or NUL` |
+| `no_surrounding_space` | `leading or trailing whitespace` |
+| `max_len` | `longer than the 59000-byte limit` |
+| `prefix` | `expected prefix <configured prefix>` |
+| `not_prefix` | `starts with a refused prefix` (never which one) |
+| `prefix_by_mode` | `wrong prefix for mode <mode>`, `mode <mode name> is not set in this environment`, `no prefix is configured for mode <mode>` |
+| `regex` | `does not match the configured regex` |
+| `enum` | `not one of the allowed values` |
+| `base64_bytes` | `not standard base64`, `does not decode to <N> bytes` |
+| `hex_bytes` | `not hex`, `does not decode to <N> bytes` |
+| `email_list` | `not a comma-separated list of email addresses` |
+| `https_url` | `not an https:// URL`, `URL contains whitespace` |
+| `ensure_prefix` | `nothing after the prefix` |
+| `pattern` | `text after the prefix does not match the pattern` |
+| `transform` (`pem_private_key`) | `no BEGIN/END markers`, `BEGIN/END labels differ`, `not a private key`, `encrypted key`, `more than one PEM block`, `body is not base64`, `not a key structure` |
+| `transform` (deprecated SigNoz alias) | the `ensure_prefix` and `pattern` reasons; the rule name stays `transform` |
+| `transform` (other name) | `unknown transform` |
+| Fly import rules | `not a valid Fly secret name`, `contains a line break`, `a # follows an odd number of double quotes`, `too long for one Fly import line`, `not valid UTF-8`, `name occurs twice in one import` |
+
+`pem_private_key` refuses an encrypted key, whether it has a `Proc-Type` header or the PKCS#8 `ENCRYPTED PRIVATE KEY` label.
 
 ## Exit codes
 

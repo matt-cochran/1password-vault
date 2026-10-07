@@ -188,8 +188,8 @@ fn status_mode_rule_failure_names_the_key_alone() {
     let (res, out) = out_of(|o| status::run(&simple(), "staging", &r, o));
     assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
     assert!(
-        out.lines()
-            .any(|l| l.starts_with("STRIPE_SECRET_KEY") && l.contains("fails rule prefix_by_mode")),
+        out.lines().any(|l| l.starts_with("STRIPE_SECRET_KEY")
+            && l.contains("failed prefix_by_mode (wrong prefix for mode test)")),
         "{out}"
     );
 }
@@ -365,6 +365,120 @@ fn sync_refusal_names_the_key_alone() {
     assert!(
         e.to_string().ends_with("nothing staged: JWT_KEY (missing)"),
         "{e}"
+    );
+}
+
+// ---------- failure reasons (FR-22) ----------
+
+fn prod_item_with_db(v: &str) -> Output {
+    let fs: Vec<Field> = prod_fields()
+        .into_iter()
+        .map(|f| {
+            if f.1 == "DATABASE_URL" {
+                top_secret("DATABASE_URL", v)
+            } else {
+                f
+            }
+        })
+        .collect();
+    item(&fs)
+}
+
+#[test]
+fn status_reason_row_starts_with_the_key_alone() {
+    let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
+    let (_, out) = status_of(&r, false);
+    assert!(
+        out.lines().any(|l| l.starts_with("DATABASE_URL ")
+            && l.contains("failed prefix (expected prefix postgres://)")),
+        "{out}"
+    );
+}
+
+#[test]
+fn status_reason_never_shows_the_hidden_product() {
+    let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
+    let (_, out) = status_of(&r, false);
+    assert!(
+        !out.contains("/DATABASE_URL") && !out.contains("product"),
+        "{out}"
+    );
+    assert_no_values(&out);
+}
+
+#[test]
+fn status_json_failing_row_has_null_product_and_a_reason() {
+    let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
+    let (_, out) = status_of(&r, true);
+    let doc = json_doc(&out);
+    let row = doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["key"] == "DATABASE_URL")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (
+            row["product"].clone(),
+            row["rule"].clone(),
+            row["reason"].clone()
+        ),
+        (
+            Value::Null,
+            Value::from("prefix"),
+            Value::from("expected prefix postgres://")
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn plan_reason_row_starts_with_the_key_alone() {
+    let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
+    let (_, out) = plan_of(&r, false);
+    assert!(
+        out.lines().any(|l| l.starts_with("DATABASE_URL ")
+            && l.contains("failed prefix (expected prefix postgres://)")),
+        "{out}"
+    );
+}
+
+#[test]
+fn sync_refusal_names_the_key_alone_with_rule_and_reason() {
+    let r = fake_sync(
+        prod_item_with_db("mysql://FIXTUREVALUE"),
+        fly_empty(),
+        fly_empty(),
+    );
+    let e = sync_of(&r, &Default::default()).0.unwrap_err();
+    assert!(
+        e.to_string().ends_with(
+            "nothing staged: DATABASE_URL (failed prefix (expected prefix postgres://))"
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn mode_not_set_reason_reads_without_a_product() {
+    let mut fleet = simple();
+    for env in fleet.environments.values_mut() {
+        env.modes.clear();
+    }
+    let fs = vec![
+        top_secret("DATABASE_URL", DB),
+        top_secret("JWT_KEY", &enc()),
+        top_secret("STRIPE_SECRET_KEY", "sk_test_FIXTUREVALUE"),
+        top_secret(STAGING_ONLY, "t-FIXTUREVALUE"),
+        top_text("LOG_LEVEL", LOG),
+    ];
+    let r = FakeRunner::new([item(&fs), fly_empty()]);
+    let (_, out) = out_of(|o| status::run(&fleet, "staging", &r, o));
+    assert!(
+        out.lines().any(|l| l.starts_with("STRIPE_SECRET_KEY")
+            && l.contains("failed prefix_by_mode (mode payments is not set in this environment)")),
+        "{out}"
     );
 }
 

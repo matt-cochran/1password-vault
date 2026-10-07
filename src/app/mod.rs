@@ -9,6 +9,7 @@
 
 pub mod config_export;
 pub mod doctor;
+pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
 pub mod run;
@@ -72,7 +73,7 @@ pub(crate) fn read_and_plan(
             rotate,
             prune_immutable,
             digest: &no_digest,
-            target_check: &fly::entry_refusal,
+            target_check: &fly::entry_refusal_reason,
         },
     );
     Ok((p, on_fly))
@@ -135,8 +136,9 @@ pub(crate) fn write_json(
                 product: json_product(&r.product),
                 key: r.key.clone(),
                 kind: kind_label(r.kind),
-                state: json_state(r.state),
-                rule: json_rule(r.state),
+                state: json_state(&r.state),
+                rule: json_rule(&r.state),
+                reason: json_reason(&r.state),
                 fly_name,
                 target: json_target(r.kind, r.target),
                 action,
@@ -200,6 +202,8 @@ struct JsonRow {
     kind: &'static str,
     state: &'static str,
     rule: Option<&'static str>,
+    /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
+    reason: Option<String>,
     fly_name: Option<String>,
     target: Option<&'static str>,
     action: Option<&'static str>,
@@ -229,20 +233,28 @@ struct JsonTotals {
 }
 
 /// Machine-readable row state, spelled with underscores (FR-21).
-fn json_state(s: KeyState) -> &'static str {
+fn json_state(s: &KeyState) -> &'static str {
     match s {
         KeyState::Missing => "missing",
         KeyState::WrongKind => "wrong_kind",
-        KeyState::RuleFailed(_) => "failing_rule",
+        KeyState::RuleFailed(..) => "failing_rule",
         KeyState::Ready => "saved",
         KeyState::Skipped => "skipped",
     }
 }
 
 /// The name of the failing rule, next to the state (FR-22).
-fn json_rule(s: KeyState) -> Option<&'static str> {
+fn json_rule(s: &KeyState) -> Option<&'static str> {
     match s {
-        KeyState::RuleFailed(rule) => Some(rule),
+        KeyState::RuleFailed(rule, _) => Some(rule),
+        _ => None,
+    }
+}
+
+/// Why the rule failed, as a separate field next to `rule` (FR-22). Never the value.
+fn json_reason(s: &KeyState) -> Option<String> {
+    match s {
+        KeyState::RuleFailed(_, reason) => Some(reason.to_string()),
         _ => None,
     }
 }
@@ -288,11 +300,12 @@ pub(crate) fn kind_label(k: Kind) -> &'static str {
     }
 }
 
-pub(crate) fn state_label(s: KeyState) -> String {
+/// The STATE cell: a failing rule reads `failed <rule> (<reason>)` (FR-22).
+pub(crate) fn state_label(s: &KeyState) -> String {
     match s {
         KeyState::Missing => "missing".into(),
         KeyState::WrongKind => "wrong kind".into(),
-        KeyState::RuleFailed(rule) => format!("fails rule {rule}"),
+        KeyState::RuleFailed(rule, reason) => format!("failed {rule} ({reason})"),
         KeyState::Ready => "saved".into(),
         KeyState::Skipped => "skipped".into(),
     }
@@ -307,7 +320,7 @@ pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String
             format!(
                 "{} ({})",
                 key_label(&r.product, &r.key),
-                state_label(r.state)
+                state_label(&r.state)
             )
         })
         .collect()
@@ -316,7 +329,7 @@ pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String
 pub(crate) fn is_blocking(r: &Row) -> bool {
     matches!(
         r.state,
-        KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(_)
+        KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(..)
     )
 }
 
@@ -324,7 +337,7 @@ pub(crate) fn is_blocking(r: &Row) -> bool {
 /// nobody filled in), get their declared guidance printed under the row (FR-17, spec §7.4;
 /// FR-26: the reason, in the STATE column, plus the key's guidance).
 fn wants_guidance(r: &Row) -> bool {
-    matches!(r.state, KeyState::Missing | KeyState::RuleFailed(_)) && !r.guidance.is_empty()
+    matches!(r.state, KeyState::Missing | KeyState::RuleFailed(..)) && !r.guidance.is_empty()
 }
 
 /// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, with guidance on the line after
@@ -349,7 +362,7 @@ pub(crate) fn print_rows(
                 r.product.clone(),
                 r.key.clone(),
                 kind_label(r.kind).to_string(),
-                state_label(r.state),
+                state_label(&r.state),
                 target(r),
             ]
             .into_iter()

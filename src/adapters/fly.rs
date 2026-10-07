@@ -205,6 +205,14 @@ pub fn entry_refusal(name: &str, value: &SecretValue) -> Option<&'static str> {
     None
 }
 
+/// [`entry_refusal`] with the rule's fixed reason (FR-22), for the planner's target check.
+pub fn entry_refusal_reason(
+    name: &str,
+    value: &SecretValue,
+) -> Option<(&'static str, &'static str)> {
+    entry_refusal(name, value).map(|rule| (rule, import_reason(rule)))
+}
+
 /// The first value rule `value` breaks, or `None` if flyctl stores it unchanged in the
 /// `NAME="""VALUE"""` form:
 ///
@@ -263,11 +271,27 @@ fn valid_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// A refusal names the key and the rule, never the value (FR-15, SR-1).
+/// A refusal names the key, the rule and its fixed reason, never the value (FR-15, FR-22,
+/// SR-1).
 fn refused(name: &str, rule: &str, op: &str) -> Error {
     Error::Policy(format!(
-        "fly {op} refused for {name:?}: rule {rule}; nothing was sent to Fly"
+        "fly {op} refused for {name:?}: rule {rule} ({}); nothing was sent to Fly",
+        import_reason(rule)
     ))
+}
+
+/// The fixed reason for a Fly import or name rule (FR-22): a constant per rule, never
+/// anything read from the value.
+pub fn import_reason(rule: &str) -> &'static str {
+    match rule {
+        "fly-name-invalid" => "not a valid Fly secret name",
+        "import-duplicate-name" => "name occurs twice in one import",
+        "import-invalid-utf8" => "not valid UTF-8",
+        "import-newline" => "contains a line break",
+        "import-hash-after-odd-quotes" => "a # follows an odd number of double quotes",
+        "import-line-too-long" => "too long for one Fly import line",
+        _ => "refused by the Fly import rules",
+    }
 }
 
 /// `flyctl auth whoami`, exit status only: `Ok(true)` logged in, `Ok(false)` not. A
@@ -1060,6 +1084,29 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// FR-22: an import refusal names the rule and its fixed reason, never the value.
+    #[test]
+    fn import_refusal_error_names_rule_and_reason() {
+        let v = sv("a\"#ZQXMARK");
+        let e = validate_import(&[("FLEET__P__K".to_string(), &v)]).unwrap_err();
+        let t = e.to_string();
+        assert!(
+            t.contains(
+                "rule import-hash-after-odd-quotes (a # follows an odd number of double quotes)"
+            ),
+            "{t}"
+        );
+        assert!(!t.contains("ZQXMARK"), "{t}");
+    }
+
+    #[test]
+    fn entry_refusal_reason_pairs_rule_with_its_reason() {
+        assert_eq!(
+            entry_refusal_reason("FLEET__P__K", &sv("a\nb")),
+            Some(("import-newline", "contains a line break"))
+        );
     }
 
     #[test]

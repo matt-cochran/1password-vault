@@ -242,7 +242,7 @@ fn print_counts(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
 /// Target column of `fly plan`. Keys present on Fly cannot be compared locally, so a
 /// desired key there is "potentially changed" (FR-5, P1).
 fn plan_target(r: &Row, held: bool) -> String {
-    match (r.kind, r.target, r.state) {
+    match (r.kind, r.target, &r.state) {
         (Kind::Config, _, _) => "-",
         (Kind::Secret, TargetState::Absent, KeyState::Ready) => "absent (new)",
         (Kind::Secret, TargetState::Absent, _) => "absent",
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(e.exit_code(), 6);
         assert!(
             e.to_string()
-                .contains("allumata/OPENAI_API_KEY (fails rule import-hash-after-odd-quotes)"),
+                .contains("allumata/OPENAI_API_KEY (failed import-hash-after-odd-quotes ("),
             "{e}"
         );
         assert_no_values(&e.to_string());
@@ -993,7 +993,7 @@ mod tests {
         assert!(matches!(e, Error::Findings(1)), "{e}");
         assert!(
             out.lines()
-                .any(|l| l.contains("SMTP_PASS") && l.contains("fails rule refuse_in")),
+                .any(|l| l.contains("SMTP_PASS") && l.contains("failed refuse_in (")),
             "{out}"
         );
         assert_no_values(&out);
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(matches!(e, Error::Policy(_)), "{e}");
         assert!(
             e.to_string()
-                .contains("allumata/SMTP_PASS (fails rule refuse_in)"),
+                .contains("allumata/SMTP_PASS (failed refuse_in ("),
             "{e}"
         );
         assert_no_values(&e.to_string());
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
-                && l.contains("fails rule import-hash-after-odd-quotes")),
+                && l.contains("failed import-hash-after-odd-quotes (")),
             "{out}"
         );
         assert_no_values(&out);
@@ -1162,7 +1162,7 @@ mod tests {
         let (res, out) = plan_out(&r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Findings(1)), "{e}");
-        assert!(out.contains("fails rule not_prefix"), "{out}");
+        assert!(out.contains("failed not_prefix ("), "{out}");
         assert_no_values(&out);
         assert_no_values(&e.to_string());
     }
