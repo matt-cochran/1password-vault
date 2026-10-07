@@ -5,7 +5,7 @@
 //   node scripts/npm/build.mjs --version X.Y.Z --assets <dir> --out <dir>
 //
 // Writes:
-//   <out>/opv/                    the unscoped "opv" package (shim + README)
+//   <out>/opv/                    the main "@matthew-cochran/opv" package (shim + README)
 //   <out>/@matthew-cochran/opv-<platform>/  one package per platform, carrying the binary
 //
 // No dependencies: only Node's standard library.
@@ -95,7 +95,7 @@ for (const entry of TARGETS) {
   }
 }
 
-// Unscoped "opv" package: shim, README and the per-platform optional deps.
+// Main "@matthew-cochran/opv" package: shim, README and the per-platform optional deps.
 const mainPackage = JSON.parse(readFileSync(join(opvPackageDir, 'package.json'), 'utf8'));
 mainPackage.version = version;
 mainPackage.optionalDependencies = Object.fromEntries(

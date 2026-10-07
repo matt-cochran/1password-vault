@@ -71,11 +71,11 @@ The minimum supported Rust version is 1.88.
 ### npm
 
 ```sh
-npm i -g opv
-npx opv --version
+npm i -g @matthew-cochran/opv
+npx @matthew-cochran/opv --version
 ```
 
-The npm package is published from v0.2.1 (npm has no v0.2.0). It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
+The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
 
 Homebrew and crates.io packages arrive in v0.1.1.
 
