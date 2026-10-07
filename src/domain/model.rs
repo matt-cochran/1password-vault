@@ -20,7 +20,7 @@ pub enum Kind {
 #[serde(default, deny_unknown_fields)]
 pub struct Rules {
     pub prefix: Option<String>,
-    pub not_prefix: Option<String>,
+    pub not_prefix: Option<OneOrMany>,
     pub regex: Option<String>,
     #[serde(rename = "enum")]
     pub r#enum: Option<Vec<String>>,
@@ -33,13 +33,41 @@ pub struct Rules {
     pub transform: Option<String>,
 }
 
+/// A string or a list of strings in TOML (`x = "a"` or `x = ["a", "b"]`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        let (one, many): (Option<&str>, &[String]) = match self {
+            Self::One(s) => (Some(s.as_str()), &[]),
+            Self::Many(v) => (None, v.as_slice()),
+        };
+        one.into_iter().chain(many.iter().map(String::as_str))
+    }
+
+    /// True when the value starts with any listed prefix.
+    pub fn any_prefix_of(&self, v: &str) -> bool {
+        self.iter().any(|p| v.starts_with(p))
+    }
+
+    /// Config validation: at least one entry, none empty.
+    pub fn is_valid(&self) -> bool {
+        self.iter().next().is_some() && self.iter().all(|s| !s.is_empty())
+    }
+}
+
 /// Required prefix chosen by an environment mode, e.g. `payments = "test"` → `sk_test_`.
 /// Modes listed in `skip` mean the key is not required in that environment.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrefixByMode {
     pub mode: String,
-    pub values: BTreeMap<String, String>,
+    pub values: BTreeMap<String, OneOrMany>,
     #[serde(default)]
     pub skip: Vec<String>,
 }

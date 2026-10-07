@@ -107,7 +107,7 @@ pub fn check(
         return Err(fail("prefix"));
     }
     if let Some(p) = &r.not_prefix
-        && v.starts_with(p.as_str())
+        && p.any_prefix_of(v)
     {
         return Err(fail("not_prefix"));
     }
@@ -117,7 +117,7 @@ pub fn check(
             .get(product)
             .and_then(|m| m.get(&p.mode))
             .and_then(|mode| p.values.get(mode))
-            .is_some_and(|pre| v.starts_with(pre.as_str()));
+            .is_some_and(|pre| pre.any_prefix_of(v));
         if !ok {
             return Err(fail("prefix_by_mode"));
         }
@@ -174,7 +174,7 @@ pub fn check(
 mod tests {
     use super::*;
     use crate::config::parse;
-    use crate::domain::model::{Fleet, Kind, PrefixByMode, Rules};
+    use crate::domain::model::{Fleet, Kind, OneOrMany, PrefixByMode, Rules};
     use std::collections::BTreeMap;
 
     fn f() -> Fleet {
@@ -328,6 +328,53 @@ mod tests {
         let env = &f.environments["staging"];
         let e = check("allumata", "STRIPE_SECRET_KEY", &spec, "staging", env, &v).unwrap_err();
         assert_eq!(e.rule, "prefix_by_mode");
+    }
+    fn stripe_lists(env: &str, v: &str) -> Result<Option<String>, RuleFailure> {
+        let t = include_str!("../../tests/fixtures/secrets.toml").replace(
+            r#"values = { test = "sk_test_", live = "sk_live_" }"#,
+            r#"values = { test = ["sk_test_", "rk_test_"], live = ["sk_live_", "rk_live_"] }"#,
+        );
+        let mut f = parse(&t).unwrap();
+        f.environments
+            .get_mut(env)
+            .unwrap()
+            .modes
+            .get_mut("allumata")
+            .unwrap()
+            .insert("payments".into(), "live".into());
+        let spec = &f.products["allumata"].keys["STRIPE_SECRET_KEY"];
+        check(
+            "allumata",
+            "STRIPE_SECRET_KEY",
+            spec,
+            env,
+            &f.environments[env],
+            &SecretValue::new(v.into()),
+        )
+        .map(|o| o.map(|s| s.expose().to_string()))
+    }
+    #[test]
+    fn prefix_by_mode_accepts_any_listed_prefix_for_the_mode() {
+        assert!(stripe_lists("staging", "rk_live_1").unwrap().is_some());
+        assert!(stripe_lists("staging", "sk_live_1").unwrap().is_some());
+        assert_eq!(
+            stripe_lists("staging", "rk_test_1").unwrap_err().rule,
+            "prefix_by_mode"
+        );
+        assert_eq!(
+            stripe_lists("staging", "sk_test_1").unwrap_err().rule,
+            "prefix_by_mode"
+        );
+    }
+    #[test]
+    fn not_prefix_list_refuses_each_entry() {
+        let r = || Rules {
+            not_prefix: Some(OneOrMany::Many(vec!["sk-or-".into(), "sk-ant-".into()])),
+            ..Rules::default()
+        };
+        assert_eq!(rule_of(r(), "sk-or-x"), "not_prefix");
+        assert_eq!(rule_of(r(), "sk-ant-x"), "not_prefix");
+        assert!(with(r(), "sk-proj-x").unwrap().is_some());
     }
     #[test]
     fn enum_rule() {
@@ -490,7 +537,7 @@ mod tests {
             ),
             (
                 Rules {
-                    not_prefix: Some("ZQX".into()),
+                    not_prefix: Some(OneOrMany::Many(vec!["nope".into(), "ZQX".into()])),
                     ..Rules::default()
                 },
                 prefixed(""),

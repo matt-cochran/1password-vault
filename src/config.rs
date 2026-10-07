@@ -126,6 +126,22 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
                     )));
                 }
             }
+            if let Some(np) = &spec.rules.not_prefix
+                && !np.is_valid()
+            {
+                return Err(cfg(format!(
+                    "{product}/{key}: rule not_prefix must be a non-empty string or non-empty list of non-empty strings"
+                )));
+            }
+            if let Some(p) = &spec.rules.prefix_by_mode {
+                for (mode, v) in &p.values {
+                    if !v.is_valid() {
+                        return Err(cfg(format!(
+                            "{product}/{key}: rule prefix_by_mode value for {mode:?} must be a non-empty string or non-empty list of non-empty strings"
+                        )));
+                    }
+                }
+            }
             if let Some(re) = &spec.rules.regex {
                 regex::Regex::new(re).map_err(|e| {
                     cfg(format!("{product}/{key}: rule regex does not compile: {e}"))
@@ -260,7 +276,10 @@ mod tests {
         assert_eq!(openai.kind, Kind::Secret);
         assert_eq!(openai.environments, vec!["prod"]);
         assert_eq!(openai.rules.prefix.as_deref(), Some("sk-"));
-        assert_eq!(openai.rules.not_prefix.as_deref(), Some("sk-or-"));
+        assert_eq!(
+            openai.rules.not_prefix,
+            Some(crate::domain::OneOrMany::One("sk-or-".into()))
+        );
         assert!(!openai.immutable);
         assert_eq!(openai.guidance, "OpenAI platform / API keys");
         assert_eq!(keys["INTEGRATION_ENC_KEY"].rules.base64_bytes, Some(32));
@@ -270,8 +289,14 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(pbm.mode, "payments");
-        assert_eq!(pbm.values["test"], "sk_test_");
-        assert_eq!(pbm.values["live"], "sk_live_");
+        assert_eq!(
+            pbm.values["test"],
+            crate::domain::OneOrMany::One("sk_test_".into())
+        );
+        assert_eq!(
+            pbm.values["live"],
+            crate::domain::OneOrMany::One("sk_live_".into())
+        );
         assert_eq!(pbm.skip, vec!["off", "external"]);
         assert_eq!(
             keys["SIGNUP_POLICY"].rules.r#enum,
@@ -329,6 +354,38 @@ mod tests {
             r#"rules = { regex = "([a-z" }"#,
         ));
         assert!(m.contains("allumata/INTEGRATION_ENC_KEY"), "{m}");
+    }
+
+    #[test]
+    fn rejects_empty_prefix_lists_and_strings() {
+        for bad in [
+            r#"rules = { not_prefix = [] }"#,
+            r#"rules = { not_prefix = "" }"#,
+            r#"rules = { not_prefix = ["a", ""] }"#,
+        ] {
+            let m = config_err(&mutate(r#"rules = { base64_bytes = 32 }"#, bad));
+            assert!(m.contains("allumata/INTEGRATION_ENC_KEY"), "{m}");
+        }
+        for bad in [
+            r#"values = { test = [], live = "sk_live_" }"#,
+            r#"values = { test = "", live = "sk_live_" }"#,
+            r#"values = { test = ["sk_test_", ""], live = "sk_live_" }"#,
+        ] {
+            let m = config_err(&mutate(
+                r#"values = { test = "sk_test_", live = "sk_live_" }"#,
+                bad,
+            ));
+            assert!(m.contains("allumata/STRIPE_SECRET_KEY"), "{m}");
+        }
+    }
+
+    #[test]
+    fn accepts_prefix_lists() {
+        let t = mutate(
+            r#"values = { test = "sk_test_", live = "sk_live_" }"#,
+            r#"values = { test = ["sk_test_", "rk_test_"], live = ["sk_live_", "rk_live_"] }"#,
+        );
+        assert!(parse(&t).is_ok());
     }
 
     #[test]
