@@ -1,0 +1,25 @@
+[package]
+name = "secretctl"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Sync secrets from 1Password into runtime targets (Fly.io first)"
+
+[features]
+# Exposes `runner::fake::FakeRunner` to integration tests and downstream test code.
+fake = []
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+secrecy = "0.10"
+zeroize = "1"
+thiserror = "2"
+base64 = "0.23"
+hex = "0.4"
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"
