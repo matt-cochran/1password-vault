@@ -17,6 +17,10 @@
 //!
 //! A failing check prints the next command for the detected platform and shell (FR-26):
 //! the sign-in command, `op account add`, or the install command.
+//!
+//! The output ends with one `Next step` line (FR-22): the first failing check and the safe
+//! command that addresses it (the first remediation line of that check), or `nothing
+//! pending`. Text only, never a prompt (FR-9).
 
 use std::io::{self, Write};
 
@@ -67,12 +71,14 @@ fn run_on(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
+    let mut next: Option<String> = None;
     let mut line = |out: &mut dyn Write, check: &str, res: Result<Check, Error>| {
         let text = match res {
             Ok(Check::Ok(detail)) => format!("ok    {check}: {detail}"),
             Ok(Check::Warn(detail)) => format!("warn  {check}: {detail}"),
             Err(e) => {
                 let t = format!("FAIL  {check}: {e}");
+                next.get_or_insert_with(|| next_step(check, &e));
                 first.get_or_insert(e);
                 t
             }
@@ -131,9 +137,33 @@ fn run_on(
             }
         }
     }
+    let next = next.unwrap_or_else(|| "Next step: nothing pending".into());
+    writeln!(out, "{next}").map_err(write_err)?;
     match first {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// The `Next step` line for the first failing check (FR-22): that check's first
+/// remediation line (the install, sign-in, `op account add` or log-in command the failure
+/// already prints, FR-26), or, when it has none, the fix-and-re-run hint. Built from opv's
+/// own messages only; never tool output or a value.
+fn next_step(check: &str, e: &Error) -> String {
+    let text = e.to_string();
+    let hint = text
+        .lines()
+        .skip(1)
+        .find_map(|l| l.strip_prefix("  "))
+        .map(|l| l.strip_prefix("next: ").unwrap_or(l).trim());
+    match hint {
+        Some(h) if !h.is_empty() => format!("Next step ({check}): {h}"),
+        _ if check == "config" => {
+            format!(
+                "Next step ({check}): fix the configuration as reported above, then run: opv doctor"
+            )
+        }
+        _ => format!("Next step ({check}): fix the failure reported above, then run: opv doctor"),
     }
 }
 
@@ -317,9 +347,16 @@ mod tests {
         (res, text_of(&out))
     }
 
-    /// The check lines only (remediation lines under a check are indented).
+    /// The check lines only (remediation lines under a check are indented; the closing
+    /// `Next step` line is not a check).
     fn checks(out: &str) -> Vec<&str> {
-        out.lines().filter(|l| !l.starts_with("  ")).collect()
+        out.lines()
+            .filter(|l| !l.starts_with("  ") && !l.starts_with("Next step"))
+            .collect()
+    }
+
+    fn next_line(out: &str) -> &str {
+        out.lines().last().unwrap()
     }
 
     #[test]
@@ -327,7 +364,7 @@ mod tests {
         let r = FakeRunner::new(good());
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        let lines: Vec<&str> = out.lines().collect();
+        let lines = checks(&out);
         assert_eq!(lines.len(), 5, "{out}");
         assert!(
             lines[0].starts_with("ok") && lines[0].contains("config"),
@@ -441,7 +478,7 @@ mod tests {
         let (res, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Config(_)), "{e}");
-        let lines: Vec<&str> = out.lines().collect();
+        let lines = checks(&out);
         assert_eq!(lines.len(), 5, "{out}");
         assert!(
             lines[0].starts_with("FAIL") && lines[0].contains("boom"),
@@ -457,8 +494,8 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         assert_eq!(
-            out.lines().last().unwrap(),
-            "ok    fly auth: signed in",
+            checks(&out).last().unwrap(),
+            &"ok    fly auth: signed in",
             "{out}"
         );
         assert_no_values(&out);
@@ -577,6 +614,138 @@ mod tests {
         assert!(out.contains("ok    fly auth"), "{out}");
         assert!(
             out.contains("skip  fly: no fly section in environment(s) dev"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_is_the_last_line_when_all_checks_pass() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(next_line(&out), "Next step: nothing pending", "{out}");
+    }
+
+    #[test]
+    fn next_step_appears_exactly_once() {
+        let r = FakeRunner::new([]);
+        for _ in 0..4 {
+            r.push_io_error(io::ErrorKind::NotFound);
+        }
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("Next step")).count(),
+            1,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_install_command_when_op_is_missing() {
+        let r = FakeRunner::new([]);
+        r.push_io_error(io::ErrorKind::NotFound);
+        r.push_io_error(io::ErrorKind::NotFound);
+        r.responses.borrow_mut().push_back(Ok(good().remove(2)));
+        r.responses.borrow_mut().push_back(Ok(good().remove(3)));
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (op): install op from https://developer.1password.com/docs/cli/get-started/ \
+             (apt, dnf or the zip for this Linux distribution)",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_signin_command_when_op_is_not_signed_in() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (op auth): sign in: eval $(op signin)",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_account_add_when_no_account_exists() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(b"[]".to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert!(
+            next_line(&out).starts_with("Next step (op auth): add one: op account add"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_fly_login_when_fly_is_logged_out() {
+        let mut g = good();
+        g[3] = Output::failure(1);
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (fly auth): log in: flyctl auth login",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_names_the_first_failing_check() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g[4] = Output::failure(1); // fly auth fails too
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert!(next_line(&out).starts_with("Next step (op auth):"), "{out}");
+    }
+
+    #[test]
+    fn next_step_for_invalid_config_is_fix_and_rerun() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
+        assert_eq!(
+            next_line(&out),
+            "Next step (config): fix the configuration as reported above, then run: opv doctor",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn next_step_never_prompts() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        let next = next_line(&out);
+        assert!(
+            !next.contains('?') && !next.to_lowercase().contains("[y/n]"),
+            "{next}"
+        );
+    }
+
+    #[test]
+    fn next_step_under_ci_names_service_account_token() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        let r = FakeRunner::new(g);
+        let h = Host::from_env(
+            &crate::host::FakeEnv::new("linux")
+                .shell("/bin/bash")
+                .var("CI"),
+        );
+        let mut out = Vec::new();
+        let _ = run_with(Ok(fleet()), &r, &h, &mut out);
+        let out = text_of(&out);
+        assert!(
+            next_line(&out).starts_with("Next step (op auth): set OP_SERVICE_ACCOUNT_TOKEN"),
             "{out}"
         );
     }
