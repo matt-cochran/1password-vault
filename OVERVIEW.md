@@ -159,10 +159,10 @@ The configuration shall support:
 - Fly application name;
 - optional managed-secret ownership;
 - products, per-key kind, rules, guidance and immutability (fleet profile, §10);
-- a flat key map with no products (simple profile, planned for v0.2, FR-20);
+- a flat key map with no products (simple profile, v0.2, FR-20);
 - future extension to additional secret sources and targets.
 
-Planned for v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25).
+Since v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25).
 
 Configuration shall never contain secret values.
 
@@ -355,7 +355,7 @@ Measured (D0 spike): a cold whole-item read by vault ID and item ID costs 2 requ
 
 Local commands (`run`) may resolve per-reference through `op run`; they use the person's desktop-app session, not a service account.
 
-Planned for v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev time, to write their IDs into `secrets.toml`. The exception is limited to the `init` command: title lookup must be unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export` (and `explain`, which reads only the configuration).
+Since v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev time, to write their IDs into `secrets.toml`. The exception is limited to the `init` command: title lookup must be unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export` (and `explain`, which reads only the configuration).
 
 ## FR-14 — Field Kinds
 
@@ -371,7 +371,7 @@ Each declared key may carry rules, evaluated after resolution and before any tar
 - `email_list`, `https_url`;
 - `prefix_by_mode` (for example Stripe `sk_test_` vs `sk_live_` chosen by a declared mode);
 - `refuse_in = [<environment>]` (a key that must not exist in an environment): evaluated before anything else, so a non-empty field in a refused environment is a blocking `refuse_in` failure even though the key is not otherwise expected there; the environments must be defined and must not also be listed in `environments`;
-- named transforms with a fixed output format (for example a SigNoz ingestion header). v0.1.0 ships `transform = "signoz_ingestion_header"`; planned for v0.2, it is replaced by the generic `ensure_prefix` and `pattern` rules, with the old name kept as a deprecated alias for one release (FR-24). v0.1.1 adds `transform = "pem_private_key"`, which stays: it validates and normalises a standard format (any PEM private key), not one vendor's convention.
+- named transforms with a fixed output format (for example a SigNoz ingestion header). v0.1.0 ships `transform = "signoz_ingestion_header"`; since v0.2, it is replaced by the generic `ensure_prefix` and `pattern` rules, with the old name kept as a deprecated alias for one release (FR-24). v0.1.1 adds `transform = "pem_private_key"`, which stays: it validates and normalises a standard format (any PEM private key), not one vendor's convention.
 
 Rule failures name the key and the rule, never the value.
 
@@ -415,7 +415,7 @@ It creates or completes the environment's item: every declared section and field
 
 ## v0.2 ergonomics (FR-20 to FR-25)
 
-The requirements below are planned for v0.2 and are not shipped in v0.1.0. They make opv usable by a single-app adopter and easier to start with, without weakening any FR or SR above. The owner adopted them on 2026-10-07. Rejected and deferred proposals are listed in §8 under "v0.2 scope".
+The requirements below shipped in v0.2.0. They make opv usable by a single-app adopter and easier to start with, without weakening any FR or SR above. The owner adopted them on 2026-10-07. Rejected and deferred proposals are listed in §8 under "v0.2 scope".
 
 ## FR-20 — Simple Profile
 
@@ -738,7 +738,7 @@ opv [--config <path>] item skeleton <environment>
 
 `--config` defaults to `secrets.toml`. `--json` exists only on `config export`; `--verbose` and `--quiet` are not implemented.
 
-Planned for v0.2 (FR-20 to FR-25), in addition to the above:
+Since v0.2 (FR-20 to FR-27), in addition to the above:
 
 ```text
 opv [--config <path>] status <environment> [--json]
@@ -1119,7 +1119,7 @@ The consumer may generate this file from its own catalog; opv reads only this fi
 
 The `fly` section is optional per environment: an environment used only for `run`, `config export` and `item skeleton` (for example `dev`) omits it, and `status` and the `fly` commands refuse it with a configuration error. `vault_id`, `item_id` and `fly.app` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
-Planned for v0.2: fleet stays the default profile and is unchanged; every v0.1.0 fleet file keeps working. A second profile, `kind = "simple"` (FR-20), serves one app per environment with a flat `[keys]` map: no products, no template, and the field name is the Fly name. `profile.kind` stays required, so a file always says which profile it uses. Both profiles share the environment table, the rules, the one-item read (FR-13) and the managed-set rule (FR-8).
+Since v0.2: fleet stays the default profile and is unchanged; every v0.1.0 fleet file keeps working. A second profile, `kind = "simple"` (FR-20), serves one app per environment with a flat `[keys]` map: no products, no template, and the field name is the Fly name. `profile.kind` stays required, so a file always says which profile it uses. Both profiles share the environment table, the rules, the one-item read (FR-13) and the managed-set rule (FR-8).
 
 ## 10.3 Coexistence with other automation
 
