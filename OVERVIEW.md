@@ -281,6 +281,8 @@ If ownership is not declared, pruning should fail safely rather than infer owner
 
 In the fleet profile (§10) the managed set is derived from the declaration: every name produced by the target naming template for a declared key. Names outside that set (for example values staged by other automation) are never pruned.
 
+Decided in v0.1.0: every declared key's rendered name must be unique within an environment's template, whichever environments the keys are declared for (otherwise one run could stage and prune the same name); a name staged by a run is never pruned by it; and an immutable key (FR-16) is never pruned. It is reported as "held (immutable), not pruned", and releasing it takes `--prune --prune-immutable <product>/<key>` (repeatable, validated before any call). Two environments may not share the same Fly app and naming template.
+
 ## FR-9 — Non-Interactive Operation
 
 Commands used by CI shall not prompt for input.
@@ -301,7 +303,20 @@ The CLI shall use stable exit codes for at least:
 - denied destructive operation;
 - child-process failure.
 
-Exact numeric assignments may be finalized during implementation.
+Final assignments (a public contract from v0.1.0):
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 2 | configuration error, and command-line usage error |
+| 3 | dependency (`op` or `flyctl` missing or unusable) |
+| 4 | source (1Password) |
+| 5 | target (Fly) |
+| 6 | policy: refused (blocking keys, a refused value, a denied destructive operation) |
+| 7 | authentication (1Password or Fly) |
+| 8 | findings (`status`, `fly plan` found blocking keys) |
+
+`run` exits with the child's own exit code. A closed stdout (`status | head`) does not change the result.
 
 ## FR-11 — Dry-Run Safety
 
@@ -344,10 +359,12 @@ Each declared key may carry rules, evaluated after resolution and before any tar
 - `base64_bytes = N`, `hex_bytes = N`;
 - `email_list`, `https_url`;
 - `prefix_by_mode` (for example Stripe `sk_test_` vs `sk_live_` chosen by a declared mode);
-- `refuse_in = [<environment>]` (a key that must not exist in an environment);
+- `refuse_in = [<environment>]` (a key that must not exist in an environment): evaluated before anything else, so a non-empty field in a refused environment is a blocking `refuse_in` failure even though the key is not otherwise expected there; the environments must be defined and must not also be listed in `environments`;
 - named transforms with a fixed output format (for example a SigNoz ingestion header).
 
 Rule failures name the key and the rule, never the value.
+
+Target limits count as rules too: `status` and `fly plan` check each ready secret against the Fly import rules (for example `import-hash-after-odd-quotes`) and show a refusal as a failing rule, so they never show green for a value `fly sync` would refuse. The maximum length is 59 000 bytes, below the 60 000-byte import line limit.
 
 ## FR-16 — Immutable Keys
 
@@ -473,7 +490,7 @@ secretctl run <environment> -- <command>
 
 secretctl fly plan <environment>
 
-secretctl fly sync <environment> [--deploy] [--prune]
+secretctl fly sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
 ```
 
 Potential global options:
@@ -824,6 +841,8 @@ rules = { enum = ["open", "invite_only"] }
 ```
 
 The consumer may generate this file from its own catalog; secretctl reads only this file. Product names are upper-cased into the template (`allumata` → `ALLUMATA`).
+
+The `fly` section is optional per environment: an environment used only for `run`, `config export` and `item skeleton` (for example `dev`) omits it, and `status` and the `fly` commands refuse it with a configuration error. `vault_id`, `item_id` and `fly.app` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
 ## 10.3 Coexistence with other automation
 
