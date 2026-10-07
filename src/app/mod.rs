@@ -150,6 +150,16 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
     Ok(())
 }
 
+/// Every Fly name the template renders for a declared key: the managed set (FR-8, §10).
+pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<String>, Error> {
+    let env = fleet.environment(env_name)?;
+    Ok(fleet
+        .products
+        .iter()
+        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| env.fly_name(p, k)))
+        .collect())
+}
+
 /// Fly names on the app that the template does not render for any declared key: other
 /// tools' secrets, which secretctl never touches (FR-5 "unmanaged on Fly", §10.3).
 pub(crate) fn unmanaged_on_fly<'a>(
@@ -157,12 +167,7 @@ pub(crate) fn unmanaged_on_fly<'a>(
     env_name: &str,
     on_fly: &'a [FlySecret],
 ) -> Result<Vec<&'a str>, Error> {
-    let env = fleet.environment(env_name)?;
-    let managed: HashSet<String> = fleet
-        .products
-        .iter()
-        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| env.fly_name(p, k)))
-        .collect();
+    let managed = managed_names(fleet, env_name)?;
     Ok(on_fly
         .iter()
         .map(|s| s.name.as_str())
@@ -285,6 +290,14 @@ pub(crate) mod testutil {
         let v: Vec<Value> = entries
             .iter()
             .map(|(n, d)| json!({"name": n, "digest": d, "status": "Deployed"}))
+            .collect();
+        Output::success(serde_json::to_vec(&v).unwrap())
+    }
+    /// `flyctl secrets list --json` output with explicit Fly status: (name, digest, status).
+    pub fn fly_st(entries: &[(&str, &str, &str)]) -> Output {
+        let v: Vec<Value> = entries
+            .iter()
+            .map(|(n, d, st)| json!({"name": n, "digest": d, "status": st}))
             .collect();
         Output::success(serde_json::to_vec(&v).unwrap())
     }

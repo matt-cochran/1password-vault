@@ -4,7 +4,8 @@
 //! (ruling P1): read the item once → list A → plan → refuse if anything blocks (nothing
 //! staged) → validate the import batch → stage → list B → report each staged key as
 //! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged) →
-//! `--deploy`: deploy, only when something effectively changed (FR-7). Without `--deploy`
+//! `--deploy`: deploy when a staged digest changed, a prune happened, or a managed name is
+//! still `Staged`/`Partial` on Fly from an earlier run (FR-7). Without `--deploy`
 //! nothing is ever deployed. `fly plan` reads the item once and lists once; it mutates
 //! nothing (FR-11).
 
@@ -12,7 +13,8 @@ use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::{
-    is_blocking, print_extras, print_rows, read_and_plan, row_names, unmanaged_on_fly, write_err,
+    is_blocking, managed_names, print_extras, print_rows, read_and_plan, row_names,
+    unmanaged_on_fly, write_err,
 };
 use crate::adapters::fly;
 use crate::domain::rules;
@@ -59,45 +61,39 @@ pub fn run(
 
     let mut changed = Vec::new();
     let mut unchanged = Vec::new();
-    if !batch.is_empty() {
+    // Nothing staged by this run: list A is the current state, no second list needed.
+    let list_b = if batch.is_empty() {
+        list_a.clone()
+    } else {
         fly::stage(r, &env.fly_app, &batch)?;
-        let list_b = fly::list(r, &env.fly_app)?;
-        for (name, _) in &batch {
-            let (a, b) = (digest(&list_a, name), digest(&list_b, name));
-            // A staged key with no digest after staging is unknown: count it as changed.
-            if b.is_none() || a != b {
-                changed.push(name.as_str());
-            } else {
-                unchanged.push(name.as_str());
-            }
+        fly::list(r, &env.fly_app)?
+    };
+    for (name, _) in &batch {
+        let (a, b) = (digest(&list_a, name), digest(&list_b, name));
+        // A staged key with no digest after staging is unknown: count it as changed.
+        if b.is_none() || a != b {
+            changed.push(name.as_str());
+        } else {
+            unchanged.push(name.as_str());
         }
     }
+
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
-    p(
-        out,
-        format!(
-            "staged: {} changed, {} unchanged",
-            changed.len(),
-            unchanged.len()
-        ),
-    )?;
-    for n in &changed {
-        p(out, format!("  changed: {n}"))?;
-    }
-    for n in &unchanged {
-        p(out, format!("  unchanged: {n}"))?;
-    }
     if opts.expect_no_change && !changed.is_empty() {
-        p(
+        // The gate result wins over output: a failed write must not turn Findings into a
+        // dependency error, so these writes are best effort and the result line comes first.
+        let _ = p(
             out,
             format!(
                 "expected no change, but {} staged key(s) changed: {}",
                 changed.len(),
                 changed.join(", ")
             ),
-        )?;
+        );
+        let _ = print_changes(out, &changed, &unchanged);
         return Err(Error::Findings(changed.len()));
     }
+    print_changes(out, &changed, &unchanged)?;
 
     let pruned = if plan.prune.is_empty() {
         false
@@ -116,16 +112,47 @@ pub fn run(
         false
     };
 
-    let effective = !changed.is_empty() || pruned;
-    match (effective, opts.deploy) {
-        (false, true) => p(out, "no effective change; not deploying".into()),
-        (false, false) => p(out, "no effective change".into()),
+    // Managed names still staged from an earlier run (e.g. a sync without --deploy, or a
+    // failed deploy). Status is only an extra deploy trigger, never change detection.
+    let managed = managed_names(fleet, env_name)?;
+    let pending: Vec<&str> = list_b
+        .iter()
+        .filter(|s| managed.contains(&s.name))
+        .filter(|s| matches!(s.status.as_deref(), Some("Staged" | "Partial")))
+        .map(|s| s.name.as_str())
+        .collect();
+    if !pending.is_empty() {
+        p(out, format!("pending on Fly: {}", pending.join(", ")))?;
+    }
+
+    let needs_deploy = !changed.is_empty() || pruned || !pending.is_empty();
+    match (needs_deploy, opts.deploy) {
+        (false, true) => p(out, "nothing pending; not deploying".into()),
+        (false, false) => p(out, "nothing pending".into()),
         (true, true) => {
             fly::deploy(r, &env.fly_app)?;
             p(out, "deployed staged secrets".into())
         }
         (true, false) => p(out, "staged changes not deployed (no --deploy)".into()),
     }
+}
+
+/// The result line, then the per-key change lists (names only).
+fn print_changes(out: &mut dyn Write, changed: &[&str], unchanged: &[&str]) -> Result<(), Error> {
+    writeln!(
+        out,
+        "staged: {} changed, {} unchanged",
+        changed.len(),
+        unchanged.len()
+    )
+    .map_err(write_err)?;
+    for n in changed {
+        writeln!(out, "  changed: {n}").map_err(write_err)?;
+    }
+    for n in unchanged {
+        writeln!(out, "  unchanged: {n}").map_err(write_err)?;
+    }
+    Ok(())
 }
 
 /// `fly plan <env>`: rows, prune list and counts; no mutation. Exits `Findings(n)` when
@@ -267,16 +294,37 @@ mod tests {
         let res = run(fleet, "prod", r, &mut out, o);
         (res, text_of(&out))
     }
-    fn no_import(r: &FakeRunner) -> bool {
-        !called(r, "flyctl", &["secrets", "import"])
-    }
 
     // ---- fly sync: refusal before staging -------------------------------------------
+    //
+    // Every refusal test passes --deploy, --prune and a valid --rotate, with a prunable
+    // managed name on Fly, and asserts nothing is staged, unset or deployed.
+
+    fn all_flags() -> SyncOpts {
+        SyncOpts {
+            deploy: true,
+            prune: true,
+            rotate: vec!["allumata/INTEGRATION_ENC_KEY".into()],
+            expect_no_change: false,
+        }
+    }
+    fn assert_nothing_mutated(r: &FakeRunner) {
+        for sub in ["import", "unset", "deploy"] {
+            assert!(
+                !called(r, "flyctl", &["secrets", sub]),
+                "{sub}: {:?}",
+                argvs(r)
+            );
+        }
+    }
 
     #[test]
     fn sync_refuses_when_anything_missing_and_stages_nothing() {
-        let r = fake_with(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
-        let e = run(&f(), "prod", &r, &mut Vec::new(), &opts()).unwrap_err();
+        let r = fake_with(
+            item_without("allumata", "OPENAI_API_KEY"),
+            fly_with_prunable(),
+        );
+        let e = run(&f(), "prod", &r, &mut Vec::new(), &all_flags()).unwrap_err();
         assert!(matches!(e, Error::Policy(_)), "{e}");
         assert!(e.to_string().contains("OPENAI_API_KEY"), "{e}");
         assert_no_values(&e.to_string());
@@ -286,20 +334,21 @@ mod tests {
                 .iter()
                 .all(|c| !(c.program == "flyctl" && c.args.contains(&"import".to_string())))
         );
+        assert_nothing_mutated(&r);
     }
 
     /// Review Focus 2: a product section missing from the item → every key Missing, the
     /// sync refuses, and nothing is staged (the only flyctl call is list A).
     #[test]
     fn sync_refuses_when_product_section_missing() {
-        let r = fake_with(item(&[]), fly_empty());
-        let (res, out) = sync_out(&f(), &r, &opts());
+        let r = fake_with(item(&[]), fly_with_prunable());
+        let (res, out) = sync_out(&f(), &r, &all_flags());
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Policy(_)), "{e}");
         for k in ["OPENAI_API_KEY", "INTEGRATION_ENC_KEY", "SIGNUP_POLICY"] {
             assert!(e.to_string().contains(k), "{e}");
         }
-        assert!(no_import(&r));
+        assert_nothing_mutated(&r);
         assert_eq!(
             argvs(&r),
             vec![
@@ -317,13 +366,13 @@ mod tests {
             complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE")),
             complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)),
         ] {
-            let r = fake_with(item, fly_empty());
-            let (res, out) = sync_out(&f(), &r, &opts());
+            let r = fake_with(item, fly_with_prunable());
+            let (res, out) = sync_out(&f(), &r, &all_flags());
             let e = res.unwrap_err();
             assert!(matches!(e, Error::Policy(_)), "{e}");
             assert_no_values(&e.to_string());
             assert_no_values(&out);
-            assert!(no_import(&r));
+            assert_nothing_mutated(&r);
         }
     }
 
@@ -332,15 +381,15 @@ mod tests {
     fn sync_validates_import_before_staging() {
         let r = fake_with(
             complete_with(secret("allumata", "OPENAI_API_KEY", "sk-a\"#FIXTUREVALUE")),
-            fly_empty(),
+            fly_with_prunable(),
         );
-        let (res, out) = sync_out(&f(), &r, &opts());
+        let (res, out) = sync_out(&f(), &r, &all_flags());
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Policy(_)), "{e}");
         assert!(e.to_string().contains(OPENAI_FLY), "{e}");
         assert_no_values(&e.to_string());
         assert_no_values(&out);
-        assert!(no_import(&r));
+        assert_nothing_mutated(&r);
         assert_eq!(r.calls.borrow().len(), 2);
     }
 
@@ -443,10 +492,11 @@ mod tests {
         );
     }
 
-    /// FR-7: no effective change → no deploy, even with `--deploy`.
+    /// FR-7: nothing changed, nothing pruned, everything Deployed → no deploy, even with
+    /// `--deploy`.
     #[test]
-    fn sync_skips_deploy_when_no_effective_change() {
-        let same = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]);
+    fn sync_skips_deploy_when_nothing_pending() {
+        let same = || fly_st(&[(OPENAI_FLY, "d1", "Deployed"), (ENC_FLY, "d2", "Deployed")]);
         let r = fake_sync(complete_item(), same(), same());
         let o = SyncOpts {
             deploy: true,
@@ -459,20 +509,119 @@ mod tests {
             "{:?}",
             argvs(&r)
         );
-        assert!(out.contains("no effective change"), "{out}");
+        assert!(out.contains("nothing pending; not deploying"), "{out}");
+    }
+
+    /// A == B, but a managed name is still Staged from an earlier run (a sync without
+    /// --deploy, or a failed deploy): `--deploy` must deploy it.
+    #[test]
+    fn sync_deploys_managed_name_pending_from_earlier_run() {
+        for status in ["Staged", "Partial"] {
+            let same = || fly_st(&[(OPENAI_FLY, "d1", status), (ENC_FLY, "d2", "Deployed")]);
+            let r = fake_sync(complete_item(), same(), same());
+            let o = SyncOpts {
+                deploy: true,
+                ..opts()
+            };
+            let (res, out) = sync_out(&f(), &r, &o);
+            res.unwrap();
+            assert_eq!(
+                argvs(&r).last().unwrap(),
+                "flyctl secrets deploy --app mcproductlabs-portfolio-production",
+                "{status}"
+            );
+            assert!(
+                out.contains(&format!("pending on Fly: {OPENAI_FLY}")),
+                "{out}"
+            );
+        }
+    }
+
+    /// With nothing staged (every secret immutable and held) there is no list B; pending
+    /// is judged on list A, and `--deploy` still deploys the earlier run's staged name.
+    #[test]
+    fn sync_deploys_pending_when_nothing_staged() {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let fl = crate::config::parse(&text.replace(
+            "guidance = \"OpenAI platform / API keys\"",
+            "guidance = \"OpenAI platform / API keys\"\nimmutable = true",
+        ))
+        .unwrap();
+        let a = || fly_st(&[(ENC_FLY, "d2", "Staged"), (OPENAI_FLY, "d1", "Deployed")]);
+        let r = FakeRunner::new([complete_item(), a(), ok(), ok()]);
+        let o = SyncOpts {
+            deploy: true,
+            ..opts()
+        };
+        let (res, out) = sync_out(&fl, &r, &o);
+        res.unwrap();
+        let app = "mcproductlabs-portfolio-production";
+        assert_eq!(
+            argvs(&r),
+            vec![
+                "op item get iprd --vault vprd --format json".to_string(),
+                format!("flyctl secrets list --app {app} --json"),
+                format!("flyctl secrets deploy --app {app}"),
+            ],
+            "{out}"
+        );
+    }
+
+    /// Another tool's staged secret is not secretctl's to deploy.
+    #[test]
+    fn unmanaged_staged_name_does_not_trigger_deploy() {
+        let same = || {
+            fly_st(&[
+                (OPENAI_FLY, "d1", "Deployed"),
+                (ENC_FLY, "d2", "Deployed"),
+                ("OTHER_TOOL_TOKEN", "d9", "Staged"),
+            ])
+        };
+        let r = fake_sync(complete_item(), same(), same());
+        let o = SyncOpts {
+            deploy: true,
+            ..opts()
+        };
+        let (res, out) = sync_out(&f(), &r, &o);
+        res.unwrap();
+        assert!(
+            !called(&r, "flyctl", &["secrets", "deploy"]),
+            "{:?}",
+            argvs(&r)
+        );
+        assert!(!out.contains("OTHER_TOOL_TOKEN"), "{out}");
+    }
+
+    /// Status never suppresses: a changed digest deploys even if Fly says Deployed.
+    #[test]
+    fn changed_digest_deploys_regardless_of_status() {
+        let r = fake_sync(
+            complete_item(),
+            fly_st(&[(OPENAI_FLY, "d1", "Deployed"), (ENC_FLY, "d2", "Deployed")]),
+            fly_st(&[(OPENAI_FLY, "d1b", "Deployed"), (ENC_FLY, "d2", "Deployed")]),
+        );
+        let o = SyncOpts {
+            deploy: true,
+            ..opts()
+        };
+        sync_out(&f(), &r, &o).0.unwrap();
+        assert!(called(&r, "flyctl", &["secrets", "deploy"]));
     }
 
     #[test]
     fn expect_no_change_fails_when_a_digest_changed() {
         // ENC is immutable and present, so held; only OPENAI is staged, and it changed.
+        // The Stripe name is prunable in prod, and --prune/--deploy are passed: the gate
+        // must stop before either happens.
         let r = fake_sync(
             complete_item(),
-            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
-            fly(&[(OPENAI_FLY, "d1-new"), (ENC_FLY, "d2")]),
+            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (STRIPE_FLY, "d3")]),
+            fly(&[(OPENAI_FLY, "d1-new"), (ENC_FLY, "d2"), (STRIPE_FLY, "d3")]),
         );
         let o = SyncOpts {
             expect_no_change: true,
             deploy: true,
+            prune: true,
             ..opts()
         };
         let (res, out) = sync_out(&f(), &r, &o);
@@ -480,7 +629,48 @@ mod tests {
         assert!(matches!(e, Error::Findings(1)), "{e}");
         assert!(out.contains(OPENAI_FLY), "{out}");
         assert!(!called(&r, "flyctl", &["secrets", "deploy"]));
+        assert!(!called(&r, "flyctl", &["secrets", "unset"]));
         assert_no_values(&out);
+    }
+
+    /// M3: a broken stdout must not turn the gate's Findings into a dependency error.
+    #[test]
+    fn expect_no_change_findings_survive_broken_stdout() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let r = fake_sync(
+            complete_item(),
+            fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
+            fly(&[(OPENAI_FLY, "d1-new"), (ENC_FLY, "d2")]),
+        );
+        // Output before staging (counts) must succeed; every write after list B fails.
+        struct FailAfterStage<'a>(&'a FakeRunner, Vec<u8>);
+        impl std::io::Write for FailAfterStage<'_> {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                if self.0.calls.borrow().len() >= 4 {
+                    return Broken.write(b);
+                }
+                self.1.extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let o = SyncOpts {
+            expect_no_change: true,
+            ..opts()
+        };
+        let mut w = FailAfterStage(&r, Vec::new());
+        let e = run(&f(), "prod", &r, &mut w, &o).unwrap_err();
+        assert!(matches!(e, Error::Findings(1)), "{e}");
     }
 
     /// A staged key Fly reports without a digest is unknown, so it counts as changed: the
@@ -554,7 +744,7 @@ mod tests {
             let r = FakeRunner::new([]);
             let o = SyncOpts {
                 rotate: vec!["allumata/INTEGRATION_ENC_KEY".into(), bad.into()],
-                ..opts()
+                ..all_flags()
             };
             let e = run(&fl, "prod", &r, &mut Vec::new(), &o).unwrap_err();
             assert!(matches!(e, Error::Config(_)), "{bad}: {e}");
@@ -575,7 +765,7 @@ mod tests {
         let r = FakeRunner::new([]);
         let o = SyncOpts {
             rotate: vec!["allumata/STRIPE_WEBHOOK".into()],
-            ..opts()
+            ..all_flags()
         };
         let e = run(&fl, "prod", &r, &mut Vec::new(), &o).unwrap_err();
         assert!(matches!(e, Error::Config(_)), "{e}");

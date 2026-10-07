@@ -11,7 +11,8 @@
 //!
 //! Fly digests are not computable locally (D0, `docs/spike-d0-findings.md` Q4), so change
 //! detection is stage-and-compare (P1, §6.4): S6 calls `list` (A), `stage`, `list` (B) and
-//! compares digests by name. `status` is deliberately ignored.
+//! compares digests by name. `status` is passed through but never used for change
+//! detection; S6 uses it only as an extra deploy trigger (pending `Staged`/`Partial`).
 //!
 //! # Stdin encoding (SR-3, SR-4)
 //!
@@ -56,12 +57,14 @@ pub const MAX_IMPORT_LINE: usize = 60_000;
 
 const TRIPLE_QUOTE: &[u8] = b"\"\"\"";
 
-/// One `secrets list --json` entry. Unknown fields (`status`, future ones) are ignored.
+/// One `secrets list --json` entry. Unknown fields (future ones) are ignored.
 #[derive(Deserialize)]
 struct ListEntry {
     name: String,
     #[serde(default)]
     digest: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// Every secret on `app` with its digest: one `flyctl secrets list --app <app> --json` call.
@@ -81,6 +84,7 @@ pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
         .map(|e| FlySecret {
             name: e.name,
             digest: e.digest,
+            status: e.status,
         })
         .collect())
 }
@@ -463,11 +467,13 @@ mod tests {
             vec![
                 FlySecret {
                     name: "A".into(),
-                    digest: Some("<digest-a>".into())
+                    digest: Some("<digest-a>".into()),
+                    status: Some("Staged".into()),
                 },
                 FlySecret {
                     name: "B".into(),
-                    digest: Some("<digest-b>".into())
+                    digest: Some("<digest-b>".into()),
+                    status: Some("Staged".into()),
                 },
             ]
         );
@@ -478,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn list_real_shape_ignores_status_and_tolerates_missing_digest() {
+    fn list_real_shape_keeps_status_and_tolerates_missing_digest() {
         let json = br#"[
           {"name":"FLEET__ALLUMATA__OPENAI_API_KEY","digest":"abbf42e97d95a292","status":"Deployed"},
           {"name":"FLEET__ALLUMATA__STRIPE_SECRET_KEY","digest":"abd0c8276c1dd3e9","status":"Staged"},
@@ -503,6 +509,17 @@ mod tests {
                 ("OTHER_TOOL", Some("0123456789abcdef")),
                 ("NULL_DIGEST", None),
                 ("NO_DIGEST", None),
+            ]
+        );
+        let status: Vec<Option<&str>> = s.iter().map(|f| f.status.as_deref()).collect();
+        assert_eq!(
+            status,
+            [
+                Some("Deployed"),
+                Some("Staged"),
+                Some("Partial"),
+                Some("Unknown"),
+                None
             ]
         );
     }

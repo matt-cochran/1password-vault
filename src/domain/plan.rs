@@ -31,11 +31,14 @@ impl fmt::Debug for ItemField {
     }
 }
 
-/// A secret listed on the Fly app. `digest` is Fly's digest when it reports one.
+/// A secret listed on the Fly app. `digest` is Fly's digest when it reports one; `status`
+/// is Fly's status (`Deployed`, `Staged`, `Partial`, ...) when it reports one. The planner
+/// ignores `status`; `fly sync` uses it only as an extra deploy trigger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlySecret {
     pub name: String,
     pub digest: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +289,7 @@ mod tests {
         FlySecret {
             name: name.into(),
             digest: digest.map(String::from),
+            status: None,
         }
     }
     fn no_rotate() -> BTreeSet<(String, String)> {

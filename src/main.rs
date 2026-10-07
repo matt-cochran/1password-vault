@@ -47,11 +47,14 @@ enum Cmd {
 #[derive(Subcommand)]
 enum FlyCmd {
     /// Show what a sync would stage, hold and prune; changes nothing (FR-5).
+    ///
+    /// Exits 8 when any row (missing, wrong kind, failing a rule) would block a sync.
     Plan { env: String },
     /// Stage managed secrets on the Fly app (FR-6..FR-8, FR-16).
     Sync {
         env: String,
-        /// Deploy staged changes when something effectively changed.
+        /// Deploy when a staged digest changed, a prune happened, or a managed name is
+        /// still pending (Staged/Partial) on Fly from an earlier run.
         #[arg(long)]
         deploy: bool,
         /// Unset managed names that are not desired in this environment.

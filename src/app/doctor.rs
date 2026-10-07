@@ -1,8 +1,9 @@
 //! `doctor` use case (FR-3).
 //!
 //! Checks, one line each, always all of them: configuration valid; `op --version`;
-//! `op whoami` (authentication; free of rate-limit cost per D0); `flyctl version` when the
-//! configuration declares a Fly app. Returns the error of the first failing check.
+//! `op whoami` (authentication; free of rate-limit cost per D0); `flyctl version` and
+//! `flyctl auth whoami` (exit status only) when the configuration declares a Fly app.
+//! Returns the error of the first failing check.
 //!
 //! Tool output is never echoed: only a version string that matches a strict pattern, and
 //! from `op whoami` only the account type (`SERVICE_ACCOUNT`, ...), never identity or
@@ -55,10 +56,20 @@ pub fn run(
     line(out, "op", op_version(r))?;
     line(out, "op auth", op_whoami(r))?;
     match wants_fly {
-        Some(true) => line(out, "flyctl", flyctl_version(r))?,
-        Some(false) => writeln!(out, "skip  flyctl: no Fly app configured").map_err(write_err)?,
+        Some(true) => {
+            line(out, "flyctl", flyctl_version(r))?;
+            line(out, "fly auth", fly_auth(r))?;
+        }
+        Some(false) => {
+            for check in ["flyctl", "fly auth"] {
+                writeln!(out, "skip  {check}: no Fly app configured").map_err(write_err)?;
+            }
+        }
         None => {
-            writeln!(out, "skip  flyctl: not checked (configuration invalid)").map_err(write_err)?
+            for check in ["flyctl", "fly auth"] {
+                writeln!(out, "skip  {check}: not checked (configuration invalid)")
+                    .map_err(write_err)?;
+            }
         }
     }
     match first {
@@ -118,6 +129,21 @@ fn flyctl_version(r: &dyn CommandRunner) -> Result<String, Error> {
     Ok(version_in(&o.stdout).map_or_else(|| "present".into(), |v| format!("version {v}")))
 }
 
+/// `flyctl auth whoami`: exit status only. Its stdout names the account (an email), so it
+/// is dropped unread (zeroized with the `Output`).
+fn fly_auth(r: &dyn CommandRunner) -> Result<String, Error> {
+    let o = spawn(r, fly::PROGRAM, &["auth", "whoami"])?;
+    if o.status != 0 {
+        return Err(Error::Auth(format!(
+            "{} auth whoami failed (exit {}): not signed in to Fly (set FLY_API_TOKEN or run \
+             `flyctl auth login`)",
+            fly::PROGRAM,
+            o.status
+        )));
+    }
+    Ok("signed in".into())
+}
+
 /// The first whitespace-separated token that looks like a version (`2.40.0`, `v0.4.112`),
 /// or `None`. Nothing else from tool output is ever printed.
 fn version_in(stdout: &[u8]) -> Option<String> {
@@ -144,6 +170,8 @@ mod tests {
 
     const WHOAMI: &str = r#"{"url":"https://my.1password.com","email":"ci-FIXTUREVALUE@example.com","user_uuid":"UFIXTUREVALUE","account_uuid":"AFIXTUREVALUE","user_type":"SERVICE_ACCOUNT"}"#;
 
+    const FLY_WHOAMI: &str = "ops-FIXTUREVALUE@example.com\n";
+
     fn good() -> Vec<Output> {
         vec![
             Output::success(b"2.40.0\n".to_vec()),
@@ -151,6 +179,7 @@ mod tests {
             Output::success(
                 b"flyctl v0.4.112 linux/amd64 Commit: ca63052e BuildDate: x\n".to_vec(),
             ),
+            Output::success(FLY_WHOAMI.as_bytes().to_vec()),
         ]
     }
 
@@ -166,7 +195,7 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 4, "{out}");
+        assert_eq!(lines.len(), 5, "{out}");
         assert!(
             lines[0].starts_with("ok") && lines[0].contains("config"),
             "{out}"
@@ -180,9 +209,18 @@ mod tests {
             lines[3].contains("flyctl") && lines[3].contains("v0.4.112"),
             "{out}"
         );
+        assert!(
+            lines[4].starts_with("ok") && lines[4].contains("fly auth"),
+            "{out}"
+        );
         assert_eq!(
             argvs(&r),
-            vec!["op --version", "op whoami --format json", "flyctl version"]
+            vec![
+                "op --version",
+                "op whoami --format json",
+                "flyctl version",
+                "flyctl auth whoami"
+            ]
         );
     }
 
@@ -210,10 +248,11 @@ mod tests {
         r.push_io_error(io::ErrorKind::NotFound);
         r.push_io_error(io::ErrorKind::NotFound);
         r.responses.borrow_mut().push_back(Ok(good().remove(2)));
+        r.responses.borrow_mut().push_back(Ok(good().remove(3)));
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Dependency(_)), "{e}");
-        assert_eq!(out.lines().count(), 4, "{out}");
+        assert_eq!(out.lines().count(), 5, "{out}");
         assert!(out.lines().nth(3).unwrap().starts_with("ok"), "{out}");
         assert!(out.lines().nth(1).unwrap().starts_with("FAIL"), "{out}");
     }
@@ -228,12 +267,13 @@ mod tests {
         assert!(matches!(e, Error::Auth(_)), "{e}");
         assert_eq!(e.exit_code(), 3);
         assert!(out.lines().nth(2).unwrap().starts_with("FAIL"), "{out}");
-        assert_eq!(out.lines().count(), 4, "{out}");
+        assert_eq!(out.lines().count(), 5, "{out}");
     }
 
     #[test]
     fn flyctl_missing_is_dependency() {
         let r = FakeRunner::new(good().into_iter().take(2));
+        r.push_io_error(io::ErrorKind::NotFound);
         r.push_io_error(io::ErrorKind::NotFound);
         let (res, out) = doctor(Ok(fleet()), &r);
         assert!(matches!(res, Err(Error::Dependency(_))), "{res:?}");
@@ -249,12 +289,46 @@ mod tests {
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Config(_)), "{e}");
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 4, "{out}");
+        assert_eq!(lines.len(), 5, "{out}");
         assert!(
             lines[0].starts_with("FAIL") && lines[0].contains("boom"),
             "{out}"
         );
         assert!(lines[1].starts_with("ok"), "{out}");
+    }
+
+    /// FR-3: Fly authentication by exit status; its stdout (an email) is never printed.
+    #[test]
+    fn fly_auth_passes_without_printing_identity() {
+        let r = FakeRunner::new(good());
+        let (res, out) = doctor(Ok(fleet()), &r);
+        res.unwrap();
+        assert_eq!(
+            out.lines().last().unwrap(),
+            "ok    fly auth: signed in",
+            "{out}"
+        );
+        assert_no_values(&out);
+        assert!(!out.contains("example.com"), "{out}");
+    }
+
+    #[test]
+    fn fly_not_signed_in_is_auth_and_identity_not_printed() {
+        let mut g = good();
+        g[3] = Output {
+            status: 1,
+            stdout: zeroize::Zeroizing::new(FLY_WHOAMI.as_bytes().to_vec()),
+        };
+        let r = FakeRunner::new(g);
+        let (res, out) = doctor(Ok(fleet()), &r);
+        let e = res.unwrap_err();
+        assert!(matches!(e, Error::Auth(_)), "{e}");
+        assert!(
+            out.lines().nth(4).unwrap().starts_with("FAIL  fly auth"),
+            "{out}"
+        );
+        assert_no_values(&out);
+        assert_no_values(&e.to_string());
     }
 
     /// Unparseable tool output is not echoed (it could be anything).
