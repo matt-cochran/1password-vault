@@ -5,4 +5,6 @@ pub mod secret;
 
 pub use model::{Environment, Fleet, KeySpec, Kind, PrefixByMode, Product, Rules};
 pub use secret::SecretValue;
+pub mod plan;
 pub mod rules;
+pub use plan::{FlySecret, ItemField, KeyState, Row, SyncPlan, TargetState, build as build_plan};
