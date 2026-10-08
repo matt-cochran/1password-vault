@@ -593,7 +593,7 @@ fn other_commands_never_look_up_titles() {
 
 // --- Fix round 1: reader-rejected shapes, duplicates, ancestor note ---
 
-const REJECT: &str = "status and fly sync will reject it until it is fixed in 1Password";
+const REJECT: &str = "status and sync will reject it until it is fixed in 1Password";
 
 /// An `op item get` document from raw field objects (shapes `item_json` cannot build).
 fn raw_item(fields: Vec<serde_json::Value>) -> Output {

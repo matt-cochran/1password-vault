@@ -447,8 +447,8 @@ fn use_cases_name_no_target_adapter() {
             }
             let s = std::fs::read_to_string(&p).unwrap();
             // Built at runtime so this test does not match itself.
-            let needle = ["fly", "::"].concat();
-            if s.contains(&needle) {
+            let needles = [["fly", "::"].concat(), ["adapters::", "fly"].concat()];
+            if needles.iter().any(|n| s.contains(n.as_str())) {
                 hits.push(p);
             }
         }

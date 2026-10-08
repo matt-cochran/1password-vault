@@ -23,8 +23,8 @@ const CFG: &str = "tests/fixtures/secrets.toml";
 fn unknown_environment_exits_2_before_any_subprocess() {
     for cmd in [
         vec!["status", "qa"],
-        vec!["fly", "plan", "qa"],
-        vec!["fly", "sync", "qa"],
+        vec!["plan", "qa"],
+        vec!["sync", "qa"],
         vec!["config", "export", "qa", "--json"],
         vec!["item", "skeleton", "qa"],
     ] {
@@ -33,7 +33,7 @@ fn unknown_environment_exits_2_before_any_subprocess() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.contains("opv: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: configuration error: undefined environment \"qa\""),
             "{cmd:?}: {err}"
         );
     }
@@ -190,10 +190,10 @@ fn invalid_rotate_entry_exits_2() {
 /// With no `op` on PATH the read fails cleanly as a dependency error (exit 3).
 #[test]
 fn missing_op_exits_3() {
-    let (code, out, err) = opv(&["--config", CFG, "fly", "plan", "prod"]);
+    let (code, out, err) = opv(&["--config", CFG, "plan", "prod"]);
     assert_eq!(code, 3, "{err}");
     assert!(out.is_empty());
-    assert!(err.contains("opv: dependency error"), "{err}");
+    assert!(err.starts_with("opv: dependency error"), "{err}");
 }
 
 #[test]
@@ -360,8 +360,8 @@ fn run_with_product_under_simple_exits_2() {
 fn simple_unknown_environment_exits_2_before_any_subprocess() {
     for cmd in [
         vec!["status", "qa"],
-        vec!["fly", "plan", "qa"],
-        vec!["fly", "sync", "qa"],
+        vec!["plan", "qa"],
+        vec!["sync", "qa"],
         vec!["config", "export", "qa", "--json"],
         vec!["item", "skeleton", "qa"],
     ] {
@@ -656,10 +656,10 @@ fn fly_plan_prints_deprecation_warning() {
     );
 }
 
-/// P0 Task 5: a refused `fly sync` alias keeps the top-level command's exit code (6).
+/// Exit code of `opv <args>` with fake `op` (an item missing every desired prod key) and
+/// `flyctl` on PATH, so plan finds blocking rows and sync refuses before staging.
 #[cfg(unix)]
-#[test]
-fn fly_sync_alias_keeps_exit_code() {
+fn code_with_fakes(args: &[&str]) -> Option<i32> {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
@@ -669,23 +669,46 @@ fn fly_sync_alias_keeps_exit_code() {
         std::fs::write(&p, body).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
     };
-    // The probe item has no allumata fields: every desired prod key is missing, so the
-    // plan refuses (policy) before staging anything.
     write("op", "#!/bin/sh\n/bin/cat \"$OP_ITEM\"\n");
     write(
         "flyctl",
         "#!/bin/sh\ncase \"$1 $2\" in \"secrets list\") /bin/cat \"$FLY_LIST\" ;; esac\n",
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
-        .args(["--config", CFG, "fly", "sync", "prod"])
+    let mut a = vec!["--config", CFG];
+    a.extend(args);
+    Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(a)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env("PATH", &bin)
         .env("OP_ITEM", "tests/fixtures/op_item.json")
         .env("FLY_LIST", "tests/fixtures/fly_list.json")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(6));
+        .unwrap()
+        .status
+        .code()
+}
+
+/// A refused `fly sync` alias exits like `sync`: policy (6).
+#[cfg(unix)]
+#[test]
+fn fly_sync_alias_exits_like_sync() {
+    let pair = (
+        code_with_fakes(&["fly", "sync", "prod"]),
+        code_with_fakes(&["sync", "prod"]),
+    );
+    assert_eq!(pair, (Some(6), Some(6)));
+}
+
+/// A `fly plan` alias with blocking rows exits like `plan`: findings (8).
+#[cfg(unix)]
+#[test]
+fn fly_plan_alias_exits_like_plan() {
+    let pair = (
+        code_with_fakes(&["fly", "plan", "prod"]),
+        code_with_fakes(&["plan", "prod"]),
+    );
+    assert_eq!(pair, (Some(8), Some(8)));
 }
 
 #[test]

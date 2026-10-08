@@ -128,8 +128,9 @@ fn explain_in(
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
+    let label_of = env.target().map_or("Fly", |t| t.label());
     let fly_name = match (spec.kind, env.target_name(product, key)) {
-        (Kind::Config, _) => "- (config: not a Fly secret)".to_string(),
+        (Kind::Config, _) => format!("- (config: not a {label_of} secret)"),
         (Kind::Secret, Some(n)) => n,
         (Kind::Secret, None) => "- (environment has no fly section)".to_string(),
     };
@@ -148,7 +149,7 @@ fn explain_in(
             env.vault_id, env.item_id
         ),
         format!("  kind:       {} ({field})", kind_label(spec.kind)),
-        format!("  fly name:   {fly_name}"),
+        format!("  {} name:   {fly_name}", label_of.to_lowercase()),
         format!(
             "  rules:      {}",
             if rules.is_empty() {
