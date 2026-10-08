@@ -65,7 +65,7 @@ pub fn run(
     let blocking = row_names(&plan.rows, is_blocking);
     if !blocking.is_empty() {
         return Err(Error::Policy(format!(
-            "fly sync refused, nothing staged: {}",
+            "sync refused, nothing staged: {}",
             blocking.join(", ")
         )));
     }

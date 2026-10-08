@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
     Environment, Fleet, FlyTarget, KeySpec, Product, Profile, SIMPLE_PRODUCT, SIMPLE_TEMPLATE,
     Target, key_label,
@@ -19,31 +20,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)
         .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
-    let fleet = parse(&text)?;
-    for warning in deprecation_warnings(&fleet) {
-        eprintln!("opv: warning: {warning}");
-    }
-    Ok(fleet)
-}
-
-/// One warning per key still using a deprecated transform (FR-24). Built from configuration
-/// only, so a warning can never contain a value: it names the product and key and the
-/// replacement rules.
-pub fn deprecation_warnings(fleet: &Fleet) -> Vec<String> {
-    use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_INGESTION_HEADER, SIGNOZ_PREFIX};
-    let mut warnings = Vec::new();
-    for (product, p) in &fleet.products {
-        for (key, spec) in &p.keys {
-            if spec.rules.transform.as_deref() == Some(SIGNOZ_INGESTION_HEADER) {
-                warnings.push(format!(
-                    "{}: transform = \"{SIGNOZ_INGESTION_HEADER}\" is deprecated; \
-                     use ensure_prefix = \"{SIGNOZ_PREFIX}\" with pattern = \"{SIGNOZ_BODY}\"",
-                    key_label(product, key)
-                ));
-            }
-        }
-    }
-    warnings
+    parse(&text)
 }
 
 /// Walk up from `start`, returning the first directory that holds `secrets.toml`.
@@ -346,6 +323,13 @@ fn validate_key(
             "{owner}: key name must match ^[A-Z][A-Z0-9_]*$"
         )));
     }
+    // `run` removes every declared name from the inherited environment (#53), so a key named
+    // after `op`'s own context would strip it: PATH finds `op`, OP_* holds its sign-in.
+    if key == "PATH" || key.starts_with("OP_") {
+        return Err(cfg(format!(
+            "{owner}: key name is reserved (PATH and OP_* are the 1Password CLI's own environment)"
+        )));
+    }
     for env in &spec.environments {
         if !environments.contains_key(env) {
             return Err(cfg(format!("{owner}: undefined environment {env:?}")));
@@ -401,6 +385,12 @@ fn validate_key(
     if let Some(re) = &spec.rules.pattern {
         regex::Regex::new(re)
             .map_err(|e| cfg(format!("{owner}: rule pattern does not compile: {e}")))?;
+    }
+    if spec.rules.transform.as_deref() == Some("signoz_ingestion_header") {
+        return Err(cfg(format!(
+            "{owner}: transform = \"signoz_ingestion_header\" was removed in 0.4.0; \
+             use ensure_prefix = \"{SIGNOZ_PREFIX}\" with pattern = \"{SIGNOZ_BODY}\""
+        )));
     }
     Ok(())
 }
@@ -696,43 +686,29 @@ mod tests {
     }
 
     #[test]
-    fn signoz_transform_yields_one_deprecation_warning_per_key() {
-        let fleet = parse(&format!(
-            "{}{}{}",
-            ok(),
-            signoz_like_key("K1", "transform = \"signoz_ingestion_header\""),
-            signoz_like_key("K2", "transform = \"signoz_ingestion_header\"")
-        ))
-        .unwrap();
-        assert_eq!(deprecation_warnings(&fleet).len(), 2);
+    fn op_environment_names_are_reserved_key_names() {
+        for key in ["PATH", "OP_SESSION_MY", "OP_SERVICE_ACCOUNT_TOKEN"] {
+            let m = config_err(&format!(
+                "{}{}",
+                ok(),
+                signoz_like_key(key, "prefix = \"x\"")
+            ));
+            assert!(m.contains("key name is reserved"), "{key}: {m}");
+        }
     }
 
     #[test]
-    fn signoz_deprecation_warning_names_key_and_suggests_the_generic_rules() {
-        let fleet = parse(&format!(
+    fn signoz_transform_is_a_configuration_error() {
+        let m = config_err(&format!(
             "{}{}",
             ok(),
             signoz_like_key("K1", "transform = \"signoz_ingestion_header\"")
-        ))
-        .unwrap();
+        ));
         assert_eq!(
-            deprecation_warnings(&fleet),
-            vec![
-                "p/K1: transform = \"signoz_ingestion_header\" is deprecated; use \
-                 ensure_prefix = \"signoz-ingestion-key=\" with pattern = \"[A-Za-z0-9._~+/-]+={0,2}\"".to_string()
-            ]
+            m,
+            "p/K1: transform = \"signoz_ingestion_header\" was removed in 0.4.0; use \
+             ensure_prefix = \"signoz-ingestion-key=\" with pattern = \"[A-Za-z0-9._~+/-]+={0,2}\""
         );
-    }
-
-    #[test]
-    fn pem_private_key_emits_no_deprecation_warning() {
-        let fleet = parse(&format!(
-            "{}{}",
-            ok(),
-            signoz_like_key("K1", "transform = \"pem_private_key\"")
-        ))
-        .unwrap();
-        assert!(deprecation_warnings(&fleet).is_empty());
     }
 
     #[test]
@@ -1184,17 +1160,5 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
     #[test]
     fn simple_rejects_unknown_fields() {
         config_err(&simple_mutate("immutable = true", "immutible = true"));
-    }
-
-    #[test]
-    fn simple_deprecation_warning_names_the_key_alone() {
-        let f = parse(&simple_mutate(
-            "rules = { base64_bytes = 32 }",
-            "rules = { transform = \"signoz_ingestion_header\" }",
-        ))
-        .unwrap();
-        let w = deprecation_warnings(&f);
-        assert_eq!(w.len(), 1);
-        assert!(w[0].starts_with("JWT_KEY: transform"), "{}", w[0]);
     }
 }

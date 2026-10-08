@@ -246,13 +246,27 @@ mod tests {
     }
 
     #[test]
-    fn clears_other_products_and_mode_skipped_managed_keys() {
+    fn clears_mode_skipped_managed_keys() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run(&fleet(), "prod", "allumata", &cmd(&["true"]), &r).unwrap();
         assert!(
             r.calls.borrow()[0]
                 .removed
                 .contains(&"STRIPE_SECRET_KEY".to_string())
+        );
+    }
+
+    #[test]
+    fn clears_another_products_managed_keys() {
+        let f = fleet_with(
+            "[products.other.keys.OTHER_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        );
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&f, "prod", "allumata", &cmd(&["true"]), &r).unwrap();
+        assert!(
+            r.calls.borrow()[0]
+                .removed
+                .contains(&"OTHER_KEY".to_string())
         );
     }
 

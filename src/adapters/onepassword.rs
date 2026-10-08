@@ -270,7 +270,19 @@ pub fn read_item_as(
     env: &Environment,
     profile: Profile,
 ) -> Result<Item, Error> {
-    read_profile_on(r, env, profile, &Host::detect)
+    read_profile_on(r, env, profile, None, &Host::detect)
+}
+
+/// [`read_item_as`] limited to the fields in `sections` (fleet profile): fields of other
+/// sections are skipped before they are validated, so a malformed field in another
+/// product's section cannot fail a product-scoped check (#52). Still one read (FR-13).
+pub fn read_item_in_sections(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    profile: Profile,
+    sections: &BTreeSet<String>,
+) -> Result<Item, Error> {
+    read_profile_on(r, env, profile, Some(sections), &Host::detect)
 }
 
 /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
@@ -288,13 +300,14 @@ fn read_item_on(
     env: &Environment,
     host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
-    read_profile_on(r, env, Profile::Fleet, host)
+    read_profile_on(r, env, Profile::Fleet, None, host)
 }
 
 fn read_profile_on(
     r: &dyn CommandRunner,
     env: &Environment,
     profile: Profile,
+    sections: Option<&BTreeSet<String>>,
     host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
     let args = [
@@ -317,7 +330,7 @@ fn read_profile_on(
         ));
     }
     let fields = match profile {
-        Profile::Fleet => parse_fields(&stdout)?,
+        Profile::Fleet => parse_fields(&stdout, sections)?,
         Profile::Simple => parse_unsectioned_fields(&stdout)?,
     };
     Ok(Item {
@@ -485,13 +498,19 @@ impl<'de> Deserialize<'de> for Concealed {
     }
 }
 
-fn parse_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
+fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<ItemField>, Error> {
     let raw: RawItem = serde_json::from_slice(json).map_err(|e| json_error(&e))?;
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for f in raw.fields {
         // Fields outside sections (built-in notesPlain etc.) are not fleet keys (D0 Q1).
         let Some(section) = f.section else { continue };
+        // Scoped reads skip other sections before validating them.
+        if let Some(only) = only
+            && !section.label.as_ref().is_some_and(|l| only.contains(l))
+        {
+            continue;
+        }
         let section = match section.label {
             Some(l) if !l.is_empty() => l,
             _ => {
@@ -1505,7 +1524,7 @@ mod tests {
 
     fn read_simple(bytes: Vec<u8>) -> Result<Item, Error> {
         let r = FakeRunner::new([Output::success(bytes)]);
-        read_profile_on(&r, &test_env(), Profile::Simple, &linux)
+        read_profile_on(&r, &test_env(), Profile::Simple, None, &linux)
     }
 
     fn labels(item: &Item) -> Vec<(&str, &str)> {
@@ -1518,7 +1537,7 @@ mod tests {
     #[test]
     fn simple_read_is_one_whole_item_call_by_ids() {
         let r = FakeRunner::new([Output::success(simple_item())]);
-        read_profile_on(&r, &test_env(), Profile::Simple, &linux).unwrap();
+        read_profile_on(&r, &test_env(), Profile::Simple, None, &linux).unwrap();
         let calls = r.calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].args, GET_ARGS);

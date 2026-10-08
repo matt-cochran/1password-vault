@@ -199,6 +199,8 @@ The command shall verify:
 
 The command shall not resolve or print secret values unless necessary to verify access.
 
+Decided in v0.4: `doctor --env <environment> [--product <product>]` checks only what that scope needs; an environment without a target needs no deployment CLI. Every `doctor` run on Linux and macOS also reports whether `op` can start a local child (FR-36).
+
 ## FR-4 — Local Process Execution
 
 The CLI shall provide:
@@ -216,6 +218,8 @@ The command shall:
 5. propagate the child's exit code.
 
 The CLI shall not write resolved secrets to disk.
+
+Decided in v0.4: before delegating, `run` removes every declared key name from the inherited environment and adds only the selected references (FR-35).
 
 ## FR-5 — Fly Plan
 
@@ -316,12 +320,12 @@ Final assignments (a public contract from v0.1.0):
 |---|---|
 | 0 | success |
 | 2 | configuration error, and command-line usage error |
-| 3 | dependency (`op` or `flyctl` missing or unusable) |
+| 3 | dependency (`op` or `flyctl` missing or unusable, including a Windows `op.exe` used for `run` under WSL) |
 | 4 | source (1Password) |
 | 5 | target (Fly) |
 | 6 | policy: refused (blocking keys, a refused value, a denied destructive operation) |
 | 7 | authentication (1Password or Fly) |
-| 8 | findings (`status`, `fly plan` found blocking keys) |
+| 8 | findings (`status`, `plan` or `check` found blocking keys) |
 
 `run` exits with the child's own exit code. A closed stdout (`status | head`) does not change the result.
 
@@ -372,7 +376,7 @@ Each declared key may carry rules, evaluated after resolution and before any tar
 - `email_list`, `https_url`;
 - `prefix_by_mode` (for example Stripe `sk_test_` vs `sk_live_` chosen by a declared mode);
 - `refuse_in = [<environment>]` (a key that must not exist in an environment): evaluated before anything else, so a non-empty field in a refused environment is a blocking `refuse_in` failure even though the key is not otherwise expected there; the environments must be defined and must not also be listed in `environments`;
-- named transforms with a fixed output format (for example a SigNoz ingestion header). v0.1.0 ships `transform = "signoz_ingestion_header"`; since v0.2, it is replaced by the generic `ensure_prefix` and `pattern` rules, with the old name kept as a deprecated alias for one release (FR-24). v0.1.1 adds `transform = "pem_private_key"`, which stays: it validates and normalises a standard format (any PEM private key), not one vendor's convention.
+- named transforms with a fixed output format (for example a SigNoz ingestion header). v0.1.0 ships `transform = "signoz_ingestion_header"`; since v0.2, it is replaced by the generic `ensure_prefix` and `pattern` rules, with the old name kept as a deprecated alias for one release (FR-24). Removed in 0.4.0. v0.1.1 adds `transform = "pem_private_key"`, which stays: it validates and normalises a standard format (any PEM private key), not one vendor's convention.
 
 Rule failures name the key and the rule, never the value.
 
@@ -551,7 +555,7 @@ The rule set (FR-15) shall gain:
 - `ensure_prefix = "<p>"`: accepts a value with or without the prefix `<p>` and stages it with exactly one `<p>`;
 - `pattern = "<regex>"` (optional, only with `ensure_prefix`): the part after the prefix must fully match the regex; a value that is only the prefix fails.
 
-They replace `transform = "signoz_ingestion_header"`, which becomes a deprecated alias for one release (v0.2) with identical behaviour: it is equivalent to `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`. Identical behaviour includes the failure rule name: a value refused through the alias fails as `transform`, as in v0.1.0. Using the alias prints a deprecation warning naming the key, not the value. The infra catalog's OTEL entries migrate to the new rules.
+They replace `transform = "signoz_ingestion_header"`, which becomes a deprecated alias for one release (v0.2) with identical behaviour: it is equivalent to `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`. Identical behaviour includes the failure rule name: a value refused through the alias fails as `transform`, as in v0.1.0. Using the alias prints a deprecation warning naming the key, not the value. Removed in 0.4.0. The infra catalog's OTEL entries migrate to the new rules.
 
 Acceptance:
 
@@ -594,7 +598,7 @@ A target is one secret store plus one runtime:
 - Core logic reaches targets only through the `SecretStore` and `Runtime` ports (FR-12). `app/` and `domain/` name no target.
 - Each environment declares at most one target section: `fly`, `azure`, `aws` or `gcp`. Existing `fly` sections are unchanged.
 - **Routing by kind (FR-14).** A secret (concealed field) is written to the store and bound on the runtime as a reference. Config (text field) is set as a plain runtime env var, unless the environment sets `config = "store"`, which routes config like secrets. Routing a secret to plain env is not expressible. On Fly, config is not synced, as since v0.1; consumers read it with `config export`.
-- `opv plan <env>` and `opv sync <env>` work for every target. `opv fly plan` and `opv fly sync` remain as aliases that print a deprecation warning for one minor release and are then removed.
+- `opv plan <env>` and `opv sync <env>` work for every target. `opv fly plan` and `opv fly sync` remain as aliases that print a deprecation warning for one minor release and are then removed. Removed in 0.4.0.
 
 ## FR-29 — Pinned References
 
@@ -630,6 +634,34 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 - After a deploy, opv waits for the new revision to report healthy or failed and reports the outcome with its exit category.
 - `doctor` checks the cloud CLI and login, store access on managed names, and runtime-identity access, and reports an identity that can read untagged secrets as broader than needed (SR-5).
 
+## v0.4 local development (FR-34 to FR-36)
+
+The requirements below make opv usable for local development without a deployment target, from issues #52, #53 and #54 found while adopting opv across products. The owner adopted them on 2026-10-08. Live account validation stays an owner-run receipt on those issues; automated tests use synthetic values and fake CLIs.
+
+## FR-34 — Local Check
+
+```bash
+opv check <environment> [--product <product>] [--json]
+```
+
+- Reads the environment's item once, by IDs (FR-13), and reports each selected key as saved, missing, wrong kind, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
+- Never lists, stages or deploys on a target, even when the environment has one; `--json` carries `target_checked: false`.
+- With `--product`, fields in other products' sections are skipped before they are validated, so they can neither block nor fail the check.
+- `--product` is required under the fleet profile and refused under the simple profile.
+
+## FR-35 — Managed-Key Isolation in `run`
+
+- Before starting `op run`, `run` removes from the inherited environment every key name declared in the loaded configuration (all products, all environments, mode-skipped keys included), then adds only the selected product's applicable references. Switching products in one shell never carries another product's managed key into the child.
+- PATH, shell and tool context, 1Password authentication and undeclared variables stay inherited: this is managed-key isolation, not a sandbox.
+- Key names that are the 1Password CLI's own environment (`PATH` and `OP_*`) are refused at configuration load, because removing them would break `op`.
+- A runner that cannot remove variables fails closed (exit 3) instead of starting the child with stale values.
+
+## FR-36 — Local-Only Onboarding and Diagnostics
+
+- `opv init` without `--fly-app` writes a run-only environment (vault and item IDs only); deployment `init` is unchanged.
+- On Linux and macOS, `doctor` reports `op local run`: the first `op` on PATH must be a native binary, because a Windows `op.exe` reached from WSL cannot start a Linux child. It fails a scope of environments without a target and warns otherwise, always with the remaining checks and a `Next step` line. `run` refuses such an `op` before starting anything (exit 3).
+- Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op` and its own sign-in; native Linux, macOS and Windows. Automatic Windows desktop-to-Linux execution is not provided.
+
 # 4. Security Requirements
 
 ## FR-26 — Diagnose and Guide
@@ -645,7 +677,7 @@ rollout (2026-10-07); each has a test.
 | Signed in, but the item or vault is not visible to this identity | `op whoami` succeeds and the item read fails | names the vault and item IDs and the identity type (user or service account, never the identity itself) and says to grant that identity access to the vault; exit 4 |
 | `op` or `flyctl` missing or untested version | existing `doctor` checks | the install command for the detected OS |
 | A value fails its rule | FR-22 reasons | the reason plus the key's `guidance` |
-| Clean run | n/a | a summary line: `N saved, M not yet on <target> (staged by the next fly sync), 0 findings` |
+| Clean run | n/a | a summary line: `N saved, M not yet on <target> (staged by the next sync), 0 findings` |
 
 Acceptance:
 
@@ -813,7 +845,7 @@ opv [--config <path>] plan <environment> [--json]
 opv [--config <path>] sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
 ```
 
-`plan` and `sync` work for every target. `fly plan` and `fly sync` are deprecated aliases for one minor release.
+`plan` and `sync` work for every target. `fly plan` and `fly sync` are deprecated aliases for one minor release. Removed in 0.4.0.
 
 There should be no generic `secret get` command in the initial release because printing raw values conflicts with the tool's primary safety goals.
 
@@ -1137,6 +1169,22 @@ Version 0.3 is acceptable, per phase, when in addition to 1–26:
 35. A missing runtime-identity grant blocks `--deploy` and names the identity and the entry.
 36. Items 9 and 10 hold for every adapter, checked by a shared marker-value test that config values never reach argv either.
 
+Version 0.4 is acceptable when, in addition to 1–36:
+
+37. `opv check` reports every selected key by name with no value, makes no target call, ignores other products' sections when `--product` is given, and exits 8 on blocking keys, 3 without `op` and 7 when signed out.
+38. `opv run` removes other products' and mode-skipped declared names, keeps PATH and undeclared variables, passes the child's exit status through, and does not leak an outer product's key into a nested run (real child-process tests).
+39. A key named `PATH` or `OP_*` is a configuration error.
+40. `opv init` without `--fly-app` writes a run-only environment; with it, output is unchanged.
+41. `doctor` reports `op local run` on every run off Windows: a Windows `op.exe` fails a local-only scope and warns otherwise, with every other check and a `Next step` line still printed.
+42. `opv fly plan` / `opv fly sync` are removed (usage error, exit 2), and `transform = "signoz_ingestion_header"` is a configuration error naming the key and its replacement.
+43. Items 9 and 10 hold for every new command and flag.
+
+## v0.4 scope
+
+- **Removed, as promised:** the `fly plan` / `fly sync` aliases (deprecated in v0.3) and the `signoz_ingestion_header` transform alias (deprecated in v0.2).
+- **Owner-run, not automated:** live dogfooding receipts for #52, #53 and #54, with a disposable development item; those issues stay open until recorded.
+- **Not provided:** remote credential forwarding (infra #524, zonetico-saas #565) and automatic Windows desktop-to-Linux execution.
+
 ## v0.3 scope
 
 Rejected or deferred from the 2026-10-08 multi-cloud review:
@@ -1218,16 +1266,7 @@ Other tools stage names outside the managed set on the same Fly app (database UR
 
 ## 10.4 Local development
 
-v0.4 dogfooding extension (#52–#54):
-- Local init needs vault/item IDs, not a deployment target.
-- check validates one environment/product with one item read, names-only output,
-  and no target query or mutation.
-- doctor scopes dependencies to an environment/product.
-- run removes all declared managed names before adding selected applicable references.
-  Undeclared variables and authentication/tool context inherit; it is not a sandbox.
-- A Windows executable masquerading as Linux op fails before local child launch.
-- Live account validation remains owner-run; automated tests use synthetic values.
-
+Since v0.4: local-only environments, `opv check`, scoped `doctor`, managed-key isolation in `run` and WSL support are specified in FR-34 to FR-36.
 
 `run` maps a product's keys to plain names for the child process (`OPENAI_API_KEY`, not the fleet name) and resolves `op://<vault>/<item>/<product>/<KEY>` references through `op run`.
 

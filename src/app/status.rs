@@ -71,7 +71,7 @@ fn summary(rows: &[Row]) -> String {
         .filter(|r| r.kind == Kind::Secret && r.target == TargetState::Absent)
         .count();
     format!(
-        "{} saved, {pending} not yet on Fly (staged by the next fly sync), 0 findings",
+        "{} saved, {pending} not yet on Fly (staged by the next sync), 0 findings",
         saved.count()
     )
 }
@@ -341,7 +341,7 @@ mod tests {
         // (config); the Stripe key is skipped and counts in neither number.
         assert_eq!(
             out.lines().last().unwrap(),
-            "3 saved, 1 not yet on Fly (staged by the next fly sync), 0 findings",
+            "3 saved, 1 not yet on Fly (staged by the next sync), 0 findings",
             "{out}"
         );
     }

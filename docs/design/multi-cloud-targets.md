@@ -133,7 +133,7 @@ cloud_run = { service = "api", region = "europe-west1", container = "app" }  # c
 ## 6. Sync flow on clouds (FR-29, FR-31, FR-32)
 
 `opv sync <env>` (and `opv plan <env>`) work for every target; `opv fly sync` and `opv fly plan`
-stay as aliases with a deprecation warning for one minor release, then are removed.
+stay as aliases with a deprecation warning for one minor release, then are removed. Removed in 0.4.0.
 
 ```text
 resolve desired values from 1Password (one item read, FR-13)

@@ -1,9 +1,8 @@
 //! Local-only validation. One item read, no deployment store, names-only output.
-use super::{read_and_plan, write_err};
+use super::{read_and_plan_products, write_err};
 use crate::domain::{Fleet, KeyState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
-use std::collections::BTreeSet;
 use std::io::Write;
 
 /// Select configuration before any subprocess call. Does not read values.
@@ -51,8 +50,7 @@ pub fn check(
         .get_mut(env)
         .expect("selected env")
         .target = None;
-    let none = BTreeSet::new();
-    let (mut plan, _) = read_and_plan(&selected, env, runner, None, &none, &none)?;
+    let mut plan = read_and_plan_products(&selected, env, runner)?;
     plan.extras.clear();
     let findings = plan.blocking();
     if json {
@@ -168,5 +166,25 @@ mod tests {
         let text = text_of(&out);
         assert_no_values(&text);
         assert!(text.contains("wrong_kind"));
+    }
+    #[test]
+    fn malformed_field_in_another_products_section_does_not_fail_the_check() {
+        let f = fleet_with(
+            "[products.other.keys.SITE]\nkind = \"config\"\nenvironments = [\"prod\"]\n",
+        );
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&item_json(&complete_fields())).unwrap();
+        doc["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "other_site", "section": {"id": "other", "label": "other"},
+                "type": "URL", "label": "SITE", "value": "https://example.invalid"
+            }));
+        let r = FakeRunner::new([crate::runner::Output::success(
+            serde_json::to_vec(&doc).unwrap(),
+        )]);
+        let res = check(&f, "prod", Some("allumata"), &r, &mut Vec::new(), false);
+        assert!(res.is_ok(), "{res:?}");
     }
 }

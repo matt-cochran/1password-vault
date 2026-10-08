@@ -173,7 +173,7 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
     {
         return Err(Error::Config(format!(
             "--fly-app {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
-            args.fly_app
+            app
         )));
     }
     for (flag, v) in [("--vault", &args.vault), ("--item", &args.item)] {

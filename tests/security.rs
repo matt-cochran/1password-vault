@@ -734,7 +734,7 @@ fn rule_failure_names_key_not_value() {
         assert_eq!(r.code, 6, "{rule}: {}", r.all());
         assert!(
             r.stderr
-                .starts_with("opv: policy denied: fly sync refused, nothing staged"),
+                .starts_with("opv: policy denied: sync refused, nothing staged"),
             "{rule}: {}",
             r.stderr
         );
@@ -877,7 +877,7 @@ fn clean_status_prints_summary_line() {
     assert_eq!(r.code, 0, "{}", r.all());
     let last = r.stdout.lines().last().unwrap();
     assert!(
-        last.ends_with(" not yet on Fly (staged by the next fly sync), 0 findings"),
+        last.ends_with(" not yet on Fly (staged by the next sync), 0 findings"),
         "{}",
         r.stdout
     );
@@ -1641,16 +1641,6 @@ kind = "secret"
 environments = ["prod"]
 rules = { transform = "nope" }
 
-[products.allumata.keys.SIGNOZ_EMPTY]
-kind = "secret"
-environments = ["prod"]
-rules = { transform = "signoz_ingestion_header" }
-
-[products.allumata.keys.SIGNOZ_PATTERN]
-kind = "secret"
-environments = ["prod"]
-rules = { transform = "signoz_ingestion_header" }
-
 [products.allumata.keys.FLY_IMPORT]
 kind = "secret"
 environments = ["prod"]
@@ -1821,18 +1811,6 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             format!("{m}t"),
             "transform",
             "unknown transform",
-        ),
-        (
-            "SIGNOZ_EMPTY",
-            "signoz-ingestion-key=".to_string(),
-            "transform",
-            "nothing after the prefix",
-        ),
-        (
-            "SIGNOZ_PATTERN",
-            format!("{m}$"),
-            "transform",
-            "text after the prefix does not match the pattern",
         ),
         (
             "FLY_IMPORT",
