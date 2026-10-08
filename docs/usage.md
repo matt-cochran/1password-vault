@@ -27,7 +27,7 @@ opv run prod -- ./server            # simple profile: no --product
 4. `sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
-7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file.
+7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file. See [Local development](#local-development).
 
 ### Next step
 
@@ -110,6 +110,37 @@ Staging uses stage semantics, so it coexists with other tools that stage secrets
 ### Pruning
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
+
+## Local development
+
+`opv run` starts a command with the environment's keys set as environment variables, under their plain names (`DATABASE_URL`, `OPENAI_API_KEY`), secrets and config alike. opv never sees the values: it hands `op run` a list of `op://` references, and `op run` resolves them and starts the command. Nothing is written to disk, and the values are gone when the process exits.
+
+```sh
+opv run dev -- npm run dev                 # simple profile: every key desired in dev
+opv run dev --product api -- cargo run     # fleet profile: the keys of one product
+```
+
+Only keys whose `environments` include the environment are set. An environment used only for local work needs no target section:
+
+```toml
+[environments.dev]
+vault_id = "vdev1234example"
+item_id  = "idev1234example"
+```
+
+Common setups:
+
+| You want | Run |
+|---|---|
+| An app or test suite | `opv run dev -- npm test` |
+| A shell with every variable set (gone on `exit`) | `opv run dev -- $SHELL` |
+| Docker Compose (`${VAR}` in `compose.yaml` and `environment:` entries without a value read from the starting process) | `opv run dev -- docker compose up` |
+| An editor or debugger whose run configurations inherit the variables | `opv run dev -- code .` |
+| Config values (not secrets) as JSON for another tool | `opv config export dev --json` |
+
+`op run` masks secret values that the command prints to stdout. `run` needs a signed-in `op` (the 1Password desktop app integration or `op signin`); it exits with the command's own exit code.
+
+There is no command that writes a `.env` file or prints `export` lines, on purpose: a secret never lands on disk (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead (most frameworks fall back to it, and Compose's `env_file` can be replaced by `environment:` entries without values).
 
 ## Exit codes
 

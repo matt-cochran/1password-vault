@@ -86,12 +86,21 @@ opv sync staging --deploy # stage and deploy, only if something changed (needs a
 
 ## 6. Local development
 
+When the user wants environment variables for local work, use `opv run`. Do not create a `.env` file, an `export` script or a shell profile entry with values, even if the user's existing setup uses one.
+
 ```sh
-opv run staging -- npm run dev                   # simple profile
-opv run dev --product api -- cargo run           # fleet profile
+opv run dev -- npm run dev                   # simple profile: every key desired in dev
+opv run dev --product api -- cargo run       # fleet profile: one product's keys
+opv run dev -- $SHELL                        # a shell with every variable set, gone on exit
+opv run dev -- docker compose up             # Compose reads ${VAR} from this environment
 ```
 
-`run` hands the secrets to the child process through `op run`; it writes no `.env` file. Use it instead of creating one.
+- Make sure the keys the app needs are declared for that environment (`environments = ["dev", ...]`). A local-only environment needs only `vault_id` and `item_id`, no target section.
+- If a script or framework reads a `.env` file, change it to read the process environment, or replace Compose `env_file:` with `environment:` entries without values, and run it under `opv run`. Then delete the `.env` file from the workflow (ask before deleting the user's files) and make sure `.env` is in `.gitignore`.
+- Update the project's README or `package.json` scripts to call `opv run`, for example `"dev": "opv run dev -- next dev"`, so everyone uses the same entry point.
+- `op run` masks secret values the program prints. If the user asks to see a value, point them to the 1Password app; do not unmask it.
+
+More patterns: [usage.md](usage.md#local-development).
 
 ## 7. CI
 

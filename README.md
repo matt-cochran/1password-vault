@@ -39,7 +39,7 @@ allumata  STRIPE_SECRET_KEY    secret  skipped  absent
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |
 
-`opv run` also injects secrets into a local process through `op run`, with no `.env` file.
+For local development, `opv run dev -- <command>` starts any command with the environment's keys set as variables, through `op run`, with no `.env` file ([patterns](docs/usage.md#local-development)).
 
 ## Quickstart
 
