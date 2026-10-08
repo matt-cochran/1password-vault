@@ -36,7 +36,7 @@ impl Error {
     /// | 5 | target (Fly) |
     /// | 6 | policy (refused: blocking keys, refused values, denied destructive operation) |
     /// | 7 | authentication (1Password or Fly) |
-    /// | 8 | findings (`status` / `fly plan` found blocking keys) |
+    /// | 8 | findings (`status` / `plan` / `check` found blocking keys) |
     ///
     /// `run` exits with the child's own code instead (FR-4); see its help.
     pub fn exit_code(&self) -> i32 {

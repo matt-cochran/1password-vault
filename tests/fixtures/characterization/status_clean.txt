@@ -6,6 +6,6 @@ allumata  INTEGRATION_ENC_KEY  secret  saved    absent
 allumata  OPENAI_API_KEY       secret  saved    absent
 allumata  SIGNUP_POLICY        config  saved    -
 allumata  STRIPE_SECRET_KEY    secret  skipped  absent
-3 saved, 2 not yet on Fly (staged by the next fly sync), 0 findings
+3 saved, 2 not yet on Fly (staged by the next sync), 0 findings
 --- result
 Ok(())

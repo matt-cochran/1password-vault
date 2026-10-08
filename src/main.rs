@@ -14,11 +14,12 @@ Examples:
   opv status staging                 # one row per product and key; fill what is missing
   opv plan staging                   # what a sync would stage, hold and prune
   opv sync staging --deploy          # stage on the environment's target, deploy only if something changed
+  opv check dev --product api        # local keys saved? names only, no target touched
   opv run dev --product api -- cargo run   # local run with the product's secrets
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or flyctl missing), 4 1Password,
-  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan).
+  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan, check).
   `run` exits with the command's own exit code.";
 
 /// Sync secrets from 1Password into runtime targets.
@@ -48,7 +49,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Check the configuration, op and its sign-in, and flyctl and its sign-in.
+    /// Check the configuration, op and its sign-in, flyctl and its sign-in, and whether op can
+    /// start local commands; --env limits it to what one environment needs.
     Doctor {
         /// Check only this environment.
         #[arg(long)]
@@ -59,7 +61,9 @@ enum Cmd {
     },
     /// Validate credential fields without contacting a deployment target.
     Check {
+        /// Environment name from the configuration (for example dev).
         env: String,
+        /// Product whose keys are checked (fleet profile only; required there).
         #[arg(long)]
         product: Option<String>,
         /// Print names and states as JSON, never values.
@@ -101,9 +105,6 @@ enum Cmd {
     /// Refuses (exit 6) and stages nothing when any key is missing, of the wrong kind or
     /// failing a rule. Nothing is deployed or removed without the flags below.
     Sync(SyncArgs),
-    /// Fly.io target commands; deprecated aliases of plan and sync.
-    #[command(subcommand, hide = true)]
-    Fly(FlyCmd),
     /// Configuration commands.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -135,7 +136,8 @@ enum Cmd {
         /// Item title in that vault, matched exactly.
         #[arg(long)]
         item: String,
-        /// Fly app of the environment (not looked up; flyctl is not called).
+        /// Fly app of the environment (not looked up; flyctl is not called). Omit it for a
+        /// run-only environment used for local development.
         #[arg(long, value_name = "APP")]
         fly_app: Option<String>,
         /// Profile to write; without it, it follows the item's shape.
@@ -147,7 +149,7 @@ enum Cmd {
     },
 }
 
-/// Arguments of `plan` (and the deprecated `fly plan`).
+/// Arguments of `plan`.
 #[derive(Args)]
 struct PlanArgs {
     /// Environment name from the configuration (for example staging or prod).
@@ -157,7 +159,7 @@ struct PlanArgs {
     json: bool,
 }
 
-/// Arguments of `sync` (and the deprecated `fly sync`).
+/// Arguments of `sync`.
 #[derive(Args)]
 struct SyncArgs {
     /// Environment name from the configuration (for example staging or prod).
@@ -187,19 +189,6 @@ impl From<SyncArgs> for sync::SyncOpts {
             prune_immutable: a.prune_immutable,
         }
     }
-}
-
-#[derive(Subcommand)]
-enum FlyCmd {
-    /// Show what a sync would stage, hold and prune; changes nothing.
-    ///
-    /// Exits 8 when any row (missing, wrong kind, failing a rule) would block a sync.
-    Plan(PlanArgs),
-    /// Stage the managed secrets on the environment's Fly app.
-    ///
-    /// Refuses (exit 6) and stages nothing when any key is missing, of the wrong kind or
-    /// failing a rule. Nothing is deployed or removed without the flags below.
-    Sync(SyncArgs),
 }
 
 #[derive(Subcommand)]
@@ -337,15 +326,6 @@ fn run_other(
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())
         }
-        Cmd::Fly(FlyCmd::Plan(a)) => {
-            deprecation("fly plan", "opv plan");
-            sync::plan_with(&loaded?, &a.env, r, out, a.json)
-        }
-        Cmd::Fly(FlyCmd::Sync(a)) => {
-            deprecation("fly sync", "opv sync");
-            let env = a.env.clone();
-            sync::run(&loaded?, &env, r, out, &a.into())
-        }
         Cmd::Config(ConfigCmd::Export { env, json: _ }) => {
             config_export::run(&loaded?, &env, r, out)
         }
@@ -383,14 +363,6 @@ fn run_init(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Erro
         force,
     };
     init::run(&args, &dir, r, out)
-}
-
-/// The one-line notice a `fly` alias prints on stderr before it runs.
-fn deprecation(old: &str, new: &str) {
-    let _ = writeln!(
-        io::stderr(),
-        "opv: \"{old}\" is deprecated; use \"{new}\" (removed in the next minor release)"
-    );
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

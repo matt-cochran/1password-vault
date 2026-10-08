@@ -450,6 +450,21 @@ fn bad_fly_app_or_env_name_fails_before_any_call() {
 }
 
 #[test]
+fn bad_fly_app_error_quotes_the_app_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(None, false);
+    a.fly_app = Some("my app".into());
+    let run = run_in(dir.path(), &a, vec![]);
+    assert!(
+        run.err()
+            .to_string()
+            .contains("--fly-app \"my app\" must match"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
 fn op_failure_goes_through_diagnosis() {
     let dir = tempfile::tempdir().unwrap();
     // vault list fails; op whoami fails; account list has one account → not signed in.

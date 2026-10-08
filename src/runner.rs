@@ -164,6 +164,23 @@ fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
     }
 }
 
+/// The first `op` on `paths` (a `PATH` value) must be a native binary: `Unsupported` when it
+/// is a Windows executable (WSL with `op` linked to `op.exe`), `Ok` when it is native or
+/// absent (a missing `op` is reported by the call that needs it).
+fn native_op_on(paths: &std::ffi::OsStr) -> io::Result<()> {
+    for dir in std::env::split_paths(paths) {
+        let path = dir.join("op");
+        if path.is_file() {
+            return if windows_binary(&path)? {
+                Err(io::ErrorKind::Unsupported.into())
+            } else {
+                Ok(())
+            };
+        }
+    }
+    Ok(())
+}
+
 fn timed_out(program: &str, limit: Duration) -> io::Error {
     io::Error::new(
         io::ErrorKind::TimedOut,
@@ -179,19 +196,10 @@ impl CommandRunner for ProcessRunner {
         if cfg!(windows) {
             return Ok(());
         }
-        if let Some(paths) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&paths) {
-                let path = dir.join("op");
-                if path.is_file() {
-                    return if windows_binary(&path)? {
-                        Err(io::ErrorKind::Unsupported.into())
-                    } else {
-                        Ok(())
-                    };
-                }
-            }
+        match std::env::var_os("PATH") {
+            Some(paths) => native_op_on(&paths),
+            None => Ok(()),
         }
-        Ok(())
     }
     fn run(
         &self,
@@ -672,5 +680,28 @@ mod tests {
         let path = dir.path().join("op");
         std::fs::write(&path, b"#!/bin/sh").unwrap();
         assert!(!windows_binary(&path).unwrap());
+    }
+
+    #[test]
+    fn windows_op_first_on_path_is_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("op"), b"MZ\x90\x00").unwrap();
+        let kind = native_op_on(dir.path().as_os_str()).unwrap_err().kind();
+        assert_eq!(kind, io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn native_op_first_on_path_is_supported() {
+        let (win, native) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(native.path().join("op"), b"\x7fELF").unwrap();
+        std::fs::write(win.path().join("op"), b"MZ").unwrap();
+        let paths = std::env::join_paths([native.path(), win.path()]).unwrap();
+        assert!(native_op_on(&paths).is_ok());
+    }
+
+    #[test]
+    fn missing_op_on_path_is_left_to_the_call() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(native_op_on(dir.path().as_os_str()).is_ok());
     }
 }

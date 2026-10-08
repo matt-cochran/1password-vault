@@ -144,7 +144,6 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `https_url = true` | an `https://` URL |
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
-| `transform = "signoz_ingestion_header"` | **deprecated**: kept for one release as an alias for `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`; loading a configuration that uses it prints a deprecation warning naming the product and key. Use the generic rules instead |
 | `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, not encrypted, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
 Fly import refusals are checked for every ready secret by `status` and `plan` as well as `sync`, so a green status means sync will not refuse the value:
@@ -187,12 +186,7 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | `ensure_prefix` | `nothing after the prefix` |
 | `pattern` | `text after the prefix does not match the pattern` |
 | `transform` (`pem_private_key`) | `no BEGIN/END markers`, `BEGIN/END labels differ`, `not a private key`, `encrypted key`, `more than one PEM block`, `body is not base64`, `not a key structure` |
-| `transform` (deprecated SigNoz alias) | the `ensure_prefix` and `pattern` reasons; the rule name stays `transform` |
 | `transform` (other name) | `unknown transform` |
 | Fly import rules | `not a valid Fly secret name`, `contains a line break`, `a # follows an odd number of double quotes`, `too long for one Fly import line`, `not valid UTF-8`, `name occurs twice in one import` |
 
 `pem_private_key` refuses an encrypted key, whether it has a `Proc-Type` header or the PKCS#8 `ENCRYPTED PRIVATE KEY` label.
-
-
-Local-only setup, scoped check/doctor, product switching and WSL support in v0.4:
-[Local development](local-development.md).

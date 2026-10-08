@@ -5,16 +5,45 @@
 Use one development vault, an item with one section per product, concealed secret fields
 and text configuration fields. Keep operator credentials in a separate profile.
 
-    opv init dev --vault fleet-dev --item fleet
-    opv doctor --env dev --product zonetico
-    opv check dev --product zonetico
-    opv run dev --product zonetico -- cargo run
+Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (the desktop app integration
+or `op signin`). On WSL, `op` must be the Linux CLI installed inside WSL (see [WSL](#wsl)).
 
-Omitting --fly-app creates a run-only environment. No placeholder app is needed.
+**New configuration.** If there is no `secrets.toml` yet, let `init` write one from the item.
+Omitting `--fly-app` creates a run-only environment; no placeholder app is needed:
+
+```sh
+opv init dev --vault fleet-dev --item fleet
+opv doctor --env dev --product zonetico
+opv check dev --product zonetico
+opv run dev --product zonetico -- cargo run
+```
+
 init writes IDs and declarations, never values; review keys, rules and modes.
-It never merges an existing configuration. Do not use --force to replace shared settings.
 
-check reads the selected environment's item once and validates only the selected product.
+**Existing configuration.** `init` refuses when `secrets.toml` already exists (exit 2) and never
+merges. To add a local environment next to deployed ones, add its block by hand. It needs only
+the vault and item IDs (from `op vault list --format json` and `op item list --vault <vault>
+--format json`, which list IDs and titles, not values), and then each key that should load
+locally lists `dev` in its `environments`:
+
+```toml
+[environments.dev]
+vault_id = "vdev1234example"
+item_id  = "idev1234example"
+
+[products.zonetico.keys.DATABASE_URL]
+kind = "secret"
+environments = ["dev", "staging", "prod"]
+```
+
+`doctor --env dev` then checks only what local work needs (configuration, `op`, its sign-in and
+whether `op` can start a local command) and skips the deployment CLIs. Unscoped `doctor` also
+reports that last check, as a warning, because deployment commands still work through
+`op.exe`.
+
+`check` reads the selected environment's item once and validates only the selected product;
+fields in other products' sections are skipped, so they cannot fail it. It exits 8 when a key
+is missing, of the wrong kind or failing a rule.
 It makes no deployment target call. check --json reports names/states/rules/findings and
 target_checked=false. It can read values internally to validate them, but prints none.
 run remains reference-only: it does not pre-read or transform values. Use check separately.
@@ -23,9 +52,11 @@ run remains reference-only: it does not pre-read or transform values. Use check 
 
 Use an explicit config path to avoid selecting an unintended ancestor configuration.
 
-    opv --config /path/to/fleet/secrets.toml run dev --product zonetico -- cargo test
-    opv --config /path/to/fleet/secrets.toml run dev --product journeeze -- npm run dev
-    opv --config /path/to/fleet/secrets.toml run dev --product allumata -- docker compose up
+```sh
+opv --config /path/to/fleet/secrets.toml run dev --product zonetico -- cargo test
+opv --config /path/to/fleet/secrets.toml run dev --product journeeze -- npm run dev
+opv --config /path/to/fleet/secrets.toml run dev --product allumata -- docker compose up
+```
 
 Do not infer product identity from a worktree directory name or reuse staging credentials
 automatically. Compose should consume process environment entries, not a plaintext env_file.
@@ -40,21 +71,25 @@ PATH, shell/tool context, 1Password authentication and undeclared variables rema
 This is managed-key isolation, not a sandbox. Keep operator commands in a separate terminal.
 If an app relied on an inherited managed key, declare its proper development field instead.
 
-Library users: InitArgs.fly_app is optional; a custom CommandRunner must implement
-run_inherited_clean for managed local runs. Its default fails closed if removal is needed.
+Library users: `InitArgs::fly_app` is an `Option<String>`; a custom `CommandRunner` must
+implement `run_inherited_clean` for managed local runs (the default fails closed with exit 3
+when there are names to remove), and may override `local_run_supported`.
 
 ## WSL
 
 Windows op.exe may use Windows desktop authentication for metadata reads, but cannot execute
-a Linux child for opv run. An op symlink pointing to a Windows binary is rejected for local
-run and development-scoped doctor. Shell aliases are not consulted by subprocess lookup.
+a Linux child for opv run. An `op` on PATH that is a Windows binary is rejected by `run` (exit 3);
+`doctor` reports it on its `op local run` line, as a failure under `--env` for a local-only
+environment and as a warning otherwise. Shell aliases are not consulted by subprocess lookup.
 Do not use a wrapper that silently substitutes op.exe.
 
 Use Linux op with its own owner-authenticated session:
 
-    op account add
-    eval "$(op signin)"
-    opv doctor --env dev --product zonetico
+```sh
+op account add
+eval "$(op signin)"
+opv doctor --env dev --product zonetico
+```
 
 Follow CLI prompts yourself; never give credentials or session tokens to an agent.
 Do not save them in shell profiles. See [manual sign-in](https://www.1password.dev/cli/sign-in-manually).
@@ -77,3 +112,6 @@ Automated checks use synthetic credentials and fake vendor CLIs; they do not pro
 account provisioning. The owner configures a disposable development item, runs doctor,
 check and a real product smoke test, then records product/tool versions, success/failure
 and missing names only. Verify local execution before remote propagation.
+
+Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op`; native Linux, macOS and Windows
+(PowerShell). Automated tests use fake CLIs; live receipts are recorded on issues #52–#54.
