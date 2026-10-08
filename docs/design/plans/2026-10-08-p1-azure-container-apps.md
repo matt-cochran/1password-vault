@@ -10,11 +10,12 @@
 
 **Tech Stack:** Rust 2024, clap, serde_json, zeroize, `az` CLI 2.90.0. New runtime dependencies (Task 3 adds them; `cargo deny check` must pass): `subtle = "2"` for the constant-time compare, and `sha2 = "0.10"` moved from `[dev-dependencies]` to `[dependencies]` for config digests and the unmanaged fingerprint. Tests use `runner::fake::FakeRunner` and `app::testutil`.
 
-**Spec:** `docs/design/multi-cloud-targets.md` (§3–§8); `docs/design/requirements.md` FR-28 to FR-33, §8 items 29–35. Issue #39.
+**Spec:** `docs/design/multi-cloud-targets.md` (§3–§8); `docs/design/resilience.md`; `docs/design/requirements.md` FR-28 to FR-33, NR-1 to NR-30, §8 items 29–35. Issue #39.
 
 ## Global Constraints
 
-- Fly behaviour is byte-identical: the 14 golden transcripts in `tests/fixtures/characterization/` must not change (`cargo test characterization` without `UPDATE_GOLDEN`).
+- Fly behaviour is byte-identical except where an NR task changes it on purpose: the 14 golden transcripts in `tests/fixtures/characterization/` change only in Tasks R1–R3, each regenerated once with `UPDATE_GOLDEN=1` in its own commit whose message lists every transcript change and the NR it implements. Every other task leaves them untouched.
+- Resilience (NR-1 to NR-30) applies to every target, Fly and 1Password included. Every external call goes through the runner's `read`/`write`/`probe` API (Task R1); no adapter spawns a CLI any other way.
 - No secret value in argv, env, logs, errors, panics or `Debug` (SR-1, SR-2, SR-3). Key Vault values go on stdin through `--file /dev/stdin`; config values go only inside the stdin spec document of `apply`, never in argv (spec §6).
 - No plaintext temp files (SR-4): no `--yaml <tempfile>`; every document goes through `/dev/stdin`.
 - On native Windows, every `az` call that carries a value on stdin fails closed before spawning with `Error::Dependency` naming WSL (spec §6 "SR-3 on Azure"). Reads work everywhere.
@@ -341,6 +342,90 @@ And in `src/adapters/mod.rs` tests: `fly_target_opens_staged_ports` (`assert!(ma
 
 ---
 
+### Task R1: Resilient runner core (NR-2, NR-3, NR-4, NR-5, NR-7, NR-11, NR-12, NR-21, NR-22, NR-29)
+
+**Files:** Modify `src/runner.rs`, `src/error.rs`, `src/main.rs`; adapters `src/adapters/onepassword.rs`, `src/adapters/fly.rs` switch to the new API. Test: `src/runner.rs` tests, `tests/cli.rs`.
+
+**Interfaces (produces):**
+
+```rust
+pub enum Outcome { Done(Output), Refused(Output), Unknown(&'static str /* reason: timeout | killed | lost | failed-write */) }
+
+pub struct Call<'a> { pub program: &'a str, pub args: &'a [&'a str], pub stdin: Option<&'a [u8]>, pub env: &'a [(&'a str, &'a str)] }
+
+pub trait CommandRunner {
+    /// Idempotent call. Retried up to 3 attempts (1 s, 2 s, 4 s, ±25 % jitter) on any failure whose
+    /// exit code is not in `refused` (e.g. az exit 3 = not found), within the run budget.
+    fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome>;
+    /// Non-idempotent call. Never retried. A non-zero exit, timeout or kill is `Unknown`.
+    fn write(&self, call: &Call) -> io::Result<Outcome>;
+    fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output>;   // existing semantics
+    fn run_inherited(..); fn run_inherited_clean(..); fn local_run_supported(..); // unchanged
+}
+pub struct Budget { pub deadline: Instant }       // run budget, `--timeout` (default 900 s)
+pub const READ_TIMEOUT: Duration = 60 s; pub const WRITE_TIMEOUT: Duration = 120 s;
+pub const OUTPUT_CAP: usize = 8 * 1024 * 1024;
+/// Pinned per-CLI environment (NR-7, NR-11), added to every call by program name.
+pub fn pinned_env(program: &str) -> &'static [(&'static str, &'static str)];
+```
+
+- `Error::Unknown(String)` → exit **9**; `Display` "outcome unknown: …"; `Error::exit_code` table and its doc updated (FR-10 extended).
+- Captured calls get stdin `/dev/null` when no stdin is given (NR-11).
+- `pinned_env`: `az` → R7 list plus `AZURE_CORE_OUTPUT=json`; `flyctl` → `FLY_NO_UPDATE_CHECK=1`, `NO_COLOR=1`; `op` → `NO_COLOR=1`. Proxy/CA variables are inherited untouched (NR-29).
+- Retry lines on stderr: `retrying <program> <subcommand> (<n>/3) in <s> s` (program and first two argv words only).
+- SIGINT/SIGTERM handler (NR-12): forward to the current child, 5 s grace, kill, exit 130/143 with `interrupted during <program> <subcommand>; safe to re-run`.
+- `--verbose` (NR-22): one stderr line per call: program, argv, duration, outcome.
+- `--timeout <secs>` global flag sets the `Budget`.
+- FakeRunner gains scripted `Unknown`, scripted failures-then-success, and a fake clock.
+
+**Tests (one assertion each):** `read_retries_transient_failure_then_succeeds`, `read_does_not_retry_refused_exit`, `read_stops_at_three_attempts`, `write_is_never_retried`, `failed_write_is_unknown`, `retry_respects_run_budget`, `output_over_cap_is_refused`, `every_call_carries_pinned_env`, `captured_call_stdin_is_null`, `proxy_env_is_inherited`, `unknown_error_exits_9`, `sigterm_forwards_and_exits_143` (unix process test), `verbose_line_has_no_stdin_bytes`.
+
+- [ ] Steps: failing tests → implement → full suite → regenerate goldens only if a transcript line changes (expected: none, since env is not in transcripts) → commit `feat(runner): read/write effects, retries, deadlines, pinned env, exit 9 (NR-2..NR-5, NR-7, NR-11, NR-12)`.
+
+---
+
+### Task R2: Preflight, provider state, dependencies, outages for Fly and 1Password (NR-10, NR-17, NR-23, NR-24, NR-26, NR-27, NR-28, NR-30)
+
+**Files:** Create `src/app/preflight.rs`; modify `src/app/sync.rs`, `src/adapters/fly.rs`, `src/adapters/onepassword.rs`, `src/host.rs` (status-page URLs per provider), `src/config.rs` + `src/domain/model.rs` (`azure.subscription` required, validated as a GUID, NR-7; test `rejects_azure_without_subscription`).
+
+**Interfaces (produces):**
+
+```rust
+pub struct Preflight { pub lines: Vec<String> }      // "ok   op: signed in", "wait container app: Provisioning", …
+/// Read-only checks, in order: CLIs present + version (only those the env needs), sign-in,
+/// reachability (one cheap read per provider), target state. Err stops the run before any write.
+pub fn preflight(fleet: &Fleet, env: &str, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Preflight, Error>;
+```
+
+- Fly state (NR-24): `flyctl status --app <app> --json` → `Status` `suspended`/`dead`, no machines, machines stopped; a running deploy (`flyctl releases --json` latest `pending`/`running`) → refuse with `Next: wait, then re-run`.
+- 1Password state (NR-26): item read failure → `op vault get <vault_id>` probe distinguishes "no vault access" from "item missing/archived"; message names IDs and the next command.
+- Outage (NR-28): a read that exhausts retries in preflight → `Error::Unknown("<provider> did not respond after 3 attempts (<step>); nothing was changed. Check <status url>, then re-run")`.
+- Eventual consistency (NR-30): Fly list B after stage polls (≤ 30 s) until every staged name shows a digest.
+- Auth before first write (NR-10): preflight's sign-in probe; an `Auth` error after a write names how many writes completed.
+- NR-17: `sync` refusal already lists all blockers; add a `Next:` per key (via `explain`).
+
+**Tests:** `preflight_failure_makes_no_write_calls` (one per check), `suspended_fly_app_refuses_with_resume_command`, `stopped_machines_are_reported_not_refused`, `deploy_in_progress_refuses`, `op_vault_without_access_is_named`, `provider_outage_before_writes_exits_9_with_status_page`, `stale_list_after_stage_is_polled`, `auth_loss_after_first_write_names_completed_writes`.
+
+- [ ] Steps: failing tests → implement → regenerate the Fly goldens once (preflight adds calls) in a separate commit listing the changes → commit `feat(preflight): provider state, dependencies and outages before the first write (NR-23, NR-24, NR-26..NR-28)`.
+
+---
+
+### Task R3: Run summary, Next lines, guarded destruction, scale, interruption matrix (NR-1, NR-16, NR-18, NR-19, NR-20)
+
+**Files:** Modify `src/error.rs` (every constructor carries a `next: Option<String>`; `main` prints `Next: …` last), `src/app/sync.rs`, `src/app/status.rs`, `src/app/mod.rs`, `src/config.rs` (`confirm_env`), `src/main.rs` (`--env-confirm`, `--product` on status/plan/sync); create `src/app/interruption_tests.rs`.
+
+- Run summary (NR-18): last block of every mutating run: `summary: written N, deployed yes|no, pruned N, pending N, unchanged N, skipped N` then `Next: …`; same object in `--json` (`summary`).
+- NR-19: `Error` variants hold `(message, next)`; a test enumerates every `Error::` construction site via the type: constructors without a next step are a compile error (constructor fns `Error::target(msg, next)`). Existing `Next step` text in doctor is unchanged.
+- NR-20: `confirm_env = true` on an environment ⇒ `sync` without `--env-confirm <env>` is `Error::Policy` with the exact command; `--prune` prints `will prune: <names>` before acting.
+- NR-16: status/plan print the counts line first and only non-ok rows unless `--all`.
+- NR-1 interruption matrix (Fly now; Task 7 adds the Azure flow): for each Fly sync scenario with N calls, for k in 1..=N fail call k as `Unknown`, then re-run cleanly on the resulting fake state; assert the final fake state equals the uninterrupted run's.
+
+**Tests:** `mutating_run_ends_with_summary_and_next`, `every_error_exit_prints_one_next_line`, `confirm_env_requires_flag`, `prune_lists_names_before_acting`, `status_hides_ok_rows_by_default`, `fly_sync_converges_after_interruption_at_every_call`.
+
+- [ ] Steps: failing tests → implement → regenerate goldens once in a separate commit → commit `feat(ux): run summary, Next lines, confirm_env, interruption matrix (NR-1, NR-16, NR-18..NR-20)`.
+
+---
+
 ### Task 4: Key Vault adapter (Junior candidate; FR-29, FR-30, FR-32, SR-3)
 
 **Files:**
@@ -368,6 +453,7 @@ Behaviour:
 - `delete`: `list` first; name not tagged → `Error::Policy("<name>: not tagged opv-managed=<env>; refusing to delete")`.
 - `ObjectIsDeletedButRecoverable` on `set` → `Error::Target("<name> is soft-deleted in Key Vault <vault>; recover it with: az keyvault secret recover --vault-name <vault> --name <name>")`. Detection: the runner discards stderr, so detect by a follow-up read-only probe `keyvault secret show-deleted --vault-name <vault> --name <name> -o none` exit 0.
 - `az::diagnose` on any non-zero exit: `az account show -o none` exit status only → non-zero ⇒ `Error::Auth("not logged in to Azure; run: az login")`; zero ⇒ `Error::Target("az <op> failed for <target>")`. `az` missing ⇒ `Error::Dependency` with `host.install_hint(Tool::Az)`.
+- Every call goes through `runner.read`/`runner.write` (Task R1): `list`, `read`, `show-deleted` are reads (refused exit codes: 3 for not found); `set`, `delete` are writes. After `write_one`, confirm by polling `secret show --query id` until the new version is observed (NR-30). A `set` refused right after a role grant is retried as a read-gated write: poll `secret list` (read) until allowed, up to 5 min with progress (NR-25).
 - `az::stdin_supported`: `cfg!(windows)` ⇒ `Error::Dependency("writing to Key Vault needs /dev/stdin; run opv sync from WSL or Linux")`.
 
 - [ ] **Step 1: Failing tests** in `src/adapters/keyvault.rs` (FakeRunner; marker value `opv-marker-kv`). One assertion each:
@@ -433,6 +519,7 @@ argv (confirm against Task 1):
 | `check_access` | `containerapp show` (principal id from `.identity.principalId` or the user identity's `principalId` via `identity show --ids <id>`), `keyvault show -n <vault> -o json` (`.id`, `.properties.enableRbacAuthorization`), then `role assignment list --assignee <principal> --scope <vault id> --include-inherited -o json` | — |
 
 Behaviour:
+- Preflight additions (NR-25, extends Task R2's `preflight`): `account show` (signed in, subscription matches `azure.subscription`), `keyvault show` (exists, not soft-deleted; 403 ⇒ firewall/RBAC message), `containerapp show` (provisioning `InProgress` ⇒ wait with progress; `Failed` ⇒ refuse naming it; `activeRevisionsMode` `Multiple` ⇒ refuse: P1 supports single-revision mode only).
 - `bindings`: select the container (R1). For each env var whose name is in `managed`: `value` → `Plain{digest: sha256(value)}`; `secretRef` → look up the CA secret; a `keyVaultUrl` of the form `<vault_uri>/secrets/<name>/<version>` → `Pinned`; anything else → `Other`. `unmanaged_fingerprint` = SHA-256 of canonical JSON of the spec with managed env entries and `opv-` CA secrets removed, and with read-only fields (`provisioningState`, `latestRevisionName`, `latestReadyRevisionName`, `outboundIpAddresses`, `systemData`, `eventStreamEndpoint`, `latestRevisionFqdn`) removed. `spec` keeps the document.
 - `apply`: `az::stdin_supported()?`; re-run `bindings`; if the new `unmanaged_fingerprint` differs from `snapshot.unmanaged_fingerprint` ⇒ `Error::Target("container app <app> changed outside opv since it was read (<paths>); nothing applied, safe to re-run")` where paths are JSON pointers of differing unmanaged nodes (names only). Then edit the fresh spec: for each `pin` set CA secret `opv-<lower store name>` = `{name, keyVaultUrl: <vault_uri>/secrets/<store>/<version>, identity}` and env `{name, secretRef}`; for each `set` env `{name, value}`; remove `unbind` env names and their `opv-` secrets. Plain unmanaged secrets keep their entry as returned by `show` (Task 1 Q5 decides whether that needs a value; if it does, `apply` fails with `Error::Config("container app <app> has plain secrets <names>; move them to Key Vault references before using opv")` before sending anything — never fetch secret values). Return `Revision(properties.latestRevisionName)` from the update output.
 - `await_healthy`: per R8. After `Healthy`, re-read `bindings` and compare the unmanaged fingerprint with the pre-update one (R9).
@@ -507,6 +594,8 @@ Flow (spec §6, exact output lines):
   - `prune_with_deploy_deletes_after_healthy_revision`
   - `prune_without_deploy_only_reports`
   - `refused_sync_makes_no_az_calls`
+  - `azure_sync_converges_after_interruption_at_every_call` (NR-1 matrix, Task R3 harness)
+  - `unknown_apply_is_reconciled_by_reading_the_revision` (NR-2)
   - `values_never_reach_argv` (uses `assert_no_values_in_argv` over every scenario's runner)
   - `secret_is_never_routed_to_plain_env` (spec stdin has no `value` for a secret key's env entry)
 - [ ] **Step 2–4:** Run (FAIL), implement, run (PASS; goldens unchanged).

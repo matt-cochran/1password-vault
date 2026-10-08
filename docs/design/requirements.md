@@ -812,6 +812,43 @@ Copies of secret values should be minimized.
 
 Security-sensitive dependencies should be kept small and audited.
 
+# 4a. Resilience Requirements (NR-1 to NR-30)
+
+Every realistic failure is a requirement (owner direction, 2026-10-08): designed for
+resiliency, transparency, and to keep the user effective. The argument, mechanisms and tests
+are in `docs/design/resilience.md`; each NR below is normative.
+
+- **NR-1 Convergence.** Every command is safe to interrupt after any external call; re-running it reaches the same end state, and no intermediate state leaves a live reference to a missing or half-written value. Proven by an interruption-matrix test per flow.
+- **NR-2 Unknown outcomes.** A write that fails, times out or is killed has an unknown outcome; opv reconciles by reading the state back before reporting. When it stays unknown, opv exits **9** ("outcome unknown; safe to re-run"), naming the step and the reconciled state. Extends FR-10.
+- **NR-3 Bounded read retry.** Reads (never writes) are retried up to 3 attempts with jittered backoff (1 s, 2 s, 4 s) inside the run budget; a definite refusal (not found, auth) is never retried. The runner's API makes write-retry unrepresentable.
+- **NR-4 Deadlines and progress.** Per-effect deadlines (probe 15 s, read 60 s, write 120 s; waits poll with their own deadline) and a run budget `--timeout` (default 900 s). Any wait prints progress on stderr at least every 15 s.
+- **NR-5 Output cap.** Captured CLI output over 8 MiB is refused and the child killed.
+- **NR-6 Validated outputs.** Every id, version and name read from a CLI is validated before reuse in argv or a document; unknown fields are ignored, missing required fields refused.
+- **NR-7 Explicit scope, pinned environment.** Every call names its scope explicitly (Fly `--app`, Azure `--subscription` from the now-required `azure.subscription`, 1Password IDs) and runs with an environment that neutralises behaviour-changing user config and prompts.
+- **NR-8 Detect, don't lock.** Concurrent edits and overlapping runs are detected (ownership tags, fingerprints, A/B compare, drift) and reported; opv takes no remote locks.
+- **NR-9 Fewest calls.** One list per store, reads only for ready keys, writes only on difference, deploy only on change; `--json` reports calls per program and duration.
+- **NR-10 Auth expiry.** Sign-in is probed before the first write; an auth failure after writes began is reported as such with the sign-in command and "re-run".
+- **NR-11 No prompts.** No captured call can wait on a prompt (no TTY stdin, prompt-disabling env, no dynamic extension install); a would-be prompt surfaces as a timeout naming the sign-in fix.
+- **NR-12 Signals.** SIGINT/SIGTERM are forwarded to the running child, which gets 5 s before it is killed; opv exits 130/143 naming the last completed step.
+- **NR-13 Version drift.** `doctor` checks minimum versions of op, flyctl and az; adapter tests use recorded real outputs.
+- **NR-14 OS differences.** Platform capabilities (stdin device, native op) are checked up front; value bytes are never re-encoded.
+- **NR-15 Value edge cases.** Byte-exact round trip per adapter; values a target would mangle are refused before any call (FR-15, FR-22).
+- **NR-16 Scale.** At most O(keys) calls; output summarises first and lists only non-ok rows by default; `--product` scoping on status, plan and sync.
+- **NR-17 All blockers at once.** A refusal names every blocking key and its next command in one run.
+- **NR-18 Run summary.** Every mutating run ends with one summary (written, deployed, pruned, pending, unchanged, skipped, next step), mirrored in `--json`, consistent with the exit code.
+- **NR-19 Next step on every error.** Every non-zero exit ends with exactly one `Next:` line holding a runnable command (extends FR-22); error constructors require it.
+- **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting; an environment with `confirm_env = true` requires `--env-confirm <env>` for mutating commands.
+- **NR-21 No clock assumptions.** No decision compares wall-clock times across machines; deadlines use monotonic local time.
+- **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call only; child stderr is still never captured (SR-1).
+- **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written.
+- **NR-24 Fly state.** Suspended or deleted apps, missing or stopped machines, a deploy in progress and `Partial` deploys are detected and reported with the exact command.
+- **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported.
+- **NR-26 1Password state.** Moved, archived or deleted items, removed vault access, rate limits and a locked desktop app are diagnosed by ID with the next command; never a title fallback (FR-13).
+- **NR-27 Missing dependencies.** Each needed CLI is resolved once in preflight with the OS-specific install command; only the CLIs the chosen environment needs are required (FR-36).
+- **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page; nothing written.
+- **NR-29 Network glitches and proxies.** Covered by NR-3/NR-2; proxy and CA environment variables pass through to CLIs untouched.
+- **NR-30 Eventual consistency.** After a write, the confirming read polls until it observes the written version or the deadline; a stale read is never reported as "unchanged".
+
 ---
 
 # 5. CLI Surface
