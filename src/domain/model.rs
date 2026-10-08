@@ -117,11 +117,50 @@ impl FlyTarget {
     }
 }
 
-/// The deployment target of one environment (FR-12, FR-28). Target-neutral domain names;
-/// today the only variant is Fly.
+/// Where the Container App reads configuration (FR-30): plain env vars (`Env`) or
+/// Key Vault references only (`Store`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigRoute {
+    #[default]
+    Env,
+    Store,
+}
+
+/// The Azure Key Vault + Container Apps target of one environment (FR-28, FR-30).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AzureTarget {
+    pub key_vault: String,
+    pub resource_group: String,
+    pub container_app: String,
+    /// R1: required only when the app has more than one container.
+    pub container: Option<String>,
+    /// "system" or a user-assigned identity resource id (R6).
+    pub identity: String,
+    /// Env-name template; `{KEY}` under the simple profile.
+    pub env_name_template: String,
+    pub config: ConfigRoute,
+}
+
+impl AzureTarget {
+    /// Env var name for `product`/`key` (same rendering as [`FlyTarget::target_name`]).
+    pub fn env_name(&self, product: &str, key: &str) -> String {
+        let product = product.to_ascii_uppercase().replace('-', "_");
+        self.env_name_template
+            .replace("{PRODUCT}", &product)
+            .replace("{KEY}", key)
+    }
+
+    /// Key Vault secret name for an env name: `_` becomes `-` (spec section 5).
+    pub fn store_name(env_name: &str) -> String {
+        env_name.replace('_', "-")
+    }
+}
+
+/// The deployment target of one environment (FR-12, FR-28). Target-neutral domain names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Fly(FlyTarget),
+    Azure(AzureTarget),
 }
 
 impl Target {
@@ -129,6 +168,7 @@ impl Target {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Fly(_) => "Fly",
+            Self::Azure(_) => "Azure",
         }
     }
 
@@ -136,6 +176,7 @@ impl Target {
     pub fn target_name(&self, product: &str, key: &str) -> String {
         match self {
             Self::Fly(f) => f.target_name(product, key),
+            Self::Azure(a) => a.env_name(product, key),
         }
     }
 }

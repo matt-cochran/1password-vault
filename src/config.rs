@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
-    Environment, Fleet, FlyTarget, KeySpec, Product, Profile, SIMPLE_PRODUCT, SIMPLE_TEMPLATE,
-    Target, key_label,
+    AzureTarget, ConfigRoute, Environment, Fleet, FlyTarget, KeySpec, Product, Profile,
+    SIMPLE_PRODUCT, SIMPLE_TEMPLATE, Target, key_label,
 };
 use crate::error::Error;
 
@@ -89,6 +89,8 @@ struct RawSimpleEnvironment {
     item_id: String,
     #[serde(default)]
     fly: Option<RawSimpleFly>,
+    #[serde(default)]
+    azure: Option<RawAzure>,
     /// Flat `mode name → mode value`: there is only one (implicit) product.
     #[serde(default)]
     modes: BTreeMap<String, String>,
@@ -126,6 +128,9 @@ struct RawEnvironment {
     /// need no Fly app.
     #[serde(default)]
     fly: Option<RawFly>,
+    /// The Azure Key Vault + Container Apps target (FR-28); exclusive with `fly`.
+    #[serde(default)]
+    azure: Option<RawAzure>,
     #[serde(default)]
     modes: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -135,6 +140,21 @@ struct RawEnvironment {
 struct RawFly {
     app: String,
     secret_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAzure {
+    key_vault: String,
+    resource_group: String,
+    container_app: String,
+    #[serde(default)]
+    container: Option<String>,
+    identity: String,
+    #[serde(default)]
+    env_name: Option<String>,
+    #[serde(default)]
+    config: Option<String>,
 }
 
 fn cfg(msg: String) -> Error {
@@ -160,6 +180,35 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
             &e.item_id,
             e.fly.as_ref().map(|f| &f.app),
         )?;
+        if e.fly.is_some() && e.azure.is_some() {
+            return Err(both_targets(&name));
+        }
+        if let Some(a) = e.azure {
+            let template = match a.env_name.clone() {
+                Some(t) if t.contains("{PRODUCT}") && t.contains("{KEY}") => t,
+                Some(t) => {
+                    return Err(cfg(format!(
+                        "environment {name}: azure.env_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
+                    )));
+                }
+                None => {
+                    return Err(cfg(format!(
+                        "environment {name}: azure.env_name is required under the fleet profile"
+                    )));
+                }
+            };
+            let target = azure_target(&name, a, template)?;
+            environments.insert(
+                name,
+                Environment {
+                    vault_id: e.vault_id,
+                    item_id: e.item_id,
+                    target: Some(Target::Azure(target)),
+                    modes: e.modes,
+                },
+            );
+            continue;
+        }
         let fly = match e.fly {
             None => None,
             Some(f) => {
@@ -204,6 +253,7 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
         profile: Profile::Fleet,
     };
     check_fly_names(&fleet)?;
+    check_azure_names(&fleet)?;
     Ok(fleet)
 }
 
@@ -230,6 +280,33 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
             &e.item_id,
             e.fly.as_ref().map(|f| &f.app),
         )?;
+        if e.fly.is_some() && e.azure.is_some() {
+            return Err(both_targets(&name));
+        }
+        if let Some(a) = e.azure {
+            if a.env_name.is_some() {
+                return Err(cfg(format!(
+                    "environment {name}: azure.env_name is not allowed under the simple \
+                     profile (the env name is the key name)"
+                )));
+            }
+            let target = azure_target(&name, a, SIMPLE_TEMPLATE.into())?;
+            let modes = if e.modes.is_empty() {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(SIMPLE_PRODUCT.to_string(), e.modes)])
+            };
+            environments.insert(
+                name,
+                Environment {
+                    vault_id: e.vault_id,
+                    item_id: e.item_id,
+                    target: Some(Target::Azure(target)),
+                    modes,
+                },
+            );
+            continue;
+        }
         let fly = match e.fly {
             None => None,
             Some(f) if f.secret_name.is_some() => {
@@ -273,6 +350,8 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
         }
     }
 
+    check_shared_targets(&environments)?;
+
     for (key, spec) in &raw.keys {
         validate_key(key, key, spec, &environments)?;
     }
@@ -283,7 +362,87 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
         profile: Profile::Simple,
     };
     check_fly_names(&fleet)?;
+    check_azure_names(&fleet)?;
     Ok(fleet)
+}
+
+fn both_targets(name: &str) -> Error {
+    cfg(format!(
+        "environment {name}: declares both fly and azure; use one target"
+    ))
+}
+
+/// Check the identifiers of an `azure` section and build the domain target (FR-28, FR-30).
+fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget, Error> {
+    let mut ids = vec![
+        ("azure.key_vault", a.key_vault.as_str()),
+        ("azure.resource_group", a.resource_group.as_str()),
+        ("azure.container_app", a.container_app.as_str()),
+    ];
+    if let Some(c) = &a.container {
+        ids.push(("azure.container", c.as_str()));
+    }
+    for (field, value) in ids {
+        check_ident(name, field, value, is_id, "^[A-Za-z0-9][A-Za-z0-9._-]*$")?;
+    }
+    check_ident(
+        name,
+        "azure.identity",
+        &a.identity,
+        is_azure_identity,
+        "\"system\" or a resource id of [A-Za-z0-9._/-] not starting with -",
+    )?;
+    let config = match a.config.as_deref() {
+        None | Some("env") => ConfigRoute::Env,
+        Some("store") => ConfigRoute::Store,
+        Some(v) => {
+            return Err(cfg(format!(
+                "environment {name}: azure.config must be \"env\" or \"store\", got {v:?}"
+            )));
+        }
+    };
+    Ok(AzureTarget {
+        key_vault: a.key_vault,
+        resource_group: a.resource_group,
+        container_app: a.container_app,
+        container: a.container,
+        identity: a.identity,
+        env_name_template: template,
+        config,
+    })
+}
+
+/// One identifier: non-empty, unpadded, and accepted by `ok` (safe in argv).
+fn check_ident(
+    name: &str,
+    field: &str,
+    value: &str,
+    ok: fn(&str) -> bool,
+    shape: &str,
+) -> Result<(), Error> {
+    if value.trim().is_empty() {
+        return Err(cfg(format!("environment {name}: {field} is empty")));
+    }
+    if value.trim() != value {
+        return Err(cfg(format!(
+            "environment {name}: {field} has leading or trailing whitespace"
+        )));
+    }
+    if !ok(value) {
+        return Err(cfg(format!(
+            "environment {name}: {field} {value:?} must match {shape}"
+        )));
+    }
+    Ok(())
+}
+
+/// `"system"` or a user-assigned identity resource id: like [`is_id`] but `/` is allowed
+/// (and may lead), and nothing may start with `-`.
+fn is_azure_identity(s: &str) -> bool {
+    !s.starts_with('-')
+        && !s.is_empty()
+        && s.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
 }
 
 /// IDs and the app name are non-empty, unpadded and safe in argv.
@@ -401,14 +560,26 @@ fn validate_key(
 /// the same names, and each would prune what the other stages (FR-8).
 fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<(), Error> {
     let mut seen: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    let mut seen_azure: BTreeMap<(&str, &str), &str> = BTreeMap::new();
     for (name, env) in environments {
-        if let Some(Target::Fly(f)) = &env.target
-            && let Some(prev) = seen.insert((&f.app, &f.secret_name_template), name)
-        {
-            return Err(cfg(format!(
-                "environments {prev} and {name} both use Fly app {:?} with fly.secret_name {:?}",
-                f.app, f.secret_name_template
-            )));
+        match &env.target {
+            Some(Target::Fly(f)) => {
+                if let Some(prev) = seen.insert((&f.app, &f.secret_name_template), name) {
+                    return Err(cfg(format!(
+                        "environments {prev} and {name} both use Fly app {:?} with fly.secret_name {:?}",
+                        f.app, f.secret_name_template
+                    )));
+                }
+            }
+            Some(Target::Azure(a)) => {
+                if let Some(prev) = seen_azure.insert((&a.key_vault, &a.env_name_template), name) {
+                    return Err(cfg(format!(
+                        "environments {prev} and {name} both use Key Vault {:?} with azure.env_name {:?}",
+                        a.key_vault, a.env_name_template
+                    )));
+                }
+            }
+            None => {}
         }
     }
     Ok(())
@@ -437,6 +608,46 @@ fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
                 if let Some(prev) = seen.insert(name.clone(), owner.clone()) {
                     return Err(cfg(format!(
                         "environment {env_name}: {prev} and {owner} both render Fly name {name}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every env name an Azure environment renders, for EVERY declared key, must be a valid
+/// env-var name; its Key Vault name (`_` to `-`) must be 1 to 127 of `[0-9A-Za-z-]` and
+/// unique case-insensitively within the environment (FR-28, FR-8).
+fn check_azure_names(fleet: &Fleet) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        let Some(Target::Azure(az)) = &env.target else {
+            continue;
+        };
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for (product, p) in &fleet.products {
+            for key in p.keys.keys() {
+                let name = az.env_name(product, key);
+                let owner = key_label(product, key);
+                if !is_env_name(&name) {
+                    return Err(cfg(format!(
+                        "environment {env_name}: {owner} renders env name {name:?}, which must match ^[A-Z][A-Z0-9_]*$"
+                    )));
+                }
+                let store = AzureTarget::store_name(&name);
+                if store.is_empty()
+                    || store.len() > 127
+                    || !store.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                {
+                    return Err(cfg(format!(
+                        "environment {env_name}: {owner} renders Key Vault name of {} characters, which must match ^[0-9A-Za-z-]{{1,127}}$",
+                        store.len()
+                    )));
+                }
+                if let Some(prev) = seen.insert(store.to_ascii_lowercase(), owner.clone()) {
+                    return Err(cfg(format!(
+                        "environment {env_name}: {prev} and {owner} both map to Key Vault name {}",
+                        store.to_ascii_lowercase()
                     )));
                 }
             }
@@ -534,6 +745,7 @@ mod tests {
         assert_eq!(
             match prod.target.as_ref().unwrap() {
                 Target::Fly(f) => f.app.as_str(),
+                Target::Azure(_) => unreachable!("fixture is Fly"),
             },
             "mcproductlabs-portfolio-production"
         );
@@ -1168,5 +1380,227 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
     #[test]
     fn simple_rejects_unknown_fields() {
         config_err(&simple_mutate("immutable = true", "immutible = true"));
+    }
+
+    const AZURE_ENV: &str = r#"
+[environments.prod]
+vault_id = "v"
+item_id = "i"
+[environments.prod.azure]
+key_vault = "kv-myapp-prod"
+resource_group = "rg-myapp"
+container_app = "ca-myapp"
+identity = "system"
+env_name = "FLEET__{PRODUCT}__{KEY}"
+"#;
+
+    const KEYS: &str = r#"
+[products.api.keys.DB_URL]
+kind = "secret"
+environments = ["prod"]
+"#;
+
+    fn azure_doc(env: &str, keys: &str) -> String {
+        format!("[profile]\nkind = \"fleet\"\n{env}{keys}")
+    }
+
+    fn azure_env_with(from: &str, to: &str) -> String {
+        assert!(AZURE_ENV.contains(from), "mutation did not match: {from:?}");
+        azure_doc(&AZURE_ENV.replace(from, to), KEYS)
+    }
+
+    fn azure_err(text: &str) -> String {
+        parse(text).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn loads_azure_target() {
+        let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
+        assert_eq!(
+            f.environments["prod"].target.as_ref().unwrap().label(),
+            "Azure"
+        );
+    }
+
+    #[test]
+    fn azure_config_route_defaults_to_env() {
+        let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
+        let Some(Target::Azure(a)) = &f.environments["prod"].target else {
+            panic!("not azure");
+        };
+        assert_eq!(a.config, ConfigRoute::Env);
+    }
+
+    #[test]
+    fn azure_config_route_store_is_accepted() {
+        let f = parse(&azure_env_with(
+            "identity = \"system\"",
+            "identity = \"system\"\nconfig = \"store\"",
+        ))
+        .unwrap();
+        let Some(Target::Azure(a)) = &f.environments["prod"].target else {
+            panic!("not azure");
+        };
+        assert_eq!(a.config, ConfigRoute::Store);
+    }
+
+    #[test]
+    fn azure_renders_env_name_from_template() {
+        let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
+        assert_eq!(f.target_name("prod", "api", "DB_URL"), "FLEET__API__DB_URL");
+    }
+
+    #[test]
+    fn azure_store_name_replaces_underscores_with_dashes() {
+        assert_eq!(
+            AzureTarget::store_name("FLEET__API__DB_URL"),
+            "FLEET--API--DB-URL"
+        );
+    }
+
+    #[test]
+    fn rejects_two_target_sections() {
+        let two = azure_doc(
+            &format!(
+                "{AZURE_ENV}[environments.prod.fly]\napp = \"a\"\nsecret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n"
+            ),
+            KEYS,
+        );
+        let e = azure_err(&two);
+        assert!(
+            e.contains("environment prod: declares both fly and azure; use one target"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rejects_key_vault_name_collision_by_product_dash_or_underscore() {
+        let keys = r#"
+[products.a-b.keys.C]
+kind = "secret"
+environments = ["prod"]
+[products.a_b.keys.C]
+kind = "secret"
+environments = ["prod"]
+"#;
+        let e = azure_err(&azure_doc(AZURE_ENV, keys));
+        assert!(e.contains("both map to Key Vault name"), "{e}");
+    }
+
+    #[test]
+    fn rejects_key_vault_name_over_127_chars() {
+        let long = "K".repeat(120);
+        let keys =
+            format!("[products.api.keys.{long}]\nkind = \"secret\"\nenvironments = [\"prod\"]\n");
+        let e = azure_err(&azure_doc(AZURE_ENV, &keys));
+        assert!(e.contains("api/KKKK") && e.contains("{1,127}"), "{e}");
+    }
+
+    #[test]
+    fn rejects_azure_identifier_with_leading_dash() {
+        let e = azure_err(&azure_env_with(
+            "resource_group = \"rg-myapp\"",
+            "resource_group = \"-rg\"",
+        ));
+        assert!(e.contains("azure.resource_group"), "{e}");
+    }
+
+    #[test]
+    fn rejects_empty_azure_identifier() {
+        let e = azure_err(&azure_env_with(
+            "key_vault = \"kv-myapp-prod\"",
+            "key_vault = \"\"",
+        ));
+        assert!(e.contains("azure.key_vault is empty"), "{e}");
+    }
+
+    #[test]
+    fn azure_identity_accepts_a_resource_id() {
+        let id = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uai";
+        let f = parse(&azure_env_with(
+            "identity = \"system\"",
+            &format!("identity = \"{id}\""),
+        ))
+        .unwrap();
+        let Some(Target::Azure(a)) = &f.environments["prod"].target else {
+            panic!("not azure");
+        };
+        assert_eq!(a.identity, id);
+    }
+
+    #[test]
+    fn rejects_azure_identity_with_shell_metacharacters() {
+        let e = azure_err(&azure_env_with(
+            "identity = \"system\"",
+            "identity = \"a;rm\"",
+        ));
+        assert!(e.contains("azure.identity"), "{e}");
+    }
+
+    #[test]
+    fn rejects_azure_env_name_without_placeholders() {
+        let e = azure_err(&azure_env_with("FLEET__{PRODUCT}__{KEY}", "STATIC"));
+        assert!(e.contains("azure.env_name"), "{e}");
+    }
+
+    #[test]
+    fn rejects_missing_env_name_under_fleet_profile() {
+        let e = azure_err(&azure_env_with(
+            "env_name = \"FLEET__{PRODUCT}__{KEY}\"\n",
+            "",
+        ));
+        assert!(e.contains("azure.env_name is required"), "{e}");
+    }
+
+    const SIMPLE_AZURE: &str = r#"
+[profile]
+kind = "simple"
+[environments.prod]
+vault_id = "v"
+item_id = "i"
+[environments.prod.azure]
+key_vault = "kv-myapp-prod"
+resource_group = "rg-myapp"
+container_app = "ca-myapp"
+identity = "system"
+[keys.JWT_KEY]
+kind = "secret"
+environments = ["prod"]
+"#;
+
+    #[test]
+    fn simple_profile_azure_uses_the_key_name_as_env_name() {
+        let f = parse(SIMPLE_AZURE).unwrap();
+        assert_eq!(f.target_name("prod", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+    }
+
+    #[test]
+    fn rejects_env_name_under_simple_profile_azure() {
+        let e = azure_err(&SIMPLE_AZURE.replace(
+            "identity = \"system\"",
+            "identity = \"system\"\nenv_name = \"{KEY}\"",
+        ));
+        assert!(e.contains("azure.env_name is not allowed"), "{e}");
+    }
+
+    #[test]
+    fn rejects_unknown_config_route() {
+        let e = azure_err(&azure_env_with(
+            "identity = \"system\"",
+            "identity = \"system\"\nconfig = \"plain\"",
+        ));
+        assert!(
+            e.contains("azure.config must be \"env\" or \"store\", got \"plain\""),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rejects_two_environments_sharing_a_key_vault_and_template() {
+        let second = AZURE_ENV
+            .replace("environments.prod", "environments.stage")
+            .replace("ca-myapp", "ca-other");
+        let e = azure_err(&azure_doc(&format!("{AZURE_ENV}{second}"), KEYS));
+        assert!(e.contains("both use Key Vault"), "{e}");
     }
 }

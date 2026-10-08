@@ -50,7 +50,7 @@ pub fn run(
     opts: &SyncOpts,
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
-    let (store, runtime) = adapters::open(fleet.target(env_name)?.1, r);
+    let (store, runtime) = adapters::open(fleet.target(env_name)?.1, r)?;
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
     let (plan, list_a) = read_and_plan(
@@ -188,7 +188,7 @@ pub fn plan_with(
     json: bool,
 ) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    let (store, _) = adapters::open(fleet.target(env_name)?.1, r);
+    let (store, _) = adapters::open(fleet.target(env_name)?.1, r)?;
     let none = BTreeSet::new();
     let (plan, on_fly) = read_and_plan(fleet, env_name, r, Some(store.as_ref()), &none, &none)?;
     if json {

@@ -702,6 +702,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
             // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
             match env.target.as_mut().unwrap() {
                 Target::Fly(f) => f.secret_name_template = "FLEET__{KEY}".into(),
+                Target::Azure(_) => unreachable!("fixture is Fly"),
             }
         }
         let fly = [fly_secret("FLEET__BOTH", None)];

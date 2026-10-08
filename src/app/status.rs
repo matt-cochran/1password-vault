@@ -34,7 +34,7 @@ pub fn run_with(
     json: bool,
 ) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    let (store, _) = adapters::open(fleet.target(env_name)?.1, r);
+    let (store, _) = adapters::open(fleet.target(env_name)?.1, r)?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, r, Some(store.as_ref()), &none, &none)?;
     if json {
