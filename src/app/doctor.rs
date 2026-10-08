@@ -8,7 +8,7 @@
 //! Environments without one are listed as skipped for Fly. Returns the error of the first
 //! failing check.
 //!
-//! A tool version opv was not tested with (op older than 2.40.0, flyctl other than
+//! A tool version opv was not tested with (op older than 2.40.0, flyctl outside 0.4.x from
 //! 0.4.112) is a `warn` line, never a failure.
 //!
 //! Tool output is never echoed: only a version string that matches a strict pattern, and
@@ -36,8 +36,15 @@ const OP: &str = "op";
 
 /// Oldest `op` release opv is tested with.
 pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
-/// The `flyctl` release opv is tested with (its import parser is ported, see fly.rs).
+/// The `flyctl` release opv is tested with (its import parser is ported, see fly.rs). Later
+/// patches of the same minor pass without a warning; another minor or an older patch warns.
 pub const FLYCTL_TESTED: (u64, u64, u64) = (0, 4, 112);
+
+/// Same major and minor as [`FLYCTL_TESTED`], at or above its patch.
+fn flyctl_tested(v: (u64, u64, u64)) -> bool {
+    let (a, b, c) = FLYCTL_TESTED;
+    v.0 == a && v.1 == b && v.2 >= c
+}
 
 /// Name of the configuration check (its message is parser output, see [`next_step`]).
 const CONFIG_CHECK: &str = "config";
@@ -293,13 +300,15 @@ fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Chec
     }
     let (a, b, c) = FLYCTL_TESTED;
     Ok(match version_in(&o.stdout) {
-        Some(v) if parse_version(&v) == Some(FLYCTL_TESTED) => Check::Ok(format!("version {v}")),
+        Some(v) if parse_version(&v).is_some_and(flyctl_tested) => {
+            Check::Ok(format!("version {v}"))
+        }
         Some(v) => Check::Warn(format!(
-            "version {v}; opv is tested with flyctl {a}.{b}.{c} (its secrets import format may differ)\n  {}",
+            "version {v}; opv is tested with flyctl {a}.{b}.{c} or a later {a}.{b}.x patch (its secrets import format may differ)\n  {}",
             host().install_hint(Tool::Flyctl)
         )),
         None => Check::Warn(format!(
-            "present, version not recognised; opv is tested with flyctl {a}.{b}.{c}\n  {}",
+            "present, version not recognised; opv is tested with flyctl {a}.{b}.{c} or a later {a}.{b}.x patch\n  {}",
             host().install_hint(Tool::Flyctl)
         )),
     })
@@ -641,12 +650,12 @@ mod tests {
         assert!(!out.contains("warn"), "{out}");
     }
 
-    /// I8: an older op or a different flyctl warns but does not fail.
+    /// I8: an older op, or a flyctl outside 0.4.x from 0.4.112, warns but does not fail.
     #[test]
     fn untested_versions_warn_but_pass() {
         for (op, fly, warn_op, warn_fly) in [
             ("2.39.9\n", "flyctl v0.4.112 linux/amd64\n", true, false),
-            ("2.30.0\n", "flyctl v0.4.113 linux/amd64\n", true, true),
+            ("2.30.0\n", "flyctl v0.4.111 linux/amd64\n", true, true),
             ("2.41.0\n", "flyctl v0.3.0 linux/amd64\n", false, true),
             ("3.0.0\n", "flyctl v0.4.112\n", false, false),
         ] {
@@ -666,6 +675,26 @@ mod tests {
                 assert!(lines[3].contains("0.4.112"), "{out}");
             }
         }
+    }
+
+    #[test]
+    fn later_flyctl_patch_does_not_warn() {
+        let mut g = good();
+        g[2] = Output::success(b"flyctl v0.4.113 linux/amd64\n".to_vec());
+        let r = FakeRunner::new(g);
+        let (res, out) = doctor(Ok(fleet()), &r);
+        res.unwrap();
+        assert!(checks(&out)[3].starts_with("ok    flyctl:"), "{out}");
+    }
+
+    #[test]
+    fn next_flyctl_minor_warns() {
+        let mut g = good();
+        g[2] = Output::success(b"flyctl v0.5.0 linux/amd64\n".to_vec());
+        let r = FakeRunner::new(g);
+        let (res, out) = doctor(Ok(fleet()), &r);
+        res.unwrap();
+        assert!(checks(&out)[3].starts_with("warn  flyctl:"), "{out}");
     }
 
     #[test]

@@ -119,7 +119,7 @@ gh attestation verify opv-x86_64-unknown-linux-musl --repo matt-cochran/1passwor
 
 ## Prerequisites
 
-- The 1Password CLI `op`, tested with 2.40.0. The Fly CLI `flyctl`, tested with 0.4.112. `opv doctor` warns (exit code unchanged) when a version differs.
+- The 1Password CLI `op`, tested with 2.40.0. The Fly CLI `flyctl`, tested with 0.4.112 and later 0.4.x patches. `opv doctor` warns (exit code unchanged) when a version differs.
 - For CI: a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, and `FLY_API_TOKEN`.
 - Locally: the 1Password desktop app integration or `op signin`, and `fly auth login`.
 - `item skeleton` is the only command that writes to 1Password; it needs a write-capable identity.
