@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a problem with opv.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never include real secret values in this report. Use made-up ones.
+  - type: input
+    id: version
+    attributes:
+      label: opv version
+      description: Output of `opv --version`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Secret safety
+      options:
+        - label: I confirm this report contains no real secret values.
+          required: true

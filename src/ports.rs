@@ -3,7 +3,7 @@
 //!
 //! P0 carries exactly the operations the current engine calls. P1 adds `read`, `bindings`,
 //! `apply`, `check_access` and `await_healthy` when the first cloud target needs them (see
-//! `docs/superpowers/specs/2026-10-08-multi-cloud-targets-design.md` §3).
+//! `docs/design/multi-cloud-targets.md` §3).
 
 use crate::domain::{SecretValue, StoreEntry};
 use crate::error::Error;

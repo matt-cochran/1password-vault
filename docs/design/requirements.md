@@ -335,7 +335,7 @@ No read-only operation shall write metadata such as "last synchronized at" back 
 
 The internal design shall permit future sources and targets without coupling core synchronization logic to 1Password or Fly.
 
-Decided in v0.3 (2026-10-08): the target side is two ports, `SecretStore` and `Runtime` (FR-28). A target is one of each; Fly implements both. The design and its argument are in `docs/superpowers/specs/2026-10-08-multi-cloud-targets-design.md`.
+Decided in v0.3 (2026-10-08): the target side is two ports, `SecretStore` and `Runtime` (FR-28). A target is one of each; Fly implements both. The design and its argument are in `docs/design/multi-cloud-targets.md`.
 
 Possible future targets include:
 
@@ -578,7 +578,7 @@ Constraints kept: FR-1, FR-2, FR-9. stdout is unchanged, so `config export --jso
 
 ## v0.3 multi-cloud targets (FR-28 to FR-33)
 
-The requirements below add Azure, AWS and GCP as targets without weakening any FR or SR above. The owner adopted them on 2026-10-08 after an FMECA review. They are delivered in phases (P0 to P4, issues #38 to #42); deferred items are listed in §8 under "v0.3 scope". Design: `docs/superpowers/specs/2026-10-08-multi-cloud-targets-design.md`.
+The requirements below add Azure, AWS and GCP as targets without weakening any FR or SR above. The owner adopted them on 2026-10-08 after an FMECA review. They are delivered in phases (P0 to P4, issues #38 to #42); deferred items are listed in §8 under "v0.3 scope". Design: `docs/design/multi-cloud-targets.md`.
 
 ## FR-28 — Targets, Ports and Routing
 

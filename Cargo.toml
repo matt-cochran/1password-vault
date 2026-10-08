@@ -5,11 +5,11 @@ edition = "2024"
 # let-chains (`if let ... && let ...`) are stable from 1.88.
 rust-version = "1.88"
 license = "MIT"
-description = "Sync secrets from 1Password to runtime targets (Fly.io) without ever printing, logging or writing secret values"
+description = "Sync secrets from 1Password into runtime targets such as Fly.io without ever printing, logging or writing a value"
 repository = "https://github.com/matt-cochran/1password-vault"
 homepage = "https://github.com/matt-cochran/1password-vault"
 readme = "README.md"
-keywords = ["1password", "secrets", "fly", "cli", "devops"]
+keywords = ["1password", "secrets", "secrets-management", "fly", "devops"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["spike/", ".delivery/", ".github/", "packaging/"]
 
