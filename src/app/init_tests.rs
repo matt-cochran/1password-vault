@@ -159,7 +159,7 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
     let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
     assert!(fleet.is_simple());
     assert_eq!(
-        fleet.fly_name("staging", crate::domain::SIMPLE_PRODUCT, "JWT_KEY"),
+        fleet.target_name("staging", crate::domain::SIMPLE_PRODUCT, "JWT_KEY"),
         "JWT_KEY"
     );
 
@@ -172,7 +172,7 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
         )),
         "{out}"
     );
-    assert!(out.ends_with("Next step: opv fly plan staging\n"), "{out}");
+    assert!(out.ends_with("Next step: opv plan staging\n"), "{out}");
     assert!(out.contains(VAULT_ID) && out.contains(ITEM_ID), "{out}");
 }
 
@@ -199,7 +199,7 @@ fn sectioned_item_writes_a_fleet_file_that_the_loader_accepts() {
     let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
     assert!(!fleet.is_simple());
     assert_eq!(
-        fleet.fly_name("staging", "web-app", "SESSION_KEY"),
+        fleet.target_name("staging", "web-app", "SESSION_KEY"),
         "FLEET__WEB_APP__SESSION_KEY"
     );
     assert_eq!(
@@ -593,7 +593,7 @@ fn other_commands_never_look_up_titles() {
 
 // --- Fix round 1: reader-rejected shapes, duplicates, ancestor note ---
 
-const REJECT: &str = "status and fly sync will reject it until it is fixed in 1Password";
+const REJECT: &str = "status and sync will reject it until it is fixed in 1Password";
 
 /// An `op item get` document from raw field objects (shapes `item_json` cannot build).
 fn raw_item(fields: Vec<serde_json::Value>) -> Output {

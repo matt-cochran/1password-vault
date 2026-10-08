@@ -148,7 +148,7 @@ pub fn read_field_shapes(
         let env = Environment {
             vault_id: vault_id.to_string(),
             item_id: item_id.to_string(),
-            fly: None,
+            target: None,
             modes: BTreeMap::new(),
         };
         return Err(failed_op_error(

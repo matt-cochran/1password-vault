@@ -15,12 +15,12 @@ use std::io::Write;
 
 use super::{
     is_blocking, managed_names, print_extras, print_rows, read_and_plan, row_names,
-    unmanaged_on_fly, write_err, write_json,
+    unmanaged_on_target, write_err, write_json,
 };
-use crate::adapters::fly;
+use crate::adapters;
 use crate::domain::rules;
 use crate::domain::{
-    Fleet, FlySecret, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, SyncPlan, TargetState,
+    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState,
     key_label,
 };
 use crate::error::Error;
@@ -50,11 +50,17 @@ pub fn run(
     opts: &SyncOpts,
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
-    let (_, target) = fleet.fly_target(env_name)?;
-    let app = target.app.as_str();
+    let (store, runtime) = adapters::open(fleet.target(env_name)?.1, r);
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
-    let (plan, list_a) = read_and_plan(fleet, env_name, r, true, &rotate, &prune_immutable)?;
+    let (plan, list_a) = read_and_plan(
+        fleet,
+        env_name,
+        r,
+        Some(store.as_ref()),
+        &rotate,
+        &prune_immutable,
+    )?;
 
     let blocking = row_names(&plan.rows, is_blocking);
     if !blocking.is_empty() {
@@ -65,7 +71,7 @@ pub fn run(
     }
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
-    fly::validate_import(&batch)?;
+    store.validate(&batch)?;
     print_extras(out, &plan)?;
     print_counts(out, &plan)?;
 
@@ -75,8 +81,8 @@ pub fn run(
     let list_b = if batch.is_empty() {
         list_a.clone()
     } else {
-        fly::stage(r, app, &batch)?;
-        fly::list(r, app)?
+        store.write(&batch)?;
+        store.list()?
     };
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -94,7 +100,7 @@ pub fn run(
     let pruned = if plan.prune.is_empty() {
         false
     } else if opts.prune {
-        fly::unset_staged(r, app, &plan.prune)?;
+        store.remove(&plan.prune)?;
         p(out, format!("pruned (staged): {}", plan.prune.join(", ")))?;
         true
     } else {
@@ -124,7 +130,7 @@ pub fn run(
     let pending: Vec<&str> = list_b
         .iter()
         .filter(|s| managed.contains(&s.name))
-        .filter(|s| matches!(s.status.as_deref(), Some("Staged" | "Partial")))
+        .filter(|s| s.pending)
         .map(|s| s.name.as_str())
         .collect();
     if !pending.is_empty() {
@@ -136,7 +142,7 @@ pub fn run(
         (false, true) => p(out, "nothing pending; not deploying".into()),
         (false, false) => p(out, "nothing pending".into()),
         (true, true) => {
-            fly::deploy(r, app)?;
+            runtime.deploy()?;
             p(out, "deployed staged secrets".into())
         }
         (true, false) => p(out, "staged changes not deployed (no --deploy)".into()),
@@ -182,9 +188,9 @@ pub fn plan_with(
     json: bool,
 ) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    fleet.fly_target(env_name)?;
+    let (store, _) = adapters::open(fleet.target(env_name)?.1, r);
     let none = BTreeSet::new();
-    let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
+    let (plan, on_fly) = read_and_plan(fleet, env_name, r, Some(store.as_ref()), &none, &none)?;
     if json {
         write_json(out, fleet, env_name, &plan)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -217,7 +223,7 @@ pub fn plan_with(
         )
         .map_err(write_err)?;
     }
-    let unmanaged = unmanaged_on_fly(fleet, env_name, &on_fly)?;
+    let unmanaged = unmanaged_on_target(fleet, env_name, &on_fly)?;
     print_counts(out, &plan)?;
     writeln!(out, "{} unmanaged on Fly (never touched)", unmanaged.len()).map_err(write_err)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -264,10 +270,10 @@ fn held_from_prune(plan: &SyncPlan) -> String {
         .join(", ")
 }
 
-fn digest<'a>(list: &'a [FlySecret], name: &str) -> Option<&'a str> {
+fn digest<'a>(list: &'a [StoreEntry], name: &str) -> Option<&'a str> {
     list.iter()
         .find(|s| s.name == name)
-        .and_then(|s| s.digest.as_deref())
+        .and_then(|s| s.version.as_deref())
 }
 
 /// `PRODUCT/KEY` under the fleet profile; `KEY` alone under the simple profile (FR-20),

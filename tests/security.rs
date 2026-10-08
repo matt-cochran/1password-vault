@@ -376,9 +376,9 @@ impl Harness {
 const COMMANDS: &[&[&str]] = &[
     &["doctor"],
     &["status", "prod"],
-    &["fly", "plan", "prod"],
-    &["fly", "sync", "prod"],
-    &["fly", "sync", "prod", "--prune", "--deploy"],
+    &["plan", "prod"],
+    &["sync", "prod"],
+    &["sync", "prod", "--prune", "--deploy"],
     &["config", "export", "prod", "--json"],
     &["item", "skeleton", "prod"],
 ];
@@ -421,7 +421,7 @@ fn assert_argv_and_env_clean(h: &Harness) {
 #[test]
 fn no_secret_in_any_argv() {
     let h = Harness::new(&good_item());
-    let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 0, "{}", r.all());
 
     let calls = h.calls();
@@ -473,9 +473,9 @@ fn no_secret_in_any_argv() {
 #[test]
 fn stdin_only_channel() {
     let h = Harness::new(&good_item());
-    let r = h.run(&["fly", "sync", "prod"]);
+    let r = h.run(&["sync", "prod"]);
     assert_eq!(r.code, 0, "{}", r.all());
-    assert_clean_output(&["fly", "sync", "prod"], &r);
+    assert_clean_output(&["sync", "prod"], &r);
 
     let calls = h.calls();
     let import: Vec<&Call> = calls
@@ -566,8 +566,8 @@ fn child_stderr_suppressed() {
     h.set("FAKE_OP_ITEM_EXIT", "1");
     for cmd in [
         &["status", "prod"][..],
-        &["fly", "plan", "prod"],
-        &["fly", "sync", "prod"],
+        &["plan", "prod"],
+        &["sync", "prod"],
         &["config", "export", "prod", "--json"],
         &["item", "skeleton", "prod"],
     ] {
@@ -600,11 +600,7 @@ fn child_stderr_suppressed() {
 fn op_failure_without_credentials_is_auth() {
     let mut h = Harness::new(&good_item());
     h.unset("OP_SERVICE_ACCOUNT_TOKEN").set("FAKE_OP_EXIT", "1");
-    for cmd in [
-        &["status", "prod"][..],
-        &["fly", "sync", "prod"],
-        &["doctor"],
-    ] {
+    for cmd in [&["status", "prod"][..], &["sync", "prod"], &["doctor"]] {
         h.reset();
         let r = h.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
@@ -640,7 +636,7 @@ fn no_files_written() {
     }
     h.set_item(&good_item());
     h.set("FAKE_FLY_LIST_FAIL_AT", "2");
-    check(&h, &["fly", "sync", "prod", "--prune", "--deploy"]);
+    check(&h, &["sync", "prod", "--prune", "--deploy"]);
     // Skeleton did reach `op item edit` with its template on stdin.
     h.unset("FAKE_FLY_LIST_FAIL_AT");
     h.set_item(&item(vec![]));
@@ -655,7 +651,7 @@ fn no_files_written() {
 fn failure_after_partial_plan_stages_nothing() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_FLY_LIST_FAIL_AT", "1");
-    let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
         r.stderr
@@ -676,7 +672,7 @@ fn failure_after_partial_plan_stages_nothing() {
     for sub in ["import", "unset", "deploy"] {
         assert_eq!(h.fly_calls(sub), 0, "{sub} after a failed list");
     }
-    assert_clean_output(&["fly", "sync"], &r);
+    assert_clean_output(&["sync"], &r);
 }
 
 /// Review Focus 4: list B (after import) fails → Target (5); nothing further is mutated
@@ -685,7 +681,7 @@ fn failure_after_partial_plan_stages_nothing() {
 fn list_b_failure_after_staging() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_FLY_LIST_FAIL_AT", "2");
-    let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
         r.stderr
@@ -697,7 +693,7 @@ fn list_b_failure_after_staging() {
     assert_eq!(h.fly_calls("list"), 2);
     assert_eq!(h.fly_calls("unset"), 0, "unset after a failed list B");
     assert_eq!(h.fly_calls("deploy"), 0, "deploy after a failed list B");
-    assert_clean_output(&["fly", "sync"], &r);
+    assert_clean_output(&["sync"], &r);
 }
 
 /// Review Focus 4 (import itself fails): Target (5), no unset/deploy afterwards.
@@ -705,7 +701,7 @@ fn list_b_failure_after_staging() {
 fn import_failure_stops_the_run() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_FLY_IMPORT_EXIT", "1");
-    let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
         r.stderr.contains("fly secrets import failed (exit 1)"),
@@ -715,7 +711,7 @@ fn import_failure_stops_the_run() {
     assert_eq!(h.fly_calls("list"), 1);
     assert_eq!(h.fly_calls("unset"), 0);
     assert_eq!(h.fly_calls("deploy"), 0);
-    assert_clean_output(&["fly", "sync"], &r);
+    assert_clean_output(&["sync"], &r);
 }
 
 /// FR-15 / Review Focus 1: a value failing a rule is named by key and rule, never by
@@ -734,7 +730,7 @@ fn rule_failure_names_key_not_value() {
         let named = format!("allumata/OPENAI_API_KEY (failed {rule} (");
 
         h.reset();
-        let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+        let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
         assert_eq!(r.code, 6, "{rule}: {}", r.all());
         assert!(
             r.stderr
@@ -746,9 +742,9 @@ fn rule_failure_names_key_not_value() {
         for sub in ["import", "unset", "deploy"] {
             assert_eq!(h.fly_calls(sub), 0, "{rule}: {sub}");
         }
-        assert_clean_output(&["fly", "sync"], &r);
+        assert_clean_output(&["sync"], &r);
 
-        for cmd in [&["status", "prod"][..], &["fly", "plan", "prod"]] {
+        for cmd in [&["status", "prod"][..], &["plan", "prod"]] {
             h.reset();
             let r = h.run(cmd);
             assert_eq!(r.code, 8, "{rule} {cmd:?}: {}", r.all());
@@ -766,8 +762,8 @@ fn rule_failure_names_key_not_value() {
 /// Commands that read the item (every `op item get` failure path).
 const READERS: &[&[&str]] = &[
     &["status", "prod"],
-    &["fly", "plan", "prod"],
-    &["fly", "sync", "prod"],
+    &["plan", "prod"],
+    &["sync", "prod"],
     &["config", "export", "prod", "--json"],
     &["item", "skeleton", "prod"],
 ];
@@ -861,7 +857,7 @@ fn ci_not_signed_in_advises_service_account_token() {
     h.unset("OP_SERVICE_ACCOUNT_TOKEN")
         .set("CI", "true")
         .set("FAKE_OP_EXIT", "1");
-    let r = h.run(&["fly", "sync", "prod"]);
+    let r = h.run(&["sync", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(
         r.stderr.contains("set OP_SERVICE_ACCOUNT_TOKEN"),
@@ -898,8 +894,8 @@ fn fly_logged_out_is_auth_with_next_step() {
         .set("FAKE_FLY_AUTH_EXIT", "1");
     for cmd in [
         &["status", "prod"][..],
-        &["fly", "plan", "prod"],
-        &["fly", "sync", "prod"],
+        &["plan", "prod"],
+        &["sync", "prod"],
     ] {
         h.reset();
         let r = h.run(cmd);
@@ -921,11 +917,11 @@ fn fly_logged_out_is_auth_with_next_step() {
     }
     h.set("CI", "true");
     h.reset();
-    let r = h.run(&["fly", "sync", "prod"]);
+    let r = h.run(&["sync", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(r.stderr.contains("set FLY_API_TOKEN"), "{}", r.stderr);
     assert!(!r.stderr.contains("auth login"), "{}", r.stderr);
-    assert_clean_output(&["fly", "sync", "prod"], &r);
+    assert_clean_output(&["sync", "prod"], &r);
 }
 
 /// FR-26 / FR-10: with a non-interactive 1Password credential (service account or
@@ -992,7 +988,7 @@ fn fly_token_failure_is_target_without_whoami() {
     h.set("FAKE_FLY_LIST_FAIL_AT", "1")
         .set("FAKE_FLY_AUTH_EXIT", "1")
         .set("FLY_API_TOKEN", "dummy-fly-token");
-    let r = h.run(&["fly", "sync", "prod"]);
+    let r = h.run(&["sync", "prod"]);
     assert_eq!(r.code, 5, "{}", r.all());
     assert!(
         r.stderr.contains(&format!(
@@ -1003,7 +999,7 @@ fn fly_token_failure_is_target_without_whoami() {
     );
     assert!(!r.stderr.contains("dummy-fly-token") && !r.stderr.contains("to see why"));
     assert_eq!(h.fly_calls("whoami"), 0);
-    assert_clean_output(&["fly", "sync", "prod"], &r);
+    assert_clean_output(&["sync", "prod"], &r);
 }
 
 /// FR-10: stable exit codes per category, observed from the real binary (src/error.rs).
@@ -1011,7 +1007,7 @@ fn fly_token_failure_is_target_without_whoami() {
 fn exit_codes() {
     // 0: everything fine.
     let h = Harness::new(&good_item());
-    assert_eq!(h.run(&["fly", "sync", "prod"]).code, 0);
+    assert_eq!(h.run(&["sync", "prod"]).code, 0);
     assert_eq!(h.run(&["status", "prod"]).code, 0);
     assert_eq!(h.run(&["doctor"]).code, 0);
 
@@ -1020,7 +1016,7 @@ fn exit_codes() {
     fs::write(&bad, "[profile]\nkind = 42\n").unwrap();
     h.reset();
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
-        .args(["--config", bad.to_str().unwrap(), "fly", "sync", "prod"])
+        .args(["--config", bad.to_str().unwrap(), "sync", "prod"])
         .env_clear()
         .env("PATH", &h.bin)
         .env("FAKE_REC", &h.rec)
@@ -1031,8 +1027,8 @@ fn exit_codes() {
     assert_eq!(out.status.code(), Some(2));
     assert!(h.calls().is_empty());
     for cmd in [
-        &["fly", "sync", "qa"][..],
-        &["fly", "sync", "prod", "--rotate", "allumata/OPENAI_API_KEY"],
+        &["sync", "qa"][..],
+        &["sync", "prod", "--rotate", "allumata/OPENAI_API_KEY"],
     ] {
         h.reset();
         let r = h.run(cmd);
@@ -1042,18 +1038,14 @@ fn exit_codes() {
 
     // 3: `op` missing from PATH (dependency).
     let no_op = Harness::build(&good_item(), false, true);
-    for cmd in [
-        &["fly", "sync", "prod"][..],
-        &["status", "prod"],
-        &["doctor"],
-    ] {
+    for cmd in [&["sync", "prod"][..], &["status", "prod"], &["doctor"]] {
         let r = no_op.run(cmd);
         assert_eq!(r.code, 3, "{cmd:?}: {}", r.all());
         assert!(r.stderr.contains("dependency error"), "{}", r.stderr);
     }
     // 3: `flyctl` missing from PATH (dependency); nothing staged.
     let no_fly = Harness::build(&good_item(), true, false);
-    let r = no_fly.run(&["fly", "sync", "prod"]);
+    let r = no_fly.run(&["sync", "prod"]);
     assert_eq!(r.code, 3, "{}", r.all());
     assert!(
         r.stderr.contains("flyctl not found on PATH"),
@@ -1064,9 +1056,9 @@ fn exit_codes() {
     // 4: source (op fails with credentials present; malformed item JSON).
     let mut h4 = Harness::new(&good_item());
     h4.set("FAKE_OP_ITEM_EXIT", "1");
-    assert_eq!(h4.run(&["fly", "sync", "prod"]).code, 4);
+    assert_eq!(h4.run(&["sync", "prod"]).code, 4);
     let h4b = Harness::new("{\"fields\": [ not json");
-    let r = h4b.run(&["fly", "sync", "prod"]);
+    let r = h4b.run(&["sync", "prod"]);
     assert_eq!(r.code, 4, "{}", r.all());
 
     // 5: target (list fails).
@@ -1082,7 +1074,7 @@ fn exit_codes() {
             .collect(),
     );
     let h6 = Harness::new(&missing);
-    let r = h6.run(&["fly", "sync", "prod"]);
+    let r = h6.run(&["sync", "prod"]);
     assert_eq!(r.code, 6, "{}", r.all());
     assert!(
         r.stderr.contains("allumata/INTEGRATION_ENC_KEY (missing)"),
@@ -1095,11 +1087,7 @@ fn exit_codes() {
     let mut h7 = Harness::new(&good_item());
     h7.unset("OP_SERVICE_ACCOUNT_TOKEN")
         .set("FAKE_OP_EXIT", "1");
-    for cmd in [
-        &["fly", "sync", "prod"][..],
-        &["status", "prod"],
-        &["doctor"],
-    ] {
+    for cmd in [&["sync", "prod"][..], &["status", "prod"], &["doctor"]] {
         h7.reset();
         let r = h7.run(cmd);
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
@@ -1109,14 +1097,14 @@ fn exit_codes() {
     // 8: findings (status / plan with a missing key).
     h6.reset();
     assert_eq!(h6.run(&["status", "prod"]).code, 8);
-    assert_eq!(h6.run(&["fly", "plan", "prod"]).code, 8);
+    assert_eq!(h6.run(&["plan", "prod"]).code, 8);
 }
 
 /// I3: `--expect-no-change` is gone (usage error, exit 2, nothing spawned).
 #[test]
 fn expect_no_change_flag_is_removed() {
     let h = Harness::new(&good_item());
-    let r = h.run(&["fly", "sync", "prod", "--expect-no-change"]);
+    let r = h.run(&["sync", "prod", "--expect-no-change"]);
     assert_eq!(r.code, 2, "{}", r.all());
     assert!(h.calls().is_empty());
 }
@@ -1133,9 +1121,9 @@ fn broken_stdout_returns_the_command_result() {
     );
     for (item_json, cmd, want) in [
         (missing.clone(), &["status", "prod"][..], 8),
-        (missing, &["fly", "plan", "prod"], 8),
+        (missing, &["plan", "prod"], 8),
         (good_item(), &["status", "prod"], 0),
-        (good_item(), &["fly", "sync", "prod"], 0),
+        (good_item(), &["sync", "prod"], 0),
     ] {
         let h = Harness::new(&item_json);
         let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
@@ -1170,7 +1158,7 @@ fn broken_stdout_returns_the_command_result() {
 fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     let h = Harness::new(&item(good_fields("sk-proj-S7MARKERVALUE\"#frag0011")));
     let rule = "import-hash-after-odd-quotes";
-    for cmd in [&["status", "prod"][..], &["fly", "plan", "prod"]] {
+    for cmd in [&["status", "prod"][..], &["plan", "prod"]] {
         h.reset();
         let r = h.run(cmd);
         assert_eq!(r.code, 8, "{cmd:?}: {}", r.all());
@@ -1184,7 +1172,7 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
         assert_clean_output(cmd, &r);
     }
     h.reset();
-    let r = h.run(&["fly", "sync", "prod", "--prune", "--deploy"]);
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 6, "{}", r.all());
     assert!(
         r.stderr
@@ -1195,7 +1183,7 @@ fn import_refusal_shows_in_status_and_plan_and_blocks_sync() {
     for sub in ["import", "unset", "deploy"] {
         assert_eq!(h.fly_calls(sub), 0, "{sub}");
     }
-    assert_clean_output(&["fly", "sync"], &r);
+    assert_clean_output(&["sync"], &r);
 }
 
 // ----------------------------------------------------------------- FR-21 (--json)
@@ -1226,7 +1214,7 @@ fn status_json_stdout_is_one_json_document() {
 #[test]
 fn fly_plan_json_stdout_is_one_json_document() {
     let h = Harness::new(&good_item());
-    let r = h.run(&["fly", "plan", "prod", "--json"]);
+    let r = h.run(&["plan", "prod", "--json"]);
     assert!(
         serde_json::from_str::<Value>(&r.stdout).is_ok(),
         "not one JSON document: {}",
@@ -1372,7 +1360,7 @@ fn status_json_omits_every_marker_value() {
 #[test]
 fn fly_plan_json_omits_every_marker_value() {
     let h = Harness::new(&good_item());
-    let r = h.run(&["fly", "plan", "prod", "--json"]);
+    let r = h.run(&["plan", "prod", "--json"]);
     serde_json::from_str::<Value>(&r.stdout).expect("one JSON document");
     assert_no_marker("fly plan --json stdout", &r.stdout);
 }
@@ -1403,9 +1391,9 @@ fn status_json_exit_code_matches_text_on_findings() {
 #[test]
 fn fly_plan_json_exit_code_matches_text_on_findings() {
     let h = Harness::new(&item_without_enc());
-    let text = h.run(&["fly", "plan", "prod"]).code;
+    let text = h.run(&["plan", "prod"]).code;
     h.reset();
-    let json = h.run(&["fly", "plan", "prod", "--json"]).code;
+    let json = h.run(&["plan", "prod", "--json"]).code;
     assert_eq!((text, json), (8, 8));
 }
 
@@ -1424,7 +1412,7 @@ fn status_json_error_prints_no_document_on_stdout() {
 fn fly_plan_json_error_prints_no_document_on_stdout() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
-    let r = h.run(&["fly", "plan", "prod", "--json"]);
+    let r = h.run(&["plan", "prod", "--json"]);
     assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
 }
 
@@ -1486,10 +1474,7 @@ fn simple_profile_commands_never_leak_values() {
 #[test]
 fn simple_profile_sync_reads_one_item() {
     let h = simple_harness();
-    let r = h.run_config(
-        SIMPLE_CONFIG,
-        &["fly", "sync", "prod", "--prune", "--deploy"],
-    );
+    let r = h.run_config(SIMPLE_CONFIG, &["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 0, "{}", r.all());
     let gets = h
         .calls()
@@ -1504,7 +1489,7 @@ fn simple_profile_sync_reads_one_item() {
 #[test]
 fn simple_profile_prune_touches_only_declared_keys() {
     let h = simple_harness();
-    let r = h.run_config(SIMPLE_CONFIG, &["fly", "sync", "prod", "--prune"]);
+    let r = h.run_config(SIMPLE_CONFIG, &["sync", "prod", "--prune"]);
     assert_eq!(r.code, 0, "{}", r.all());
     let unset: Vec<Vec<String>> = h
         .calls()
@@ -1938,9 +1923,9 @@ fn rule_failure_reasons_never_carry_a_marker() {
     for (cmd, want) in [
         (&["status", "prod"][..], 8),
         (&["status", "prod", "--json"], 8),
-        (&["fly", "plan", "prod"], 8),
-        (&["fly", "plan", "prod", "--json"], 8),
-        (&["fly", "sync", "prod", "--prune", "--deploy"], 6),
+        (&["plan", "prod"], 8),
+        (&["plan", "prod", "--json"], 8),
+        (&["sync", "prod", "--prune", "--deploy"], 6),
     ] {
         h.reset();
         let r = h.run(cmd);

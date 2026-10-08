@@ -1126,7 +1126,7 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 
 Version 0.3 is acceptable, per phase, when in addition to 1–26:
 
-27. Every Fly command produces byte-identical `flyctl` argv, stdin and output before and after the move onto the ports (characterization tests), and `app/` and `domain/` reach Fly only through the ports (`init`, which writes a Fly configuration, excepted).
+27. Every Fly command produces byte-identical `flyctl` argv, stdin and output before and after the move onto the ports (characterization tests), and `app/` and `domain/` reach Fly only through the ports (`init`, which writes a Fly configuration, and `doctor`, which checks the installed vendor CLIs, excepted; `doctor` gains per-adapter checks in P1).
 28. `opv plan` and `opv sync` behave as `fly plan` and `fly sync` on Fly targets; the `fly` forms still work and print a deprecation warning.
 29. A secret is written to the store and bound by a pinned version reference; a config field is a plain runtime env var, or a store reference with `config = "store"`. No configuration routes a secret to plain env.
 30. `sync` without `--deploy` changes nothing the running app can see, including after a restart; `status` reports the pending deploy.

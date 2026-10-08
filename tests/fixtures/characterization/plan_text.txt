@@ -1,0 +1,12 @@
+$ op item get iprd --vault vprd --format json
+$ flyctl secrets list --app mcproductlabs-portfolio-production --json
+--- stdout
+PRODUCT   KEY                  KIND    STATE    TARGET
+allumata  INTEGRATION_ENC_KEY  secret  saved    absent (new)
+allumata  OPENAI_API_KEY       secret  saved    potentially changed
+allumata  SIGNUP_POLICY        config  saved    -
+allumata  STRIPE_SECRET_KEY    secret  skipped  absent
+2 to stage, 0 held (immutable), 0 to prune
+0 unmanaged on Fly (never touched)
+--- result
+Ok(())

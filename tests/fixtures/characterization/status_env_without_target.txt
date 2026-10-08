@@ -1,0 +1,3 @@
+--- stdout
+--- result
+Err(Config("environment \"dev\" has no fly section (add fly.app and fly.secret_name to use status and the fly commands)"))
