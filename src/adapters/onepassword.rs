@@ -782,7 +782,7 @@ mod tests {
         Environment {
             vault_id: "vstg".into(),
             item_id: "istg".into(),
-            fly: Some(crate::domain::Target::Fly(crate::domain::FlyTarget {
+            target: Some(crate::domain::Target::Fly(crate::domain::FlyTarget {
                 app: "fleet-staging".into(),
                 secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             })),

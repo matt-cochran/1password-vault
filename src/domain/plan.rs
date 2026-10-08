@@ -700,7 +700,7 @@ rules = { transform = "signoz_ingestion_header" }
         fleet.products.insert("q".into(), q);
         for env in fleet.environments.values_mut() {
             // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
-            match env.fly.as_mut().unwrap() {
+            match env.target.as_mut().unwrap() {
                 Target::Fly(f) => f.secret_name_template = "FLEET__{KEY}".into(),
             }
         }
@@ -831,7 +831,7 @@ rules = { transform = "signoz_ingestion_header" }
     #[test]
     fn env_without_fly_plans_rows_and_config_only() {
         let mut fleet = f();
-        fleet.environments.get_mut("prod").unwrap().fly = None;
+        fleet.environments.get_mut("prod").unwrap().target = None;
         let item = vec![
             secret("allumata", "OPENAI_API_KEY", "sk-proj-1"),
             config_field("allumata", "SIGNUP_POLICY", "invite_only"),

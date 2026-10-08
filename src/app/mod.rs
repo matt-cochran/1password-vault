@@ -25,13 +25,14 @@ pub mod sync;
 use std::collections::{BTreeSet, HashSet};
 use std::io::{self, Write};
 
-use crate::adapters::{fly, onepassword};
+use crate::adapters::onepassword;
 use crate::domain::plan;
 use crate::domain::{
-    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, Target,
-    TargetState, key_label,
+    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState,
+    key_label,
 };
 use crate::error::Error;
+use crate::ports::SecretStore;
 use crate::runner::CommandRunner;
 
 /// Fly digests are not computable locally (D0 Q4, ruling P1): every key present on Fly is
@@ -40,48 +41,41 @@ fn no_digest(_: &SecretValue) -> Option<String> {
     None
 }
 
-/// Read the environment's item once (FR-13), list the Fly app once when `with_fly`, and
-/// build the plan. `env_name` must already be resolved (callers do it first); with
-/// `with_fly` the environment must have a Fly target (`Error::Config` otherwise, before
-/// any call).
+/// Read the environment's item once (FR-13), list the target's store once when `store` is
+/// given, and build the plan. `env_name` must already be resolved, and the target opened,
+/// by the caller (so a missing target is `Error::Config` before any call).
 ///
-/// When the environment has a Fly target, every ready secret is also checked against the
-/// Fly import rules ([`fly::entry_refusal`]), so `status` and `fly plan` show a value
-/// `fly sync` would refuse as a failing rule naming product/KEY.
+/// With a store, every ready secret is also checked against the store's own rules
+/// ([`SecretStore::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
+/// failing rule naming product/KEY.
 pub(crate) fn read_and_plan(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
-    with_fly: bool,
+    store: Option<&dyn SecretStore>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let env = fleet.environment(env_name)?;
-    let app = if with_fly {
-        match fleet.target(env_name)?.1 {
-            Target::Fly(t) => Some(t.app.as_str()),
-        }
-    } else {
-        None
-    };
     let item = onepassword::read_item_as(r, env, fleet.profile)?;
-    let on_fly = match app {
-        Some(app) => fly::list(r, app)?,
+    let on_target = match store {
+        Some(s) => s.list()?,
         None => Vec::new(),
     };
+    let refusal = |n: &str, v: &SecretValue| store.and_then(|s| s.refusal(n, v));
     let p = plan::build_with(
         fleet,
         env_name,
         item.fields,
-        &on_fly,
+        &on_target,
         &plan::PlanOptions {
             rotate,
             prune_immutable,
             digest: &no_digest,
-            target_check: &fly::entry_refusal_reason,
+            target_check: &refusal,
         },
     );
-    Ok((p, on_fly))
+    Ok((p, on_target))
 }
 
 /// A failed write to the output stream. A closed pipe never gets here: `main` swallows
@@ -436,6 +430,30 @@ pub(crate) fn unmanaged_on_target<'a>(
         .map(|s| s.name.as_str())
         .filter(|n| !managed.contains(*n))
         .collect())
+}
+
+/// FR-12, §8 item 27: use cases reach a target only through the ports. `init` writes a Fly
+/// configuration and `doctor` checks installed vendor CLIs, so both may name an adapter.
+#[cfg(test)]
+#[test]
+fn use_cases_name_no_target_adapter() {
+    let mut hits = Vec::new();
+    for dir in ["src/app", "src/domain"] {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let exempt = ["init.rs", "doctor.rs", "characterization_tests.rs"];
+            if exempt.iter().any(|x| p.ends_with(x)) {
+                continue;
+            }
+            let s = std::fs::read_to_string(&p).unwrap();
+            // Built at runtime so this test does not match itself.
+            let needle = ["fly", "::"].concat();
+            if s.contains(&needle) {
+                hits.push(p);
+            }
+        }
+    }
+    assert!(hits.is_empty(), "a target adapter named in core: {hits:?}");
 }
 
 #[cfg(test)]

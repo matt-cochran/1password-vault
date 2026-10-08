@@ -203,7 +203,7 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
             Environment {
                 vault_id: e.vault_id,
                 item_id: e.item_id,
-                fly,
+                target: fly,
                 modes: e.modes,
             },
         );
@@ -276,7 +276,7 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
             Environment {
                 vault_id: e.vault_id,
                 item_id: e.item_id,
-                fly,
+                target: fly,
                 modes,
             },
         );
@@ -285,7 +285,7 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
     // each would prune what the other stages (FR-8).
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for (name, env) in &environments {
-        if let Some(Target::Fly(f)) = &env.fly
+        if let Some(Target::Fly(f)) = &env.target
             && let Some(prev) = seen.insert(&f.app, name)
         {
             return Err(cfg(format!(
@@ -410,7 +410,7 @@ fn validate_key(
 fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<(), Error> {
     let mut seen: BTreeMap<(&str, &str), &str> = BTreeMap::new();
     for (name, env) in environments {
-        if let Some(Target::Fly(f)) = &env.fly
+        if let Some(Target::Fly(f)) = &env.target
             && let Some(prev) = seen.insert((&f.app, &f.secret_name_template), name)
         {
             return Err(cfg(format!(
@@ -429,7 +429,7 @@ fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<
 /// run (FR-2, FR-8).
 fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
     for (env_name, env) in &fleet.environments {
-        let Some(Target::Fly(fly)) = &env.fly else {
+        let Some(Target::Fly(fly)) = &env.target else {
             continue;
         };
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(prod.vault_id, "vprd");
         assert_eq!(prod.item_id, "iprd");
         assert_eq!(
-            match prod.fly.as_ref().unwrap() {
+            match prod.target.as_ref().unwrap() {
                 Target::Fly(f) => f.app.as_str(),
             },
             "mcproductlabs-portfolio-production"
@@ -890,7 +890,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             ok()
         );
         let f = parse(&t).unwrap();
-        assert!(f.environments["dev"].fly.is_none());
+        assert!(f.environments["dev"].target.is_none());
         assert!(matches!(
             f.target("dev"),
             Err(Error::Config(m)) if m.contains("dev") && m.contains("no fly section")

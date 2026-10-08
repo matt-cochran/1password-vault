@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err, write_json};
+use crate::adapters;
 use crate::domain::{Fleet, KeyState, Kind, Row, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -33,9 +34,9 @@ pub fn run_with(
     json: bool,
 ) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    fleet.target(env_name)?;
+    let (store, _) = adapters::open(fleet.target(env_name)?.1, r);
     let none = BTreeSet::new();
-    let (plan, _) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
+    let (plan, _) = read_and_plan(fleet, env_name, r, Some(store.as_ref()), &none, &none)?;
     if json {
         write_json(out, fleet, env_name, &plan)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();

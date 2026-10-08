@@ -146,8 +146,8 @@ impl Target {
 pub struct Environment {
     pub vault_id: String,
     pub item_id: String,
-    /// The parsed target: `None` when the environment has no `fly` section.
-    pub fly: Option<Target>,
+    /// The deployment target (FR-28): `None` when the environment declares none.
+    pub target: Option<Target>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -155,7 +155,7 @@ pub struct Environment {
 impl Environment {
     /// The environment's deployment target, or `None` when it has none.
     pub fn target(&self) -> Option<&Target> {
-        self.fly.as_ref()
+        self.target.as_ref()
     }
 
     /// Store name for `product`/`key`, or `None` when the environment has no target.
@@ -227,7 +227,7 @@ impl Fleet {
     /// undefined or has no `fly` section (status, `fly plan`, `fly sync` need one).
     pub fn target(&self, env: &str) -> Result<(&Environment, &Target), Error> {
         let e = self.environment(env)?;
-        match &e.fly {
+        match &e.target {
             Some(t) => Ok((e, t)),
             None if self.is_simple() => Err(Error::Config(format!(
                 "environment {env:?} has no fly section (add fly.app to use status and the \
@@ -251,7 +251,7 @@ impl Fleet {
     /// # Panics
     /// If `env` is not a defined environment with a target. Callers resolve it first.
     pub fn target_name(&self, env: &str, product: &str, key: &str) -> String {
-        match self.environments.get(env).and_then(|e| e.fly.as_ref()) {
+        match self.environments.get(env).and_then(|e| e.target.as_ref()) {
             Some(t) => t.target_name(product, key),
             None => panic!("fly_name: environment {env:?} undefined or without fly"),
         }
@@ -267,7 +267,7 @@ mod tests {
         let e = Environment {
             vault_id: "v".into(),
             item_id: "i".into(),
-            fly: Some(Target::Fly(FlyTarget {
+            target: Some(Target::Fly(FlyTarget {
                 app: "a".into(),
                 secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             })),
@@ -277,7 +277,7 @@ mod tests {
             e.target_name("my-app", "API_KEY").as_deref(),
             Some("FLEET__MY_APP__API_KEY")
         );
-        let no_fly = Environment { fly: None, ..e };
+        let no_fly = Environment { target: None, ..e };
         assert_eq!(no_fly.target_name("my-app", "API_KEY"), None);
     }
 
