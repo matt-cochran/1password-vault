@@ -324,10 +324,12 @@ fn validate_key(
         )));
     }
     // `run` removes every declared name from the inherited environment (#53), so a key named
-    // after `op`'s own context would strip it: PATH finds `op`, OP_* holds its sign-in.
-    if key == "PATH" || key.starts_with("OP_") {
+    // after `op`'s own context would strip it: PATH finds `op`, HOME and XDG_CONFIG_HOME
+    // locate its configuration, OP_* holds its sign-in.
+    if matches!(key, "PATH" | "HOME" | "XDG_CONFIG_HOME") || key.starts_with("OP_") {
         return Err(cfg(format!(
-            "{owner}: key name is reserved (PATH and OP_* are the 1Password CLI's own environment)"
+            "{owner}: key name is reserved (PATH, HOME, XDG_CONFIG_HOME and OP_* are the \
+             1Password CLI's own environment)"
         )));
     }
     for env in &spec.environments {
@@ -687,7 +689,13 @@ mod tests {
 
     #[test]
     fn op_environment_names_are_reserved_key_names() {
-        for key in ["PATH", "OP_SESSION_MY", "OP_SERVICE_ACCOUNT_TOKEN"] {
+        for key in [
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "OP_SESSION_MY",
+            "OP_SERVICE_ACCOUNT_TOKEN",
+        ] {
             let m = config_err(&format!(
                 "{}{}",
                 ok(),

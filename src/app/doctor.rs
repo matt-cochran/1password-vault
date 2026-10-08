@@ -128,7 +128,9 @@ fn run_on(
         CONFIG_CHECK,
         config.map(|f| Check::Ok(config_summary(&f))),
     )?;
-    line(out, "op", op_version(r, host))?;
+    let op_check = op_version(r, host);
+    let op_present = op_check.is_ok();
+    line(out, "op", op_check)?;
     line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
     match fly_envs {
         Some((true, without)) => {
@@ -156,8 +158,15 @@ fn run_on(
             }
         }
     }
-    if !cfg!(windows) {
+    if cfg!(windows) {
+    } else if op_present {
         line(out, "op local run", local_run(r, local_only))?;
+    } else {
+        writeln!(
+            out,
+            "skip  op local run: op not available (see the op line above)"
+        )
+        .map_err(write_err)?;
     }
     let next = next.unwrap_or_else(|| "Next step: nothing pending".into());
     writeln!(out, "{next}").map_err(write_err)?;

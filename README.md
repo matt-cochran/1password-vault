@@ -57,7 +57,7 @@ opv doctor                     # config, op, flyctl and sign-in; ends with the n
 opv status staging             # one row per key: saved, missing, wrong kind or failing a rule
 opv plan staging               # what a sync would stage, hold and prune; changes nothing
 opv sync staging --deploy      # stage on the target, deploy only if something changed
-opv check dev                  # local keys saved? names only, no deployment target
+opv check staging              # every key saved? names only, no deployment target touched
 opv run staging -- ./server    # run a process with the secrets in its environment
 ```
 

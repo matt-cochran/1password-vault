@@ -113,5 +113,5 @@ account provisioning. The owner configures a disposable development item, runs d
 check and a real product smoke test, then records product/tool versions, success/failure
 and missing names only. Verify local execution before remote propagation.
 
-Tested with: `op` 2.40.0+, WSL 2 (Ubuntu) with the Linux `op`, macOS and Linux natively, and
-Windows natively in PowerShell.
+Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op`; native Linux, macOS and Windows
+(PowerShell). Automated tests use fake CLIs; live receipts are recorded on issues #52–#54.

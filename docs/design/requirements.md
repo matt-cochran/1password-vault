@@ -229,6 +229,8 @@ The CLI shall provide:
 opv fly plan <environment>
 ```
 
+Since v0.4 the command is `opv plan <environment>` (FR-28); the `fly` form is removed.
+
 The command shall produce a human-readable synchronization plan without exposing secret values.
 
 The plan should classify keys as:
@@ -250,6 +252,8 @@ The CLI shall provide:
 ```bash
 opv fly sync <environment>
 ```
+
+Since v0.4 the command is `opv sync <environment>` (FR-28); the `fly` form is removed (also for `--deploy`, FR-7).
 
 The command shall:
 
@@ -653,7 +657,7 @@ opv check <environment> [--product <product>] [--json]
 
 - Before starting `op run`, `run` removes from the inherited environment every key name declared in the loaded configuration (all products, all environments, mode-skipped keys included), then adds only the selected product's applicable references. Switching products in one shell never carries another product's managed key into the child.
 - PATH, shell and tool context, 1Password authentication and undeclared variables stay inherited: this is managed-key isolation, not a sandbox.
-- Key names that are the 1Password CLI's own environment (`PATH` and `OP_*`) are refused at configuration load, because removing them would break `op`.
+- Key names that are the 1Password CLI's own environment (`PATH`, `HOME`, `XDG_CONFIG_HOME` and `OP_*`) are refused at configuration load, because removing them would break `op`.
 - A runner that cannot remove variables fails closed (exit 3) instead of starting the child with stale values.
 
 ## FR-36 — Local-Only Onboarding and Diagnostics
@@ -1169,11 +1173,11 @@ Version 0.3 is acceptable, per phase, when in addition to 1–26:
 35. A missing runtime-identity grant blocks `--deploy` and names the identity and the entry.
 36. Items 9 and 10 hold for every adapter, checked by a shared marker-value test that config values never reach argv either.
 
-Version 0.4 is acceptable when, in addition to 1–36:
+Version 0.4 is acceptable when, in addition to 1–36 (item 42 supersedes items 21 and 28, which described the deprecated forms):
 
 37. `opv check` reports every selected key by name with no value, makes no target call, ignores other products' sections when `--product` is given, and exits 8 on blocking keys, 3 without `op` and 7 when signed out.
 38. `opv run` removes other products' and mode-skipped declared names, keeps PATH and undeclared variables, passes the child's exit status through, and does not leak an outer product's key into a nested run (real child-process tests).
-39. A key named `PATH` or `OP_*` is a configuration error.
+39. A key named `PATH`, `HOME`, `XDG_CONFIG_HOME` or `OP_*` is a configuration error.
 40. `opv init` without `--fly-app` writes a run-only environment; with it, output is unchanged.
 41. `doctor` reports `op local run` on every run off Windows: a Windows `op.exe` fails a local-only scope and warns otherwise, with every other check and a `Next step` line still printed.
 42. `opv fly plan` / `opv fly sync` are removed (usage error, exit 2), and `transform = "signoz_ingestion_header"` is a configuration error naming the key and its replacement.

@@ -190,7 +190,3 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | Fly import rules | `not a valid Fly secret name`, `contains a line break`, `a # follows an odd number of double quotes`, `too long for one Fly import line`, `not valid UTF-8`, `name occurs twice in one import` |
 
 `pem_private_key` refuses an encrypted key, whether it has a `Proc-Type` header or the PKCS#8 `ENCRYPTED PRIVATE KEY` label.
-
-
-Local-only setup, scoped check/doctor, product switching and WSL support in v0.4:
-[Local development](local-development.md).

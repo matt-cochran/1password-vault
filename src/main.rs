@@ -49,7 +49,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Check the configuration, op and its sign-in, and flyctl and its sign-in.
+    /// Check the configuration, op and its sign-in, flyctl and its sign-in, and whether op can
+    /// start local commands; --env limits it to what one environment needs.
     Doctor {
         /// Check only this environment.
         #[arg(long)]
@@ -60,7 +61,9 @@ enum Cmd {
     },
     /// Validate credential fields without contacting a deployment target.
     Check {
+        /// Environment name from the configuration (for example dev).
         env: String,
+        /// Product whose keys are checked (fleet profile only; required there).
         #[arg(long)]
         product: Option<String>,
         /// Print names and states as JSON, never values.
@@ -133,7 +136,8 @@ enum Cmd {
         /// Item title in that vault, matched exactly.
         #[arg(long)]
         item: String,
-        /// Fly app of the environment (not looked up; flyctl is not called).
+        /// Fly app of the environment (not looked up; flyctl is not called). Omit it for a
+        /// run-only environment used for local development.
         #[arg(long, value_name = "APP")]
         fly_app: Option<String>,
         /// Profile to write; without it, it follows the item's shape.
