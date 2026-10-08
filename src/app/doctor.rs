@@ -420,12 +420,14 @@ mod tests {
     const CHECK_LINES: usize = if cfg!(windows) { 5 } else { 6 };
 
     /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
+    #[cfg(not(windows))]
     fn doctor_local_only(r: &FakeRunner) -> (Result<(), Error>, String) {
         let mut out = Vec::new();
         let res = run_on(Ok(fleet()), r, &|| linux(), true, &mut out);
         (res, text_of(&out))
     }
 
+    #[cfg(not(windows))]
     fn windows_op(r: &FakeRunner) -> &FakeRunner {
         *r.local_run_error.borrow_mut() = Some(io::ErrorKind::Unsupported);
         r
