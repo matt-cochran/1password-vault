@@ -59,6 +59,26 @@ pub trait CommandRunner {
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32>;
 
+    /// Check that the native CLI can execute a child for local run (not metadata reads).
+    fn local_run_supported(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Remove managed parent variables before adding selected references.
+    fn run_inherited_clean(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        remove: &[String],
+    ) -> io::Result<i32> {
+        if remove.is_empty() {
+            self.run_inherited(program, args, env)
+        } else {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
     /// A short read-only diagnosis call (`op whoami`, `op account list`, `flyctl auth
     /// whoami`; FR-26): no stdin, no extra env, killed after `limit` (a `TimedOut` error).
     /// The default delegates to [`CommandRunner::run`], so fakes record it like any call.
@@ -134,6 +154,33 @@ impl Default for ProcessRunner {
     }
 }
 
+/// Read only the executable header, never any credential source.
+fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
+    let mut header = [0u8; 2];
+    match std::fs::File::open(path)?.read_exact(&mut header) {
+        Ok(()) => Ok(header == *b"MZ"),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The first `op` on `paths` (a `PATH` value) must be a native binary: `Unsupported` when it
+/// is a Windows executable (WSL with `op` linked to `op.exe`), `Ok` when it is native or
+/// absent (a missing `op` is reported by the call that needs it).
+fn native_op_on(paths: &std::ffi::OsStr) -> io::Result<()> {
+    for dir in std::env::split_paths(paths) {
+        let path = dir.join("op");
+        if path.is_file() {
+            return if windows_binary(&path)? {
+                Err(io::ErrorKind::Unsupported.into())
+            } else {
+                Ok(())
+            };
+        }
+    }
+    Ok(())
+}
+
 fn timed_out(program: &str, limit: Duration) -> io::Error {
     io::Error::new(
         io::ErrorKind::TimedOut,
@@ -145,6 +192,15 @@ fn timed_out(program: &str, limit: Duration) -> io::Error {
 }
 
 impl CommandRunner for ProcessRunner {
+    fn local_run_supported(&self) -> io::Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        match std::env::var_os("PATH") {
+            Some(paths) => native_op_on(&paths),
+            None => Ok(()),
+        }
+    }
     fn run(
         &self,
         program: &str,
@@ -221,6 +277,27 @@ impl CommandRunner for ProcessRunner {
         ProcessRunner::with_timeout(limit.min(self.timeout)).run(program, args, None, &[])
     }
 
+    fn run_inherited_clean(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        remove: &[String],
+    ) -> io::Result<i32> {
+        let mut cmd = Command::new(program);
+        for key in remove {
+            cmd.env_remove(key);
+        }
+        let status = cmd
+            .args(args)
+            .envs(env.iter().copied())
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        Ok(exit_code(status))
+    }
+
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
         let status = Command::new(program)
             .args(args)
@@ -252,6 +329,7 @@ pub mod fake {
         pub env: Vec<(String, String)>,
         /// True for `run_inherited` calls.
         pub inherited: bool,
+        pub removed: Vec<String>,
     }
 
     impl std::fmt::Debug for Call {
@@ -272,6 +350,7 @@ pub mod fake {
     pub struct FakeRunner {
         pub calls: RefCell<Vec<Call>>,
         pub responses: RefCell<VecDeque<io::Result<Output>>>,
+        pub local_run_error: RefCell<Option<io::ErrorKind>>,
     }
 
     impl FakeRunner {
@@ -279,6 +358,7 @@ pub mod fake {
             Self {
                 calls: RefCell::default(),
                 responses: RefCell::new(responses.into_iter().map(Ok).collect()),
+                local_run_error: RefCell::new(None),
             }
         }
 
@@ -306,6 +386,7 @@ pub mod fake {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
                 inherited,
+                removed: Vec::new(),
             });
             match self.responses.borrow_mut().pop_front() {
                 Some(r) => r,
@@ -323,6 +404,13 @@ pub mod fake {
     }
 
     impl CommandRunner for FakeRunner {
+        fn local_run_supported(&self) -> io::Result<()> {
+            match *self.local_run_error.borrow() {
+                Some(kind) => Err(kind.into()),
+                None => Ok(()),
+            }
+        }
+
         fn run(
             &self,
             program: &str,
@@ -331,6 +419,20 @@ pub mod fake {
             env: &[(&str, &str)],
         ) -> io::Result<Output> {
             self.record(program, args, stdin, env, false)
+        }
+
+        fn run_inherited_clean(
+            &self,
+            program: &str,
+            args: &[&str],
+            env: &[(&str, &str)],
+            remove: &[String],
+        ) -> io::Result<i32> {
+            let result = self.run_inherited(program, args, env);
+            if let Some(call) = self.calls.borrow_mut().last_mut() {
+                call.removed = remove.to_vec();
+            }
+            result
         }
 
         /// Returns the queued response's `status` as the exit code.
@@ -562,5 +664,44 @@ mod tests {
             .run("opv-definitely-not-installed", &[], None, &[])
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn recognizes_windows_cli_header_without_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, b"MZsynthetic").unwrap();
+        assert!(windows_binary(&path).unwrap());
+    }
+
+    #[test]
+    fn shell_cli_header_is_not_windows_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, b"#!/bin/sh").unwrap();
+        assert!(!windows_binary(&path).unwrap());
+    }
+
+    #[test]
+    fn windows_op_first_on_path_is_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("op"), b"MZ\x90\x00").unwrap();
+        let kind = native_op_on(dir.path().as_os_str()).unwrap_err().kind();
+        assert_eq!(kind, io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn native_op_first_on_path_is_supported() {
+        let (win, native) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(native.path().join("op"), b"\x7fELF").unwrap();
+        std::fs::write(win.path().join("op"), b"MZ").unwrap();
+        let paths = std::env::join_paths([native.path(), win.path()]).unwrap();
+        assert!(native_op_on(&paths).is_ok());
+    }
+
+    #[test]
+    fn missing_op_on_path_is_left_to_the_call() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(native_op_on(dir.path().as_os_str()).is_ok());
     }
 }

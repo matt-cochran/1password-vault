@@ -41,7 +41,7 @@ If the 1Password item already exists, let opv write the file. It looks the vault
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging
 ```
 
-Repeat per environment by adding the next `[environments.<env>]` block by hand (vault ID, item ID, `fly.app`), copying the IDs from `opv init` output or from `op vault list --format json` and `op item list --vault <vault> --format json` (these list IDs and titles, not values). Then add rules where the user knows the format of a value, for example `rules = { prefix = "sk-" }` or `rules = { base64_bytes = 32 }`; see [configuration.md](configuration.md#rules-reference). Mark keys that must never change once set (encryption keys) with `immutable = true`.
+Repeat per environment by adding the next `[environments.<env>]` block by hand (vault ID and item ID, plus `fly.app` only for an environment that deploys to Fly; a local-only `dev` environment has none), copying the IDs from `opv init` output or from `op vault list --format json` and `op item list --vault <vault> --format json` (these list IDs and titles, not values). Then add rules where the user knows the format of a value, for example `rules = { prefix = "sk-" }` or `rules = { base64_bytes = 32 }`; see [configuration.md](configuration.md#rules-reference). Mark keys that must never change once set (encryption keys) with `immutable = true`.
 
 If there is no item yet, write `secrets.toml` from the example in [configuration.md](configuration.md), then (with the user's yes) run `opv item skeleton <env>` to create the empty fields.
 
@@ -51,7 +51,7 @@ Then:
 opv doctor
 ```
 
-It checks the file, `op` and its sign-in, and `flyctl` and its sign-in, and ends with a `Next step` line. Do what that line says before continuing.
+It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`), and ends with a `Next step` line. Do what that line says before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need.
 
 ## 4. Get every key to "saved"
 
@@ -96,6 +96,8 @@ opv run dev -- docker compose up             # Compose reads ${VAR} from this en
 ```
 
 - Make sure the keys the app needs are declared for that environment (`environments = ["dev", ...]`). A local-only environment needs only `vault_id` and `item_id`, no target section.
+- Before the first run, `opv check dev` (fleet: `opv check dev --product <p>`) reports each key as saved, missing, of the wrong kind or failing a rule, by name only, and exits 8 if anything needs fixing. It never touches a deployment target.
+- `opv run` removes every key name declared in the configuration from the inherited environment before adding the selected product's references, so switching products in one shell does not leak the previous product's keys. Other variables (PATH, tool settings, 1Password sign-in) are kept: it is not a sandbox.
 - If a script or framework reads a `.env` file, change it to read the process environment, or replace Compose `env_file:` with `environment:` entries without values, and run it under `opv run`. Then delete the `.env` file from the workflow (ask before deleting the user's files) and make sure `.env` is in `.gitignore`.
 - Update the project's README or `package.json` scripts to call `opv run`, for example `"dev": "opv run dev -- next dev"`, so everyone uses the same entry point.
 - `op run` masks secret values the program prints. If the user asks to see a value, point them to the 1Password app; do not unmask it.
@@ -119,4 +121,4 @@ More patterns: [usage.md](usage.md#local-development).
 | 5 | target (Fly) error | the message names the app; check the token and that the app exists |
 | 6 | refused | a key is missing, of the wrong kind or failing a rule; run `opv status` |
 | 7 | not signed in | run the sign-in command opv prints |
-| 8 | findings | `status` or `plan` found keys to fix; see step 4 |
+| 8 | findings | `status`, `plan` or `check` found keys to fix; see step 4 |

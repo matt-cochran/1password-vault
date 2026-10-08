@@ -20,7 +20,7 @@ allumata  INTEGRATION_ENC_KEY  secret  saved    absent
 allumata  OPENAI_API_KEY       secret  saved    absent
 allumata  SIGNUP_POLICY        config  saved    -
 allumata  STRIPE_SECRET_KEY    secret  skipped  absent
-3 saved, 2 not yet on Fly (staged by the next fly sync), 0 findings
+3 saved, 2 not yet on Fly (staged by the next sync), 0 findings
 ```
 
 ## Why
@@ -57,6 +57,7 @@ opv doctor                     # config, op, flyctl and sign-in; ends with the n
 opv status staging             # one row per key: saved, missing, wrong kind or failing a rule
 opv plan staging               # what a sync would stage, hold and prune; changes nothing
 opv sync staging --deploy      # stage on the target, deploy only if something changed
+opv check staging              # every key saved? names only, no deployment target touched
 opv run staging -- ./server    # run a process with the secrets in its environment
 ```
 
@@ -86,6 +87,7 @@ rules = { base64_bytes = 32 }
 
 - [Installing](docs/install.md): install script, release binaries, npm, from source, verifying downloads, prerequisites.
 - [Configuration](docs/configuration.md): store layout, `secrets.toml`, the fleet and simple profiles, `opv init`, rules and failure reasons.
+- [Local development](docs/local-development.md): local-only environments, `opv check`, switching products, WSL.
 - [Usage](docs/usage.md): every command, JSON output, change detection, pruning, exit codes, security model, GitHub Actions.
 - [Setting up with an AI assistant](docs/agent-setup.md): a step-by-step procedure and safety rules for Claude Code, Codex, Cursor and similar; [llms.txt](llms.txt) indexes the docs for them.
 - [Design](docs/design/): requirements, design decisions and plans, for contributors.

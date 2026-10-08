@@ -164,7 +164,7 @@ fn top_level_help_describes_config_discovery() {
 fn usage_errors_exit_2() {
     for args in [
         vec!["--config", CFG, "config", "export", "prod"], // --json is required
-        vec!["--config", CFG, "fly", "sync"],
+        vec!["--config", CFG, "sync"],
         vec!["nonsense"],
     ] {
         let (code, _, err) = opv(&args);
@@ -177,7 +177,6 @@ fn invalid_rotate_entry_exits_2() {
     let (code, _, err) = opv(&[
         "--config",
         CFG,
-        "fly",
         "sync",
         "prod",
         "--rotate",
@@ -202,7 +201,7 @@ fn invalid_prune_immutable_entry_exits_2() {
         &["--prune", "--prune-immutable", "allumata/OPENAI_API_KEY"][..], // not immutable
         &["--prune-immutable", "allumata/INTEGRATION_ENC_KEY"],           // without --prune
     ] {
-        let mut args = vec!["--config", CFG, "fly", "sync", "prod"];
+        let mut args = vec!["--config", CFG, "sync", "prod"];
         args.extend(extra);
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{extra:?}: {err}");
@@ -212,7 +211,7 @@ fn invalid_prune_immutable_entry_exits_2() {
 
 #[test]
 fn expect_no_change_is_not_a_flag() {
-    let (code, _, err) = opv(&["--config", CFG, "fly", "sync", "prod", "--expect-no-change"]);
+    let (code, _, err) = opv(&["--config", CFG, "sync", "prod", "--expect-no-change"]);
     assert_eq!(code, 2, "{err}");
 }
 
@@ -231,8 +230,8 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
     let cfg = cfg.to_str().unwrap();
     for cmd in [
         vec!["status", "dev"],
-        vec!["fly", "plan", "dev"],
-        vec!["fly", "sync", "dev"],
+        vec!["plan", "dev"],
+        vec!["sync", "dev"],
     ] {
         let mut args = vec!["--config", cfg];
         args.extend(&cmd);
@@ -270,8 +269,8 @@ fn help_has_examples_and_no_requirement_ids() {
     for args in [
         vec!["--help"],
         vec!["status", "--help"],
-        vec!["fly", "sync", "--help"],
-        vec!["fly", "plan", "--help"],
+        vec!["sync", "--help"],
+        vec!["plan", "--help"],
         vec!["run", "--help"],
         vec!["doctor", "--help"],
         vec!["item", "skeleton", "--help"],
@@ -305,25 +304,6 @@ fn run_requires_product_and_command() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{args:?}: {err}");
     }
-}
-
-#[test]
-fn deprecated_signoz_transform_prints_a_warning_on_stderr() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("secrets.toml");
-    let text = std::fs::read_to_string(CFG).unwrap();
-    std::fs::write(
-        &cfg,
-        format!(
-            "{text}\n[products.p.keys.TRACE]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ transform = \"signoz_ingestion_header\" }}\n"
-        ),
-    )
-    .unwrap();
-    let (_, _, err) = opv(&["--config", cfg.to_str().unwrap(), "status", "prod"]);
-    assert!(
-        err.contains("warning: p/TRACE: transform = \"signoz_ingestion_header\" is deprecated"),
-        "{err}"
-    );
 }
 
 const SIMPLE: &str = "tests/fixtures/simple.toml";
@@ -639,76 +619,18 @@ fn init_ignores_discovery_and_writes_nothing_when_op_is_missing() {
     drop(dir);
 }
 
+/// 0.4.0: the `fly` subcommand is gone; clap reports an unknown subcommand (exit 2).
+#[test]
+fn fly_subcommand_is_removed() {
+    let (code, _, _) = opv(&["--config", CFG, "fly", "sync", "prod"]);
+    assert_eq!(code, 2);
+}
+
 /// P0 Task 5: `opv plan` is a top-level command.
 #[test]
 fn plan_is_a_top_level_command() {
     let (code, _, _) = opv(&["plan", "--help"]);
     assert_eq!(code, 0);
-}
-
-/// P0 Task 5: the `fly plan` alias warns on stderr before doing anything.
-#[test]
-fn fly_plan_prints_deprecation_warning() {
-    let (_, _, err) = opv(&["--config", CFG, "fly", "plan", "prod"]);
-    assert!(
-        err.contains("\"fly plan\" is deprecated; use \"opv plan\""),
-        "{err}"
-    );
-}
-
-/// Exit code of `opv <args>` with fake `op` (an item missing every desired prod key) and
-/// `flyctl` on PATH, so plan finds blocking rows and sync refuses before staging.
-#[cfg(unix)]
-fn code_with_fakes(args: &[&str]) -> Option<i32> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    let write = |name: &str, body: &str| {
-        let p = bin.join(name);
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-    };
-    write("op", "#!/bin/sh\n/bin/cat \"$OP_ITEM\"\n");
-    write(
-        "flyctl",
-        "#!/bin/sh\ncase \"$1 $2\" in \"secrets list\") /bin/cat \"$FLY_LIST\" ;; esac\n",
-    );
-    let mut a = vec!["--config", CFG];
-    a.extend(args);
-    Command::new(env!("CARGO_BIN_EXE_opv"))
-        .args(a)
-        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
-        .env("PATH", &bin)
-        .env("OP_ITEM", "tests/fixtures/op_item.json")
-        .env("FLY_LIST", "tests/fixtures/fly_list.json")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .unwrap()
-        .status
-        .code()
-}
-
-/// A refused `fly sync` alias exits like `sync`: policy (6).
-#[cfg(unix)]
-#[test]
-fn fly_sync_alias_exits_like_sync() {
-    let pair = (
-        code_with_fakes(&["fly", "sync", "prod"]),
-        code_with_fakes(&["sync", "prod"]),
-    );
-    assert_eq!(pair, (Some(6), Some(6)));
-}
-
-/// A `fly plan` alias with blocking rows exits like `plan`: findings (8).
-#[cfg(unix)]
-#[test]
-fn fly_plan_alias_exits_like_plan() {
-    let pair = (
-        code_with_fakes(&["fly", "plan", "prod"]),
-        code_with_fakes(&["plan", "prod"]),
-    );
-    assert_eq!(pair, (Some(8), Some(8)));
 }
 
 #[test]
@@ -724,4 +646,70 @@ fn init_rejects_config_flag_and_bad_profile() {
     let (code, _, err) = opv_in(dir.path(), &a);
     assert_eq!(code, 2, "{err}");
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+/// Exit code of `opv <args>` with only a fake `op` on PATH: `script` is its shell body. The
+/// fixture item has no allumata fields, so every desired key is missing.
+#[cfg(unix)]
+fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let op = dir.path().join("op");
+    std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(args)
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("OP_ITEM", "tests/fixtures/op_item.json")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap()
+        .status
+        .code()
+}
+
+/// #52: `check` without `op` is a dependency error, before any target is considered.
+#[test]
+fn check_without_op_exits_3() {
+    let (code, _, err) = opv(&["--config", CFG, "check", "prod", "--product", "allumata"]);
+    assert_eq!(code, 3, "{err}");
+}
+
+/// #52: `check` reports missing keys as findings (exit 8).
+#[cfg(unix)]
+#[test]
+fn check_with_missing_keys_exits_8() {
+    let code = code_with_op(
+        "/bin/cat \"$OP_ITEM\"",
+        &["--config", CFG, "check", "prod", "--product", "allumata"],
+    );
+    assert_eq!(code, Some(8));
+}
+
+/// #52: a signed-out `op` makes `check` an authentication error (exit 7).
+#[cfg(unix)]
+#[test]
+fn check_when_signed_out_exits_7() {
+    let code = code_with_op(
+        "exit 1",
+        &["--config", CFG, "check", "prod", "--product", "allumata"],
+    );
+    assert_eq!(code, Some(7));
+}
+
+/// #52: `doctor --product` needs `--env` (usage error, exit 2).
+#[test]
+fn doctor_product_requires_env() {
+    let (code, _, _) = opv(&["--config", CFG, "doctor", "--product", "allumata"]);
+    assert_eq!(code, 2);
+}
+
+/// #52: `init` accepts a run-only environment without `--fly-app` (it gets as far as `op`).
+#[test]
+fn init_accepts_a_run_only_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, _, err) = opv_in(dir.path(), &["init", "dev", "--vault", "v", "--item", "i"]);
+    assert_eq!(code, 3, "{err}");
 }

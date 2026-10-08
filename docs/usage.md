@@ -5,7 +5,8 @@
 Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config`, the path is used exactly as given and no search is done. `<ENV>` is an environment name from the file.
 
 ```sh
-opv doctor                          # config, op and sign-in, flyctl and sign-in
+opv doctor                          # config, op and sign-in, flyctl and sign-in, op local run
+opv doctor --env dev --product allumata   # only what local work in dev needs; no deployment CLIs
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status staging                  # one row per product and key; exit 8 if any blocks
@@ -15,11 +16,10 @@ opv plan staging --json             # the same plan as one machine-readable JSON
 opv sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
+opv check dev --product allumata    # each key saved, missing, wrong kind or failing a rule; exit 8 if any
 opv run dev --product allumata -- cargo run
 opv run prod -- ./server            # simple profile: no --product
 ```
-
-`opv fly plan` and `opv fly sync` remain as deprecated aliases for one minor release: they print a warning on stderr and behave exactly like `opv plan` and `opv sync`.
 
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
 2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values.
@@ -27,7 +27,8 @@ opv run prod -- ./server            # simple profile: no --product
 4. `sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
-7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file. See [Local development](#local-development).
+7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. `--json` prints `schema_version`, `environment`, `target_checked: false`, `rows` (product, key, state, rule, reason) and `findings`.
+8. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. It writes no `.env` file. See [Local development](#local-development).
 
 ### Next step
 
@@ -138,6 +139,8 @@ Common setups:
 | An editor or debugger whose run configurations inherit the variables | `opv run dev -- code .` |
 | Config values (not secrets) as JSON for another tool | `opv config export dev --json` |
 
+Before the first run, `opv check dev` (fleet: `--product <p>`) tells you which keys are missing, of the wrong kind or failing a rule, by name only. `run` removes every key name declared in the configuration from the inherited environment before adding the selected keys, so switching products in one shell never leaks the previous product's keys; everything else (PATH, tool settings, the 1Password sign-in) is inherited, so this is not a sandbox. The full local guide, including WSL, is [local-development.md](local-development.md).
+
 `op run` masks secret values that the command prints to stdout. `run` needs a signed-in `op` (the 1Password desktop app integration or `op signin`); it exits with the command's own exit code.
 
 There is no command that writes a `.env` file or prints `export` lines, on purpose: a secret never lands on disk (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead (most frameworks fall back to it, and Compose's `env_file` can be replaced by `environment:` entries without values).
@@ -148,12 +151,12 @@ There is no command that writes a `.env` file or prints `export` lines, on purpo
 |---|---|
 | 0 | success |
 | 2 | configuration error or command-line usage error |
-| 3 | dependency: `op` or `flyctl` missing or unusable, or output cannot be written |
+| 3 | dependency: `op` or `flyctl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
 | 4 | 1Password source error (including an `op` timeout) |
 | 5 | Fly target error (including a `flyctl` timeout, and deploy on an app with no machines) |
 | 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule), or `config export` refused |
 | 7 | authentication |
-| 8 | findings: `status` or `plan` found blocking keys |
+| 8 | findings: `status`, `plan` or `check` found blocking keys |
 | 101 | internal panic (Rust default) |
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
@@ -168,7 +171,7 @@ Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) o
 
 `doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. Child stderr is suppressed on purpose, because it could echo a value; a re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
 
-A clean `status` ends with a summary line, for example `49 saved, 13 not yet on Fly (staged by the next fly sync), 0 findings`.
+A clean `status` ends with a summary line, for example `49 saved, 13 not yet on Fly (staged by the next sync), 0 findings`.
 
 ## GitHub Actions example
 
@@ -207,4 +210,3 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.
-

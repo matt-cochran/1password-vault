@@ -15,6 +15,7 @@ pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
 pub mod init;
+pub mod local;
 pub mod run;
 #[cfg(test)]
 mod simple_tests;
@@ -58,6 +59,35 @@ pub(crate) fn read_and_plan(
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let env = fleet.environment(env_name)?;
     let item = onepassword::read_item_as(r, env, fleet.profile)?;
+    plan_item(fleet, env_name, item.fields, store, rotate, prune_immutable)
+}
+
+/// [`read_and_plan`] for a local check of the products in `fleet` only, with no target: the
+/// item read skips other products' sections, so their fields can neither block nor fail it.
+pub(crate) fn read_and_plan_products(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<SyncPlan, Error> {
+    let env = fleet.environment(env_name)?;
+    let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
+    let item = if fleet.is_simple() {
+        onepassword::read_item_as(r, env, fleet.profile)?
+    } else {
+        onepassword::read_item_in_sections(r, env, fleet.profile, &sections)?
+    };
+    let none = BTreeSet::new();
+    Ok(plan_item(fleet, env_name, item.fields, None, &none, &none)?.0)
+}
+
+fn plan_item(
+    fleet: &Fleet,
+    env_name: &str,
+    fields: Vec<plan::ItemField>,
+    store: Option<&dyn SecretStore>,
+    rotate: &BTreeSet<(String, String)>,
+    prune_immutable: &BTreeSet<(String, String)>,
+) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let on_target = match store {
         Some(s) => s.list()?,
         None => Vec::new(),
@@ -66,7 +96,7 @@ pub(crate) fn read_and_plan(
     let p = plan::build_with(
         fleet,
         env_name,
-        item.fields,
+        fields,
         &on_target,
         &plan::PlanOptions {
             rotate,
