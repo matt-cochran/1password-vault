@@ -1,0 +1,5 @@
+$ op item get iprd --vault vprd --format json
+$ flyctl secrets list --app mcproductlabs-portfolio-production --json
+--- stdout
+--- result
+Err(Policy("fly sync refused, nothing staged: allumata/OPENAI_API_KEY (missing)"))

@@ -7,6 +7,8 @@
 //!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26).
 //! - Output names products, keys, kinds, rules and Fly names, never values (SR-1).
 
+#[cfg(test)]
+mod characterization_tests;
 pub mod config_export;
 pub mod doctor;
 pub mod explain;
