@@ -848,11 +848,11 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-13 Version drift.** `doctor` checks minimum versions of op, flyctl and az; adapter tests use recorded real outputs.
 - **NR-14 OS differences.** Platform capabilities (stdin device, native op) are checked up front; value bytes are never re-encoded.
 - **NR-15 Value edge cases.** Byte-exact round trip per adapter; values a target would mangle are refused before any call (FR-15, FR-22).
-- **NR-16 Scale.** At most O(keys) calls; output summarises first and lists only non-ok rows by default; `--product` scoping on status, plan and sync.
+- **NR-16 Scale.** At most O(keys) calls; output starts with a one-line count summary (rows kept as they are, PR #63); `--product` scoping on status, plan and sync.
 - **NR-17 All blockers at once.** A refusal names every blocking key and its next command in one run.
 - **NR-18 Run summary.** Every mutating run ends with one summary (written, deployed, pruned, pending, unchanged, skipped, next step), mirrored in `--json`, consistent with the exit code.
 - **NR-19 Next step on every error.** Every non-zero exit ends with exactly one `Next:` line holding a runnable command (extends FR-22); error constructors require it.
-- **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting; an environment with `confirm_env = true` requires `--env-confirm <env>` for mutating commands.
+- **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting; an environment with `confirm_env = true` requires `--confirm <env>` for mutating commands.
 - **NR-21 No clock assumptions.** No decision compares wall-clock times across machines; deadlines use monotonic local time.
 - **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call only; child stderr is still never captured (SR-1).
 - **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written.

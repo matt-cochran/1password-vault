@@ -1,0 +1,51 @@
+{
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/opv-fixture-rg/providers/Microsoft.App/containerApps/opv-fixture-app/revisions/opv-fixture-app--0000001",
+  "name": "opv-fixture-app--0000001",
+  "properties": {
+    "active": true,
+    "createdTime": "2026-10-08T21:59:08+00:00",
+    "fqdn": "opv-fixture-app--0000001.lemonsmoke-d84b3d65.eastus2.azurecontainerapps.io",
+    "healthState": "Healthy",
+    "provisioningState": "Provisioned",
+    "replicas": 1,
+    "runningState": "Running",
+    "template": {
+      "containers": [
+        {
+          "env": [
+            {
+              "name": "FLEET__API__DB_URL",
+              "secretRef": "opv-8fdafc4d16ff6017"
+            },
+            {
+              "name": "LOG_LEVEL",
+              "value": "opv-fixture-config-marker"
+            }
+          ],
+          "image": "mcr.microsoft.com/k8se/quickstart:latest",
+          "name": "opv-fixture-app",
+          "probes": [],
+          "resources": {
+            "cpu": 0.5,
+            "memory": "1Gi"
+          }
+        }
+      ],
+      "initContainers": null,
+      "revisionSuffix": null,
+      "scale": {
+        "cooldownPeriod": null,
+        "maxReplicas": 10,
+        "minReplicas": 1,
+        "pollingInterval": null,
+        "rules": null
+      },
+      "serviceBinds": null,
+      "terminationGracePeriodSeconds": null,
+      "volumes": null
+    },
+    "trafficWeight": 100
+  },
+  "resourceGroup": "opv-fixture-rg",
+  "type": "Microsoft.App/containerapps/revisions"
+}
