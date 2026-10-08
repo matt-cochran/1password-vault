@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to Fly.io, Azure, AWS and GCP with one command: opv sync prod" width="100%">
+  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to local development (shell, IDE, Docker), Fly.io, Azure, AWS and GCP: opv run dev -- npm run dev" width="100%">
 </p>
 
 # opv
