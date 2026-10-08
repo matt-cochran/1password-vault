@@ -225,3 +225,77 @@ Low-probability risk is a secret stored as a text field becoming plain env (R12)
 because a heuristic would be speculative. The mitigations that must not be dropped are pinned
 references (FR-29), read-modify-write with the unmanaged fingerprint (FR-31), prune order and the
 ownership tag (FR-32), and P0 characterization tests.
+
+## 11. Provider plug-in contract (FR-37)
+
+Decided 2026-10-08 (owner): every provider is pluggable behind one contract, so adding a provider
+changes no core code. Fly, Azure and Kubernetes all implement it.
+
+```rust
+/// One deployment provider. Registered once in `adapters::registry::PROVIDERS`.
+pub trait Provider: Sync {
+    /// Config section name under `[environments.<env>]`: "fly", "azure", "kubernetes".
+    fn section(&self) -> &'static str;
+    /// Parses and validates that section (identifiers, templates, required fields, NR-7 scope).
+    fn parse(&self, env: &str, section: &toml::Value, profile: Profile) -> Result<Box<dyn TargetConfig>, Error>;
+}
+
+/// A validated, provider-specific target. Core code sees only this trait.
+pub trait TargetConfig: fmt::Debug + Send + Sync {
+    fn provider(&self) -> &'static str;                       // "Fly", "Azure", "Kubernetes" (labels)
+    fn env_name(&self, product: &str, key: &str) -> String;   // runtime env var name
+    fn store_name(&self, env_name: &str) -> String;           // name in the store
+    fn name_rules(&self) -> NameRules;                        // patterns, case sensitivity, limits (FR-30)
+    fn same_target(&self, other: &dyn TargetConfig) -> bool;  // two environments sharing one target
+    fn tools(&self) -> &'static [Tool];                       // CLIs it needs (NR-27)
+    fn open<'a>(&'a self, env: &'a str, r: &'a dyn CommandRunner) -> Ports<'a>;
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<Vec<Check>, Error>;  // NR-23..NR-26
+    fn doctor(&self, r: &dyn CommandRunner) -> Vec<Check>;
+    fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)>;
+}
+```
+
+- `config.rs` keeps the generic environment fields and dispatches each remaining table to the
+  provider registered under that section name; an unknown section is a config error listing the
+  registered names; two provider sections in one environment is the FR-28 error.
+- `Target` (the enum) is replaced by `Box<dyn TargetConfig>`. `app/`, `domain/` and `config.rs`
+  never name a provider; the existing guard test is extended to every provider module name.
+- `init` stays provider-aware by design (it writes a provider section) through
+  `Provider::init_section`, added when a provider supports `init`.
+- Adding a provider = one module under `src/adapters/<provider>/` + one line in the registry +
+  docs. Nothing else.
+
+## 12. Kubernetes target (FR-38)
+
+Store: Kubernetes Secrets. Runtime: a Deployment (StatefulSet later if asked). CLI: `kubectl`.
+
+```toml
+[environments.dev.kubernetes]
+context    = "kind-opv"                    # required; passed as --context on every call (NR-7)
+namespace  = "myapp"                       # required; --namespace on every call
+deployment = "api"
+container  = "api"                         # optional when the pod has one container
+env_name   = "FLEET__{PRODUCT}__{KEY}"     # fleet profile only
+config     = "env"                         # or "store" (a ConfigMap-free design: config in Secrets)
+```
+
+- **Pinned flow.** Kubernetes Secrets have no versions, so opv creates an immutable Secret per
+  value version: name `opv-<store name>-<first 10 hex of SHA-256(value)>`, `immutable: true`,
+  labels `opv-managed=<env>`, `opv-key=<store name>`. The hash suffix is the version (FR-29); a pod
+  sees a new value only when the Deployment is repinned. Store names follow DNS-1123
+  (`_` → `-`, lower case, ≤ 253 with the suffix) and are collision-checked at load.
+- **Writes** go through `kubectl apply -f - --server-side --field-manager=opv` with the manifest on
+  stdin (SR-3); values are base64 in `data`, never in argv.
+- **Compare before write** reads `kubectl get secret -l opv-key=<name>,opv-managed=<env> -o json`;
+  the current version is the one the Deployment binds; the desired version's name is computable
+  locally from the value hash, so an unchanged value is a name lookup, with no value read back.
+- **Runtime apply** reads the Deployment (`kubectl get deployment -o json`), edits only managed
+  env entries (`valueFrom.secretKeyRef` for secrets, `value` for config), and writes it back with
+  `kubectl replace -f -` carrying `metadata.resourceVersion`: Kubernetes rejects the write if anyone
+  changed the Deployment in between (true optimistic concurrency, stronger than R9).
+- **Health:** `kubectl rollout status deployment/<d> --timeout=<deadline>` plus the Deployment's
+  `status.conditions`; prune deletes old `opv-managed` Secrets only after a successful rollout, and
+  never one still referenced by any ReplicaSet the Deployment owns.
+- **Access** (FR-33 as amended by R6): the Deployment's ServiceAccount needs no secret access
+  (kubelet mounts the env); `doctor` checks the operator's own rights with
+  `kubectl auth can-i` for get/create/delete secrets and get/update deployments.

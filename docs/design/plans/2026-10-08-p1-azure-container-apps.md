@@ -1,8 +1,8 @@
-# P1: Azure Key Vault + Container Apps Implementation Plan
+# 0.5.0: Resilience, Provider Plug-ins, Azure (Key Vault + Container Apps) and Kubernetes — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `opv plan|status|sync <env>` work for an environment whose target is Azure Key Vault (secrets) plus an Azure Container App (runtime), with pinned Key Vault references, config as env vars, and no change to Fly behaviour. Released as opv 0.5.0 (issue #39).
+**Goal:** `opv plan|status|sync <env>` work for an environment whose target is Azure Key Vault (secrets) plus an Azure Container App (runtime), with pinned Key Vault references, config as env vars, and no change to Fly behaviour. Also: resilience NR-1..NR-30 for every provider, a provider plug-in contract (FR-37), and a Kubernetes target (FR-38). Released as opv 0.5.0 (issue #39; Kubernetes gets its own issue).
 
 **Architecture:** A new `[environments.<env>.azure]` target maps to two adapters, `adapters::keyvault::KeyVault` and `adapters::containerapp::ContainerApp`, both wrapping `az` through `CommandRunner`. The ports split by flow (R4): a shared `Store` (list, refusal) with `StagedStore` (Fly: validate, write, remove) and `PinnedStore` (Key Vault: read, write_one, delete); `StagedRuntime` (Fly: deploy) and `PinnedRuntime` (Container Apps: bindings, apply, await_healthy). `adapters::open` returns `Ports::Staged | Ports::Pinned`, so a Fly path can never call a Key Vault operation and vice versa (compile-time, no "not supported" errors). `app/sync.rs` keeps the Fly flow byte-identical and adds the pinned flow; the planner gets exact `Present`/`WouldChange` from compare-before-write reads.
 
@@ -10,11 +10,12 @@
 
 **Tech Stack:** Rust 2024, clap, serde_json, zeroize, `az` CLI 2.90.0. New runtime dependencies (Task 3 adds them; `cargo deny check` must pass): `subtle = "2"` for the constant-time compare, and `sha2 = "0.10"` moved from `[dev-dependencies]` to `[dependencies]` for config digests and the unmanaged fingerprint. Tests use `runner::fake::FakeRunner` and `app::testutil`.
 
-**Spec:** `docs/design/multi-cloud-targets.md` (§3–§8); `docs/design/resilience.md`; `docs/design/requirements.md` FR-28 to FR-33, NR-1 to NR-30, §8 items 29–35. Issue #39.
+**Spec:** `docs/design/multi-cloud-targets.md` (§3–§8, §11 plug-in contract, §12 Kubernetes); `docs/design/resilience.md`; `docs/design/requirements.md` FR-28 to FR-33, NR-1 to NR-30, §8 items 29–35. Issue #39.
 
 ## Global Constraints
 
 - Fly behaviour is byte-identical except where an NR task changes it on purpose: the 14 golden transcripts in `tests/fixtures/characterization/` change only in Tasks R1–R3, each regenerated once with `UPDATE_GOLDEN=1` in its own commit whose message lists every transcript change and the NR it implements. Every other task leaves them untouched.
+- Provider plug-ins (FR-37): after Task P, `app/`, `domain/` and `config.rs` never name a provider; every provider lives under `src/adapters/<provider>/` and is registered in one line.
 - Resilience (NR-1 to NR-30) applies to every target, Fly and 1Password included. Every external call goes through the runner's `read`/`write`/`probe` API (Task R1); no adapter spawns a CLI any other way.
 - No secret value in argv, env, logs, errors, panics or `Debug` (SR-1, SR-2, SR-3). Key Vault values go on stdin through `--file /dev/stdin`; config values go only inside the stdin spec document of `apply`, never in argv (spec §6).
 - No plaintext temp files (SR-4): no `--yaml <tempfile>`; every document goes through `/dev/stdin`.
@@ -426,6 +427,24 @@ pub fn preflight(fleet: &Fleet, env: &str, r: &dyn CommandRunner, host: &dyn Fn(
 
 ---
 
+### Task P: Provider plug-in contract; Fly and Azure config move behind it (FR-37)
+
+**Files:** Create `src/adapters/registry.rs`, `src/provider.rs` (the `Provider` and `TargetConfig` traits, `NameRules`, `Check`); move Fly into `src/adapters/fly/` (`mod.rs` = today's fly.rs, `config.rs` = Fly section parsing and name checks moved out of `src/config.rs`); move Azure section parsing (Task 2) into `src/adapters/azure/config.rs`; modify `src/config.rs` (generic environment fields + dispatch by section name), `src/domain/model.rs` (`Environment.target: Option<Box<dyn TargetConfig>>`; `Target` enum, `FlyTarget`, `AzureTarget` leave the domain), every use case (`target.provider()`, `target.open(..)`, `target.preflight(..)`), `src/app/mod.rs` guard test (names: `fly`, `azure`, `kubernetes`, `keyvault`, `containerapp`, `kubectl`, `flyctl`, `az `).
+
+**Interfaces:** exactly §11 of `docs/design/multi-cloud-targets.md`. `Ports` (Task 3) is returned by `TargetConfig::open`. `adapters::open` is removed (no parallel path).
+
+**Rules:**
+- Unknown section under an environment → `environment <env>: unknown target section "<name>"; known: azure, fly, kubernetes`.
+- Two provider sections → the existing FR-28 message (generalised: `declares both <a> and <b>; use one target`).
+- Collision and limit checks run generically from `name_rules()` for every provider; Fly's existing messages stay byte-identical (`renders Fly name …`) by having Fly's `NameRules` carry its label.
+- `doctor`, `explain`, `init`: provider-specific lines come from `TargetConfig::doctor/explain`; `init` keeps writing a Fly section (it is the only provider with `init` in 0.5.0) via `Provider::init_section` on the Fly provider.
+
+**Tests:** `unknown_target_section_lists_known_providers`, `two_provider_sections_are_refused`, `core_modules_name_no_provider` (extended guard), `fly_config_errors_are_unchanged` (existing config tests keep passing verbatim), `registry_has_fly_and_azure`. Goldens unchanged.
+
+- [ ] Steps: failing tests → move code (git mv to keep history) → full suite → commit `refactor(providers): plug-in contract; Fly and Azure behind it (FR-37)`.
+
+---
+
 ### Task 4: Key Vault adapter (Junior candidate; FR-29, FR-30, FR-32, SR-3)
 
 **Files:**
@@ -617,7 +636,43 @@ Doctor lines (in order, after the op lines):
 
 ---
 
-### Task 9: Docs, requirements, changelog, version 0.5.0
+### Task K1: Kubernetes recon on a local kind cluster (manager)
+
+Install `kind` (pinned release, checksum-verified) into `~/.local/bin`; `kind create cluster --name opv`; namespace `opv-spike`; a Deployment with one container (`registry.k8s.io/pause` or nginx). Answer and record in `docs/design/spike-k8s-findings.md`, saving real outputs (marker values only) to `tests/fixtures/kubernetes/`:
+
+| # | Question |
+|---|---|
+| K1 | `kubectl apply -f - --server-side --field-manager=opv` with an immutable Secret on stdin: output shape, exit codes; re-apply of an identical immutable Secret is a no-op (exit 0)? A changed one is refused? |
+| K2 | `kubectl get secret -l opv-managed=dev,opv-key=<k> -o json`: shape; empty list exit code. |
+| K3 | `kubectl get deployment <d> -o json` then `kubectl replace -f -` with a stale `resourceVersion`: exit code and the `Conflict` signal (exit status only; stderr is not captured). |
+| K4 | `kubectl rollout status deployment/<d> --timeout=60s`: exit codes for success, timeout, and a pod that cannot start (missing Secret key). Does the old ReplicaSet keep serving? |
+| K5 | `kubectl auth can-i create secrets -n <ns>`: exit codes for yes/no. |
+| K6 | `--context` of a missing context: exit code; unreachable cluster (stopped kind): exit code and time to fail (NR-28/NR-29). |
+| K7 | Byte-exact round trip of edge-case markers (Unicode, CRLF, trailing newline) through `data` base64 → container env. |
+
+Tear down: `kind delete cluster --name opv`.
+
+---
+
+### Task K2: Kubernetes provider (FR-38, FR-29..FR-33, NR-*)
+
+**Files:** Create `src/adapters/kubernetes/{mod.rs,config.rs,store.rs,runtime.rs}`; one line in `src/adapters/registry.rs`; `src/host.rs` (`Tool::Kubectl`, install hints: Linux/macOS/Windows official instructions URL plus `brew install kubectl` / `winget install -e --id Kubernetes.kubectl`).
+
+**Config (`config.rs`):** `context`, `namespace`, `deployment` required; `container` optional; `env_name` (fleet only); `config = "env" | "store"`. Identifiers validated (DNS-1123 for namespace/deployment/container; context: no leading `-`, no shell metacharacters). Store name = env name lower-cased with `_` → `-`; `opv-<store>-<10 hex>` ≤ 253 and DNS-1123; collisions case-insensitive.
+
+**Store (`PinnedStore`):** `list` = `get secret -l opv-managed=<env> -o json` (read); `read(name)` = the version the Deployment binds plus the Secret object; `write_one(name, value)` = compute `opv-<store>-<hash>`; if it exists (list) → return it (idempotent, no write); else `apply -f - --server-side --field-manager=opv` (write) with an immutable Secret (labels `opv-managed`, `opv-key`), value base64 in `data.value`; `delete(name)` = delete every `opv-key=<name>` Secret not referenced by the Deployment or any of its ReplicaSets, label-checked (FR-32). Compare-before-write needs no value read: the desired version name is the hash.
+
+**Runtime (`PinnedRuntime`):** `bindings` = `get deployment -o json`; `apply` = edit managed env (`valueFrom.secretKeyRef {name: <secret>, key: value}` / `value`) and `replace -f -` with `resourceVersion` (a conflict exit → `Error::Target("deployment <d> changed while opv applied; nothing applied; safe to re-run")`); `await_healthy` = `rollout status --timeout=<remaining budget>` (NR-4) plus conditions; `check_access` = `auth can-i` for get/create/delete secrets and get/update deployments (advisory, R6).
+
+**Every call:** `--context <c> --namespace <ns>` explicit (NR-7); pinned env `KUBECONFIG` inherited, `NO_COLOR=1`; reads/writes through the R1 runner.
+
+**Tests (fixtures from K1):** `write_is_skipped_when_hash_named_secret_exists`, `write_sends_manifest_on_stdin_and_no_value_in_argv`, `secret_name_is_content_hash`, `apply_carries_resource_version`, `resource_version_conflict_is_safe_to_rerun_error`, `prune_keeps_secrets_referenced_by_any_replicaset`, `every_call_names_context_and_namespace`, `rollout_failure_prunes_nothing`, `kubernetes_sync_converges_after_interruption_at_every_call` (R3 harness), `unreachable_cluster_before_writes_exits_9` (NR-28).
+
+- [ ] Steps: failing tests → implement → full suite → commit `feat(kubernetes): Secrets + Deployment provider (FR-38)`.
+
+---
+
+### Task 9: Docs, requirements, changelog, version 0.5.0 (Azure, Kubernetes, resilience, plug-ins)
 
 **Files:**
 - Modify: `README.md` (Targets table: Azure Key Vault + Container Apps "supported (preview until the live receipt in #39)"; "Works today" line), `docs/configuration.md` (`[environments.<env>.azure]` reference, routing, naming rules, R1–R3), `docs/usage.md` (Azure sync flow, `--deploy`, `--prune` order, drift, soft delete), `docs/install.md` (prerequisite `az` ≥ 2.60, WSL for writes on Windows), `docs/agent-setup.md` + `llms.txt` (Azure steps and the identity grant), `docs/design/requirements.md` (§8 items 29–35 marked for Azure Container Apps; record R1–R6), `docs/design/multi-cloud-targets.md` (rulings, recon outcome), `CHANGELOG.md` (`## [0.5.0] - <date>` Added: Azure target; Changed: doctor flyctl patch range from [Unreleased]), `Cargo.toml` + `Cargo.lock` + `npm/*/package.json` version `0.5.0` (follow how 0.4.0 bumped them: `git show 98a56df --stat`).
@@ -627,7 +682,7 @@ Doctor lines (in order, after the op lines):
 
 ---
 
-### Task 10: Live smoke test and release (owner + manager)
+### Task 10: Live smoke tests (Azure sandbox, kind cluster) and release (owner + manager)
 
 - [ ] **Step 1:** With the owner's OK, recreate the Task 1 sandbox; a disposable 1Password item `opv-spike-azure` with two secrets and one config field; `secrets.toml` in a scratch directory.
 - [ ] **Step 2:** Run and record (names and versions only): `opv doctor`, `opv plan dev`, `opv sync dev`, `opv sync dev --deploy`, change one secret in 1Password, `opv status dev` (WouldChange), `opv sync dev --deploy` (repin), re-pin by hand to v1 then `opv status dev` (drift), `opv sync dev --deploy --prune` after removing a key from the config.

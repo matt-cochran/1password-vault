@@ -638,6 +638,21 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 - After a deploy, opv waits for the new revision to report healthy or failed and reports the outcome with its exit category.
 - `doctor` checks the cloud CLI and login, store access on managed names, and runtime-identity access, and reports an identity that can read untagged secrets as broader than needed (SR-5).
 
+## FR-37 — Pluggable Providers
+
+Every deployment provider implements one plug-in contract (`docs/design/multi-cloud-targets.md`
+§11): config section parsing, name mapping and limits, ports, preflight, doctor and explain. Core
+modules (`app/`, `domain/`, `config.rs`) never name a provider; a guard test enforces it. Adding a
+provider changes no core code. Owner decision 2026-10-08.
+
+## FR-38 — Kubernetes Target
+
+`[environments.<env>.kubernetes]` targets a Deployment through `kubectl` with explicit
+`--context` and `--namespace`. Values are stored as immutable, content-hash-named Secrets (the
+version, FR-29), bound through `secretKeyRef`; the Deployment is updated with its
+`resourceVersion` (optimistic concurrency, FR-31); health is the rollout status (FR-33); old
+Secrets are pruned only after a successful rollout (FR-32). Design: §12 of the multi-cloud design.
+
 ## v0.4 local development (FR-34 to FR-36)
 
 The requirements below make opv usable for local development without a deployment target, from issues #52, #53 and #54 found while adopting opv across products. The owner adopted them on 2026-10-08. Live account validation stays an owner-run receipt on those issues; automated tests use synthetic values and fake CLIs.
