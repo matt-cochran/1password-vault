@@ -11,7 +11,7 @@ homepage = "https://github.com/matt-cochran/1password-vault"
 readme = "README.md"
 keywords = ["1password", "secrets", "secrets-management", "fly", "devops"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["spike/", ".delivery/", ".github/", "packaging/"]
+exclude = ["spike/", ".delivery/", ".github/", "packaging/", "docs/assets/"]
 
 [features]
 # Exposes `runner::fake::FakeRunner` to integration tests and downstream test code.
