@@ -38,7 +38,7 @@ fn args(profile: Option<Profile>, force: bool) -> InitArgs {
         env: "staging".into(),
         vault: "myapp-staging".into(),
         item: "myapp".into(),
-        fly_app: "myapp-staging".into(),
+        fly_app: Some("myapp-staging".into()),
         profile,
         force,
     }
@@ -441,7 +441,7 @@ fn bad_fly_app_or_env_name_fails_before_any_call() {
     ] {
         let mut a = args(None, false);
         a.env = env.into();
-        a.fly_app = app.into();
+        a.fly_app = Some(app.into());
         let run = run_in(dir.path(), &a, vec![]);
         assert_eq!(run.err().exit_code(), 2, "{env} {app}");
         assert!(run.r.calls.borrow().is_empty());
@@ -792,4 +792,20 @@ fn no_ancestor_note_without_an_ancestor_file() {
     if config::discover(dir.path()).is_none() {
         assert_eq!(ancestor_note(&nested), None);
     }
+}
+
+#[test]
+fn targetless_init_writes_no_fly_section() {
+    let mut a = args(None, false);
+    a.fly_app = None;
+    let (_dir, run) = init_with(&simple_fields(), &a);
+    assert!(!run.file().contains("fly."));
+}
+
+#[test]
+fn targetless_fleet_init_points_to_product_check() {
+    let mut a = args(None, false);
+    a.fly_app = None;
+    let (_dir, run) = init_with(&fleet_fields(), &a);
+    assert!(run.out.contains("opv check staging --product <product>"));
 }

@@ -208,3 +208,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.
 
+
+
+Local-only setup, scoped check/doctor, product switching and WSL support in v0.4:
+[Local development](local-development.md).

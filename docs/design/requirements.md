@@ -1218,6 +1218,17 @@ Other tools stage names outside the managed set on the same Fly app (database UR
 
 ## 10.4 Local development
 
+v0.4 dogfooding extension (#52–#54):
+- Local init needs vault/item IDs, not a deployment target.
+- check validates one environment/product with one item read, names-only output,
+  and no target query or mutation.
+- doctor scopes dependencies to an environment/product.
+- run removes all declared managed names before adding selected applicable references.
+  Undeclared variables and authentication/tool context inherit; it is not a sandbox.
+- A Windows executable masquerading as Linux op fails before local child launch.
+- Live account validation remains owner-run; automated tests use synthetic values.
+
+
 `run` maps a product's keys to plain names for the child process (`OPENAI_API_KEY`, not the fleet name) and resolves `op://<vault>/<item>/<product>/<KEY>` references through `op run`.
 
 ---

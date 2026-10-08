@@ -59,6 +59,26 @@ pub trait CommandRunner {
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32>;
 
+    /// Check that the native CLI can execute a child for local run (not metadata reads).
+    fn local_run_supported(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Remove managed parent variables before adding selected references.
+    fn run_inherited_clean(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        remove: &[String],
+    ) -> io::Result<i32> {
+        if remove.is_empty() {
+            self.run_inherited(program, args, env)
+        } else {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
     /// A short read-only diagnosis call (`op whoami`, `op account list`, `flyctl auth
     /// whoami`; FR-26): no stdin, no extra env, killed after `limit` (a `TimedOut` error).
     /// The default delegates to [`CommandRunner::run`], so fakes record it like any call.
@@ -134,6 +154,16 @@ impl Default for ProcessRunner {
     }
 }
 
+/// Read only the executable header, never any credential source.
+fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
+    let mut header = [0u8; 2];
+    match std::fs::File::open(path)?.read_exact(&mut header) {
+        Ok(()) => Ok(header == *b"MZ"),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 fn timed_out(program: &str, limit: Duration) -> io::Error {
     io::Error::new(
         io::ErrorKind::TimedOut,
@@ -145,6 +175,24 @@ fn timed_out(program: &str, limit: Duration) -> io::Error {
 }
 
 impl CommandRunner for ProcessRunner {
+    fn local_run_supported(&self) -> io::Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                let path = dir.join("op");
+                if path.is_file() {
+                    return if windows_binary(&path)? {
+                        Err(io::ErrorKind::Unsupported.into())
+                    } else {
+                        Ok(())
+                    };
+                }
+            }
+        }
+        Ok(())
+    }
     fn run(
         &self,
         program: &str,
@@ -221,6 +269,27 @@ impl CommandRunner for ProcessRunner {
         ProcessRunner::with_timeout(limit.min(self.timeout)).run(program, args, None, &[])
     }
 
+    fn run_inherited_clean(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        remove: &[String],
+    ) -> io::Result<i32> {
+        let mut cmd = Command::new(program);
+        for key in remove {
+            cmd.env_remove(key);
+        }
+        let status = cmd
+            .args(args)
+            .envs(env.iter().copied())
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        Ok(exit_code(status))
+    }
+
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
         let status = Command::new(program)
             .args(args)
@@ -252,6 +321,7 @@ pub mod fake {
         pub env: Vec<(String, String)>,
         /// True for `run_inherited` calls.
         pub inherited: bool,
+        pub removed: Vec<String>,
     }
 
     impl std::fmt::Debug for Call {
@@ -272,6 +342,7 @@ pub mod fake {
     pub struct FakeRunner {
         pub calls: RefCell<Vec<Call>>,
         pub responses: RefCell<VecDeque<io::Result<Output>>>,
+        pub local_run_error: RefCell<Option<io::ErrorKind>>,
     }
 
     impl FakeRunner {
@@ -279,6 +350,7 @@ pub mod fake {
             Self {
                 calls: RefCell::default(),
                 responses: RefCell::new(responses.into_iter().map(Ok).collect()),
+                local_run_error: RefCell::new(None),
             }
         }
 
@@ -306,6 +378,7 @@ pub mod fake {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
                 inherited,
+                removed: Vec::new(),
             });
             match self.responses.borrow_mut().pop_front() {
                 Some(r) => r,
@@ -323,6 +396,13 @@ pub mod fake {
     }
 
     impl CommandRunner for FakeRunner {
+        fn local_run_supported(&self) -> io::Result<()> {
+            match *self.local_run_error.borrow() {
+                Some(kind) => Err(kind.into()),
+                None => Ok(()),
+            }
+        }
+
         fn run(
             &self,
             program: &str,
@@ -331,6 +411,20 @@ pub mod fake {
             env: &[(&str, &str)],
         ) -> io::Result<Output> {
             self.record(program, args, stdin, env, false)
+        }
+
+        fn run_inherited_clean(
+            &self,
+            program: &str,
+            args: &[&str],
+            env: &[(&str, &str)],
+            remove: &[String],
+        ) -> io::Result<i32> {
+            let result = self.run_inherited(program, args, env);
+            if let Some(call) = self.calls.borrow_mut().last_mut() {
+                call.removed = remove.to_vec();
+            }
+            result
         }
 
         /// Returns the queued response's `status` as the exit code.
@@ -562,5 +656,21 @@ mod tests {
             .run("opv-definitely-not-installed", &[], None, &[])
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn recognizes_windows_cli_header_without_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, b"MZsynthetic").unwrap();
+        assert!(windows_binary(&path).unwrap());
+    }
+
+    #[test]
+    fn shell_cli_header_is_not_windows_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op");
+        std::fs::write(&path, b"#!/bin/sh").unwrap();
+        assert!(!windows_binary(&path).unwrap());
     }
 }

@@ -49,7 +49,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Check the configuration, op and its sign-in, and flyctl and its sign-in.
-    Doctor,
+    Doctor {
+        /// Check only this environment.
+        #[arg(long)]
+        env: Option<String>,
+        /// Limit configuration checks to one product; requires --env.
+        #[arg(long, requires = "env")]
+        product: Option<String>,
+    },
+    /// Validate credential fields without contacting a deployment target.
+    Check {
+        env: String,
+        #[arg(long)]
+        product: Option<String>,
+        /// Print names and states as JSON, never values.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one row per product and key with its 1Password and Fly state (names only).
     ///
     /// Exits 8 when any key is missing, of the wrong kind or failing a rule.
@@ -121,7 +137,7 @@ enum Cmd {
         item: String,
         /// Fly app of the environment (not looked up; flyctl is not called).
         #[arg(long, value_name = "APP")]
-        fly_app: String,
+        fly_app: Option<String>,
         /// Profile to write; without it, it follows the item's shape.
         #[arg(long, value_parser = ["simple", "fleet"])]
         profile: Option<String>,
@@ -309,7 +325,12 @@ fn run_other(
     match cmd {
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
-        Cmd::Doctor => doctor::run(loaded, r, out),
+        Cmd::Doctor { env, product } => {
+            doctor::run_scoped(loaded, env.as_deref(), product.as_deref(), r, out)
+        }
+        Cmd::Check { env, product, json } => {
+            opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
+        }
         Cmd::Status { env, json } => status::run_with(&loaded?, &env, r, out, json),
         Cmd::Plan(a) => sync::plan_with(&loaded?, &a.env, r, out, a.json),
         Cmd::Sync(a) => {

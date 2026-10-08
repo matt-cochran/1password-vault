@@ -48,6 +48,27 @@ enum Check {
     Warn(String),
 }
 
+pub fn run_scoped(
+    config: Result<Fleet, Error>,
+    env: Option<&str>,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let config = match env {
+        Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
+        None if product.is_some() => Err(Error::Config("--product requires --env".into())),
+        None => config,
+    };
+    if let Ok(f) = &config
+        && env.is_some()
+        && f.environments.values().all(|e| e.target().is_none())
+    {
+        super::run::ensure_native(r)?;
+    }
+    run(config, r, out)
+}
+
 pub fn run(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
@@ -833,5 +854,17 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         assert_no_values(&out);
+    }
+
+    #[test]
+    fn scoped_development_doctor_never_queries_fly_in_mixed_file() {
+        let mut f = fleet();
+        let mut env = f.environments["staging"].clone();
+        env.target = None;
+        f.environments.insert("dev".into(), env);
+        let r = FakeRunner::new(good().into_iter().take(2));
+        let mut out = Vec::new();
+        run_scoped(Ok(f), Some("dev"), Some("allumata"), &r, &mut out).unwrap();
+        assert!(r.calls.borrow().iter().all(|c| c.program == "op"));
     }
 }

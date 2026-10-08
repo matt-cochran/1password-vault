@@ -120,3 +120,7 @@ More patterns: [usage.md](usage.md#local-development).
 | 6 | refused | a key is missing, of the wrong kind or failing a rule; run `opv status` |
 | 7 | not signed in | run the sign-in command opv prints |
 | 8 | findings | `status` or `plan` found keys to fix; see step 4 |
+
+
+Local-only setup, scoped check/doctor, product switching and WSL support in v0.4:
+[Local development](local-development.md).
