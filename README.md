@@ -106,3 +106,6 @@ The repository is named `1password-vault` for historical reasons; the tool is `o
 ## License
 
 [MIT](LICENSE)
+
+
+[Local development](docs/local-development.md): v0.4 setup, product switching and WSL.

@@ -15,6 +15,7 @@ pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
 pub mod init;
+pub mod local;
 pub mod run;
 #[cfg(test)]
 mod simple_tests;

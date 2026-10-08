@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - Unreleased
+
+### Added
+- Run-only init without --fly-app, names-only product check and scoped doctor (#52).
+- Native CLI checks and local WSL setup guide (#54).
+
+### Changed
+- Local run clears all declared key names before injecting selected references (#53).
+  Other-product and mode-skipped managed values no longer survive. Undeclared context
+  still inherits; this is not a sandbox.
+- InitArgs.fly_app is optional; custom runners must support managed variable removal.
+- Fly command alias removal is deferred during this migration.
+
 ## [0.3.0] - 2026-10-08
 
 ### Added

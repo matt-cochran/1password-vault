@@ -86,12 +86,31 @@ pub fn run(
     let mut args: Vec<&str> = vec!["run", "--"];
     args.extend(command.iter().map(String::as_str));
 
+    // Clear all declared keys, including other products and mode-skipped keys.
+    // Keep PATH and authentication context; add only selected references afterward.
+    let remove: Vec<String> = fleet
+        .products
+        .values()
+        .flat_map(|p| p.keys.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ensure_native(runner)?;
     runner
-        .run_inherited(OP, &args, &env_pairs)
+        .run_inherited_clean(OP, &args, &env_pairs, &remove)
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
             k => Error::Dependency(format!("cannot run {OP} ({k})")),
         })
+}
+
+/// Windows op.exe can read metadata from WSL, but cannot execute a Linux child.
+pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
+    runner.local_run_supported().map_err(|e| {
+        if e.kind() == io::ErrorKind::Unsupported {
+            Error::Dependency("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See docs/local-development.md (WSL).".into())
+        } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind())) }
+    })
 }
 
 #[cfg(test)]
@@ -224,5 +243,25 @@ mod tests {
             run(&fleet(), "prod", "allumata", &cmd(&["env"]), &r),
             Err(Error::Dependency(_))
         ));
+    }
+
+    #[test]
+    fn clears_other_products_and_mode_skipped_managed_keys() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&fleet(), "prod", "allumata", &cmd(&["true"]), &r).unwrap();
+        assert!(
+            r.calls.borrow()[0]
+                .removed
+                .contains(&"STRIPE_SECRET_KEY".to_string())
+        );
+    }
+
+    #[test]
+    fn incompatible_windows_cli_fails_before_child_launch() {
+        let r = FakeRunner::new([]);
+        *r.local_run_error.borrow_mut() = Some(io::ErrorKind::Unsupported);
+        let result = run(&fleet(), "prod", "allumata", &cmd(&["true"]), &r);
+        assert!(result.unwrap_err().to_string().contains("Linux child"));
+        assert!(r.calls.borrow().is_empty());
     }
 }

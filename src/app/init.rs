@@ -43,7 +43,7 @@ pub struct InitArgs {
     pub env: String,
     pub vault: String,
     pub item: String,
-    pub fly_app: String,
+    pub fly_app: Option<String>,
     /// `--profile`: overrides detection.
     pub profile: Option<Profile>,
     pub force: bool,
@@ -124,7 +124,17 @@ fn run_on(
         out,
         "add rules and guidance by hand; see the README (Rules reference)".into(),
     )?;
-    w(out, format!("Next step: opv plan {}", args.env))
+    let next = if args.fly_app.is_some() {
+        "plan"
+    } else {
+        "check"
+    };
+    let product = if args.fly_app.is_none() && decl.profile == Profile::Fleet {
+        " --product <product>"
+    } else {
+        ""
+    };
+    w(out, format!("Next step: opv {next} {}{product}", args.env))
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
@@ -158,7 +168,9 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
             args.env
         )));
     }
-    if !config::is_id(&args.fly_app) {
+    if let Some(app) = &args.fly_app
+        && !config::is_id(app)
+    {
         return Err(Error::Config(format!(
             "--fly-app {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
             args.fly_app
@@ -407,9 +419,11 @@ fn render(args: &InitArgs, vault_id: &str, item_id: &str, d: &Declared) -> Strin
     let _ = writeln!(s, "[environments.{env}]");
     let _ = writeln!(s, "vault_id = {}", quoted(vault_id));
     let _ = writeln!(s, "item_id = {}", quoted(item_id));
-    let _ = writeln!(s, "fly.app = {}", quoted(&args.fly_app));
-    if d.profile == Profile::Fleet {
-        let _ = writeln!(s, "fly.secret_name = {}", quoted(FLEET_TEMPLATE));
+    if let Some(app) = &args.fly_app {
+        let _ = writeln!(s, "fly.app = {}", quoted(app));
+        if d.profile == Profile::Fleet {
+            let _ = writeln!(s, "fly.secret_name = {}", quoted(FLEET_TEMPLATE));
+        }
     }
     for (product, keys) in &d.keys {
         for (key, kind) in keys {
