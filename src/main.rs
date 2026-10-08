@@ -8,8 +8,12 @@ use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, s
 use opv::config;
 use opv::runner::ProcessRunner;
 
+const QUICK_START: &str = "Start here:\n  opv setup                         Guided setup for this project\n  opv doctor                        Find a setup problem and its next step\n  opv session                       Sign in once for your terminal\n\nEveryday use:\n  opv check dev --product api        Check that your app's settings are ready\n  opv run dev --product api -- npm run dev\n\nDeployment:\n  opv plan staging                  Preview changes\n  opv sync staging --deploy         Save settings and deploy\n\nUse opv <command> --help for options. Advanced commands remain available below.";
+
 const EXAMPLES: &str = "\
 Examples:
+  opv setup                         # guided owner setup; resumes saved progress
+  opv session                       # authenticated owner terminal; type exit to leave
   opv item skeleton staging          # add the missing (empty) fields to the 1Password item
   opv status staging                 # one row per product and key; fill what is missing
   opv plan staging                   # what a sync would stage, hold and prune
@@ -22,10 +26,10 @@ Exit codes:
   5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan, check).
   `run` exits with the command's own exit code.";
 
-/// Sync secrets from 1Password into runtime targets.
+/// Use 1Password settings in local apps and deployment targets.
 ///
 /// Values live in 1Password and are consumed by the runtime; opv only connects the
-/// two and never prints, logs or writes a secret value. <ENV> is the name of an
+/// two and never prints, logs or saves a secret value to a local file. <ENV> is the name of an
 /// environment defined in the configuration (for example staging or prod).
 #[derive(Parser)]
 #[command(
@@ -34,6 +38,7 @@ Exit codes:
     version,
     about,
     long_about,
+    after_help = QUICK_START,
     after_long_help = EXAMPLES
 )]
 struct Cli {
@@ -49,8 +54,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Check the configuration, op and its sign-in, flyctl and its sign-in, and whether op can
-    /// start local commands; --env limits it to what one environment needs.
+    /// Set up local credentials with a guided, resumable owner flow.
+    ///
+    /// Finds opv.setup.toml in this directory or a parent. Handles sign-in, creates
+    /// missing fields, explains where each value comes from and saves progress.
+    /// Requires your own interactive terminal. Never deploys or applies infrastructure.
+    Setup {
+        /// Project setup recipe; contains names and instructions, never credentials.
+        #[arg(long, value_name = "PATH")]
+        recipe: Option<PathBuf>,
+        /// 1Password account to use when signing in.
+        #[arg(long)]
+        account: Option<String>,
+        /// Product to set up; otherwise the guide asks when several are declared.
+        #[arg(long)]
+        product: Option<String>,
+    },
+    /// Sign in once for a terminal or a command; no token copying or shell exports.
+    ///
+    /// With no command, opens an owner terminal. Exit that terminal to end the session.
+    /// With a command after --, returns its exit code. Requires your interactive terminal.
+    Session {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Find setup problems and show the next step.
+    ///
+    /// Checks configuration, CLI installation and sign-in. --env limits checks to
+    /// what that environment needs, including whether op can start local commands.
     Doctor {
         /// Check only this environment.
         #[arg(long)]
@@ -59,7 +92,7 @@ enum Cmd {
         #[arg(long, requires = "env")]
         product: Option<String>,
     },
-    /// Validate credential fields without contacting a deployment target.
+    /// Check whether your required settings are ready; contacts no deployment target.
     Check {
         /// Environment name from the configuration (for example dev).
         env: String,
@@ -70,7 +103,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show one row per product and key with its 1Password and Fly state (names only).
+    /// Inspect settings in 1Password and on the deployment target (names only).
     ///
     /// Exits 8 when any key is missing, of the wrong kind or failing a rule.
     Status {
@@ -80,7 +113,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Run a command with the product's secrets in its environment, via `op run`.
+    /// Run your app with the selected product's 1Password settings.
     ///
     /// Exits with the child's own exit code, so a child code can equal an opv
     /// category code (for example 2); opv's own errors print `opv: ...` on
@@ -96,11 +129,11 @@ enum Cmd {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    /// Show what a sync would stage, hold and prune; changes nothing.
+    /// Preview deployment changes without changing anything.
     ///
     /// Exits 8 when any row (missing, wrong kind, failing a rule) would block a sync.
     Plan(PlanArgs),
-    /// Stage the managed secrets on the environment's target.
+    /// Save managed settings on the configured deployment target.
     ///
     /// Refuses (exit 6) and stages nothing when any key is missing, of the wrong kind or
     /// failing a rule. Nothing is deployed or removed without the flags below.
@@ -123,7 +156,7 @@ enum Cmd {
         #[arg(long)]
         env: Option<String>,
     },
-    /// Write a starter secrets.toml in the current directory from an existing item.
+    /// Generate configuration from a 1Password item you have already set up.
     ///
     /// Looks the vault and item up by title once, reads the item's field names and types
     /// (never its values) and writes IDs, key names and kinds. Writes nothing to 1Password.
@@ -270,6 +303,40 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
+    if let Cmd::Session { account, command } = &cli.cmd {
+        use opv::app::{setup, setup_runtime};
+        use setup::Interaction;
+        setup_runtime::Console::require_terminal()?;
+        let mut runtime = setup_runtime::Runtime::with_account(account.as_deref());
+        let mut console = setup_runtime::Console;
+        setup::prepare(account.as_deref(), &mut runtime, &mut console)?;
+        if command.is_empty() {
+            console.show("Signed in. This terminal can run opv setup, check and run. Type exit to leave the session.")?;
+        }
+        return runtime.child(command);
+    }
+    if let Cmd::Setup {
+        recipe,
+        account,
+        product,
+    } = &cli.cmd
+    {
+        use opv::app::{setup, setup_recipe, setup_runtime};
+        setup_runtime::Console::require_terminal()?;
+        let start = std::env::current_dir()
+            .map_err(|_| Error::Config("Cannot locate the current directory.".into()))?;
+        let recipe = recipe.clone().or_else(|| setup_recipe::discover(&start)).ok_or_else(|| Error::Config(
+            "[SETUP-RECIPE] This project has no setup recipe yet. Add opv.setup.toml, or use opv setup --recipe <path>. See docs/guided-setup.md for the reusable recipe format.".into()
+        ))?;
+        return setup::run(
+            &recipe,
+            cli.config.as_deref(),
+            account.as_deref(),
+            product.as_deref(),
+            &mut setup_runtime::Runtime::with_account(account.as_deref()),
+            &mut setup_runtime::Console,
+        );
+    }
     let r = ProcessRunner::default();
     if let Cmd::Init { .. } = &cli.cmd {
         return run_init(cli, &r, out).map(|()| 0);
@@ -288,7 +355,7 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
                     config::load(&found)
                 }
                 None => Err(Error::Config(format!(
-                    "no secrets.toml found in {} or any parent directory; pass --config <path>",
+                    "no secrets.toml found in {} or any parent directory. New project? Run opv setup. Already configured? Pass --config <path> to select its configuration.",
                     start.display()
                 ))),
             },
@@ -312,6 +379,8 @@ fn run_other(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     match cmd {
+        Cmd::Setup { .. } => unreachable!("handled before configuration discovery"),
+        Cmd::Session { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Doctor { env, product } => {

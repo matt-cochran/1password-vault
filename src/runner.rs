@@ -104,7 +104,7 @@ fn exit_code(status: ExitStatus) -> i32 {
 
 /// Read to EOF into a buffer that is zeroized on drop. Growth copies into a fresh
 /// `Zeroizing` allocation, so no unzeroized copy of the data is left behind by `realloc`.
-fn read_to_end_zeroizing(mut r: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn read_to_end_zeroizing(mut r: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
     let mut out = Zeroizing::new(Vec::with_capacity(8 * 1024));
     let mut chunk = [0u8; 8 * 1024];
     let res = loop {

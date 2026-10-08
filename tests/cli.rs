@@ -238,7 +238,7 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.contains("environment \"dev\" has no fly section"),
+            err.contains("environment \"dev\" has no deployment target"),
             "{cmd:?}: {err}"
         );
     }
@@ -712,4 +712,15 @@ fn init_accepts_a_run_only_environment() {
     let dir = tempfile::tempdir().unwrap();
     let (code, _, err) = opv_in(dir.path(), &["init", "dev", "--vault", "v", "--item", "i"]);
     assert_eq!(code, 3, "{err}");
+}
+
+#[test]
+fn guided_commands_refuse_headless_execution_before_vendor_calls() {
+    for command in ["setup", "session"] {
+        let (code, stdout, stderr) = opv(&[command]);
+        assert_eq!(code, 6);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("SETUP-TERMINAL"));
+        assert!(stderr.contains("interactive terminal"));
+    }
 }

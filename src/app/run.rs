@@ -26,11 +26,15 @@ pub fn run_for(
 ) -> Result<i32, Error> {
     match (fleet.is_simple(), product) {
         (false, Some(p)) => run(fleet, env_name, p, command, runner),
-        (false, None) => Err(Error::Config(
-            "--product is required under the fleet profile (usage: run <env> --product <p> \
-             -- <cmd>...)"
-                .into(),
-        )),
+        (false, None) => Err(Error::Config(format!(
+            "--product is required. Choose one of: {}. Usage: opv run {env_name} --product <name> -- <command>",
+            fleet
+                .products
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
         (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
         (true, Some(_)) => Err(Error::Config(
             "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
