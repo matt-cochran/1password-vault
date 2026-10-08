@@ -6,7 +6,7 @@ This doc answers the four D0 questions, plus two follow-ups: how `fly secrets im
 - **Targets:** vault `fleet-dev`, item `fleet` (Secure Note), Fly app `secretctl-test` (no machines). The Fly app keeps its original name `secretctl-test` although the CLI is now `opv`.
 - **Runs:** the owner ran `spike/d0-probe.sh` twice on 2026-10-07. Run 1 did the stdin edit and then stopped in step 4 because of a script bug that was later fixed. Run 2 completed every step.
 - **Evidence:** file names below are in `spike/out/`, which is git-ignored. All values in it are redacted to `"<v>"` and stderr is scrubbed. The leak grep was clean after both runs.
-- **Copy:** this file is committed as `docs/spike-d0-findings.md`. The redacted fixtures are `tests/fixtures/op_item.json` and `tests/fixtures/fly_list.json`.
+- **Copy:** this file is committed as `docs/design/spike-d0-findings.md`. The redacted fixtures are `tests/fixtures/op_item.json` and `tests/fixtures/fly_list.json`.
 
 ## Q1: item JSON shape (`op item get <item-id> --vault <vault-id> --format json`)
 

@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest a change to opv.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem should this change solve?
+    validations:
+      required: true
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: input
+    id: requirement
+    attributes:
+      label: Related requirement or target
+      description: A requirement ID (for example FR-28) from docs/design/requirements.md, or the target this relates to.
+    validations:
+      required: true

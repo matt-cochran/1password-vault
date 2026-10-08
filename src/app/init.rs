@@ -124,7 +124,7 @@ fn run_on(
         out,
         "add rules and guidance by hand; see the README (Rules reference)".into(),
     )?;
-    w(out, format!("Next step: opv fly plan {}", args.env))
+    w(out, format!("Next step: opv plan {}", args.env))
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
@@ -312,9 +312,9 @@ fn declare(
 }
 
 /// The tail of every note on a field the later reader rejects.
-const REJECTED: &str = "status and fly sync will reject it until it is fixed in 1Password";
+const REJECTED: &str = "status and sync will reject it until it is fixed in 1Password";
 
-/// Why `status` / `fly sync` (the item reader for `profile`) would reject this field, if
+/// Why `status` / `sync` (the item reader for `profile`) would reject this field, if
 /// they would; duplicates are checked separately ([`check_duplicates`]). Mirrors
 /// `onepassword::parse_fields` (fleet) and `parse_unsectioned_fields` (simple).
 fn reader_rejects(f: &FieldShape, profile: Profile) -> Option<String> {

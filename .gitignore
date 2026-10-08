@@ -25,3 +25,4 @@ rustc-ice-*.txt
 
 # Throwaway spikes (D0); never committed
 spike/
+.superpowers/

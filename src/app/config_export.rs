@@ -21,7 +21,7 @@ pub fn run(
 ) -> Result<(), Error> {
     fleet.environment(env_name)?;
     let none = BTreeSet::new();
-    let (plan, _) = read_and_plan(fleet, env_name, r, false, &none, &none)?;
+    let (plan, _) = read_and_plan(fleet, env_name, r, None, &none, &none)?;
     let refused = row_names(&plan.rows, refuses);
     if !refused.is_empty() {
         return Err(Error::Policy(format!(
