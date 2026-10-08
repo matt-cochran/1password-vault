@@ -19,14 +19,28 @@ pub fn select(
         ));
     }
     if !fleet.is_simple() && required && product.is_none() {
-        return Err(Error::Config(
-            "--product is required under the fleet profile".into(),
-        ));
+        return Err(Error::Config(format!(
+            "--product is required because this configuration contains multiple products. Choose --product <name> (available: {}).",
+            fleet
+                .products
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
     if let Some(p) = product
         && !fleet.products.contains_key(p)
     {
-        return Err(Error::Config(format!("undefined product {p:?}")));
+        return Err(Error::Config(format!(
+            "undefined product {p:?}; choose one of: {}",
+            fleet
+                .products
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
@@ -79,6 +93,12 @@ pub fn check(
                 KeyState::Skipped => "skipped".to_string(),
             };
             writeln!(out, "{label}: {state}").map_err(write_err)?;
+            if !matches!(row.state, KeyState::Ready | KeyState::Skipped) {
+                let guidance = &selected.products[&row.product].keys[&row.key].guidance;
+                if !guidance.is_empty() {
+                    writeln!(out, "  Next: {guidance}").map_err(write_err)?;
+                }
+            }
         }
         writeln!(out, "{findings} finding(s); no deployment target checked").map_err(write_err)?;
     }

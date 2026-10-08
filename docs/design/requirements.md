@@ -302,7 +302,7 @@ Prune scope: only template names of declared keys that are not desired in this e
 
 Commands used by CI shall not prompt for input.
 
-If an operation requires confirmation, the CLI shall require an explicit command-line option instead of falling back to interactive confirmation.
+Automation commands require explicit flags for confirmation and never fall back to prompts. The owner-only `setup` and `session` commands are explicit interactive entry points: they require a terminal, refuse CI and service-account/Connect authentication, and do not deploy or prune.
 
 CI behavior must be predictable from arguments and configuration alone.
 
@@ -420,7 +420,7 @@ The CLI shall provide:
 opv item skeleton <environment>
 ```
 
-It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This is the only command that writes to 1Password, and it needs a write-capable identity; `fly sync`, `plan`, `status` and `config export` stay read-only.
+It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5; `fly sync`, `plan`, `status` and `config export` stay read-only.
 
 ## v0.2 ergonomics (FR-20 to FR-25)
 
@@ -790,7 +790,7 @@ A CI identity shall require only:
 - the minimum Fly permissions required to manage secrets for the target application;
 - on cloud targets, read and write on the opv-tagged store entries and update on the one runtime service. Read is needed for compare-before-write (FR-31); it adds no exposure, because the same values are readable through the CI 1Password token.
 
-The CLI shall not require write access to 1Password for synchronization.
+The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. This write exception does not apply to synchronization or CI.
 
 ## SR-6 — Explicit Destructive Operations
 

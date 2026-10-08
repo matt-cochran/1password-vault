@@ -296,7 +296,7 @@ mod tests {
         let r = FakeRunner::new([]);
         let e = run(&fl, "dev", &r, &mut Vec::new()).unwrap_err();
         assert!(
-            matches!(&e, Error::Config(m) if m.contains("\"dev\"") && m.contains("no fly section")),
+            matches!(&e, Error::Config(m) if m.contains("\"dev\"") && m.contains("no deployment target")),
             "{e}"
         );
         assert!(r.calls.borrow().is_empty());

@@ -17,6 +17,10 @@ mod guidance_tests;
 pub mod init;
 pub mod local;
 pub mod run;
+pub mod setup;
+mod setup_import;
+pub mod setup_recipe;
+pub mod setup_runtime;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;

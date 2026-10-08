@@ -877,7 +877,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         assert!(f.environments["dev"].target.is_none());
         assert!(matches!(
             f.target("dev"),
-            Err(Error::Config(m)) if m.contains("dev") && m.contains("no fly section")
+            Err(Error::Config(m)) if m.contains("dev") && m.contains("no deployment target")
         ));
         assert!(f.target("prod").is_ok());
         // `secret_name` stays required when `fly` is present.
@@ -1161,7 +1161,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         .unwrap();
         assert!(matches!(
             f.target("dev"),
-            Err(Error::Config(m)) if m.contains("add fly.app") && !m.contains("secret_name")
+            Err(Error::Config(m)) if m.contains("configure fly.app") && !m.contains("secret_name")
         ));
     }
 
