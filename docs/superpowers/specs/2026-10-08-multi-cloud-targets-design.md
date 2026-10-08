@@ -81,8 +81,14 @@ pub trait Runtime {
   stage-and-compare on digests (§6.4), expressed through the port as `read → None` plus
   digest-based versions.
 - `app/sync.rs`, `app/status.rs`, `domain/plan.rs`, `app/doctor.rs` and `app/explain.rs` stop naming
-  Fly. Fly-only names (`FlySecret`, `fly_name`) become target-neutral (`StoreEntry`, `env_name`).
+  Fly. Fly-only names (`FlySecret`, `fly_name`) become target-neutral (`StoreEntry`, `target_name`).
   No parallel path remains after P0.
+- **Fly config is unchanged:** config fields have never been synced to Fly (consumers read them with
+  `config export`), and P0 keeps that. Config routing applies to cloud runtimes only.
+- **Ports grow with their consumers:** P0 adds only the operations the current engine calls
+  (`list`, value refusal, batch validate, write, remove, deploy). P1 adds `read`, `bindings`,
+  `apply`, `check_access` and `await_healthy` when Key Vault and Container Apps first need them;
+  the signatures above are that destination.
 
 ## 4. Configuration (FR-28)
 

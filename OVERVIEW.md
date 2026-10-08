@@ -593,7 +593,7 @@ A target is one secret store plus one runtime:
 
 - Core logic reaches targets only through the `SecretStore` and `Runtime` ports (FR-12). `app/` and `domain/` name no target.
 - Each environment declares at most one target section: `fly`, `azure`, `aws` or `gcp`. Existing `fly` sections are unchanged.
-- **Routing by kind (FR-14).** A secret (concealed field) is written to the store and bound on the runtime as a reference. Config (text field) is set as a plain runtime env var, unless the environment sets `config = "store"`, which routes config like secrets. Routing a secret to plain env is not expressible.
+- **Routing by kind (FR-14).** A secret (concealed field) is written to the store and bound on the runtime as a reference. Config (text field) is set as a plain runtime env var, unless the environment sets `config = "store"`, which routes config like secrets. Routing a secret to plain env is not expressible. On Fly, config is not synced, as since v0.1; consumers read it with `config export`.
 - `opv plan <env>` and `opv sync <env>` work for every target. `opv fly plan` and `opv fly sync` remain as aliases that print a deprecation warning for one minor release and are then removed.
 
 ## FR-29 — Pinned References
@@ -1126,7 +1126,7 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 
 Version 0.3 is acceptable, per phase, when in addition to 1–26:
 
-27. Every Fly command produces byte-identical `flyctl` argv and stdin before and after the move onto the ports (characterization tests), and `app/` and `domain/` name no target.
+27. Every Fly command produces byte-identical `flyctl` argv, stdin and output before and after the move onto the ports (characterization tests), and `app/` and `domain/` reach Fly only through the ports (`init`, which writes a Fly configuration, excepted).
 28. `opv plan` and `opv sync` behave as `fly plan` and `fly sync` on Fly targets; the `fly` forms still work and print a deprecation warning.
 29. A secret is written to the store and bound by a pinned version reference; a config field is a plain runtime env var, or a store reference with `config = "store"`. No configuration routes a secret to plain env.
 30. `sync` without `--deploy` changes nothing the running app can see, including after a restart; `status` reports the pending deploy.
