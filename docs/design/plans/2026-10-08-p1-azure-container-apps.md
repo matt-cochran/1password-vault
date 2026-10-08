@@ -4,7 +4,9 @@
 
 **Goal:** `opv plan|status|sync <env>` work for an environment whose target is Azure Key Vault (secrets) plus an Azure Container App (runtime), with pinned Key Vault references, config as env vars, and no change to Fly behaviour. Released as opv 0.5.0 (issue #39).
 
-**Architecture:** A new `[environments.<env>.azure]` target maps to two adapters, `adapters::keyvault::KeyVault` (implements `SecretStore`) and `adapters::containerapp::ContainerApp` (implements `Runtime`), both wrapping `az` through `CommandRunner`. The ports grow the operations the spec reserved for P1 (`read`, `bindings`, `apply`, `check_access`, `await_healthy`) with Fly-preserving defaults. `app/sync.rs` keeps the Fly stage-and-compare flow unchanged and adds a pinned-reference flow chosen by `Runtime::flow()`; the planner gets exact `Present`/`WouldChange` states from compare-before-write reads.
+**Architecture:** A new `[environments.<env>.azure]` target maps to two adapters, `adapters::keyvault::KeyVault` and `adapters::containerapp::ContainerApp`, both wrapping `az` through `CommandRunner`. The ports split by flow (R4): a shared `Store` (list, refusal) with `StagedStore` (Fly: validate, write, remove) and `PinnedStore` (Key Vault: read, write_one, delete); `StagedRuntime` (Fly: deploy) and `PinnedRuntime` (Container Apps: bindings, apply, await_healthy). `adapters::open` returns `Ports::Staged | Ports::Pinned`, so a Fly path can never call a Key Vault operation and vice versa (compile-time, no "not supported" errors). `app/sync.rs` keeps the Fly flow byte-identical and adds the pinned flow; the planner gets exact `Present`/`WouldChange` from compare-before-write reads.
+
+**Review:** FMECA/poka-yoke/TRIZ review of this plan, 2026-10-08 (in the PR description). Its changes are folded in below: typed port split (R4), hashed Container Apps secret names (R2), access check demoted to `doctor` (R6), hardened `az` environment (R7), health definition for probe-less and scale-to-zero apps (R8), post-apply verification (R9), recon fixtures as test inputs (R10).
 
 **Tech Stack:** Rust 2024, clap, serde_json, zeroize, `az` CLI 2.90.0. New runtime dependencies (Task 3 adds them; `cargo deny check` must pass): `subtle = "2"` for the constant-time compare, and `sha2 = "0.10"` moved from `[dev-dependencies]` to `[dependencies]` for config digests and the unmanaged fingerprint. Tests use `runner::fake::FakeRunner` and `app::testutil`.
 
@@ -30,18 +32,22 @@
 ## Rulings (decisions this plan makes where the spec is silent)
 
 - **R1 `container`.** A Container App can run several containers. `azure.container` is optional; when absent the app must have exactly one container, otherwise `apply`/`bindings` fail with `Error::Config` listing the container names. Mirrors the GCP section's optional `container`.
-- **R2 Container Apps secret names.** The Container App secret that holds a reference is named `opv-` + lower-case Key Vault name (e.g. `FLEET--API--DB-URL` → `opv-fleet--api--db-url`). Managed set = env names from the template; CA secrets starting `opv-` that no managed env var references are reported, never removed in P1.
+- **R2 Container Apps secret names.** The Container App secret that holds a reference is named `opv-` + the first 16 hex chars of SHA-256(lower-case Key Vault name) — 20 chars, the limit `az containerapp secret set --help` states, deterministic and collision-checked at config load. `opv explain` shows the mapping. Managed set = env names from the template; `opv-` CA secrets no managed env var references are reported, never removed in P1.
 - **R3 Case.** Key Vault names are case-insensitive, so the collision check (spec §5) compares lower-cased store names.
-- **R4 Two flows, one port.** `Runtime::flow() -> Flow` (`StageDeploy` for Fly, `PinnedRefs` for clouds). `sync` dispatches on it. The spec's "no parallel path" referred to Fly-specific code in `app/`; both flows reach targets only through the ports.
+- **R4 Two flows, typed ports.** Fly has no versions, so it cannot pin; clouds have no staging area. Two flows are domain reality, so the ports say so in types: `Store {list, refusal}`; `StagedStore: Store {validate, write, remove}`; `PinnedStore: Store {read, write_one, delete}`; `StagedRuntime {deploy}`; `PinnedRuntime {bindings, apply, await_healthy}`; `adapters::open → Ports::{Staged{store, runtime}, Pinned{store, runtime}}`. `status`/`plan` use `Store` only. No trait method with a "not supported" default exists. Migration: the current `SecretStore`/`Runtime` are renamed in place (Task 3), leaving no old trait behind.
 - **R5 JSON schema.** `status --json`/`plan --json` gain optional per-key fields (`binding`, `pending_deploy`, `drift`) that are absent for Fly. Additive, so `schema_version` stays 1 (the spec's bump is deferred until a field changes meaning).
-- **R6 Identity.** `identity = "system"` or a user-assigned identity resource id; written verbatim into each CA secret's `identity`. `check_access` verifies the role assignment `Key Vault Secrets User` (or `Key Vault Secrets Officer`/`Administrator`) on the vault scope for that identity's principal, for an RBAC vault. An access-policy vault is checked for `get` on secrets. Anything else is a blocking finding.
+- **R6 Identity; access check demoted.** `identity = "system"` or a user-assigned identity resource id, written verbatim into each CA secret's `identity`. A role-assignment check gives false "no access" answers (group membership needs `--include-groups`, custom roles and PIM are invisible), and a false answer would block every deploy. The authoritative check is Azure's own: a revision whose identity cannot fetch a referenced secret fails provisioning (recon Q14), which `await_healthy` already reports and which leaves the previous revision serving. So `check_access` is a `doctor` **warning** with the grant command, not a deploy gate. Amends FR-33 ("blocking access check" → "advisory in doctor; deploy gated by revision health") — owner approval required.
+- **R7 Hardened `az` environment.** Every `az` call gets `AZURE_EXTENSION_USE_DYNAMIC_INSTALL=no` (an extension install prompt would hang a non-interactive run, FR-9), `AZURE_CORE_NO_COLOR=true`, `AZURE_CORE_ONLY_SHOW_ERRORS=true`, `AZURE_CORE_COLLECT_TELEMETRY=no`, and `--only-show-errors`. `az` writes each command's argv to `~/.azure/commands/*.log` (observed 2026-10-08), which is why no value and no config value may ever be in argv. Recon Q12 proves stdin values and response bodies do not reach that directory.
+- **R8 Health.** Healthy = `provisioningState` `Provisioned` and `runningState` in {`Running`, `RunningAtMaxScale`} and `healthState` in {`Healthy`, `None`} (`None` = no probes configured). A revision scaled to zero (recon Q7) counts as healthy once `Provisioned`. Failed = `provisioningState` `Failed` or `healthState` `Unhealthy`. Timeout default 300 s, `--deploy-timeout <s>` to override; a timeout is `Error::Target` naming the revision and the last states.
+- **R9 Post-apply verification.** Container Apps exposes no usable etag (recon Q8 to confirm), so a change made between opv's read and its update cannot be prevented. It is detected: after `update`, `bindings` is read again; a different unmanaged fingerprint than before the update ⇒ `Error::Target("container app <app> changed while opv applied (<paths>); check those settings")`. Window ≈ one `az` call.
+- **R10 Fixtures from reality.** Every adapter test fixture is a recon output with values replaced by markers, stored under `tests/fixtures/azure/`. No hand-invented JSON shapes.
 
 The live recon (Task 1) may overturn R1–R6 or any `az` argv below; its findings update this plan, the spec and `requirements.md` before Task 4 starts.
 
 ## Review Focus
 
 1. A Container App with a plain (non–Key Vault) secret the user set by hand: `apply` must keep it, and must not need or send its value. Test in Task 6 (`apply_keeps_unmanaged_plain_secret_without_its_value`).
-2. Two keys whose Key Vault names differ only by case or `_`/`-` (`DB_URL` and `DB-URL`, or `Db_Url` and `DB_URL`): config load fails naming both. Test in Task 2.
+2. Two keys whose Key Vault names (or hashed Container Apps secret names, R2) differ only by case or `_`/`-` (`DB_URL` and `DB-URL`, or `Db_Url` and `DB_URL`): config load fails naming both. Test in Task 2.
 3. A value exactly at and one byte over Key Vault's 25 KB limit: at passes, over is `RuleFailed("store_limit", …)` in `status`, and `sync` refuses before any call. Test in Task 4.
 4. A binding re-pinned by hand to an older version: `status` reports drift; `sync` without `--deploy` leaves it; `sync --deploy` repins. Test in Task 7.
 5. `--prune --deploy` when the new revision comes up unhealthy: nothing is deleted from Key Vault. Test in Task 7.
@@ -66,7 +72,7 @@ az containerapp create -n opv-spike-app -g opv-spike-rg --environment opv-spike-
   --image mcr.microsoft.com/k8se/quickstart:latest --system-assigned --ingress external --target-port 80
 ```
 
-Grant the app identity `Key Vault Secrets User` on the vault, and the operator `Key Vault Secrets Officer`.
+Grant the app identity `Key Vault Secrets User` on the vault, and the operator `Key Vault Secrets Officer`. Save every JSON output (values replaced by markers) under `tests/fixtures/azure/` for R10.
 
 - [ ] **Step 2: Answer each question with the exact command and output shape** (use the marker value `opv-spike-marker-1`; never a real secret)
 
@@ -82,7 +88,11 @@ Grant the app identity `Key Vault Secrets User` on the vault, and the operator `
 | Q8 | Does `show` expose an etag usable for optimistic concurrency with `update`? | probably not; fingerprint fallback |
 | Q9 | Probe for login: `az account show` exit status when signed out. | non-zero |
 | Q10 | Secret name limits for Container Apps secrets (`opv-` + lower-cased KV name): max length, allowed characters. | `^[a-z0-9][a-z0-9-]*[a-z0-9]$`, ≤ 253 |
-| Q11 | `az role assignment list --assignee <principalId> --scope <vault id> --include-inherited -o json`: shape of `roleDefinitionName`. | string |
+| Q11 | `az role assignment list --assignee <principalId> --scope <vault id> --include-inherited --include-groups -o json`: shape of `roleDefinitionName`. | string |
+| Q12 | After writing and reading the marker, `grep -rl opv-spike-marker-1 ~/.azure` finds nothing (no value in command logs, caches or telemetry). Repeat with a config marker sent through `update --yaml /dev/stdin`. | no matches |
+| Q13 | With `AZURE_EXTENSION_USE_DYNAMIC_INSTALL=no`, does any command opv uses need an extension (`containerapp` is core in 2.90?)? Missing extension ⇒ immediate non-zero exit, no prompt. | no prompt |
+| Q14 | Remove the app identity's role, deploy a new revision pinned to a version: does the revision fail provisioning (`provisioningState Failed`), and does the previous revision keep serving traffic in single-revision mode? | yes / yes — R6 depends on it |
+| Q15 | A probe-less app and a min-replicas-0 app: their `healthState`/`runningState` after a good deploy. | `None` / scaled-to-zero state — R8 |
 
 - [ ] **Step 3: Write `docs/design/spike-p1-azure-findings.md`** with versions (`az version`, extension `containerapp` version), each question, the command, the observed output shape (names only, marker values only), and the decision. Update this plan's argv tables and rulings where they differ.
 
@@ -262,40 +272,48 @@ pub enum Health { Healthy, Unhealthy(String), TimedOut }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessFinding { pub store_name: String, pub reason: &'static str }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Flow { StageDeploy, PinnedRefs }
 ```
 
 ```rust
-// src/ports.rs additions
-pub trait SecretStore {
-    // existing: list, refusal, validate, write, remove
-    /// Current value and version, for compare-before-write (FR-31). Fly: Ok(None).
-    fn read(&self, name: &str) -> Result<Option<(SecretValue, String)>, Error> { let _ = name; Ok(None) }
-    /// Writes one entry, value on stdin, tagged opv-managed=<env>; returns the new version.
-    /// Fly: unused (its batch `write` stays).
-    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
-        let _ = (name, value); Err(Error::Target("write_one is not supported by this store".into()))
-    }
-    /// Deletes one entry; refuses an entry without the ownership tag (FR-32).
-    fn delete(&self, name: &str) -> Result<(), Error> {
-        let _ = name; Err(Error::Target("delete is not supported by this store".into()))
-    }
+// src/ports.rs (replaces SecretStore/Runtime; renamed in place, no old trait left)
+pub trait Store {
+    fn list(&self) -> Result<Vec<StoreEntry>, Error>;
+    fn refusal(&self, name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)>;
+}
+pub trait StagedStore: Store {           // Fly
+    fn validate(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
+    fn write(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
+    fn remove(&self, names: &[String]) -> Result<(), Error>;
+}
+pub trait PinnedStore: Store {           // Key Vault
+    /// Current value and version, for compare-before-write (FR-31). None when absent.
+    fn read(&self, name: &str) -> Result<Option<(SecretValue, String)>, Error>;
+    /// One new version, value on stdin, tagged opv-managed=<env>; returns the version id.
+    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error>;
+    /// Refuses an entry without the ownership tag (FR-32).
+    fn delete(&self, name: &str) -> Result<(), Error>;
+}
+pub trait StagedRuntime { fn deploy(&self) -> Result<(), Error>; }
+pub trait PinnedRuntime {
+    fn bindings(&self) -> Result<RuntimeSnapshot, Error>;
+    fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error>;
+    fn await_healthy(&self, revision: &Revision) -> Result<Health, Error>;
+    /// Advisory only (R6): used by doctor, never gates a deploy.
+    fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error>;
 }
 
-pub trait Runtime {
-    // existing: deploy
-    fn flow(&self) -> Flow { Flow::StageDeploy }
-    fn bindings(&self) -> Result<RuntimeSnapshot, Error> { Ok(RuntimeSnapshot::default()) }
-    fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error> {
-        let _ = (change, snapshot); Err(Error::Target("apply is not supported by this runtime".into()))
-    }
-    fn await_healthy(&self, revision: &Revision) -> Result<Health, Error> { let _ = revision; Ok(Health::Healthy) }
-    fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error> { let _ = names; Ok(Vec::new()) }
+// src/adapters/mod.rs
+pub enum Ports<'a> {
+    Staged { store: Box<dyn StagedStore + 'a>, runtime: Box<dyn StagedRuntime + 'a> },
+    Pinned { store: Box<dyn PinnedStore + 'a>, runtime: Box<dyn PinnedRuntime + 'a> },
 }
+impl<'a> Ports<'a> { pub fn store(&self) -> &dyn Store; }   // for status/plan
+pub fn open<'a>(target: &'a Target, r: &'a dyn CommandRunner) -> Ports<'a>;
 ```
 
-Fly needs no new code: the defaults are its behaviour. The `deploy` method stays for `StageDeploy`.
+`Flow` is not needed (the `Ports` variant is the flow); drop it from `domain/runtime.rs`.
+
+Fly implements `Store + StagedStore + StagedRuntime` by moving its existing impl blocks; no Fly logic changes.
 
 - [ ] **Step 1: Failing tests** in `src/domain/runtime.rs`:
 
@@ -314,12 +332,12 @@ fn raw_spec_debug_prints_length_only() {
 }
 ```
 
-And in `src/adapters/fly.rs` tests: `fly_runtime_flow_is_stage_deploy` (`assert_eq!(fly.flow(), Flow::StageDeploy)`).
+And in `src/adapters/mod.rs` tests: `fly_target_opens_staged_ports` (`assert!(matches!(open(&fly_target, &r), Ports::Staged { .. }))`).
 
 - [ ] **Step 2: Run** — FAIL (types missing).
-- [ ] **Step 3: Implement** the types and trait defaults above.
+- [ ] **Step 3: Implement** the types and traits above; update every caller (`app/sync.rs`, `app/status.rs`, `app/mod.rs`, `app/doctor.rs`) to match on `Ports`.
 - [ ] **Step 4: Run** full suite; golden files unchanged.
-- [ ] **Step 5: Commit** `feat(ports): P1 store and runtime operations with Fly-preserving defaults (FR-29, FR-31, FR-33)`.
+- [ ] **Step 5: Commit** `refactor(ports): split ports by flow, staged (Fly) and pinned (clouds) (FR-12, FR-28)`.
 
 ---
 
@@ -330,8 +348,8 @@ And in `src/adapters/fly.rs` tests: `fly_runtime_flow_is_stage_deploy` (`assert_
 - Modify: `src/adapters/mod.rs` (`pub mod az; pub mod keyvault;`), `src/host.rs` (`Tool::Az` with install hint)
 
 **Interfaces:**
-- Consumes: `SecretStore` (Task 3), `AzureTarget::store_name` (Task 2).
-- Produces: `pub struct KeyVault<'a> { pub runner: &'a dyn CommandRunner, pub vault: &'a str, pub env: &'a str, pub template_names: &'a BTreeSet<String> }` implementing `SecretStore`; `pub const VALUE_LIMIT: usize = 25 * 1024;`; `pub fn az::diagnose(r, op: &str, target: &str) -> Error`; `pub fn az::stdin_supported() -> Result<(), Error>`.
+- Consumes: `Store`, `PinnedStore` (Task 3), `AzureTarget::store_name` (Task 2).
+- Produces: `pub struct KeyVault<'a> { pub runner: &'a dyn CommandRunner, pub vault: &'a str, pub env: &'a str, pub template_names: &'a BTreeSet<String> }` implementing `Store + PinnedStore`; `pub const VALUE_LIMIT: usize = 25 * 1024;`; `pub fn az::diagnose(r, op: &str, target: &str) -> Error`; `pub fn az::stdin_supported() -> Result<(), Error>`.
 
 argv (confirm against Task 1 findings):
 
@@ -346,8 +364,6 @@ Behaviour:
 - `list` returns `StoreEntry { name, version: None, pending: false }` for entries tagged `opv-managed=<env>` **and** whose name is in `template_names` (managed set, FR-8). Unknown JSON fields ignored.
 - `read`: exit with `SecretNotFound` → `Ok(None)`; otherwise parse `.value` into `SecretValue` (zeroize the JSON buffer: it is `Output::stdout`, already `Zeroizing`) and the version = last path segment of `.id`.
 - `refusal(name, value)`: value longer than `VALUE_LIMIT` → `Some(("store_limit", "longer than the Key Vault limit of 25 KB"))`; empty → `Some(("store_limit", "Key Vault cannot store an empty value"))`.
-- `validate(batch)`: first refusal → `Error::Policy("<name>: failed store_limit (<reason>)")`.
-- `write(batch)` (Fly batch API): unused for Azure; returns `Error::Target("internal: batch write on Key Vault")`.
 - `write_one`: `az::stdin_supported()?` first; parse `.id` → version.
 - `delete`: `list` first; name not tagged → `Error::Policy("<name>: not tagged opv-managed=<env>; refusing to delete")`.
 - `ObjectIsDeletedButRecoverable` on `set` → `Error::Target("<name> is soft-deleted in Key Vault <vault>; recover it with: az keyvault secret recover --vault-name <vault> --name <name>")`. Detection: the runner discards stderr, so detect by a follow-up read-only probe `keyvault secret show-deleted --vault-name <vault> --name <name> -o none` exit 0.
@@ -404,8 +420,8 @@ Behaviour:
 - Modify: `src/adapters/mod.rs`
 
 **Interfaces:**
-- Consumes: `Runtime`, `RuntimeSnapshot`, `RuntimeChange`, `Binding`, `Revision`, `Health`, `AccessFinding`, `Flow` (Task 3); `az::diagnose`, `az::stdin_supported` (Task 4).
-- Produces: `pub struct ContainerApp<'a> { pub runner, pub target: &'a AzureTarget, pub managed: &'a BTreeSet<String> /* env names */, pub vault_uri: String /* https://<vault>.vault.azure.net */ }` with `flow() == Flow::PinnedRefs`.
+- Consumes: `PinnedRuntime`, `RuntimeSnapshot`, `RuntimeChange`, `Binding`, `Revision`, `Health`, `AccessFinding` (Task 3); `az::diagnose`, `az::stdin_supported` (Task 4).
+- Produces: `pub struct ContainerApp<'a> { pub runner, pub target: &'a AzureTarget, pub managed: &'a BTreeSet<String> /* env names */, pub vault_uri: String /* https://<vault>.vault.azure.net */ }` implementing `PinnedRuntime`.
 
 argv (confirm against Task 1):
 
@@ -419,7 +435,7 @@ argv (confirm against Task 1):
 Behaviour:
 - `bindings`: select the container (R1). For each env var whose name is in `managed`: `value` → `Plain{digest: sha256(value)}`; `secretRef` → look up the CA secret; a `keyVaultUrl` of the form `<vault_uri>/secrets/<name>/<version>` → `Pinned`; anything else → `Other`. `unmanaged_fingerprint` = SHA-256 of canonical JSON of the spec with managed env entries and `opv-` CA secrets removed, and with read-only fields (`provisioningState`, `latestRevisionName`, `latestReadyRevisionName`, `outboundIpAddresses`, `systemData`, `eventStreamEndpoint`, `latestRevisionFqdn`) removed. `spec` keeps the document.
 - `apply`: `az::stdin_supported()?`; re-run `bindings`; if the new `unmanaged_fingerprint` differs from `snapshot.unmanaged_fingerprint` ⇒ `Error::Target("container app <app> changed outside opv since it was read (<paths>); nothing applied, safe to re-run")` where paths are JSON pointers of differing unmanaged nodes (names only). Then edit the fresh spec: for each `pin` set CA secret `opv-<lower store name>` = `{name, keyVaultUrl: <vault_uri>/secrets/<store>/<version>, identity}` and env `{name, secretRef}`; for each `set` env `{name, value}`; remove `unbind` env names and their `opv-` secrets. Plain unmanaged secrets keep their entry as returned by `show` (Task 1 Q5 decides whether that needs a value; if it does, `apply` fails with `Error::Config("container app <app> has plain secrets <names>; move them to Key Vault references before using opv")` before sending anything — never fetch secret values). Return `Revision(properties.latestRevisionName)` from the update output.
-- `await_healthy`: `healthState == "Healthy" && runningState in {"Running","RunningAtMaxScale"}` ⇒ `Healthy`; `provisioningState == "Failed"` or `healthState == "Unhealthy"` ⇒ `Unhealthy(<state names>)`; timeout ⇒ `TimedOut`.
+- `await_healthy`: per R8. After `Healthy`, re-read `bindings` and compare the unmanaged fingerprint with the pre-update one (R9).
 - `check_access`: for an RBAC vault, a role named `Key Vault Secrets User`, `Key Vault Secrets Officer` or `Key Vault Administrator` at the vault scope or above ⇒ no findings; else one `AccessFinding{store_name, reason: "the app identity has no Key Vault secrets read role on <vault>"}` per name. Access-policy vault: `keyvault show` `.properties.accessPolicies[]` with the principal's `objectId` and `permissions.secrets` containing `get`.
 
 - [ ] **Step 1: Failing tests** (fixtures under `tests/fixtures/azure/containerapp-show-*.json`, hand-written from Task 1 shapes, marker values only):
@@ -433,7 +449,9 @@ Behaviour:
   - `apply_keeps_unmanaged_plain_secret_without_its_value` (or the Config error, per Q5)
   - `apply_refuses_when_unmanaged_part_changed_and_names_the_path`
   - `apply_returns_latest_revision_name`
-  - `await_healthy_reports_healthy` / `await_healthy_reports_unhealthy_state` / `await_healthy_times_out` (fake clock: inject `sleep: &dyn Fn(Duration)`)
+  - `await_healthy_reports_healthy` / `await_healthy_accepts_probe_less_revision` / `await_healthy_accepts_scaled_to_zero_revision` / `await_healthy_reports_failed_provisioning` / `await_healthy_times_out` (fake clock: inject `sleep: &dyn Fn(Duration)`)
+  - `concurrent_unmanaged_change_after_apply_is_reported` (R9)
+  - `every_az_call_carries_the_hardened_environment` (R7)
   - `check_access_passes_with_secrets_user_role`
   - `check_access_reports_each_name_without_role`
 - [ ] **Step 2–4:** Run (FAIL), implement, run (PASS).
@@ -444,7 +462,7 @@ Behaviour:
 ### Task 7: Pinned-reference sync flow (FR-29, FR-31, FR-32, FR-33)
 
 **Files:**
-- Modify: `src/app/sync.rs` (dispatch on `runtime.flow()`; new `run_pinned`), `src/app/status.rs` (drift/pending lines), `src/app/mod.rs` (JSON optional fields, R5)
+- Modify: `src/app/sync.rs` (match on `Ports`; new `run_pinned`), `src/app/status.rs` (drift/pending lines), `src/app/mod.rs` (JSON optional fields, R5)
 - Test: `src/app/azure_tests.rs` (new, `#[cfg(test)] mod azure_tests;` in `app/mod.rs`)
 
 **Interfaces:**
@@ -455,7 +473,7 @@ Flow (spec §6, exact output lines):
 
 ```text
 1. plan (Task 5) → refuse on blocking rows: "sync refused, nothing staged: <names>"   (unchanged text)
-2. store.validate(batch)
+2. every value checked with store.refusal before any write (refuse the whole run on the first one)
 3. for each ready secret (and config when config = "store") with state Absent/WouldChange:
        v = store.write_one(name, value)          → "written: <names> (new versions, not live until --deploy)"
    unchanged                                     → "unchanged: <names>"
@@ -468,11 +486,9 @@ Flow (spec §6, exact output lines):
 6. if change empty → "nothing pending"
    elif !--deploy  → "pending deploy (pass --deploy): <names>"
    else:
-       findings = runtime.check_access(store names referenced by change.pin)
-       findings non-empty → Error::Policy("app identity cannot read: <names>; grant Key Vault Secrets User on <vault>")
        rev = runtime.apply(change, snap) ; health = runtime.await_healthy(rev)
        Healthy → "deployed revision <rev>"
-       Unhealthy/TimedOut → Error::Target("revision <rev> is <state>; previous revision keeps serving; nothing pruned")
+       Unhealthy/TimedOut → Error::Target("revision <rev> is <state>; previous revision keeps serving; nothing pruned; run opv doctor --env <env> to check Key Vault access")
 7. if --prune and --deploy and Healthy: store.delete(each unbound store name) → "pruned: <names>"
    if --prune without --deploy → "not pruned without --deploy: <names>"
 8. "env-routed (visible to readers of <container_app>): <names>"   (config routed to env)
@@ -486,7 +502,7 @@ Flow (spec §6, exact output lines):
   - `config_routed_to_store_is_written_to_key_vault`
   - `drift_is_reported_by_status`
   - `drift_is_left_without_deploy`
-  - `missing_access_blocks_deploy_before_apply`
+  - `failed_revision_names_doctor_access_check`
   - `unhealthy_revision_prunes_nothing`
   - `prune_with_deploy_deletes_after_healthy_revision`
   - `prune_without_deploy_only_reports`
@@ -504,9 +520,9 @@ Flow (spec §6, exact output lines):
 - Modify: `src/app/doctor.rs` (az checks when any environment has an Azure target, scoped like Fly), `src/app/explain.rs` (show `key vault name`, `env name`, `routing`), `src/main.rs` help text, `src/host.rs` (`Tool::Az` install hints: Linux `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash`, macOS `brew install azure-cli`, Windows `winget install -e --id Microsoft.AzureCLI`).
 
 Doctor lines (in order, after the op lines):
-`az` version (warn below 2.60.0), `az login` (`az account show -o none`), `key vault <vault>` (`keyvault secret list ... -o none` exit status), `container app <app>` (`containerapp show ... -o none`), `app identity access` (`check_access` on every managed store name; finding ⇒ fail with the grant command `az role assignment create --assignee <principal> --role "Key Vault Secrets User" --scope <vault id>`).
+`az` version (warn below 2.60.0), `az login` (`az account show -o none`), `key vault <vault>` (`keyvault secret list ... -o none` exit status), `container app <app>` (`containerapp show ... -o none`), `app identity access` (`check_access` on every managed store name; a finding is a **warn** line with the grant command `az role assignment create --assignee <principal> --role "Key Vault Secrets User" --scope <vault id>`, never a failure, R6).
 
-- [ ] **Step 1: Failing tests:** `doctor_checks_az_only_with_azure_target`, `doctor_signed_out_of_azure_names_az_login`, `doctor_missing_access_names_grant_command`, `explain_azure_key_shows_key_vault_name`, `fly_doctor_output_unchanged` (existing tests keep passing).
+- [ ] **Step 1: Failing tests:** `doctor_checks_az_only_with_azure_target`, `doctor_signed_out_of_azure_names_az_login`, `doctor_missing_access_warns_with_grant_command`, `explain_azure_key_shows_key_vault_name`, `fly_doctor_output_unchanged` (existing tests keep passing).
 - [ ] **Step 2–4:** Run (FAIL), implement, run (PASS).
 - [ ] **Step 5: Commit** `feat(doctor): Azure CLI, login, vault, app and identity checks (FR-26, FR-33)`.
 
