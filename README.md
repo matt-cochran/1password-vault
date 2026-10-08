@@ -83,6 +83,7 @@ rules = { base64_bytes = 32 }
 - [Installing](docs/install.md): install script, release binaries, npm, from source, verifying downloads, prerequisites.
 - [Configuration](docs/configuration.md): store layout, `secrets.toml`, the fleet and simple profiles, `opv init`, rules and failure reasons.
 - [Usage](docs/usage.md): every command, JSON output, change detection, pruning, exit codes, security model, GitHub Actions.
+- [Setting up with an AI assistant](docs/agent-setup.md): a step-by-step procedure and safety rules for Claude Code, Codex, Cursor and similar; [llms.txt](llms.txt) indexes the docs for them.
 - [Design](docs/design/): requirements, design decisions and plans, for contributors.
 - [Changelog](CHANGELOG.md).
 
