@@ -8,6 +8,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod host;
+pub mod ports;
 pub mod runner;
 
 pub use error::Error;
