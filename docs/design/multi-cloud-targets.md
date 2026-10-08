@@ -1,7 +1,7 @@
 # Multi-cloud targets: Azure, AWS and GCP
 
 Status: approved by the owner on 2026-10-08. Requirements FR-28 to FR-33 and §8 items 27 to 36 in
-`OVERVIEW.md` are normative; this document is their argument and the delivery plan.
+`docs/design/requirements.md` are normative; this document is their argument and the delivery plan.
 
 ## 1. Intent
 
@@ -216,7 +216,7 @@ Each phase is one feature branch → `dev` PR → release through staging → ma
 | P4 Secret Manager + Cloud Run | manager reviews | `recon`; two adapters; confirm Cloud Run functions coverage |
 
 The P1 `recon` result can change §6 details (exact commands, health signals). Any change goes back
-into this document and `OVERVIEW.md` before the adapter is built.
+into this document and `docs/design/requirements.md` before the adapter is built.
 
 ## 10. Risk summary
 

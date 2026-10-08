@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, clap, serde_json, zeroize; tests use `runner::fake::FakeRunner` and `app::testutil`.
 
-**Spec:** `docs/superpowers/specs/2026-10-08-multi-cloud-targets-design.md` (§3, §8, §9); `OVERVIEW.md` FR-12, FR-28, §8 items 27–28.
+**Spec:** `docs/design/multi-cloud-targets.md` (§3, §8, §9); `docs/design/requirements.md` FR-12, FR-28, §8 items 27–28.
 
 ## Global Constraints
 
@@ -301,7 +301,7 @@ fn app_and_domain_name_no_fly_adapter() {
 ### Task 5: `opv plan` / `opv sync` and deprecated `fly` aliases (Junior)
 
 **Files:**
-- Modify: `src/main.rs`, `tests/cli.rs`, `README.md`, `CLAUDE.md`, `OVERVIEW.md` (§5 already lists the commands; no change unless wording is wrong)
+- Modify: `src/main.rs`, `tests/cli.rs`, `README.md`, `CLAUDE.md`, `docs/design/requirements.md` (§5 already lists the commands; no change unless wording is wrong)
 
 **Interfaces:**
 - Consumes: `app::sync::{run, plan_with, SyncOpts}` unchanged.

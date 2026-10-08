@@ -9,7 +9,7 @@
 //! | [`unset_staged`] | `secrets unset <names...> --app <app> --stage` |
 //! | [`deploy`] | `secrets deploy --app <app>` |
 //!
-//! Fly digests are not computable locally (D0, `docs/spike-d0-findings.md` Q4), so change
+//! Fly digests are not computable locally (D0, `docs/design/spike-d0-findings.md` Q4), so change
 //! detection is stage-and-compare (P1, §6.4): S6 calls `list` (A), `stage`, `list` (B) and
 //! compares digests by name. `status` is passed through but never used for change
 //! detection; S6 uses it only as an extra deploy trigger (pending `Staged`/`Partial`).
@@ -1182,7 +1182,7 @@ mod tests {
     // ------------------------------------------------- flyctl import parser port
     //
     // A Rust port of `parseSecrets` in flyctl v0.4.112 `internal/command/secrets/parser.go`
-    // (commit ca63052e), as documented line by line in docs/spike-d0-findings.md
+    // (commit ca63052e), as documented line by line in docs/design/spike-d0-findings.md
     // ("Follow-up 2a"). Go strings are bytes; every byte the parser inspects (`\n`, `\r`,
     // `#`, `"`, `'`, `=`, ` `) is ASCII, and UTF-8 continuation bytes are never ASCII, so
     // char-level operations on `&str` are equivalent here.
