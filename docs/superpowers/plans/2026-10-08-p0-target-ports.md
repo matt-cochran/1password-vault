@@ -38,6 +38,7 @@
 - Create: `src/app/characterization_tests.rs`
 - Create: `tests/fixtures/characterization/*.txt` (written by the test on first run with `UPDATE_GOLDEN=1`)
 - Modify: `src/app/mod.rs` (add `#[cfg(test)] mod characterization_tests;` next to `mod simple_tests;`)
+- Modify: `Cargo.toml` (`sha2` dev-dependency)
 
 **Interfaces:**
 - Consumes: `app::sync::{run, plan_with, SyncOpts}`, `app::status::run_with`, `app::testutil::*`, `runner::fake::FakeRunner`.
@@ -123,7 +124,7 @@ Add one `#[test]` per scenario in the same shape (queue the responses each path 
 | `status_env_without_target` | `status::run_with` on `dev` | (no call) |
 | `simple_sync_deploy` | simple-profile fleet from `simple_tests.rs` fixtures, `deploy: true` | changed |
 
-If `sha2` is not already a dev-dependency, use the existing digest crate in `Cargo.toml`; if none exists, record `<stdin N bytes>` plus the byte-wise sum modulo 2^32 instead, and say so in the report.
+Add `sha2 = "0.10"` under `[dev-dependencies]` in `Cargo.toml` (it is not a dependency yet; `cargo deny check` must still pass).
 
 - [ ] **Step 2: Generate the golden files**
 
