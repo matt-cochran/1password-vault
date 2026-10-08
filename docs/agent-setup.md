@@ -19,7 +19,7 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 ```sh
 opv --version || curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 op --version        # 1Password CLI; tested with 2.40.0
-flyctl version      # Fly CLI, for a Fly target; tested with 0.4.112
+flyctl version      # Fly CLI, for a Fly target; tested with 0.4.112 and later 0.4.x patches
 ```
 
 If `op` or `flyctl` is missing, `opv doctor` (step 3) prints the install command for the user's OS.
