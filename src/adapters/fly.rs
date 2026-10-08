@@ -54,7 +54,9 @@ use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::ports::{StagedRuntime, StagedStore, Store};
-use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
+use crate::runner::{
+    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
+};
 
 /// The Fly CLI binary.
 pub const PROGRAM: &str = "flyctl";
@@ -117,6 +119,7 @@ pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<StoreEntry>, Error> 
     const WHAT: &str = "fly secrets list";
     let out = run(
         r,
+        Effect::Read,
         WHAT,
         app,
         &["secrets", "list", "--app", app, "--json"],
@@ -157,6 +160,7 @@ pub fn stage(
     // whether access and authentication work.
     run(
         r,
+        Effect::Write,
         "fly secrets import",
         app,
         &["secrets", "import", "--app", app, "--stage"],
@@ -180,7 +184,15 @@ pub fn unset_staged(r: &dyn CommandRunner, app: &str, names: &[String]) -> Resul
     let mut args = vec!["secrets", "unset"];
     args.extend(names.iter().map(String::as_str));
     args.extend(["--app", app, "--stage"]);
-    run(r, "fly secrets unset", app, &args, None, &args)?;
+    run(
+        r,
+        Effect::Write,
+        "fly secrets unset",
+        app,
+        &args,
+        None,
+        &args,
+    )?;
     Ok(())
 }
 
@@ -190,6 +202,7 @@ pub fn unset_staged(r: &dyn CommandRunner, app: &str, names: &[String]) -> Resul
 pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
     run(
         r,
+        Effect::Write,
         "fly secrets deploy",
         app,
         &["secrets", "deploy", "--app", app],
@@ -335,7 +348,7 @@ pub fn import_reason(rule: &str) -> &'static str {
 /// account (an email), so it is dropped unread (zeroized with the `Output`, SR-1). Shared
 /// by `doctor` and the failure diagnosis (FR-26).
 pub fn auth_whoami(r: &dyn CommandRunner) -> io::Result<bool> {
-    r.probe(PROGRAM, &["auth", "whoami"], PROBE_TIMEOUT)
+    r.probe(&Call::new(PROGRAM, &["auth", "whoami"]), PROBE_TIMEOUT)
         .map(|o| o.status == 0)
 }
 
@@ -380,12 +393,13 @@ fn check_app(app: &str, who: &str) -> String {
 fn failure(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
+    effect: Effect,
     what: &str,
     app: &str,
     status: i32,
     hint: &[&str],
 ) -> Error {
-    let failed = format!("{what} failed (exit {status})");
+    let failed = format!("{what} failed ({})", status_text(status));
     let h = host();
     if let Some(var) = h.fly_token {
         return Error::Target(format!(
@@ -399,6 +413,11 @@ fn failure(
             "{failed}: logged in to Fly\n  {}",
             check_app(app, "the logged-in Fly account")
         )),
+        Err(_) if effect == Effect::Write => Error::Unknown(format!(
+            "{failed}; the change may or may not have been applied\n  next: run \
+             `{PROGRAM} {}` to see why, then re-run the same command",
+            hint.join(" ")
+        )),
         Err(_) => Error::Target(format!(
             "{failed}; run `{PROGRAM} {}` to see why",
             hint.join(" ")
@@ -406,44 +425,76 @@ fn failure(
     }
 }
 
+/// Whether a flyctl call changes the app (NR-2): reads are retried by the runner, writes
+/// never are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    Read,
+    Write,
+}
+
 /// Run one flyctl subcommand and map failures to typed, value-free errors. A non-zero exit
 /// is diagnosed by [`failure`] (child stderr is discarded, SR-1). The host is detected
 /// only on failure.
+///
+/// Mapping (NR-2): a read still failing after its retries, or a write that exited non-zero,
+/// is diagnosed as before (`auth whoami` is a definite read-back for sign-in); a write
+/// whose diagnosis cannot run, or that timed out, was killed or was lost, is
+/// `Error::Unknown` (exit 9, safe to re-run). A read that never finished is `Target`.
 fn run(
     r: &dyn CommandRunner,
+    effect: Effect,
     what: &str,
     app: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
     hint: &[&str],
 ) -> Result<Output, Error> {
-    run_on(r, &Host::detect, what, app, args, stdin, hint)
+    run_on(r, &Host::detect, effect, what, app, args, stdin, hint)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_on(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
+    effect: Effect,
     what: &str,
     app: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
     hint: &[&str],
 ) -> Result<Output, Error> {
-    let out = r
-        .run(PROGRAM, args, stdin, &[])
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                host().install_hint(Tool::Flyctl)
-            )),
-            // The runner's own message names the program and the limit (no child output).
-            io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
-            kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
-        })?;
-    if out.status != 0 {
-        return Err(failure(r, host, what, app, out.status, hint));
+    let call = Call::new(PROGRAM, args).with_stdin(stdin);
+    let outcome = match effect {
+        Effect::Read => r.read(&call, &[]),
+        Effect::Write => r.write(&call),
     }
-    Ok(out)
+    .map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => Error::Dependency(format!(
+            "{PROGRAM} not found on PATH\n  {}",
+            host().install_hint(Tool::Flyctl)
+        )),
+        // The runner's own message names the program (no child output).
+        io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
+        kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
+    })?;
+    match outcome {
+        Outcome::Done(out) => Ok(out),
+        Outcome::Refused(out) => Err(failure(r, host, effect, what, app, out.status, hint)),
+        Outcome::Unknown {
+            status: Some(status),
+            ..
+        } => Err(failure(r, host, effect, what, app, status, hint)),
+        Outcome::Unknown { reason, .. } if effect == Effect::Write => Err(Error::Unknown(format!(
+            "{what}: {}; the change may or may not have been applied\n  next: re-run \
+                 the same command",
+            unknown_text(PROGRAM, reason)
+        ))),
+        Outcome::Unknown { reason, .. } => Err(Error::Target(format!(
+            "{what}: {}",
+            unknown_text(PROGRAM, reason)
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -452,7 +503,7 @@ mod tests {
 
     use super::*;
     use crate::runner::Output;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     const MARK: &str = "sk-proj-LEAKCANARY";
 
@@ -727,12 +778,12 @@ mod tests {
 
     #[test]
     fn failure_is_target_error() {
-        let r = FakeRunner::new([Output::failure(1), logged_in()]);
+        let r = FakeRunner::new(failed_read(1).chain([logged_in()]));
         match list(&r, "app") {
             Err(Error::Target(m)) => assert_eq!(m, logged_in_msg("fly secrets list", 1)),
             other => panic!("{other:?}"),
         }
-        assert_eq!(r.calls.borrow()[1].args, vec!["auth", "whoami"]);
+        assert_eq!(r.calls.borrow()[3].args, vec!["auth", "whoami"]);
     }
 
     // ---------------------------------------------------------------- unset / deploy
@@ -803,7 +854,7 @@ mod tests {
         // flyctl has no distinct auth exit code and stderr is discarded (SR-1): no exit
         // status is guessed into Auth; only a failing `auth whoami` is.
         for code in [1, 2, 3, 4, 5, 77, 126, 127, 255, -1] {
-            let r = FakeRunner::new([Output::failure(code), logged_in()]);
+            let r = FakeRunner::new(failed_read(code).chain([logged_in()]));
             assert!(matches!(list(&r, "app"), Err(Error::Target(_))), "{code}");
         }
     }
@@ -829,15 +880,15 @@ mod tests {
     /// only.
     #[test]
     fn failure_hint_never_contains_a_value_or_stdin() {
-        for call in four_calls() {
-            let r = FakeRunner::new([Output {
+        for (attempts, call) in four_calls() {
+            let r = FakeRunner::new((0..attempts).map(|_| Output {
                 status: 1,
                 stdout: zeroize::Zeroizing::new(MARK.as_bytes().to_vec()),
-            }]);
+            }));
             r.push_io_error(io::ErrorKind::PermissionDenied);
             let e = call(&r).unwrap_err();
             let t = err_text(&e);
-            assert!(matches!(e, Error::Target(_)), "{t}");
+            assert!(matches!(e, Error::Target(_) | Error::Unknown(_)), "{t}");
             assert!(t.contains("run `flyctl secrets "), "{t}");
             assert!(t.contains("--app fleet-prod"), "{t}");
             assert!(t.contains("to see why"), "{t}");
@@ -871,15 +922,24 @@ mod tests {
 
     type FlyCall = Box<dyn Fn(&FakeRunner) -> Result<(), Error>>;
 
-    fn four_calls() -> [FlyCall; 4] {
+    /// The four public calls, each with the number of attempts a failure takes (a read is
+    /// retried, a write never is).
+    fn four_calls() -> [(usize, FlyCall); 4] {
+        let reads = crate::runner::READ_ATTEMPTS as usize;
         [
-            Box::new(|r| list(r, "fleet-prod").map(|_| ())),
-            Box::new(|r| {
-                let v = sv(MARK);
-                stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)])
-            }),
-            Box::new(|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()])),
-            Box::new(|r| deploy(r, "fleet-prod")),
+            (reads, Box::new(|r| list(r, "fleet-prod").map(|_| ()))),
+            (
+                1,
+                Box::new(|r| {
+                    let v = sv(MARK);
+                    stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)])
+                }),
+            ),
+            (
+                1,
+                Box::new(|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()])),
+            ),
+            (1, Box::new(|r| deploy(r, "fleet-prod"))),
         ]
     }
 
@@ -893,12 +953,20 @@ mod tests {
 
     /// `run_on` for a failing `secrets <sub>` on `app` with `host`.
     fn fail_on(h: Host, sub: &str, app: &str, whoami: Option<Output>) -> (Error, FakeRunner) {
-        let r = FakeRunner::new([Output::failure(1)]);
+        let effect = if sub == "list" {
+            Effect::Read
+        } else {
+            Effect::Write
+        };
+        let r = match effect {
+            Effect::Read => FakeRunner::new(failed_read(1)),
+            Effect::Write => FakeRunner::new([Output::failure(1)]),
+        };
         if let Some(w) = whoami {
             r.responses.borrow_mut().push_back(Ok(w));
         }
         let what = format!("fly secrets {sub}");
-        let e = run_on(&r, &|| h, &what, app, &["secrets", sub], None, &[]).unwrap_err();
+        let e = run_on(&r, &|| h, effect, &what, app, &["secrets", sub], None, &[]).unwrap_err();
         (e, r)
     }
 
@@ -1020,27 +1088,28 @@ mod tests {
     #[test]
     fn public_calls_with_fly_token_skip_whoami() {
         let h = host(crate::host::FakeEnv::new("linux").var("FLY_API_TOKEN"));
-        for call in four_calls() {
-            let r = FakeRunner::new([Output::failure(1)]);
+        for (attempts, call) in four_calls() {
+            let r = FakeRunner::new((0..attempts).map(|_| Output::failure(1)));
             let e = crate::host::with_test_host(h, || call(&r)).unwrap_err();
             assert_eq!(e.exit_code(), 5, "{e}");
             assert!(
                 err_text(&e).contains("flyctl failed for app fleet-prod"),
                 "{e}"
             );
-            assert_eq!(r.calls.borrow().len(), 1);
+            assert_eq!(r.calls.borrow().len(), attempts);
         }
     }
 
     /// FR-26: a diagnosis probe that times out is Unknown → the last-resort re-run hint.
     #[test]
     fn whoami_timeout_falls_back_to_rerun_hint() {
-        let r = FakeRunner::new([Output::failure(1)]);
+        let r = FakeRunner::new(failed_read(1));
         r.push_io_error(io::ErrorKind::TimedOut);
         let h = bash();
         let e = run_on(
             &r,
             &|| h,
+            Effect::Read,
             "fly secrets list",
             "app",
             &["secrets", "list"],
@@ -1059,18 +1128,48 @@ mod tests {
     #[test]
     fn no_failure_path_says_to_see_why_when_whoami_runs() {
         for who in [logged_in, logged_out] {
-            for call in four_calls() {
-                let r = FakeRunner::new([Output::failure(1), who()]);
+            for (attempts, call) in four_calls() {
+                let r = FakeRunner::new((0..attempts).map(|_| Output::failure(1)).chain([who()]));
                 let e = call(&r).unwrap_err();
                 let t = err_text(&e);
                 assert!(!t.contains("to see why"), "{t}");
                 assert!(!t.contains("FLYIDENTITY") && !t.contains(MARK), "{t}");
                 assert!(matches!(e, Error::Target(_) | Error::Auth(_)), "{t}");
                 let calls = r.calls.borrow();
-                assert_eq!(calls.len(), 2);
-                assert_eq!(calls[1].args, vec!["auth", "whoami"]);
+                assert_eq!(calls.len(), attempts + 1);
+                assert_eq!(calls[attempts].args, vec!["auth", "whoami"]);
             }
         }
+    }
+
+    /// NR-2: a write that timed out may or may not have happened: exit 9, safe to re-run.
+    #[test]
+    fn write_timeout_is_unknown_exit_9() {
+        for (attempts, call) in four_calls().into_iter().skip(1) {
+            let r = FakeRunner::default();
+            r.push_unknowns("timeout", attempts as u32);
+            let e = call(&r).unwrap_err();
+            assert_eq!(e.exit_code(), 9, "{e}");
+        }
+    }
+
+    /// NR-2: a failed write whose `auth whoami` cannot run is an unknown outcome (exit 9)
+    /// naming the re-run step; a failed read in the same case stays a target error.
+    #[test]
+    fn failed_write_without_diagnosis_is_unknown_exit_9() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        let e = crate::host::with_test_host(bash(), || deploy(&r, "fleet-prod")).unwrap_err();
+        assert_eq!(e.exit_code(), 9, "{e}");
+    }
+
+    /// NR-3: a read that timed out on every attempt is a target error, not exit 9: nothing
+    /// was changed.
+    #[test]
+    fn read_timeout_is_target_not_unknown() {
+        let r = FakeRunner::default();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        assert_eq!(list(&r, "app").unwrap_err().exit_code(), 5);
     }
 
     /// FR-26: host detection happens only on the failure path.
@@ -1085,6 +1184,7 @@ mod tests {
         run_on(
             &r,
             &host,
+            Effect::Read,
             "fly secrets list",
             "app",
             &["secrets", "list"],
@@ -1098,10 +1198,7 @@ mod tests {
     #[test]
     fn timeout_is_target_error_naming_the_program() {
         let r = FakeRunner::default();
-        r.responses.borrow_mut().push_back(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "flyctl did not finish within 300 s and was killed",
-        )));
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         match list(&r, "app") {
             Err(Error::Target(m)) => {
                 assert!(

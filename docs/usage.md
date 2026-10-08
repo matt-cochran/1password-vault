@@ -153,11 +153,17 @@ There is no command that writes a `.env` file or prints `export` lines, on purpo
 | 2 | configuration error or command-line usage error |
 | 3 | dependency: `op` or `flyctl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
 | 4 | 1Password source error (including an `op` timeout) |
-| 5 | Fly target error (including a `flyctl` timeout, and deploy on an app with no machines) |
+| 5 | Fly target error (including a `flyctl secrets list` timeout, and deploy on an app with no machines) |
 | 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule), or `config export` refused |
 | 7 | authentication |
 | 8 | findings: `status`, `plan` or `check` found blocking keys |
+| 9 | outcome unknown: a change to the target (or `op item edit`) may or may not have been applied, for example a `flyctl secrets deploy` that timed out; nothing is known to be broken; re-run the same command |
+| 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` |
 | 101 | internal panic (Rust default) |
+
+CI may retry a job that exited 9; codes 2 to 8 need a fix first.
+
+Global options: `--timeout <secs>` (default 900) caps the whole run; each `op`/`flyctl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s). A failed read is retried up to 3 attempts with backoff (1 s, then 2 s), printing `retrying <program> <subcommand> (n/3) in <s> s`; a write is never retried. `--verbose` prints one stderr line per call: program, arguments, duration and outcome, never a value.
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 

@@ -22,6 +22,10 @@ pub enum Error {
     Policy(String),
     #[error("status findings: {0}")]
     Findings(usize),
+    /// An external change may or may not have been applied; nothing is known to be broken;
+    /// re-running the same command is safe (NR-2).
+    #[error("outcome unknown: {0}")]
+    Unknown(String),
 }
 
 impl Error {
@@ -37,6 +41,9 @@ impl Error {
     /// | 6 | policy (refused: blocking keys, refused values, denied destructive operation) |
     /// | 7 | authentication (1Password or Fly) |
     /// | 8 | findings (`status` / `plan` / `check` found blocking keys) |
+    /// | 9 | outcome unknown (a change may or may not have been applied; safe to re-run) |
+    ///
+    /// 130 / 143: interrupted by SIGINT / SIGTERM (Unix).
     ///
     /// `run` exits with the child's own code instead (FR-4); see its help.
     pub fn exit_code(&self) -> i32 {
@@ -48,6 +55,7 @@ impl Error {
             Error::Policy(_) => 6,
             Error::Auth(_) => 7,
             Error::Findings(_) => 8,
+            Error::Unknown(_) => 9,
         }
     }
 }
@@ -66,5 +74,19 @@ mod tests {
         assert_eq!(Error::Target(s()).exit_code(), 5);
         assert_eq!(Error::Policy(s()).exit_code(), 6);
         assert_eq!(Error::Findings(3).exit_code(), 8);
+    }
+
+    #[test]
+    fn unknown_error_exits_9() {
+        assert_eq!(Error::Unknown("fly secrets deploy".into()).exit_code(), 9);
+    }
+
+    #[test]
+    fn unknown_error_says_outcome_unknown() {
+        let e = Error::Unknown("fly secrets deploy: flyctl was killed".into());
+        assert_eq!(
+            e.to_string(),
+            "outcome unknown: fly secrets deploy: flyctl was killed"
+        );
     }
 }

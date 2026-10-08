@@ -47,7 +47,9 @@ use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
 use crate::host::{Host, OpCredential, Platform, Tool};
-use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
+use crate::runner::{
+    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
+};
 
 const OP: &str = "op";
 
@@ -115,7 +117,10 @@ pub enum Session {
 /// `user_type` is parsed; from `account list` only the number of entries. `op` missing is
 /// `Err(Dependency)` with the install hint. `host` is called only when needed.
 pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Session, Error> {
-    let who = match r.probe(OP, &["whoami", "--format", "json"], PROBE_TIMEOUT) {
+    let who = match r.probe(
+        &Call::new(OP, &["whoami", "--format", "json"]),
+        PROBE_TIMEOUT,
+    ) {
         Ok(o) => o,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(&host())),
         Err(_) => return Ok(Session::Unknown),
@@ -131,7 +136,10 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
         return Ok(Session::NotSignedIn);
     }
     Ok(
-        match r.probe(OP, &["account", "list", "--format", "json"], PROBE_TIMEOUT) {
+        match r.probe(
+            &Call::new(OP, &["account", "list", "--format", "json"]),
+            PROBE_TIMEOUT,
+        ) {
             Ok(o) if o.status == 0 && account_count(&o.stdout) == Some(0) => Session::NoAccount,
             _ => Session::NotSignedIn,
         },
@@ -239,6 +247,19 @@ pub(crate) fn failed_op_error(
     failed: &str,
     grant: &str,
 ) -> Error {
+    failed_op_error_as(r, env, host, failed, grant, false)
+}
+
+/// [`failed_op_error`] for a read or (`write`) a write. For a write whose session cannot be
+/// diagnosed, the change may or may not have happened: `Error::Unknown` (exit 9, NR-2).
+fn failed_op_error_as(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+    grant: &str,
+    write: bool,
+) -> Error {
     let session = match diagnose(r, host) {
         Ok(s) => s,
         Err(e) => return e,
@@ -249,6 +270,10 @@ pub(crate) fn failed_op_error(
              available to this identity\n  next: {grant} (vault {}), or check vault_id and \
              item_id in the configuration",
             env.item_id, env.vault_id, env.vault_id
+        )),
+        Session::Unknown if write => Error::Unknown(format!(
+            "{failed}; the item may or may not have been changed{}, then re-run",
+            rerun_hint(env)
         )),
         Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env))),
         s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
@@ -319,13 +344,13 @@ fn read_profile_on(
         "--format",
         "json",
     ];
-    let Output { status, stdout } = run_op(r, &args, None, host)?;
+    let Output { status, stdout } = read_op(r, &args, host)?;
     if status != 0 {
         return Err(failed_op_error(
             r,
             env,
             host,
-            &format!("op item get failed (exit {status})"),
+            &format!("op item get failed ({})", status_text(status)),
             "grant this identity access to the vault",
         ));
     }
@@ -390,14 +415,33 @@ fn write_skeleton_on(
         "json",
     ];
     // The edited item comes back on stdout (with values); it is dropped, zeroized, unread.
-    let out = run_op(r, &args, Some(&template), host)?;
-    if out.status != 0 {
-        return Err(failed_op_error(
+    // A write (NR-2): never retried. A non-zero exit keeps the session diagnosis (a
+    // definite read-back for access and sign-in); anything else is an unknown outcome,
+    // which is safe to re-run because the skeleton only adds what is still missing.
+    let call = Call::new(OP, &args).with_stdin(Some(&template));
+    let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
+        Outcome::Done(_) => return Ok(()),
+        Outcome::Refused(o) => o.status,
+        Outcome::Unknown {
+            status: Some(s), ..
+        } => s,
+        Outcome::Unknown { reason, .. } => {
+            return Err(Error::Unknown(format!(
+                "{}: {}; the item may or may not have been changed\n  next: re-run the \
+                 same command (it adds only the fields still missing)",
+                call.step(),
+                unknown_text(OP, reason)
+            )));
+        }
+    };
+    if status != 0 {
+        return Err(failed_op_error_as(
             r,
             env,
             host,
-            &format!("op item edit failed (exit {})", out.status),
+            &format!("op item edit failed ({})", status_text(status)),
             "grant this identity write access to the vault",
+            true,
         ));
     }
     Ok(())
@@ -422,21 +466,32 @@ pub fn op_missing(host: &Host) -> Error {
     ))
 }
 
-pub(crate) fn run_op(
+/// An `op` spawn error: missing binary (with the install hint) or another start failure.
+fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
+    match e.kind() {
+        io::ErrorKind::NotFound => op_missing(&host()),
+        io::ErrorKind::TimedOut => Error::Source(format!("op: {e}")),
+        kind => Error::Dependency(format!("failed to run op: {kind}")),
+    }
+}
+
+/// One `op` read (NR-3: retried by the runner). The returned output may carry a non-zero
+/// status (still failing after the last attempt): callers diagnose it (FR-26). A read that
+/// never finished is a `Source` error naming the step; nothing was changed.
+pub(crate) fn read_op(
     r: &dyn CommandRunner,
     args: &[&str],
-    stdin: Option<&[u8]>,
     host: &dyn Fn() -> Host,
 ) -> Result<Output, Error> {
-    r.run(OP, args, stdin, &[]).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => op_missing(&host()),
-        // The runner's own message names the program and the limit (no child output).
-        io::ErrorKind::TimedOut => {
-            let sub: Vec<&str> = args.iter().take(2).copied().collect();
-            Error::Source(format!("op {}: {e}", sub.join(" ")))
-        }
-        kind => Error::Dependency(format!("failed to run op: {kind}")),
-    })
+    let call = Call::new(OP, args);
+    match r.read(&call, &[]).map_err(|e| op_spawn_error(&e, host))? {
+        Outcome::Done(o) | Outcome::Refused(o) => Ok(o),
+        Outcome::Unknown { reason, .. } => Err(Error::Source(format!(
+            "{}: {}",
+            call.step(),
+            unknown_text(OP, reason)
+        ))),
+    }
 }
 
 /// serde_json's Display can quote input (values), so report only position and category.
@@ -773,7 +828,7 @@ mod tests {
     use super::*;
     use crate::host::FakeEnv;
     use crate::runner::Output;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     const GET_ARGS: [&str; 7] = ["item", "get", "istg", "--vault", "vstg", "--format", "json"];
     const EDIT_ARGS: [&str; 7] = [
@@ -1046,7 +1101,7 @@ mod tests {
     /// IDs and the identity type, with the grant instruction; never "to see why".
     #[test]
     fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
-        let r = FakeRunner::new([Output::failure(1), Output::success(WHOAMI_SA)]);
+        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA)]));
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         let m = match &e {
             Error::Source(m) => m.clone(),
@@ -1069,6 +1124,8 @@ mod tests {
             argvs(&r),
             vec![
                 "op item get istg --vault vstg --format json",
+                "op item get istg --vault vstg --format json",
+                "op item get istg --vault vstg --format json",
                 "op whoami --format json"
             ]
         );
@@ -1078,7 +1135,7 @@ mod tests {
     /// variables are set (the motivating bug: an expired OP_SESSION_*).
     #[test]
     fn non_zero_exit_not_signed_in_is_auth_with_signin_command() {
-        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1), accounts(1)]));
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         let t = e.to_string();
@@ -1088,28 +1145,31 @@ mod tests {
         assert!(!t.contains("to see why"), "{t}");
     }
 
-    /// FR-13: diagnosis never reads the item a second time.
+    /// FR-13: diagnosis never reads the item a second time (the one read's own retries,
+    /// NR-3, are attempts of the same read).
     #[test]
     fn diagnosis_makes_no_extra_item_read() {
         for whoami in [Output::success(WHOAMI_SA), Output::failure(1)] {
-            let r = FakeRunner::new([Output::failure(1), whoami, accounts(0)]);
+            let r = FakeRunner::new(failed_read(1).chain([whoami, accounts(0)]));
             let _ = read_item_with(&r, &test_env(), &linux());
             let reads = argvs(&r)
                 .iter()
                 .filter(|a| a.starts_with("op item"))
                 .count();
-            assert_eq!(reads, 1, "{:?}", argvs(&r));
+            assert_eq!(
+                reads,
+                crate::runner::READ_ATTEMPTS as usize,
+                "{:?}",
+                argvs(&r)
+            );
         }
     }
 
     /// The re-run hint survives only as the last resort: when whoami itself cannot run.
     #[test]
     fn rerun_hint_only_when_session_cannot_be_diagnosed() {
-        let r = FakeRunner::new([Output::failure(1)]);
-        r.responses.borrow_mut().push_back(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "op did not finish within 300 s and was killed",
-        )));
+        let r = FakeRunner::new(failed_read(1));
+        r.push_unknown("timeout");
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
@@ -1134,7 +1194,7 @@ mod tests {
             ]
         };
         for s in sessions() {
-            let r = FakeRunner::new(std::iter::once(leaky()).chain(s));
+            let r = FakeRunner::new((0..crate::runner::READ_ATTEMPTS).map(|_| leaky()).chain(s));
             let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
             let t = format!("{e} {e:?}");
             assert!(!t.contains(MARK) && !t.contains("--reveal"), "{t}");
@@ -1164,10 +1224,7 @@ mod tests {
     #[test]
     fn timeout_is_source_error_naming_op() {
         let r = FakeRunner::default();
-        r.responses.borrow_mut().push_back(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "op did not finish within 300 s and was killed",
-        )));
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m.starts_with("op item get: op did not finish")),
@@ -1187,7 +1244,7 @@ mod tests {
         let r = FakeRunner::new([Output::success(item_json)]);
         read_item_on(&r, &test_env(), &host).unwrap();
         assert_eq!(called.get(), 0);
-        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1), accounts(1)]));
         let _ = read_item_on(&r, &test_env(), &host);
         assert!(called.get() > 0);
     }
@@ -1239,7 +1296,7 @@ mod tests {
             FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
             FakeEnv::new("linux").var("OP_CONNECT_HOST"),
         ] {
-            let r = FakeRunner::new([Output::failure(1)]);
+            let r = FakeRunner::new(failed_read(1));
             let h = Host::from_env(&env);
             diagnose(&r, &|| h).unwrap();
             assert_eq!(argvs(&r), vec!["op whoami --format json"], "{env:?}");
@@ -1490,6 +1547,44 @@ mod tests {
         let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(e.to_string().contains("eval $(op signin)"), "{e}");
+    }
+
+    /// NR-2: an edit that timed out may or may not have happened: exit 9, safe to re-run.
+    #[test]
+    fn skeleton_edit_timeout_is_unknown_exit_9() {
+        let item = read(allumata_item());
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        assert_eq!(e.exit_code(), 9, "{e}");
+    }
+
+    /// NR-2: a failed edit whose session cannot be diagnosed is an unknown outcome.
+    #[test]
+    fn skeleton_edit_failure_without_diagnosis_is_unknown_exit_9() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        assert_eq!(e.exit_code(), 9, "{e}");
+    }
+
+    /// NR-2: the edit is a write, so it is never retried.
+    #[test]
+    fn skeleton_edit_is_never_retried() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::failure(2), Output::success(WHOAMI_SA)]);
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let _ = write_skeleton_with(&r, &test_env(), &item, &missing, &linux());
+        assert_eq!(
+            argvs(&r)
+                .iter()
+                .filter(|a| a.starts_with("op item edit"))
+                .count(),
+            1
+        );
     }
 
     // ---------- simple profile (FR-20) ----------

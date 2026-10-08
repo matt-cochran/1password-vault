@@ -93,7 +93,7 @@ mod tests {
     use super::*;
     use crate::app::testutil::*;
     use crate::runner::Output;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     fn status_of(item: Output, fly_list: Output) -> (Result<(), Error>, String, FakeRunner) {
         let r = FakeRunner::new([item, fly_list]);
@@ -312,20 +312,19 @@ mod tests {
 
     #[test]
     fn status_source_failure_is_typed_and_value_free() {
-        let r = FakeRunner::new([
-            Output::failure(1),
-            Output::success(
-                br#"{"email":"x-FIXTUREVALUE@example.com","user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
-            ),
-        ]);
+        let r = FakeRunner::new(failed_read(1).chain([Output::success(
+            br#"{"email":"x-FIXTUREVALUE@example.com","user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
+        )]));
         let mut out = Vec::new();
         let e = run(&fleet(), "prod", &r, &mut out).unwrap_err();
         assert!(matches!(e, Error::Source(_)), "{e}");
         assert_no_values(&e.to_string());
-        // One item read, then the free session check; no Fly call.
+        // One item read (retried, NR-3), then the free session check; no Fly call.
         assert_eq!(
             argvs(&r),
             vec![
+                "op item get iprd --vault vprd --format json",
+                "op item get iprd --vault vprd --format json",
                 "op item get iprd --vault vprd --format json",
                 "op whoami --format json"
             ]

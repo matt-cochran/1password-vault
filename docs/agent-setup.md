@@ -122,3 +122,4 @@ More patterns: [usage.md](usage.md#local-development).
 | 6 | refused | a key is missing, of the wrong kind or failing a rule; run `opv status` |
 | 7 | not signed in | run the sign-in command opv prints |
 | 8 | findings | `status`, `plan` or `check` found keys to fix; see step 4 |
+| 9 | outcome unknown | a change may or may not have been applied; re-run the same command |

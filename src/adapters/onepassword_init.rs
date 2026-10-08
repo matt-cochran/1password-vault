@@ -24,12 +24,12 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use super::onepassword::{Session, diagnose, failed_op_error, json_error, run_op, session_error};
+use super::onepassword::{Session, diagnose, failed_op_error, json_error, read_op, session_error};
 use crate::config;
 use crate::domain::Environment;
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::{CommandRunner, Output};
+use crate::runner::{CommandRunner, Output, status_text};
 
 /// At most this many candidates are listed in a no-match or several-matches error.
 const MAX_CANDIDATES: usize = 20;
@@ -143,7 +143,7 @@ pub fn read_field_shapes(
     let args = [
         "item", "get", item_id, "--vault", vault_id, "--format", "json",
     ];
-    let Output { status, stdout } = run_op(r, &args, None, host)?;
+    let Output { status, stdout } = read_op(r, &args, host)?;
     if status != 0 {
         let env = Environment {
             vault_id: vault_id.to_string(),
@@ -155,7 +155,7 @@ pub fn read_field_shapes(
             r,
             &env,
             host,
-            &format!("op item get failed (exit {status})"),
+            &format!("op item get failed ({})", status_text(status)),
             "grant this identity access to the vault",
         ));
     }
@@ -185,11 +185,11 @@ fn list(
     failed: &str,
     what: &str,
 ) -> Result<Output, Error> {
-    let out = run_op(r, args, None, host)?;
+    let out = read_op(r, args, host)?;
     if out.status == 0 {
         return Ok(out);
     }
-    let failed = format!("{failed} failed (exit {})", out.status);
+    let failed = format!("{failed} failed ({})", status_text(out.status));
     Err(match diagnose(r, host) {
         Err(e) => e,
         Ok(Session::SignedIn(t)) => Error::Source(format!(
@@ -263,7 +263,7 @@ mod tests {
 
     use super::*;
     use crate::host::FakeEnv;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     fn linux() -> Host {
         Host::from_env(&FakeEnv::new("linux").shell("/bin/bash"))
@@ -379,10 +379,9 @@ mod tests {
     #[test]
     fn failed_list_is_diagnosed() {
         // Signed in: Source (4) asking to check access.
-        let r = FakeRunner::new([
-            Output::failure(1),
-            Output::success(br#"{"user_type":"USER"}"#.to_vec()),
-        ]);
+        let r = FakeRunner::new(
+            failed_read(1).chain([Output::success(br#"{"user_type":"USER"}"#.to_vec())]),
+        );
         let e = resolve_vault(&r, "x", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 4, "{e}");
         assert!(
@@ -390,11 +389,8 @@ mod tests {
             "{e}"
         );
         // Not signed in: Auth (7) with the sign-in step.
-        let r = FakeRunner::new([
-            Output::failure(1),
-            Output::failure(1),
-            Output::success("[{}]"),
-        ]);
+        let r =
+            FakeRunner::new(failed_read(1).chain([Output::failure(1), Output::success("[{}]")]));
         let e = resolve_item(&r, "v1", "x", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(e.to_string().contains("not signed in to 1Password"), "{e}");
@@ -438,10 +434,9 @@ mod tests {
 
     #[test]
     fn failed_item_read_is_diagnosed_naming_ids() {
-        let r = FakeRunner::new([
-            Output::failure(1),
-            Output::success(br#"{"user_type":"SERVICE_ACCOUNT"}"#.to_vec()),
-        ]);
+        let r = FakeRunner::new(failed_read(1).chain([Output::success(
+            br#"{"user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
+        )]));
         let e = read_field_shapes(&r, "v1", "i1", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 4);
         assert!(e.to_string().contains("item i1 in vault v1"), "{e}");

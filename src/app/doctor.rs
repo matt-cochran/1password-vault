@@ -224,10 +224,12 @@ fn next_step(check: &str, e: &Error) -> String {
 }
 
 fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, Error> {
-    r.run(program, args, None, &[]).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH")),
-        kind => Error::Dependency(format!("failed to run {program} ({kind})")),
-    })
+    let call = crate::runner::Call::new(program, args);
+    r.probe(&call, crate::runner::PROBE_TIMEOUT)
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH")),
+            kind => Error::Dependency(format!("failed to run {program} ({kind})")),
+        })
 }
 
 /// [`spawn`] whose "not found" names the install command for this platform (FR-26).

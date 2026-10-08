@@ -93,7 +93,8 @@ case "$1 $2" in
     [ -f "$FAKE_REC/.lists" ] && read l < "$FAKE_REC/.lists"
     l=$((l + 1))
     echo "$l" > "$FAKE_REC/.lists"
-    [ "$l" = "$FAKE_FLY_LIST_FAIL_AT" ] && exit 1
+    # From list number FAKE_FLY_LIST_FAIL_AT on, every list fails (a read is retried).
+    [ -n "$FAKE_FLY_LIST_FAIL_AT" ] && [ "$l" -ge "$FAKE_FLY_LIST_FAIL_AT" ] && exit 1
     if [ "$l" = 1 ]; then cat "$FAKE_FIX/list_a.json"; else cat "$FAKE_FIX/list_b.json"; fi
     exit 0 ;;
   "secrets import") exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;
@@ -202,7 +203,9 @@ struct Call {
 struct Run {
     code: i32,
     stdout: String,
+    /// stderr without the runner's retry notices (NR-3), which are in `retries`.
     stderr: String,
+    retries: Vec<String>,
 }
 
 impl Run {
@@ -327,16 +330,23 @@ impl Harness {
             .env_clear()
             .env("PATH", &self.bin)
             .env("TMPDIR", &self.tmp)
+            // Test builds only: retries (NR-3) without waiting out the backoff.
+            .env("OPV_TEST_BACKOFF_SCALE", "0")
             .env("FAKE_REC", &self.rec)
             .env("FAKE_FIX", &self.fix)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&self.cwd)
             .output()
             .unwrap();
+        let all_err = String::from_utf8(out.stderr).unwrap();
+        let (retries, rest): (Vec<&str>, Vec<&str>) = all_err
+            .split_inclusive('\n')
+            .partition(|l| l.starts_with("retrying "));
         Run {
             code: out.status.code().expect("exited normally"),
             stdout: String::from_utf8(out.stdout).unwrap(),
-            stderr: String::from_utf8(out.stderr).unwrap(),
+            stderr: rest.concat(),
+            retries: retries.iter().map(|l| l.trim_end().to_string()).collect(),
         }
     }
 
@@ -677,6 +687,24 @@ fn failure_after_partial_plan_stages_nothing() {
 
 /// Review Focus 4: list B (after import) fails → Target (5); nothing further is mutated
 /// (no unset, no deploy) even with --prune --deploy.
+/// NR-3: a read that keeps failing prints one notice per retry, naming the step only.
+#[test]
+fn failing_read_prints_retry_notices() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1");
+    let r = h.run(&["status", "prod"]);
+    assert_eq!(
+        r.retries
+            .iter()
+            .map(|l| l.split(" in ").next().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            "retrying flyctl secrets list (2/3)",
+            "retrying flyctl secrets list (3/3)"
+        ]
+    );
+}
+
 #[test]
 fn list_b_failure_after_staging() {
     let mut h = Harness::new(&good_item());
@@ -690,7 +718,11 @@ fn list_b_failure_after_staging() {
         r.stderr
     );
     assert_eq!(h.fly_calls("import"), 1);
-    assert_eq!(h.fly_calls("list"), 2);
+    assert_eq!(
+        h.fly_calls("list"),
+        4,
+        "list A, then list B and its two retries"
+    );
     assert_eq!(h.fly_calls("unset"), 0, "unset after a failed list B");
     assert_eq!(h.fly_calls("deploy"), 0, "deploy after a failed list B");
     assert_clean_output(&["sync"], &r);
@@ -807,7 +839,13 @@ fn expired_session_is_auth_with_signin_command() {
         assert_clean_output(cmd, &r);
         assert_eq!(
             op_subcommands(&h),
-            vec!["item get", "whoami --format", "account list"],
+            vec![
+                "item get",
+                "item get",
+                "item get",
+                "whoami --format",
+                "account list"
+            ],
             "{cmd:?}"
         );
         assert_eq!(h.fly_calls("import"), 0);
@@ -866,7 +904,10 @@ fn ci_not_signed_in_advises_service_account_token() {
     );
     assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
     assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
-    assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
+    assert_eq!(
+        op_subcommands(&h),
+        vec!["item get", "item get", "item get", "whoami --format"]
+    );
 }
 
 /// FR-26: a clean `status` ends with the summary line on stdout; exit 0.
@@ -959,7 +1000,10 @@ fn rejected_credential_keeps_source_category() {
         );
         assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
         assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
-        assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
+        assert_eq!(
+            op_subcommands(&h),
+            vec!["item get", "item get", "item get", "whoami --format"]
+        );
     }
 }
 

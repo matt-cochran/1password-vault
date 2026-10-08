@@ -663,6 +663,8 @@ fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
         .env_remove("OP_CONNECT_TOKEN")
         .env("PATH", dir.path())
         .env("OP_ITEM", "tests/fixtures/op_item.json")
+        // Test builds only: retries (NR-3) without waiting out the backoff.
+        .env("OPV_TEST_BACKOFF_SCALE", "0")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap()
@@ -712,4 +714,106 @@ fn init_accepts_a_run_only_environment() {
     let dir = tempfile::tempdir().unwrap();
     let (code, _, err) = opv_in(dir.path(), &["init", "dev", "--vault", "v", "--item", "i"]);
     assert_eq!(code, 3, "{err}");
+}
+
+/// A fake `op` that runs `script`, in a fresh PATH dir; returns the dir.
+#[cfg(unix)]
+fn fake_op(script: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let op = dir.path().join("op");
+    std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+/// NR-29: proxy and CA variables reach the CLI untouched.
+#[cfg(unix)]
+#[test]
+fn proxy_env_is_inherited() {
+    let dir = fake_op("printf '%s' \"$HTTPS_PROXY\" > \"$OPV_LOG\"; /bin/cat \"$OP_ITEM\"");
+    let log = dir.path().join("log");
+    Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("HTTPS_PROXY", "http://proxy.example:3128")
+        .env("OPV_LOG", &log)
+        .env("OP_ITEM", "tests/fixtures/op_item.json")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "http://proxy.example:3128"
+    );
+}
+
+/// NR-12: SIGTERM reaches the running CLI, and opv exits 143 naming the step.
+#[cfg(unix)]
+#[test]
+fn sigterm_forwards_and_exits_143() {
+    let dir = fake_op(
+        "trap 'echo forwarded > \"$OPV_LOG\"; kill $! 2>/dev/null; exit 0' TERM\n\
+         echo started > \"$OPV_LOG.start\"\n\
+         /bin/sleep 30 &\n\
+         wait",
+    );
+    let log = dir.path().join("log");
+    let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("OPV_LOG", &log)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = dir.path().join("log.start");
+    let t = std::time::Instant::now();
+    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Command::new("/bin/kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let forwarded = std::fs::read_to_string(&log).unwrap_or_default();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        (out.status.code(), forwarded.trim(), err.trim()),
+        (
+            Some(143),
+            "forwarded",
+            "opv: interrupted during op item get; safe to re-run"
+        )
+    );
+}
+
+/// NR-4: `--timeout` and `--verbose` are global flags.
+#[test]
+fn timeout_and_verbose_are_accepted_globally() {
+    let (code, _, err) = opv(&[
+        "--timeout",
+        "5",
+        "--verbose",
+        "explain",
+        "--config",
+        CFG,
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// `--timeout` takes 1 to 86400 seconds; anything else is a usage error (exit 2).
+#[test]
+fn timeout_out_of_range_exits_2() {
+    let (code, _, _) = opv(&["--timeout", "0", "explain", "--config", CFG, "x"]);
+    assert_eq!(code, 2);
 }

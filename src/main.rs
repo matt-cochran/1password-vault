@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use opv::Error;
 use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
 use opv::config;
-use opv::runner::ProcessRunner;
+use opv::runner::{Budget, ProcessRunner};
 
 const EXAMPLES: &str = "\
 Examples:
@@ -43,6 +43,22 @@ struct Cli {
     /// then each parent directory, and the first one found is used.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Stop after this many seconds in total.
+    ///
+    /// Every call to op or flyctl must finish inside this budget; a read that fails is
+    /// retried only while time remains.
+    #[arg(
+        long,
+        global = true,
+        value_name = "SECS",
+        default_value_t = 900,
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    timeout: u64,
+    /// Print one line per call to op or flyctl on stderr: program, arguments, duration and
+    /// outcome (never values).
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -270,7 +286,16 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
-    let r = ProcessRunner::default();
+    let r = ProcessRunner::new(
+        Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
+        cli.verbose,
+    );
+    // `run` keeps default signal behaviour: the user's command under `op run` handles its
+    // own signals and its exit code is passed through (FR-4).
+    if !matches!(cli.cmd, Cmd::Run { .. }) {
+        opv::runner::signals::install()
+            .map_err(|e| Error::Dependency(format!("cannot install signal handlers: {e}")))?;
+    }
     if let Cmd::Init { .. } = &cli.cmd {
         return run_init(cli, &r, out).map(|()| 0);
     }

@@ -12,7 +12,7 @@ use crate::app::testutil::{
 };
 use crate::app::{config_export, run as run_cmd, status, sync};
 use crate::runner::Output;
-use crate::runner::fake::FakeRunner;
+use crate::runner::fake::{FakeRunner, failed_read};
 
 const VAULT_ID: &str = "vaultid01";
 const ITEM_ID: &str = "itemid01";
@@ -471,11 +471,9 @@ fn op_failure_goes_through_diagnosis() {
     let run = run_in(
         dir.path(),
         &args(None, false),
-        vec![
-            Output::failure(1),
-            Output::failure(1),
-            Output::success(b"[{}]".to_vec()),
-        ],
+        failed_read(1)
+            .chain([Output::failure(1), Output::success(b"[{}]".to_vec())])
+            .collect(),
     );
     assert_eq!(run.err().exit_code(), 7, "{}", run.err());
     assert!(run.err().to_string().contains("not signed in to 1Password"));
