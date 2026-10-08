@@ -80,7 +80,9 @@ requirement updates `docs/design/requirements.md` in the same pull request.
 ## Releases
 
 Maintainers bump the version and `CHANGELOG.md` on `dev`, promote through `staging`
-to `main`, and push a `vX.Y.Z` tag; the release workflow builds, signs and publishes.
+to `main`, and push a `vX.Y.Z` tag; the release workflow builds, signs and publishes the
+GitHub release. npm is published by hand afterwards with
+`scripts/npm/publish-manual.sh vX.Y.Z`.
 
 ## Security
 
