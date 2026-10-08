@@ -33,7 +33,7 @@ use crate::domain::{
     key_label,
 };
 use crate::error::Error;
-use crate::ports::SecretStore;
+use crate::ports::Store;
 use crate::runner::CommandRunner;
 
 /// Fly digests are not computable locally (D0 Q4, ruling P1): every key present on Fly is
@@ -47,13 +47,13 @@ fn no_digest(_: &SecretValue) -> Option<String> {
 /// by the caller (so a missing target is `Error::Config` before any call).
 ///
 /// With a store, every ready secret is also checked against the store's own rules
-/// ([`SecretStore::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
+/// ([`Store::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
 /// failing rule naming product/KEY.
 pub(crate) fn read_and_plan(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
-    store: Option<&dyn SecretStore>,
+    store: Option<&dyn Store>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
@@ -84,7 +84,7 @@ fn plan_item(
     fleet: &Fleet,
     env_name: &str,
     fields: Vec<plan::ItemField>,
-    store: Option<&dyn SecretStore>,
+    store: Option<&dyn Store>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {

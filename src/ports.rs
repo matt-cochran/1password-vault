@@ -1,20 +1,30 @@
-//! Target ports (FR-12, FR-28). Core logic reaches a target only through these two traits;
-//! a target is one [`SecretStore`] plus one [`Runtime`], and Fly implements both.
+//! Target ports (FR-12, FR-28), split by flow. Core logic reaches a target only through
+//! these traits; a target is one store plus one runtime of the same flow:
 //!
-//! P0 carries exactly the operations the current engine calls. P1 adds `read`, `bindings`,
-//! `apply`, `check_access` and `await_healthy` when the first cloud target needs them (see
-//! `docs/design/multi-cloud-targets.md` §3).
+//! - **staged** (Fly): the store stages pending changes and the runtime deploys them
+//!   ([`StagedStore`] + [`StagedRuntime`]); Fly implements both.
+//! - **pinned** (clouds): the store writes versions and the runtime binds each env name to
+//!   one pinned version ([`PinnedStore`] + [`PinnedRuntime`]), FR-29, FR-31, FR-33.
+//!
+//! Both store kinds share [`Store`], which is all `status` and `plan` need. See
+//! `docs/design/multi-cloud-targets.md` §3.
 
-use crate::domain::{SecretValue, StoreEntry};
+use crate::domain::{
+    AccessFinding, Health, Revision, RuntimeChange, RuntimeSnapshot, SecretValue, StoreEntry,
+};
 use crate::error::Error;
 
-/// Where secret values are written: Fly secrets today.
-pub trait SecretStore {
+/// Where secret values are written: the operations every flow shares.
+pub trait Store {
     /// Every entry with its version and pending flag. Never values.
     fn list(&self) -> Result<Vec<StoreEntry>, Error>;
     /// The first rule this store would refuse for `(name, value)`, with its fixed reason
     /// (FR-22), so `status` and `plan` show what `sync` would refuse.
     fn refusal(&self, name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)>;
+}
+
+/// A store whose writes are pending until the runtime deploys them: Fly secrets.
+pub trait StagedStore: Store {
     /// Refuses the whole batch before any write, naming the key and rule, never the value.
     fn validate(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
     /// Writes the batch as a pending change, values on stdin only (SR-3).
@@ -23,8 +33,30 @@ pub trait SecretStore {
     fn remove(&self, names: &[String]) -> Result<(), Error>;
 }
 
-/// What runs the app: the Fly app today.
-pub trait Runtime {
+/// A store whose writes are versions the runtime pins to: Key Vault.
+pub trait PinnedStore: Store {
+    /// Current value and version, for compare-before-write (FR-31). None when absent.
+    fn read(&self, name: &str) -> Result<Option<(SecretValue, String)>, Error>;
+    /// One new version, value on stdin, tagged opv-managed=<env>; returns the version id.
+    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error>;
+    /// Refuses an entry without the ownership tag (FR-32).
+    fn delete(&self, name: &str) -> Result<(), Error>;
+}
+
+/// What runs the app in the staged flow: the Fly app.
+pub trait StagedRuntime {
     /// Makes pending store changes live (FR-7). Called only under `--deploy`.
     fn deploy(&self) -> Result<(), Error>;
+}
+
+/// What runs the app in the pinned flow: a Container App.
+pub trait PinnedRuntime {
+    /// The current managed bindings and the fingerprint of everything else (FR-31).
+    fn bindings(&self) -> Result<RuntimeSnapshot, Error>;
+    /// Applies `change` onto `snapshot` (read-modify-write) and returns the new revision.
+    fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error>;
+    /// Waits for `revision` to become healthy, unhealthy, or time out (FR-33).
+    fn await_healthy(&self, revision: &Revision) -> Result<Health, Error>;
+    /// Advisory only (R6): used by doctor, never gates a deploy.
+    fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error>;
 }

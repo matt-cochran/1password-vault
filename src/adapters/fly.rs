@@ -53,7 +53,7 @@ use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
-use crate::ports::{Runtime, SecretStore};
+use crate::ports::{StagedRuntime, StagedStore, Store};
 use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
 
 /// The Fly CLI binary.
@@ -84,13 +84,16 @@ pub struct Fly<'a> {
     pub app: &'a str,
 }
 
-impl SecretStore for Fly<'_> {
+impl Store for Fly<'_> {
     fn list(&self) -> Result<Vec<StoreEntry>, Error> {
         list(self.runner, self.app)
     }
     fn refusal(&self, name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)> {
         entry_refusal_reason(name, value)
     }
+}
+
+impl StagedStore for Fly<'_> {
     fn validate(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error> {
         validate_import(batch)
     }
@@ -102,7 +105,7 @@ impl SecretStore for Fly<'_> {
     }
 }
 
-impl Runtime for Fly<'_> {
+impl StagedRuntime for Fly<'_> {
     fn deploy(&self) -> Result<(), Error> {
         deploy(self.runner, self.app)
     }
