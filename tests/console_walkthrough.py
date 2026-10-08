@@ -6,6 +6,7 @@ import pty
 import select
 import sys
 import tempfile
+import termios
 import time
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -64,12 +65,16 @@ else:
                     if chunk:
                         transcript.extend(chunk)
                     text = transcript.decode(errors="replace")
-                    if not resume and not sent_value and "Provider login (hidden; Enter to skip): " in text:
-                        os.write(fd, b"synthetic-private-value\n")
-                        sent_value = True
                     if not resume and not sent_save and "[y/N]" in text:
                         os.write(fd, b"y\n")
                         sent_save = True
+                # Prompt output can arrive before the password reader changes the
+                # terminal flags. Send input only once its hidden mode is active;
+                # keep polling the flag even when no further output is produced.
+                if not resume and not sent_value and b"Provider login (hidden; Enter to skip): " in transcript:
+                    if not termios.tcgetattr(fd)[3] & termios.ECHO:
+                        os.write(fd, b"synthetic-private-value\n")
+                        sent_value = True
                 done, child_status = os.waitpid(pid, os.WNOHANG)
                 if done:
                     status = child_status
