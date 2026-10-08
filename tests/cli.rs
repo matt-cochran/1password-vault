@@ -33,7 +33,7 @@ fn unknown_environment_exits_2_before_any_subprocess() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.starts_with("opv: configuration error: undefined environment \"qa\""),
+            err.contains("opv: configuration error: undefined environment \"qa\""),
             "{cmd:?}: {err}"
         );
     }
@@ -193,7 +193,7 @@ fn missing_op_exits_3() {
     let (code, out, err) = opv(&["--config", CFG, "fly", "plan", "prod"]);
     assert_eq!(code, 3, "{err}");
     assert!(out.is_empty());
-    assert!(err.starts_with("opv: dependency error"), "{err}");
+    assert!(err.contains("opv: dependency error"), "{err}");
 }
 
 #[test]
@@ -637,6 +637,55 @@ fn init_ignores_discovery_and_writes_nothing_when_op_is_missing() {
     assert!(!err.contains("using "), "{err}");
     assert!(!nested.join("secrets.toml").exists());
     drop(dir);
+}
+
+/// P0 Task 5: `opv plan` is a top-level command.
+#[test]
+fn plan_is_a_top_level_command() {
+    let (code, _, _) = opv(&["plan", "--help"]);
+    assert_eq!(code, 0);
+}
+
+/// P0 Task 5: the `fly plan` alias warns on stderr before doing anything.
+#[test]
+fn fly_plan_prints_deprecation_warning() {
+    let (_, _, err) = opv(&["--config", CFG, "fly", "plan", "prod"]);
+    assert!(
+        err.contains("\"fly plan\" is deprecated; use \"opv plan\""),
+        "{err}"
+    );
+}
+
+/// P0 Task 5: a refused `fly sync` alias keeps the top-level command's exit code (6).
+#[cfg(unix)]
+#[test]
+fn fly_sync_alias_keeps_exit_code() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let write = |name: &str, body: &str| {
+        let p = bin.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // The probe item has no allumata fields: every desired prod key is missing, so the
+    // plan refuses (policy) before staging anything.
+    write("op", "#!/bin/sh\n/bin/cat \"$OP_ITEM\"\n");
+    write(
+        "flyctl",
+        "#!/bin/sh\ncase \"$1 $2\" in \"secrets list\") /bin/cat \"$FLY_LIST\" ;; esac\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["--config", CFG, "fly", "sync", "prod"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env("PATH", &bin)
+        .env("OP_ITEM", "tests/fixtures/op_item.json")
+        .env("FLY_LIST", "tests/fixtures/fly_list.json")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(6));
 }
 
 #[test]

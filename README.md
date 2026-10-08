@@ -212,7 +212,7 @@ rules = { enum = ["debug", "info", "warn"] }
 
 Kinds, rules, guidance, modes and `immutable` work as in the fleet profile. Key names match `^[A-Z][A-Z0-9_]*$`. The managed set is exactly the declared keys: `--prune` unsets only a declared key that is not desired in the environment, and any other name on the Fly app is reported as unmanaged and never touched. Every command reads the item once, by vault ID and item ID.
 
-Under the simple profile, commands name a key by its name alone: `status` and `fly plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
+Under the simple profile, commands name a key by its name alone: `status` and `plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
 
 One caveat for `run` under the simple profile: it hands `op run` references of the form `op://<vault>/<item>/KEY`, and `op` matches a field with that label in *any* section. Keep simple-profile keys only as unsectioned fields: a sectioned field with the same label can be picked up by `run` while `status` reports the key missing, and having both can make `op` report the reference as ambiguous.
 
@@ -229,12 +229,12 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--p
 - It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs. No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
 - It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
 - The profile follows the item's shape: only unsectioned fields gives a simple file, only sectioned fields gives a fleet file (one product per section, `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"`). An item with both is an error naming both shapes; `--profile` then decides, and the fields of the other shape are ignored with a note.
-- A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed: rename the field in 1Password and run `init --force` again. When `status` and `fly sync` would reject such a field (a wrong type, a field in a section without a label, a sectioned field without a label), the note says so. A label given twice where opv reads the item is an error and nothing is written.
+- A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed: rename the field in 1Password and run `init --force` again. When `status` and `sync` would reject such a field (a wrong type, a field in a section without a label, a sectioned field without a label), the note says so. A label given twice where opv reads the item is an error and nothing is written.
 - `--fly-app` is required; `flyctl` is not called.
 - It writes `./secrets.toml` in the current directory (`--config` is not accepted). If the file exists, it refuses (exit 2) unless `--force` is given; it never merges. If a parent directory already holds a `secrets.toml`, a note names it: the new file takes precedence for commands run from here down. The file is validated like a hand-written one and written atomically (a temporary file in the same directory, then a rename).
 - It writes nothing to 1Password. It costs three 1Password requests (`op vault list`, `op item list`, `op item get`), at dev time only.
 
-It ends with the path, the counts (`N secret, M config, skipped K`) and `Next step: opv fly plan <env>`.
+It ends with the path, the counts (`N secret, M config, skipped K`) and `Next step: opv plan <env>`.
 
 ## Workflow
 
@@ -246,19 +246,21 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # 
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status staging                  # one row per product and key; exit 8 if any blocks
 opv status staging --json           # the same state as one machine-readable JSON document
-opv fly plan staging                # what a sync would stage, hold and prune; exit 8 if any blocks
-opv fly plan staging --json         # the same plan as one machine-readable JSON document
-opv fly sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
+opv plan staging                    # what a sync would stage, hold and prune; exit 8 if any blocks
+opv plan staging --json             # the same plan as one machine-readable JSON document
+opv sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
 opv run dev --product allumata -- cargo run
 opv run prod -- ./server            # simple profile: no --product
 ```
 
+`opv fly plan` and `opv fly sync` remain as deprecated aliases for one minor release: they print a warning on stderr and behave exactly like `opv plan` and `opv sync`.
+
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
 2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values.
-3. `fly plan` shows the same rows plus the Fly side. It changes nothing.
-4. `fly sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule.
+3. `plan` shows the same rows plus the target side. It changes nothing.
+4. `sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
 7. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It writes no `.env` file.
@@ -298,7 +300,7 @@ It reads only the configuration: no 1Password or Fly call, and no value or value
 
 ### Machine-readable status and plan
 
-`status <ENV> --json` and `fly plan <ENV> --json` print exactly one JSON document on stdout
+`status <ENV> --json` and `plan <ENV> --json` print exactly one JSON document on stdout
 and nothing else. It contains names, states and counts only: no value, no value fragment,
 no value length and no guidance. Exit codes are unchanged, and an error is still reported
 on stderr with no partial document on stdout. The top-level `schema_version` is `1`; adding
@@ -337,7 +339,7 @@ failing rule when `state` is `failing_rule`, and `reason` says why (see
 
 ### Change detection
 
-Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `fly sync` reads Fly's secret metadata, stages, reads it again and compares the digests. `fly plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it.
+Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. `plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Deploying an app that has no machines exits 5.
 
@@ -368,7 +370,7 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `transform = "signoz_ingestion_header"` | **deprecated**: kept for one release as an alias for `ensure_prefix = "signoz-ingestion-key="` with `pattern = "[A-Za-z0-9._~+/-]+={0,2}"`; loading a configuration that uses it prints a deprecation warning naming the product and key. Use the generic rules instead |
 | `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, not encrypted, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
 
-Fly import refusals are checked for every ready secret by `status` and `fly plan` as well as `fly sync`, so a green status means sync will not refuse the value:
+Fly import refusals are checked for every ready secret by `status` and `plan` as well as `sync`, so a green status means sync will not refuse the value:
 
 | Rule | Refuses |
 |---|---|
@@ -381,7 +383,7 @@ Fly import refusals are checked for every ready secret by `status` and `fly plan
 
 ### Failure reasons
 
-Every rule failure carries a reason. `status`, `fly plan` and `fly sync` print it after the rule name, and `--json` carries it in a separate `reason` field next to `rule`:
+Every rule failure carries a reason. `status`, `plan` and `sync` print it after the rule name, and `--json` carries it in a separate `reason` field next to `rule`:
 
 ```text
 journeeze/GITHUB_APP_PRIVATE_KEY: failed transform (BEGIN/END labels differ)
@@ -425,7 +427,7 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | 5 | Fly target error (including a `flyctl` timeout, and deploy on an app with no machines) |
 | 6 | policy refusal: `fly sync` refused (missing, wrong kind, failing rule), or `config export` refused |
 | 7 | authentication |
-| 8 | findings: `status` or `fly plan` found blocking keys |
+| 8 | findings: `status` or `plan` found blocking keys |
 | 101 | internal panic (Rust default) |
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
@@ -449,7 +451,7 @@ A clean `status` ends with a summary line, for example `49 saved, 13 not yet on 
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
 - `run` hands secret values to the child process through `op run`; the child can read them.
-- No multiline values. Two profiles: `fleet` (products, sections, a naming template) and `simple` (one app per environment, unsectioned fields, Fly name = key name). `--json` on `status` and `fly plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
+- No multiline values. Two profiles: `fleet` (products, sections, a naming template) and `simple` (one app per environment, unsectioned fields, Fly name = key name). `--json` on `status` and `plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability.
@@ -474,10 +476,10 @@ jobs:
           sha256sum -c SHA256SUMS --ignore-missing
           install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv
       - name: Stage secrets on Fly
-        run: opv fly sync prod
+        run: opv sync prod
 ```
 
-This stages without deploying; a later `fly deploy` (or `opv fly sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
+This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
 

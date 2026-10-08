@@ -12,13 +12,13 @@ const EXAMPLES: &str = "\
 Examples:
   opv item skeleton staging          # add the missing (empty) fields to the 1Password item
   opv status staging                 # one row per product and key; fill what is missing
-  opv fly plan staging               # what a sync would stage, hold and prune
-  opv fly sync staging --deploy      # stage on Fly, deploy only if something changed
+  opv plan staging                   # what a sync would stage, hold and prune
+  opv sync staging --deploy          # stage on the environment's target, deploy only if something changed
   opv run dev --product api -- cargo run   # local run with the product's secrets
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or flyctl missing), 4 1Password,
-  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, fly plan).
+  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan).
   `run` exits with the command's own exit code.";
 
 /// Sync secrets from 1Password into runtime targets.
@@ -76,8 +76,40 @@ enum Cmd {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    /// Fly.io target commands.
-    #[command(subcommand)]
+    /// Show what a sync would stage, hold and prune; changes nothing.
+    ///
+    /// Exits 8 when any row (missing, wrong kind, failing a rule) would block a sync.
+    Plan {
+        /// Environment name from the configuration (for example staging or prod).
+        env: String,
+        /// Print one machine-readable JSON document instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stage the managed secrets on the environment's target.
+    ///
+    /// Refuses (exit 6) and stages nothing when any key is missing, of the wrong kind or
+    /// failing a rule. Nothing is deployed or removed without the flags below.
+    Sync {
+        /// Environment name from the configuration (for example staging or prod).
+        env: String,
+        /// Deploy when a staged digest changed, a prune happened, or a managed name is
+        /// still pending (Staged/Partial) on the target from an earlier run.
+        #[arg(long)]
+        deploy: bool,
+        /// Unset managed names that are not desired in this environment. Immutable keys
+        /// are never pruned unless named with --prune-immutable.
+        #[arg(long)]
+        prune: bool,
+        /// Stage an immutable key even though it is present on the target (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        rotate: Vec<String>,
+        /// Let --prune unset this immutable key (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        prune_immutable: Vec<String>,
+    },
+    /// Fly.io target commands; deprecated aliases of plan and sync.
+    #[command(subcommand, hide = true)]
     Fly(FlyCmd),
     /// Configuration commands.
     #[command(subcommand)]
@@ -283,7 +315,26 @@ fn run_other(
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Doctor => doctor::run(loaded, r, out),
         Cmd::Status { env, json } => status::run_with(&loaded?, &env, r, out, json),
-        Cmd::Fly(FlyCmd::Plan { env, json }) => sync::plan_with(&loaded?, &env, r, out, json),
+        Cmd::Plan { env, json } => sync::plan_with(&loaded?, &env, r, out, json),
+        Cmd::Sync {
+            env,
+            deploy,
+            prune,
+            rotate,
+            prune_immutable,
+        } => {
+            let opts = sync::SyncOpts {
+                deploy,
+                prune,
+                rotate,
+                prune_immutable,
+            };
+            sync::run(&loaded?, &env, r, out, &opts)
+        }
+        Cmd::Fly(FlyCmd::Plan { env, json }) => {
+            deprecation("fly plan", "opv plan");
+            sync::plan_with(&loaded?, &env, r, out, json)
+        }
         Cmd::Fly(FlyCmd::Sync {
             env,
             deploy,
@@ -291,6 +342,7 @@ fn run_other(
             rotate,
             prune_immutable,
         }) => {
+            deprecation("fly sync", "opv sync");
             let opts = sync::SyncOpts {
                 deploy,
                 prune,
@@ -336,6 +388,14 @@ fn run_init(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Erro
         force,
     };
     init::run(&args, &dir, r, out)
+}
+
+/// The one-line notice a `fly` alias prints on stderr before it runs.
+fn deprecation(old: &str, new: &str) {
+    let _ = writeln!(
+        io::stderr(),
+        "opv: \"{old}\" is deprecated; use \"{new}\" (removed in the next minor release)"
+    );
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.
@@ -422,7 +482,7 @@ mod tests {
             assert!(!re.is_match(t), "requirement id in help: {t}");
         }
         assert!(texts[0].contains("Examples:"), "{}", texts[0]);
-        for step in ["item skeleton", "status", "fly plan", "fly sync", "run "] {
+        for step in ["item skeleton", "status", "plan ", "sync ", "run "] {
             assert!(texts[0].contains(step), "{step}: {}", texts[0]);
         }
         assert!(texts[0].contains("7 authentication"), "{}", texts[0]);

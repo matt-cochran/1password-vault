@@ -124,7 +124,7 @@ fn run_on(
         out,
         "add rules and guidance by hand; see the README (Rules reference)".into(),
     )?;
-    w(out, format!("Next step: opv fly plan {}", args.env))
+    w(out, format!("Next step: opv plan {}", args.env))
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
