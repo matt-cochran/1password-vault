@@ -101,9 +101,9 @@ pub const REASON_NOT_EMAIL_LIST: &str = "not a comma-separated list of email add
 pub const REASON_NOT_HTTPS: &str = "not an https:// URL";
 /// `https_url`.
 pub const REASON_URL_WHITESPACE: &str = "URL contains whitespace";
-/// `ensure_prefix`, and the deprecated SigNoz alias (rule `transform`).
+/// `ensure_prefix`.
 pub const REASON_NOTHING_AFTER_PREFIX: &str = "nothing after the prefix";
-/// `pattern`, and the deprecated SigNoz alias (rule `transform`).
+/// `pattern`.
 pub const REASON_NO_PATTERN_MATCH: &str = "text after the prefix does not match the pattern";
 /// `transform` with a name this version does not know.
 pub const REASON_UNKNOWN_TRANSFORM: &str = "unknown transform";
@@ -165,12 +165,11 @@ fn email_re() -> &'static Regex {
     re(&R, r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 }
 
-/// The generic `pattern` that reproduces the deprecated SigNoz body check (FR-24).
+/// The generic `pattern` used to reproduce the removed SigNoz body check in the 0.4.0
+/// removal error (FR-24).
 pub const SIGNOZ_BODY: &str = r"[A-Za-z0-9._~+/-]+={0,2}";
-/// The prefix of the deprecated SigNoz ingestion header (FR-24).
+/// The prefix of the removed SigNoz ingestion header (FR-24).
 pub const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
-/// Deprecated transform name kept as an alias for `ensure_prefix` + `pattern` (FR-24).
-pub const SIGNOZ_INGESTION_HEADER: &str = "signoz_ingestion_header";
 
 /// Transform name: one PEM private key block, staged as a single line.
 pub const PEM_PRIVATE_KEY: &str = "pem_private_key";
@@ -391,13 +390,7 @@ pub fn check(
         if t == PEM_PRIVATE_KEY {
             return Ok(Some(SecretValue::new(v.to_string())));
         }
-        if t != SIGNOZ_INGESTION_HEADER {
-            return Err(fail("transform", REASON_UNKNOWN_TRANSFORM));
-        }
-        // The deprecated alias: identical behaviour, failure rule name stays `transform`.
-        return ensure_prefixed(v, SIGNOZ_PREFIX, Some(SIGNOZ_BODY))
-            .map(Some)
-            .map_err(|(_, why)| fail("transform", why));
+        return Err(fail("transform", REASON_UNKNOWN_TRANSFORM));
     }
     Ok(Some(SecretValue::new(v.to_string())))
 }
@@ -791,50 +784,6 @@ mod tests {
             "sk-abc"
         );
     }
-    #[test]
-    fn signoz_alias_and_its_ensure_prefix_pattern_equivalent_agree() {
-        fn outcomes(rules: fn() -> Rules) -> Vec<Result<Option<String>, ()>> {
-            [
-                "abc.DEF_1~+/-x==",
-                "signoz-ingestion-key=abc",
-                "signoz-ingestion-key=",
-                "a b",
-                "",
-            ]
-            .into_iter()
-            .map(|v| with(rules(), v).map_err(|_| ()))
-            .collect()
-        }
-        let alias = || Rules {
-            transform: Some("signoz_ingestion_header".into()),
-            ..Rules::default()
-        };
-        let generic = || Rules {
-            ensure_prefix: Some("signoz-ingestion-key=".into()),
-            pattern: Some("[A-Za-z0-9._~+/-]+={0,2}".into()),
-            ..Rules::default()
-        };
-        assert_eq!(outcomes(alias), outcomes(generic));
-    }
-    #[test]
-    fn signoz_transform_normalises_and_returns_transformed_value() {
-        let r = || Rules {
-            transform: Some("signoz_ingestion_header".into()),
-            ..Rules::default()
-        };
-        let want = "signoz-ingestion-key=abc.DEF_1~+/-x==";
-        assert_eq!(with(r(), "abc.DEF_1~+/-x==").unwrap().unwrap(), want);
-        assert_eq!(with(r(), want).unwrap().unwrap(), want);
-        for bad in [
-            "a b",
-            "ab===",
-            "a$b",
-            "signoz-ingestion-key=",
-            "signoz-ingestion-key=a b",
-        ] {
-            assert_eq!(rule_of(r(), bad), "transform", "{bad}");
-        }
-    }
     fn pem(label: &str, eol: &str) -> (String, String) {
         let der: Vec<u8> = std::iter::once(0x30u8)
             .chain((0..150u8).map(|i| i.wrapping_mul(7)))
@@ -1093,18 +1042,6 @@ mod tests {
         );
     }
     #[test]
-    fn signoz_alias_keeps_rule_transform_with_pattern_reason() {
-        let r = Rules {
-            transform: Some(SIGNOZ_INGESTION_HEADER.into()),
-            ..Rules::default()
-        };
-        let e = with(r, "a$b").unwrap_err();
-        assert_eq!(
-            (e.rule, e.reason),
-            ("transform", Reason::Fixed(REASON_NO_PATTERN_MATCH))
-        );
-    }
-    #[test]
     fn max_len_reason_states_the_limit() {
         assert!(REASON_TOO_LONG.contains(&MAX_LEN.to_string()));
     }
@@ -1210,13 +1147,6 @@ mod tests {
                     ..Rules::default()
                 },
                 prefixed(""),
-            ),
-            (
-                Rules {
-                    transform: Some("signoz_ingestion_header".into()),
-                    ..Rules::default()
-                },
-                format!("{MARK} $"),
             ),
             (
                 Rules {

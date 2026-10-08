@@ -48,12 +48,33 @@ enum Check {
     Warn(String),
 }
 
+pub fn run_scoped(
+    config: Result<Fleet, Error>,
+    env: Option<&str>,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let config = match env {
+        Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
+        None if product.is_some() => Err(Error::Config("--product requires --env".into())),
+        None => config,
+    };
+    // Scoped to environments without a target: local runs are all they are for, so a
+    // Windows op.exe is a failure there and only a warning elsewhere (#54).
+    let local_only = env.is_some()
+        && config
+            .as_ref()
+            .is_ok_and(|f| f.environments.values().all(|e| e.target().is_none()));
+    run_on(config, r, &Host::detect, local_only, out)
+}
+
 pub fn run(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(config, r, &Host::detect, out)
+    run_on(config, r, &Host::detect, false, out)
 }
 
 /// [`run`] on a given host (tests).
@@ -63,7 +84,7 @@ pub fn run_with(
     host: &Host,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(config, r, &|| *host, out)
+    run_on(config, r, &|| *host, false, out)
 }
 
 /// The host is detected only when a check needs it (a failure or a credential decision).
@@ -71,6 +92,7 @@ fn run_on(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
+    local_only: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
@@ -106,7 +128,9 @@ fn run_on(
         CONFIG_CHECK,
         config.map(|f| Check::Ok(config_summary(&f))),
     )?;
-    line(out, "op", op_version(r, host))?;
+    let op_check = op_version(r, host);
+    let op_present = op_check.is_ok();
+    line(out, "op", op_check)?;
     line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
     match fly_envs {
         Some((true, without)) => {
@@ -133,6 +157,16 @@ fn run_on(
                     .map_err(write_err)?;
             }
         }
+    }
+    if cfg!(windows) {
+    } else if op_present {
+        line(out, "op local run", local_run(r, local_only))?;
+    } else {
+        writeln!(
+            out,
+            "skip  op local run: op not available (see the op line above)"
+        )
+        .map_err(write_err)?;
     }
     let next = next.unwrap_or_else(|| "Next step: nothing pending".into());
     writeln!(out, "{next}").map_err(write_err)?;
@@ -271,6 +305,32 @@ fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Chec
     })
 }
 
+/// Whether `opv run` can work here: the first `op` on PATH must be native, because a Windows
+/// `op.exe` reached from WSL cannot start a Linux child (#54). Local-only scopes fail on it;
+/// everything else warns, since deployment commands still work through `op.exe`.
+fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
+    const WINDOWS_OP: &str = "op is the Windows op.exe, which cannot start a Linux child, so \
+                              `opv run` will fail here\n  install the Linux 1Password CLI in WSL and sign in: \
+                              see docs/local-development.md (WSL)";
+    match r.local_run_supported() {
+        Ok(()) => Ok(Check::Ok(
+            "native op; opv run can start local commands".into(),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::Unsupported && local_only => {
+            Err(Error::Dependency(WINDOWS_OP.into()))
+        }
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(Check::Warn(WINDOWS_OP.into())),
+        Err(e) if local_only => Err(Error::Dependency(format!(
+            "cannot inspect op on PATH ({})",
+            e.kind()
+        ))),
+        Err(e) => Ok(Check::Warn(format!(
+            "cannot inspect op on PATH ({})",
+            e.kind()
+        ))),
+    }
+}
+
 /// `2.40.0` / `v0.4.112` → (major, minor, patch). Missing parts count as 0; anything else
 /// (more than three parts, non-digits) is `None`.
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -356,6 +416,23 @@ mod tests {
         Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
     }
 
+    /// config, op, op auth, flyctl, fly auth, and (off Windows) op local run.
+    const CHECK_LINES: usize = if cfg!(windows) { 5 } else { 6 };
+
+    /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
+    #[cfg(not(windows))]
+    fn doctor_local_only(r: &FakeRunner) -> (Result<(), Error>, String) {
+        let mut out = Vec::new();
+        let res = run_on(Ok(fleet()), r, &|| linux(), true, &mut out);
+        (res, text_of(&out))
+    }
+
+    #[cfg(not(windows))]
+    fn windows_op(r: &FakeRunner) -> &FakeRunner {
+        *r.local_run_error.borrow_mut() = Some(io::ErrorKind::Unsupported);
+        r
+    }
+
     fn doctor(config: Result<Fleet, Error>, r: &FakeRunner) -> (Result<(), Error>, String) {
         let mut out = Vec::new();
         let res = run_with(config, r, &linux(), &mut out);
@@ -380,7 +457,7 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         let lines = checks(&out);
-        assert_eq!(lines.len(), 5, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES, "{out}");
         assert!(
             lines[0].starts_with("ok") && lines[0].contains("config"),
             "{out}"
@@ -438,7 +515,7 @@ mod tests {
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Dependency(_)), "{e}");
         let lines = checks(&out);
-        assert_eq!(lines.len(), 5, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES, "{out}");
         assert!(lines[3].starts_with("ok"), "{out}");
         assert!(lines[1].starts_with("FAIL"), "{out}");
         assert!(lines[2].starts_with("FAIL  op auth"), "{out}");
@@ -467,7 +544,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("\n  sign in: eval $(op signin)\n"), "{out}");
-        assert_eq!(lines.len(), 5, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES, "{out}");
         // Doctor and the read path share one classification: whoami, then account list.
         assert_eq!(
             argvs(&r)[1..3],
@@ -494,7 +571,7 @@ mod tests {
         let e = res.unwrap_err();
         assert!(matches!(e, Error::Config(_)), "{e}");
         let lines = checks(&out);
-        assert_eq!(lines.len(), 5, "{out}");
+        assert_eq!(lines.len(), CHECK_LINES, "{out}");
         assert!(
             lines[0].starts_with("FAIL") && lines[0].contains("boom"),
             "{out}"
@@ -508,11 +585,7 @@ mod tests {
         let r = FakeRunner::new(good());
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
-        assert_eq!(
-            checks(&out).last().unwrap(),
-            &"ok    fly auth: signed in",
-            "{out}"
-        );
+        assert!(checks(&out).contains(&"ok    fly auth: signed in"), "{out}");
         assert_no_values(&out);
         assert!(!out.contains("example.com"), "{out}");
     }
@@ -833,5 +906,52 @@ mod tests {
         let (res, out) = doctor(Ok(fleet()), &r);
         res.unwrap();
         assert_no_values(&out);
+    }
+
+    #[test]
+    fn scoped_development_doctor_never_queries_fly_in_mixed_file() {
+        let mut f = fleet();
+        let mut env = f.environments["staging"].clone();
+        env.target = None;
+        f.environments.insert("dev".into(), env);
+        let r = FakeRunner::new(good().into_iter().take(2));
+        let mut out = Vec::new();
+        run_scoped(Ok(f), Some("dev"), Some("allumata"), &r, &mut out).unwrap();
+        assert!(r.calls.borrow().iter().all(|c| c.program == "op"));
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn native_op_passes_the_local_run_check() {
+        let (_, out) = doctor(Ok(fleet()), &FakeRunner::new(good()));
+        assert!(out.contains("ok    op local run: native op"), "{out}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_op_warns_when_deployment_environments_are_in_scope() {
+        let r = FakeRunner::new(good());
+        let (res, _) = doctor(Ok(fleet()), windows_op(&r));
+        assert!(res.is_ok());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_op_fails_a_local_only_scope() {
+        let r = FakeRunner::new(good());
+        let (res, _) = doctor_local_only(windows_op(&r));
+        assert!(matches!(res, Err(Error::Dependency(_))));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_op_failure_still_prints_every_check_and_a_next_step() {
+        let r = FakeRunner::new(good());
+        let (_, out) = doctor_local_only(windows_op(&r));
+        assert!(
+            out.ends_with(
+                "Next step (op local run): install the Linux 1Password CLI in WSL and sign in: see docs/local-development.md (WSL)\n"
+            ),
+            "{out}"
+        );
     }
 }
