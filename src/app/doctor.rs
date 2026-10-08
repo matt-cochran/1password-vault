@@ -92,10 +92,10 @@ fn run_on(
     // (any environment has fly, environments without fly)
     let fly_envs = match &config {
         Ok(f) => Some((
-            f.environments.values().any(|e| e.fly.is_some()),
+            f.environments.values().any(|e| e.target().is_some()),
             f.environments
                 .iter()
-                .filter(|(_, e)| e.fly.is_none())
+                .filter(|(_, e)| e.target().is_none())
                 .map(|(n, _)| n.clone())
                 .collect::<Vec<_>>(),
         )),

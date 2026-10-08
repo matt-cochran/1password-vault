@@ -12,7 +12,7 @@ Initial scope:
 
 - 1Password is the canonical source of truth.
 - Local development uses `op://` secret references and process injection.
-- Fly.io is the first deployment target.
+- Fly.io is the first deployment target. Since v0.3, Azure, AWS and GCP are targets too (FR-28 to FR-33).
 - CI/CD must support unattended, least-privilege operation.
 - Secret values must never be persisted by the CLI.
 
@@ -335,9 +335,10 @@ No read-only operation shall write metadata such as "last synchronized at" back 
 
 The internal design shall permit future sources and targets without coupling core synchronization logic to 1Password or Fly.
 
+Decided in v0.3 (2026-10-08): the target side is two ports, `SecretStore` and `Runtime` (FR-28). A target is one of each; Fly implements both. The design and its argument are in `docs/design/multi-cloud-targets.md`.
+
 Possible future targets include:
 
-- AWS Secrets Manager;
 - Kubernetes Secrets;
 - Cloudflare;
 - Docker/Compose;
@@ -575,6 +576,60 @@ Constraints kept: FR-1, FR-2, FR-9. stdout is unchanged, so `config export --jso
 
 ---
 
+## v0.3 multi-cloud targets (FR-28 to FR-33)
+
+The requirements below add Azure, AWS and GCP as targets without weakening any FR or SR above. The owner adopted them on 2026-10-08 after an FMECA review. They are delivered in phases (P0 to P4, issues #38 to #42); deferred items are listed in §8 under "v0.3 scope". Design: `docs/design/multi-cloud-targets.md`.
+
+## FR-28 — Targets, Ports and Routing
+
+A target is one secret store plus one runtime:
+
+| Cloud | Store | Runtimes |
+|---|---|---|
+| Fly | Fly secrets | Fly app (one adapter for both) |
+| Azure | Key Vault | Container Apps, App Service |
+| AWS | Secrets Manager | ECS |
+| GCP | Secret Manager | Cloud Run (which covers Cloud Run functions) |
+
+- Core logic reaches targets only through the `SecretStore` and `Runtime` ports (FR-12). `app/` and `domain/` name no target.
+- Each environment declares at most one target section: `fly`, `azure`, `aws` or `gcp`. Existing `fly` sections are unchanged.
+- **Routing by kind (FR-14).** A secret (concealed field) is written to the store and bound on the runtime as a reference. Config (text field) is set as a plain runtime env var, unless the environment sets `config = "store"`, which routes config like secrets. Routing a secret to plain env is not expressible. On Fly, config is not synced, as since v0.1; consumers read it with `config export`.
+- `opv plan <env>` and `opv sync <env>` work for every target. `opv fly plan` and `opv fly sync` remain as aliases that print a deprecation warning for one minor release and are then removed.
+
+## FR-29 — Pinned References
+
+Every secret reference on a cloud runtime binds an explicit store version (Key Vault versioned URI, ECS `valueFrom` ARN with a version id, Cloud Run `secret:N`, App Service versioned `SecretUri`), never "latest".
+
+- A store write is the staging step: the running app does not see it, even on restart or scale-out.
+- Rebinding to the new version, and setting config env values, is the deploy step and happens only with `--deploy` (FR-7, FR-9).
+- `status` reports, per key: store value current, binding current, pending deploy, and drift (a binding to a version opv did not write). Drift is overwritten only with `--deploy`.
+
+## FR-30 — Store Naming and Limits
+
+- The env name comes from the naming template (fleet) or the field name (simple). Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged) and validates it when the configuration loads.
+- Two keys that map to one store name are a configuration error naming both keys.
+- Each store and runtime declares its value-size limits. They are checked with the rules, before any call, and a failure names the key and the limit, never the value (FR-15).
+
+## FR-31 — Compare Before Write; Read-Modify-Write on Runtimes
+
+- Before writing a secret, opv reads the store's current value into a redacting type and compares it in constant time. It writes only when the value differs or is missing, so an unchanged run creates no store version and reports no change.
+- A runtime change reads the current service spec, changes only managed names, and sends the whole spec on stdin. Config values are never in argv (SR-3).
+- The unmanaged part of the spec is fingerprinted before and after the write, and the platform's optimistic concurrency is used where it exists. A concurrent change fails with the changed paths (never values) and a "safe to re-run" exit.
+- On Azure and AWS, values travel through `/dev/stdin`. On native Windows those writes fail closed with a typed error naming WSL; reads, `plan` and `status` work everywhere.
+
+## FR-32 — Cloud Prune Order and Ownership
+
+- `--prune` without `--deploy` only reports on cloud targets.
+- With `--deploy`, opv unbinds the names on the runtime, waits for a healthy revision, then deletes them from the store. A store entry is never deleted while a running revision references it.
+- opv tags every store entry it creates with `opv-managed=<environment>` and refuses to delete one without that tag. The declared-set rule of FR-8 still applies.
+- A soft-deleted name (Key Vault soft delete, AWS recovery window) that blocks a re-create fails with the exact recover command. opv never recovers or purges by itself.
+
+## FR-33 — Runtime Access and Health
+
+- Before a cloud deploy, opv checks that the runtime identity (Container Apps or App Service managed identity, ECS execution role, Cloud Run service account) can read every referenced store entry. A missing grant blocks the deploy and names the identity and the entry.
+- After a deploy, opv waits for the new revision to report healthy or failed and reports the outcome with its exit category.
+- `doctor` checks the cloud CLI and login, store access on managed names, and runtime-identity access, and reports an identity that can read untagged secrets as broader than needed (SR-5).
+
 # 4. Security Requirements
 
 ## FR-26 — Diagnose and Guide
@@ -696,7 +751,8 @@ The CLI shall not create plaintext files containing resolved secrets, including 
 A CI identity shall require only:
 
 - read access to the required 1Password vault/items;
-- the minimum Fly permissions required to manage secrets for the target application.
+- the minimum Fly permissions required to manage secrets for the target application;
+- on cloud targets, read and write on the opv-tagged store entries and update on the one runtime service. Read is needed for compare-before-write (FR-31); it adds no exposure, because the same values are readable through the CI 1Password token.
 
 The CLI shall not require write access to 1Password for synchronization.
 
@@ -704,7 +760,7 @@ The CLI shall not require write access to 1Password for synchronization.
 
 Secret deletion shall require explicit user intent.
 
-The CLI shall never infer that every secret present on Fly but absent from configuration should be deleted.
+The CLI shall never infer that every secret present on a target but absent from configuration should be deleted.
 
 ## SR-7 — Shell Avoidance
 
@@ -749,6 +805,15 @@ opv [--config <path>] run <environment> -- <command>        # simple profile: no
 ```
 
 In v0.2, `--json` is on `status`, `fly plan` and `config export`, and `status` and `fly plan` print text without it. Without `--config`, `secrets.toml` is found by walking up parent directories, and the resolved path is printed on stderr (FR-25). `doctor` ends with a "Next step" line (FR-22). `--verbose` and `--quiet` stay unimplemented.
+
+Since v0.3 (FR-28 to FR-33), in addition to the above:
+
+```text
+opv [--config <path>] plan <environment> [--json]
+opv [--config <path>] sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
+```
+
+`plan` and `sync` work for every target. `fly plan` and `fly sync` are deprecated aliases for one minor release.
 
 There should be no generic `secret get` command in the initial release because printing raw values conflicts with the tool's primary safety goals.
 
@@ -804,6 +869,8 @@ src/
 ```
 
 Core orchestration must not know about subprocess syntax.
+
+Decided in v0.3: the shipped layout keeps the flat `src/app`, `src/domain` and `src/adapters` modules. The target ports are synchronous, take the existing `CommandRunner`, and are `SecretStore` and `Runtime` as specified in FR-28 and the v0.3 design; the `SecretTarget` sketch below is superseded.
 
 Example interfaces:
 
@@ -1053,9 +1120,30 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 
 - **Pre-declared sync policy** (deploy or prune by configuration): rejected, because it replaces explicit per-run intent (FR-8, FR-9, SR-6).
 - **Rotation epoch** (rotate immutable keys by bumping a counter): rejected, because rotation must stay a per-key explicit act (FR-16, SR-6).
-- **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded; FR-12 stays the design intent.
-- **Exact change detection in `fly plan`**: deferred, because Fly digests cannot be computed locally and `plan` must not stage (FR-5, FR-11, §6.4).
-- **Merging `pattern` into `regex`**: deferred. In v0.2 `pattern` is allowed only alongside `ensure_prefix` and applies to the text after the prefix, which `regex` does not do (FR-24).
+- **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded. Funded in v0.3 as the `SecretStore` and `Runtime` ports (FR-28).
+- **Exact change detection in `fly plan`**: deferred, because Fly digests cannot be computed locally and `plan` must not stage (FR-5, FR-11, §6.4). Backlog: #36.
+- **Merging `pattern` into `regex`**: deferred. In v0.2 `pattern` is allowed only alongside `ensure_prefix` and applies to the text after the prefix, which `regex` does not do (FR-24). Backlog: #37.
+
+Version 0.3 is acceptable, per phase, when in addition to 1–26:
+
+27. Every Fly command produces byte-identical `flyctl` argv, stdin and output before and after the move onto the ports (characterization tests), and `app/` and `domain/` reach Fly only through the ports (`init`, which writes a Fly configuration, and `doctor`, which checks the installed vendor CLIs, excepted; `doctor` gains per-adapter checks in P1).
+28. `opv plan` and `opv sync` behave as `fly plan` and `fly sync` on Fly targets; the `fly` forms still work and print a deprecation warning.
+29. A secret is written to the store and bound by a pinned version reference; a config field is a plain runtime env var, or a store reference with `config = "store"`. No configuration routes a secret to plain env.
+30. `sync` without `--deploy` changes nothing the running app can see, including after a restart; `status` reports the pending deploy.
+31. A run where 1Password, the store and the bindings already agree writes nothing, deploys nothing and reports no change.
+32. Store-name collisions and size-limit violations fail at configuration load or rule check, naming the key, before any cloud call.
+33. A runtime change touches only managed names; a concurrent change to the unmanaged part fails with the changed paths and a re-run exit.
+34. `--prune --deploy` deletes a store entry only after a healthy revision no longer references it, and refuses an entry without the ownership tag.
+35. A missing runtime-identity grant blocks `--deploy` and names the identity and the entry.
+36. Items 9 and 10 hold for every adapter, checked by a shared marker-value test that config values never reach argv either.
+
+## v0.3 scope
+
+Rejected or deferred from the 2026-10-08 multi-cloud review:
+
+- **AWS Lambda runtime**: deferred, because Lambda env vars cannot reference Secrets Manager, so FR-29 cannot hold without app-side code. Backlog: #34.
+- **Separate Cloud Run functions adapter**: not needed, because current Cloud Run functions are Cloud Run services; confirmed in P4. Backlog: #35.
+- **Value-entropy heuristic** to catch a secret stored as a text field: rejected as unproven and prone to false positives. The 1Password kind is explicit (FR-14) and every plan lists env-routed names.
 
 ---
 

@@ -1,17 +1,17 @@
 [package]
 name = "opv"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 # let-chains (`if let ... && let ...`) are stable from 1.88.
 rust-version = "1.88"
 license = "MIT"
-description = "Sync secrets from 1Password to runtime targets (Fly.io) without ever printing, logging or writing secret values"
+description = "Sync secrets from 1Password into runtime targets such as Fly.io without ever printing, logging or writing a value"
 repository = "https://github.com/matt-cochran/1password-vault"
 homepage = "https://github.com/matt-cochran/1password-vault"
 readme = "README.md"
-keywords = ["1password", "secrets", "fly", "cli", "devops"]
+keywords = ["1password", "secrets", "secrets-management", "fly", "devops"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["spike/", ".delivery/", ".github/", "packaging/"]
+exclude = ["spike/", ".delivery/", ".github/", "packaging/", "docs/assets/"]
 
 [features]
 # Exposes `runner::fake::FakeRunner` to integration tests and downstream test code.
@@ -31,3 +31,4 @@ regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
+sha2 = "0.10"

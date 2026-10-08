@@ -9,7 +9,7 @@
 //! | [`unset_staged`] | `secrets unset <names...> --app <app> --stage` |
 //! | [`deploy`] | `secrets deploy --app <app>` |
 //!
-//! Fly digests are not computable locally (D0, `docs/spike-d0-findings.md` Q4), so change
+//! Fly digests are not computable locally (D0, `docs/design/spike-d0-findings.md` Q4), so change
 //! detection is stage-and-compare (P1, §6.4): S6 calls `list` (A), `stage`, `list` (B) and
 //! compares digests by name. `status` is passed through but never used for change
 //! detection; S6 uses it only as an extra deploy trigger (pending `Staged`/`Partial`).
@@ -50,9 +50,10 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::domain::SecretValue;
-use crate::domain::plan::FlySecret;
+use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
+use crate::ports::{Runtime, SecretStore};
 use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
 
 /// The Fly CLI binary.
@@ -76,8 +77,40 @@ struct ListEntry {
     status: Option<String>,
 }
 
-/// Every secret on `app` with its digest: one `flyctl secrets list --app <app> --json` call.
-pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
+/// Fly as both target ports (FR-28): a Fly secret is the store entry and the env var at
+/// once. Each method is the free function of the same operation, unchanged.
+pub struct Fly<'a> {
+    pub runner: &'a dyn CommandRunner,
+    pub app: &'a str,
+}
+
+impl SecretStore for Fly<'_> {
+    fn list(&self) -> Result<Vec<StoreEntry>, Error> {
+        list(self.runner, self.app)
+    }
+    fn refusal(&self, name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)> {
+        entry_refusal_reason(name, value)
+    }
+    fn validate(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error> {
+        validate_import(batch)
+    }
+    fn write(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error> {
+        stage(self.runner, self.app, batch)
+    }
+    fn remove(&self, names: &[String]) -> Result<(), Error> {
+        unset_staged(self.runner, self.app, names)
+    }
+}
+
+impl Runtime for Fly<'_> {
+    fn deploy(&self) -> Result<(), Error> {
+        deploy(self.runner, self.app)
+    }
+}
+
+/// Every secret on `app` with its version and pending flag: one
+/// `flyctl secrets list --app <app> --json` call.
+pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<StoreEntry>, Error> {
     const WHAT: &str = "fly secrets list";
     let out = run(
         r,
@@ -97,10 +130,10 @@ pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
     })?;
     Ok(entries
         .into_iter()
-        .map(|e| FlySecret {
+        .map(|e| StoreEntry {
             name: e.name,
-            digest: e.digest,
-            status: e.status,
+            version: e.digest,
+            pending: matches!(e.status.as_deref(), Some("Staged" | "Partial")),
         })
         .collect())
 }
@@ -619,15 +652,15 @@ mod tests {
         assert_eq!(
             s,
             vec![
-                FlySecret {
+                StoreEntry {
                     name: "A".into(),
-                    digest: Some("<digest-a>".into()),
-                    status: Some("Staged".into()),
+                    version: Some("<digest-a>".into()),
+                    pending: true,
                 },
-                FlySecret {
+                StoreEntry {
                     name: "B".into(),
-                    digest: Some("<digest-b>".into()),
-                    status: Some("Staged".into()),
+                    version: Some("<digest-b>".into()),
+                    pending: true,
                 },
             ]
         );
@@ -650,7 +683,7 @@ mod tests {
         let s = list(&r, "fleet-prod").unwrap();
         let got: Vec<(&str, Option<&str>)> = s
             .iter()
-            .map(|f| (f.name.as_str(), f.digest.as_deref()))
+            .map(|f| (f.name.as_str(), f.version.as_deref()))
             .collect();
         assert_eq!(
             got,
@@ -665,17 +698,8 @@ mod tests {
                 ("NO_DIGEST", None),
             ]
         );
-        let status: Vec<Option<&str>> = s.iter().map(|f| f.status.as_deref()).collect();
-        assert_eq!(
-            status,
-            [
-                Some("Deployed"),
-                Some("Staged"),
-                Some("Partial"),
-                Some("Unknown"),
-                None
-            ]
-        );
+        let pending: Vec<bool> = s.iter().map(|f| f.pending).collect();
+        assert_eq!(pending, [false, true, true, false, false]);
     }
 
     #[test]
@@ -1158,7 +1182,7 @@ mod tests {
     // ------------------------------------------------- flyctl import parser port
     //
     // A Rust port of `parseSecrets` in flyctl v0.4.112 `internal/command/secrets/parser.go`
-    // (commit ca63052e), as documented line by line in docs/spike-d0-findings.md
+    // (commit ca63052e), as documented line by line in docs/design/spike-d0-findings.md
     // ("Follow-up 2a"). Go strings are bytes; every byte the parser inspects (`\n`, `\r`,
     // `#`, `"`, `'`, `=`, ` `) is ASCII, and UTF-8 continuation bytes are never ASCII, so
     // char-level operations on `&str` are equivalent here.
@@ -1402,5 +1426,19 @@ mod tests {
             .map(|(k, v)| (k.clone(), v.expose().to_string()))
             .collect();
         assert_eq!(parsed, want);
+    }
+
+    #[test]
+    fn fly_store_write_is_one_staged_import() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        let v = sv(MARK);
+        Fly {
+            runner: &r,
+            app: "app",
+        }
+        .write(&[("A".into(), &v)])
+        .unwrap();
+        let argv: Vec<String> = r.calls.borrow().iter().map(|c| c.args.join(" ")).collect();
+        assert_eq!(argv, ["secrets import --app app --stage"]);
     }
 }

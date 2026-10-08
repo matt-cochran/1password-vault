@@ -5,9 +5,9 @@ pub mod secret;
 
 pub use model::{
     Environment, Fleet, FlyTarget, KeySpec, Kind, OneOrMany, PrefixByMode, Product, Profile, Rules,
-    SIMPLE_PRODUCT, SIMPLE_TEMPLATE, key_label,
+    SIMPLE_PRODUCT, SIMPLE_TEMPLATE, Target, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;
 pub mod rules;
-pub use plan::{FlySecret, ItemField, KeyState, Row, SyncPlan, TargetState, build as build_plan};
+pub use plan::{ItemField, KeyState, Row, StoreEntry, SyncPlan, TargetState, build as build_plan};

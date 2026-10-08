@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::domain::{
     Environment, Fleet, FlyTarget, KeySpec, Product, Profile, SIMPLE_PRODUCT, SIMPLE_TEMPLATE,
-    key_label,
+    Target, key_label,
 };
 use crate::error::Error;
 
@@ -192,10 +192,10 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
                         "environment {name}: fly.secret_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
                     )));
                 }
-                Some(FlyTarget {
+                Some(Target::Fly(FlyTarget {
                     app: f.app,
                     secret_name_template: f.secret_name,
-                })
+                }))
             }
         };
         environments.insert(
@@ -203,12 +203,12 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
             Environment {
                 vault_id: e.vault_id,
                 item_id: e.item_id,
-                fly,
+                target: fly,
                 modes: e.modes,
             },
         );
     }
-    check_shared_fly_targets(&environments)?;
+    check_shared_targets(&environments)?;
 
     for (product, p) in &raw.products {
         if !is_product_name(product) {
@@ -261,10 +261,10 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
                      profile (the Fly name is the key name)"
                 )));
             }
-            Some(f) => Some(FlyTarget {
+            Some(f) => Some(Target::Fly(FlyTarget {
                 app: f.app,
                 secret_name_template: SIMPLE_TEMPLATE.into(),
-            }),
+            })),
         };
         let modes = if e.modes.is_empty() {
             BTreeMap::new()
@@ -276,7 +276,7 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
             Environment {
                 vault_id: e.vault_id,
                 item_id: e.item_id,
-                fly,
+                target: fly,
                 modes,
             },
         );
@@ -285,7 +285,7 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
     // each would prune what the other stages (FR-8).
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for (name, env) in &environments {
-        if let Some(f) = &env.fly
+        if let Some(Target::Fly(f)) = &env.target
             && let Some(prev) = seen.insert(&f.app, name)
         {
             return Err(cfg(format!(
@@ -407,10 +407,10 @@ fn validate_key(
 
 /// Two environments staging into the same Fly app with the same name template would manage
 /// the same names, and each would prune what the other stages (FR-8).
-fn check_shared_fly_targets(environments: &BTreeMap<String, Environment>) -> Result<(), Error> {
+fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<(), Error> {
     let mut seen: BTreeMap<(&str, &str), &str> = BTreeMap::new();
     for (name, env) in environments {
-        if let Some(f) = &env.fly
+        if let Some(Target::Fly(f)) = &env.target
             && let Some(prev) = seen.insert((&f.app, &f.secret_name_template), name)
         {
             return Err(cfg(format!(
@@ -429,11 +429,13 @@ fn check_shared_fly_targets(environments: &BTreeMap<String, Environment>) -> Res
 /// run (FR-2, FR-8).
 fn check_fly_names(fleet: &Fleet) -> Result<(), Error> {
     for (env_name, env) in &fleet.environments {
-        let Some(fly) = &env.fly else { continue };
+        let Some(Target::Fly(fly)) = &env.target else {
+            continue;
+        };
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
         for (product, p) in &fleet.products {
             for key in p.keys.keys() {
-                let name = fly.fly_name(product, key);
+                let name = fly.target_name(product, key);
                 let owner = key_label(product, key);
                 if !is_env_name(&name) {
                     return Err(cfg(format!(
@@ -496,7 +498,7 @@ mod tests {
     fn loads_fleet_profile_and_builds_fly_names() {
         let f = parse(&ok()).unwrap();
         assert_eq!(
-            f.fly_name("prod", "allumata", "OPENAI_API_KEY"),
+            f.target_name("prod", "allumata", "OPENAI_API_KEY"),
             "FLEET__ALLUMATA__OPENAI_API_KEY"
         );
         assert_eq!(
@@ -538,7 +540,9 @@ mod tests {
         assert_eq!(prod.vault_id, "vprd");
         assert_eq!(prod.item_id, "iprd");
         assert_eq!(
-            prod.fly.as_ref().unwrap().app,
+            match prod.target.as_ref().unwrap() {
+                Target::Fly(f) => f.app.as_str(),
+            },
             "mcproductlabs-portfolio-production"
         );
         assert_eq!(prod.modes["allumata"]["payments"], "off");
@@ -886,12 +890,12 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             ok()
         );
         let f = parse(&t).unwrap();
-        assert!(f.environments["dev"].fly.is_none());
+        assert!(f.environments["dev"].target.is_none());
         assert!(matches!(
-            f.fly_target("dev"),
+            f.target("dev"),
             Err(Error::Config(m)) if m.contains("dev") && m.contains("no fly section")
         ));
-        assert!(f.fly_target("prod").is_ok());
+        assert!(f.target("prod").is_ok());
         // `secret_name` stays required when `fly` is present.
         let t = format!(
             "{}\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\nfly.app = \"dev-app\"\n",
@@ -964,15 +968,15 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
     }
 
     #[test]
-    fn try_fly_name_reports_undefined_environment() {
+    fn try_target_name_reports_undefined_environment() {
         let f = parse(&ok()).unwrap();
         assert_eq!(
-            f.try_fly_name("staging", "allumata", "SIGNUP_POLICY")
+            f.try_target_name("staging", "allumata", "SIGNUP_POLICY")
                 .unwrap(),
             "FLEET__ALLUMATA__SIGNUP_POLICY"
         );
         assert!(matches!(
-            f.try_fly_name("qa", "allumata", "SIGNUP_POLICY"),
+            f.try_target_name("qa", "allumata", "SIGNUP_POLICY"),
             Err(Error::Config(m)) if m.contains("qa")
         ));
         assert_eq!(f.environment("prod").unwrap().vault_id, "vprd");
@@ -1067,7 +1071,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
     #[test]
     fn simple_fly_name_is_the_key_name() {
         let f = parse(&simple()).unwrap();
-        assert_eq!(f.fly_name("prod", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+        assert_eq!(f.target_name("prod", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
     }
 
     #[test]
@@ -1172,7 +1176,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         ))
         .unwrap();
         assert!(matches!(
-            f.fly_target("dev"),
+            f.target("dev"),
             Err(Error::Config(m)) if m.contains("add fly.app") && !m.contains("secret_name")
         ));
     }

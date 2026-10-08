@@ -125,10 +125,10 @@ jobs:
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           node scripts/npm/build.mjs --version "$version" --assets dist --out npm-dist
-          mkdir -p npm-smoke/node_modules/opv npm-smoke/node_modules/@matthew-cochran/opv-linux-x64
-          cp -r npm-dist/opv/. npm-smoke/node_modules/opv/
+          mkdir -p npm-smoke/node_modules/@matthew-cochran/opv npm-smoke/node_modules/@matthew-cochran/opv-linux-x64
+          cp -r npm-dist/opv/. npm-smoke/node_modules/@matthew-cochran/opv/
           cp -r npm-dist/@matthew-cochran/opv-linux-x64/. npm-smoke/node_modules/@matthew-cochran/opv-linux-x64/
-          out="$(node npm-smoke/node_modules/opv/bin/opv.js --version)"
+          out="$(node npm-smoke/node_modules/@matthew-cochran/opv/bin/opv.js --version)"
           echo "$out"
           case "$out" in
             'opv '*) ;;
@@ -167,7 +167,8 @@ jobs:
   npm:
     name: Publish npm packages
     needs: package
-    # Off until the first public npm release (v0.2.0): set repo variable NPM_PUBLISH=true to enable.
+    # Off until trusted publishers are configured on npmjs.com for all 7 packages
+    # (repo matt-cochran/1password-vault, workflow release.yml); then set repo variable NPM_PUBLISH=true.
     if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true && vars.NPM_PUBLISH == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -181,39 +182,28 @@ jobs:
           path: dist
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
-      - name: Check for NPM_TOKEN
-        id: token
-        shell: bash
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [[ -z "$NPM_TOKEN" ]]; then
-            echo "::notice::NPM_TOKEN is not set; skipping npm publish"
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          fi
+      # Trusted publishing (OIDC): npm >= 11.5.1 exchanges the job's id-token for a
+      # short-lived publish credential. No NPM_TOKEN; provenance is attached.
+      - name: Use npm with trusted publishing support
+        run: npm install -g npm@^11.5.1
       # Note: pre-release tags (e.g. v0.1.1-rc1) are rejected by build.mjs by design.
       - name: Build npm packages
-        if: steps.token.outputs.present == 'true'
         run: node scripts/npm/build.mjs --version "${GITHUB_REF_NAME#v}" --assets dist --out npm-dist
       - name: Publish npm packages
-        if: steps.token.outputs.present == 'true'
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # Platform packages first, then the main package.
           for pkg in npm-dist/@matthew-cochran/opv-* npm-dist/opv; do
             name="$(node -p "require('./$pkg/package.json').name")"
             version="$(node -p "require('./$pkg/package.json').version")"
+            # `npm view` prints nothing (and succeeds) for a missing version: compare output.
             set +e
             published="$(npm view "${name}@${version}" version 2>&1)"
             rc=$?
             set -e
-            if [[ $rc -eq 0 && -n "$published" ]]; then
+            if [[ $rc -eq 0 && "$published" == "$version" ]]; then
               echo "::notice::${name}@${version} already published; skipping"
               continue
             fi

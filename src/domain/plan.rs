@@ -31,14 +31,15 @@ impl fmt::Debug for ItemField {
     }
 }
 
-/// A secret listed on the Fly app. `digest` is Fly's digest when it reports one; `status`
-/// is Fly's status (`Deployed`, `Staged`, `Partial`, ...) when it reports one. The planner
-/// ignores `status`; `fly sync` uses it only as an extra deploy trigger.
+/// A value listed on the target's store (FR-12): its name, the store's version of the
+/// value when it reports one (Fly: the digest), and whether a change is written but not yet
+/// live (Fly: status `Staged` or `Partial`). The planner ignores `pending`; `fly sync` uses
+/// it only as an extra deploy trigger.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlySecret {
+pub struct StoreEntry {
     pub name: String,
-    pub digest: Option<String>,
-    pub status: Option<String>,
+    pub version: Option<String>,
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +158,7 @@ pub fn build(
     fleet: &Fleet,
     env_name: &str,
     item: Vec<ItemField>,
-    fly: &[FlySecret],
+    fly: &[StoreEntry],
     rotate: &BTreeSet<(String, String)>,
     digest: &dyn Fn(&SecretValue) -> Option<String>,
 ) -> SyncPlan {
@@ -184,7 +185,7 @@ pub fn build_with(
     fleet: &Fleet,
     env_name: &str,
     item: Vec<ItemField>,
-    fly: &[FlySecret],
+    fly: &[StoreEntry],
     opts: &PlanOptions<'_>,
 ) -> SyncPlan {
     let env = fleet
@@ -193,7 +194,7 @@ pub fn build_with(
         .unwrap_or_else(|| panic!("undefined environment {env_name}"));
     let on_fly: BTreeMap<&str, Option<&str>> = fly
         .iter()
-        .map(|s| (s.name.as_str(), s.digest.as_deref()))
+        .map(|s| (s.name.as_str(), s.version.as_deref()))
         .collect();
 
     let mut by_name: BTreeMap<(&str, &str), &ItemField> = BTreeMap::new();
@@ -215,7 +216,7 @@ pub fn build_with(
 
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
-            let fly_name = env.fly_name(product, key);
+            let fly_name = env.target_name(product, key);
             let fly_entry = fly_name.as_deref().and_then(|n| on_fly.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
             let declared_here = spec.environments.iter().any(|e| e == env_name);
@@ -346,6 +347,7 @@ pub fn build_with(
 mod tests {
     use super::*;
     use crate::config;
+    use crate::domain::model::Target;
     use base64::Engine as _;
 
     fn f() -> Fleet {
@@ -371,17 +373,17 @@ mod tests {
     fn none(_: &SecretValue) -> Option<String> {
         None
     }
-    fn fly_secret(name: &str, digest: Option<&str>) -> FlySecret {
-        FlySecret {
+    fn fly_secret(name: &str, version: Option<&str>) -> StoreEntry {
+        StoreEntry {
             name: name.into(),
-            digest: digest.map(String::from),
-            status: None,
+            version: version.map(String::from),
+            pending: false,
         }
     }
     fn no_rotate() -> BTreeSet<(String, String)> {
         BTreeSet::new()
     }
-    fn plan(item: Vec<ItemField>, fly: &[FlySecret]) -> SyncPlan {
+    fn plan(item: Vec<ItemField>, fly: &[StoreEntry]) -> SyncPlan {
         build(&f(), "prod", item, fly, &no_rotate(), &none)
     }
     fn row<'a>(p: &'a SyncPlan, key: &str) -> &'a Row {
@@ -698,7 +700,9 @@ rules = { transform = "signoz_ingestion_header" }
         fleet.products.insert("q".into(), q);
         for env in fleet.environments.values_mut() {
             // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
-            env.fly.as_mut().unwrap().secret_name_template = "FLEET__{KEY}".into();
+            match env.target.as_mut().unwrap() {
+                Target::Fly(f) => f.secret_name_template = "FLEET__{KEY}".into(),
+            }
         }
         let fly = [fly_secret("FLEET__BOTH", None)];
         let item = vec![secret("p", "BOTH", "v1")];
@@ -827,7 +831,7 @@ rules = { transform = "signoz_ingestion_header" }
     #[test]
     fn env_without_fly_plans_rows_and_config_only() {
         let mut fleet = f();
-        fleet.environments.get_mut("prod").unwrap().fly = None;
+        fleet.environments.get_mut("prod").unwrap().target = None;
         let item = vec![
             secret("allumata", "OPENAI_API_KEY", "sk-proj-1"),
             config_field("allumata", "SIGNUP_POLICY", "invite_only"),
