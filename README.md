@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to Fly.io, Azure, AWS and GCP with one command: opv sync prod" width="100%">
+</p>
+
 # opv
 
 [![CI](https://github.com/matt-cochran/1password-vault/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/matt-cochran/1password-vault/actions/workflows/ci.yml)
