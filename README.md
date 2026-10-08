@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to local development (shell, IDE, Docker), Fly.io, Azure, AWS and GCP: opv run dev -- npm run dev" width="100%">
+  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to local development (shell, IDE, Docker), Fly.io, and (planned) Azure, AWS and GCP: opv run dev -- npm run dev" width="100%">
 </p>
 
 # opv
@@ -10,6 +10,8 @@
 [![MSRV 1.88](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](Cargo.toml)
 
 Sync secrets from 1Password into the places your apps run, without ever printing, logging or writing a value.
+
+**Works today:** local development (`opv run`) and Fly.io. Azure, AWS and GCP are [planned](#targets).
 
 1Password owns the values. Your runtime consumes them. `opv` connects the two and nothing else: no server, no state, no encryption of its own, and no command that prints a secret. What to sync lives in a committed `secrets.toml` that holds IDs and validation rules, never values.
 
