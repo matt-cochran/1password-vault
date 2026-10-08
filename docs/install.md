@@ -73,6 +73,21 @@ npx @matthew-cochran/opv --version
 
 The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
 
+### Keep one install
+
+Use one install method per machine. Each one puts `opv` in a different directory
+(`install.sh` in `~/.local/bin`, npm in its global `bin`, `cargo install` in
+`~/.cargo/bin`), and updating one leaves the others alone. The shell runs the
+first `opv` on `PATH`, which may be an old copy:
+
+```sh
+type -a opv        # every opv on PATH; the first one runs
+opv --version
+```
+
+If `type -a` lists more than one, remove the copies you do not update, for
+example `rm ~/.local/bin/opv`, `npm uninstall -g @matthew-cochran/opv` or
+`cargo uninstall opv`. Then run `hash -r` so the shell forgets the old path.
 
 ## Verify a download
 
