@@ -311,7 +311,7 @@ impl<'a> Ports<'a> { pub fn store(&self) -> &dyn Store; }   // for status/plan
 pub fn open<'a>(target: &'a Target, r: &'a dyn CommandRunner) -> Ports<'a>;
 ```
 
-`Flow` is not needed (the `Ports` variant is the flow); drop it from `domain/runtime.rs`.
+There is no `Flow` enum: the `Ports` variant is the flow.
 
 Fly implements `Store + StagedStore + StagedRuntime` by moving its existing impl blocks; no Fly logic changes.
 
