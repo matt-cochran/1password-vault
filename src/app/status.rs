@@ -33,7 +33,7 @@ pub fn run_with(
     json: bool,
 ) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    fleet.fly_target(env_name)?;
+    fleet.target(env_name)?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
     if json {

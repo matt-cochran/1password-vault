@@ -50,7 +50,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::domain::SecretValue;
-use crate::domain::plan::FlySecret;
+use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
@@ -76,8 +76,9 @@ struct ListEntry {
     status: Option<String>,
 }
 
-/// Every secret on `app` with its digest: one `flyctl secrets list --app <app> --json` call.
-pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
+/// Every secret on `app` with its version and pending flag: one
+/// `flyctl secrets list --app <app> --json` call.
+pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<StoreEntry>, Error> {
     const WHAT: &str = "fly secrets list";
     let out = run(
         r,
@@ -97,10 +98,10 @@ pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<FlySecret>, Error> {
     })?;
     Ok(entries
         .into_iter()
-        .map(|e| FlySecret {
+        .map(|e| StoreEntry {
             name: e.name,
-            digest: e.digest,
-            status: e.status,
+            version: e.digest,
+            pending: matches!(e.status.as_deref(), Some("Staged" | "Partial")),
         })
         .collect())
 }
@@ -619,15 +620,15 @@ mod tests {
         assert_eq!(
             s,
             vec![
-                FlySecret {
+                StoreEntry {
                     name: "A".into(),
-                    digest: Some("<digest-a>".into()),
-                    status: Some("Staged".into()),
+                    version: Some("<digest-a>".into()),
+                    pending: true,
                 },
-                FlySecret {
+                StoreEntry {
                     name: "B".into(),
-                    digest: Some("<digest-b>".into()),
-                    status: Some("Staged".into()),
+                    version: Some("<digest-b>".into()),
+                    pending: true,
                 },
             ]
         );
@@ -650,7 +651,7 @@ mod tests {
         let s = list(&r, "fleet-prod").unwrap();
         let got: Vec<(&str, Option<&str>)> = s
             .iter()
-            .map(|f| (f.name.as_str(), f.digest.as_deref()))
+            .map(|f| (f.name.as_str(), f.version.as_deref()))
             .collect();
         assert_eq!(
             got,
@@ -665,17 +666,8 @@ mod tests {
                 ("NO_DIGEST", None),
             ]
         );
-        let status: Vec<Option<&str>> = s.iter().map(|f| f.status.as_deref()).collect();
-        assert_eq!(
-            status,
-            [
-                Some("Deployed"),
-                Some("Staged"),
-                Some("Partial"),
-                Some("Unknown"),
-                None
-            ]
-        );
+        let pending: Vec<bool> = s.iter().map(|f| f.pending).collect();
+        assert_eq!(pending, [false, true, true, false, false]);
     }
 
     #[test]

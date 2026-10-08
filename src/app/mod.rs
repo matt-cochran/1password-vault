@@ -28,8 +28,8 @@ use std::io::{self, Write};
 use crate::adapters::{fly, onepassword};
 use crate::domain::plan;
 use crate::domain::{
-    Fleet, FlySecret, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, SyncPlan, TargetState,
-    key_label,
+    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, Target,
+    TargetState, key_label,
 };
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -55,10 +55,12 @@ pub(crate) fn read_and_plan(
     with_fly: bool,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
-) -> Result<(SyncPlan, Vec<FlySecret>), Error> {
+) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let env = fleet.environment(env_name)?;
     let app = if with_fly {
-        Some(fleet.fly_target(env_name)?.1.app.as_str())
+        match fleet.target(env_name)?.1 {
+            Target::Fly(t) => Some(t.app.as_str()),
+        }
     } else {
         None
     };
@@ -126,7 +128,7 @@ pub(crate) fn write_json(
         .rows
         .iter()
         .map(|r| {
-            let fly_name = env.fly_name(&r.product, &r.key);
+            let fly_name = env.target_name(&r.product, &r.key);
             let action = row_action(
                 r,
                 fly_name.as_deref(),
@@ -168,7 +170,7 @@ pub(crate) fn write_json(
             .map(|(product, key)| JsonHeld {
                 product: json_product(product),
                 key: key.clone(),
-                fly_name: env.fly_name(product, key),
+                fly_name: env.target_name(product, key),
             })
             .collect(),
         prune: plan.prune.clone(),
@@ -413,20 +415,20 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
 
 /// Every Fly name the template renders for a declared key: the managed set (FR-8, §10).
 pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<String>, Error> {
-    let (_, target) = fleet.fly_target(env_name)?;
+    let (_, target) = fleet.target(env_name)?;
     Ok(fleet
         .products
         .iter()
-        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| target.fly_name(p, k)))
+        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| target.target_name(p, k)))
         .collect())
 }
 
 /// Fly names on the app that the template does not render for any declared key: other
 /// tools' secrets, which opv never touches (FR-5 "unmanaged on Fly", §10.3).
-pub(crate) fn unmanaged_on_fly<'a>(
+pub(crate) fn unmanaged_on_target<'a>(
     fleet: &Fleet,
     env_name: &str,
-    on_fly: &'a [FlySecret],
+    on_fly: &'a [StoreEntry],
 ) -> Result<Vec<&'a str>, Error> {
     let managed = managed_names(fleet, env_name)?;
     Ok(on_fly

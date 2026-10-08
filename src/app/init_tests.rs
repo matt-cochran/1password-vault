@@ -159,7 +159,7 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
     let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
     assert!(fleet.is_simple());
     assert_eq!(
-        fleet.fly_name("staging", crate::domain::SIMPLE_PRODUCT, "JWT_KEY"),
+        fleet.target_name("staging", crate::domain::SIMPLE_PRODUCT, "JWT_KEY"),
         "JWT_KEY"
     );
 
@@ -199,7 +199,7 @@ fn sectioned_item_writes_a_fleet_file_that_the_loader_accepts() {
     let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
     assert!(!fleet.is_simple());
     assert_eq!(
-        fleet.fly_name("staging", "web-app", "SESSION_KEY"),
+        fleet.target_name("staging", "web-app", "SESSION_KEY"),
         "FLEET__WEB_APP__SESSION_KEY"
     );
     assert_eq!(

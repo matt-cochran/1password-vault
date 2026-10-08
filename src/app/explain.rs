@@ -128,7 +128,7 @@ fn explain_in(
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
-    let fly_name = match (spec.kind, env.fly_name(product, key)) {
+    let fly_name = match (spec.kind, env.target_name(product, key)) {
         (Kind::Config, _) => "- (config: not a Fly secret)".to_string(),
         (Kind::Secret, Some(n)) => n,
         (Kind::Secret, None) => "- (environment has no fly section)".to_string(),

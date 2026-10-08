@@ -15,13 +15,13 @@ use std::io::Write;
 
 use super::{
     is_blocking, managed_names, print_extras, print_rows, read_and_plan, row_names,
-    unmanaged_on_fly, write_err, write_json,
+    unmanaged_on_target, write_err, write_json,
 };
 use crate::adapters::fly;
 use crate::domain::rules;
 use crate::domain::{
-    Fleet, FlySecret, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, SyncPlan, TargetState,
-    key_label,
+    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, Target,
+    TargetState, key_label,
 };
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -50,8 +50,9 @@ pub fn run(
     opts: &SyncOpts,
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
-    let (_, target) = fleet.fly_target(env_name)?;
-    let app = target.app.as_str();
+    let app = match fleet.target(env_name)?.1 {
+        Target::Fly(t) => t.app.as_str(),
+    };
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
     let (plan, list_a) = read_and_plan(fleet, env_name, r, true, &rotate, &prune_immutable)?;
@@ -124,7 +125,7 @@ pub fn run(
     let pending: Vec<&str> = list_b
         .iter()
         .filter(|s| managed.contains(&s.name))
-        .filter(|s| matches!(s.status.as_deref(), Some("Staged" | "Partial")))
+        .filter(|s| s.pending)
         .map(|s| s.name.as_str())
         .collect();
     if !pending.is_empty() {
@@ -182,7 +183,7 @@ pub fn plan_with(
     json: bool,
 ) -> Result<(), Error> {
     // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    fleet.fly_target(env_name)?;
+    fleet.target(env_name)?;
     let none = BTreeSet::new();
     let (plan, on_fly) = read_and_plan(fleet, env_name, r, true, &none, &none)?;
     if json {
@@ -217,7 +218,7 @@ pub fn plan_with(
         )
         .map_err(write_err)?;
     }
-    let unmanaged = unmanaged_on_fly(fleet, env_name, &on_fly)?;
+    let unmanaged = unmanaged_on_target(fleet, env_name, &on_fly)?;
     print_counts(out, &plan)?;
     writeln!(out, "{} unmanaged on Fly (never touched)", unmanaged.len()).map_err(write_err)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -264,10 +265,10 @@ fn held_from_prune(plan: &SyncPlan) -> String {
         .join(", ")
 }
 
-fn digest<'a>(list: &'a [FlySecret], name: &str) -> Option<&'a str> {
+fn digest<'a>(list: &'a [StoreEntry], name: &str) -> Option<&'a str> {
     list.iter()
         .find(|s| s.name == name)
-        .and_then(|s| s.digest.as_deref())
+        .and_then(|s| s.version.as_deref())
 }
 
 /// `PRODUCT/KEY` under the fleet profile; `KEY` alone under the simple profile (FR-20),

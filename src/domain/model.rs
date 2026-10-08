@@ -109,7 +109,7 @@ pub struct FlyTarget {
 impl FlyTarget {
     /// Fly secret name for `product`/`key`: `{PRODUCT}` becomes the upper-cased product with
     /// `-` replaced by `_`, `{KEY}` becomes the key verbatim.
-    pub fn fly_name(&self, product: &str, key: &str) -> String {
+    pub fn target_name(&self, product: &str, key: &str) -> String {
         let product = product.to_ascii_uppercase().replace('-', "_");
         self.secret_name_template
             .replace("{PRODUCT}", &product)
@@ -117,21 +117,50 @@ impl FlyTarget {
     }
 }
 
-/// One deployment environment: one 1Password item (by IDs, FR-13) and, optionally, one Fly app.
+/// The deployment target of one environment (FR-12, FR-28). Target-neutral domain names;
+/// today the only variant is Fly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Fly(FlyTarget),
+}
+
+impl Target {
+    /// Short, user-facing target name (`"Fly"`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Fly(_) => "Fly",
+        }
+    }
+
+    /// Store name for `product`/`key` on this target.
+    pub fn target_name(&self, product: &str, key: &str) -> String {
+        match self {
+            Self::Fly(f) => f.target_name(product, key),
+        }
+    }
+}
+
+/// One deployment environment: one 1Password item (by IDs, FR-13) and, optionally, one
+/// deployment target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
     pub vault_id: String,
     pub item_id: String,
-    /// `None` when the environment has no `fly` section.
-    pub fly: Option<FlyTarget>,
+    /// The parsed target: `None` when the environment has no `fly` section.
+    pub fly: Option<Target>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Environment {
-    /// Fly secret name for `product`/`key`, or `None` when the environment has no Fly target.
-    pub fn fly_name(&self, product: &str, key: &str) -> Option<String> {
-        self.fly.as_ref().map(|f| f.fly_name(product, key))
+    /// The environment's deployment target, or `None` when it has none.
+    pub fn target(&self) -> Option<&Target> {
+        self.fly.as_ref()
+    }
+
+    /// Store name for `product`/`key`, or `None` when the environment has no target.
+    pub fn target_name(&self, product: &str, key: &str) -> Option<String> {
+        self.target().map(|t| t.target_name(product, key))
     }
 }
 
@@ -194,12 +223,12 @@ impl Fleet {
         })
     }
 
-    /// The environment and its Fly target; `Error::Config` naming the environment when it is
+    /// The environment and its target; `Error::Config` naming the environment when it is
     /// undefined or has no `fly` section (status, `fly plan`, `fly sync` need one).
-    pub fn fly_target(&self, env: &str) -> Result<(&Environment, &FlyTarget), Error> {
+    pub fn target(&self, env: &str) -> Result<(&Environment, &Target), Error> {
         let e = self.environment(env)?;
         match &e.fly {
-            Some(f) => Ok((e, f)),
+            Some(t) => Ok((e, t)),
             None if self.is_simple() => Err(Error::Config(format!(
                 "environment {env:?} has no fly section (add fly.app to use status and the \
                  fly commands)"
@@ -211,19 +240,19 @@ impl Fleet {
         }
     }
 
-    /// Fly secret name for `product`/`key` in `env`; `Error::Config` if `env` is undefined
-    /// or has no Fly target.
-    pub fn try_fly_name(&self, env: &str, product: &str, key: &str) -> Result<String, Error> {
-        Ok(self.fly_target(env)?.1.fly_name(product, key))
+    /// Store name for `product`/`key` in `env`; `Error::Config` if `env` is undefined
+    /// or has no target.
+    pub fn try_target_name(&self, env: &str, product: &str, key: &str) -> Result<String, Error> {
+        Ok(self.target(env)?.1.target_name(product, key))
     }
 
-    /// Fly secret name for `product`/`key` in `env`.
+    /// Store name for `product`/`key` in `env`.
     ///
     /// # Panics
-    /// If `env` is not a defined environment with a Fly target. Callers resolve it first.
-    pub fn fly_name(&self, env: &str, product: &str, key: &str) -> String {
+    /// If `env` is not a defined environment with a target. Callers resolve it first.
+    pub fn target_name(&self, env: &str, product: &str, key: &str) -> String {
         match self.environments.get(env).and_then(|e| e.fly.as_ref()) {
-            Some(f) => f.fly_name(product, key),
+            Some(t) => t.target_name(product, key),
             None => panic!("fly_name: environment {env:?} undefined or without fly"),
         }
     }
@@ -234,22 +263,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fly_name_normalizes_product() {
+    fn target_name_normalizes_product() {
         let e = Environment {
             vault_id: "v".into(),
             item_id: "i".into(),
-            fly: Some(FlyTarget {
+            fly: Some(Target::Fly(FlyTarget {
                 app: "a".into(),
                 secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
-            }),
+            })),
             modes: BTreeMap::new(),
         };
         assert_eq!(
-            e.fly_name("my-app", "API_KEY").as_deref(),
+            e.target_name("my-app", "API_KEY").as_deref(),
             Some("FLEET__MY_APP__API_KEY")
         );
         let no_fly = Environment { fly: None, ..e };
-        assert_eq!(no_fly.fly_name("my-app", "API_KEY"), None);
+        assert_eq!(no_fly.target_name("my-app", "API_KEY"), None);
     }
 
     #[test]
@@ -258,7 +287,7 @@ mod tests {
             app: "a".into(),
             secret_name_template: SIMPLE_TEMPLATE.into(),
         };
-        assert_eq!(t.fly_name(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+        assert_eq!(t.target_name(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
     }
 
     #[test]
