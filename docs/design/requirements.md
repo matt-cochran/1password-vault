@@ -655,6 +655,16 @@ version, FR-29), bound through `secretKeyRef`; the Deployment is updated with it
 `resourceVersion` (optimistic concurrency, FR-31); health is the rollout status (FR-33); old
 Secrets are pruned only after a successful rollout (FR-32). Design: §12 of the multi-cloud design.
 
+## FR-39 — Named Stores and Cross-Provider Bindings
+
+Stores can be declared once as `[stores.<name>]` and referenced by a runtime with
+`secrets_in = "<name>"`; without it, a runtime uses its own store. A binding registry lists the
+supported (store kind, runtime) pairs; an unsupported pair is a config error at load. 0.5.0 adds
+Key Vault → Kubernetes Deployment through the External Secrets Operator, with versions pinned
+(`refreshInterval: 0`, `remoteRef.version`), readiness checked before the Deployment is repinned,
+and prune only after a healthy rollout. Commands are unchanged. Design: §13 of the multi-cloud
+design. Owner decision 2026-10-08.
+
 ## v0.4 local development (FR-34 to FR-36)
 
 The requirements below make opv usable for local development without a deployment target, from issues #52, #53 and #54 found while adopting opv across products. The owner adopted them on 2026-10-08. Live account validation stays an owner-run receipt on those issues; automated tests use synthetic values and fake CLIs.
