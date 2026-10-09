@@ -692,6 +692,29 @@ Both methods put the same binary in one place, so either can install or update i
 
 ---
 
+### Task C: Named stores and cross-provider bindings; Key Vault → Kubernetes via the External Secrets Operator (FR-39)
+
+Design: `docs/design/multi-cloud-targets.md` §13; recon: `docs/design/spike-eso-findings.md` (E1–E5), fixtures `tests/fixtures/external-secrets/`.
+- Config: top-level `[stores.<name>]` parsed generically and dispatched to the provider that declares the store kind (`Provider::store_kinds`: Azure → `azure_key_vault`, fields `azure_key_vault`, `subscription`, optional `secret_store` = in-cluster ClusterSecretStore name, default the opv store name). Runtime sections may set `secrets_in = "<name>"`; unknown store → config error with line/column and the defined names; unsupported (store kind, runtime) pair → config error listing supported pairs from the binding registry (`Provider::bindings`).
+- Binding Key Vault → Deployment: store = the Azure Key Vault adapter (unchanged); runtime = the Kubernetes Deployment runtime with an external-binding mode: per pinned version, apply an `ExternalSecret` (`external-secrets.io/v1`) named `opv-<store>-<first 10 chars of the Key Vault version id>` (version ids are random, not value-derived), `refreshInterval: "0"`, `secretStoreRef {kind: ClusterSecretStore, name}`, `target {name: same, creationPolicy: Owner}`, `data[0] {secretKey: value, remoteRef {key: <kv name>, version}}`, labels `opv-managed=<env>`, `opv-key=<store>`; write with `apply -f - --server-side --field-manager=opv -o name`; poll `Ready` (fail fast on `SecretSyncedError` with opv's own diagnosis: version exists in Key Vault? store Ready?); then repin `secretKeyRef` and roll out as today. GC deletes unreferenced ExternalSecrets (Secrets follow by ownership, E4); Key Vault entries deleted only after a healthy rollout (FR-32).
+- Preflight/doctor: CRD `externalsecrets.external-secrets.io` served at v1; ClusterSecretStore exists and `Ready=True` (refuse with its message otherwise); `auth can-i create externalsecrets.external-secrets.io`; plus the Key Vault store checks (subscription, vault).
+- explain/status: the chain per key (`DB_URL → Key Vault <vault> (v…) → ExternalSecret opv-… → env`).
+- Tests: config (stores, secrets_in, unknown store, unsupported pair), binding happy path through app::sync with stateful fakes for az + kubectl, SecretSyncedError diagnosis, GC/prune order, interruption matrix, no value in any name/label/annotation.
+
+### Task UX1: Output contract (P1, P2, P10, P11, P19, P20, P22, P4 in output; Fly waits on an in-progress deploy)
+
+From `scratchpad/cli-ux-proposals.md` (owner chose all Recommend + Consider items). One `Next: <runnable command>` as the last line of every non-zero exit (NR-19; replaces the four current spellings; `check` guidance lines are not called Next); one run summary for `sync`, identical across providers, plus `sync --json`; `confirm_env` + `--confirm <env>` for sync (exit 6 with the exact command); `plan` names what it would do and ends with the sync command; key names as `product/KEY (TARGET_NAME)` in sync output; `sync --product` (stage/prune/deploy only that product's names; prune restricted); `status` with no env = one line per environment; provider-neutral wording in all output; Fly `sync` waits (progress, run budget) for an in-progress Fly deploy instead of refusing. Goldens regenerated once in a separate commit listing changes.
+
+### Task UX2: Help, completion, environment defaults, colour (P5, P13, P14, P15, P17, P4 in help)
+
+Global options under a `Global options:` heading; 3–5 line examples per command; `opv completions <bash|zsh|fish|powershell>` (clap_complete); `OPV_CONFIG` for `--config`; `OPV_PRODUCT` for `--product` on check/run/doctor/explain/status/plan (never sync), with a `product <p> (from OPV_PRODUCT)` stderr line; colour on TTY only for state words, honouring `NO_COLOR` and `--color auto|always|never`; provider-neutral help text and exit-code descriptions.
+
+### Task UX3: Diagnostics and onboarding (P3, P6, P7, P8, P9, P16, P18)
+
+First-run router (no config → init vs setup choice; `opv setup` without a recipe offers the generic recipe path); `doctor --env` reads the item and reports it; sign-in advice → `opv session` on a TTY (CI wording unchanged); `explain KEY` resolves a unique product and suggests close matches; enum failures list allowed values (from config only); diagnose a failed `op item get` before retrying (retry only when signed in and the vault is accessible); `doctor --json` (`schema_version`, checks with name/status/detail/next).
+
+---
+
 ### Task 9: Docs, requirements, changelog, version 0.5.0 (Azure, Kubernetes, resilience, plug-ins)
 
 **Files:**
