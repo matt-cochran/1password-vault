@@ -11,5 +11,6 @@ pub mod host;
 pub mod ports;
 pub mod provider;
 pub mod runner;
+pub mod scrub;
 
 pub use error::Error;

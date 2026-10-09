@@ -247,6 +247,11 @@ impl<'a> Kubectl<'a> {
     /// itself was refused ⇒ `Target` naming the next command. A failed write whose cause
     /// cannot be told is `Unknown` (it may have been applied).
     pub fn diagnose(&self, effect: Effect, what: &str, why: &str, hint: &str) -> Error {
+        // The probes explain the failed call; its excerpt stays with the error (NR-31).
+        crate::runner::diagnosing(|| self.diagnose_failure(effect, what, why, hint))
+    }
+
+    fn diagnose_failure(&self, effect: Effect, what: &str, why: &str, hint: &str) -> Error {
         let t = self.target;
         let ctx = t.context.as_str();
         let contexts = ["config", "get-contexts", ctx, "-o", "name"];
@@ -536,6 +541,25 @@ mod tests {
             r.calls.borrow()[0]
                 .env
                 .contains(&("NO_COLOR".into(), "1".into()))
+        );
+    }
+
+    /// NR-31: a refused `kubectl` read keeps its own stderr through the diagnosis probes.
+    #[test]
+    fn failed_read_leaves_a_kubectl_said_excerpt() {
+        let r = FakeRunner::default();
+        for _ in 0..crate::runner::READ_ATTEMPTS {
+            r.push_with_stderr(
+                Output::failure(1),
+                "Error from server (Forbidden): deployments.apps \"api\" is forbidden\n",
+            );
+        }
+        r.push_with_stderr(ok("context/kind-opv\n"), "");
+        r.push_with_stderr(ok("v1.36"), "");
+        let _ = kubectl_get_deployment(&r);
+        assert_eq!(
+            crate::runner::take_failure_excerpt().map(|x| x.render()),
+            Some("  kubectl said: Error from server (Forbidden): deployments.apps \"api\" is forbidden\n".into())
         );
     }
 

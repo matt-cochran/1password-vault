@@ -286,10 +286,11 @@ impl KeyVault<'_> {
                 ..
             }
         ) {
-            if self.is_soft_deleted(name)? {
+            // These reads explain the failed set, so its excerpt stays (NR-31).
+            if crate::runner::diagnosing(|| self.is_soft_deleted(name))? {
                 return Err(soft_deleted_error(name, self.vault));
             }
-            if !az::signed_in(self.runner)? {
+            if !crate::runner::diagnosing(|| az::signed_in(self.runner))? {
                 return Err(az::not_logged_in(None));
             }
             self.await_access()?;

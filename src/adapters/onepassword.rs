@@ -19,8 +19,10 @@
 //!
 //! Secrecy (SR-1, SR-3, SR-4, SR-8):
 //! - Nothing but IDs and fixed words goes in argv; the template goes on stdin; no files.
-//! - Child stderr is never read (`ProcessRunner` sends it to `Stdio::null()`), and no error
-//!   built here includes child output or serde_json's own messages (they can quote values).
+//! - Child stderr is held in memory by the runner and shown only scrubbed, on failure or
+//!   with `--verbose` (NR-31); every item read registers its field values with the
+//!   scrubber. No error built here includes child output or serde_json's own messages
+//!   (they can quote values).
 //! - Values are deserialized straight into [`SecretValue`] (zeroized on drop). The raw JSON
 //!   is kept in a `Zeroizing` buffer and never printed (`Item`'s `Debug` shows its length).
 //!
@@ -260,6 +262,18 @@ fn failed_op_error_as(
     grant: &str,
     write: bool,
 ) -> Error {
+    // The probes explain the failed call; its excerpt stays with the error (NR-31).
+    crate::runner::diagnosing(|| failed_op_session_error(r, env, host, failed, grant, write))
+}
+
+fn failed_op_session_error(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+    grant: &str,
+    write: bool,
+) -> Error {
     let session = match diagnose(r, host) {
         Ok(s) => s,
         Err(e) => return e,
@@ -484,7 +498,7 @@ fn write_skeleton_on(
 }
 
 /// Last resort (FR-26), used only when the session could not be diagnosed: a value-free
-/// command to re-run by hand, since `op`'s stderr is discarded (SR-1). IDs only; without
+/// command to re-run by hand (`op`'s stderr is shown only as a scrubbed excerpt). IDs only; without
 /// `--format json` and `--reveal`, `op` conceals secret fields. (`op item edit` cannot be
 /// re-run without its stdin, so the hint reads the item.)
 fn rerun_hint(env: &Environment) -> String {
@@ -522,7 +536,15 @@ pub(crate) fn read_op(
 ) -> Result<Output, Error> {
     let call = Call::new(OP, args);
     match r.read(&call, &[]).map_err(|e| op_spawn_error(&e, host))? {
-        Outcome::Done(o) | Outcome::Refused(o) => Ok(o),
+        Outcome::Done(o) => {
+            // Every item read in this run registers all its field values with the stderr
+            // scrubber (NR-31), the selected sections' or not.
+            if args.starts_with(&["item", "get"]) {
+                crate::scrub::register_item_values(&o.stdout);
+            }
+            Ok(o)
+        }
+        Outcome::Refused(o) => Ok(o),
         Outcome::Unknown { .. } => Err(OP_CLI.outage(&call.step())),
     }
 }

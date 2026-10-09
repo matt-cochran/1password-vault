@@ -17,9 +17,9 @@
 
 use std::io::{self, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
@@ -223,6 +223,11 @@ pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(900);
 pub const OUTPUT_CAP: usize = 8 * 1024 * 1024;
 /// Attempts per read, the first one included (NR-3).
 pub const READ_ATTEMPTS: u32 = 3;
+/// Child stderr kept in memory per captured call: the last 64 KiB (NR-31).
+pub const STDERR_CAP: usize = 64 * 1024;
+/// How long stderr may stay open after the child's stdout is collected (a grandchild can
+/// hold it); what arrived by then is kept.
+const STDERR_GRACE: Duration = Duration::from_millis(200);
 /// `Output::status` of a call whose stdout exceeded [`OUTPUT_CAP`].
 pub const OVER_CAP: i32 = -2;
 /// Time a child gets after a forwarded SIGINT/SIGTERM before it is killed (NR-12).
@@ -307,7 +312,226 @@ trait Engine {
     fn jitter(&self) -> f64;
     /// One stderr line (retry notices).
     fn note(&self, line: &str);
-    fn attempt(&self, call: &Call, limit: Duration) -> io::Result<Attempt>;
+    /// True with `--verbose` (NR-22, NR-31).
+    fn verbose(&self) -> bool;
+    /// One attempt, with the child's stderr held in memory (NR-31).
+    fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)>;
+}
+
+/// One attempt through `e`, printing the `--verbose` lines: the call line (NR-22), then the
+/// call's scrubbed stderr and the shape of its stdout, never its content (NR-31).
+fn attempt_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
+    let t = e.now();
+    let res = e.attempt(call, limit);
+    if e.verbose() {
+        // An item's values are registered before its own call's stderr is shown.
+        if let Ok((Attempt::Exited(o), _)) = &res
+            && o.status == 0
+            && call.program == "op"
+            && call.args.starts_with(&["item", "get"])
+        {
+            crate::scrub::register_item_values(&o.stdout);
+        }
+        let outcome = match &res {
+            Ok((a, _)) => a.describe(),
+            Err(err) => format!("not started ({:?})", err.kind()),
+        };
+        e.note(&verbose_line(
+            call,
+            e.now().saturating_duration_since(t),
+            &outcome,
+        ));
+        if let Ok((a, stderr)) = &res {
+            for line in crate::scrub::tail_lines(
+                &stderr.bytes,
+                stderr.truncated,
+                crate::scrub::VERBOSE_LINES,
+            ) {
+                e.note(&format!("    stderr: {line}"));
+            }
+            if let Attempt::Exited(o) = a {
+                e.note(&format!("    stdout: {}", stdout_shape(&o.stdout)));
+            }
+        }
+    }
+    res
+}
+
+/// `<n> bytes`, plus the top-level JSON keys (scrubbed, at most 12) or the array length
+/// when stdout is JSON. Never any value (NR-31).
+pub fn stdout_shape(stdout: &[u8]) -> String {
+    let n = stdout.len();
+    let unit = if n == 1 { "byte" } else { "bytes" };
+    let mut shape = format!("{n} {unit}");
+    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return shape;
+    };
+    match &doc {
+        serde_json::Value::Object(m) => {
+            let mut keys: Vec<String> = m.keys().take(12).map(|k| crate::scrub::scrub(k)).collect();
+            if m.len() > 12 {
+                keys.push("…".into());
+            }
+            shape.push_str(&format!(", JSON object with keys: {}", keys.join(", ")));
+        }
+        serde_json::Value::Array(a) => shape.push_str(&format!(", JSON array of {}", a.len())),
+        _ => shape.push_str(", JSON scalar"),
+    }
+    crate::scrub::wipe_json(&mut doc);
+    shape
+}
+
+/// A child's stderr, held in memory only (NR-31): the last [`STDERR_CAP`] bytes, zeroized
+/// on drop. `Debug` shows its length only.
+#[derive(Default)]
+pub(crate) struct Stderr {
+    bytes: Zeroizing<Vec<u8>>,
+    /// Earlier output was dropped to stay within the cap.
+    truncated: bool,
+}
+
+impl std::fmt::Debug for Stderr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stderr")
+            .field("len", &self.bytes.len())
+            .field("truncated", &self.truncated)
+            .finish()
+    }
+}
+
+impl Stderr {
+    /// Append `data`, keeping only the last [`STDERR_CAP`] bytes. The buffer is allocated
+    /// once at twice the cap and never grows, so no unzeroized copy is left by `realloc`.
+    fn push(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        if self.bytes.capacity() == 0 {
+            self.bytes = Zeroizing::new(Vec::with_capacity(2 * STDERR_CAP));
+        }
+        let data = if data.len() > STDERR_CAP {
+            self.truncated = true;
+            &data[data.len() - STDERR_CAP..]
+        } else {
+            data
+        };
+        if self.bytes.len() + data.len() > 2 * STDERR_CAP {
+            let keep = STDERR_CAP - data.len();
+            let start = self.bytes.len() - keep;
+            self.bytes.copy_within(start.., 0);
+            self.bytes.truncate(keep);
+            self.truncated = true;
+        }
+        self.bytes.extend_from_slice(data);
+    }
+
+    /// The last [`STDERR_CAP`] bytes, leaving this buffer empty.
+    fn take(&mut self) -> Stderr {
+        let mut out = Stderr {
+            bytes: std::mem::take(&mut self.bytes),
+            truncated: self.truncated,
+        };
+        if out.bytes.len() > STDERR_CAP {
+            let start = out.bytes.len() - STDERR_CAP;
+            out.bytes.copy_within(start.., 0);
+            out.bytes.truncate(STDERR_CAP);
+            out.truncated = true;
+        }
+        out
+    }
+}
+
+/// The child's stderr of the last failed captured call on this thread, waiting for opv's
+/// error line (NR-31). Raw bytes in zeroizing memory; scrubbed only when shown, so values
+/// registered later in the run are scrubbed too.
+///
+/// Every call (each read attempt, write and probe) takes the next call id and clears the
+/// slot when it starts; a failure is stored stamped with its own id, and is handed out only
+/// while no later call has started. So an excerpt can only follow the error made from that
+/// same failed call. The one exception is [`diagnosing`]: the read-only probes an adapter
+/// runs to explain a failure (`op whoami`, `az account show`, …) belong to that failure and
+/// neither clear nor replace it.
+mod failure {
+    use std::cell::{Cell, RefCell};
+
+    use super::Stderr;
+
+    struct Failed {
+        call: u64,
+        program: String,
+        stderr: Stderr,
+    }
+
+    thread_local! {
+        static CALL: Cell<u64> = const { Cell::new(0) };
+        static DIAGNOSING: Cell<u32> = const { Cell::new(0) };
+        static LAST: RefCell<Option<Failed>> = const { RefCell::new(None) };
+    }
+
+    /// A call starts: its id, after clearing the slot. `None` inside [`diagnosing`]: the
+    /// probe is part of the failure being explained and leaves the slot alone.
+    pub(super) fn begin() -> Option<u64> {
+        if DIAGNOSING.with(Cell::get) > 0 {
+            return None;
+        }
+        LAST.with(|l| l.borrow_mut().take());
+        Some(CALL.with(|c| {
+            c.set(c.get() + 1);
+            c.get()
+        }))
+    }
+
+    /// Call `call` failed with `stderr`; kept only while it is still the latest call.
+    pub(super) fn record(call: Option<u64>, program: &str, stderr: Stderr) {
+        let Some(call) = call.filter(|id| *id == CALL.with(Cell::get)) else {
+            return;
+        };
+        LAST.with(|l| {
+            *l.borrow_mut() = Some(Failed {
+                call,
+                program: program.to_string(),
+                stderr,
+            })
+        });
+    }
+
+    pub(super) fn take() -> Option<crate::scrub::Excerpt> {
+        let f = LAST.with(|l| l.borrow_mut().take())?;
+        if f.call != CALL.with(Cell::get) {
+            return None;
+        }
+        crate::scrub::Excerpt::from_stderr(&f.program, &f.stderr.bytes, f.stderr.truncated)
+    }
+
+    pub(super) struct Diagnosis;
+
+    impl Diagnosis {
+        pub(super) fn enter() -> Self {
+            DIAGNOSING.with(|d| d.set(d.get() + 1));
+            Diagnosis
+        }
+    }
+
+    impl Drop for Diagnosis {
+        fn drop(&mut self) {
+            DIAGNOSING.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+}
+
+/// The scrubbed stderr excerpt of the failed call the error at hand came from (a read
+/// refused, a write or probe that exited non-zero), if it wrote any; taken once. Any call
+/// started after the failure (other than a [`diagnosing`] probe) drops it, so an excerpt
+/// never attaches to an error it did not cause (NR-31).
+pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
+    failure::take()
+}
+
+/// Run `f`, the read-only diagnosis of the call that just failed (FR-26): its probes keep
+/// that call's excerpt instead of starting a new one (NR-31). Used only on failure paths.
+pub fn diagnosing<T>(f: impl FnOnce() -> T) -> T {
+    let _scope = failure::Diagnosis::enter();
+    f()
 }
 
 fn left(e: &dyn Engine) -> Duration {
@@ -322,14 +546,23 @@ fn backoff(n: u32, jitter: f64) -> Duration {
 fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
     let mut n = 1;
     loop {
+        // Each attempt is its own call: the excerpt belongs to the last one only.
+        let id = failure::begin();
         let limit = READ_TIMEOUT.min(left(e));
         if limit.is_zero() {
             return Err(budget_spent(call));
         }
-        let failed = match e.attempt(call, limit)? {
+        let (attempt, stderr) = attempt_on(e, call, limit)?;
+        let failed = match attempt {
             Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
-            Attempt::Exited(o) if refused.contains(&o.status) => return Ok(Outcome::Refused(o)),
-            Attempt::Exited(o) => Outcome::Refused(o),
+            Attempt::Exited(o) if refused.contains(&o.status) => {
+                failure::record(id, call.program, stderr);
+                return Ok(Outcome::Refused(o));
+            }
+            Attempt::Exited(o) => {
+                failure::record(id, call.program, stderr);
+                Outcome::Refused(o)
+            }
             Attempt::OverCap => return Ok(Outcome::Refused(Output::failure(OVER_CAP))),
             // opv's own interrupt never retries: the run is stopping (NR-12).
             Attempt::Killed if signals::stopping() => return Ok(Outcome::unknown("killed")),
@@ -370,16 +603,21 @@ fn budget_spent(call: &Call) -> io::Error {
 }
 
 fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
+    let id = failure::begin();
     let limit = WRITE_TIMEOUT.min(left(e));
     if limit.is_zero() {
         return Err(budget_spent(call));
     }
-    Ok(match e.attempt(call, limit)? {
+    let (attempt, stderr) = attempt_on(e, call, limit)?;
+    Ok(match attempt {
         Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
-        Attempt::Exited(o) => Outcome::Unknown {
-            reason: "failed-write",
-            status: Some(o.status),
-        },
+        Attempt::Exited(o) => {
+            failure::record(id, call.program, stderr);
+            Outcome::Unknown {
+                reason: "failed-write",
+                status: Some(o.status),
+            }
+        }
         Attempt::OverCap => Outcome::unknown("failed-write"),
         Attempt::TimedOut => Outcome::unknown("timeout"),
         Attempt::Killed => Outcome::unknown("killed"),
@@ -388,6 +626,7 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
 }
 
 fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> {
+    let id = failure::begin();
     let limit = limit.min(left(e));
     let timed_out = || {
         io::Error::new(
@@ -402,8 +641,14 @@ fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> 
     if limit.is_zero() {
         return Err(timed_out());
     }
-    match e.attempt(call, limit)? {
-        Attempt::Exited(o) => Ok(o),
+    let (attempt, stderr) = attempt_on(e, call, limit)?;
+    match attempt {
+        Attempt::Exited(o) => {
+            if o.status != 0 {
+                failure::record(id, call.program, stderr);
+            }
+            Ok(o)
+        }
         Attempt::OverCap => Ok(Output::failure(OVER_CAP)),
         Attempt::TimedOut => Err(timed_out()),
         Attempt::Killed => Err(io::ErrorKind::Interrupted.into()),
@@ -494,8 +739,9 @@ pub(crate) fn read_to_end_zeroizing(r: impl Read) -> io::Result<Zeroizing<Vec<u8
     })
 }
 
-/// Runs real processes with `std::process::Command`. Child stderr is discarded because it
-/// may echo values (SR-1); callers map outcomes to typed errors.
+/// Runs real processes with `std::process::Command`. Child stderr is held in memory only
+/// and shown only scrubbed, on failure or with `--verbose` (SR-1, NR-31); callers map
+/// outcomes to typed errors.
 ///
 /// Each captured call is killed at the earlier of its effect's limit and the run budget.
 /// `run_inherited` (the user's own command under `op run`) has no limit.
@@ -527,7 +773,7 @@ impl ProcessRunner {
         }
     }
 
-    fn spawn_attempt(&self, call: &Call, limit: Duration) -> io::Result<Attempt> {
+    fn spawn_attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
         if signals::stopping() {
             signals::wait_for_exit();
         }
@@ -535,6 +781,41 @@ impl ProcessRunner {
         let deadline = Instant::now() + limit;
         let mut child = command_for(call).spawn()?;
         signals::track(&child, call.step());
+        let child_stderr = child.stderr.take().expect("stderr is piped");
+        // stderr is read on its own thread into a bounded, zeroizing buffer held in memory
+        // only (NR-31). The buffer is shared so what arrived is kept even when a grandchild
+        // keeps the pipe open.
+        let tail = Arc::new(Mutex::new((Stderr::default(), false)));
+        let sink = Arc::clone(&tail);
+        std::thread::spawn(move || {
+            let mut pipe = child_stderr;
+            let mut chunk = Zeroizing::new([0u8; 8 * 1024]);
+            loop {
+                match pipe.read(&mut chunk[..]) {
+                    Ok(0) => break,
+                    Ok(n) => lock(&sink).0.push(&chunk[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            lock(&sink).1 = true;
+        });
+        let attempt = self.wait_attempt(call, &mut child, deadline)?;
+        let grace = Instant::now() + STDERR_GRACE;
+        while !lock(&tail).1 && Instant::now() < grace {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let stderr = lock(&tail).0.take();
+        Ok((attempt, stderr))
+    }
+
+    /// Feed stdin, collect stdout and wait for the child within `deadline`.
+    fn wait_attempt(
+        &self,
+        call: &Call,
+        child: &mut std::process::Child,
+        deadline: Instant,
+    ) -> io::Result<Attempt> {
         let child_stdin = child.stdin.take();
         let child_stdout = child.stdout.take().expect("stdout is piped");
 
@@ -565,20 +846,20 @@ impl ProcessRunner {
         });
 
         let status = loop {
-            match signals::reap(&mut child) {
+            match signals::reap(child) {
                 Ok(Some(st)) => break st,
                 Ok(None) => {}
                 Err(_) => {
-                    signals::kill(&mut child);
+                    signals::kill(child);
                     return Ok(Attempt::Lost);
                 }
             }
             if over.load(Ordering::SeqCst) {
-                signals::kill(&mut child);
+                signals::kill(child);
                 return Ok(Attempt::OverCap);
             }
             if Instant::now() >= deadline {
-                signals::kill(&mut child);
+                signals::kill(child);
                 return Ok(Attempt::TimedOut);
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -608,6 +889,12 @@ impl ProcessRunner {
     }
 }
 
+/// A poisoned lock still holds a usable buffer: a reader thread that panicked only stops
+/// adding to it.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 impl Default for ProcessRunner {
     fn default() -> Self {
         Self::new(Budget::default(), false)
@@ -616,7 +903,7 @@ impl Default for ProcessRunner {
 
 /// The process for a captured call: argv as given, the program's [`pinned_env`] then the
 /// call's own env on top of the inherited environment, stdin `/dev/null` unless the call
-/// sends some (NR-11), stdout piped, stderr discarded (SR-1).
+/// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
 fn command_for(call: &Call) -> Command {
     let mut cmd = Command::new(call.program);
     cmd.args(call.args)
@@ -628,7 +915,7 @@ fn command_for(call: &Call) -> Command {
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     cmd
 }
 
@@ -673,17 +960,11 @@ impl Engine for ProcessRunner {
     fn note(&self, line: &str) {
         let _ = writeln!(io::stderr(), "{line}");
     }
-    fn attempt(&self, call: &Call, limit: Duration) -> io::Result<Attempt> {
-        let t = Instant::now();
-        let res = self.spawn_attempt(call, limit);
-        if self.verbose {
-            let outcome = match &res {
-                Ok(a) => a.describe(),
-                Err(e) => format!("not started ({:?})", e.kind()),
-            };
-            Engine::note(self, &verbose_line(call, t.elapsed(), &outcome));
-        }
-        res
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
+    fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
+        self.spawn_attempt(call, limit)
     }
 }
 
@@ -903,11 +1184,11 @@ pub mod fake {
     //! call, `OutOfMemory` output over the cap; any other kind is a spawn error.
 
     use std::cell::{Cell, RefCell};
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::io;
     use std::time::{Duration, Instant};
 
-    use super::{Attempt, CommandRunner, Engine, Outcome, Output};
+    use super::{Attempt, CommandRunner, Engine, Outcome, Output, Stderr};
 
     /// One recorded invocation, including env names and values so tests can assert what
     /// reached env versus argv. `Debug` shows argv but redacts stdin and env values.
@@ -946,6 +1227,10 @@ pub mod fake {
         pub elapsed: Cell<Duration>,
         /// Run budget measured on the fake clock.
         pub budget: Cell<Duration>,
+        /// `--verbose`: call lines, scrubbed stderr and stdout shape go to `notes`.
+        pub verbose: Cell<bool>,
+        /// Child stderr per call index (see [`FakeRunner::push_with_stderr`]).
+        stderr: RefCell<HashMap<usize, Vec<u8>>>,
     }
 
     impl Default for FakeRunner {
@@ -958,6 +1243,8 @@ pub mod fake {
                 start: Instant::now(),
                 elapsed: Cell::new(Duration::ZERO),
                 budget: Cell::new(super::DEFAULT_RUN_TIMEOUT),
+                verbose: Cell::new(false),
+                stderr: RefCell::default(),
             }
         }
     }
@@ -981,6 +1268,24 @@ pub mod fake {
                 .borrow_mut()
                 .extend(responses.into_iter().map(Ok));
             r
+        }
+
+        /// Queue `out` for the next unanswered call, with `stderr` as the child's stderr.
+        pub fn push_with_stderr(&self, out: Output, stderr: &str) {
+            let index = self.calls.borrow().len() + self.responses.borrow().len();
+            self.stderr
+                .borrow_mut()
+                .insert(index, stderr.as_bytes().to_vec());
+            self.responses.borrow_mut().push_back(Ok(out));
+        }
+
+        /// The stderr queued for call `index`, if any.
+        fn stderr_of(&self, index: usize) -> Stderr {
+            let mut s = Stderr::default();
+            if let Some(b) = self.stderr.borrow_mut().remove(&index) {
+                s.push(&b);
+            }
+            s
         }
 
         /// Queue a spawn failure, e.g. `NotFound` for a missing binary.
@@ -1050,17 +1355,22 @@ pub mod fake {
         fn note(&self, line: &str) {
             self.notes.borrow_mut().push(line.to_string());
         }
-        fn attempt(&self, call: &super::Call, _limit: Duration) -> io::Result<Attempt> {
-            match self.record(call.program, call.args, call.stdin, call.env, false) {
-                Ok(o) => Ok(Attempt::Exited(o)),
+        fn verbose(&self) -> bool {
+            self.verbose.get()
+        }
+        fn attempt(&self, call: &super::Call, _limit: Duration) -> io::Result<(Attempt, Stderr)> {
+            let index = self.calls.borrow().len();
+            let attempt = match self.record(call.program, call.args, call.stdin, call.env, false) {
+                Ok(o) => Attempt::Exited(o),
                 Err(e) => match e.kind() {
-                    io::ErrorKind::TimedOut => Ok(Attempt::TimedOut),
-                    io::ErrorKind::Interrupted => Ok(Attempt::Killed),
-                    io::ErrorKind::ConnectionAborted => Ok(Attempt::Lost),
-                    io::ErrorKind::OutOfMemory => Ok(Attempt::OverCap),
-                    _ => Err(e),
+                    io::ErrorKind::TimedOut => Attempt::TimedOut,
+                    io::ErrorKind::Interrupted => Attempt::Killed,
+                    io::ErrorKind::ConnectionAborted => Attempt::Lost,
+                    io::ErrorKind::OutOfMemory => Attempt::OverCap,
+                    _ => return Err(e),
                 },
-            }
+            };
+            Ok((attempt, self.stderr_of(index)))
         }
     }
 
@@ -1077,9 +1387,17 @@ pub mod fake {
             super::write_on(self, call)
         }
 
-        /// A queued `TimedOut` comes back as that error, like a real probe timeout.
+        /// A queued `TimedOut` comes back as that error, like a real probe timeout. A
+        /// non-zero exit keeps its stderr for the failure excerpt, like the real probe.
         fn probe(&self, call: &super::Call, _limit: Duration) -> io::Result<Output> {
-            self.record(call.program, call.args, call.stdin, call.env, false)
+            let id = super::failure::begin();
+            let index = self.calls.borrow().len();
+            let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
+            let stderr = self.stderr_of(index);
+            if out.status != 0 {
+                super::failure::record(id, call.program, stderr);
+            }
+            Ok(out)
         }
 
         fn pause(&self, d: Duration, note: &str) {
@@ -1480,10 +1798,10 @@ mod tests {
         assert!(matches!(o, Outcome::Done(o) if o.stdout.as_slice() == b"v1\n"));
     }
 
-    /// A child that writes to stderr and fails: status propagated, stderr not captured.
+    /// A child that writes to stderr and fails: status propagated, stderr kept out of stdout.
     #[cfg(unix)]
     #[test]
-    fn process_runner_reports_status_and_drops_stderr() {
+    fn process_runner_reports_status_and_keeps_stderr_out_of_stdout() {
         let o = ProcessRunner::default()
             .read(
                 &Call::new("sh", &["-c", "echo leaked-value >&2; exit 3"]),
@@ -1678,5 +1996,239 @@ mod tests {
     fn missing_op_on_path_is_left_to_the_call() {
         let dir = tempfile::tempdir().unwrap();
         assert!(native_op_on(dir.path().as_os_str()).is_ok());
+    }
+
+    // ------------------------------------------------------------ stderr (NR-31)
+
+    fn failing_read_with_stderr(stderr: &str) -> FakeRunner {
+        let r = FakeRunner::default();
+        (0..READ_ATTEMPTS).for_each(|_| r.push_with_stderr(Output::failure(1), stderr));
+        let _ = read_fake(&r);
+        r
+    }
+
+    fn excerpt_lines() -> Vec<String> {
+        take_failure_excerpt().map(|e| e.lines).unwrap_or_default()
+    }
+
+    #[test]
+    fn failed_read_leaves_its_stderr_excerpt() {
+        failing_read_with_stderr("ERROR: item not found\n");
+        assert_eq!(excerpt_lines(), ["ERROR: item not found"]);
+    }
+
+    #[test]
+    fn failed_read_excerpt_masks_a_registered_value() {
+        crate::scrub::register("RnrMarker-91kq");
+        failing_read_with_stderr("bad value RnrMarker-91kq\n");
+        assert_eq!(excerpt_lines(), ["bad value __SECRET__"]);
+    }
+
+    #[test]
+    fn read_succeeding_after_a_failure_leaves_no_excerpt() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(1), "transient\n");
+        r.push_with_stderr(Output::success("ok"), "");
+        let _ = read_fake(&r);
+        assert_eq!(take_failure_excerpt(), None);
+    }
+
+    #[test]
+    fn failed_write_leaves_its_stderr_excerpt() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(2), "Error: app not found\n");
+        let _ = r.write(&Call::new("flyctl", &["secrets", "import"]));
+        assert_eq!(
+            take_failure_excerpt().map(|e| e.program),
+            Some("flyctl".into())
+        );
+    }
+
+    #[test]
+    fn failed_probe_leaves_its_stderr_excerpt() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(1), "[ERROR] not signed in\n");
+        let _ = r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT);
+        assert_eq!(excerpt_lines(), ["[ERROR] not signed in"]);
+    }
+
+    /// A diagnosis probe explains the failed read, so the read's excerpt stays.
+    #[test]
+    fn diagnosis_probe_keeps_the_failed_calls_excerpt() {
+        let r = failing_read_with_stderr("denied\n");
+        r.push_with_stderr(Output::success("{}"), "");
+        diagnosing(|| r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT)).unwrap();
+        assert_eq!(excerpt_lines(), ["denied"]);
+    }
+
+    #[test]
+    fn failed_diagnosis_probe_does_not_replace_the_failed_calls_excerpt() {
+        let r = failing_read_with_stderr("denied\n");
+        r.push_with_stderr(Output::failure(1), "not signed in\n");
+        diagnosing(|| r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT)).unwrap();
+        assert_eq!(excerpt_lines(), ["denied"]);
+    }
+
+    #[test]
+    fn probe_outside_a_diagnosis_drops_an_earlier_excerpt() {
+        let r = failing_read_with_stderr("denied\n");
+        r.push_with_stderr(Output::success("{}"), "");
+        r.probe(&Call::new("az", &["version"]), PROBE_TIMEOUT)
+            .unwrap();
+        assert_eq!(take_failure_excerpt(), None);
+    }
+
+    fn failed_probe_then_successful_read() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(1), "[ERROR] probe went wrong\n");
+        r.push_with_stderr(Output::success("ok"), "");
+        let _ = r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT);
+        let _ = read_fake(&r);
+    }
+
+    #[test]
+    fn failed_probe_then_success_then_config_error_attaches_nothing() {
+        failed_probe_then_successful_read();
+        let e = crate::error::Error::Config("bad secrets.toml".into());
+        assert_eq!(
+            crate::error::report(&e, take_failure_excerpt().as_ref()),
+            "opv: configuration error: bad secrets.toml\n"
+        );
+    }
+
+    #[test]
+    fn failed_probe_then_success_then_target_error_attaches_nothing() {
+        failed_probe_then_successful_read();
+        let e = crate::error::Error::Target("app is dead".into());
+        assert_eq!(
+            crate::error::report(&e, take_failure_excerpt().as_ref()),
+            "opv: target error: app is dead\n"
+        );
+    }
+
+    #[test]
+    fn failed_write_excerpt_attaches_to_its_own_error() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(2), "Error: app not found\n");
+        let _ = r.write(&Call::new("flyctl", &["secrets", "import"]));
+        let e = crate::error::Error::Unknown("flyctl secrets import failed (exit 2)".into());
+        assert_eq!(
+            crate::error::report(&e, take_failure_excerpt().as_ref()),
+            "opv: outcome unknown: flyctl secrets import failed (exit 2)\n  flyctl said: Error: app not found\n"
+        );
+    }
+
+    #[test]
+    fn excerpt_is_taken_once() {
+        failing_read_with_stderr("x\n");
+        let _ = take_failure_excerpt();
+        assert_eq!(take_failure_excerpt(), None);
+    }
+
+    fn verbose_notes(stdout: &str, stderr: &str) -> Vec<String> {
+        let r = FakeRunner::default();
+        r.verbose.set(true);
+        r.push_with_stderr(Output::success(stdout), stderr);
+        let _ = r.read(&Call::new("az", &["keyvault", "secret", "list"]), &[]);
+        r.notes.take()
+    }
+
+    #[test]
+    fn verbose_shows_call_line_stderr_and_stdout_shape() {
+        assert_eq!(
+            verbose_notes(r#"{"b":"VbsContent-1","a":2}"#, "WARNING: preview\n"),
+            [
+                "az keyvault secret list (0.00 s): exit 0",
+                "    stderr: WARNING: preview",
+                "    stdout: 26 bytes, JSON object with keys: a, b",
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_never_shows_stdout_content() {
+        let notes = verbose_notes(r#"{"k":"VbsContent-2"}"#, "").join("\n");
+        assert!(!notes.contains("VbsContent-2"), "{notes}");
+    }
+
+    #[test]
+    fn verbose_stderr_is_scrubbed() {
+        let notes = verbose_notes("", "Authorization: Bearer abc.def\n");
+        assert_eq!(notes[1], "    stderr: Authorization: Bearer __SECRET__");
+    }
+
+    #[test]
+    fn stdout_shape_of_an_array_is_its_length() {
+        assert_eq!(stdout_shape(b"[1,2,3]"), "7 bytes, JSON array of 3");
+    }
+
+    #[test]
+    fn stdout_shape_of_text_is_its_size() {
+        assert_eq!(stdout_shape(b"secret text"), "11 bytes");
+    }
+
+    #[test]
+    fn stderr_buffer_keeps_the_last_64_kib() {
+        let mut s = Stderr::default();
+        for i in 0..40u8 {
+            s.push(&[i; 4096]);
+        }
+        let t = s.take();
+        assert_eq!(
+            (t.bytes.len(), t.truncated, t.bytes[t.bytes.len() - 1]),
+            (STDERR_CAP, true, 39)
+        );
+    }
+
+    #[test]
+    fn stderr_debug_shows_length_only() {
+        let mut s = Stderr::default();
+        s.push(b"DbgMarker");
+        assert_eq!(format!("{s:?}"), "Stderr { len: 9, truncated: false }");
+    }
+
+    /// A real child writes a registered marker to stderr and fails: the excerpt holds the
+    /// line with the marker masked.
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_failure_excerpt_masks_a_registered_value() {
+        crate::scrub::register("PrcMarker-77xq");
+        let _ = ProcessRunner::default().read(
+            &Call::new("sh", &["-c", "echo 'warn PrcMarker-77xq' >&2; exit 3"]),
+            &[3],
+        );
+        assert_eq!(excerpt_lines(), ["warn __SECRET__"]);
+    }
+
+    /// More stderr than the cap neither blocks the child nor loses the last line.
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_keeps_the_tail_of_a_large_stderr() {
+        let _ = ProcessRunner::default().read(
+            &Call::new(
+                "sh",
+                &["-c", "i=0; while [ $i -lt 3000 ]; do echo 'noise line of some length here' >&2; i=$((i+1)); done; echo last >&2; exit 3"],
+            ),
+            &[3],
+        );
+        assert_eq!(excerpt_lines().last().map(String::as_str), Some("last"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_successful_read_leaves_no_excerpt() {
+        let _ = ProcessRunner::default().read(&Call::new("sh", &["-c", "echo note >&2"]), &[]);
+        assert_eq!(take_failure_excerpt(), None);
+    }
+
+    /// Interactive calls are unchanged: the terminal passes through and nothing is
+    /// captured for an excerpt.
+    #[cfg(unix)]
+    #[test]
+    fn run_inherited_captures_no_stderr() {
+        let code = ProcessRunner::default()
+            .run_inherited("sh", &["-c", "exit 3"], &[])
+            .unwrap();
+        assert_eq!((code, take_failure_excerpt()), (3, None));
     }
 }

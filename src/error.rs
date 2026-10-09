@@ -58,6 +58,40 @@ impl Error {
             Error::Unknown(_) => 9,
         }
     }
+
+    /// True for the categories an external call can cause; only these show the failed
+    /// call's stderr excerpt (NR-31). Configuration, policy and findings never do.
+    pub fn from_external_call(&self) -> bool {
+        matches!(
+            self,
+            Error::Dependency(_)
+                | Error::Auth(_)
+                | Error::Source(_)
+                | Error::Target(_)
+                | Error::Unknown(_)
+        )
+    }
+}
+
+/// What opv prints on stderr for `e` (NR-31, SR-1): `opv: <error>`, with the failed call's
+/// scrubbed stderr `excerpt` (`  az said: …`, at most 5 lines) right after the error's
+/// first line, so the error's own `next:` step stays last. The error's `Display` is
+/// unchanged; the excerpt is shown only for [`Error::from_external_call`] categories.
+pub fn report(e: &Error, excerpt: Option<&crate::scrub::Excerpt>) -> String {
+    let msg = format!("opv: {e}");
+    let (head, rest) = match msg.split_once('\n') {
+        Some((h, r)) => (h, Some(r)),
+        None => (msg.as_str(), None),
+    };
+    let mut out = format!("{head}\n");
+    if let Some(x) = excerpt.filter(|_| e.from_external_call()) {
+        out.push_str(&x.render());
+    }
+    if let Some(r) = rest {
+        out.push_str(r);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -74,6 +108,38 @@ mod tests {
         assert_eq!(Error::Target(s()).exit_code(), 5);
         assert_eq!(Error::Policy(s()).exit_code(), 6);
         assert_eq!(Error::Findings(3).exit_code(), 8);
+    }
+
+    fn excerpt() -> crate::scrub::Excerpt {
+        crate::scrub::Excerpt {
+            program: "az".into(),
+            lines: vec!["ERROR: (Forbidden) caller lacks get permission".into()],
+        }
+    }
+
+    #[test]
+    fn report_puts_the_excerpt_after_the_first_error_line() {
+        let e = Error::Target("az keyvault secret list failed (exit 1)\n  next: az login".into());
+        assert_eq!(
+            report(&e, Some(&excerpt())),
+            "opv: target error: az keyvault secret list failed (exit 1)\n  az said: ERROR: (Forbidden) caller lacks get permission\n  next: az login\n"
+        );
+    }
+
+    #[test]
+    fn report_without_excerpt_is_the_error_line() {
+        assert_eq!(
+            report(&Error::Source("x".into()), None),
+            "opv: source error: x\n"
+        );
+    }
+
+    #[test]
+    fn report_never_attaches_an_excerpt_to_a_policy_error() {
+        assert_eq!(
+            report(&Error::Policy("x".into()), Some(&excerpt())),
+            "opv: policy denied: x\n"
+        );
     }
 
     #[test]

@@ -148,7 +148,8 @@ struct Cli {
     )]
     timeout: u64,
     /// Print one line per call to op or the target CLI on stderr: program, arguments,
-    /// duration and outcome (never values).
+    /// duration and outcome, then the call's own error output with secrets masked and the
+    /// size of its result (never values).
     #[arg(long, global = true, help_heading = "Global options")]
     verbose: bool,
     /// Colour state words (ok, warn, FAIL, saved, missing...): auto colours only on a
@@ -467,8 +468,10 @@ fn main() -> ExitCode {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(exit_byte(code)),
         Err(e) => {
-            // Error messages never contain secret values or child output (SR-1).
-            let _ = writeln!(io::stderr(), "opv: {e}");
+            // Error messages never contain secret values (SR-1). The failed call's stderr
+            // follows only as a scrubbed excerpt of at most 5 lines (NR-31).
+            let excerpt = opv::runner::take_failure_excerpt();
+            let _ = write!(io::stderr(), "{}", opv::error::report(&e, excerpt.as_ref()));
             ExitCode::from(exit_byte(e.exit_code()))
         }
     }

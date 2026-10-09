@@ -491,8 +491,9 @@ impl PinnedRuntime for KubeDeployment<'_> {
         if let Outcome::Done(out) = outcome {
             return self.generation(&out.stdout, &what);
         }
-        // Reconcile by reading back (NR-2, K3).
-        let Ok(fresh) = self.k.get_deployment() else {
+        // Reconcile by reading back (NR-2, K3); the read-back explains the failure, so the
+        // replace's excerpt stays (NR-31).
+        let Ok(fresh) = crate::runner::diagnosing(|| self.k.get_deployment()) else {
             return Err(self.k.fail(
                 Effect::Write,
                 &what,
