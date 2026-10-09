@@ -192,7 +192,8 @@ pub(crate) fn apply(k: &Kubectl<'_>, name: &str, body: &[u8]) -> Result<(), Erro
                 )))
             }
         }
-        other => match get(k, name) {
+        // The read-back explains the failure, so the apply's excerpt stays (NR-31).
+        other => match crate::runner::diagnosing(|| get(k, name)) {
             Ok(Some(_)) => Ok(()),
             _ => Err(k.fail(
                 Effect::Write,
@@ -409,7 +410,8 @@ pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
         }
         Outcome::Refused(out) => {
             let group = ["get", "--raw", "/apis/external-secrets.io"];
-            match k.call(Effect::Read, what, &group, None, &[1])? {
+            let probe = || k.call(Effect::Read, what, &group, None, &[1]);
+            match crate::runner::diagnosing(probe)? {
                 Outcome::Done(_) => Err(not_served(true)),
                 _ => match k.diagnose(
                     Effect::Read,
@@ -690,7 +692,7 @@ impl<'a> ExternalStore<'a> {
         args.push("--ignore-not-found");
         match self.k.call(Effect::Write, what, &args, None, &[])? {
             Outcome::Done(_) => Ok(()),
-            other => match list(&self.k, selector) {
+            other => match crate::runner::diagnosing(|| list(&self.k, selector)) {
                 Ok(left) if !left.iter().any(|l| names.contains(&l.name.as_str())) => Ok(()),
                 _ => Err(self.k.fail(
                     Effect::Write,

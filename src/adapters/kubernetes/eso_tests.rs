@@ -1128,6 +1128,30 @@ fn doctor_reports_a_missing_operator() {
     assert!(out.contains("FAIL  external secrets operator: dependency error: the External Secrets Operator is not installed"), "{out}");
 }
 
+#[test]
+fn doctor_json_lists_the_external_secrets_checks() {
+    let sim = Sim::new(item_with(API_V1));
+    let mut out = Vec::new();
+    let _ = crate::app::doctor::run_scoped_as(Ok(fleet_a()), None, None, true, &sim, &mut out);
+    let doc: serde_json::Value = serde_json::from_slice(&out).expect("one JSON document");
+    let names: Vec<&str> = doc["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(
+        [
+            "external secrets operator",
+            "cluster secret store",
+            "key vault"
+        ]
+        .iter()
+        .all(|n| names.contains(n)),
+        "{names:?}"
+    );
+}
+
 // ---- no value anywhere but the Key Vault write's stdin (SR-1..SR-3) ----
 
 #[test]
