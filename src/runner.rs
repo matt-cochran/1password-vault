@@ -171,8 +171,13 @@ pub trait CommandRunner {
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output>;
 
     /// Wait `d` (never past the run budget) before polling again, printing `note` on
-    /// stderr first: the confirming read after a write (NR-30). The fake advances its clock.
+    /// stderr first (nothing when it is empty): the confirming read after a write (NR-30),
+    /// a target busy with an update (NR-25). The fake advances its clock.
     fn pause(&self, d: Duration, note: &str);
+
+    /// One line for the person running opv on stderr, never on stdout (so `--json` stays
+    /// parseable): e.g. a read command's preflight note. Names only, never a value.
+    fn note(&self, line: &str);
 
     /// Run `program` with inherited stdin/stdout/stderr and the given extra `env`, wait, and
     /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
@@ -350,7 +355,9 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
 }
 
 fn pause_on(e: &dyn Engine, d: Duration, note: &str) {
-    e.note(note);
+    if !note.is_empty() {
+        e.note(note);
+    }
     e.sleep(d.min(left(e)));
 }
 
@@ -674,7 +681,7 @@ impl Engine for ProcessRunner {
                 Ok(a) => a.describe(),
                 Err(e) => format!("not started ({:?})", e.kind()),
             };
-            self.note(&verbose_line(call, t.elapsed(), &outcome));
+            Engine::note(self, &verbose_line(call, t.elapsed(), &outcome));
         }
         res
     }
@@ -726,6 +733,10 @@ impl CommandRunner for ProcessRunner {
 
     fn pause(&self, d: Duration, note: &str) {
         pause_on(self, d, note)
+    }
+
+    fn note(&self, line: &str) {
+        Engine::note(self, line)
     }
 
     fn local_run_supported(&self) -> io::Result<()> {
@@ -1073,6 +1084,10 @@ pub mod fake {
 
         fn pause(&self, d: Duration, note: &str) {
             super::pause_on(self, d, note)
+        }
+
+        fn note(&self, line: &str) {
+            super::Engine::note(self, line)
         }
 
         fn local_run_supported(&self) -> io::Result<()> {

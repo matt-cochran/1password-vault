@@ -83,12 +83,11 @@ fn ca_show() -> Output {
     Output::success(serde_json::to_vec(&recorded("containerapp-show.json")).unwrap())
 }
 
-/// `status prod --json` on `responses` (then the app's bindings and the vault URI): the
+/// `status prod --json` on `responses` (after the preflight, then the app's bindings): the
 /// TARGET of each row by key, and the runner.
 fn azure_status(mut responses: Vec<Output>) -> (Vec<(String, String)>, FakeRunner) {
     responses.push(ca_show());
-    responses.push(preflight().swap_remove(1));
-    let r = FakeRunner::new(responses);
+    let r = FakeRunner::new(preflight().into_iter().chain(responses));
     let mut out = Vec::new();
     super::status::run_with(&azure(), "prod", &r, &mut out, true).unwrap();
     let doc: Value = serde_json::from_slice(&out).unwrap();
@@ -166,16 +165,70 @@ fn azure_status_reports_absent_when_the_listed_entry_is_gone() {
     assert_eq!(target_of(&targets, "API_KEY"), "absent");
 }
 
+/// NR-23: `status` checks the target, read-only, before it reads 1Password.
+#[test]
+fn azure_status_checks_the_subscription_before_reading_1password() {
+    let (_, r) = azure_status(vec![
+        azure_item(),
+        kv_list(&["API-KEY", "DB-URL"]),
+        kv_show("API-KEY", API_KEY),
+        kv_show("DB-URL", DB_URL),
+    ]);
+    assert_eq!(
+        r.calls.borrow()[0].args[..3],
+        ["account", "show", "--subscription"]
+    );
+}
+
+/// The app with an update in progress, as the preflight reads it.
+fn preflight_in_progress() -> Vec<Output> {
+    let mut v = preflight();
+    let mut app = recorded("containerapp-show.json");
+    app["properties"]["provisioningState"] = json!("InProgress");
+    v[3] = Output::success(serde_json::to_vec(&app).unwrap());
+    v
+}
+
+/// A read command never waits on an update in progress (NR-25): the preflight reads the
+/// app once and `status` goes on.
+#[test]
+fn azure_status_does_not_wait_for_an_update_in_progress() {
+    let r = FakeRunner::new(preflight_in_progress().into_iter().chain([
+        azure_item(),
+        kv_list(&["API-KEY", "DB-URL"]),
+        kv_show("API-KEY", API_KEY),
+        kv_show("DB-URL", DB_URL),
+        ca_show(),
+    ]));
+    let mut out = Vec::new();
+    super::status::run_with(&azure(), "prod", &r, &mut out, true).unwrap();
+    assert_eq!(r.elapsed.get(), std::time::Duration::ZERO);
+}
+
+/// The in-progress note goes to stderr, so `--json` stays one document.
+#[test]
+fn azure_status_notes_an_update_in_progress_on_stderr() {
+    let r = FakeRunner::new(preflight_in_progress().into_iter().chain([
+        azure_item(),
+        kv_list(&["API-KEY", "DB-URL"]),
+        kv_show("API-KEY", API_KEY),
+        kv_show("DB-URL", DB_URL),
+        ca_show(),
+    ]));
+    let mut out = Vec::new();
+    super::status::run_with(&azure(), "prod", &r, &mut out, true).unwrap();
+    assert!(r.notes.borrow()[0].contains("an update is in progress"));
+}
+
 #[test]
 fn azure_status_prints_no_store_value() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", "api-FIXTUREVALUE-old"),
         kv_show("DB-URL", DB_URL),
         ca_show(),
-        preflight().swap_remove(1),
-    ]);
+    ]));
     let mut out = Vec::new();
     let _ = super::status::run(&azure(), "prod", &r, &mut out);
     assert!(!text_of(&out).contains(MARKER));
@@ -183,12 +236,12 @@ fn azure_status_prints_no_store_value() {
 
 #[test]
 fn azure_plan_reads_each_secret_once() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", API_KEY),
         kv_show("DB-URL", "changed-FIXTUREVALUE"),
-    ]);
+    ]));
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, false).unwrap();
     assert_eq!(kv_reads(&r), 2);
@@ -196,12 +249,12 @@ fn azure_plan_reads_each_secret_once() {
 
 #[test]
 fn azure_plan_stages_only_the_changed_secret() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", API_KEY),
         kv_show("DB-URL", "changed-FIXTUREVALUE"),
-    ]);
+    ]));
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, true).unwrap();
     let doc: Value = serde_json::from_slice(&out).unwrap();
@@ -210,12 +263,12 @@ fn azure_plan_stages_only_the_changed_secret() {
 
 #[test]
 fn azure_plan_shows_an_unchanged_secret_as_unchanged() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", API_KEY),
         kv_show("DB-URL", "changed-FIXTUREVALUE"),
-    ]);
+    ]));
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, false).unwrap();
     assert!(

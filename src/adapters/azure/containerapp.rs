@@ -66,7 +66,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::az::{self, Effect, Pacer};
+use super::az::{self, Effect};
 use super::{AzureTarget, ConfigRoute, preflight};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
@@ -110,8 +110,6 @@ pub struct ContainerApp<'a> {
     pub target: &'a AzureTarget,
     /// Managed env names (from the template, FR-8).
     pub managed: BTreeSet<String>,
-    /// Health-poll waits and progress lines (NR-4).
-    pacer: &'a dyn Pacer,
     poll_every: Duration,
     wait_max: Duration,
     /// The spec `apply` read just before its update, for the R9 check.
@@ -123,13 +121,11 @@ impl<'a> ContainerApp<'a> {
         runner: &'a dyn CommandRunner,
         target: &'a AzureTarget,
         managed: BTreeSet<String>,
-        pacer: &'a dyn Pacer,
     ) -> Self {
         Self {
             runner,
             target,
             managed,
-            pacer,
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             applied_from: RefCell::new(None),
@@ -698,15 +694,17 @@ impl PinnedRuntime for ContainerApp<'_> {
             if waited >= self.wait_max {
                 return Ok(Health::TimedOut);
             }
-            if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
-                self.pacer.note(&format!(
+            let note = if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
+                reported = Some(waited);
+                format!(
                     "waiting for revision {rev} of container app {}: {last}, {} s",
                     self.app(),
                     waited.as_secs()
-                ));
-                reported = Some(waited);
-            }
-            self.pacer.sleep(self.poll_every);
+                )
+            } else {
+                String::new()
+            };
+            self.runner.pause(self.poll_every, &note);
             waited += self.poll_every;
         }
     }
@@ -1081,7 +1079,7 @@ mod tests {
         t: &'a AzureTarget,
         m: &'a BTreeSet<String>,
     ) -> ContainerApp<'a> {
-        ContainerApp::new(r, t, m.clone(), &az::NO_WAIT)
+        ContainerApp::new(r, t, m.clone())
             .with_wait(Duration::from_secs(5), Duration::from_secs(10))
     }
 
@@ -1677,18 +1675,17 @@ mod tests {
 
     #[test]
     fn await_healthy_sleeps_the_poll_interval_between_reads() {
-        let pacer = az::RecordingPacer::default();
         let (t, m) = (target(), managed());
         let r = FakeRunner::new([
             out(&revision("Provisioning", "Activating", "None")),
             out(&healthy_revision()),
             out(&show_ready()),
         ]);
-        ContainerApp::new(&r, &t, m, &pacer)
+        ContainerApp::new(&r, &t, m)
             .with_wait(Duration::from_secs(5), Duration::from_secs(300))
             .await_healthy(&Revision(REV.into()))
             .unwrap();
-        assert_eq!(*pacer.sleeps.borrow(), [Duration::from_secs(5)]);
+        assert_eq!(r.elapsed.get(), Duration::from_secs(5));
     }
 
     #[test]
@@ -1736,18 +1733,17 @@ mod tests {
 
     /// Progress lines printed while waiting `polls` reads that never get ready.
     fn progress_over(polls: usize) -> Vec<String> {
-        let pacer = az::RecordingPacer::default();
         let (t, m) = (target(), managed());
         let starting = revision("Provisioning", "Activating", "None");
         let r = FakeRunner::new((0..polls).map(|_| out(&starting)));
-        ContainerApp::new(&r, &t, m, &pacer)
+        ContainerApp::new(&r, &t, m)
             .with_wait(
                 Duration::from_secs(5),
                 Duration::from_secs(5 * (polls as u64 - 1)),
             )
             .await_healthy(&Revision(REV.into()))
             .unwrap();
-        pacer.notes.into_inner()
+        r.notes.into_inner()
     }
 
     #[test]

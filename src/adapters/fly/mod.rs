@@ -1344,6 +1344,40 @@ mod tests {
         assert_eq!(list(&r, "app").unwrap_err().exit_code(), 9);
     }
 
+    /// A Fly target as configured (simple profile, app `app`).
+    fn fly_target() -> crate::domain::Fleet {
+        crate::config::parse(
+            "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
+             item_id = \"i\"\n[environments.prod.fly]\napp = \"app\"\n[keys.K]\n\
+             kind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap()
+    }
+
+    /// Read commands make no preflight call on Fly: the app's state matters only to writes.
+    #[test]
+    fn read_mode_preflight_makes_no_call() {
+        let fleet = fly_target();
+        let r = FakeRunner::new(Vec::<Output>::new());
+        let t = fleet.environments["prod"].target().unwrap();
+        t.preflight(&r, crate::provider::PreflightMode::Read)
+            .unwrap();
+        assert!(r.calls.borrow().is_empty());
+    }
+
+    /// `sync` (mutate mode) refuses while a deploy is running, before any write.
+    #[test]
+    fn mutate_mode_preflight_refuses_a_running_deploy() {
+        let fleet = fly_target();
+        let r = FakeRunner::new([
+            Output::success(r#"{"Status":"deployed","Machines":[{"state":"started"}]}"#),
+            Output::success(r#"[{"Version":2,"Status":"running"}]"#),
+        ]);
+        let t = fleet.environments["prod"].target().unwrap();
+        let res = t.preflight(&r, crate::provider::PreflightMode::Mutate);
+        assert!(matches!(res, Err(Error::Target(m)) if m.contains("already running")));
+    }
+
     /// NR-24: preflight reads the app status, then its releases; nothing else.
     #[test]
     fn preflight_reads_status_then_releases() {

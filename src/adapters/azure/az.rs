@@ -11,7 +11,6 @@
 //! argv and maps failures. The pinned `az` environment (R7, NR-7) is added by the runner.
 
 use std::io;
-use std::time::Duration;
 
 use crate::error::Error;
 use crate::host::{Host, Tool};
@@ -45,31 +44,6 @@ pub fn stdin_supported(action: &str) -> Result<(), Error> {
         )));
     }
     Ok(())
-}
-
-/// Waiting and progress output for polling loops, injectable so tests never sleep (NR-25,
-/// NR-30).
-pub trait Pacer {
-    /// Wait `d`.
-    fn sleep(&self, d: Duration);
-    /// One progress line for the person running opv (stderr, never a value).
-    fn note(&self, line: &str);
-}
-
-/// The real [`Pacer`]: sleeps the thread and prints progress on stderr.
-pub struct SystemPacer;
-
-/// The pacer production code passes to adapters.
-pub static SYSTEM_PACER: SystemPacer = SystemPacer;
-
-impl Pacer for SystemPacer {
-    fn sleep(&self, d: Duration) {
-        std::thread::sleep(d);
-    }
-
-    fn note(&self, line: &str) {
-        eprintln!("{line}");
-    }
 }
 
 /// Whether a call changes the target (NR-2).
@@ -211,38 +185,6 @@ pub(crate) fn not_logged_in(failed: Option<&str>) -> Error {
         "not logged in to Azure ({why})\n  next: run `az login` (in CI: sign in with \
          azure/login first), then run opv again"
     ))
-}
-
-/// A [`Pacer`] for tests that neither waits nor prints.
-#[cfg(test)]
-pub(crate) struct NoWait;
-
-#[cfg(test)]
-impl Pacer for NoWait {
-    fn sleep(&self, _d: Duration) {}
-    fn note(&self, _line: &str) {}
-}
-
-#[cfg(test)]
-pub(crate) static NO_WAIT: NoWait = NoWait;
-
-/// A [`Pacer`] for tests: records every sleep and note, never waits.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct RecordingPacer {
-    pub sleeps: std::cell::RefCell<Vec<Duration>>,
-    pub notes: std::cell::RefCell<Vec<String>>,
-}
-
-#[cfg(test)]
-impl Pacer for RecordingPacer {
-    fn sleep(&self, d: Duration) {
-        self.sleeps.borrow_mut().push(d);
-    }
-
-    fn note(&self, line: &str) {
-        self.notes.borrow_mut().push(line.to_string());
-    }
 }
 
 #[cfg(test)]

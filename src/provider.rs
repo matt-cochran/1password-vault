@@ -100,11 +100,14 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error>;
-    /// Read-only checks of the target's own state, run by mutating commands before their
-    /// first write (NR-23, NR-24): `Err` refuses the run with nothing written, and so does
-    /// a returned check that failed. The other returned checks are printed one line each,
-    /// like `doctor`'s; return only those worth a line (warnings), a passing state is silent.
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error>;
+    /// Read-only checks of the target's own state (NR-23 to NR-25): `Err` stops the
+    /// command, and so does a returned check that failed. The other returned checks are
+    /// printed one line each, like `doctor`'s; return only those worth a line (warnings), a
+    /// passing state is silent. `mode` says whether the command will write: only
+    /// [`PreflightMode::Mutate`] may wait for an update in progress (bounded by the run
+    /// budget, with progress); [`PreflightMode::Read`] never waits and reports it as a
+    /// warning instead.
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error>;
     /// `doctor` lines: tool versions and sign-in, never identities or values (FR-3).
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
@@ -159,6 +162,8 @@ pub struct StoreNameRules {
     pub label: &'static str,
     pub max_len: usize,
     pub allowed: fn(char) -> bool,
+    /// What the first and last characters may be (a subset of `allowed`).
+    pub edge: fn(char) -> bool,
     /// The rule as shown to the user, e.g. `^[0-9A-Za-z-]{1,127}$`.
     pub pattern: &'static str,
     /// Store names differing only in case are the same name.
@@ -170,6 +175,15 @@ pub struct StoreNameRules {
 pub struct Check {
     pub name: std::borrow::Cow<'static, str>,
     pub outcome: Result<Verdict, Error>,
+}
+
+/// Whether the command running a preflight writes to the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightMode {
+    /// `status` and `plan`: never wait on the target; an update in progress is one note.
+    Read,
+    /// `sync`: wait for an update in progress before the first write.
+    Mutate,
 }
 
 /// What a target's read-only state checks found (NR-24): lines to print, and whether a

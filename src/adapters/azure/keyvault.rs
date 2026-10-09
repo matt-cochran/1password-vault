@@ -65,8 +65,6 @@ pub struct KeyVault<'a> {
     /// The managed env names (from the template, FR-8). The ports speak env names; each
     /// is stored under its Key Vault spelling ([`AzureTarget::key_vault_name`]).
     pub managed: BTreeSet<String>,
-    /// Waits and progress lines for the polling loops (NR-25, NR-30).
-    pub pacer: &'a dyn az::Pacer,
 }
 
 /// One `keyvault secret list --json` entry. Unknown fields are ignored (R10).
@@ -352,13 +350,15 @@ impl KeyVault<'_> {
                     secs = waited.as_secs()
                 )));
             }
-            self.pacer.sleep(ACCESS_POLL);
             waited += ACCESS_POLL;
-            self.pacer.note(&format!(
-                "waiting for Key Vault access on {} ({} s)…",
-                self.vault,
-                waited.as_secs()
-            ));
+            self.runner.pause(
+                ACCESS_POLL,
+                &format!(
+                    "waiting for Key Vault access on {} ({} s)…",
+                    self.vault,
+                    waited.as_secs()
+                ),
+            );
         }
     }
 
@@ -408,7 +408,7 @@ impl KeyVault<'_> {
                      nothing else was changed; re-run to confirm"
                 )));
             }
-            self.pacer.sleep(CONFIRM_POLL);
+            self.runner.pause(CONFIRM_POLL, "");
             waited += CONFIRM_POLL;
         }
     }
@@ -538,22 +538,12 @@ mod tests {
         env: &'a str,
         template_names: &'a BTreeSet<String>,
     ) -> KeyVault<'a> {
-        vault_paced(r, &az::NO_WAIT, env, template_names)
-    }
-
-    fn vault_paced<'a>(
-        r: &'a FakeRunner,
-        pacer: &'a dyn az::Pacer,
-        env: &'a str,
-        template_names: &'a BTreeSet<String>,
-    ) -> KeyVault<'a> {
         KeyVault {
             runner: r,
             vault: VAULT,
             subscription: SUBSCRIPTION,
             env,
             managed: template_names.clone(),
-            pacer,
         }
     }
 
@@ -837,11 +827,10 @@ mod tests {
             Output::success(id(VERSION)),
         ]);
         let templates = names(&[]);
-        let pacer = az::RecordingPacer::default();
-        vault_paced(&r, &pacer, "prod", &templates)
+        vault(&r, "prod", &templates)
             .write_one(NAME, &secret())
             .unwrap();
-        assert_eq!(*pacer.sleeps.borrow(), vec![Duration::from_secs(2)]);
+        assert_eq!(r.elapsed.get(), Duration::from_secs(2));
     }
 
     #[test]
@@ -907,13 +896,14 @@ mod tests {
             .chain(written());
         let r = FakeRunner::new(responses);
         let templates = names(&[]);
-        let pacer = az::RecordingPacer::default();
-        vault_paced(&r, &pacer, "prod", &templates)
+        vault(&r, "prod", &templates)
             .write_one(NAME, &secret())
             .unwrap();
+        let notes = r.notes.borrow();
+        let waits: Vec<&String> = notes.iter().filter(|n| n.starts_with("waiting")).collect();
         assert_eq!(
-            *pacer.notes.borrow(),
-            vec!["waiting for Key Vault access on kv-opv-fixture (15 s)…".to_string()]
+            waits,
+            ["waiting for Key Vault access on kv-opv-fixture (15 s)…"]
         );
     }
 

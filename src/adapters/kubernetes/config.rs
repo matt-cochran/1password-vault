@@ -19,7 +19,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::{PinnedRuntime, Ports};
 use crate::provider::{
-    Check, NameRules, Preflight, Provider, Section, StoreNameRules, TargetConfig, Verdict, eq_as,
+    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreNameRules, TargetConfig,
+    Verdict, eq_as,
 };
 use crate::runner::CommandRunner;
 
@@ -277,6 +278,7 @@ impl TargetConfig for KubernetesTarget {
                 label: "Kubernetes name",
                 max_len: 63,
                 allowed: store_char,
+                edge: |c| c.is_ascii_lowercase() || c.is_ascii_digit(),
                 pattern: LABEL_PATTERN,
                 case_insensitive: true,
             }),
@@ -315,16 +317,16 @@ impl TargetConfig for KubernetesTarget {
         // The rollout wait ends inside the run budget (NR-4), not after a fixed 600 s.
         let wait = r.remaining().unwrap_or(WAIT_MAX);
         Ok(Ports::Pinned {
-            store: Box::new(KubeSecrets::new(r, &self.target)),
+            store: Box::new(KubeSecrets::new(r, &self.target, managed.clone())),
             runtime: Box::new(
                 KubeDeployment::new(r, &self.target, managed)
-                    .with_wait(POLL_EVERY, wait, std::thread::sleep)
+                    .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
                     .with_config_in_store(self.config == ConfigRoute::Store),
             ),
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<Preflight, Error> {
+    fn preflight(&self, _r: &dyn CommandRunner, _mode: PreflightMode) -> Result<Preflight, Error> {
         // Every kubectl failure is diagnosed per call (context, reachability, refusal).
         Ok(Preflight::default())
     }
@@ -746,6 +748,28 @@ environments = ["dev"]
     fn simple_profile_uses_the_key_name_as_env_name() {
         let f = parse(SIMPLE).unwrap();
         assert_eq!(f.target_name("dev", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+    }
+
+    /// A key ending in `_` renders a Kubernetes name ending in `-`: refused at load, at the
+    /// key's declaration, not at sync.
+    #[test]
+    fn key_ending_in_underscore_is_refused_at_its_line() {
+        let e = err(&SIMPLE.replace("[keys.JWT_KEY]", "[keys.JWT_KEY_]"));
+        assert!(
+            e.contains("JWT_KEY_ renders Kubernetes name \"jwt-key-\"")
+                && e.contains("line 11, column 7"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn fleet_key_ending_in_underscore_is_refused_at_its_line() {
+        let e = err(&doc(ENV, &KEYS.replace("DB_URL]", "DB_URL_]")));
+        assert!(
+            e.contains("api/DB_URL_ renders Kubernetes name \"fleet--api--db-url-\"")
+                && e.contains("line 13, column 20"),
+            "{e}"
+        );
     }
 
     #[test]

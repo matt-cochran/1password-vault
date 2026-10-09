@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use super::az;
 use super::containerapp::ContainerApp;
 use super::keyvault::KeyVault;
 use super::preflight;
@@ -17,7 +16,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, NameRules, Preflight, Provider, Section, StoreNameRules, TargetConfig, eq_as,
+    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreNameRules, TargetConfig,
+    eq_as,
 };
 use crate::runner::CommandRunner;
 
@@ -290,6 +290,7 @@ impl TargetConfig for AzureTarget {
                 label: "Key Vault name",
                 max_len: 127,
                 allowed: key_vault_char,
+                edge: key_vault_char,
                 pattern: "^[0-9A-Za-z-]{1,127}$",
                 // R3: Key Vault names are case-insensitive.
                 case_insensitive: true,
@@ -319,20 +320,10 @@ impl TargetConfig for AzureTarget {
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
-        // Tests shorten the health wait and never sleep; production has no such switch.
+        let app = ContainerApp::new(r, self, managed.clone());
+        // Tests shorten the health wait; production has no such switch.
         #[cfg(test)]
-        let test_wait = TEST_WAIT.with(std::cell::Cell::get);
-        #[cfg(test)]
-        let pacer: &dyn az::Pacer = if test_wait.is_some() {
-            &az::NO_WAIT
-        } else {
-            &az::SYSTEM_PACER
-        };
-        #[cfg(not(test))]
-        let pacer: &dyn az::Pacer = &az::SYSTEM_PACER;
-        let app = ContainerApp::new(r, self, managed.clone(), pacer);
-        #[cfg(test)]
-        let app = match test_wait {
+        let app = match TEST_WAIT.with(std::cell::Cell::get) {
             Some((every, max)) => app.with_wait(every, max),
             None => app,
         };
@@ -343,14 +334,13 @@ impl TargetConfig for AzureTarget {
                 subscription: &self.subscription,
                 env,
                 managed,
-                pacer,
             }),
             runtime: Box::new(app),
         })
     }
 
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error> {
-        preflight::run(self, r, &az::SYSTEM_PACER)
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error> {
+        preflight::run(self, r, mode)
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {

@@ -616,7 +616,7 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 
 ## FR-30 — Store Naming and Limits
 
-- The env name comes from the naming template (fleet) or the field name (simple). Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged) and validates it when the configuration loads.
+- The env name comes from the naming template (fleet) or the field name (simple). Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged; Kubernetes: lower case, `_` becomes `-`) and validates it when the configuration loads, first and last characters included (a Kubernetes name cannot end in `-`, so a key ending in `_` is refused at load with the key and its line, never at sync).
 - Two keys that map to one store name are a configuration error naming both keys.
 - Each store and runtime declares its value-size limits. They are checked with the rules, before any call, and a failure names the key and the limit, never the value (FR-15).
 
@@ -631,6 +631,7 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 
 - `--prune` without `--deploy` only reports on cloud targets.
 - With `--deploy`, opv unbinds the names on the runtime, waits for a healthy revision, then deletes them from the store. A store entry is never deleted while a running revision references it.
+- After a healthy revision, superseded versions of every pinned name are collected where versions are separate objects (Kubernetes: version Secrets labelled `opv-managed=<env>` that neither the Deployment nor any ReplicaSet references); Key Vault keeps them as history. Every name is collected on every `--deploy` run, so an interrupted run's leftovers go on the next one (NR-1).
 - opv tags every store entry it creates with `opv-managed=<environment>` and refuses to delete one without that tag. The declared-set rule of FR-8 still applies.
 - A soft-deleted name (Key Vault soft delete, AWS recovery window) that blocks a re-create fails with the exact recover command. opv never recovers or purges by itself.
 
@@ -859,7 +860,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call only; child stderr is still never captured (SR-1).
 - **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written. The plan's own reads (the item read by IDs, the target's first list) are the CLI, sign-in and reachability checks, so preflight adds no second item read; tool versions stay with `doctor` (NR-13).
 - **NR-24 Fly state.** Deleted (`dead`) apps and a deploy in progress are refused with the reason and next step. Suspended or pending apps (on the Machines platform: no machines), missing machines and stopped machines are a `warn` line; secrets are app-level so they still stage, and `--deploy` is skipped with `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). `Partial` deploys are detected and reported with the exact command. Fixtures are recorded flyctl output (`tests/fixtures/fly/`).
-- **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported.
+- **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported. Preflight has a mode: read commands (`status`, `plan`, `doctor`) run the same checks but never wait on an update in progress (provisioning `InProgress`, or any provider's equivalent); they print one note line on stderr and continue. Only `sync` waits, with progress, bounded by the run budget.
 - **NR-26 1Password state.** Moved, archived or deleted items, removed vault access, rate limits and a locked desktop app are diagnosed by ID with the next command; never a title fallback (FR-13).
 - **NR-27 Missing dependencies.** Each needed CLI is resolved once in preflight with the OS-specific install command; only the CLIs the chosen environment needs are required (FR-36).
 - **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page; nothing written. Applies to every read before a write, `status` and `plan` included.

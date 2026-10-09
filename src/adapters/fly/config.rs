@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, NameRules, Preflight, Provider, Section, TargetConfig, Verdict, eq_as,
+    Check, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig, Verdict, eq_as,
 };
 use crate::runner::CommandRunner;
 
@@ -207,8 +207,13 @@ impl TargetConfig for FlyTarget {
         })
     }
 
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error> {
-        super::preflight(r, &self.app)
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error> {
+        match mode {
+            // The app's state matters only to writes; a read command's flyctl calls are
+            // diagnosed one by one (FR-26), so it makes no extra call.
+            PreflightMode::Read => Ok(Preflight::default()),
+            PreflightMode::Mutate => super::preflight(r, &self.app),
+        }
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {

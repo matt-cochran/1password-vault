@@ -13,8 +13,8 @@ use std::io::Write;
 
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
-    PinnedRow, is_blocking, open_target, print_extras, print_rows, read_and_plan, write_err,
-    write_json,
+    PinnedRow, is_blocking, open_target, preflight, print_extras, print_rows, read_and_plan,
+    write_err, write_json,
 };
 use crate::domain::{Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
 use crate::error::Error;
@@ -42,6 +42,8 @@ pub fn run_with(
 ) -> Result<(), Error> {
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
+    // The target's state, read-only and never waiting (NR-23, NR-25).
+    preflight::read(t, r)?;
     let none = BTreeSet::new();
     let (plan, listed) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     let pinned = match &ports {

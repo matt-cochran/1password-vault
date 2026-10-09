@@ -180,7 +180,7 @@ env_name   = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
 config     = "env"                       # or "store"
 ```
 
-opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<10 hex of the value's hash>`, labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. A changed value is a new Secret; old ones are removed only by `--prune`, after a healthy rollout. The Secret name is the variable name lower-cased with `_` changed to `-`, so it must be a valid DNS-1123 name (at most 253 characters with the suffix), and collisions are an error. <!-- verify: name length/limit message -->
+opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<10 hex of the value's hash>`, labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. A changed value is a new Secret; old ones are removed only by `--prune`, after a healthy rollout. The Secret name is the variable name lower-cased with `_` changed to `-`, so it must be a valid DNS-1123 name (at most 253 characters with the suffix), and collisions are an error. A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused when the configuration loads, naming the key and its line. <!-- verify: name length/limit message -->
 
 ### Guarding an environment: `confirm_env`
 

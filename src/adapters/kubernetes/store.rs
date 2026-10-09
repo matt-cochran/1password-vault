@@ -41,15 +41,26 @@ const VALUE_PATH: &str = r#"jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.
 /// The Secrets of one Kubernetes target.
 pub struct KubeSecrets<'a> {
     k: Kubectl<'a>,
+    /// Managed env names (from the template, FR-8): the names this port speaks.
+    managed: BTreeSet<String>,
     /// store name → version the Deployment binds, read once per command.
     bound: OnceCell<BTreeMap<String, String>>,
+    /// Every string of the Deployment and its ReplicaSets, read once, after the healthy
+    /// rollout that precedes any delete.
+    referenced: OnceCell<BTreeSet<String>>,
 }
 
 impl<'a> KubeSecrets<'a> {
-    pub fn new(runner: &'a dyn CommandRunner, target: &'a KubeTarget) -> Self {
+    pub fn new(
+        runner: &'a dyn CommandRunner,
+        target: &'a KubeTarget,
+        managed: BTreeSet<String>,
+    ) -> Self {
         Self {
             k: Kubectl::new(runner, target),
+            managed,
             bound: OnceCell::new(),
+            referenced: OnceCell::new(),
         }
     }
 
@@ -146,7 +157,10 @@ impl<'a> KubeSecrets<'a> {
 
     /// Every string in the Deployment and in every ReplicaSet of the namespace: a Secret
     /// named by any of them is still referenced (FR-32; superset of "its ReplicaSets").
-    fn referenced(&self) -> Result<BTreeSet<String>, Error> {
+    fn referenced(&self) -> Result<&BTreeSet<String>, Error> {
+        if let Some(seen) = self.referenced.get() {
+            return Ok(seen);
+        }
         let mut seen = BTreeSet::new();
         strings(&self.k.get_deployment()?, &mut seen);
         let what = "kubectl get replicasets";
@@ -158,7 +172,7 @@ impl<'a> KubeSecrets<'a> {
             "get replicasets",
         )?;
         strings(&super::parse_json(&out, what)?, &mut seen);
-        Ok(seen)
+        Ok(self.referenced.get_or_init(|| seen))
     }
 }
 
@@ -200,8 +214,9 @@ pub fn refusal(name: &str, value: &SecretValue) -> Option<(&'static str, &'stati
 }
 
 impl Store for KubeSecrets<'_> {
-    /// One entry per store name with opv Secrets labelled for this environment. The
-    /// version comes from `read` (the binding), never from the list.
+    /// One entry per managed env name with opv Secrets labelled for this environment (the
+    /// port speaks env names; a Secret of a name the template does not render is not
+    /// listed). The version comes from `read` (the binding), never from the list.
     fn list(&self) -> Result<Vec<StoreEntry>, Error> {
         let selector = format!("{LABEL_MANAGED}={}", self.t().env);
         let stores: BTreeSet<String> = self
@@ -209,10 +224,12 @@ impl Store for KubeSecrets<'_> {
             .into_iter()
             .map(|(_, store)| store)
             .collect();
-        Ok(stores
-            .into_iter()
-            .map(|name| StoreEntry {
-                name,
+        Ok(self
+            .managed
+            .iter()
+            .filter(|n| stores.contains(&store_name(n)))
+            .map(|n| StoreEntry {
+                name: n.clone(),
                 version: None,
                 pending: false,
             })
@@ -412,7 +429,7 @@ mod tests {
 
     fn with_store<T>(r: &FakeRunner, f: impl FnOnce(&KubeSecrets) -> T) -> T {
         let t = target();
-        f(&KubeSecrets::new(r, &t))
+        f(&KubeSecrets::new(r, &t, managed()))
     }
 
     fn stdin_text(r: &FakeRunner, i: usize) -> String {
@@ -430,7 +447,7 @@ mod tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert_eq!(names, ["fleet--api--db-url"]);
+        assert_eq!(names, ["FLEET__API__DB_URL"]);
     }
 
     #[test]
@@ -697,5 +714,49 @@ mod tests {
         r.push_unknown("lost");
         r.responses.borrow_mut().push_back(Ok(ok("")));
         assert!(with_store(&r, |s| s.delete("FLEET__API__DB_URL")).is_ok());
+    }
+
+    /// A re-pinned key: superseded versions nothing references are deleted, the pinned one
+    /// is never a candidate (FR-32).
+    #[test]
+    fn collect_superseded_deletes_unreferenced_versions_but_the_pinned_one() {
+        let stale = "opv-fleet--api--db-url-0123456789";
+        let pinned = "opv-fleet--api--db-url-aaaaaaaaaa";
+        let r = FakeRunner::new([
+            ok(&format!(
+                "{pinned}\tfleet--api--db-url\n{stale}\tfleet--api--db-url\n"
+            )),
+            unbound_deployment(),
+            ok("{\"items\": []}"),
+            ok(&format!("secret/{stale}")),
+        ]);
+        with_store(&r, |s| {
+            s.collect_superseded("FLEET__API__DB_URL", "aaaaaaaaaa")
+        })
+        .unwrap();
+        assert_eq!(
+            args(&r, 3)[5..],
+            ["delete", "secret", stale, "--ignore-not-found"]
+        );
+    }
+
+    #[test]
+    fn collect_superseded_keeps_versions_a_replicaset_references() {
+        let r = FakeRunner::new([
+            ok(&format!("{DB_URL_SECRET}\tfleet--api--db-url\n")),
+            unbound_deployment(),
+            ok(REPLICASETS),
+        ]);
+        with_store(&r, |s| {
+            s.collect_superseded("FLEET__API__DB_URL", "aaaaaaaaaa")
+        })
+        .unwrap();
+        assert!(!all_argv(&r).contains("delete"));
+    }
+
+    #[test]
+    fn list_names_only_managed_env_names() {
+        let r = FakeRunner::new([ok("opv-other-0123456789\tother\n")]);
+        assert!(with_store(&r, |s| s.list()).unwrap().is_empty());
     }
 }

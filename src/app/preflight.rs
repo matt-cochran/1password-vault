@@ -17,26 +17,40 @@
 //! read and no extra sign-in probe. Only the CLIs the environment uses are ever called
 //! (NR-27). A read still unanswered after its retries is an outage (NR-28): exit 9 naming
 //! the provider, the step and its status page; nothing was changed.
+//!
+//! Read commands (`status`, `plan`) run step 3 too, as [`read`], before the target's first
+//! read: the same diagnosis, but they never wait on the target. An update in progress is
+//! one note line on stderr and they go on with the state as it is.
 
 use std::io::Write;
 
 use super::write_err;
 use crate::error::Error;
-use crate::provider::TargetConfig;
+use crate::provider::{PreflightMode, TargetConfig};
 use crate::runner::CommandRunner;
 
-/// Step 3: the target's own state checks. A failed check refuses the run; every other
-/// check returned prints one line in `doctor`'s format (`warn  fly app <app>: ...`); the result is the line to print instead of a deploy when the
-/// runtime has nothing to restart.
+/// Step 3 for a mutating command: the target's own state, waiting for an update in
+/// progress. A failed check refuses the run; every other check returned prints one line in
+/// `doctor`'s format (`warn  fly app <app>: ...`); the result is the line to print instead
+/// of a deploy when the runtime has nothing to restart.
 pub(crate) fn run(
     t: &dyn TargetConfig,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<Option<String>, Error> {
-    let pre = t.preflight(r)?;
+    let pre = t.preflight(r, PreflightMode::Mutate)?;
     for c in pre.checks {
         let line = c.outcome?.line(&c.name);
         writeln!(out, "{line}").map_err(write_err)?;
     }
     Ok(pre.skip_deploy)
+}
+
+/// Step 3 for a read command: never waits; each warning is one note on stderr, so
+/// `--json` output stays a single document.
+pub(crate) fn read(t: &dyn TargetConfig, r: &dyn CommandRunner) -> Result<(), Error> {
+    for c in t.preflight(r, PreflightMode::Read)?.checks {
+        r.note(&c.outcome?.line(&c.name));
+    }
+    Ok(())
 }

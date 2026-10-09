@@ -1,15 +1,16 @@
 //! Azure preflight (NR-23, NR-25), the vault URI (NR-6) and the `doctor` lines (FR-26,
 //! FR-33, R6).
 //!
-//! Preflight is read-only and runs in this order; the first failure stops the command
-//! before anything is read from 1Password or changed in Azure:
+//! Preflight is read-only and runs in this order, before the command's first Azure read
+//! (`status`, `plan`: before 1Password too; `sync`: once its blocking keys are refused);
+//! the first failure stops the command with nothing changed in Azure:
 //!
 //! | step | argv | on failure |
 //! |---|---|---|
 //! | subscription | `account show --subscription <s> -o none` (probe, exit status only) | signed out: `az login`; signed in: the subscription this account cannot see |
 //! | vault | `keyvault show -n <vault> -o json` | `keyvault show-deleted -n <vault>` exit 0: the recover command; else not found |
 //! | vault data plane | `keyvault secret list --vault-name <vault> -o none` | firewall or private endpoint: network access; else the role grant |
-//! | app | `containerapp show -g <rg> -n <app> -o json` | revision mode not single: refused; `InProgress`: waits with progress; `Failed`: a note, then proceeds (R11) |
+//! | app | `containerapp show -g <rg> -n <app> -o json` | revision mode not single: refused; `InProgress`: `sync` waits with progress within the run budget, `status`/`plan` never wait (a `warn` line); `Failed`: a `warn` line, then proceeds (R11) |
 //!
 //! Every call but the probes carries `--only-show-errors --subscription <s>` (R7, NR-7).
 //! The vault's `properties.vaultUri` is validated and kept for the rest of the run, so
@@ -21,13 +22,13 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::AzureTarget;
-use super::az::{self, AZ_CLI, Effect, Pacer};
+use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
 use crate::adapters::probe::{parse_version, spawn_tool};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
-use crate::provider::{Check, Preflight, Verdict};
+use crate::provider::{Check, Preflight, PreflightMode, Verdict};
 use crate::runner::{CommandRunner, Outcome, Output, unknown_text};
 
 /// Oldest Azure CLI opv is tested with: `doctor` warns below it.
@@ -45,23 +46,36 @@ pub const DOCTOR_CHECKS: &[&str] = &[
 
 /// The preflight of an Azure target (NR-23, NR-25). Keeps the vault URI for `open`. A
 /// Container App whose last update failed is a warning: its previous revision keeps
-/// serving and opv applies a fresh one (R11).
-pub fn run(t: &AzureTarget, r: &dyn CommandRunner, pacer: &dyn Pacer) -> Result<Preflight, Error> {
+/// serving and opv applies a fresh one (R11). An update in progress is waited for under
+/// [`PreflightMode::Mutate`] and is a warning under [`PreflightMode::Read`].
+pub fn run(
+    t: &AzureTarget,
+    r: &dyn CommandRunner,
+    mode: PreflightMode,
+) -> Result<Preflight, Error> {
     subscription(t, r)?;
     let vault = vault(t, r)?;
     t.vault_uri.set(vault_uri(&vault, &t.key_vault)?);
     vault_answers(t, r, &vault)?;
-    let app = settled_app(t, r, pacer)?;
+    let app = match mode {
+        PreflightMode::Mutate => settled_app(t, r)?,
+        PreflightMode::Read => app(t, r)?,
+    };
+    let warn = |detail: &str| Check {
+        name: format!("container app {}", t.container_app).into(),
+        outcome: Ok(Verdict::Warn(detail.into())),
+    };
     let mut pre = Preflight::default();
-    if provisioning(&app) == "Failed" {
-        pre.checks.push(Check {
-            name: format!("container app {}", t.container_app).into(),
-            outcome: Ok(Verdict::Warn(
-                "its last update failed (provisioningState Failed); the previous revision \
-                 keeps serving, and opv will apply a fresh one"
-                    .into(),
-            )),
-        });
+    match provisioning(&app) {
+        "InProgress" => pre.checks.push(warn(
+            "an update is in progress (provisioningState InProgress); this shows the state \
+             before it finishes",
+        )),
+        "Failed" => pre.checks.push(warn(
+            "its last update failed (provisioningState Failed); the previous revision keeps \
+             serving, and opv will apply a fresh one",
+        )),
+        _ => {}
     }
     Ok(pre)
 }
@@ -281,9 +295,9 @@ fn provisioning(app: &Value) -> &str {
 }
 
 /// The app once no update is in progress (NR-25): polls every [`POLL_EVERY`] up to
-/// [`WAIT_MAX`] (the run budget may end it sooner, NR-4), with a progress line at least
-/// every [`PROGRESS_EVERY`].
-fn settled_app(t: &AzureTarget, r: &dyn CommandRunner, pacer: &dyn Pacer) -> Result<Value, Error> {
+/// [`WAIT_MAX`], never past the run budget (NR-4), with a progress line at least every
+/// [`PROGRESS_EVERY`].
+fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
     let mut waited = Duration::ZERO;
     let mut reported: Option<Duration> = None;
     loop {
@@ -303,16 +317,18 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner, pacer: &dyn Pacer) -> Res
                 secs = waited.as_secs()
             )));
         }
-        if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
-            pacer.note(&format!(
+        let note = if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
+            reported = Some(waited);
+            format!(
                 "waiting for container app {} to finish its current update (provisioningState \
                  InProgress), {} s",
                 t.container_app,
                 waited.as_secs()
-            ));
-            reported = Some(waited);
-        }
-        pacer.sleep(POLL_EVERY);
+            )
+        } else {
+            String::new()
+        };
+        r.pause(POLL_EVERY, &note);
         waited += POLL_EVERY;
     }
 }
@@ -467,7 +483,7 @@ fn app_verdict(t: &AzureTarget, app: &Value) -> Verdict {
 /// that could not run is a warning, never a failure. Deploys are gated by revision health.
 fn access(t: &AzureTarget, r: &dyn CommandRunner, uri: String) -> Verdict {
     t.vault_uri.set(uri);
-    let ca = ContainerApp::new(r, t, BTreeSet::new(), &az::SYSTEM_PACER);
+    let ca = ContainerApp::new(r, t, BTreeSet::new());
     let advisory = "advisory: a revision that cannot read its secrets never becomes ready, and \
                     the previous one keeps serving";
     match ca.check_access(std::slice::from_ref(&t.key_vault)) {
@@ -539,7 +555,7 @@ mod tests {
 
     fn preflight_on(responses: Vec<Output>) -> (FakeRunner, Result<Preflight, Error>) {
         let r = FakeRunner::new(responses);
-        let res = run(&target(), &r, &az::NO_WAIT);
+        let res = run(&target(), &r, PreflightMode::Mutate);
         (r, res)
     }
 
@@ -557,7 +573,7 @@ mod tests {
     fn preflight_keeps_the_vault_uri_read_from_azure() {
         let r = FakeRunner::new(healthy_with(&app_show()));
         let t = target();
-        run(&t, &r, &az::NO_WAIT).unwrap();
+        run(&t, &r, PreflightMode::Mutate).unwrap();
         assert_eq!(
             t.vault_uri.get(),
             Some("https://kv-opv-fixture.vault.azure.net")
@@ -568,7 +584,7 @@ mod tests {
     fn open_after_preflight_reads_the_vault_once() {
         let r = FakeRunner::new(healthy_with(&app_show()));
         let t = target();
-        run(&t, &r, &az::NO_WAIT).unwrap();
+        run(&t, &r, PreflightMode::Mutate).unwrap();
         vault_uri_of(&t, &r).unwrap();
         let shows = r
             .calls
@@ -710,14 +726,49 @@ mod tests {
         let mut responses = healthy_with(&app_in("InProgress"));
         responses.push(out(&app_show()));
         let r = FakeRunner::new(responses);
-        let pacer = az::RecordingPacer::default();
-        run(&target(), &r, &pacer).unwrap();
+        run(&target(), &r, PreflightMode::Mutate).unwrap();
         assert_eq!(
-            *pacer.notes.borrow(),
+            *r.notes.borrow(),
             [
                 "waiting for container app opv-fixture-app to finish its current update \
               (provisioningState InProgress), 0 s"
             ]
+        );
+    }
+
+    /// The wait is bounded by the run budget (NR-4): the next poll never starts once it
+    /// is spent.
+    #[test]
+    fn waiting_for_an_app_update_stops_at_the_run_budget() {
+        let polls = (0..10).map(|_| out(&app_in("InProgress")));
+        let mut responses = vec![ok(), out(&vault_show()), ok()];
+        responses.extend(polls);
+        let r = FakeRunner::new(responses);
+        r.budget.set(Duration::from_secs(12));
+        let res = run(&target(), &r, PreflightMode::Mutate);
+        assert!(res.is_err() && r.calls.borrow().len() < 13, "{res:?}");
+    }
+
+    /// Read commands never wait on an update in progress (NR-25): one read of the app.
+    #[test]
+    fn read_mode_reads_an_app_in_progress_once() {
+        let r = FakeRunner::new(healthy_with(&app_in("InProgress")));
+        run(&target(), &r, PreflightMode::Read).unwrap();
+        assert_eq!(r.calls.borrow().len(), 4);
+    }
+
+    #[test]
+    fn read_mode_reports_an_app_in_progress_as_a_warning() {
+        let r = FakeRunner::new(healthy_with(&app_in("InProgress")));
+        let pre = run(&target(), &r, PreflightMode::Read).unwrap();
+        let line = pre.checks[0]
+            .outcome
+            .as_ref()
+            .unwrap()
+            .line(&pre.checks[0].name);
+        assert!(
+            line.starts_with("warn  container app opv-fixture-app: an update is in progress"),
+            "{line}"
         );
     }
 

@@ -119,8 +119,9 @@ impl<'a> KubeDeployment<'a> {
         Self {
             k: Kubectl::new(runner, target),
             managed,
-            sleep: Box::new(std::thread::sleep),
-            note: Box::new(|line| eprintln!("{line}")),
+            // The runner's clock and stderr: a wait never passes the run budget (NR-4).
+            sleep: Box::new(move |d| runner.pause(d, "")),
+            note: Box::new(move |line| runner.note(line)),
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             config_in_store: false,
@@ -147,7 +148,7 @@ impl<'a> KubeDeployment<'a> {
         self
     }
 
-    /// Where progress lines go (stderr by default).
+    /// Where progress lines go (the runner's stderr by default).
     pub fn with_progress(mut self, note: impl Fn(&str) + 'a) -> Self {
         self.note = Box::new(note);
         self

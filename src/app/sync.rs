@@ -425,9 +425,27 @@ fn run_pinned(
             format!("deployed revision {}: {}", revision.0, join(&pending))
         },
     )?;
-    // Superseded versions of re-pinned names (FR-32): a no-op where the store keeps history.
-    for (name, (_, version)) in &change.pin {
-        store.collect_superseded(name, version)?;
+    // Superseded versions (FR-32) of every name the healthy revision pins, not only those
+    // re-pinned now, so a run stopped before this step is finished by the next (NR-1). A
+    // no-op where the store keeps history.
+    let mut bound: BTreeMap<&str, &str> = snap
+        .bindings
+        .iter()
+        .filter_map(|(n, b)| match b {
+            Binding::Pinned { version, .. } => Some((n.as_str(), version.as_str())),
+            _ => None,
+        })
+        .collect();
+    bound.extend(
+        change
+            .pin
+            .iter()
+            .map(|(n, (_, v))| (n.as_str(), v.as_str())),
+    );
+    for name in want.store.keys() {
+        if let Some(version) = bound.get(name.as_str()) {
+            store.collect_superseded(name, version)?;
+        }
     }
     let mut pruned = Vec::new();
     for name in deletes {
@@ -906,6 +924,8 @@ pub fn plan_with(
 ) -> Result<(), Error> {
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
+    // The target's state, read-only and never waiting (NR-23, NR-25).
+    preflight::read(t, r)?;
     let none = BTreeSet::new();
     let (plan, on_target) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     if json {

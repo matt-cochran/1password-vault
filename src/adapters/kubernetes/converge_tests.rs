@@ -1,8 +1,9 @@
-//! Interruption matrix for the Kubernetes adapters (NR-1, resilience §4): a stateful fake
-//! cluster interprets the adapters' `kubectl` calls; a pinned-flow sync (write versions →
-//! repin → await health → prune) is interrupted at every call, with and without the call's
-//! effect, then re-run. The end state must equal the uninterrupted run's, and no state may
-//! bind a missing Secret.
+//! Interruption matrix for the Kubernetes target (NR-1, resilience §4): a stateful fake
+//! cluster (plus the 1Password item) interprets every call of the real `opv sync dev
+//! --deploy --prune` (`app::sync`: write versions → repin → await health → collect
+//! superseded versions → prune), which is interrupted at every call, with and without the
+//! call's effect, then re-run. The end state must equal the uninterrupted run's, and no
+//! state may bind a missing Secret.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,11 +14,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
-use super::testutil::{DEPLOYMENT, REPLICASETS, managed, target};
-use super::{KubeDeployment, KubeSecrets, store_name};
-use crate::domain::{Binding, Health, RuntimeChange, SecretValue};
+use super::testutil::{DEPLOYMENT, REPLICASETS};
+use crate::app::sync::{self, SyncOpts};
+use crate::app::testutil::{item_json, secret, text};
+use crate::config;
+use crate::domain::Fleet;
 use crate::error::Error;
-use crate::ports::{PinnedRuntime, PinnedStore};
 use crate::runner::{Call, CommandRunner, Outcome, Output};
 
 const STALE: &str = "opv-fleet--api--db-url-0123456789";
@@ -26,6 +28,45 @@ const DESIRED: [(&str, &str); 2] = [
     ("NEW_KEY", "opv-k8s-marker-3"),
 ];
 const CONFIG: (&str, &str) = ("LOG_LEVEL", "opv-k8s-config-2");
+
+/// The spike's target (context `kind-opv`, namespace `opv-spike`, Deployment `api`) as
+/// environment `dev`, declaring [`DESIRED`] and [`CONFIG`]. `K7`, bound on the recorded
+/// Deployment, is not declared, so opv leaves it alone.
+fn fleet() -> Fleet {
+    let mut toml = String::from(
+        r#"
+[profile]
+kind = "simple"
+[environments.dev]
+vault_id = "vdev"
+item_id = "idev"
+[environments.dev.kubernetes]
+context = "kind-opv"
+namespace = "opv-spike"
+deployment = "api"
+"#,
+    );
+    for (key, kind) in [
+        (DESIRED[0].0, "secret"),
+        (DESIRED[1].0, "secret"),
+        (CONFIG.0, "config"),
+    ] {
+        toml.push_str(&format!(
+            "[keys.{key}]\nkind = \"{kind}\"\nenvironments = [\"dev\"]\n"
+        ));
+    }
+    config::parse(&toml).unwrap()
+}
+
+/// The 1Password item holding the desired values.
+fn item() -> String {
+    let fields = [
+        secret("", DESIRED[0].0, DESIRED[0].1),
+        secret("", DESIRED[1].0, DESIRED[1].1),
+        text("", CONFIG.0, CONFIG.1),
+    ];
+    String::from_utf8(item_json(&fields)).unwrap()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Cut {
@@ -110,8 +151,11 @@ impl Cluster {
         }
     }
 
-    /// Run one kubectl call against the state: (exit status, stdout).
-    fn exec(&self, args: &[String], stdin: Option<&[u8]>) -> (i32, String) {
+    /// Run one `op` or `kubectl` call against the state: (exit status, stdout).
+    fn exec(&self, program: &str, args: &[String], stdin: Option<&[u8]>) -> (i32, String) {
+        if program == "op" {
+            return (0, item());
+        }
         assert_eq!(args[0], "--context", "unscoped call: {args:?}");
         assert_eq!(args[2], "--namespace", "unscoped call: {args:?}");
         let a: Vec<&str> = args[5..].iter().map(String::as_str).collect();
@@ -254,8 +298,10 @@ impl Cluster {
         self.argv.borrow_mut().push(args.clone());
         match self.cut.get() {
             Some((k, Cut::BeforeEffect)) if k == n => (true, (0, String::new())),
-            Some((k, Cut::AfterEffect)) if k == n => (true, self.exec(&args, call.stdin)),
-            _ => (false, self.exec(&args, call.stdin)),
+            Some((k, Cut::AfterEffect)) if k == n => {
+                (true, self.exec(call.program, &args, call.stdin))
+            }
+            _ => (false, self.exec(call.program, &args, call.stdin)),
         }
     }
 }
@@ -293,62 +339,21 @@ impl CommandRunner for Cluster {
 
     fn pause(&self, _: Duration, _: &str) {}
 
+    fn note(&self, _: &str) {}
+
     fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
         unreachable!("the fake cluster runs no inherited child")
     }
 }
 
-/// The pinned flow over the adapters, as Task 7's `run_pinned` orders it with
-/// `--deploy --prune`: compare and write versions, repin, await health, then prune.
+/// `opv sync dev --deploy --prune` through the real pinned flow (`app::sync`).
 fn sync(c: &Cluster) -> Result<(), Error> {
-    let (t, m) = (target(), managed());
-    let store = KubeSecrets::new(c, &t);
-    let rt = KubeDeployment::new(c, &t, m)
-        .with_wait(Duration::from_secs(5), Duration::from_secs(30), |_| {})
-        .with_progress(|_| {});
-    let mut pins = BTreeMap::new();
-    for (env, v) in DESIRED {
-        let value = SecretValue::new(v.into());
-        let version = match store.read(env)? {
-            Some((cur, ver)) if cur.expose() == value.expose() => ver,
-            _ => store.write_one(env, &value)?,
-        };
-        pins.insert(env.to_string(), (store_name(env), version));
-    }
-    let snap = rt.bindings()?;
-    let mut change = RuntimeChange {
-        pin: BTreeMap::new(),
-        set: BTreeMap::new(),
-        unbind: vec![],
+    let opts = SyncOpts {
+        deploy: true,
+        prune: true,
+        ..Default::default()
     };
-    for (env, (store, version)) in &pins {
-        let want = Binding::Pinned {
-            store_name: store.clone(),
-            version: version.clone(),
-        };
-        if snap.bindings.get(env) != Some(&want) {
-            change
-                .pin
-                .insert(env.clone(), (store.clone(), version.clone()));
-        }
-    }
-    let want = Binding::Plain {
-        digest: super::digest_hex(CONFIG.1),
-    };
-    if snap.bindings.get(CONFIG.0) != Some(&want) {
-        change.set.insert(CONFIG.0.into(), CONFIG.1.into());
-    }
-    if !(change.pin.is_empty() && change.set.is_empty()) {
-        let rev = rt.apply(&change, &snap)?;
-        match rt.await_healthy(&rev)? {
-            Health::Healthy => {}
-            other => return Err(Error::Target(format!("revision {} is {other:?}", rev.0))),
-        }
-    }
-    for env in pins.keys() {
-        store.delete(env)?;
-    }
-    Ok(())
+    sync::run(&fleet(), "dev", c, &mut Vec::new(), &opts)
 }
 
 fn reference() -> (Cluster, usize) {
@@ -421,4 +426,15 @@ fn rollout_failure_prunes_nothing() {
     };
     let _ = sync(&c);
     assert!(c.secrets.borrow().contains_key(STALE));
+}
+
+#[test]
+fn sync_binds_every_desired_key_by_reference() {
+    let (c, _) = reference();
+    let (_, env) = c.state();
+    let bound = |name: &str| {
+        env.iter()
+            .any(|e| e["name"] == name && e.pointer("/valueFrom/secretKeyRef/name").is_some())
+    };
+    assert!(DESIRED.iter().all(|(n, _)| bound(n)), "{env:?}");
 }
