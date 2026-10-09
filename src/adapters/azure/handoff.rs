@@ -10,6 +10,15 @@
 //!   Python reader inside `az` fail or read corrupted data). Each connection gets its own
 //!   server instance, up to [`MAX_CONNECTIONS`]. If `az` exits without ever connecting,
 //!   the hand-off reports it and the value went nowhere.
+//!
+//!   The pipe's name is visible in az's command line, so before writing a byte the server
+//!   checks who connected (M1): `GetNamedPipeClientProcessId` must name the `az` process
+//!   opv started (the runner's tracked child) or one of its descendants (`az.cmd` runs
+//!   Python as a child), found by walking the client's parent chain in a process
+//!   snapshot. Any other client is closed unread, and the call fails afterwards even if
+//!   `az` read the value too, so a stolen read never goes unnoticed. (Serving exactly one
+//!   connection was the fallback; az may open the path more than once, so the client
+//!   check was chosen.)
 
 use std::io;
 
@@ -121,8 +130,8 @@ pub(crate) mod pipe {
         CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_OUTBOUND, WriteFile,
     };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use zeroize::Zeroizing;
 
@@ -134,14 +143,77 @@ pub(crate) mod pipe {
 
     impl super::Handoff for Pipe {
         fn offer(&self, data: &[u8]) -> Result<Box<dyn Offer>, Error> {
-            Ok(Box::new(Server::start(data)?))
+            Ok(Box::new(Server::start(data, started_by_opv)?))
         }
+    }
+
+    /// Who may read the value: a client process id is accepted when this returns true.
+    pub type Accept = fn(u32) -> bool;
+
+    /// The client is the `az` process opv started for this call, or a descendant of it
+    /// (M1). The child is tracked right after it is spawned; a client that connects first
+    /// waits for that, up to two seconds.
+    fn started_by_opv(client: u32) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let child = loop {
+            match crate::runner::signals::current_child() {
+                Some(c) => break c,
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                None => return false,
+            }
+        };
+        descends_from(client, child)
+    }
+
+    /// Whether `pid` is `ancestor` or below it, by the parent chain of a process snapshot
+    /// (at most 16 levels; a parent id that was reused ends the walk).
+    fn descends_from(pid: u32, ancestor: u32) -> bool {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+        if pid == ancestor {
+            return true;
+        }
+        // SAFETY: a snapshot handle closed before returning; entries are plain structs
+        // with `dwSize` set as the API requires.
+        let parents: std::collections::HashMap<u32, u32> = unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut map = std::collections::HashMap::new();
+            let mut e = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut ok = Process32FirstW(snap, &mut e) != 0;
+            while ok {
+                map.insert(e.th32ProcessID, e.th32ParentProcessID);
+                ok = Process32NextW(snap, &mut e) != 0;
+            }
+            CloseHandle(snap);
+            map
+        };
+        let mut cur = pid;
+        for _ in 0..16 {
+            match parents.get(&cur) {
+                Some(&p) if p == ancestor => return true,
+                Some(&p) if p != 0 && p != cur => cur = p,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// A pipe server for one value.
     pub struct Server {
         path: String,
         served: Arc<AtomicUsize>,
+        /// Connections from a client that is not `az` (closed unread, M1).
+        refused: Arc<AtomicUsize>,
         done: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -181,7 +253,8 @@ pub(crate) mod pipe {
     }
 
     impl Server {
-        pub fn start(data: &[u8]) -> Result<Self, Error> {
+        /// Serve `data` to clients `accept` approves (production: [`started_by_opv`]).
+        pub fn start(data: &[u8], accept: Accept) -> Result<Self, Error> {
             use std::hash::BuildHasher;
             let random =
                 std::collections::hash_map::RandomState::new().hash_one(std::time::Instant::now());
@@ -196,8 +269,9 @@ pub(crate) mod pipe {
             let first = first as usize;
             let data = Zeroizing::new(data.to_vec());
             let served = Arc::new(AtomicUsize::new(0));
+            let refused = Arc::new(AtomicUsize::new(0));
             let done = Arc::new(AtomicBool::new(false));
-            let (s, d) = (Arc::clone(&served), Arc::clone(&done));
+            let (s, d, x) = (Arc::clone(&served), Arc::clone(&done), Arc::clone(&refused));
             let thread = std::thread::spawn(move || {
                 let mut handle = first as HANDLE;
                 for n in 0..MAX_CONNECTIONS {
@@ -208,7 +282,15 @@ pub(crate) mod pipe {
                         unsafe { CloseHandle(handle) };
                         return;
                     }
-                    if ok {
+                    let mut client = 0u32;
+                    // SAFETY: a connected pipe handle owned by this thread.
+                    let known = ok
+                        && unsafe { GetNamedPipeClientProcessId(handle, &mut client) } != 0
+                        && accept(client);
+                    if ok && !known {
+                        x.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if known {
                         let mut off = 0usize;
                         while off < data.len() {
                             let mut wrote = 0u32;
@@ -246,6 +328,7 @@ pub(crate) mod pipe {
             Ok(Self {
                 path,
                 served,
+                refused,
                 done,
                 thread: Some(thread),
             })
@@ -266,6 +349,14 @@ pub(crate) mod pipe {
         }
         fn finish(mut self: Box<Self>) -> Result<(), Error> {
             self.stop();
+            if self.refused.load(Ordering::SeqCst) > 0 {
+                return Err(Error::Target(
+                    "another process connected to opv's private pipe for az and was refused; \
+                     nothing was sent to it, but treat this machine as untrusted\n  next: \
+                     check the processes running as you, then run opv again"
+                        .into(),
+                ));
+            }
             if self.served() == 0 {
                 return Err(Error::Target(
                     "az exited without reading the value from opv's private pipe; nothing was \
@@ -320,10 +411,15 @@ pub(crate) mod pipe {
 
         use super::*;
 
+        /// The test reads the pipe itself: this process is the approved client.
+        fn this_process(pid: u32) -> bool {
+            pid == std::process::id()
+        }
+
         #[test]
         fn a_client_reads_the_exact_bytes() {
             let data: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
-            let server = Server::start(&data).unwrap();
+            let server = Server::start(&data, this_process).unwrap();
             let mut got = Vec::new();
             std::fs::File::open(server.path())
                 .unwrap()
@@ -334,8 +430,30 @@ pub(crate) mod pipe {
 
         #[test]
         fn finish_without_a_reader_is_an_error() {
-            let server = Box::new(Server::start(b"x").unwrap());
+            let server = Box::new(Server::start(b"x", this_process).unwrap());
             assert!(server.finish().is_err());
+        }
+
+        /// M1: a client that is not the az process opv started reads nothing.
+        #[test]
+        fn an_unknown_client_reads_nothing() {
+            let server = Server::start(b"FIXTUREVALUE", |_| false).unwrap();
+            let mut got = Vec::new();
+            let _ = std::fs::File::open(server.path()).and_then(|mut f| f.read_to_end(&mut got));
+            assert!(got.is_empty());
+        }
+
+        /// M1: and the call fails, so a stolen read never goes unnoticed.
+        #[test]
+        fn an_unknown_client_fails_the_call() {
+            let server = Server::start(b"FIXTUREVALUE", |_| false).unwrap();
+            let _ = std::fs::File::open(server.path()).map(|mut f| f.read_to_end(&mut Vec::new()));
+            assert!(Box::new(server).finish().is_err());
+        }
+
+        #[test]
+        fn the_child_itself_is_its_own_descendant() {
+            assert!(descends_from(std::process::id(), std::process::id()));
         }
 
         #[test]

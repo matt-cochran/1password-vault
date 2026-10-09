@@ -881,10 +881,9 @@ environments = ["dev"]
     fn invalid_namespace_points_at_its_line() {
         assert_eq!(
             err(&with("\"myapp\"", "\"My_App\"")),
-            "configuration error: invalid secrets.toml: TOML parse error at line 9, column 13\n  \
-             |\n9 | namespace = \"My_App\"\n  |             ^^^^^^^^\nkubernetes.namespace \
-             \"My_App\" must be a Kubernetes name: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 \
-             characters)\n"
+            "configuration error: invalid secrets.toml: TOML parse error at line 9, column 13\n\
+             kubernetes.namespace \"My_App\" must be a Kubernetes name: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 \
+             characters)"
         );
     }
 

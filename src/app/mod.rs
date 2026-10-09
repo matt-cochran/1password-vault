@@ -1035,6 +1035,7 @@ pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<Str
     plan.prune.retain(|n| names.contains(n));
     plan.held_from_prune.retain(|(p, _, _)| p == product);
     plan.config.retain(|p, _| p == product);
+    plan.concealed_config.retain(|(p, _)| p == product);
 }
 
 /// Target name → `product/KEY` of every declared key, so output names a key the way the

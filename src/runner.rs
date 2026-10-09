@@ -353,15 +353,17 @@ trait Engine {
 fn attempt_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
     let t = e.now();
     let res = e.attempt(call, limit);
+    // Every successful `op item get` registers all its values with the scrubber, with or
+    // without `--verbose` and whichever path made the read (setup, manifest, tidy, deploy
+    // credentials), before its own call's stderr can be shown (M3, SR-1).
+    if let Ok((Attempt::Exited(o), _)) = &res
+        && o.status == 0
+        && call.program == "op"
+        && call.args.windows(2).any(|w| w == ["item", "get"])
+    {
+        crate::scrub::register_item_values(&o.stdout);
+    }
     if e.verbose() {
-        // An item's values are registered before its own call's stderr is shown.
-        if let Ok((Attempt::Exited(o), _)) = &res
-            && o.status == 0
-            && call.program == "op"
-            && call.args.starts_with(&["item", "get"])
-        {
-            crate::scrub::register_item_values(&o.stdout);
-        }
         let outcome = match &res {
             Ok((a, _)) => a.describe(),
             Err(err) => format!("not started ({:?})", err.kind()),
@@ -1157,10 +1159,14 @@ impl CommandRunner for ProcessRunner {
     }
 }
 
-/// SIGINT/SIGTERM handling (NR-12): the signal is forwarded to the running captured child,
-/// which gets [`SIGNAL_GRACE`] before it is killed; opv then exits 130 (SIGINT) or 143
-/// (SIGTERM) with "interrupted during <step>; safe to re-run". Unix only: on Windows,
-/// Ctrl-C keeps its default behaviour (the console delivers it to the child too).
+/// SIGINT/SIGTERM/SIGHUP/SIGQUIT handling (NR-12, I2): the signal is forwarded to the
+/// running captured child (SIGQUIT as SIGTERM, so no core dump), which gets
+/// [`SIGNAL_GRACE`] before it is killed; the registered private directories are removed
+/// (SR-4); opv then exits 128 + the signal (130 for SIGINT, 143 for SIGTERM) with
+/// "interrupted during <step>; safe to re-run". Core dumps are disabled for opv and its
+/// children (SR-8). On Windows a console control handler (Ctrl-C, Ctrl-Break, closing the
+/// console, log-off, shutdown) does the same: the console delivers the event to the child
+/// too, so opv waits for it, ends it after the grace period, cleans up and exits 130.
 pub mod signals {
     use std::process::{Child, ExitStatus};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1232,6 +1238,12 @@ pub mod signals {
         }
     }
 
+    /// The pid of the captured child running now, if any: the Windows value pipe accepts
+    /// only this process or one of its descendants as its client (M1).
+    pub fn current_child() -> Option<u32> {
+        *lock(&CHILD)
+    }
+
     pub(super) fn track(child: &Child, step: String) {
         *lock(&CHILD) = Some(child.id());
         *lock(&STEP) = step;
@@ -1296,39 +1308,127 @@ pub mod signals {
         }
     }
 
-    /// Install the handler (once, from `main`). A no-op outside Unix.
+    /// The signals opv handles (I2: a closed terminal or dropped SSH session sends SIGHUP,
+    /// Ctrl-\\ sends SIGQUIT; both would otherwise skip every cleanup).
+    #[cfg(unix)]
+    pub const HANDLED: [i32; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+    /// What the handler does once a signal or console event arrived: stop new calls, stop
+    /// the running child, remove the private directories, report and exit `128 + sig`.
+    fn stop_and_exit(sig: i32) -> ! {
+        STOPPING.store(true, Ordering::SeqCst);
+        forward(sig);
+        run_cleanups();
+        let step = lock(&STEP).clone();
+        let rerun = lock(&RERUN).clone();
+        let message = interrupted_message(&step);
+        if JSON.load(Ordering::SeqCst) {
+            println!("{}", interrupted_json(sig, &message, &rerun));
+        }
+        eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
+        std::process::exit(128 + sig);
+    }
+
+    /// Install the handler (once, from `main`).
     #[cfg(unix)]
     pub fn install() -> std::io::Result<()> {
-        use signal_hook::consts::{SIGINT, SIGTERM};
-        let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
+        no_core_dumps();
+        let mut signals = signal_hook::iterator::Signals::new(HANDLED)?;
         std::thread::spawn(move || {
             if let Some(sig) = signals.forever().next() {
-                STOPPING.store(true, Ordering::SeqCst);
-                forward(sig);
-                run_cleanups();
-                let step = lock(&STEP).clone();
-                let rerun = lock(&RERUN).clone();
-                let message = interrupted_message(&step);
-                if JSON.load(Ordering::SeqCst) {
-                    println!("{}", interrupted_json(sig, &message, &rerun));
-                }
-                eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
-                std::process::exit(128 + sig);
+                stop_and_exit(sig);
             }
         });
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    /// No core dump of opv's memory (or of a child's, which inherits the limit) can reach
+    /// the disk (SR-4, SR-8). Best effort.
+    #[cfg(unix)]
+    fn no_core_dumps() {
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: a plain syscall with a valid, initialised struct.
+        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) };
+        #[cfg(target_os = "linux")]
+        // SAFETY: a plain prctl with integer arguments.
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0)
+        };
+    }
+
+    /// Install the console control handler (once, from `main`): Ctrl-C, Ctrl-Break,
+    /// closing the console, log-off and shutdown all stop the child, remove the private
+    /// directories and exit (I2, SR-4).
+    #[cfg(windows)]
+    pub fn install() -> std::io::Result<()> {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: registers a plain `extern "system"` function that lives for the process.
+        if unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Runs on a thread the system creates for the event. Never returns: returning would
+    /// let the default handler end the process before the cleanup.
+    #[cfg(windows)]
+    unsafe extern "system" fn on_console_event(_event: u32) -> windows_sys::core::BOOL {
+        // Every event is reported as an interruption (exit 130, like SIGINT).
+        stop_and_exit(2)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn install() -> std::io::Result<()> {
         Ok(())
     }
 
-    /// Send `sig` to the current child, wait up to the grace period, then kill it.
+    /// Wait up to the grace period for the console's own event to end the child, then end
+    /// it (Windows delivers Ctrl-C and close to every process on the console).
+    #[cfg(windows)]
+    fn forward(_sig: i32) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        let Some(id) = *lock(&CHILD) else { return };
+        let t = std::time::Instant::now();
+        while t.elapsed() < super::SIGNAL_GRACE {
+            if *lock(&CHILD) != Some(id) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let slot = lock(&CHILD);
+        if *slot == Some(id) {
+            // SAFETY: a terminate-only handle on a pid we spawned and have not reaped (the
+            // slot is cleared under this lock when it is reaped), closed right after.
+            unsafe {
+                let h = OpenProcess(PROCESS_TERMINATE, 0, id);
+                if !h.is_null() {
+                    TerminateProcess(h, 1);
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn forward(_sig: i32) {}
+
+    /// Send `sig` to the current child (SIGQUIT as SIGTERM: no core dump), wait up to the
+    /// grace period, then kill it.
     #[cfg(unix)]
     fn forward(sig: i32) {
         let Some(id) = *lock(&CHILD) else { return };
         let Ok(pid) = i32::try_from(id) else { return };
+        let sig = if sig == libc::SIGQUIT {
+            libc::SIGTERM
+        } else {
+            sig
+        };
         // SAFETY: a plain syscall on a pid we spawned and have not reaped (the slot is
         // cleared under the same lock when it is reaped).
         unsafe { libc::kill(pid, sig) };
@@ -2406,6 +2506,47 @@ mod tests {
     fn verbose_stderr_is_scrubbed() {
         let notes = verbose_notes("", "Authorization: Bearer abc.def\n");
         assert_eq!(notes[1], "    stderr: Authorization: Bearer __SECRET__");
+    }
+
+    /// I1: a value holding CR, BEL or ESC is masked in `--verbose` stderr too.
+    fn verbose_with_value(value: &str) -> String {
+        crate::scrub::register(value);
+        verbose_notes("", &format!("error: bad value {value}\n")).join("\n")
+    }
+
+    #[test]
+    fn verbose_masks_a_crlf_value() {
+        let notes = verbose_with_value("Line1-vbsCrlfAAAA\r\nLine2-vbsCrlfBBBB");
+        assert!(!notes.contains("vbsCrlf"), "{notes}");
+    }
+
+    #[test]
+    fn verbose_masks_a_value_with_bel() {
+        let notes = verbose_with_value("vbsBel-AAAA\x07vbsBel-BBBB");
+        assert!(!notes.contains("vbsBel"), "{notes}");
+    }
+
+    #[test]
+    fn verbose_masks_a_value_with_esc() {
+        let notes = verbose_with_value("vbsEsc-AAAA\x1b[31mvbsEsc-BBBB");
+        assert!(!notes.contains("vbsEsc"), "{notes}");
+    }
+
+    /// M3: every successful `op item get` registers its values, without `--verbose` and
+    /// with op's global flags before the subcommand.
+    #[test]
+    fn item_read_registers_its_values_without_verbose() {
+        let r = FakeRunner::new([Output::success(
+            r#"{"fields":[{"label":"K","value":"m3ItemValueQ8z"}]}"#,
+        )]);
+        let _ = r.read(
+            &Call::new(
+                "op",
+                &["--account", "acme", "item", "get", "i", "--vault", "v"],
+            ),
+            &[],
+        );
+        assert_eq!(crate::scrub::scrub("x m3ItemValueQ8z"), "x __SECRET__");
     }
 
     #[test]

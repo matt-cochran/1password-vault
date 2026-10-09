@@ -365,7 +365,7 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
                 "invalid {}: {}; expected one line: project = \"<name>\" (optionally account = \
                  \"<account>\")",
                 path.display(),
-                e.message()
+                crate::config::toml_error_inline(text, e.span(), e.message())
             )
             .into(),
         )

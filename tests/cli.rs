@@ -1101,3 +1101,138 @@ fn every_text_failure_ends_with_a_runnable_next() {
     }
     assert!(bad.is_empty(), "{bad:?}");
 }
+
+/// I2: SIGHUP (a closed terminal, a dropped SSH session) is handled like SIGTERM: opv
+/// exits 128 + 1 naming the step.
+#[cfg(unix)]
+#[test]
+fn sighup_is_handled_and_exits_129() {
+    let dir = fake_op(
+        "trap 'kill $! 2>/dev/null; exit 0' HUP TERM\n\
+         echo started > \"$OPV_LOG.start\"\n\
+         /bin/sleep 30 &\n\
+         wait",
+    );
+    let log = dir.path().join("log");
+    let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
+        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("OPV_LOG", &log)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(&dir.path().join("log.start"));
+    signal(child.id(), "HUP");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[cfg(unix)]
+fn wait_for(path: &std::path::Path) {
+    let t = std::time::Instant::now();
+    while !path.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn signal(pid: u32, sig: &str) {
+    Command::new("/bin/kill")
+        .args([&format!("-{sig}"), &pid.to_string()])
+        .status()
+        .unwrap();
+}
+
+/// I2 (SR-4): an Azure deploy sign-in interrupted by `sig` leaves no private az directory
+/// behind. Fake `op` serves the deploy-credential item; fake `az login` hangs until the
+/// signal; the runtime directory is a RAM (tmpfs) directory of the test's own.
+#[cfg(target_os = "linux")]
+fn az_dir_left_after(sig: &str) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str| {
+        let p = bin.path().join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write(
+        "op",
+        r#"/bin/cat <<'JSON'
+{"id":"azure","fields":[
+ {"id":"t","type":"STRING","label":"AZURE_TENANT_ID","value":"11111111-1111-1111-1111-111111111111"},
+ {"id":"c","type":"STRING","label":"AZURE_CLIENT_ID","value":"55555555-5555-5555-5555-555555555555"},
+ {"id":"s","type":"CONCEALED","label":"AZURE_CLIENT_SECRET","value":"i2-marker-secret"}]}
+JSON"#,
+    );
+    write(
+        "az",
+        "if [ \"$1\" = login ]; then\n\
+           echo '{}' > \"$AZURE_CONFIG_DIR/service_principal_entries.json\"\n\
+           echo started > \"$OPV_LOG.start\"\n\
+           trap 'kill $! 2>/dev/null; exit 1' HUP TERM INT\n\
+           /bin/sleep 30 &\n\
+           wait\n\
+         fi\n\
+         echo '{}'",
+    );
+    let runtime = tempfile::Builder::new().tempdir_in("/dev/shm").unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cfg = bin.path().join("secrets.toml");
+    std::fs::write(
+        &cfg,
+        "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"vprd\"\n\
+         item_id = \"iprd\"\ndeploy_credentials = \"op://deploy/azure\"\n\
+         [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+         key_vault = \"kv-myapp-prod\"\nresource_group = \"rg-myapp\"\n\
+         container_app = \"ca-myapp\"\nidentity = \"system\"\n\
+         [keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+    )
+    .unwrap();
+    let log = bin.path().join("log");
+    let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["--config", cfg.to_str().unwrap(), "status", "prod"])
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("OP_SERVICE_ACCOUNT_TOKEN", "dummy-not-a-token")
+        .env("OPV_LOG", &log)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(&bin.path().join("log.start"));
+    // The sign-in is under way: its private directory exists before the signal.
+    let before = std::fs::read_dir(runtime.path()).unwrap().count();
+    assert_eq!(before, 1, "no private az directory to clean up");
+    signal(child.id(), sig);
+    let _ = child.wait_with_output().unwrap();
+    std::fs::read_dir(runtime.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sighup_removes_the_private_az_dir() {
+    assert_eq!(az_dir_left_after("HUP"), Vec::<String>::new());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigquit_removes_the_private_az_dir() {
+    assert_eq!(az_dir_left_after("QUIT"), Vec::<String>::new());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigint_removes_the_private_az_dir() {
+    assert_eq!(az_dir_left_after("INT"), Vec::<String>::new());
+}

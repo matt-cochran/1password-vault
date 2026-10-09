@@ -171,6 +171,31 @@ pub fn ram_backed(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Sweep the private directories that killed runs left behind (SR-4), at the start of
+/// every Azure run whether or not it signs in with deploy credentials (I2): the Linux
+/// runtime directory when it is the user's and RAM-backed, `%LOCALAPPDATA%\Temp` on
+/// Windows. Best effort; never an error.
+pub fn sweep_stale() {
+    if cfg!(windows) {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Temp"))
+            && base.is_absolute()
+            && base.is_dir()
+        {
+            sweep(&base);
+        }
+        return;
+    }
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        && owned_dir(&runtime)
+        && ram_backed(&runtime).unwrap_or(false)
+    {
+        sweep(&runtime);
+    }
+}
+
 /// Remove `<prefix><pid>-*` directories whose run is gone (killed before it could clean
 /// up). A live run's directory, anything not owned by this user and anything that is not
 /// a plain directory are left alone.

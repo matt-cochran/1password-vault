@@ -61,7 +61,7 @@ The live recon (Task 1) may overturn R1–R6 or any `az` argv below; its finding
 
 ### Task 1: Live recon against a throwaway Azure resource group (manager + owner)
 
-Needs the owner's explicit OK to create and delete resources in subscription "OutboundLabs". Nothing here goes to CI.
+Needs the owner's explicit OK to create and delete resources in the owner's sandbox subscription. Nothing here goes to CI.
 
 **Files:**
 - Create: `docs/design/spike-p1-azure-findings.md`

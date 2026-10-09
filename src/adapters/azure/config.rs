@@ -413,6 +413,9 @@ impl TargetConfig for AzureTarget {
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
+        // Directories a killed run left behind are removed at the start of every Azure run
+        // (I2, SR-4), not only by the next deploy sign-in.
+        super::login::sweep_stale();
         let app = ContainerApp::new(r, self, managed.clone());
         // Tests shorten the health wait; production has no such switch.
         #[cfg(test)]
@@ -534,14 +537,14 @@ environments = ["prod"]
     }
 
     /// FR-2, FR-37: a mistyped field in the provider section shows the file's line and
-    /// column, the line itself and the field, like any other TOML error.
+    /// column and the field, like any other TOML error; never the line itself (C1).
     #[test]
     fn azure_section_type_error_points_at_the_field() {
         let bad = azure_env_with("identity = \"system\"", "identity = 5");
         assert_eq!(
             parse(&bad).unwrap_err().to_string(),
-            "configuration error: invalid secrets.toml: TOML parse error at line 12, column 12\n   \
-             |\n12 | identity = 5\n   |            ^\ninvalid type: integer `5`, expected a string\n"
+            "configuration error: invalid secrets.toml: TOML parse error at line 12, column 12\n\
+             invalid type: integer, expected a string"
         );
     }
 

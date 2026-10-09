@@ -277,11 +277,17 @@ impl<'a> Section<'a> {
     }
 
     /// The section as `T`. A missing, unknown or mistyped field is reported like any other
-    /// TOML error in the file: line, column, the line itself and the field (FR-2).
+    /// TOML error in the file: line, column and the field (FR-2), never the line itself
+    /// (C1, SR-1).
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, Error> {
-        T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|mut e| {
-            e.set_input(Some(self.text));
-            Error::Config(format!("invalid secrets.toml: {e}").into())
+        T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|e| {
+            Error::Config(
+                format!(
+                    "invalid secrets.toml: {}",
+                    crate::config::toml_error(self.text, e.span(), e.message())
+                )
+                .into(),
+            )
         })
     }
 }

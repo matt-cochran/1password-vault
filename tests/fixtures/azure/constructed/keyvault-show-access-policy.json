@@ -60,10 +60,10 @@
   "resourceGroup": "opv-fixture-rg",
   "systemData": {
     "createdAt": "2026-10-08T21:13:14.963000+00:00",
-    "createdBy": "admin@outboundlabs.com",
+    "createdBy": "admin@example.com",
     "createdByType": "User",
     "lastModifiedAt": "2026-10-08T21:13:14.963000+00:00",
-    "lastModifiedBy": "admin@outboundlabs.com",
+    "lastModifiedBy": "admin@example.com",
     "lastModifiedByType": "User"
   },
   "tags": {},

@@ -4,7 +4,7 @@
   "properties": {
     "active": true,
     "createdTime": "2026-10-08T21:59:08+00:00",
-    "fqdn": "opv-fixture-app--0000001.lemonsmoke-d84b3d65.eastus2.azurecontainerapps.io",
+    "fqdn": "opv-fixture-app--0000001.opv-fixture-app.fixture.eastus2.azurecontainerapps.io",
     "healthState": "Healthy",
     "provisioningState": "Provisioned",
     "replicas": 1,

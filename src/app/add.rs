@@ -349,7 +349,9 @@ fn rule(spec: &str) -> Result<(String, Value), Error> {
         match toml::from_str::<Rules>(&probe) {
             Ok(_) => return Ok((name.to_string(), v)),
             Err(e) => {
-                first.get_or_insert_with(|| e.message().trim().to_string());
+                first.get_or_insert_with(|| {
+                    crate::config::toml_error_inline(&probe, None, e.message())
+                });
             }
         }
     }

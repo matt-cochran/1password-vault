@@ -166,7 +166,11 @@ fn doctor_gets_a_failed_deploy_sign_in_back() {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)])]);
     let (_, failed) = open_for_doctor_on(&fl, "prod", &r, &linux);
-    assert!(failed.is_some_and(|e| e.to_string().contains("field FLY_API_TOKEN is missing")));
+    assert!(failed.is_some_and(|f| {
+        f.error
+            .to_string()
+            .contains("field FLY_API_TOKEN is missing")
+    }));
 }
 
 /// After a failed deploy sign-in, doctor's `op` calls still carry the account.
@@ -232,16 +236,22 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
     );
 }
 
-/// `doctor --env` keeps the failed deploy read's scrubbed stderr in `error::report`'s
-/// order: the error line, then `  op said: …`, then the rest (NR-31, UX1).
+/// `doctor --env` keeps the failed deploy read's scrubbed stderr beside the error
+/// (NR-31, UX1), for the text output only.
 #[test]
-fn doctor_deploy_failure_puts_the_excerpt_after_the_error_line() {
-    let e = doctor_signed_out_deploy_failure();
+fn doctor_deploy_failure_keeps_the_excerpt_beside_the_error() {
+    let f = doctor_signed_out_failure();
     assert_eq!(
-        e.text().lines().nth(1),
-        Some("  op said: [ERROR] not signed in"),
-        "{e:?}"
+        f.excerpt.map(|x| x.render()).as_deref(),
+        Some("  op said: [ERROR] not signed in\n"),
     );
+}
+
+/// M2: the excerpt is never part of the error's text, so no JSON document carries it.
+#[test]
+fn doctor_deploy_failure_text_has_no_excerpt() {
+    let e = doctor_signed_out_deploy_failure();
+    assert!(!e.text().contains("said:"), "{e:?}");
 }
 
 /// The excerpt never replaces the sign-in step, which stays the error's `Do:` (A3).
@@ -256,6 +266,10 @@ fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
 }
 
 fn doctor_signed_out_deploy_failure() -> Error {
+    doctor_signed_out_failure().error
+}
+
+fn doctor_signed_out_failure() -> super::DeployFailure {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([]);
     r.push_with_stderr(crate::runner::Output::failure(1), "[ERROR] not signed in");

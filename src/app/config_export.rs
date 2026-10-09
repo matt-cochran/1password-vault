@@ -31,15 +31,27 @@ pub fn run(
     // Config values are not secret (FR-18); `plan.config` never holds a secret-kind value.
     // Under the simple profile (FR-20) the export is a flat `KEY -> value` object, with no
     // product level.
+    // M4 (owner ruling): config kept concealed in 1Password is accepted, but its value is
+    // never printed.
+    let mut config = plan.config.clone();
+    for (product, key) in &plan.concealed_config {
+        if let Some(v) = config.get_mut(product).and_then(|m| m.get_mut(key)) {
+            *v = CONCEALED.to_string();
+        }
+    }
+    let plan_config = &config;
     let empty = BTreeMap::new();
     let json = if fleet.is_simple() {
-        serde_json::to_string_pretty(plan.config.get(SIMPLE_PRODUCT).unwrap_or(&empty))
+        serde_json::to_string_pretty(plan_config.get(SIMPLE_PRODUCT).unwrap_or(&empty))
     } else {
-        serde_json::to_string_pretty(&plan.config)
+        serde_json::to_string_pretty(plan_config)
     }
     .map_err(|_| Error::Config("cannot serialize config export".into()))?;
     writeln!(out, "{json}").map_err(write_err)
 }
+
+/// What `config export` shows for a config key kept concealed in 1Password (M4).
+pub const CONCEALED: &str = "<concealed in 1Password>";
 
 fn refuses(r: &Row) -> bool {
     match r.kind {
@@ -92,6 +104,21 @@ mod tests {
     fn reads_config_stored_as_secret() {
         let (res, _, _) = export(complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)));
         assert!(res.is_ok());
+    }
+
+    /// M4: config kept concealed is never printed.
+    #[test]
+    fn config_stored_as_secret_is_never_printed() {
+        let (_, out, _) = export(complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)));
+        assert!(!text_of(&out).contains(POLICY), "{}", text_of(&out));
+    }
+
+    /// M4: it shows as `<concealed in 1Password>` instead.
+    #[test]
+    fn config_stored_as_secret_shows_as_concealed() {
+        let (_, out, _) = export(complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["allumata"]["SIGNUP_POLICY"], CONCEALED);
     }
 
     /// FR-43: a secret stored as text is read tolerantly; its value is never printed.
