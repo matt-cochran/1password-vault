@@ -16,8 +16,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreNameRules, TargetConfig,
-    eq_as,
+    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreConfig, StoreNameRules,
+    TargetConfig, eq_as,
 };
 use crate::runner::CommandRunner;
 
@@ -86,7 +86,7 @@ impl Eq for ResolvedUri {}
 /// its line and column like any other field (FR-2, NR-7).
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
-struct Subscription(String);
+pub(crate) struct Subscription(pub(crate) String);
 
 impl TryFrom<String> for Subscription {
     type Error = String;
@@ -95,7 +95,7 @@ impl TryFrom<String> for Subscription {
         if is_guid(&s) {
             Ok(Self(s.to_ascii_lowercase()))
         } else {
-            Err("azure.subscription must be a subscription id like \
+            Err("subscription must be a subscription id like \
                  00000000-0000-0000-0000-000000000000 (az account list -o table shows yours)"
                 .into())
         }
@@ -103,7 +103,7 @@ impl TryFrom<String> for Subscription {
 }
 
 /// A GUID: 8-4-4-4-12 hex digits.
-fn is_guid(s: &str) -> bool {
+pub(crate) fn is_guid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
         && parts
@@ -194,6 +194,18 @@ impl Provider for AzureProvider {
     fn init_section(&self, _name: &str, _profile: Profile) -> Option<String> {
         None
     }
+
+    fn store_kinds(&self) -> &'static [&'static str] {
+        &[super::store::KIND]
+    }
+
+    fn parse_store(
+        &self,
+        _kind: &str,
+        section: &Section<'_>,
+    ) -> Result<Box<dyn StoreConfig>, Error> {
+        super::store::parse(section)
+    }
 }
 
 /// Check the identifiers of an `azure` section and build the target (FR-28, FR-30).
@@ -253,11 +265,21 @@ const REFERENCE_ROUTE: &str = "Key Vault reference pinned to one version (never 
 /// The Container Apps secret that carries the reference (R2), for `explain`.
 const APP_SECRET: &str = "opv-<16 hex> per Key Vault version (SHA-256 of key vault name/version); a new version is a new revision";
 
-fn key_vault_char(c: char) -> bool {
+pub(crate) fn key_vault_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-'
 }
 
 impl AzureTarget {
+    /// The vault this target writes to, for the shared Key Vault checks.
+    pub fn vault_ref(&self) -> preflight::Vault {
+        preflight::Vault {
+            name: self.key_vault.clone(),
+            subscription: self.subscription.clone(),
+            vault_field: "azure.key_vault".into(),
+            subscription_field: "azure.subscription".into(),
+        }
+    }
+
     /// Env var name for `product`/`key`: `{PRODUCT}` becomes the upper-cased product with
     /// `-` replaced by `_`, `{KEY}` becomes the key verbatim.
     pub fn env_name_of(&self, product: &str, key: &str) -> String {

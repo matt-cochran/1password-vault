@@ -112,7 +112,7 @@ pub fn run(
 pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
     runner.local_run_supported().map_err(|e| {
         if e.kind() == io::ErrorKind::Unsupported {
-            Error::Dependency("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See docs/local-development.md (WSL).".into())
+            Error::Dependency(format!("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See {}/local-development.md#wsl.", crate::DOCS_URL))
         } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind())) }
     })
 }

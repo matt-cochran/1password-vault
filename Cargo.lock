@@ -292,6 +292,7 @@ dependencies = [
  "base64",
  "clap",
  "clap_complete",
+ "getrandom",
  "hex",
  "libc",
  "regex",

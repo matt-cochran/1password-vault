@@ -534,7 +534,8 @@ fn failure(
             check_app(app, &format!("the token in {var}"))
         ));
     }
-    match auth_whoami(r) {
+    // The probe explains the failed call; its excerpt stays with the error (NR-31).
+    match crate::runner::diagnosing(|| auth_whoami(r)) {
         Ok(false) => not_logged_in(&h, Some(&failed)),
         Ok(true) => Error::Target(format!(
             "{failed}: logged in to Fly\n  {}",

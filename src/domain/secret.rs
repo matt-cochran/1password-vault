@@ -7,7 +7,10 @@ use secrecy::{ExposeSecret, SecretString};
 pub struct SecretValue(SecretString);
 
 impl SecretValue {
+    /// Wrap `v` and register it with the run's stderr scrubber (NR-31), so every value opv
+    /// reads, transforms (`ensure_prefix`) or stages is masked in any child output shown.
     pub fn new(v: String) -> Self {
+        crate::scrub::register(&v);
         Self(SecretString::from(v))
     }
 
@@ -62,6 +65,13 @@ mod tests {
             assert!(!out.contains("sk-live"), "leaked: {out}");
             assert!(out.contains("<REDACTED>"));
         }
+    }
+
+    /// NR-31: every value opv holds (read, transformed or staged) is masked in child output.
+    #[test]
+    fn new_value_is_registered_with_the_scrubber() {
+        let _s = SecretValue::new("sv-registered-Q4z".into());
+        assert_eq!(crate::scrub::scrub("x sv-registered-Q4z"), "x __SECRET__");
     }
 
     #[test]

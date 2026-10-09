@@ -11,5 +11,10 @@ pub mod host;
 pub mod ports;
 pub mod provider;
 pub mod runner;
+pub mod scrub;
 
 pub use error::Error;
+
+/// The user documentation, for links in messages: a binary install has no `docs/` folder
+/// (review #17).
+pub const DOCS_URL: &str = "https://github.com/matt-cochran/1password-vault/blob/main/docs";

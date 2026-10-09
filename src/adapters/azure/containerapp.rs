@@ -220,7 +220,11 @@ impl<'a> ContainerApp<'a> {
         status: i32,
     ) -> Error {
         let failed = format!("az {what} failed ({})", status_text(status));
-        match (az::signed_in(self.runner), effect) {
+        // The probe explains the failed call; its excerpt stays with the error (NR-31).
+        match (
+            crate::runner::diagnosing(|| az::signed_in(self.runner)),
+            effect,
+        ) {
             (Ok(false), _) => az::not_logged_in(Some(&failed)),
             (Ok(true), Effect::Read) => Error::Target(format!(
                 "{failed}: signed in to Azure, but {subject} could not be read; nothing was \

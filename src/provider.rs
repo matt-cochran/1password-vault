@@ -16,7 +16,7 @@ use toml::de::{DeValue, ValueDeserializer};
 use crate::domain::{Kind, Profile, SecretValue};
 use crate::error::Error;
 use crate::host::Host;
-use crate::ports::Ports;
+use crate::ports::{PinnedStore, Ports};
 use crate::runner::CommandRunner;
 
 /// One deployment provider. Registered once in `adapters::registry::PROVIDERS`.
@@ -62,6 +62,43 @@ pub trait Provider: Sync {
             self.label()
         )))
     }
+    /// Store kinds this provider declares for `[stores.<name>]` tables (FR-39): the key that
+    /// names the kind, e.g. `azure_key_vault = "kv-myapp-prod"`.
+    fn store_kinds(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Parses a `[stores.<name>]` table of `kind` (one of [`Provider::store_kinds`]). Read it
+    /// with [`Section::deserialize`] so a bad field shows its line; [`Section::env`] is the
+    /// store's name.
+    fn parse_store(
+        &self,
+        kind: &str,
+        section: &Section<'_>,
+    ) -> Result<Box<dyn StoreConfig>, Error> {
+        Err(Error::Config(format!(
+            "store {}: {} declares no store kind {kind:?}",
+            section.env(),
+            self.label()
+        )))
+    }
+    /// The stores of other providers this provider's runtime can bind (`secrets_in`, FR-39).
+    fn bindings(&self) -> &'static [StoreBinding] {
+        &[]
+    }
+    /// `target` (parsed by this provider) with its secrets in `store`. Called only for a
+    /// pair [`Provider::bindings`] declares.
+    fn bind(
+        &self,
+        target: Box<dyn TargetConfig>,
+        store: &dyn StoreConfig,
+    ) -> Result<Box<dyn TargetConfig>, Error> {
+        let _ = target;
+        Err(Error::Config(format!(
+            "{} cannot keep its secrets in {}",
+            self.label(),
+            store.describe()
+        )))
+    }
 }
 
 /// One field of a `deploy_credentials` item (FR-40): its label and kind (concealed = secret,
@@ -87,6 +124,76 @@ pub trait DeployLogin {
     fn env(&self, program: &str) -> Vec<(&'static str, &str)>;
 }
 
+/// One supported (store kind, runtime) pair for `secrets_in` (FR-39).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreBinding {
+    /// The store kind, e.g. `azure_key_vault`.
+    pub store_kind: &'static str,
+    /// How the runtime reaches it, in messages: "External Secrets Operator".
+    pub via: &'static str,
+}
+
+/// A validated `[stores.<name>]` table (FR-39): a store one or more runtimes keep their
+/// secrets in. Core code sees only this trait; the provider that declared the kind owns it.
+pub trait StoreConfig: fmt::Debug + Send + Sync {
+    /// The provider that declared this store kind.
+    fn provider(&self) -> &'static dyn Provider;
+    /// The store kind, e.g. `azure_key_vault`.
+    fn kind(&self) -> &'static str;
+    /// The `[stores.<name>]` name.
+    fn name(&self) -> &str;
+    /// The store in messages, e.g. `Key Vault kv-myapp-prod`.
+    fn describe(&self) -> String;
+    /// The store's own identifier (a vault name), which a bridge's settings must name.
+    fn locator(&self) -> &str;
+    /// The name in-cluster bridges know this store by (an External Secrets
+    /// `ClusterSecretStore`); defaults to [`StoreConfig::name`].
+    fn bridge_name(&self) -> &str;
+    /// Name in the store for a runtime env var name.
+    fn store_name(&self, env_name: &str) -> String;
+    /// Limits of a store name, checked at load for every environment that uses the store.
+    fn name_rules(&self) -> StoreNameRules;
+    /// The store port for environment `env` (FR-28); `managed` as for
+    /// [`TargetConfig::open`].
+    fn open<'a>(
+        &'a self,
+        env: &'a str,
+        managed: BTreeSet<String>,
+        r: &'a dyn CommandRunner,
+    ) -> Box<dyn PinnedStore + 'a>;
+    /// Read-only checks of the store before any write (NR-23, NR-25); `Err` stops.
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<(), Error>;
+    /// `doctor` lines of the store.
+    fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
+    /// `explain` lines for an env name kept in this store.
+    fn explain(&self, env_name: &str) -> Vec<(&'static str, String)>;
+    /// True when `other` is the same store (two names for one vault).
+    fn same_store(&self, other: &dyn StoreConfig) -> bool;
+    /// Equal configuration (every field).
+    fn eq_dyn(&self, other: &dyn StoreConfig) -> bool;
+    fn as_any(&self) -> &dyn Any;
+    fn clone_box(&self) -> Box<dyn StoreConfig>;
+}
+
+impl Clone for Box<dyn StoreConfig> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl PartialEq for Box<dyn StoreConfig> {
+    fn eq(&self, other: &Self) -> bool {
+        self.eq_dyn(other.as_ref())
+    }
+}
+
+impl Eq for Box<dyn StoreConfig> {}
+
+/// [`StoreConfig::eq_dyn`] for a store type with `PartialEq`.
+pub fn store_eq_as<T: PartialEq + 'static>(this: &T, other: &dyn StoreConfig) -> bool {
+    other.as_any().downcast_ref::<T>() == Some(this)
+}
+
 /// One provider section of `secrets.toml` (`[environments.<env>.<section>]`), with its
 /// place in the file so errors point at the offending line.
 pub struct Section<'a> {
@@ -101,7 +208,7 @@ impl<'a> Section<'a> {
         Self { env, value, text }
     }
 
-    /// The environment this section belongs to.
+    /// The environment this section belongs to (for a `[stores.<name>]` table: the store).
     pub fn env(&self) -> &str {
         self.env
     }
@@ -126,6 +233,12 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn store_name(&self, env_name: &str) -> String;
     /// Name patterns, case sensitivity and limits, checked generically at load (FR-30).
     fn name_rules(&self) -> NameRules;
+    /// The named store this target keeps its secrets in (`secrets_in`, FR-39); `None` when
+    /// it uses its own store. Its name rules are checked too, across every environment
+    /// that uses it.
+    fn secrets_in(&self) -> Option<&dyn StoreConfig> {
+        None
+    }
     /// True when `other` is the same target: two environments on it would manage the same
     /// names, and each would prune what the other stages (FR-8).
     fn same_target(&self, other: &dyn TargetConfig) -> bool;

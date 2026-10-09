@@ -16,7 +16,7 @@ use super::{
     PinnedRow, is_blocking, open_target, preflight, print_extras, print_rows, read_and_plan,
     write_err, write_json,
 };
-use crate::domain::{Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
+use crate::domain::{Binding, Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
 use crate::provider::TargetConfig;
@@ -99,6 +99,9 @@ struct PinnedStatus {
     drift: Vec<String>,
     env_routed: Vec<String>,
     runtime: String,
+    /// How each bound name reaches the app, when it passes through more than one object
+    /// (FR-39). Names and version ids only.
+    chains: Vec<String>,
 }
 
 impl PinnedStatus {
@@ -112,6 +115,9 @@ impl PinnedStatus {
         }
         if !self.drift.is_empty() {
             line(drift_line(env_name, &self.drift.join(", ")))?;
+        }
+        for chain in &self.chains {
+            line(format!("chain: {chain}"))?;
         }
         if !self.env_routed.is_empty() {
             line(format!(
@@ -170,6 +176,14 @@ fn pinned_status(
         drift: d.drift.iter().cloned().collect(),
         env_routed: want.plain.keys().cloned().collect(),
         runtime: runtime.describe(),
+        chains: want
+            .store
+            .keys()
+            .filter_map(|n| match snap.bindings.get(n) {
+                Some(Binding::Pinned { version, .. }) => runtime.chain(n, version),
+                _ => None,
+            })
+            .collect(),
     })
 }
 
@@ -206,7 +220,7 @@ mod tests {
     use super::*;
     use crate::app::testutil::*;
     use crate::runner::Output;
-    use crate::runner::fake::{FakeRunner, failed_read};
+    use crate::runner::fake::FakeRunner;
 
     fn status_of(item: Output, fly_list: Output) -> (Result<(), Error>, String, FakeRunner) {
         let r = FakeRunner::new([item, fly_list]);
@@ -425,7 +439,7 @@ mod tests {
 
     #[test]
     fn status_source_failure_is_typed_and_value_free() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::success(
+        let r = FakeRunner::new(std::iter::once(Output::failure(1)).chain([Output::success(
             br#"{"email":"x-FIXTUREVALUE@example.com","user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
         )]));
         r.responses
@@ -435,13 +449,11 @@ mod tests {
         let e = run(&fleet(), "prod", &r, &mut out).unwrap_err();
         assert!(matches!(e, Error::Source(_)), "{e}");
         assert_no_values(&e.to_string());
-        // One item read (retried, NR-3), then the free session and vault checks (NR-26);
-        // no Fly call.
+        // One item read, then the free session and vault checks (NR-26, P16: before any
+        // retry; the vault is not readable, so none); no Fly call.
         assert_eq!(
             argvs(&r),
             vec![
-                "op item get iprd --vault vprd --format json",
-                "op item get iprd --vault vprd --format json",
                 "op item get iprd --vault vprd --format json",
                 "op whoami --format json",
                 "op vault get vprd --format json"

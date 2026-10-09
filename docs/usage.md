@@ -11,7 +11,8 @@ Every command's `--help` lists its own options first, then the global options (`
 ```sh
 opv login prod                      # sign in to prod's 1Password account; opens a signed-in terminal
 opv doctor                          # config, op and sign-in, flyctl and sign-in, op local run
-opv doctor --env dev --product allumata   # only what local work in dev needs; no deployment CLIs
+opv doctor --env dev --product allumata   # only what local work in dev needs, plus one read of its item
+opv doctor --json                   # the same checks as one JSON document
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status staging                  # one row per product and key; exit 8 if any blocks
@@ -43,7 +44,13 @@ opv run prod -- ./server            # simple profile: no --product
 Next step (op auth): sign in: opv login
 ```
 
-An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
+On a machine a person signs in from (not CI, no service-account token) the sign-in step is `opv login <env>` (`opv login` when doctor has no `--env`), the same in every shell. Under CI it is the service-account wording instead.
+
+With `--env`, doctor also reads that environment's item once, by IDs, and checks the selected product's keys as `check` does: `ok    item: <vault_id>/<item_id> readable (<n> field(s) in section <product>)`, or a `FAIL  item:` line naming each key that is missing, of the wrong kind or failing a rule, with `opv check <env> --product <p>` as the next step (exit 8). So doctor is never all clear when `check` would fail. Without `--env` no item is read.
+
+`--json` prints `{"schema_version": 1, "checks": [{"name", "status": "ok"|"warn"|"fail"|"skip", "detail", "next"}], "next"}`: `detail` is the check's first line (names, versions and commands only), `next` its remediation or `null`, and the top-level `next` is the first failing check's step, or `null` when nothing is pending. The exit code is the same as without `--json`.
+
+With no `secrets.toml` at all, the step offers both ways to start: `opv init <env> --vault <vault title> --item <item title>` for an existing item, `opv setup` for a new project. An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
 
 ### Explain a key
 
@@ -64,7 +71,7 @@ allumata/OPENAI_API_KEY in prod
   inspect:    op item get iprd --vault vprd
 ```
 
-Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile that names the bare key (`did you mean KEY?`). Under the fleet profile a bare `<KEY>` resolves to the one product that declares it; when several do, the error lists them (`ambiguous key "KEY": declared as api/KEY, web/KEY`). An undeclared key or product suggests the closest declared names.
 
 It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
 
@@ -138,6 +145,16 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 - **Soft-deleted names (Key Vault).** A deleted secret name stays reserved until it is purged, so writing it again fails. opv prints the exact `az keyvault secret recover` command; it never recovers or purges anything itself. <!-- verify: exact recover command text -->
 - **Access.** The app's identity needs read access to the vault secrets. `opv doctor` warns, with the grant command, if it cannot confirm that. If the identity really cannot read a secret, Azure refuses the new revision, the old one keeps serving, and `sync` reports it.
 
+#### Key Vault → Kubernetes through External Secrets (`secrets_in`)
+
+With `secrets_in` (see [configuration](configuration.md#secrets-in-a-named-store-storesname-and-secrets_in)) the same commands run, with these differences:
+
+- **Before any write**, `sync` checks the vault (subscription, vault, data-plane access), that the cluster serves `external-secrets.io/v1`, that the `ClusterSecretStore` exists and is `Ready`, and that you may create ExternalSecrets in the namespace. Any failure stops the run with nothing written and names the fix; a store that is not Ready is quoted with its own message. `status` and `plan` print the same findings as `warn` lines and go on.
+- **Deploy** writes Key Vault versions, applies one ExternalSecret per pinned version, and waits (progress line every 15 seconds, within `--timeout`) until each is `Ready`. Only then does it repin the Deployment and wait for the rollout.
+- **When an ExternalSecret cannot sync**, the operator only says `could not get secret data from provider`, so opv finds the cause itself: the version is missing from Key Vault, the `ClusterSecretStore` is missing or not Ready, it points at another vault, or (when all of that is fine) its identity cannot read the secret. The Deployment is not changed and the message ends with the next step.
+- **Clean-up.** After a healthy rollout opv deletes the ExternalSecrets (and with them their Secrets) that neither the Deployment nor any ReplicaSet references, so `kubectl rollout undo` keeps working. `--prune` deletes a pruned key's ExternalSecrets first and its Key Vault entry after. Key Vault keeps old versions as history.
+- **`status`** prints one `chain:` line per bound key, e.g. `chain: DB_URL → Key Vault kv-myapp-prod (46687ce78b…) → ExternalSecret opv-db-url-46687ce78b → env DB_URL`.
+
 Values reach `az` and `kubectl` only on stdin. On native Windows the Azure writes stop with a message that names WSL; `plan` and `status` work everywhere.
 
 ### Progress, summary and next step
@@ -158,7 +175,7 @@ Every failure also ends with exactly one `Next:` line holding a command you can 
 
 - **Reads are retried, writes are not.** A failed read (`op item get`, a list, a status check) is tried up to 3 times, with a 1 s then 2 s pause, printing `retrying az keyvault secret list (2/3) in 2 s`. A refusal such as not found or not signed in is never retried. A write is never repeated blindly: opv reads the target back to see what happened.
 - **One time budget.** `--timeout <secs>` (default 900) caps the whole run, including waits for a revision or rollout. There is no separate deploy timeout.
-- **`--verbose`** prints one stderr line per external call: the program, its arguments, how long it took and the outcome. Values never appear, because they are never in arguments.
+- **`--verbose`** prints one stderr line per external call: the program, its arguments, how long it took and the outcome. Under it come the call's own error output (`    stderr: ...`, every secret masked as `__SECRET__`) and the size and JSON shape of its result (`    stdout: 412 bytes, JSON object with keys: ...`). A result's content is never shown.
 - **Safe to re-run.** Stopping opv at any point (Ctrl-C, a CI cancel, a lost connection) leaves the app working. Run the same command again and it finishes the rest.
 - **Exit 9** means opv cannot tell what happened: a write may or may not have been applied, or 1Password, Fly, Azure or the cluster did not answer after 3 tries (nothing was written). Nothing is known to be broken. Check the provider's status page if one is named, then re-run the same command. CI may retry a job that exits 9.
 - **Exit 130 / 143** means you pressed Ctrl-C or the job was terminated. opv names the step it stopped in.
@@ -278,7 +295,7 @@ Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) o
 - Signed in but the read still failed is a source error (4) naming the vault and item IDs and the identity type (USER or SERVICE_ACCOUNT, never the identity) and saying to grant that identity access to the vault.
 - On Fly, a failed `flyctl` call with `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` set is a Fly target error (5): "flyctl failed for app <app>: check that the token in <variable> can access it, that the app exists, and, for a deploy, that it has at least one machine". `flyctl auth whoami` is not consulted there, because app-scoped deploy tokens fail it. With no Fly token set, opv runs `flyctl auth whoami` (exit status only; its output names the account and is never shown): logged out is authentication (7), "not logged in to Fly", with `flyctl auth login`, or "set FLY_API_TOKEN" under CI; logged in is a target error (5) with the same app wording.
 
-`doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. Child stderr is suppressed on purpose, because it could echo a value; a re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
+`doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. When a call fails, the last lines (at most 5) it wrote on stderr follow opv's error line, labelled with the program (`  az said: ...`), after every value opv read or staged and every token, key or password pattern is masked as `__SECRET__`; its output on stdout is never shown. A re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
 
 A clean `status` ends with a summary line, for example `49 saved, 13 not yet on Fly (staged by the next sync), 0 findings`.
 

@@ -188,7 +188,7 @@ fn list(
         return Ok(out);
     }
     let failed = format!("{failed} failed ({})", status_text(out.status));
-    Err(match diagnose(r, host) {
+    Err(match crate::runner::diagnosing(|| diagnose(r, host)) {
         Err(e) => e,
         Ok(Session::SignedIn(t)) => Error::Source(format!(
             "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \

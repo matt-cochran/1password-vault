@@ -16,7 +16,8 @@ mod completions;
 
 const QUICK_START: &str = "\
 Start here:
-  opv setup                        Guided setup for this project
+  opv setup                        Guided setup for a new project
+  opv init dev --vault V --item I  Use a 1Password item you already set up
   opv doctor                       Find a setup problem and its next step
   opv login dev                    Sign in to 1Password for an environment
 
@@ -93,15 +94,16 @@ Examples:
 
 const EXPLAIN_EXAMPLES: &str = "\
 Examples:
-  opv explain api/OPENAI_API_KEY             # fleet profile: PRODUCT/KEY
-  opv explain DATABASE_URL                   # simple profile: KEY
+  opv explain OPENAI_API_KEY                 # the one product that declares it
+  opv explain api/OPENAI_API_KEY             # pick a product when several declare it
   opv explain api/OPENAI_API_KEY --env prod  # when several environments exist";
 
 const DOCTOR_EXAMPLES: &str = "\
 Examples:
   opv doctor                           # every check, every environment
-  opv doctor --env dev                 # only what dev needs (no deployment CLI)
-  opv doctor --env prod --product api  # one product's configuration";
+  opv doctor --env dev                 # only what dev needs, plus one read of its item
+  opv doctor --env prod --product api  # one product's keys
+  opv doctor --json                    # the same checks as one JSON document";
 
 const STATUS_EXAMPLES: &str = "\
 Examples:
@@ -156,7 +158,8 @@ struct Cli {
     )]
     timeout: u64,
     /// Print one line per call to op or the target CLI on stderr: program, arguments,
-    /// duration and outcome (never values).
+    /// duration and outcome, then the call's own error output with secrets masked and the
+    /// size of its result (never values).
     #[arg(long, global = true, help_heading = "Global options")]
     verbose: bool,
     /// Colour state words (ok, warn, FAIL, saved, missing...): auto colours only on a
@@ -210,7 +213,8 @@ enum Cmd {
     /// Find setup problems and show the next step.
     ///
     /// Checks configuration, CLI installation and sign-in. --env limits checks to
-    /// what that environment needs, including whether op can start local commands.
+    /// what that environment needs, including whether op can start local commands, and
+    /// reads its item once to check the keys as `check` does (names only, never values).
     #[command(after_help = DOCTOR_EXAMPLES)]
     Doctor {
         /// Check only this environment.
@@ -219,6 +223,9 @@ enum Cmd {
         /// Limit configuration checks to one product; requires --env. [env: OPV_PRODUCT]
         #[arg(long, requires = "env")]
         product: Option<String>,
+        /// Print one JSON document (check names, states and next steps) instead of lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Check whether your required settings are ready; contacts no deployment target.
     #[command(after_help = CHECK_EXAMPLES)]
@@ -287,8 +294,9 @@ enum Cmd {
     /// target call.
     #[command(after_help = EXPLAIN_EXAMPLES)]
     Explain {
-        /// The key: PRODUCT/KEY, or KEY under the simple profile. Under the fleet profile
-        /// a bare KEY means OPV_PRODUCT/KEY when OPV_PRODUCT is set.
+        /// The key. A bare KEY resolves to the one product that declares it (to
+        /// OPV_PRODUCT/KEY when OPV_PRODUCT is set); when several do, they are listed.
+        /// An unknown name suggests the closest declared ones.
         #[arg(value_name = "[PRODUCT/]KEY")]
         target: String,
         /// Environment name; may be omitted when only one environment is declared.
@@ -469,8 +477,10 @@ fn main() -> ExitCode {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(exit_byte(code)),
         Err(e) => {
-            // Error messages never contain secret values or child output (SR-1).
-            let _ = writeln!(io::stderr(), "opv: {e}");
+            // Error messages never contain secret values (SR-1). The failed call's stderr
+            // follows only as a scrubbed excerpt of at most 5 lines (NR-31).
+            let excerpt = opv::runner::take_failure_excerpt();
+            let _ = write!(io::stderr(), "{}", opv::error::report(&e, excerpt.as_ref()));
             ExitCode::from(exit_byte(e.exit_code()))
         }
     }
@@ -497,7 +507,7 @@ impl Cmd {
     /// Text output with state words worth colouring (never JSON, never values).
     fn has_state_words(&self) -> bool {
         match self {
-            Cmd::Doctor { .. } => true,
+            Cmd::Doctor { json, .. } => !json,
             Cmd::Check { json, .. } | Cmd::Status { json, .. } => !json,
             Cmd::Plan(a) => !a.json,
             _ => false,
@@ -534,6 +544,7 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
         Cmd::Doctor {
             env: Some(_),
             product,
+            ..
         } => {
             let (p, used) = product_or_env(product.take(), env, fleet_profile);
             *product = p;
@@ -562,7 +573,7 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     }
     if let Cmd::Login { env, command } = &cli.cmd {
         use opv::app::{login, setup_runtime};
-        setup_runtime::Console::require_terminal()?;
+        setup_runtime::Console::require_terminal("login")?;
         let fleet = find_config(cli.config.as_ref(), config_source).transpose()?;
         return login::run(
             fleet.as_ref(),
@@ -579,12 +590,13 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     } = &cli.cmd
     {
         use opv::app::{setup, setup_recipe, setup_runtime};
-        setup_runtime::Console::require_terminal()?;
+        setup_runtime::Console::require_terminal("setup")?;
         let start = std::env::current_dir()
             .map_err(|_| Error::Config("Cannot locate the current directory.".into()))?;
-        let recipe = recipe.clone().or_else(|| setup_recipe::discover(&start)).ok_or_else(|| Error::Config(
-            "[SETUP-RECIPE] This project has no setup recipe yet. Add opv.setup.toml, or use opv setup --recipe <path>. See docs/guided-setup.md for the reusable recipe format.".into()
-        ))?;
+        let recipe = recipe
+            .clone()
+            .or_else(|| setup_recipe::discover(&start))
+            .ok_or_else(|| setup_recipe::missing(&start))?;
         return setup::run(
             &recipe,
             cli.config.as_deref(),
@@ -611,11 +623,9 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
     let loaded = find_config(cli.config.as_ref(), config_source).unwrap_or_else(|| {
-        let start = std::env::current_dir().unwrap_or_default();
-        Err(Error::Config(format!(
-            "no secrets.toml found in {} or any parent directory. New project? Run opv setup. Already configured? Pass --config <path> to select its configuration.",
-            start.display()
-        )))
+        Err(config::not_found(
+            &std::env::current_dir().unwrap_or_default(),
+        ))
     });
     let mut cmd = cli.cmd;
     apply_product_env(&mut cmd, &loaded);
@@ -678,8 +688,8 @@ fn run_other(
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Completions { .. } => unreachable!("handled by run"),
-        Cmd::Doctor { env, product } => {
-            doctor::run_scoped(loaded, env.as_deref(), product.as_deref(), r, out)
+        Cmd::Doctor { env, product, json } => {
+            doctor::run_scoped_as(loaded, env.as_deref(), product.as_deref(), json, r, out)
         }
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)

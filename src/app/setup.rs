@@ -38,10 +38,10 @@ pub trait Interaction {
 }
 
 fn settings_error(message: &str) -> Error {
-    Error::Config(format!("[SETUP-SETTINGS] {message}"))
+    Error::Config(message.to_string())
 }
 fn source_error(message: &str) -> Error {
-    Error::Source(format!("[SETUP-ACCESS] {message}"))
+    Error::Source(message.to_string())
 }
 
 #[derive(Deserialize)]
@@ -93,12 +93,12 @@ fn version(backend: &dyn Backend) -> Result<String, Error> {
         .collect::<Result<Vec<_>, _>>()
         .ok();
     if output.status != 0 || numbers.as_ref().is_none_or(|n| n.len() != 3) {
-        return Err(Error::Dependency("[SETUP-VERSION] Cannot recognize the Linux/native op installation. Run op --version, then reinstall the official CLI if needed.".into()));
+        return Err(Error::Dependency("Cannot recognize the Linux/native op installation. Run op --version, then reinstall the official CLI if needed.".into()));
     }
     let numbers = numbers.expect("checked");
     if (numbers[0], numbers[1], numbers[2]) < super::doctor::OP_TESTED_MIN {
         return Err(Error::Dependency(
-            "[SETUP-VERSION] Update 1Password CLI to 2.40.0 or newer, then rerun setup.".into(),
+            "Update 1Password CLI to 2.40.0 or newer, then rerun setup.".into(),
         ));
     }
     Ok(value.to_owned())

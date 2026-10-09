@@ -201,6 +201,8 @@ The command shall not resolve or print secret values unless necessary to verify 
 
 Decided in v0.4: `doctor --env <environment> [--product <product>]` checks only what that scope needs; an environment without a target needs no deployment CLI. Every `doctor` run on Linux and macOS also reports whether `op` can start a local child (FR-36).
 
+Decided in v0.5 (UX review P6, P18): `doctor --env` makes the environment's one item read by IDs (FR-13) and evaluates the selected keys as `check` does, reporting names, counts and states only, so it is never all clear when `check` would fail. Unscoped `doctor` reads no item. `doctor --json` prints `{schema_version: 1, checks: [{name, status, detail, next}], next}`.
+
 ## FR-4 — Local Process Execution
 
 The CLI shall provide:
@@ -651,10 +653,25 @@ provider changes no core code. Owner decision 2026-10-08.
 ## FR-38 — Kubernetes Target
 
 `[environments.<env>.kubernetes]` targets a Deployment through `kubectl` with explicit
-`--context` and `--namespace`. Values are stored as immutable, content-hash-named Secrets (the
-version, FR-29), bound through `secretKeyRef`; the Deployment is updated with its
+`--context` and `--namespace`. Values are stored as immutable Secrets named
+`opv-<store name>-<random id>` (the id is the version, FR-29), bound through `secretKeyRef`. The id
+comes from the OS RNG and is never derived from the value: a content-hash name would let anyone
+who can list Secrets confirm a guessed value, so no name, label or annotation carries anything
+value-derived (SR-1, SR-2). Compare-before-write reads the bound value and compares it in
+constant time; an unchanged value writes nothing, and a version orphaned by a lost write is
+collected after the next healthy rollout (NR-1); the Deployment is updated with its
 `resourceVersion` (optimistic concurrency, FR-31); health is the rollout status (FR-33); old
 Secrets are pruned only after a successful rollout (FR-32). Design: §12 of the multi-cloud design.
+
+## FR-39 — Named Stores and Cross-Provider Bindings
+
+Stores can be declared once as `[stores.<name>]` and referenced by a runtime with
+`secrets_in = "<name>"`; without it, a runtime uses its own store. A binding registry lists the
+supported (store kind, runtime) pairs; an unsupported pair is a config error at load. 0.5.0 adds
+Key Vault → Kubernetes Deployment through the External Secrets Operator, with versions pinned
+(`refreshInterval: 0`, `remoteRef.version`), readiness checked before the Deployment is repinned,
+and prune only after a healthy rollout. Commands are unchanged. Design: §13 of the multi-cloud
+design. Owner decision 2026-10-08.
 
 ## v0.4 local development (FR-34 to FR-36)
 
@@ -779,6 +796,8 @@ Secret values shall never appear in:
 
 Debug logging shall redact conservatively.
 
+Child output: the stderr of every captured `op`, `flyctl`, `az` and `kubectl` call is held in memory only (never on disk) and shown only after the scrubber of NR-31 has masked secret values: at most 5 lines under the error of the call that failed, or every call's lines with `--verbose`. A child's stdout and anything opv sends on stdin (values, Kubernetes Secret manifests) are never shown; `--verbose` gives only stdout's size and JSON shape (NR-31).
+
 ## SR-2 — Secret-Safe Types
 
 Resolved secret values shall use a dedicated wrapper type whose `Debug` and `Display` implementations are redacted.
@@ -845,7 +864,7 @@ Copies of secret values should be minimized.
 
 Security-sensitive dependencies should be kept small and audited.
 
-# 4a. Resilience Requirements (NR-1 to NR-30)
+# 4a. Resilience Requirements (NR-1 to NR-31)
 
 Every realistic failure is a requirement (owner direction, 2026-10-08): designed for
 resiliency, transparency, and to keep the user effective. The argument, mechanisms and tests
@@ -853,7 +872,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 
 - **NR-1 Convergence.** Every command is safe to interrupt after any external call; re-running it reaches the same end state, and no intermediate state leaves a live reference to a missing or half-written value. Proven by an interruption-matrix test per flow.
 - **NR-2 Unknown outcomes.** A write that fails, times out or is killed has an unknown outcome; opv reconciles by reading the state back before reporting. When it stays unknown, opv exits **9** ("outcome unknown; safe to re-run"), naming the step and the reconciled state. Extends FR-10.
-- **NR-3 Bounded read retry.** Reads (never writes) are retried up to 3 attempts with jittered backoff (1 s, 2 s, 4 s) inside the run budget; a definite refusal (not found, auth) is never retried. The runner's API makes write-retry unrepresentable.
+- **NR-3 Bounded read retry.** Reads (never writes) are retried up to 3 attempts with jittered backoff (1 s, 2 s, 4 s) inside the run budget; a definite refusal (not found, auth) is never retried. The runner's API makes write-retry unrepresentable. Since v0.5 (UX review P16) the 1Password item read is diagnosed after its first failed attempt (`op whoami`, then `op vault get <vault_id>`) and retried only when the identity is signed in and can open the vault; otherwise the diagnosis is reported at once.
 - **NR-4 Deadlines and progress.** Per-effect deadlines (probe 15 s, read 60 s, write 120 s; waits poll with their own deadline) and a run budget `--timeout` (default 900 s). Any wait prints progress on stderr at least every 15 s.
 - **NR-5 Output cap.** Captured CLI output over 8 MiB is refused and the child killed.
 - **NR-6 Validated outputs.** Every id, version and name read from a CLI is validated before reuse in argv or a document; unknown fields are ignored, missing required fields refused.
@@ -872,7 +891,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-19 Next step on every error.** Every non-zero exit ends with exactly one `Next:` line holding a runnable command (extends FR-22); error constructors require it.
 - **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting; an environment with `confirm_env = true` requires `--confirm <env>` for mutating commands.
 - **NR-21 No clock assumptions.** No decision compares wall-clock times across machines; deadlines use monotonic local time.
-- **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call only; child stderr is still never captured (SR-1).
+- **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call, followed by that call's scrubbed stderr and its stdout shape (NR-31). Child stderr is shown only scrubbed, stdout and stdin content never (SR-1).
 - **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written. The plan's own reads (the item read by IDs, the target's first list) are the CLI, sign-in and reachability checks, so preflight adds no second item read; tool versions stay with `doctor` (NR-13).
 - **NR-24 Fly state.** Deleted (`dead`) apps and a deploy in progress are refused with the reason and next step. Suspended or pending apps (on the Machines platform: no machines), missing machines and stopped machines are a `warn` line; secrets are app-level so they still stage, and `--deploy` is skipped with `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). `Partial` deploys are detected and reported with the exact command. Fixtures are recorded flyctl output (`tests/fixtures/fly/`).
 - **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported. Preflight has a mode: read commands (`status`, `plan`, `doctor`) run the same checks but never wait on an update in progress (provisioning `InProgress`, or any provider's equivalent); they print one note line on stderr and continue. Only `sync` waits, with progress, bounded by the run budget.
@@ -881,6 +900,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page; nothing written. Applies to every read before a write, `status` and `plan` included.
 - **NR-29 Network glitches and proxies.** Covered by NR-3/NR-2; proxy and CA environment variables pass through to CLIs untouched.
 - **NR-30 Eventual consistency.** After a write, the confirming read polls until it observes the written version or the deadline; a stale read is never reported as "unchanged".
+- **NR-31 CLI output transparency.** Every failure shows what the CLI said, without leaking a secret. (1) Capture: the stderr of every captured call of every provider (`op`, `flyctl`, `az`, `kubectl`; reads, writes and probes) is read into a bounded, zeroized in-memory buffer (the last 64 KiB) and never written to disk; interactive calls (`run`, `setup`, `session`) keep the terminal. (2) Scrubbing: before any of it is shown, every registered value is replaced with `__SECRET__`. Registered: all field values of every 1Password item read in the run and every `SecretValue` created (transformed by `ensure_prefix`, staged, read from a target). Each is matched raw, JSON-escaped (plain, ASCII-only `\uXXXX` as az writes it, and Go's form with `<`, `>`, `&` escaped, as kubectl writes it), Go-quoted (`%q`), Python-`repr`-quoted, standard base64 (the form a Kubernetes Secret manifest carries), base64url (padded and unpadded) and percent-encoded. Values under 4 bytes and their encodings are matched as whole tokens only. Then patterns mask secrets opv never handled: JWTs, `Bearer <token>`, `OP_SESSION_*=…`, `ops_…` service-account tokens, Azure `sig=`, `AccountKey=`, `SharedAccessSignature=` and `client_secret=`, PEM private-key blocks (also a block whose BEGIN line was cut off), well-known API key prefixes (`sk-`, `sk_live_`, `ghp_`, `xoxb-`, `AKIA…`), and `password=`, `token=`, `secret=`, `apikey=` assignments in `key=value` or `"key": "value"` form. Names and ids (a Key Vault secret id, a Secret name) stay readable. Escape sequences and control characters are removed and lines cut at 240 characters. The registry holds values in `Zeroizing` memory; its `Debug` shows a count. (3) On failure: when a call fails (a refused read, a write or probe exiting non-zero) and opv exits with a dependency, authentication, source, target or unknown-outcome error, the last ≤5 non-empty scrubbed lines follow the error's first line, labelled `  <program> said: <line>` (`op said:`, `flyctl said:`, `az said:`, `kubectl said:`), so the error's `next:` step stays last. An excerpt attaches only to the error made from its own call: every call takes a new call id and clears the excerpt when it starts, a failure is stored with its call id, and it is shown only if no later call started before opv exits. The one exception is the read-only diagnosis of that failure (`op whoami`, `op vault get`, `az account show`, `flyctl auth whoami`, kubectl's context and version checks, and the read-back after a failed write): those calls neither clear nor replace the excerpt. Configuration, policy and findings errors never show one. (4) With `--verbose`: each call line is followed by its scrubbed stderr (`    stderr: <line>`, at most 20) and its stdout shape (`    stdout: <n> bytes`, plus the top-level JSON keys or array length). (5) Never shown: stdout content, and what opv sends on stdin (values, Kubernetes Secret manifests, Container App and Deployment bodies). The error's `Display` is unchanged (tests and `--json` too). Limit: a value opv has not read yet (a failure before or during the item read) is masked only by the patterns.
 
 ---
 

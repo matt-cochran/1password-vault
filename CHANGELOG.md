@@ -14,6 +14,7 @@ before upgrading.
 
 - Azure target: `[environments.<env>.azure]` syncs secrets to Key Vault and binds them to a Container App ([#39](https://github.com/matt-cochran/1password-vault/issues/39); FR-28 to FR-33). Secrets are written as new versions and the app uses them only after `opv sync <env> --deploy`; `--prune` removes old entries only after a healthy revision. See [usage](docs/usage.md#sync-on-azure-and-kubernetes).
 - Kubernetes target: `[environments.<env>.kubernetes]` stores values as immutable Secrets and updates a Deployment through `kubectl` (FR-38).
+- Named stores: `[stores.<name>]` declares a store once and `secrets_in = "<name>"` on a runtime keeps its secrets there; commands are unchanged. First pair: Azure Key Vault → Kubernetes Deployment through the External Secrets Operator, pinned to one Key Vault version per ExternalSecret, checked before any write and pruned only after a healthy rollout ([configuration](docs/configuration.md#secrets-in-a-named-store-storesname-and-secrets_in); FR-39).
 - Plug-in providers: Fly, Azure and Kubernetes implement one contract, so a new provider is one module ([CONTRIBUTING.md](CONTRIBUTING.md#adding-a-provider); FR-37).
 - Resilience (NR-1 to NR-30): reads retry up to 3 times, writes never; progress lines during waits; `--timeout <secs>` (default 900) caps a run; `--verbose` prints one line per external call; every mutating run ends with a summary and every failure with one `Next:` line; Ctrl-C and SIGTERM leave the target safe to re-run (exit 130/143).
 - Exit code 9: outcome unknown, or a provider did not answer. Nothing is known to be broken; re-run the same command.
@@ -28,11 +29,17 @@ before upgrading.
 - `deploy_credentials = "op://<vault>/<item>"` per environment: `status`, `plan`, `sync` and `doctor --env` sign the target CLI in with that environment's least-privilege deploy identity for the run only. Fly: `FLY_API_TOKEN`, only in `flyctl`'s environment. Azure: a service principal signed in to a private per-run `AZURE_CONFIG_DIR` (RAM-only on Linux/WSL, DPAPI-encrypted on Windows; not macOS), removed at the end of the run, including Ctrl-C and SIGTERM. Not for Kubernetes (FR-40, SR-4, SR-5). See [configuration](docs/configuration.md#account-and-deploy-credentials).
 - Azure on native Windows: values reach `az` through a user-only named pipe instead of `/dev/stdin`, so Key Vault writes and Container App updates work without WSL.
 - `opv sync` checks the Fly app before its first write (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running stops it with nothing written and the next step; suspended, pending or stopped-machine apps print a `warn` line and staging goes ahead, and `--deploy` is skipped with a notice when the app has no machines (NR-23, NR-24).
+- `opv doctor --env <env> [--product <p>]` reads the item once by IDs and reports `ok item: <vault>/<item> readable (<n> field(s) in section <p>)`, or a failing line naming each key that is not ready and `opv check` as the next step, so doctor is never all clear when `check` would fail. `opv doctor --json` prints `{schema_version, checks: [{name, status, detail, next}], next}`.
+- `opv explain KEY` resolves the product when only one declares the key, lists the candidates when several do, and suggests close names for an unknown key or product.
 - After staging, `sync` re-reads Fly's list for up to 30 seconds until every staged name shows a digest, so a lagging list is never reported as unchanged (NR-30).
 
 ### Changed
 
 - A 1Password or Fly read that gets no answer after 3 attempts exits 9 naming the provider, the step and its status page (status.1password.com, status.flyio.net); nothing was changed. It was exit 4 (1Password) or 5 (Fly) (NR-28).
+- With no `secrets.toml`, opv offers both ways to start: `opv init` for an existing 1Password item, `opv setup` for a new project. `opv setup` without `opv.setup.toml` points to the generic recipe and the command that uses it.
+- A failing `enum` rule lists the declared values: `failed enum (expected one of: debug, info)`, never the stored value.
+- A failed item read is diagnosed (`op whoami`, `op vault get`) before it is retried; it is retried only when signed in with access to the vault, so a wrong ID or a missing sign-in is reported at once instead of after two retries.
+- `doctor` reports a missing `op` once (the sign-in check is skipped), an older `op` with an upgrade command, and no longer repeats a long failure (a TOML error) in its final error line.
 - A failed item read while signed in now tells removed vault access from a moved, archived or deleted item (`op vault get <vault_id>`, by ID), with the next command (NR-26).
 - A `sync` refusal ends with the `opv explain` command for the blocking keys (NR-17). A sign-in lost after `sync` wrote something names the writes that completed (NR-10).
 - npm and `install.sh` install to the same place (`~/.local/bin/opv`, or `%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), so either can update the other's copy ([install](docs/install.md#one-install-location)).

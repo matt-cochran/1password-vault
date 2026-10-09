@@ -10,6 +10,7 @@
 //! | `read` | `keyvault secret show --vault-name <vault> --name <name> -o json` |
 //! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
 //! | `delete` | `keyvault secret delete --vault-name <vault> --name <name> -o none` |
+//! | `has_version` | `keyvault secret show --vault-name <vault> --name <name> --version <v> --query id -o tsv` (diagnosis only) |
 //!
 //! Every call also carries `--subscription <azure.subscription>` (NR-7).
 //!
@@ -110,6 +111,12 @@ impl PinnedStore for KeyVault<'_> {
     /// left as they are, never disabled or deleted (FR-32).
     fn collect_superseded(&self, _name: &str, _keep_version: &str) -> Result<(), Error> {
         Ok(())
+    }
+
+    /// `keyvault secret show --version <v> --query id -o tsv` (a read): exit 3 is "no such
+    /// version". The value is never asked for.
+    fn has_version(&self, name: &str, version: &str) -> Result<Option<bool>, Error> {
+        self.version_exists(name, version).map(Some)
     }
 }
 
@@ -286,10 +293,11 @@ impl KeyVault<'_> {
                 ..
             }
         ) {
-            if self.is_soft_deleted(name)? {
+            // These reads explain the failed set, so its excerpt stays (NR-31).
+            if crate::runner::diagnosing(|| self.is_soft_deleted(name))? {
                 return Err(soft_deleted_error(name, self.vault));
             }
-            if !az::signed_in(self.runner)? {
+            if !crate::runner::diagnosing(|| az::signed_in(self.runner))? {
                 return Err(az::not_logged_in(None));
             }
             self.await_access()?;
@@ -410,6 +418,39 @@ impl KeyVault<'_> {
             }
             self.runner.pause(CONFIRM_POLL, "");
             waited += CONFIRM_POLL;
+        }
+    }
+
+    /// Whether `version` of `name` exists (exit 3: it does not).
+    fn version_exists(&self, name: &str, version: &str) -> Result<bool, Error> {
+        const OP: &str = "keyvault secret show";
+        let name = &AzureTarget::key_vault_name(name);
+        let args = [
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            self.vault,
+            "--name",
+            name,
+            "--version",
+            version,
+            "--query",
+            "id",
+            "-o",
+            "tsv",
+            az::ONLY_SHOW_ERRORS,
+        ];
+        match invoke(
+            self.runner,
+            Effect::Read,
+            OP,
+            &self.scoped(&args),
+            None,
+            &[3],
+        )? {
+            Outcome::Refused(out) if out.status == 3 => Ok(false),
+            other => read_output(self.runner, OP, self.vault, other).map(|_| true),
         }
     }
 

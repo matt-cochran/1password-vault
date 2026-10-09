@@ -406,9 +406,28 @@ fn assert_no_marker(what: &str, text: &str) {
     }
 }
 
+/// True for a line of a failed call's scrubbed stderr excerpt (NR-31).
+fn is_excerpt_line(l: &str) -> bool {
+    ["  op said: ", "  flyctl said: ", "  az said: "]
+        .iter()
+        .any(|p| l.starts_with(p))
+}
+
+/// No value anywhere. Child stderr (the canary) only on stderr, and only in the labelled,
+/// scrubbed excerpt of a failed call (NR-31); stdout never carries child output.
 fn assert_clean_output(cmd: &[&str], r: &Run) {
     assert_no_marker(&format!("{cmd:?} stdout"), &r.stdout);
-    assert_no_marker(&format!("{cmd:?} stderr"), &r.stderr);
+    assert!(
+        !r.stderr.contains(MARK),
+        "{cmd:?} stderr contains {MARK}:\n{}",
+        r.stderr
+    );
+    for l in r.stderr.lines().filter(|l| l.contains(CHILD_STDERR)) {
+        assert!(
+            is_excerpt_line(l),
+            "{cmd:?} child stderr outside an excerpt: {l}"
+        );
+    }
 }
 
 fn assert_argv_and_env_clean(h: &Harness) {
@@ -552,18 +571,24 @@ fn no_secret_in_stdout_or_stderr() {
     }
 }
 
-/// Carried from S1-M5: every fake writes a canary plus a value to stderr on every call;
-/// neither appears in opv's stdout or stderr for any command, including failures.
+/// Carried from S1-M5, amended by NR-31: every fake writes a canary plus a value to stderr
+/// on every call. A successful command shows none of it.
 #[test]
-fn drops_child_stderr() {
-    let mut h = Harness::new(&good_item());
+fn successful_commands_drop_child_stderr() {
+    let h = Harness::new(&good_item());
     for cmd in COMMANDS {
         h.reset();
         let r = h.run(cmd);
         assert!(!h.calls().is_empty(), "{cmd:?} spawned nothing");
-        assert_clean_output(cmd, &r);
+        assert_no_marker(&format!("{cmd:?}"), &r.all());
     }
-    // Failing children too: op fails, then flyctl list fails.
+}
+
+/// NR-31: failing children (op fails, then flyctl list fails) show their stderr only as
+/// the labelled excerpt, with the value scrubbed.
+#[test]
+fn failing_commands_show_only_scrubbed_child_stderr() {
+    let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_EXIT", "1");
     for cmd in COMMANDS {
         h.reset();
@@ -594,8 +619,10 @@ fn child_stderr_suppressed() {
         let r = h.run(cmd);
         assert_eq!(r.code, 4, "{cmd:?}: {}", r.all());
         assert!(
+            // P16: a retry note may come first (signed in, vault readable).
             r.stderr
-                .starts_with("opv: source error: op item get failed (exit 1)"),
+                .lines()
+                .any(|l| l.starts_with("opv: source error: op item get failed (exit 1)")),
             "{cmd:?}: {}",
             r.stderr
         );
@@ -848,13 +875,7 @@ fn expired_session_is_auth_with_signin_command() {
         assert_clean_output(cmd, &r);
         assert_eq!(
             op_subcommands(&h),
-            vec![
-                "item get",
-                "item get",
-                "item get",
-                "whoami --format",
-                "account list"
-            ],
+            vec!["item get", "whoami --format", "account list"],
             "{cmd:?}"
         );
         assert_eq!(h.fly_calls("import"), 0);
@@ -921,10 +942,7 @@ fn ci_not_signed_in_advises_service_account_token() {
         r.stderr
     );
     assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
-    assert_eq!(
-        op_subcommands(&h),
-        vec!["item get", "item get", "item get", "whoami --format"]
-    );
+    assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
 }
 
 /// FR-26: a clean `status` ends with the summary line on stdout; exit 0.
@@ -1021,10 +1039,7 @@ fn rejected_credential_keeps_source_category() {
             r.stderr
         );
         assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
-        assert_eq!(
-            op_subcommands(&h),
-            vec!["item get", "item get", "item get", "whoami --format"]
-        );
+        assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
     }
 }
 
@@ -1812,12 +1827,7 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             "regex",
             "does not match the configured regex",
         ),
-        (
-            "ENUM",
-            format!("{m}enum"),
-            "enum",
-            "not one of the allowed values",
-        ),
+        ("ENUM", format!("{m}enum"), "enum", "expected one of: a, b"),
         (
             "B64_NOT",
             format!("{m}!!"),
@@ -2062,5 +2072,196 @@ fn simple_profile_rule_failure_reason_carries_no_marker() {
     assert_eq!(
         (row["product"].clone(), row["reason"].clone()),
         (Value::Null, json!("expected prefix postgres://"))
+    );
+}
+
+// ------------------------------------------------- NR-31: scrubbed child stderr excerpts
+
+/// An item value with every character class an encoding changes.
+const JSONISH: &str = "S7MARKERVALUEjson\"q\\w/\u{e9}+?&=0007";
+
+fn jsonish_item() -> String {
+    let mut fields = good_fields(OPENAI);
+    fields.push(field(
+        Some("allumata"),
+        "JSONISH_EXTRA",
+        "CONCEALED",
+        Some(JSONISH),
+    ));
+    item(fields)
+}
+
+/// `status prod` after a good item read, with every `flyctl secrets list` failing and
+/// writing `value` to stderr.
+fn list_failure_with_stderr(value: &str) -> Run {
+    let mut h = Harness::new(&jsonish_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_STDERR_VALUE", value);
+    h.run(&["status", "prod"])
+}
+
+const MASKED_EXCERPT: &str = "\n  flyctl said: S7CHILDSTDERR __SECRET__\n";
+
+#[test]
+fn excerpt_masks_a_raw_item_value() {
+    assert!(
+        list_failure_with_stderr(JSONISH)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_a_json_escaped_item_value() {
+    let escaped = serde_json::to_string(JSONISH).unwrap();
+    let r = list_failure_with_stderr(&escaped[1..escaped.len() - 1]);
+    assert!(r.stderr.contains(MASKED_EXCERPT), "{}", r.stderr);
+}
+
+#[test]
+fn excerpt_masks_a_base64_item_value() {
+    use base64::Engine as _;
+    let enc = base64::engine::general_purpose::STANDARD.encode(JSONISH);
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_a_base64url_item_value() {
+    use base64::Engine as _;
+    let enc = base64::engine::general_purpose::URL_SAFE.encode(JSONISH);
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_an_unpadded_base64url_item_value() {
+    use base64::Engine as _;
+    let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JSONISH);
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_a_percent_encoded_item_value() {
+    let enc: String = JSONISH
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+/// A token opv never read is masked by its shape.
+#[test]
+fn excerpt_masks_a_jwt_opv_never_read() {
+    let r = list_failure_with_stderr("eyJhbGciOiJIUzI1NiJ9.eyJTN01BUktFUiI6MX0.c2ln");
+    assert!(r.stderr.contains(MASKED_EXCERPT), "{}", r.stderr);
+}
+
+/// A value of the notes field, outside every section, is registered too.
+#[test]
+fn excerpt_masks_an_unsectioned_item_value() {
+    assert!(
+        list_failure_with_stderr(NOTES)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+/// At most five lines, the last ones, each labelled with the program, right after the
+/// error line.
+#[test]
+fn excerpt_shows_the_last_five_lines_labelled_with_the_program() {
+    let r = list_failure_with_stderr("l2\nl3\nl4\nl5\nl6\nl7");
+    let excerpt: Vec<&str> = r.stderr.lines().filter(|l| is_excerpt_line(l)).collect();
+    assert_eq!(
+        excerpt,
+        [
+            "  flyctl said: l3",
+            "  flyctl said: l4",
+            "  flyctl said: l5",
+            "  flyctl said: l6",
+            "  flyctl said: l7"
+        ],
+        "{}",
+        r.stderr
+    );
+}
+
+/// `--verbose` shows each call's stderr, scrubbed (the notes value only the registry
+/// knows), under its call line.
+#[test]
+fn verbose_shows_scrubbed_child_stderr() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_STDERR_VALUE", NOTES);
+    let r = h.run(&["--verbose", "status", "prod"]);
+    assert!(
+        r.stderr
+            .contains("\n    stderr: S7CHILDSTDERR __SECRET__\n"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// `--verbose` shows the size and JSON shape of each call's stdout.
+#[test]
+fn verbose_shows_stdout_shape() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["--verbose", "status", "prod"]);
+    assert!(
+        r.stderr
+            .lines()
+            .any(|l| l.starts_with("    stdout: ") && l.contains("JSON object with keys: ")),
+        "{}",
+        r.stderr
+    );
+}
+
+/// SR-1: no stdout content (the fakes print markers in item, whoami and account JSON)
+/// reaches any output with `--verbose`, on success or failure.
+#[test]
+fn verbose_never_shows_stdout_content() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_STDERR_VALUE", "plain");
+    let mut runs = Vec::new();
+    for fail in [
+        None,
+        Some(("FAKE_OP_EXIT", "1")),
+        Some(("FAKE_FLY_LIST_FAIL_AT", "1")),
+    ] {
+        if let Some((k, v)) = fail {
+            h.set(k, v);
+        }
+        for cmd in COMMANDS {
+            h.reset();
+            let args: Vec<&str> = std::iter::once("--verbose")
+                .chain(cmd.iter().copied())
+                .collect();
+            runs.push(h.run(&args).all());
+        }
+    }
+    assert!(
+        runs.iter().all(|t| !t.contains(MARK)),
+        "{}",
+        runs.join("\n----\n")
     );
 }
