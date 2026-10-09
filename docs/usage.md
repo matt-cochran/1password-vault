@@ -4,7 +4,7 @@
 
 Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the flag wins). Without either, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config` or `OPV_CONFIG`, the path is used exactly as given and no search is done; a path from `OPV_CONFIG` is announced as `using <path> (from OPV_CONFIG)` on stderr. `init` refuses both, because it always writes `./secrets.toml`. `<ENV>` is an environment name from the file.
 
-`OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env`, `explain` (where a bare `KEY` means `$OPV_PRODUCT/KEY`), `status <ENV>` and `plan`. It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
+`OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env`, `explain` and `open` (where a bare `KEY` means `$OPV_PRODUCT/KEY`), `status` (with or without `<ENV>`) and `plan`. It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
 
 Every command's `--help` lists its own options first, then the global options (`--config`, `--timeout`, `--verbose`, `--color`) under `Global options:`, then a few examples.
 
@@ -14,7 +14,8 @@ opv doctor --env dev --product allumata   # only what local work in dev needs, p
 opv doctor --json                   # the same checks as one JSON document
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
-opv status                          # one line per environment
+opv status                          # one line per environment, run-only ones included
+opv status --json                   # the same as one JSON document
 opv status staging                  # one row per product and key; exit 8 if any blocks
 opv status staging --product api    # one product's rows, totals and findings
 opv status staging --json           # the same state as one machine-readable JSON document
@@ -23,13 +24,15 @@ opv plan staging --json             # the same plan as one machine-readable JSON
 opv sync staging [--deploy] [--prune] [--product P] [--confirm staging] [--json] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
+opv open allumata/OPENAI_API_KEY --env prod      # open the key's item in 1Password to fill it in
+opv help states                     # what each state word means
 opv check dev --product allumata    # each key saved, missing, wrong kind or failing a rule; exit 8 if any
 opv run dev --product allumata -- cargo run
 opv run prod -- ./server            # simple profile: no --product
 ```
 
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
-2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values. Its first line counts the rows: `staging: 12 keys · 10 saved · 1 skipped · 1 finding · 2 not yet on Fly`.
+2. `status` shows what is missing, of the wrong kind, or failing a rule, problems first, each with its reason, its declared `guidance` and an `open:` link to its item in 1Password ([Open a key in 1Password](#open-a-key-in-1password)). It prints names, never values. Its first line counts the rows: `staging: 12 keys · 10 saved · 1 skipped · 1 finding · 2 not yet on Fly`. The state words are listed in [States](#states).
 3. `plan` shows the same rows plus the target side, then names what a sync would do and ends with the command that does it (see [Plan](#plan)). It changes nothing.
 4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app stops it with nothing written. A Fly deploy already running is waited for: opv reads the releases again every 5 s, prints `waiting for the running Fly deploy of <app> (release vN) to finish, 15 s` on stderr at least every 15 s, and goes on once it has finished; if it is still running when the `--timeout` budget is nearly spent (or after 10 minutes), opv stops with nothing written and a `Next:` line. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
@@ -48,8 +51,10 @@ Next: opv explain api/OPENAI_API_KEY --env prod
 
 ```text
 opv: 1 finding
-Next: fix the keys above in 1Password, then run opv check dev --product api
+Next: opv open api/DATABASE_URL --env dev
 ```
+
+For findings (`status`, `plan`, `check`; exit 8) the step opens the first key to fix in 1Password; the `open:` lines above it link every one.
 
 When the failure came from an external call, what that program wrote on stderr (at most 5 lines, every secret masked as `__SECRET__`) sits between the error line and `Next:`:
 
@@ -95,11 +100,53 @@ allumata/OPENAI_API_KEY in prod
   immutable:  no
   guidance:   OpenAI platform / API keys
   inspect:    op item get iprd --vault vprd
+  open:       opv open allumata/OPENAI_API_KEY --env prod
 ```
 
 Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. Other providers show their own rows (`env name:`, `key vault name:`, ...), and every value starts in one column. An environment without a target section shows `target:     none (run-only)`. The fleet form `<product>/<key>` is a configuration error under the simple profile that names the bare key (`did you mean KEY?`). Under the fleet profile a bare `<KEY>` resolves to the one product that declares it; when several do, the error lists them (`ambiguous key "KEY": declared as api/KEY, web/KEY`). An undeclared key or product suggests the closest declared names; when exactly one is close, the `Next:` line is `opv explain <that name>`.
 
 It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
+
+### States
+
+`status`, `plan` and `check` use one small set of words, the same on every provider. `opv help states` prints them.
+
+| Column | Word | Meaning |
+|---|---|---|
+| STATE (1Password) | `saved` | stored in the right kind of field and passes every rule |
+| | `missing` | no field with this name in the item's section |
+| | `wrong kind` | a text field where a secret needs a concealed one, or the reverse; the row says which: `wrong kind (stored as text; declared secret: use a concealed field)` |
+| | `failed` | fails a rule; the rule and the reason follow: `failed enum (expected one of: debug, info)` |
+| | `skipped` | not required in this environment |
+| TARGET | `new` | not on the target yet; the next sync writes it |
+| | `same` | on the target with the same value (Azure, Kubernetes) |
+| | `changed` | on the target with another value; the next sync writes it |
+| | `unknown` | on the target, but Fly does not reveal values, so opv cannot compare them; sync stages and compares digests |
+| | `pending` | written but not yet live; the next `sync --deploy` rolls it out |
+| | `held` | immutable and already set; replace it with `--rotate` |
+| | `extra` | on the target but not wanted in this environment; removed only with `--prune` (sync prints `extra, not pruned`) |
+| | `drift` | the app is bound to something other than what opv last wrote |
+| | `n/a` | not a target secret (config keys, and skipped keys that are not on the target) |
+
+`missing`, `wrong kind` and `failed` are findings. In `status` and `plan` their rows come first, so a 40-key fleet with one problem shows it on the first table line. The JSON `state` and `target` fields keep their own spellings (below).
+
+### Open a key in 1Password
+
+```sh
+opv open <[product/]KEY> [--env <environment>] [--print]
+```
+
+Every missing or failing row in `status`, `plan` and `check` carries the link to its item, with the field to fix:
+
+```text
+allumata  OPENAI_API_KEY  secret  missing  new
+    guidance: OpenAI platform / API keys
+    open: https://start.1password.com/open/i?a=<account>&v=vprd&i=iprd&h=my.1password.com (section allumata, field OPENAI_API_KEY)
+```
+
+The link is 1Password's private item link, the form "Copy Private Link" produces: account, vault and item IDs and the sign-in host, never a value. 1Password links to items, not single fields, so the section and field are named next to it. opv takes the account from one free `op whoami` call, made only when there is something to fix; when that call fails the link has the vault and item only.
+
+`opv open` resolves the key as `explain` does (a bare `KEY` under one product, `--env` optional with one environment), prints its section and field and the link, and opens the link with the desktop's opener: `xdg-open` (Linux with a display), `wslview` (WSL), `open` (macOS) or `rundll32 url.dll,FileProtocolHandler` (Windows). The opener gets the link as its only argument; no shell is involved. Over SSH, under CI, on a machine without a display, or with `--print` it only prints the link, which is what an assistant should show its user. It never reads the item.
 
 ### Machine-readable status and plan
 
@@ -113,6 +160,7 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
 {
   "schema_version": 1,
   "environment": "prod",
+  "changes": "some",
   "rows": [
     {
       "product": "allumata",
@@ -144,6 +192,12 @@ a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. With `
 the document carries `"product": "<p>"` and only that product's rows and totals. The
 document is meant for the scheduled drift check.
 
+Two fields arrived in 0.5.0. `changes` is `some` when a sync would certainly change the
+target (a new or changed key, a prune, a pending binding), `unknown` when only keys whose
+values the target hides (Fly) would be staged, and `none` otherwise; a nightly drift job
+can alert on `some`. A missing or failing row also carries `open_url`, the 1Password item
+link to fix it in (IDs only); `check --json` rows carry it too.
+
 ### One product: `--product`
 
 `status`, `plan` and `sync` take `--product <p>` under the fleet profile:
@@ -156,12 +210,20 @@ document is meant for the scheduled drift check.
 Without an environment, `status` prints one line per environment, in name order:
 
 ```text
-dev: run-only (no target)
+dev: run-only · 6 keys · 5 saved · 0 skipped · 1 finding
 prod: 14 keys · 13 saved · 1 skipped · 0 findings · 0 not yet on Fly
 staging: 14 keys · 11 saved · 1 skipped · 2 findings · 1 not yet on Fly
 ```
 
-It reads each environment's item once. An environment it cannot read is one line `prod: not checked (<error>)` and the others are still shown; the exit code is that error's, else 8 when any environment has findings (with `Next: opv status <env>` for the first), else 0.
+It reads each environment's item once, a run-only environment's too, so a green overview means every environment is green. An environment it cannot read is one line `prod: not checked (<error>)` and the others are still shown; the exit code is that error's, else 8 when any environment has findings (with `Next: opv status <env>`, or `opv check <env> --product <p>` for a run-only one, for the first), else 0.
+
+`--product <p>` (or `OPV_PRODUCT`) counts only that product's keys in every line. `--json` prints one document instead:
+
+```json
+{"schema_version":1,"environments":[{"name":"dev","target":null,"keys":6,"saved":5,"skipped":0,"findings":1,"error":null},{"name":"prod","target":"fly","keys":14,"saved":13,"skipped":1,"findings":0,"error":null}]}
+```
+
+`target` is the target section (`fly`, `azure`, `kubernetes`) or `null` for run-only; an environment that could not be read has `null` counts and the first line of its error in `error`.
 
 ### Plan
 
@@ -170,18 +232,22 @@ It reads each environment's item once. An environment it cannot read is one line
 ```text
 prod: 4 keys · 0 findings · 1 to stage · 1 held (immutable) · 1 to prune · 1 unmanaged on Fly (never touched)
 PRODUCT   KEY                  KIND    STATE    TARGET
-...
+allumata  OPENAI_API_KEY       secret  saved    unknown
+allumata  INTEGRATION_ENC_KEY  secret  saved    held
+allumata  SIGNUP_POLICY        config  saved    n/a
+allumata  STRIPE_SECRET_KEY    secret  skipped  extra
+unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
 would stage: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
 would prune (needs --prune): allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
 held (immutable): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY) (pass --rotate PRODUCT/KEY to replace)
 Next: opv sync prod --deploy --prune
 ```
 
-On Azure and Kubernetes the line says `would write`. The `Next:` command adds `--prune` only when something would be pruned, `--product` when you scoped the plan, and `--confirm <env>` for a [guarded environment](#guarded-environments). When a key blocks the sync, `plan` exits 8 and the `Next:` line says to fix it and run `plan` again.
+On Azure and Kubernetes the line says `would write`. The `Next:` command adds `--prune` only when something would be pruned, `--product` when you scoped the plan, and `--confirm <env>` for a [guarded environment](#guarded-environments). When a key blocks the sync, `plan` lists it first with its `open:` link, says `would stage once the findings are fixed:`, exits 8, and its `Next:` line opens the first key in 1Password.
 
 ### Change detection on Fly
 
-Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. `plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows "unchanged" or "changed" instead.
+Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. `plan` therefore shows a desired key that is already on Fly as `unknown`. An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows `same` or `changed` instead.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Deploying an app that has no machines exits 5.
 
@@ -394,6 +460,8 @@ jobs:
 ```
 
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
+
+**Job summary.** When `$GITHUB_STEP_SUMMARY` is set (GitHub Actions sets it for every step), `status`, `plan` and `sync` append a Markdown section to the job's summary page: for `status` and `plan`, the count line, `changes` (plan) and one table row per key, problems first, with product, key, kind, state word (`failed <rule>`, without the reason) and target word; for `sync`, its summary line and the written, pruned, pending, held, extra and unchanged names. It holds names and state words only: no value, no rule reason and no 1Password link (the link names your account). Nothing to configure; outside GitHub Actions nothing is written. For a nightly drift check, run `opv plan prod --json` and alert when `changes` is `some`.
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
 ## Security model and limits

@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn opv(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -51,6 +52,7 @@ fn missing_config_file_exits_2() {
 /// Run opv with `dir` as the working directory and no `op` or `flyctl` on PATH.
 fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .current_dir(dir)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -412,6 +414,7 @@ mod run_with_fake_op {
 
     fn run(path: &std::path::Path, args: &[&str]) -> (i32, String, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -486,6 +489,7 @@ mod run_with_fake_op {
     fn simple_child_sees_unsectioned_op_references() {
         let (dir, _) = fake_op_dir("simple-env");
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args(["--config", super::SIMPLE, "run", "prod", "--"])
             .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -504,6 +508,7 @@ mod run_with_fake_op {
     #[test]
     fn missing_op_exits_3() {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args([
                 "--config",
                 CFG,
@@ -688,6 +693,7 @@ fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
     std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
     Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -766,6 +772,7 @@ fn proxy_env_is_inherited() {
     let dir = fake_op("printf '%s' \"$HTTPS_PROXY\" > \"$OPV_LOG\"; /bin/cat \"$OP_ITEM\"");
     let log = dir.path().join("log");
     Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", CFG, "check", "prod", "--product", "allumata"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -796,6 +803,7 @@ fn sigterm_forwards_and_exits_143() {
     );
     let log = dir.path().join("log");
     let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", CFG, "check", "prod", "--product", "allumata"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")

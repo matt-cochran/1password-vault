@@ -14,10 +14,11 @@ use std::io::Write;
 
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
-    KeyNames, PinnedRow, check_product, count_line, is_blocking, open_target, preflight,
-    print_extras, print_rows, product_names, read_and_plan, scope_plan, write_err, write_json,
+    KeyNames, PinnedRow, check_product, ci_summary, count_line, is_blocking, item_url, open_next,
+    open_target, plan_item, plural, preflight, print_extras, print_legend, print_rows,
+    product_names, read_and_plan, read_fields, scope_plan, target_word, write_err, write_json,
 };
-use crate::domain::{Binding, Fleet, Kind, Row, StoreEntry, SyncPlan, TargetState};
+use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
 use crate::provider::TargetConfig;
@@ -78,7 +79,39 @@ pub fn run_scoped(
         Ports::Staged { .. } => None,
     };
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
-    let findings = || Error::findings(n, fix_then(&status_command(env_name, product)));
+    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
+    let link = if n > 0 {
+        Some(item_url(fleet, env_name, r)?)
+    } else {
+        None
+    };
+    let findings = || Error::findings(n, open_next(&plan.rows, env_name));
+    let env = fleet.environment(env_name)?;
+    let held: BTreeSet<(&str, &str)> = plan
+        .held_immutable
+        .iter()
+        .map(|(p, k)| (p.as_str(), k.as_str()))
+        .collect();
+    let word = |row: &Row| {
+        let binding = env
+            .target_name(&row.product, &row.key)
+            .and_then(|name| pinned.as_ref().and_then(|p| p.rows.get(&name)));
+        target_word(
+            row,
+            held.contains(&(row.product.as_str(), row.key.as_str())),
+            binding,
+        )
+        .to_string()
+    };
+    let count = count_line(env_name, &plan.rows, t.provider().label());
+    r.step_summary(&ci_summary::table(
+        &status_command(env_name, product),
+        &count,
+        None,
+        &plan.rows,
+        fleet.is_simple(),
+        word,
+    ));
     if json {
         write_json(
             out,
@@ -87,17 +120,16 @@ pub fn run_scoped(
             &plan,
             pinned.as_ref().map(|p| &p.rows),
             product,
+            link.as_deref(),
         )?;
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
     let names = KeyNames::new(fleet, env_name)?;
-    writeln!(
-        out,
-        "{}",
-        count_line(env_name, &plan.rows, t.provider().label())
-    )
-    .map_err(write_err)?;
-    print_rows(out, fleet, &plan.rows, target)?;
+    writeln!(out, "{count}").map_err(write_err)?;
+    print_rows(out, fleet, &plan.rows, word, link.as_deref())?;
+    let words: Vec<String> = plan.rows.iter().map(&word).collect();
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    print_legend(out, &words, t.provider().label())?;
     print_extras(out, &plan)?;
     if let Some(p) = &pinned {
         p.print(out, env_name, &names)?;
@@ -116,61 +148,171 @@ fn status_command(env_name: &str, product: Option<&str>) -> String {
     }
 }
 
-/// The next step for findings: fix the values where they live, then look again.
-pub(crate) fn fix_then(command: &str) -> String {
-    format!("fix the keys above in 1Password, then run {command}")
-}
-
-/// `status` without an environment (P22): one count line per environment, in name order;
-/// an environment without a target is `run-only`. One item read per environment with a
-/// target (FR-13). An environment that cannot be read is one line naming the error, and the
-/// rest are still shown; the first such error is the result, else `Findings` when any
-/// environment has findings.
-pub fn overview(fleet: &Fleet, r: &dyn CommandRunner, out: &mut dyn Write) -> Result<(), Error> {
+/// `status` without an environment (P22, H11): one count line per environment, in name
+/// order. Every environment is read, a run-only one too (`dev: run-only · 2 keys · 1
+/// finding`), so a green overview means every environment is green. One item read per
+/// environment (FR-13); a target is also listed as `status <env>` does. `product` limits
+/// every line to that product's keys. An environment that cannot be read is one line
+/// naming the error, and the rest are still shown; the first such error is the result,
+/// else `Findings` when any environment has findings. With `json`, one document
+/// `{"schema_version":1,"product":…,"environments":[{"name","target","keys","saved",
+/// "skipped","findings","error"}]}` and nothing else on stdout.
+pub fn overview(
+    fleet: &Fleet,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    check_product(fleet, product)?;
     let mut first_err: Option<(String, Error)> = None;
     let mut findings = 0;
     let mut first_finding: Option<&str> = None;
+    let mut docs = Vec::new();
     for (name, env) in &fleet.environments {
-        let Some(t) = env.target() else {
-            writeln!(out, "{name}: run-only (no target)").map_err(write_err)?;
-            continue;
-        };
-        match env_rows(fleet, name, t, r) {
+        let t = env.target();
+        let rows = env_rows(fleet, name, t, r).map(|mut rows| {
+            if let Some(p) = product {
+                rows.retain(|row| row.product == p);
+            }
+            rows
+        });
+        let target = t.map(|t| t.provider().section());
+        match rows {
             Ok(rows) => {
-                writeln!(out, "{}", count_line(name, &rows, t.provider().label()))
-                    .map_err(write_err)?;
+                let line = match t {
+                    Some(t) => count_line(name, &rows, t.provider().label()),
+                    None => run_only_line(name, &rows),
+                };
                 let n = rows.iter().filter(|r| is_blocking(r)).count();
                 if n > 0 {
                     findings += n;
                     first_finding.get_or_insert(name);
                 }
+                docs.push(OverviewEnv {
+                    name: name.clone(),
+                    target,
+                    keys: Some(rows.len()),
+                    saved: Some(rows.iter().filter(|r| r.state == KeyState::Ready).count()),
+                    skipped: Some(rows.iter().filter(|r| r.state == KeyState::Skipped).count()),
+                    findings: Some(n),
+                    error: None,
+                });
+                if !json {
+                    writeln!(out, "{line}").map_err(write_err)?;
+                }
             }
             Err(e) => {
                 let first = e.to_string().lines().next().unwrap_or_default().to_string();
-                writeln!(out, "{name}: not checked ({first})").map_err(write_err)?;
+                if !json {
+                    writeln!(out, "{name}: not checked ({first})").map_err(write_err)?;
+                }
+                docs.push(OverviewEnv {
+                    name: name.clone(),
+                    target,
+                    keys: None,
+                    saved: None,
+                    skipped: None,
+                    findings: None,
+                    error: Some(first),
+                });
                 first_err.get_or_insert((name.clone(), e));
             }
         }
     }
+    if json {
+        let doc = OverviewDoc {
+            schema_version: 1,
+            product: product.map(str::to_string),
+            environments: docs,
+        };
+        let text = serde_json::to_string(&doc)
+            .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
+        writeln!(out, "{text}").map_err(write_err)?;
+    }
+    let scoped = |cmd: String| match product {
+        Some(p) => format!("{cmd} --product {p}"),
+        None => cmd,
+    };
     if let Some((name, e)) = first_err {
-        return Err(e.or_next(|| format!("opv status {name}")));
+        return Err(e.or_next(|| scoped(format!("opv status {name}"))));
     }
     match first_finding {
-        Some(name) => Err(Error::findings(findings, format!("opv status {name}"))),
+        Some(name) => {
+            let cmd = match fleet.environments.get(name).and_then(|e| e.target()) {
+                Some(_) => format!("opv status {name}"),
+                None if fleet.is_simple() => format!("opv check {name}"),
+                None => match product {
+                    Some(_) => format!("opv check {name}"),
+                    None => format!("opv check {name} --product {}", first_product(fleet)),
+                },
+            };
+            Err(Error::findings(findings, scoped(cmd)))
+        }
         None => Ok(()),
     }
 }
 
-/// One environment's rows, for [`overview`].
+/// The first declared product, for a runnable `opv check <env> --product <p>` step.
+fn first_product(fleet: &Fleet) -> &str {
+    fleet
+        .products
+        .keys()
+        .next()
+        .map_or("<name>", String::as_str)
+}
+
+/// `dev: run-only · 4 keys · 3 saved · 1 skipped · 1 finding` (H11).
+fn run_only_line(env_name: &str, rows: &[Row]) -> String {
+    let saved = rows.iter().filter(|r| r.state == KeyState::Ready).count();
+    let skipped = rows.iter().filter(|r| r.state == KeyState::Skipped).count();
+    let n = rows.iter().filter(|r| is_blocking(r)).count();
+    format!(
+        "{env_name}: run-only · {} · {saved} saved · {skipped} skipped · {}",
+        plural(rows.len(), "key", "keys"),
+        plural(n, "finding", "findings"),
+    )
+}
+
+#[derive(serde::Serialize)]
+struct OverviewDoc {
+    schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    product: Option<String>,
+    environments: Vec<OverviewEnv>,
+}
+
+/// One environment of the overview document: counts, or the first line of the error that
+/// stopped it (value-free like every error).
+#[derive(serde::Serialize)]
+struct OverviewEnv {
+    name: String,
+    /// The target section (`fly`, `azure`, `kubernetes`), or `null` for run-only.
+    target: Option<&'static str>,
+    keys: Option<usize>,
+    saved: Option<usize>,
+    skipped: Option<usize>,
+    findings: Option<usize>,
+    error: Option<String>,
+}
+
+/// One environment's rows, for [`overview`]: with a target as `status <env>` reads them
+/// (item and store list), without one from the item alone, as `check` does.
 fn env_rows(
     fleet: &Fleet,
     env_name: &str,
-    t: &dyn TargetConfig,
+    t: Option<&dyn TargetConfig>,
     r: &dyn CommandRunner,
 ) -> Result<Vec<Row>, Error> {
+    let none = BTreeSet::new();
+    let Some(t) = t else {
+        let fields = read_fields(fleet, env_name, r)?;
+        return Ok(plan_item(fleet, env_name, fields, None, &none, &none)?
+            .0
+            .rows);
+    };
     let (_, ports) = open_target(fleet, env_name, r)?;
     preflight::read(t, r)?;
-    let none = BTreeSet::new();
     Ok(
         read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?
             .0
@@ -271,19 +413,6 @@ fn pinned_status(
         env_routed: want.plain.keys().cloned().collect(),
         runtime: runtime.describe(),
     })
-}
-
-/// Target state of a row. A store that reads its values back is compared exactly, so a
-/// differing secret is "would change" (FR-31); Fly digests cannot be compared locally (P1),
-/// so a secret there is "present" and `sync` reports whether staging changed it.
-fn target(r: &Row) -> String {
-    match (r.kind, r.target) {
-        (Kind::Config, _) => "-",
-        (Kind::Secret, TargetState::Absent) => "absent",
-        (Kind::Secret, TargetState::WouldChange) => "would change",
-        (Kind::Secret, _) => "present",
-    }
-    .to_string()
 }
 
 #[cfg(test)]
@@ -421,9 +550,9 @@ mod tests {
         let (res, out, _) = status_of(complete_item(), fly(&[(OPENAI_FLY, "d1")]));
         res.unwrap();
         let row = |k: &str| out.lines().find(|l| l.contains(k)).unwrap().to_string();
-        assert!(row("OPENAI_API_KEY").ends_with("present"), "{out}");
-        assert!(row("INTEGRATION_ENC_KEY").ends_with("absent"), "{out}");
-        assert!(row("SIGNUP_POLICY").ends_with('-'), "{out}");
+        assert!(row("OPENAI_API_KEY").ends_with("unknown"), "{out}");
+        assert!(row("INTEGRATION_ENC_KEY").ends_with("new"), "{out}");
+        assert!(row("SIGNUP_POLICY").ends_with("n/a"), "{out}");
         assert!(out.contains("PRODUCT") && out.contains("TARGET"), "{out}");
     }
 
@@ -562,13 +691,13 @@ mod tests {
         assert_eq!(res.unwrap_err().exit_code(), 8);
     }
 
-    /// NR-19: findings name the command to run after fixing them.
+    /// NR-19, H1: the next step opens the first key to fix in 1Password.
     #[test]
-    fn status_findings_next_step_is_status_again() {
+    fn status_findings_next_step_opens_the_first_key() {
         let (res, _, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
         assert_eq!(
             res.unwrap_err().next_step(),
-            Some("fix the keys above in 1Password, then run opv status prod")
+            Some("opv open allumata/OPENAI_API_KEY --env prod")
         );
     }
 }

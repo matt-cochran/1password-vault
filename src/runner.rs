@@ -179,6 +179,11 @@ pub trait CommandRunner {
     /// parseable): e.g. a read command's preflight note. Names only, never a value.
     fn note(&self, line: &str);
 
+    /// Append Markdown to the CI job summary (H8): the file `$GITHUB_STEP_SUMMARY` names,
+    /// when set. Names and states only, never a value or a link. Best effort: a summary
+    /// that cannot be written never fails the command. The default writes nothing.
+    fn step_summary(&self, _markdown: &str) {}
+
     /// Run `program` with inherited stdin/stdout/stderr and the given extra `env`, wait, and
     /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
@@ -208,6 +213,15 @@ pub trait CommandRunner {
         } else {
             Err(io::ErrorKind::Unsupported.into())
         }
+    }
+}
+
+/// Append `markdown` to the job summary file at `path` (H8), creating it if needed. Errors
+/// are ignored: the summary is a convenience, never part of the command's result.
+pub fn append_summary(path: &std::path::Path, markdown: &str) {
+    use std::fs::OpenOptions;
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(markdown.as_bytes());
     }
 }
 
@@ -1020,6 +1034,12 @@ impl CommandRunner for ProcessRunner {
         Engine::note(self, line)
     }
 
+    fn step_summary(&self, markdown: &str) {
+        if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY").filter(|p| !p.is_empty()) {
+            append_summary(std::path::Path::new(&path), markdown);
+        }
+    }
+
     fn local_run_supported(&self) -> io::Result<()> {
         if cfg!(windows) {
             return Ok(());
@@ -1243,6 +1263,8 @@ pub mod fake {
         pub verbose: Cell<bool>,
         /// Child stderr per call index (see [`FakeRunner::push_with_stderr`]).
         stderr: RefCell<HashMap<usize, Vec<u8>>>,
+        /// Markdown passed to [`CommandRunner::step_summary`], in order.
+        pub summaries: RefCell<Vec<String>>,
     }
 
     impl Default for FakeRunner {
@@ -1257,6 +1279,7 @@ pub mod fake {
                 budget: Cell::new(super::DEFAULT_RUN_TIMEOUT),
                 verbose: Cell::new(false),
                 stderr: RefCell::default(),
+                summaries: RefCell::default(),
             }
         }
     }
@@ -1401,7 +1424,19 @@ pub mod fake {
 
         /// A queued `TimedOut` comes back as that error, like a real probe timeout. A
         /// non-zero exit keeps its stderr for the failure excerpt, like the real probe.
+        ///
+        /// An `op whoami` probe with nothing queued answers exit 1 (no account known), so a
+        /// test that is not about the optional link probe after findings (H1) need not
+        /// queue it; its argv is still recorded.
         fn probe(&self, call: &super::Call, _limit: Duration) -> io::Result<Output> {
+            if call.program == "op"
+                && call.args.first() == Some(&"whoami")
+                && self.responses.borrow().is_empty()
+            {
+                self.responses
+                    .borrow_mut()
+                    .push_back(Ok(Output::failure(1)));
+            }
             let id = super::failure::begin();
             let index = self.calls.borrow().len();
             let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
@@ -1418,6 +1453,11 @@ pub mod fake {
 
         fn note(&self, line: &str) {
             super::Engine::note(self, line)
+        }
+
+        /// Recorded in [`FakeRunner::summaries`]; no file is written.
+        fn step_summary(&self, markdown: &str) {
+            self.summaries.borrow_mut().push(markdown.to_string());
         }
 
         fn local_run_supported(&self) -> io::Result<()> {

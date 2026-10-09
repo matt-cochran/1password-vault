@@ -26,9 +26,10 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use super::{
-    KeyNames, check_product, compare, is_blocking, managed_names, open_target, plan_item, plural,
-    preflight, print_extras, print_rows, product_names, read_and_plan, read_fields, row_names,
-    scope_plan, unmanaged_on_target, write_err, write_json,
+    KeyNames, check_product, ci_summary, compare, is_blocking, item_url, managed_names, open_next,
+    open_target, plan_item, plural, preflight, print_extras, print_legend, print_rows,
+    product_names, read_and_plan, read_fields, row_names, scope_plan, target_word,
+    unmanaged_on_target, write_err, write_json,
 };
 use crate::domain::plan::CurrentState::Same;
 use crate::domain::rules;
@@ -133,6 +134,7 @@ pub fn run(
         }
     };
     let next = report.next(env_name, opts, guarded);
+    r.step_summary(&report.step_summary(env_name, opts, &c.names));
     if opts.json {
         return report.write_json(out, env_name, t, opts, next.as_deref());
     }
@@ -232,6 +234,24 @@ impl Report {
             self.unchanged.len(),
             self.skipped.len()
         )
+    }
+
+    /// The CI job summary section (H8): the summary line and each list, names only.
+    fn step_summary(&self, env_name: &str, opts: &SyncOpts, names: &KeyNames) -> String {
+        let mut heading = format!("opv sync {env_name}");
+        if let Some(p) = &opts.product {
+            heading.push_str(&format!(" --product {p}"));
+        }
+        let lists = [
+            ("written", names.join(&self.written)),
+            ("pruned", names.join(&self.pruned)),
+            ("pending deploy", names.join(&self.pending)),
+            ("held (immutable)", names.join(&self.held)),
+            ("extra, not pruned", names.join(&self.kept)),
+            ("unchanged", names.join(&self.unchanged)),
+        ];
+        let lists: Vec<(&str, &str)> = lists.iter().map(|(l, n)| (*l, n.as_str())).collect();
+        ci_summary::lists(&heading, &self.summary(), &lists)
     }
 
     /// The command that finishes the job: a deploy for pending names, `--prune` for kept
@@ -428,10 +448,10 @@ fn pending_line(names: &KeyNames, pending: &[String]) -> String {
     format!("pending deploy (pass --deploy): {}", names.join(pending))
 }
 
-/// `not desired here, kept (pass --prune to remove): …`, the same words on every provider.
+/// `extra, not pruned (pass --prune to remove): …`, the same words on every provider (H5).
 fn kept_line(names: &KeyNames, kept: &[String]) -> String {
     format!(
-        "not desired here, kept (pass --prune to remove): {}",
+        "extra, not pruned (pass --prune to remove): {}",
         names.join(kept)
     )
 }
@@ -1208,26 +1228,33 @@ pub fn plan_scoped(
         scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
     }
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
-    let findings = || {
-        let cmd = match product {
-            Some(p) => format!("opv plan {env_name} --product {p}"),
-            None => format!("opv plan {env_name}"),
-        };
-        Error::findings(n, super::status::fix_then(&cmd))
+    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
+    let link = if n > 0 {
+        Some(item_url(fleet, env_name, r)?)
+    } else {
+        None
     };
-    if json {
-        write_json(out, fleet, env_name, &plan, None, product)?;
-        return if n > 0 { Err(findings()) } else { Ok(()) };
-    }
-    let names = KeyNames::new(fleet, env_name)?;
+    let findings = || Error::findings(n, open_next(&plan.rows, env_name));
+    let held: BTreeSet<(&str, &str)> = plan
+        .held_immutable
+        .iter()
+        .map(|(p, k)| (p.as_str(), k.as_str()))
+        .collect();
+    let word = |row: &Row| {
+        target_word(
+            row,
+            held.contains(&(row.product.as_str(), row.key.as_str())),
+            None,
+        )
+        .to_string()
+    };
     let verb = match ports {
         Ports::Staged { .. } => "stage",
         Ports::Pinned { .. } => "write",
     };
     let label = t.provider().label();
     let unmanaged = unmanaged_on_target(fleet, env_name, &on_target)?;
-    writeln!(
-        out,
+    let count = format!(
         "{env_name}: {} · {} · {} to {verb} · {} held (immutable) · {} to prune · {} unmanaged \
          on {label} (never touched)",
         plural(plan.rows.len(), "key", "keys"),
@@ -1236,24 +1263,41 @@ pub fn plan_scoped(
         plan.held_immutable.len(),
         plan.prune.len(),
         unmanaged.len(),
-    )
-    .map_err(write_err)?;
-    let held: BTreeSet<(&str, &str)> = plan
-        .held_immutable
-        .iter()
-        .map(|(p, k)| (p.as_str(), k.as_str()))
-        .collect();
-    print_rows(out, fleet, &plan.rows, |row| {
-        plan_target(
-            row,
-            held.contains(&(row.product.as_str(), row.key.as_str())),
-        )
-    })?;
+    );
+    let heading = match product {
+        Some(p) => format!("opv plan {env_name} --product {p}"),
+        None => format!("opv plan {env_name}"),
+    };
+    let changes = plan_changes(&plan);
+    r.step_summary(&ci_summary::table(
+        &heading,
+        &count,
+        Some(changes),
+        &plan.rows,
+        fleet.is_simple(),
+        word,
+    ));
+    if json {
+        write_json(out, fleet, env_name, &plan, None, product, link.as_deref())?;
+        return if n > 0 { Err(findings()) } else { Ok(()) };
+    }
+    let names = KeyNames::new(fleet, env_name)?;
+    writeln!(out, "{count}").map_err(write_err)?;
+    print_rows(out, fleet, &plan.rows, word, link.as_deref())?;
+    let words: Vec<String> = plan.rows.iter().map(&word).collect();
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    print_legend(out, &words, label)?;
     print_extras(out, &plan)?;
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
     let staged: Vec<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
     if !staged.is_empty() {
-        line(format!("would {verb}: {}", names.join(&staged)))?;
+        // Findings block the sync, so nothing is staged until they are fixed (bug 10).
+        let when = if n > 0 {
+            " once the findings are fixed"
+        } else {
+            ""
+        };
+        line(format!("would {verb}{when}: {}", names.join(&staged)))?;
     }
     if !plan.prune.is_empty() {
         line(format!(
@@ -1297,22 +1341,24 @@ pub fn plan_scoped(
     .map_err(write_err)
 }
 
-/// Target column of `plan`. A store that reads its values back is compared exactly
-/// ("unchanged" / "changed", FR-31); keys present on Fly cannot be compared locally, so a
-/// desired key there is "potentially changed" (FR-5, P1).
-fn plan_target(r: &Row, held: bool) -> String {
-    match (r.kind, r.target, &r.state) {
-        (Kind::Config, _, _) => "-",
-        (Kind::Secret, TargetState::Absent, KeyState::Ready) => "absent (new)",
-        (Kind::Secret, TargetState::Absent, _) => "absent",
-        (Kind::Secret, _, _) if held => "present (immutable, held)",
-        (Kind::Secret, TargetState::Present, KeyState::Ready) => "unchanged",
-        (Kind::Secret, TargetState::WouldChange, KeyState::Ready) => "changed",
-        (Kind::Secret, _, KeyState::Ready) => "potentially changed",
-        (Kind::Secret, _, KeyState::Skipped) => "present (not desired)",
-        (Kind::Secret, _, _) => "present",
+/// `changes` for the step summary (H8), as the JSON's: `some` when a staged key is new or
+/// certainly changed or a name would be pruned, `unknown` when only keys whose values the
+/// target hides would be staged, `none` otherwise.
+fn plan_changes(plan: &SyncPlan) -> &'static str {
+    let staged = |r: &Row| r.state == KeyState::Ready && r.kind == Kind::Secret;
+    let certain = plan
+        .rows
+        .iter()
+        .filter(|r| staged(r))
+        .any(|r| matches!(r.target, TargetState::Absent | TargetState::WouldChange))
+        || !plan.prune.is_empty();
+    if certain {
+        "some"
+    } else if plan.stage.is_empty() {
+        "none"
+    } else {
+        "unknown"
     }
-    .to_string()
 }
 
 /// `product/KEY (TARGET_NAME)` (`KEY (TARGET_NAME)` under the simple profile) for every
@@ -2246,7 +2292,7 @@ mod tests {
             out.contains("1 to stage · 1 held (immutable) · 1 to prune"),
             "{out}"
         );
-        assert!(out.contains("potentially changed"), "{out}");
+        assert!(out.contains("unknown"), "{out}");
         assert!(out.contains(STRIPE_FLY), "{out}");
         assert!(out.contains("1 unmanaged on Fly"), "{out}");
         assert_no_values(&out);
@@ -2261,7 +2307,7 @@ mod tests {
             out.contains("2 to stage · 0 held (immutable) · 0 to prune"),
             "{out}"
         );
-        assert!(out.contains("absent (new)"), "{out}");
+        assert!(out.contains("  new"), "{out}");
     }
 
     #[test]

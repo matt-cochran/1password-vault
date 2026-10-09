@@ -249,6 +249,8 @@ Decided in v0.1.0: Fly digests cannot be computed locally, so a desired key that
 
 Decided in v0.5 (FR-31): a pinned store that can read its values back (Azure Key Vault) is read once per ready secret it lists, and the value compared exactly in constant time, so `plan` shows "unchanged" or "changed" and `status` "present" or "would change" for it. Fly is unchanged.
 
+Decided in v0.5 (CLI UX pass 2, H4/H5): `status` and `plan` share one TARGET vocabulary on every provider: `new`, `same`, `changed`, `unknown` (Fly: the value cannot be compared; this replaces "potentially changed"), `pending`, `held`, `extra` (on the target, not desired here), `drift` and `n/a` (config, or skipped and absent). Problem rows (missing, wrong kind, failed) are listed first, each with its full reason and a link to its 1Password item (H1). `opv help states` defines each word. The FR-21 JSON `state` and `target` values are unchanged; the document gains `changes` (`none`/`some`/`unknown`) and `open_url` on blocking rows.
+
 ## FR-6 — Fly Synchronization
 
 The CLI shall provide:
@@ -405,6 +407,8 @@ opv status <environment>
 ```
 
 One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
+
+Decided in v0.5 (H1, H11): target words follow the shared vocabulary under FR-5's plan decisions; each missing or failing row also prints `open:` with 1Password's private item link (account UUID and sign-in host from `op whoami`, vault and item IDs; never a value) and the section and field to fix, and `opv open <[product/]KEY>` opens it. `opv status` without an environment reads every environment, run-only ones included (one item read each, FR-13), and takes `--product`, `OPV_PRODUCT` and `--json`. With `$GITHUB_STEP_SUMMARY` set, `status`, `plan` and `sync` append a names-and-states Markdown summary (H8; no value, reason or link).
 
 ## FR-18 — Config Export
 
