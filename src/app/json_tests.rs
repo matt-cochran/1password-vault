@@ -21,6 +21,39 @@ pub(crate) fn framed(body: &[u8], res: &Result<(), Error>, rerun: &str) -> Strin
     String::from_utf8(out).unwrap()
 }
 
+/// `framed` with the temporary directory `dir` replaced by `<dir>` and the rest of each such
+/// path written with `/`, so one golden serves every platform. The directory is replaced in
+/// both its raw and its JSON-escaped spelling (`C:\\Users\\...` inside a JSON string).
+pub(crate) fn without_dir(framed: &str, dir: &std::path::Path) -> String {
+    let raw = dir.display().to_string();
+    let quoted = serde_json::to_string(&raw).expect("a string");
+    let escaped = &quoted[1..quoted.len() - 1];
+    let s = framed.replace(escaped, "<dir>").replace(&raw, "<dir>");
+    // The rest of the path, up to the end of its JSON string: separators become `/`.
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s.as_str();
+    while let Some(at) = rest.find("<dir>") {
+        let (before, tail) = rest.split_at(at + "<dir>".len());
+        out.push_str(before);
+        let end = tail.find('"').unwrap_or(tail.len());
+        out.push_str(&tail[..end].replace("\\\\", "/").replace('\\', "/"));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `framed` without the `checks` entry named `name`. `doctor` runs the `op local run` check
+/// off Windows only (a Windows `op.exe` reached from WSL is what it detects, #54), so the
+/// doctor goldens leave it out on every platform; its own tests cover it.
+pub(crate) fn without_check(framed: &str, name: &str) -> String {
+    let mut doc: serde_json::Value = serde_json::from_str(framed).expect("one JSON document");
+    if let Some(checks) = doc["checks"].as_array_mut() {
+        checks.retain(|c| c["name"] != name);
+    }
+    serde_json::to_string(&doc).unwrap()
+}
+
 /// Compare `actual` (one JSON line) with `tests/fixtures/json/<name>.json`, pretty-printed
 /// so a diff shows the field that moved.
 pub(crate) fn golden(name: &str, actual: &str) {
@@ -34,6 +67,18 @@ pub(crate) fn golden(name: &str, actual: &str) {
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(expected, pretty, "golden {path} differs");
+}
+
+#[test]
+fn a_windows_temp_path_is_normalized_in_its_json_escaped_form() {
+    let dir = std::path::Path::new(r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpAB12");
+    let framed = serde_json::json!({ "path": dir.join("secrets.toml").display().to_string() })
+        .to_string()
+        .replace('/', "\\\\");
+    assert_eq!(
+        without_dir(&framed, dir),
+        r#"{"path":"<dir>/secrets.toml"}"#
+    );
 }
 
 fn status_json(item: crate::runner::Output) -> String {

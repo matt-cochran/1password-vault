@@ -535,6 +535,45 @@ fn a_service_account_gets_one_note_that_a_person_will_tidy() {
     );
 }
 
+const READ_ONLY_NOTE: &str = "The next opv run by a signed-in person tidies it.";
+
+#[test]
+fn a_service_account_says_nothing_when_only_the_marker_is_missing() {
+    let op = FakeOp::new(tidy_item_without("convention"), "SERVICE_ACCOUNT");
+    tidied(&op);
+    assert_eq!(op.notes(), "");
+}
+
+#[test]
+fn a_person_never_writes_the_marker_alone() {
+    let op = FakeOp::person(tidy_item_without("convention"));
+    tidied(&op);
+    assert_eq!(op.edits(), 0);
+}
+
+/// A missing value is reported as a missing key; a read-only run adds no layout note.
+#[test]
+fn a_service_account_says_nothing_when_only_fields_are_missing() {
+    let op = FakeOp::new(tidy_item_without("LOG_LEVEL"), "SERVICE_ACCOUNT");
+    tidied(&op);
+    assert_eq!(op.notes(), "");
+}
+
+#[test]
+fn ci_says_nothing_about_an_empty_item() {
+    let op = FakeOp::person(item(&[]));
+    with_host(FakeEnv::new("linux").var("CI"), || tidied(&op));
+    assert_eq!(op.notes(), "");
+}
+
+#[test]
+fn a_service_account_gets_the_note_once_however_often_the_item_is_read() {
+    let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
+    tidied(&op);
+    tidied(&op);
+    assert_eq!(op.notes().matches(READ_ONLY_NOTE).count(), 1);
+}
+
 #[test]
 fn a_service_account_token_writes_nothing_and_needs_no_whoami() {
     let op = FakeOp::person(messy_item());

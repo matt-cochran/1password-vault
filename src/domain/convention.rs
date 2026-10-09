@@ -483,6 +483,17 @@ impl TidyPlan {
         self.ops.is_empty()
     }
 
+    /// Whether the plan changes a field that already exists: moves, renames, conceals,
+    /// sets aside or normalizes it, or relabels a section. Creating empty sections and
+    /// fields for missing keys, and the convention marker that goes with any tidy, are
+    /// scaffolding: a missing value shows up as a missing key, not as a layout problem, so
+    /// a read-only run says nothing about them.
+    pub fn fixes_layout(&self) -> bool {
+        self.changes
+            .iter()
+            .any(|c| !matches!(c, Change::CreatedSection(_) | Change::CreatedField(_)))
+    }
+
     /// See [`summary`].
     pub fn summary(&self) -> String {
         summary(&self.changes)

@@ -393,9 +393,10 @@ mod run_with_fake_op {
             let op = dir.join("op");
             std::fs::write(
                 &op,
-                // `run` first reads the item once (FR-43): an empty item, and a session
-                // whoami cannot classify, so nothing is tidied and nothing is printed.
-                "#!/bin/sh\necho \"$1\" >> \"$FAKE_OP_LOG\"\ncase \"$1\" in\n  item) echo '{\"fields\":[]}'; exit 0 ;;\n  whoami) exit 1 ;;\n  account) echo '[]'; exit 0 ;;\nesac\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+                // `run` first reads the item once (FR-43): an empty item, read by a service
+                // account (read-only, like CI). Missing fields alone are no layout problem,
+                // so nothing is tidied and nothing is printed.
+                "#!/bin/sh\necho \"$1\" >> \"$FAKE_OP_LOG\"\ncase \"$1\" in\n  item) echo '{\"fields\":[]}'; exit 0 ;;\n  whoami) echo '{\"user_type\":\"SERVICE_ACCOUNT\"}'; exit 0 ;;\n  account) echo '[]'; exit 0 ;;\nesac\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
             )
             .unwrap();
             std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -422,6 +423,9 @@ mod run_with_fake_op {
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
             .env_remove("OPV_CONFIG")
             .env_remove("OPV_PRODUCT")
+            // The fake's `whoami` decides the identity, on CI runners too.
+            .env_remove("CI")
+            .env_remove("GITHUB_ACTIONS")
             .env("FAKE_OP_LOG", path.join("calls.log"))
             .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
             .output()

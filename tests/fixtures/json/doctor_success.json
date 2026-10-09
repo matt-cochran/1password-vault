@@ -46,13 +46,6 @@
       "do": null
     },
     {
-      "name": "op local run",
-      "status": "ok",
-      "detail": "native op; opv run can start local commands",
-      "next": null,
-      "do": null
-    },
-    {
       "name": "opv",
       "status": "ok",
       "detail": "not found on PATH",
