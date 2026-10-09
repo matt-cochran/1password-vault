@@ -43,6 +43,10 @@
 //! every error, auth included, so authentication is told apart by the separate, read-only
 //! `flyctl auth whoami` call ([`auth_whoami`], shared with `doctor`), never by guessing.
 
+pub mod config;
+
+pub use config::{FLYCTL_TESTED, FlyTarget, PROVIDER};
+
 use std::collections::BTreeSet;
 use std::io;
 
@@ -60,6 +64,19 @@ use crate::runner::{
 
 /// The Fly CLI binary.
 pub const PROGRAM: &str = "flyctl";
+
+/// The Fly CLI and how to install it.
+pub const FLYCTL: Tool = Tool {
+    program: PROGRAM,
+    ci: "install flyctl in the CI job (GitHub Actions: \
+         uses: superfly/flyctl-actions/setup-flyctl@master)",
+    macos: "install: brew install flyctl",
+    windows: "install: iwr https://fly.io/install.ps1 -useb | iex",
+    linux: "install: curl -L https://fly.io/install.sh | sh",
+};
+
+/// A Fly token in the environment, in the order they are tried (by name only).
+pub const CREDENTIAL_VARS: &[&str] = &["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"];
 
 /// Longest encoded stdin line (`NAME="""VALUE"""`, excluding the newline) we will send.
 ///
@@ -401,7 +418,7 @@ fn failure(
 ) -> Error {
     let failed = format!("{what} failed ({})", status_text(status));
     let h = host();
-    if let Some(var) = h.fly_token {
+    if let Some(var) = h.token(CREDENTIAL_VARS) {
         return Error::Target(format!(
             "{failed}\n  {}",
             check_app(app, &format!("the token in {var}"))
@@ -472,7 +489,7 @@ fn run_on(
     .map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => Error::Dependency(format!(
             "{PROGRAM} not found on PATH\n  {}",
-            host().install_hint(Tool::Flyctl)
+            host().install_hint(FLYCTL)
         )),
         // The runner's own message names the program (no child output).
         io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
@@ -700,7 +717,7 @@ mod tests {
     #[test]
     fn list_parses_names_and_digests() {
         let r = FakeRunner::new([Output::success(
-            &include_bytes!("../../tests/fixtures/fly_list.json")[..],
+            &include_bytes!("../../../tests/fixtures/fly_list.json")[..],
         )]);
         let s = list(&r, "app").unwrap();
         assert_eq!(
@@ -949,6 +966,37 @@ mod tests {
 
     fn bash() -> Host {
         host(crate::host::FakeEnv::new("linux").shell("/bin/bash"))
+    }
+
+    #[test]
+    fn flyctl_install_hint_per_platform() {
+        let hints: Vec<String> = ["macos", "windows", "linux"]
+            .map(|os| host(crate::host::FakeEnv::new(os)).install_hint(FLYCTL))
+            .into();
+        assert_eq!(
+            hints,
+            [
+                "install: brew install flyctl",
+                "install: iwr https://fly.io/install.ps1 -useb | iex",
+                "install: curl -L https://fly.io/install.sh | sh",
+            ]
+        );
+    }
+
+    #[test]
+    fn flyctl_install_hint_under_ci_is_the_setup_action() {
+        let ci = host(crate::host::FakeEnv::new("linux").var("CI"));
+        assert!(ci.install_hint(FLYCTL).contains("setup-flyctl"));
+    }
+
+    #[test]
+    fn fly_api_token_wins_over_fly_access_token() {
+        let h = host(
+            crate::host::FakeEnv::new("linux")
+                .var("FLY_ACCESS_TOKEN")
+                .var("FLY_API_TOKEN"),
+        );
+        assert_eq!(h.token(CREDENTIAL_VARS), Some("FLY_API_TOKEN"));
     }
 
     /// `run_on` for a failing `secrets <sub>` on `app` with `host`.

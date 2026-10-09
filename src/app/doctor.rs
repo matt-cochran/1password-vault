@@ -3,13 +3,12 @@
 //! Checks, one line each, always all of them: configuration valid; `op --version`;
 //! the 1Password session via [`onepassword::diagnose`] (`op whoami`, and `op account list`
 //! when it fails; free of rate-limit cost per D0), the same classification a failed item
-//! read uses (FR-26); `flyctl version` and
-//! `flyctl auth whoami` (exit status only) when some environment has a `fly` section.
-//! Environments without one are listed as skipped for Fly. Returns the error of the first
-//! failing check.
+//! read uses (FR-26); then, for each provider some environment uses, the provider's own
+//! checks (`TargetConfig::doctor`, FR-37). Environments without a target are listed as
+//! skipped. Returns the error of the first failing check.
 //!
-//! A tool version opv was not tested with (op older than 2.40.0, flyctl outside 0.4.x from
-//! 0.4.112) is a `warn` line, never a failure.
+//! A tool version opv was not tested with (op older than 2.40.0, or a provider CLI outside
+//! its tested range) is a `warn` line, never a failure.
 //!
 //! Tool output is never echoed: only a version string that matches a strict pattern, and
 //! from `op whoami` only the account type (`SERVICE_ACCOUNT`, ...), never identity or
@@ -25,35 +24,19 @@
 use std::io::{self, Write};
 
 use super::write_err;
-use crate::adapters::{fly, kubernetes, onepassword};
+use crate::adapters::probe::{parse_version, spawn_tool, version_in};
+use crate::adapters::{onepassword, registry};
 use crate::domain::Fleet;
 use crate::error::Error;
-use crate::host::{Host, Tool};
-use crate::runner::{CommandRunner, Output};
-
-/// The 1Password CLI binary (same name the 1Password adapter runs).
-const OP: &str = "op";
+use crate::host::{Host, OP_CLI};
+use crate::provider::{TargetConfig, Verdict as Check};
+use crate::runner::CommandRunner;
 
 /// Oldest `op` release opv is tested with.
 pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
-/// The `flyctl` release opv is tested with (its import parser is ported, see fly.rs). Later
-/// patches of the same minor pass without a warning; another minor or an older patch warns.
-pub const FLYCTL_TESTED: (u64, u64, u64) = (0, 4, 112);
-
-/// Same major and minor as [`FLYCTL_TESTED`], at or above its patch.
-fn flyctl_tested(v: (u64, u64, u64)) -> bool {
-    let (a, b, c) = FLYCTL_TESTED;
-    v.0 == a && v.1 == b && v.2 >= c
-}
 
 /// Name of the configuration check (its message is parser output, see [`next_step`]).
 const CONFIG_CHECK: &str = "config";
-
-/// A check result: ok, ok with a warning, or failed.
-enum Check {
-    Ok(String),
-    Warn(String),
-}
 
 pub fn run_scoped(
     config: Result<Fleet, Error>,
@@ -118,48 +101,63 @@ fn run_on(
         writeln!(out, "{text}").map_err(write_err)
     };
 
-    // (any environment has fly, environments without fly)
-    let fly_envs = match &config {
-        Ok(f) => Some((
-            f.environments.values().any(|e| e.target().is_some()),
+    let (fleet, config_line) = match config {
+        Ok(f) => {
+            let summary = config_summary(&f);
+            (Some(f), Ok(Check::Ok(summary)))
+        }
+        Err(e) => (None, Err(e)),
+    };
+    // (one target per provider in use, environments without a target)
+    let targets = fleet.as_ref().map(|f| {
+        (
+            providers_in_use(f),
             f.environments
                 .iter()
                 .filter(|(_, e)| e.target().is_none())
                 .map(|(n, _)| n.clone())
                 .collect::<Vec<_>>(),
-        )),
-        Err(_) => None,
-    };
-    line(
-        out,
-        CONFIG_CHECK,
-        config.map(|f| Check::Ok(config_summary(&f))),
-    )?;
+        )
+    });
+    line(out, CONFIG_CHECK, config_line)?;
     let op_check = op_version(r, host);
     let op_present = op_check.is_ok();
     line(out, "op", op_check)?;
     line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
-    match fly_envs {
-        Some((true, without)) => {
-            line(out, "flyctl", flyctl_version(r, host))?;
-            line(out, "fly auth", fly_auth(r, host))?;
+    let default = registry::DEFAULT;
+    match targets {
+        Some((used, without)) if !used.is_empty() => {
+            for t in &used {
+                for c in t.doctor(r, host) {
+                    line(out, c.name, c.outcome)?;
+                }
+            }
             if !without.is_empty() {
+                // One provider in use: its section name; several: "target".
+                let section = match used.as_slice() {
+                    [only] => only.provider().section(),
+                    _ => "target",
+                };
                 writeln!(
                     out,
-                    "skip  fly: no fly section in environment(s) {} (run, config export and item skeleton only)",
+                    "skip  {section}: no {section} section in environment(s) {} (run, config export and item skeleton only)",
                     without.join(", ")
                 )
                 .map_err(write_err)?;
             }
         }
-        Some((false, _)) => {
-            for check in ["flyctl", "fly auth"] {
-                writeln!(out, "skip  {check}: no environment has a fly section")
-                    .map_err(write_err)?;
+        Some(_) => {
+            for check in default.doctor_checks() {
+                writeln!(
+                    out,
+                    "skip  {check}: no environment has a {} section",
+                    default.section()
+                )
+                .map_err(write_err)?;
             }
         }
         None => {
-            for check in ["flyctl", "fly auth"] {
+            for check in default.doctor_checks() {
                 writeln!(out, "skip  {check}: not checked (configuration invalid)")
                     .map_err(write_err)?;
             }
@@ -181,6 +179,25 @@ fn run_on(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// One target per provider some environment uses, in registry order (FR-37).
+fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
+    let mut used: Vec<&dyn TargetConfig> = Vec::new();
+    for t in f.environments.values().filter_map(|e| e.target()) {
+        if !used
+            .iter()
+            .any(|u| u.provider().section() == t.provider().section())
+        {
+            used.push(t);
+        }
+    }
+    used.sort_by_key(|t| {
+        registry::PROVIDERS
+            .iter()
+            .position(|p| p.section() == t.provider().section())
+    });
+    used
 }
 
 /// `valid (N environment(s), M product(s))`, or under the simple profile, whose one
@@ -223,37 +240,8 @@ fn next_step(check: &str, e: &Error) -> String {
     }
 }
 
-fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, Error> {
-    let call = crate::runner::Call::new(program, args);
-    r.probe(&call, crate::runner::PROBE_TIMEOUT)
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH")),
-            kind => Error::Dependency(format!("failed to run {program} ({kind})")),
-        })
-}
-
-/// [`spawn`] whose "not found" names the install command for this platform (FR-26).
-fn spawn_tool(
-    r: &dyn CommandRunner,
-    tool: Tool,
-    host: &dyn Fn() -> Host,
-    args: &[&str],
-) -> Result<Output, Error> {
-    let program = match tool {
-        Tool::Op => OP,
-        Tool::Flyctl => fly::PROGRAM,
-        Tool::Kubectl => kubernetes::PROGRAM,
-    };
-    spawn(r, program, args).map_err(|e| match e {
-        Error::Dependency(m) if m.ends_with("not found on PATH") => {
-            Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)))
-        }
-        e => e,
-    })
-}
-
 fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
-    let o = spawn_tool(r, Tool::Op, host, &["--version"])?;
+    let o = spawn_tool(r, OP_CLI, host, &["--version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
             "op --version failed (exit {})",
@@ -267,11 +255,11 @@ fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, E
         }
         Some(v) => Check::Warn(format!(
             "version {v}; opv is tested with op {a}.{b}.{c} or newer\n  {}",
-            host().install_hint(Tool::Op)
+            host().install_hint(OP_CLI)
         )),
         None => Check::Warn(format!(
             "present, version not recognised; opv is tested with op {a}.{b}.{c} or newer\n  {}",
-            host().install_hint(Tool::Op)
+            host().install_hint(OP_CLI)
         )),
     })
 }
@@ -290,31 +278,6 @@ fn op_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<String, Err
                 .expect("every other session is an error"))
         }
     }
-}
-
-fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
-    let o = spawn_tool(r, Tool::Flyctl, host, &["version"])?;
-    if o.status != 0 {
-        return Err(Error::Dependency(format!(
-            "{} version failed (exit {})",
-            fly::PROGRAM,
-            o.status
-        )));
-    }
-    let (a, b, c) = FLYCTL_TESTED;
-    Ok(match version_in(&o.stdout) {
-        Some(v) if parse_version(&v).is_some_and(flyctl_tested) => {
-            Check::Ok(format!("version {v}"))
-        }
-        Some(v) => Check::Warn(format!(
-            "version {v}; opv is tested with flyctl {a}.{b}.{c} or a later {a}.{b}.x patch (its secrets import format may differ)\n  {}",
-            host().install_hint(Tool::Flyctl)
-        )),
-        None => Check::Warn(format!(
-            "present, version not recognised; opv is tested with flyctl {a}.{b}.{c} or a later {a}.{b}.x patch\n  {}",
-            host().install_hint(Tool::Flyctl)
-        )),
-    })
 }
 
 /// Whether `opv run` can work here: the first `op` on PATH must be native, because a Windows
@@ -341,63 +304,6 @@ fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
             e.kind()
         ))),
     }
-}
-
-/// `2.40.0` / `v0.4.112` → (major, minor, patch). Missing parts count as 0; anything else
-/// (more than three parts, non-digits) is `None`.
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let v = v.strip_prefix('v').unwrap_or(v);
-    let mut parts = v.split('.').map(|p| p.parse::<u64>().ok());
-    let major = parts.next()??;
-    let minor = parts.next().unwrap_or(Some(0))?;
-    let patch = parts.next().unwrap_or(Some(0))?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((major, minor, patch))
-}
-
-/// `flyctl auth whoami`: exit status only, via the same check a failed flyctl call uses
-/// (FR-26). Its stdout names the account (an email), so it is dropped unread.
-fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
-    match fly::auth_whoami(r) {
-        Ok(true) => Ok(Check::Ok("signed in".into())),
-        // FR-26: app-scoped deploy tokens cannot run `auth whoami`, so with a Fly token in
-        // the environment a failure here is not proof of being logged out.
-        Ok(false) => match host().fly_token {
-            Some(var) => Ok(Check::Warn(format!(
-                "{} auth whoami failed with {var} set (an app-scoped deploy token cannot \
-                 run it); fly commands will show whether the token can access the app",
-                fly::PROGRAM
-            ))),
-            None => Err(fly::not_logged_in(&host(), None)),
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
-            "{} not found on PATH\n  {}",
-            fly::PROGRAM,
-            host().install_hint(Tool::Flyctl)
-        ))),
-        Err(e) => Err(Error::Dependency(format!(
-            "failed to run {} ({})",
-            fly::PROGRAM,
-            e.kind()
-        ))),
-    }
-}
-
-/// The first whitespace-separated token that looks like a version (`2.40.0`, `v0.4.112`),
-/// or `None`. Nothing else from tool output is ever printed.
-fn version_in(stdout: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(stdout).ok()?;
-    s.split_whitespace()
-        .find(|t| {
-            let digits = t.strip_prefix('v').unwrap_or(t);
-            digits.len() <= 32
-                && digits.starts_with(|c: char| c.is_ascii_digit())
-                && digits.contains('.')
-                && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
-        })
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

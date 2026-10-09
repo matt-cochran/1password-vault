@@ -60,3 +60,26 @@ pub trait PinnedRuntime {
     /// Advisory only (R6): used by doctor, never gates a deploy.
     fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error>;
 }
+
+/// A target's store and runtime adapters, returned by `TargetConfig::open`. The variant is
+/// the flow: staged (one store and one runtime that deploys staged changes) or pinned.
+pub enum Ports<'a> {
+    Staged {
+        store: Box<dyn StagedStore + 'a>,
+        runtime: Box<dyn StagedRuntime + 'a>,
+    },
+    Pinned {
+        store: Box<dyn PinnedStore + 'a>,
+        runtime: Box<dyn PinnedRuntime + 'a>,
+    },
+}
+
+impl Ports<'_> {
+    /// The store as the operations every flow shares, for `status` and `plan`.
+    pub fn store(&self) -> &dyn Store {
+        match self {
+            Ports::Staged { store, .. } => store.as_ref(),
+            Ports::Pinned { store, .. } => store.as_ref(),
+        }
+    }
+}

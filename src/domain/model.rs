@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::provider::TargetConfig;
 
 /// Field kind. In 1Password a concealed field is a secret and a text field is config (FR-14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -97,121 +98,38 @@ pub struct Product {
     pub keys: BTreeMap<String, KeySpec>,
 }
 
-/// The Fly.io target of one environment (§10.3). Optional: an environment used only for
-/// `run`, `config export` and `item skeleton` needs no Fly app.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlyTarget {
-    pub app: String,
-    /// Fly secret name template containing `{PRODUCT}` and `{KEY}`; defines the managed set (FR-8).
-    pub secret_name_template: String,
-}
-
-impl FlyTarget {
-    /// Fly secret name for `product`/`key`: `{PRODUCT}` becomes the upper-cased product with
-    /// `-` replaced by `_`, `{KEY}` becomes the key verbatim.
-    pub fn target_name(&self, product: &str, key: &str) -> String {
-        let product = product.to_ascii_uppercase().replace('-', "_");
-        self.secret_name_template
-            .replace("{PRODUCT}", &product)
-            .replace("{KEY}", key)
-    }
-}
-
-/// Where the Container App reads configuration (FR-30): plain env vars (`Env`) or
-/// Key Vault references only (`Store`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConfigRoute {
-    #[default]
-    Env,
-    Store,
-}
-
-/// The Azure Key Vault + Container Apps target of one environment (FR-28, FR-30).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AzureTarget {
-    pub key_vault: String,
-    pub resource_group: String,
-    pub container_app: String,
-    /// R1: required only when the app has more than one container.
-    pub container: Option<String>,
-    /// "system" or a user-assigned identity resource id (R6).
-    pub identity: String,
-    /// Env-name template; `{KEY}` under the simple profile.
-    pub env_name_template: String,
-    pub config: ConfigRoute,
-}
-
-impl AzureTarget {
-    /// Env var name for `product`/`key` (same rendering as [`FlyTarget::target_name`]).
-    pub fn env_name(&self, product: &str, key: &str) -> String {
-        let product = product.to_ascii_uppercase().replace('-', "_");
-        self.env_name_template
-            .replace("{PRODUCT}", &product)
-            .replace("{KEY}", key)
-    }
-
-    /// Key Vault secret name for an env name: `_` becomes `-` (spec section 5).
-    pub fn store_name(env_name: &str) -> String {
-        env_name.replace('_', "-")
-    }
-}
-
-/// The deployment target of one environment (FR-12, FR-28). Target-neutral domain names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Fly(FlyTarget),
-    Azure(AzureTarget),
-}
-
-impl Target {
-    /// Short, user-facing target name (`"Fly"`).
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Fly(_) => "Fly",
-            Self::Azure(_) => "Azure",
-        }
-    }
-
-    /// Store name for `product`/`key` on this target.
-    pub fn target_name(&self, product: &str, key: &str) -> String {
-        match self {
-            Self::Fly(f) => f.target_name(product, key),
-            Self::Azure(a) => a.env_name(product, key),
-        }
-    }
-}
-
 /// One deployment environment: one 1Password item (by IDs, FR-13) and, optionally, one
 /// deployment target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
     pub vault_id: String,
     pub item_id: String,
-    /// The deployment target (FR-28): `None` when the environment declares none.
-    pub target: Option<Target>,
+    /// The deployment target (FR-28, FR-37): `None` when the environment declares none.
+    pub target: Option<Box<dyn TargetConfig>>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Environment {
     /// The environment's deployment target, or `None` when it has none.
-    pub fn target(&self) -> Option<&Target> {
-        self.target.as_ref()
+    pub fn target(&self) -> Option<&dyn TargetConfig> {
+        self.target.as_deref()
     }
 
-    /// Store name for `product`/`key`, or `None` when the environment has no target.
+    /// Target name (the runtime env var name) for `product`/`key`, or `None` when the
+    /// environment has no target.
     pub fn target_name(&self, product: &str, key: &str) -> Option<String> {
-        self.target().map(|t| t.target_name(product, key))
+        self.target().map(|t| t.env_name(product, key))
     }
 }
 
 /// Which `profile.kind` the configuration declared (§10.2, FR-20).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Profile {
-    /// Products with sections in the item and a Fly name template (§10.2). The default.
+    /// Products with sections in the item and a target name template (§10.2). The default.
     #[default]
     Fleet,
-    /// A flat `[keys]` map (FR-20): unsectioned item fields, Fly name = key name.
+    /// A flat `[keys]` map (FR-20): unsectioned item fields, target name = key name.
     Simple,
 }
 
@@ -221,7 +139,7 @@ pub enum Profile {
 /// [`key_label`].
 pub const SIMPLE_PRODUCT: &str = "";
 
-/// Fly name template of a simple-profile environment: the key name itself (FR-20).
+/// Target name template of a simple-profile environment: the key name itself (FR-20).
 pub const SIMPLE_TEMPLATE: &str = "{KEY}";
 
 /// The user-facing name of `product`/`key`: `product/KEY` under the fleet profile, `KEY`
@@ -238,7 +156,7 @@ pub fn key_label(product: &str, key: &str) -> String {
 ///
 /// A simple-profile file (FR-20) is desugared into the same model: one product named
 /// [`SIMPLE_PRODUCT`] holding every key, unsectioned item fields (section
-/// [`SIMPLE_PRODUCT`]), and a Fly template of [`SIMPLE_TEMPLATE`], so the planner, rules,
+/// [`SIMPLE_PRODUCT`]), and a target name template of [`SIMPLE_TEMPLATE`], so the planner, rules,
 /// stage-and-compare and prune logic are shared unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fleet {
@@ -264,35 +182,14 @@ impl Fleet {
         })
     }
 
-    /// The environment and its target; `Error::Config` naming the environment when it is
-    /// undefined or has no `fly` section (status, `fly plan`, `fly sync` need one).
-    pub fn target(&self, env: &str) -> Result<(&Environment, &Target), Error> {
-        let e = self.environment(env)?;
-        match &e.target {
-            Some(t) => Ok((e, t)),
-            None if self.is_simple() => Err(Error::Config(format!(
-                "environment {env:?} has no deployment target. For local settings use opv check {env} and opv run {env} -- <command>. To deploy, configure fly.app first."
-            ))),
-            None => Err(Error::Config(format!(
-                "environment {env:?} has no deployment target. For local settings use opv check {env} --product <name> and opv run {env} --product <name> -- <command>. To deploy, configure fly.app and fly.secret_name first."
-            ))),
-        }
-    }
-
-    /// Store name for `product`/`key` in `env`; `Error::Config` if `env` is undefined
-    /// or has no target.
-    pub fn try_target_name(&self, env: &str, product: &str, key: &str) -> Result<String, Error> {
-        Ok(self.target(env)?.1.target_name(product, key))
-    }
-
-    /// Store name for `product`/`key` in `env`.
+    /// Target name (runtime env var name) for `product`/`key` in `env`.
     ///
     /// # Panics
     /// If `env` is not a defined environment with a target. Callers resolve it first.
     pub fn target_name(&self, env: &str, product: &str, key: &str) -> String {
-        match self.environments.get(env).and_then(|e| e.target.as_ref()) {
-            Some(t) => t.target_name(product, key),
-            None => panic!("fly_name: environment {env:?} undefined or without fly"),
+        match self.environments.get(env).and_then(|e| e.target()) {
+            Some(t) => t.env_name(product, key),
+            None => panic!("target_name: environment {env:?} undefined or without a target"),
         }
     }
 }
@@ -300,34 +197,6 @@ impl Fleet {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn target_name_normalizes_product() {
-        let e = Environment {
-            vault_id: "v".into(),
-            item_id: "i".into(),
-            target: Some(Target::Fly(FlyTarget {
-                app: "a".into(),
-                secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
-            })),
-            modes: BTreeMap::new(),
-        };
-        assert_eq!(
-            e.target_name("my-app", "API_KEY").as_deref(),
-            Some("FLEET__MY_APP__API_KEY")
-        );
-        let no_fly = Environment { target: None, ..e };
-        assert_eq!(no_fly.target_name("my-app", "API_KEY"), None);
-    }
-
-    #[test]
-    fn simple_template_renders_the_key_name_itself() {
-        let t = FlyTarget {
-            app: "a".into(),
-            secret_name_template: SIMPLE_TEMPLATE.into(),
-        };
-        assert_eq!(t.target_name(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
-    }
 
     #[test]
     fn key_label_hides_the_implicit_product() {

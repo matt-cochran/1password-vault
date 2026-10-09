@@ -1,11 +1,11 @@
 //! `explain <product>/<key> [--env <env>]` use case (FR-22); `explain <KEY>` under the
 //! simple profile (FR-20).
 //!
-//! Reads only the configuration: no 1Password or Fly call, so it takes no runner at all
+//! Reads only the configuration: no 1Password or target call, so it takes no runner at all
 //! and cannot emit a value or a value fragment (SR-1, §5). It is not a `secret get`.
 //!
 //! For the environment named by `--env` (or the only one declared, when `--env` is
-//! omitted) it prints the `op://` reference, the field kind, the Fly name, the declared
+//! omitted) it prints the `op://` reference, the field kind, the target's names, the declared
 //! rules, `immutable` and `guidance`, plus the `op item get <item_id> --vault <vault_id>`
 //! command a person can run to inspect the field in their own terminal. That command never
 //! contains `--reveal`.
@@ -15,6 +15,7 @@
 use std::io::Write;
 
 use super::{kind_label, write_err};
+use crate::adapters::registry;
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
 use crate::domain::{Fleet, rules};
 use crate::error::Error;
@@ -128,11 +129,25 @@ fn explain_in(
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
-    let label_of = env.target().map_or("Fly", |t| t.label());
-    let fly_name = match (spec.kind, env.target_name(product, key)) {
-        (Kind::Config, _) => format!("- (config: not a {label_of} secret)"),
-        (Kind::Secret, Some(n)) => n,
-        (Kind::Secret, None) => "- (environment has no fly section)".to_string(),
+    // Without a target, the lines name the default provider (FR-37).
+    let label_of = env
+        .target()
+        .map_or(registry::DEFAULT.label(), |t| t.provider().label());
+    let name_label = format!("{} name", label_of.to_lowercase());
+    let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
+        (Kind::Config, _) => vec![(name_label, format!("- (config: not a {label_of} secret)"))],
+        (Kind::Secret, Some(t)) => t
+            .explain(product, key)
+            .into_iter()
+            .map(|(l, v)| (l.to_string(), v))
+            .collect(),
+        (Kind::Secret, None) => vec![(
+            name_label,
+            format!(
+                "- (environment has no {} section)",
+                registry::DEFAULT.section()
+            ),
+        )],
     };
     let rules = describe_rules(&spec.rules);
     let guidance = if spec.guidance.is_empty() {
@@ -149,7 +164,11 @@ fn explain_in(
             env.vault_id, env.item_id
         ),
         format!("  kind:       {} ({field})", kind_label(spec.kind)),
-        format!("  {} name:   {fly_name}", label_of.to_lowercase()),
+    ];
+    for (l, v) in target_lines {
+        lines.push(format!("  {:<11} {v}", format!("{l}:")));
+    }
+    lines.extend([
         format!(
             "  rules:      {}",
             if rules.is_empty() {
@@ -163,7 +182,7 @@ fn explain_in(
             if spec.immutable { "yes" } else { "no" }
         ),
         format!("  guidance:   {guidance}"),
-    ];
+    ]);
     if !rules::applies(spec, env_name, env, product) {
         lines.push("  note:       not required here (its prefix_by_mode mode is skipped)".into());
     }
@@ -301,6 +320,26 @@ mod tests {
     #[test]
     fn prints_the_field_kind() {
         assert!(openai_prod().contains("kind:       secret (concealed field)"));
+    }
+
+    /// FR-37: a provider's own explain lines stay readable when a label is wider than the
+    /// column.
+    #[test]
+    fn prints_the_key_vault_name_of_an_azure_target() {
+        let fleet = crate::config::parse(
+            "[profile]\nkind = \"fleet\"\n\
+             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
+             [environments.prod.azure]\nkey_vault = \"kv\"\nresource_group = \"rg\"\n\
+             container_app = \"ca\"\nidentity = \"system\"\n\
+             env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+             [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let out = explain(&fleet, "api/TOKEN", Some("prod")).unwrap();
+        assert!(
+            out.contains("  key vault name: FLEET--API--TOKEN\n"),
+            "{out}"
+        );
     }
 
     #[test]

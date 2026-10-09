@@ -5,7 +5,7 @@
 //!   call, so an unknown name is `Error::Config` and `plan::build` never sees one.
 //! - A command that reads 1Password makes exactly one `op item get` (FR-13); a failed `op`
 //!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26).
-//! - Output names products, keys, kinds, rules and Fly names, never values (SR-1).
+//! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
 #[cfg(test)]
 mod characterization_tests;
@@ -30,18 +30,19 @@ pub mod sync;
 use std::collections::{BTreeSet, HashSet};
 use std::io::{self, Write};
 
-use crate::adapters::onepassword;
+use crate::adapters::{onepassword, registry};
 use crate::domain::plan;
 use crate::domain::{
-    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState,
-    key_label,
+    Environment, Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan,
+    TargetState, key_label,
 };
 use crate::error::Error;
-use crate::ports::Store;
+use crate::ports::{Ports, Store};
+use crate::provider::TargetConfig;
 use crate::runner::CommandRunner;
 
-/// Fly digests are not computable locally (D0 Q4, ruling P1): every key present on Fly is
-/// `Unknown` to the planner, and change detection is stage-and-compare in `fly sync`.
+/// Store digests are not computable locally (D0 Q4, ruling P1): every key present on the
+/// target is `Unknown` to the planner, and change detection is stage-and-compare in `sync`.
 fn no_digest(_: &SecretValue) -> Option<String> {
     None
 }
@@ -124,7 +125,7 @@ fn json_product(product: &str) -> Option<String> {
     (product != SIMPLE_PRODUCT).then(|| product.to_string())
 }
 
-/// FR-21: one names-only JSON document for `status --json` and `fly plan --json`.
+/// FR-21: one names-only JSON document for `status --json` and `plan --json`.
 ///
 /// Under the simple profile (FR-20) `product` is `null` in rows, extras and held entries,
 /// matching the text table, which has no PRODUCT column there.
@@ -156,10 +157,10 @@ pub(crate) fn write_json(
         .rows
         .iter()
         .map(|r| {
-            let fly_name = env.target_name(&r.product, &r.key);
+            let target_name = env.target_name(&r.product, &r.key);
             let action = row_action(
                 r,
-                fly_name.as_deref(),
+                target_name.as_deref(),
                 &staged,
                 &pruned,
                 &held_keys,
@@ -172,7 +173,7 @@ pub(crate) fn write_json(
                 state: json_state(&r.state),
                 rule: json_rule(&r.state),
                 reason: json_reason(&r.state),
-                fly_name,
+                fly_name: target_name,
                 target: json_target(r.kind, r.target),
                 action,
             }
@@ -292,7 +293,7 @@ fn json_reason(s: &KeyState) -> Option<String> {
     }
 }
 
-/// Target presence: secrets are present/absent/would-change; config is not a Fly secret.
+/// Target presence: secrets are present/absent/would-change; config is not a target secret.
 fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     match (kind, target) {
         (Kind::Config, _) => None,
@@ -302,10 +303,10 @@ fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     }
 }
 
-/// What a `fly plan` would do with this row: stage, prune or hold it.
+/// What a `plan` would do with this row: stage, prune or hold it.
 fn row_action(
     r: &Row,
-    fly_name: Option<&str>,
+    target_name: Option<&str>,
     staged: &HashSet<&str>,
     pruned: &HashSet<&str>,
     held_keys: &HashSet<(&str, &str)>,
@@ -314,7 +315,7 @@ fn row_action(
     if held_keys.contains(&(r.product.as_str(), r.key.as_str())) {
         return Some("held");
     }
-    let name = fly_name?;
+    let name = target_name?;
     if staged.contains(name) {
         Some("would_stage")
     } else if pruned.contains(name) {
@@ -441,33 +442,67 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
     Ok(())
 }
 
-/// Every Fly name the template renders for a declared key: the managed set (FR-8, §10).
+/// The environment and its target; `Error::Config` naming the environment when it is
+/// undefined or has no target section (status, plan and sync need one). The hint names
+/// what the default provider needs (FR-37).
+pub(crate) fn target<'f>(
+    fleet: &'f Fleet,
+    env: &str,
+) -> Result<(&'f Environment, &'f dyn TargetConfig), Error> {
+    let e = fleet.environment(env)?;
+    if let Some(t) = e.target() {
+        return Ok((e, t));
+    }
+    let hint = registry::DEFAULT.setup_hint(fleet.profile);
+    let local = if fleet.is_simple() {
+        format!("opv check {env} and opv run {env} -- <command>")
+    } else {
+        format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>")
+    };
+    Err(Error::Config(format!(
+        "environment {env:?} has no deployment target. For local settings use {local}. To deploy, {hint} first."
+    )))
+}
+
+/// Resolve the environment's target, run its preflight checks (NR-23 to NR-26) and open
+/// its ports. Every check happens before the first call that reads or changes anything.
+pub(crate) fn open_target<'a>(
+    fleet: &'a Fleet,
+    env_name: &'a str,
+    r: &'a dyn CommandRunner,
+) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
+    let (_, t) = target(fleet, env_name)?;
+    t.preflight(r)?;
+    Ok((t, t.open(env_name, r)?))
+}
+
+/// Every name the target renders for a declared key: the managed set (FR-8, §10).
 pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<String>, Error> {
-    let (_, target) = fleet.target(env_name)?;
+    let (_, t) = target(fleet, env_name)?;
     Ok(fleet
         .products
         .iter()
-        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| target.target_name(p, k)))
+        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
 }
 
-/// Fly names on the app that the template does not render for any declared key: other
-/// tools' secrets, which opv never touches (FR-5 "unmanaged on Fly", §10.3).
+/// Names on the target that the template does not render for any declared key: other
+/// tools' secrets, which opv never touches (FR-5 "unmanaged on <target>", §10.3).
 pub(crate) fn unmanaged_on_target<'a>(
     fleet: &Fleet,
     env_name: &str,
-    on_fly: &'a [StoreEntry],
+    on_target: &'a [StoreEntry],
 ) -> Result<Vec<&'a str>, Error> {
     let managed = managed_names(fleet, env_name)?;
-    Ok(on_fly
+    Ok(on_target
         .iter()
         .map(|s| s.name.as_str())
         .filter(|n| !managed.contains(*n))
         .collect())
 }
 
-/// FR-12, §8 item 27: use cases reach a target only through the ports. `init` writes a Fly
-/// configuration and `doctor` checks installed vendor CLIs, so both may name an adapter.
+/// FR-12, §8 item 27: use cases reach a target only through the ports. `init` writes a
+/// provider section by design (FR-37), so it may name an adapter.
 #[cfg(test)]
 #[test]
 fn use_cases_name_no_target_adapter() {
@@ -475,11 +510,11 @@ fn use_cases_name_no_target_adapter() {
     for dir in ["src/app", "src/domain"] {
         for e in std::fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
-            let exempt = ["init.rs", "doctor.rs", "characterization_tests.rs"];
+            let exempt = ["init.rs", "characterization_tests.rs"];
             if exempt.iter().any(|x| p.ends_with(x)) {
                 continue;
             }
-            let s = std::fs::read_to_string(&p).unwrap();
+            let s = production_code(&std::fs::read_to_string(&p).unwrap());
             // Built at runtime so this test does not match itself.
             let needles = [["fly", "::"].concat(), ["adapters::", "fly"].concat()];
             if needles.iter().any(|n| s.contains(n.as_str())) {
@@ -488,6 +523,62 @@ fn use_cases_name_no_target_adapter() {
         }
     }
     assert!(hits.is_empty(), "a target adapter named in core: {hits:?}");
+}
+
+/// The production code of a source file: comment lines dropped, and everything from the
+/// first `#[cfg(test)]` item that is not a `mod x;` declaration cut off.
+#[cfg(test)]
+fn production_code(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut kept = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim() == "#[cfg(test)]" {
+            let next = lines.get(i + 1).map_or("", |n| n.trim());
+            if !(next.starts_with("mod ") && next.ends_with(';')) {
+                break;
+            }
+        }
+        if !l.trim_start().starts_with("//") {
+            kept.push(*l);
+        }
+    }
+    kept.join("\n")
+}
+
+/// FR-37: `app/`, `domain/` and `config.rs` never name a provider, its CLI or its store;
+/// provider lines come from `TargetConfig`. Only `init` writes a provider section by design.
+#[cfg(test)]
+#[test]
+fn core_modules_name_no_provider() {
+    let mut files = vec![std::path::PathBuf::from("src/config.rs")];
+    for dir in ["src/app", "src/domain"] {
+        for e in std::fs::read_dir(dir).unwrap() {
+            files.push(e.unwrap().path());
+        }
+    }
+    let words = [
+        "fly",
+        "azure",
+        "kubernetes",
+        "keyvault",
+        "containerapp",
+        "kubectl",
+        "flyctl",
+    ];
+    let re = regex::Regex::new(&format!(r"(?i)\b({})\b|\baz\s", words.join("|"))).unwrap();
+    let hits: Vec<String> = files
+        .iter()
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name != "init.rs" && !name.ends_with("_tests.rs")
+        })
+        .filter_map(|p| {
+            let code = production_code(&std::fs::read_to_string(p).unwrap());
+            re.find(&code)
+                .map(|m| format!("{}: {:?}", p.display(), m.as_str()))
+        })
+        .collect();
+    assert!(hits.is_empty(), "a provider named in core: {hits:?}");
 }
 
 #[cfg(test)]

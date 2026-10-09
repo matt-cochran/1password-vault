@@ -44,6 +44,16 @@ pub use store::KubeSecrets;
 
 /// The Kubernetes CLI binary.
 pub const PROGRAM: &str = "kubectl";
+
+/// The Kubernetes CLI and how to install it (FR-26).
+pub const KUBECTL: Tool = Tool {
+    program: PROGRAM,
+    ci: "install kubectl in the CI job (GitHub Actions: uses: azure/setup-kubectl)",
+    macos: "install: brew install kubectl",
+    windows: "install: winget install -e --id Kubernetes.kubectl",
+    linux: "install kubectl from https://kubernetes.io/docs/tasks/tools/ \
+            (the official instructions for this Linux distribution)",
+};
 /// The `data` key every opv Secret stores its value under.
 pub const VALUE_KEY: &str = "value";
 /// Ownership label: the opv environment that wrote the Secret (FR-32).
@@ -315,7 +325,7 @@ fn spawn_error(what: &str, e: &io::Error) -> Error {
     match e.kind() {
         io::ErrorKind::NotFound => Error::Dependency(format!(
             "{PROGRAM} not found on PATH\n  {}",
-            Host::detect().install_hint(Tool::Kubectl)
+            Host::detect().install_hint(KUBECTL)
         )),
         io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
         kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
@@ -568,6 +578,28 @@ mod tests {
             kubectl_get_deployment(&r),
             Err(Error::Dependency(m)) if m.starts_with("kubectl not found on PATH")
         ));
+    }
+
+    fn kubectl_hint(os: &str) -> String {
+        Host::from_env(&crate::host::FakeEnv::new(os)).install_hint(KUBECTL)
+    }
+
+    #[test]
+    fn kubectl_install_hint_on_macos_uses_brew() {
+        assert_eq!(kubectl_hint("macos"), "install: brew install kubectl");
+    }
+
+    #[test]
+    fn kubectl_install_hint_on_windows_uses_winget() {
+        assert_eq!(
+            kubectl_hint("windows"),
+            "install: winget install -e --id Kubernetes.kubectl"
+        );
+    }
+
+    #[test]
+    fn kubectl_install_hint_on_linux_points_at_official_instructions() {
+        assert!(kubectl_hint("linux").contains("https://kubernetes.io/docs/tasks/tools/"));
     }
 
     #[test]

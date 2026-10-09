@@ -14,14 +14,16 @@
 //!    elsewhere. Any other shell (nu, tcsh, csh, ...): PowerShell on Windows (its default),
 //!    [`Shell::Other`] elsewhere, which gets a generic `op signin` hint, never POSIX syntax.
 //! 4. Non-interactive credentials, by name only: 1Password `OP_SERVICE_ACCOUNT_TOKEN`, or
-//!    Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`); Fly `FLY_API_TOKEN` /
-//!    `FLY_ACCESS_TOKEN`. With one set, failures are never answered with an interactive
-//!    sign-in command.
+//!    Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`); each provider's own
+//!    (`Provider::credential_vars`, e.g. `FLY_API_TOKEN`). With one set, failures are never
+//!    answered with an interactive sign-in command.
 //!
 //! Credential variables are tested by name only; their values are never read (SR-1).
 //! Messages are text, never prompts (FR-9). Detection runs only on failure paths.
 
 use std::fmt;
+
+use crate::adapters::registry;
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -150,13 +152,29 @@ pub enum Shell {
     Other,
 }
 
-/// A tool opv runs, for install guidance.
+/// A CLI opv runs, and the one install line per platform for it (FR-26). The 1Password
+/// CLI is [`OP_CLI`]; each provider declares its own next to its adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tool {
-    Op,
-    Flyctl,
-    Kubectl,
+pub struct Tool {
+    /// The program name on PATH.
+    pub program: &'static str,
+    /// Under CI.
+    pub ci: &'static str,
+    pub macos: &'static str,
+    pub windows: &'static str,
+    /// Linux, WSL and any other platform.
+    pub linux: &'static str,
 }
+
+/// The 1Password CLI.
+pub const OP_CLI: Tool = Tool {
+    program: "op",
+    ci: "install op in the CI job (GitHub Actions: uses: 1password/install-cli-action)",
+    macos: "install: brew install 1password-cli",
+    windows: "install: winget install AgileBits.1Password.CLI",
+    linux: "install op from https://developer.1password.com/docs/cli/get-started/ \
+            (apt, dnf or the zip for this Linux distribution)",
+};
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,8 +220,9 @@ pub struct Host {
     pub ci: bool,
     /// A non-interactive 1Password credential, if set (service account wins over Connect).
     pub op_credential: Option<OpCredential>,
-    /// `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN`, whichever is set (that order), by name.
-    pub fly_token: Option<&'static str>,
+    /// Which of [`registry::credential_vars`] are set, one bit each (by name; values are
+    /// never read). Read with [`Host::token`].
+    tokens: u64,
 }
 
 impl Host {
@@ -278,16 +297,28 @@ impl Host {
         } else {
             None
         };
-        let fly_token = ["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"]
-            .into_iter()
-            .find(|n| env.is_set(n));
+        let tokens = registry::credential_vars()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| env.is_set(n))
+            .fold(0, |bits, (i, _)| bits | 1 << i);
         Host {
             platform,
             shell,
             ci,
             op_credential,
-            fly_token,
+            tokens,
         }
+    }
+
+    /// The first of a provider's `vars` that is set, by name (FR-26).
+    pub fn token(&self, vars: &[&'static str]) -> Option<&'static str> {
+        let all = registry::credential_vars();
+        vars.iter().copied().find(|v| {
+            all.iter()
+                .position(|a| a == v)
+                .is_some_and(|i| self.tokens & 1 << i != 0)
+        })
     }
 
     /// How to sign `op` in from this shell, or `None` when no interactive sign-in applies
@@ -326,39 +357,13 @@ impl Host {
 
     /// One line telling the user how to install `tool` on this platform.
     pub fn install_hint(&self, tool: Tool) -> String {
-        if self.ci {
-            return match tool {
-                Tool::Op => "install op in the CI job (GitHub Actions: \
-                             uses: 1password/install-cli-action)"
-                    .into(),
-                Tool::Flyctl => "install flyctl in the CI job (GitHub Actions: \
-                                 uses: superfly/flyctl-actions/setup-flyctl@master)"
-                    .into(),
-                Tool::Kubectl => "install kubectl in the CI job (GitHub Actions: \
-                                  uses: azure/setup-kubectl)"
-                    .into(),
-            };
-        }
-        let cmd = match (tool, self.platform) {
-            (Tool::Op, Platform::MacOs) => "brew install 1password-cli",
-            (Tool::Op, Platform::Windows) => "winget install AgileBits.1Password.CLI",
-            (Tool::Op, _) => {
-                return "install op from https://developer.1password.com/docs/cli/get-started/ \
-                        (apt, dnf or the zip for this Linux distribution)"
-                    .into();
-            }
-            (Tool::Flyctl, Platform::MacOs) => "brew install flyctl",
-            (Tool::Flyctl, Platform::Windows) => "iwr https://fly.io/install.ps1 -useb | iex",
-            (Tool::Flyctl, _) => "curl -L https://fly.io/install.sh | sh",
-            (Tool::Kubectl, Platform::MacOs) => "brew install kubectl",
-            (Tool::Kubectl, Platform::Windows) => "winget install -e --id Kubernetes.kubectl",
-            (Tool::Kubectl, _) => {
-                return "install kubectl from https://kubernetes.io/docs/tasks/tools/ \
-                        (the official instructions for this Linux distribution)"
-                    .into();
-            }
+        let line = match (self.ci, self.platform) {
+            (true, _) => tool.ci,
+            (false, Platform::MacOs) => tool.macos,
+            (false, Platform::Windows) => tool.windows,
+            (false, _) => tool.linux,
         };
-        format!("install: {cmd}")
+        line.into()
     }
 }
 
@@ -518,21 +523,16 @@ mod tests {
     }
 
     #[test]
-    fn fly_token_by_name() {
-        assert_eq!(host(FakeEnv::new("linux")).fly_token, None);
-        assert_eq!(
-            host(FakeEnv::new("linux").var("FLY_ACCESS_TOKEN")).fly_token,
-            Some("FLY_ACCESS_TOKEN")
-        );
-        assert_eq!(
-            host(
-                FakeEnv::new("linux")
-                    .var("FLY_ACCESS_TOKEN")
-                    .var("FLY_API_TOKEN")
-            )
-            .fly_token,
-            Some("FLY_API_TOKEN")
-        );
+    fn token_is_the_first_set_variable_of_the_given_ones() {
+        let all = registry::credential_vars();
+        let h = host(FakeEnv::new("linux").var(all[1]).var(all[0]));
+        assert_eq!(h.token(&all[..2]), Some(all[0]));
+    }
+
+    #[test]
+    fn token_is_none_when_no_given_variable_is_set() {
+        let all = registry::credential_vars();
+        assert_eq!(host(FakeEnv::new("linux")).token(&all), None);
     }
 
     /// `CI` counts only when truthy; `GITHUB_ACTIONS=true` counts.
@@ -568,64 +568,18 @@ mod tests {
 
     #[test]
     fn install_hint_per_platform() {
-        let h = |os: &str| host(FakeEnv::new(os));
+        let hints: Vec<String> = [
+            FakeEnv::new("macos"),
+            FakeEnv::new("windows"),
+            FakeEnv::new("linux").var("WSL_DISTRO_NAME"),
+            FakeEnv::new("linux").var("CI"),
+        ]
+        .into_iter()
+        .map(|e| host(e).install_hint(OP_CLI))
+        .collect();
         assert_eq!(
-            h("macos").install_hint(Tool::Op),
-            "install: brew install 1password-cli"
-        );
-        assert_eq!(
-            h("windows").install_hint(Tool::Op),
-            "install: winget install AgileBits.1Password.CLI"
-        );
-        assert!(
-            h("linux")
-                .install_hint(Tool::Op)
-                .contains("developer.1password.com")
-        );
-        assert_eq!(
-            h("macos").install_hint(Tool::Flyctl),
-            "install: brew install flyctl"
-        );
-        assert_eq!(
-            h("linux").install_hint(Tool::Flyctl),
-            "install: curl -L https://fly.io/install.sh | sh"
-        );
-        let wsl = host(FakeEnv::new("linux").var("WSL_DISTRO_NAME"));
-        assert_eq!(
-            wsl.install_hint(Tool::Flyctl),
-            "install: curl -L https://fly.io/install.sh | sh"
-        );
-        assert_eq!(
-            h("windows").install_hint(Tool::Flyctl),
-            "install: iwr https://fly.io/install.ps1 -useb | iex"
-        );
-        let ci = host(FakeEnv::new("linux").var("CI"));
-        assert!(ci.install_hint(Tool::Op).contains("install-cli-action"));
-        assert!(ci.install_hint(Tool::Flyctl).contains("setup-flyctl"));
-    }
-
-    #[test]
-    fn kubectl_install_hint_on_macos_uses_brew() {
-        assert_eq!(
-            host(FakeEnv::new("macos")).install_hint(Tool::Kubectl),
-            "install: brew install kubectl"
-        );
-    }
-
-    #[test]
-    fn kubectl_install_hint_on_windows_uses_winget() {
-        assert_eq!(
-            host(FakeEnv::new("windows")).install_hint(Tool::Kubectl),
-            "install: winget install -e --id Kubernetes.kubectl"
-        );
-    }
-
-    #[test]
-    fn kubectl_install_hint_on_linux_points_at_official_instructions() {
-        assert!(
-            host(FakeEnv::new("linux"))
-                .install_hint(Tool::Kubectl)
-                .contains("https://kubernetes.io/docs/tasks/tools/")
+            hints,
+            [OP_CLI.macos, OP_CLI.windows, OP_CLI.linux, OP_CLI.ci]
         );
     }
 }

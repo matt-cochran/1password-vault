@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use super::write_err;
 use crate::adapters::onepassword_init::{self, FieldShape};
+use crate::adapters::registry;
 use crate::config;
 use crate::domain::{Kind, Profile};
 use crate::error::Error;
@@ -33,9 +34,6 @@ use crate::runner::CommandRunner;
 
 /// The file `init` writes, in the directory it is given (the current directory).
 pub const FILE_NAME: &str = "secrets.toml";
-
-/// The fleet Fly name template written for a fleet file (§10.2, the fixture's template).
-pub const FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
 /// `opv init` arguments.
 #[derive(Debug, Clone)]
@@ -419,11 +417,14 @@ fn render(args: &InitArgs, vault_id: &str, item_id: &str, d: &Declared) -> Strin
     let _ = writeln!(s, "[environments.{env}]");
     let _ = writeln!(s, "vault_id = {}", quoted(vault_id));
     let _ = writeln!(s, "item_id = {}", quoted(item_id));
-    if let Some(app) = &args.fly_app {
-        let _ = writeln!(s, "fly.app = {}", quoted(app));
-        if d.profile == Profile::Fleet {
-            let _ = writeln!(s, "fly.secret_name = {}", quoted(FLEET_TEMPLATE));
-        }
+    // `--fly-app` names the target of the default provider, the only one with `init` in
+    // 0.5.0 (FR-37).
+    if let Some(section) = args
+        .fly_app
+        .as_deref()
+        .and_then(|app| registry::DEFAULT.init_section(app, d.profile))
+    {
+        s.push_str(&section);
     }
     for (product, keys) in &d.keys {
         for (key, kind) in keys {

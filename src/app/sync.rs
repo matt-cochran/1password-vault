@@ -1,32 +1,32 @@
-//! `fly plan` / `fly sync` use cases (FR-5..FR-8, FR-16, §6.4).
+//! `plan` / `sync` use cases (FR-5..FR-8, FR-16, §6.4).
 //!
-//! Fly digests cannot be computed locally (D0 Q4), so `fly sync` is stage-and-compare
+//! Fly digests cannot be computed locally (D0 Q4), so `sync` is stage-and-compare
 //! (ruling P1): read the item once → list A → plan → refuse if anything blocks (nothing
 //! staged) → validate the import batch → stage → list B → report each staged key as
 //! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged; never
 //! an immutable key unless named with `--prune-immutable`) →
 //! `--deploy`: deploy when a staged digest changed, a prune happened, or a managed name is
 //! still `Staged`/`Partial` on Fly from an earlier run (FR-7). Without `--deploy`
-//! nothing is ever deployed. `fly plan` reads the item once and lists once; it mutates
+//! nothing is ever deployed. `plan` reads the item once and lists once; it mutates
 //! nothing (FR-11).
 
 use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::{
-    is_blocking, managed_names, print_extras, print_rows, read_and_plan, row_names,
+    is_blocking, managed_names, open_target, print_extras, print_rows, read_and_plan, row_names,
     unmanaged_on_target, write_err, write_json,
 };
-use crate::adapters::{self, Ports};
 use crate::domain::rules;
 use crate::domain::{
     Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState,
     key_label,
 };
 use crate::error::Error;
+use crate::ports::Ports;
 use crate::runner::CommandRunner;
 
-/// Flags of `fly sync`.
+/// Flags of `sync`.
 #[derive(Debug, Default, Clone)]
 pub struct SyncOpts {
     /// Deploy staged changes (FR-7). Never implied.
@@ -50,7 +50,8 @@ pub fn run(
     opts: &SyncOpts,
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
-    let (store, runtime) = match adapters::open(fleet.target(env_name)?.1, r)? {
+    let (t, ports) = open_target(fleet, env_name, r)?;
+    let (store, runtime) = match ports {
         Ports::Staged { store, runtime } => (store, runtime),
         // Replaced by the pinned sync flow (FR-29, FR-31).
         Ports::Pinned { .. } => {
@@ -142,7 +143,14 @@ pub fn run(
         .map(|s| s.name.as_str())
         .collect();
     if !pending.is_empty() {
-        p(out, format!("pending on Fly: {}", pending.join(", ")))?;
+        p(
+            out,
+            format!(
+                "pending on {}: {}",
+                t.provider().label(),
+                pending.join(", ")
+            ),
+        )?;
     }
 
     let needs_deploy = !changed.is_empty() || pruned || !pending.is_empty();
@@ -175,7 +183,7 @@ fn print_changes(out: &mut dyn Write, changed: &[&str], unchanged: &[&str]) -> R
     Ok(())
 }
 
-/// `fly plan <env>`: rows, prune list and counts; no mutation. Exits `Findings(n)` when
+/// `plan <env>`: rows, prune list and counts; no mutation. Exits `Findings(n)` when
 /// n rows would block a sync.
 pub fn plan(
     fleet: &Fleet,
@@ -186,7 +194,7 @@ pub fn plan(
     plan_with(fleet, env_name, r, out, false)
 }
 
-/// `fly plan <env> [--json]`. With `json`, stdout carries one FR-21 document and no table
+/// `plan <env> [--json]`. With `json`, stdout carries one FR-21 document and no table
 /// or counts; exit codes are unchanged (`Findings(n)` for blocking rows).
 pub fn plan_with(
     fleet: &Fleet,
@@ -195,10 +203,10 @@ pub fn plan_with(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    let ports = adapters::open(fleet.target(env_name)?.1, r)?;
+    // Needs a target: `Error::Config` naming the environment otherwise, before any call.
+    let (t, ports) = open_target(fleet, env_name, r)?;
     let none = BTreeSet::new();
-    let (plan, on_fly) = read_and_plan(fleet, env_name, r, Some(ports.store()), &none, &none)?;
+    let (plan, on_target) = read_and_plan(fleet, env_name, r, Some(ports.store()), &none, &none)?;
     if json {
         write_json(out, fleet, env_name, &plan)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -231,9 +239,15 @@ pub fn plan_with(
         )
         .map_err(write_err)?;
     }
-    let unmanaged = unmanaged_on_target(fleet, env_name, &on_fly)?;
+    let unmanaged = unmanaged_on_target(fleet, env_name, &on_target)?;
     print_counts(out, &plan)?;
-    writeln!(out, "{} unmanaged on Fly (never touched)", unmanaged.len()).map_err(write_err)?;
+    writeln!(
+        out,
+        "{} unmanaged on {} (never touched)",
+        unmanaged.len(),
+        t.provider().label()
+    )
+    .map_err(write_err)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     if n > 0 {
         writeln!(out, "{n} key(s) block a sync").map_err(write_err)?;
@@ -253,7 +267,7 @@ fn print_counts(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
     .map_err(write_err)
 }
 
-/// Target column of `fly plan`. Keys present on Fly cannot be compared locally, so a
+/// Target column of `plan`. Keys present on Fly cannot be compared locally, so a
 /// desired key there is "potentially changed" (FR-5, P1).
 fn plan_target(r: &Row, held: bool) -> String {
     match (r.kind, r.target, &r.state) {
