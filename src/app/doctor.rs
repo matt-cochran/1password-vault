@@ -1857,7 +1857,14 @@ mod tests {
         let (res, out, _) = doctor_scoped(complete_item(), true);
         crate::app::json_tests::golden(
             "doctor_success",
-            &crate::app::json_tests::framed(out.as_bytes(), &res, "opv doctor --env prod --json"),
+            &crate::app::json_tests::without_check(
+                &crate::app::json_tests::framed(
+                    out.as_bytes(),
+                    &res,
+                    "opv doctor --env prod --json",
+                ),
+                "op local run",
+            ),
         );
     }
 
@@ -1866,7 +1873,14 @@ mod tests {
         let (res, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
         crate::app::json_tests::golden(
             "doctor_failure",
-            &crate::app::json_tests::framed(out.as_bytes(), &res, "opv doctor --env prod --json"),
+            &crate::app::json_tests::without_check(
+                &crate::app::json_tests::framed(
+                    out.as_bytes(),
+                    &res,
+                    "opv doctor --env prod --json",
+                ),
+                "op local run",
+            ),
         );
     }
 

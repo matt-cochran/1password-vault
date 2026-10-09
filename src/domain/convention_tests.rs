@@ -198,6 +198,27 @@ fn a_conventional_item_needs_no_tidy() {
     assert!(plan_of(&layout(&tidy_fields())).is_empty());
 }
 
+/// The convention marker alone is never a reason to tidy: a read-only run would
+/// otherwise note it forever.
+#[test]
+fn a_conventional_item_without_the_marker_needs_no_tidy() {
+    assert!(plan_of(&with(&[], "convention")).is_empty());
+}
+
+#[test]
+fn missing_fields_alone_fix_no_layout() {
+    assert!(!plan_of(&layout(&[])).fixes_layout());
+}
+
+#[test]
+fn a_secret_stored_as_text_fixes_the_layout() {
+    let l = with(
+        &[("web", "SESSION_KEY", "STRING", "s-CONVMARKER")],
+        "SESSION_KEY",
+    );
+    assert!(plan_of(&l).fixes_layout());
+}
+
 #[test]
 fn a_missing_field_is_created_empty() {
     let l = with(&[], "LOG_LEVEL");

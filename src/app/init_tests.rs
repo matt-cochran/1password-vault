@@ -1271,8 +1271,8 @@ fn init_json(fields: &[Field], a: &InitArgs) -> (tempfile::TempDir, String) {
     let mut out = Vec::new();
     let res = run_as(a, dir.path(), &r, &mut out, true);
     let framed = crate::app::json_tests::framed(&out, &res, "opv init staging --json");
-    // The temp directory differs per run.
-    let framed = framed.replace(&dir.path().display().to_string(), "<dir>");
+    // The temp directory differs per run and per platform.
+    let framed = crate::app::json_tests::without_dir(&framed, dir.path());
     (dir, framed)
 }
 

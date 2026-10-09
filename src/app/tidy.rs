@@ -67,6 +67,27 @@ impl Drop for Active {
     }
 }
 
+/// True the first time this run asks for `env_name`: the read-only note is printed at
+/// most once per environment, however many times a command reads the item. Per thread in
+/// this crate's unit tests, so tests stay independent.
+fn first_note(env_name: &str) -> bool {
+    use std::collections::BTreeSet;
+    #[cfg(test)]
+    {
+        thread_local! {
+            static SEEN: std::cell::RefCell<BTreeSet<String>> =
+                const { std::cell::RefCell::new(BTreeSet::new()) };
+        }
+        SEEN.with(|s| s.borrow_mut().insert(env_name.to_string()))
+    }
+    #[cfg(not(test))]
+    {
+        static SEEN: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+        SEEN.lock()
+            .map_or(true, |mut s| s.insert(env_name.to_string()))
+    }
+}
+
 /// Who runs opv, as far as 1Password writes go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Identity {
@@ -183,10 +204,14 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
     match identity(r) {
         Identity::Person => {}
         Identity::ReadOnly => {
-            r.note(&format!(
-                "1Password ({env_name}) is not laid out the way opv expects; read it as it is \
-                 (read-only here). The next opv run by a signed-in person tidies it."
-            ));
+            // Only a fix a person's run would make to existing fields is worth a note; once
+            // per environment per run.
+            if plan.fixes_layout() && first_note(env_name) {
+                r.note(&format!(
+                    "1Password ({env_name}) is not laid out the way opv expects; read it as \
+                     it is (read-only here). The next opv run by a signed-in person tidies it."
+                ));
+            }
             return Ok(done(layout, Vec::new(), None, first));
         }
         Identity::Unknown => return Ok(done(layout, Vec::new(), None, first)),
