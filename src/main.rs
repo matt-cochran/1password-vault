@@ -39,6 +39,14 @@ Deployment:
 Every command is listed above. Use opv <command> --help for its options and examples,
 and opv help states for what each state word means.";
 
+/// [`EXAMPLES`] with the registered providers and their CLIs filled in (FR-37).
+fn examples() -> String {
+    use opv::adapters::registry;
+    EXAMPLES
+        .replace("{TARGET_CLIS}", &registry::programs().join(", "))
+        .replace("{TARGETS}", &registry::labels().join(", "))
+}
+
 const EXAMPLES: &str = "\
 Examples:
   opv setup                        # guided owner setup; resumes saved progress
@@ -54,8 +62,8 @@ Examples:
   opv run dev --product api -- cargo run   # local run with the product's secrets
 
 Exit codes:
-  0 ok, 2 configuration or usage, 3 dependency (op or the target CLI (flyctl, az,
-  kubectl) missing), 4 1Password, 5 target (Fly, Azure, Kubernetes), 6 refused (policy),
+  0 ok, 2 configuration or usage, 3 dependency (op or the target CLI missing:
+  {TARGET_CLIS}), 4 1Password, 5 target ({TARGETS}), 6 refused (policy),
   7 authentication, 8 findings (status, plan, check),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
@@ -336,7 +344,7 @@ point at the docs of the same release.";
     bin_name = "opv",
     version,
     after_help = QUICK_START,
-    after_long_help = EXAMPLES,
+    after_long_help = examples(),
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -357,14 +365,15 @@ struct Cli {
     config: Option<PathBuf>,
     /// Stop after this many seconds in total.
     ///
-    /// Every call to op or the target CLI (flyctl, az, kubectl) must finish inside this
-    /// budget; a read that fails is retried only while time remains.
+    /// Every call to op or the target's CLI must finish inside this budget, a rollout
+    /// write included (each write is also killed after 15 minutes); a read that fails is
+    /// retried only while time remains.
     #[arg(
         long,
         global = true,
         value_name = "SECS",
         help_heading = "Global options",
-        default_value_t = 900,
+        default_value_t = 1800,
         value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     timeout: u64,

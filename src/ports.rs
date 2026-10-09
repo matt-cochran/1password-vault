@@ -45,8 +45,11 @@ pub trait PinnedStore: Store {
     /// run metadata (FR-42; never a value), where the store records metadata; returns the
     /// version id.
     fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error>;
-    /// Refuses an entry without the ownership tag (FR-32).
-    fn delete(&self, name: &str) -> Result<(), Error>;
+    /// Deletes the entry of `name` (FR-32); refuses one without the ownership tag. `true`
+    /// when nothing of `name` is left; `false` when the store kept versions a runtime's
+    /// rollback history still references (Kubernetes ReplicaSets), so the name is only
+    /// unbound this run, not pruned.
+    fn delete(&self, name: &str) -> Result<bool, Error>;
     /// Removes versions of `name` other than `keep_version` once a healthy revision binds
     /// `keep_version` (FR-32). Called only after a healthy revision. A store that keeps
     /// version history inside one entry (Key Vault) implements it as a no-op: old versions
@@ -88,6 +91,13 @@ pub trait PinnedRuntime {
     /// ExternalSecret opv-… → env DB_URL`. Names and version ids only.
     fn chain(&self, _name: &str, _version: &str) -> Option<String> {
         None
+    }
+    /// Drops what the runtime's configuration still holds for the store entries of env
+    /// names `names` (FR-32, NR-1), which opv deletes right after: called once a healthy
+    /// revision binds none of them, so the app never references a deleted entry. The
+    /// default holds nothing outside its revisions.
+    fn release(&self, _names: &[String]) -> Result<(), Error> {
+        Ok(())
     }
 }
 

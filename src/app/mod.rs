@@ -42,6 +42,8 @@ pub mod signin;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;
+#[cfg(test)]
+mod staged_tests;
 pub mod status;
 pub(crate) mod suggest;
 pub mod sync;
@@ -1264,38 +1266,141 @@ fn use_cases_name_no_target_adapter() {
     assert!(hits.is_empty(), "a target adapter named in core: {hits:?}");
 }
 
-/// The production code of a source file: comment lines dropped, and everything from the
-/// first `#[cfg(test)]` item that is not a `mod x;` declaration cut off.
+/// The production code of a source file: comments dropped, and every item gated by
+/// `#[cfg(test)]` (a function, a `mod x { … }` block, a `mod x;` declaration, a
+/// `thread_local!`) removed; the code after it is kept and checked (FR-37). A file whose
+/// inner attribute is `#![cfg(test)]` has none. String literals are kept, so a provider
+/// named in one is found; braces inside them, in char literals or in comments never count.
 #[cfg(test)]
 fn production_code(src: &str) -> String {
-    let lines: Vec<&str> = src.lines().collect();
-    let mut kept = Vec::new();
-    for (i, l) in lines.iter().enumerate() {
-        if l.trim() == "#[cfg(test)]" {
-            let next = lines.get(i + 1).map_or("", |n| n.trim());
-            if !(next.starts_with("mod ") && next.ends_with(';')) {
-                break;
-            }
-        }
-        if !l.trim_start().starts_with("//") {
-            kept.push(*l);
-        }
+    let code = Lexed::new(src);
+    if code.text.trim_start().starts_with("#![cfg(test)]") {
+        return String::new();
     }
-    kept.join("\n")
+    let (text, real) = (&code.text, &code.real);
+    let gate = "#[cfg(test)]";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < text.len() {
+        if real[i] && text[i..].starts_with(gate) {
+            i = skip_item(text, real, i + gate.len());
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
-/// FR-37, FR-39: `app/`, `domain/` and `config.rs` never name a provider, its CLI, its store
-/// or a store kind or binding;
-/// provider lines come from `TargetConfig`. Only `init` writes a provider section by design.
+/// Source with comments replaced by spaces; `real[i]` is false inside string and char
+/// literals, so only real code opens or closes a block.
 #[cfg(test)]
-#[test]
-fn core_modules_name_no_provider() {
-    let mut files = vec![std::path::PathBuf::from("src/config.rs")];
-    for dir in ["src/app", "src/domain"] {
-        for e in std::fs::read_dir(dir).unwrap() {
-            files.push(e.unwrap().path());
+struct Lexed {
+    text: String,
+    real: Vec<bool>,
+}
+
+#[cfg(test)]
+impl Lexed {
+    fn new(src: &str) -> Self {
+        let b = src.as_bytes();
+        let mut text = Vec::with_capacity(b.len());
+        let mut real = Vec::with_capacity(b.len());
+        let push = |text: &mut Vec<u8>, real: &mut Vec<bool>, c: u8, r: bool| {
+            text.push(c);
+            real.push(r);
+        };
+        let mut i = 0;
+        while i < b.len() {
+            let ident_before = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            if b[i..].starts_with(b"//") {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            } else if b[i..].starts_with(b"/*") {
+                let end = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+                (i..end).for_each(|_| push(&mut text, &mut real, b' ', true));
+                i = end;
+            } else if !ident_before && (b[i] == b'r' || b[i..].starts_with(b"br")) && {
+                let s = i + if b[i] == b'b' { 2 } else { 1 };
+                let hashes = b[s..].iter().take_while(|c| **c == b'#').count();
+                b.get(s + hashes) == Some(&b'"')
+            } {
+                let s = i + if b[i] == b'b' { 2 } else { 1 };
+                let hashes = b[s..].iter().take_while(|c| **c == b'#').count();
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = s + hashes + 1;
+                let end = src[body..]
+                    .find(&close)
+                    .map_or(b.len(), |e| body + e + close.len());
+                (i..end).for_each(|j| push(&mut text, &mut real, b[j], false));
+                i = end;
+            } else if b[i] == b'"' {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                let end = (j + 1).min(b.len());
+                (i..end).for_each(|k| push(&mut text, &mut real, b[k], false));
+                i = end;
+            } else if b[i] == b'\''
+                && (b.get(i + 1) == Some(&b'\\') || b.get(i + 2) == Some(&b'\''))
+            {
+                let mut j = i + 1;
+                if b[j] == b'\\' {
+                    j += 2;
+                }
+                while j < b.len() && b[j] != b'\'' {
+                    j += 1;
+                }
+                let end = (j + 1).min(b.len());
+                (i..end).for_each(|k| push(&mut text, &mut real, b[k], false));
+                i = end;
+            } else {
+                push(&mut text, &mut real, b[i], true);
+                i += 1;
+            }
+        }
+        Self {
+            text: String::from_utf8_lossy(&text).into_owned(),
+            real,
         }
     }
+}
+
+/// The index just past the item that starts after `from` (further attributes included):
+/// at its `;` outside any bracket, or at the `}` that closes its first block.
+#[cfg(test)]
+fn skip_item(text: &str, real: &[bool], from: usize) -> usize {
+    let b = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = from;
+    while i < b.len() {
+        if !real[i] {
+            i += 1;
+            continue;
+        }
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            b';' if depth == 0 => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// The first provider word in the production code of `src` (FR-37, FR-39), if any.
+#[cfg(test)]
+fn provider_named(src: &str) -> Option<String> {
     let words = [
         "fly",
         "azure",
@@ -1311,6 +1416,26 @@ fn core_modules_name_no_provider() {
         "clustersecretstores?",
     ];
     let re = regex::Regex::new(&format!(r"(?i)\b({})\b|\baz\s", words.join("|"))).unwrap();
+    re.find(&production_code(src))
+        .map(|m| m.as_str().to_string())
+}
+
+/// FR-37, FR-39: `app/`, `domain/`, `config.rs`, `config/`, `config_store.rs` and
+/// `config_edit.rs` never name a provider, its CLI, its store or a store kind or binding;
+/// provider lines come from `TargetConfig`. Only `init` writes a provider section by design.
+#[cfg(test)]
+#[test]
+fn core_modules_name_no_provider() {
+    let mut files: Vec<std::path::PathBuf> =
+        ["src/config.rs", "src/config_store.rs", "src/config_edit.rs"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+    for dir in ["src/app", "src/domain", "src/config"] {
+        for e in std::fs::read_dir(dir).unwrap() {
+            files.push(e.unwrap().path());
+        }
+    }
     let hits: Vec<String> = files
         .iter()
         .filter(|p| {
@@ -1318,12 +1443,37 @@ fn core_modules_name_no_provider() {
             name != "init.rs" && !name.ends_with("_tests.rs")
         })
         .filter_map(|p| {
-            let code = production_code(&std::fs::read_to_string(p).unwrap());
-            re.find(&code)
-                .map(|m| format!("{}: {:?}", p.display(), m.as_str()))
+            provider_named(&std::fs::read_to_string(p).unwrap())
+                .map(|m| format!("{}: {m:?}", p.display()))
         })
         .collect();
     assert!(hits.is_empty(), "a provider named in core: {hits:?}");
+}
+
+/// The guard keeps reading after a test-only `mod x;` declaration (FR-37).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_provider_named_after_a_test_module_declaration() {
+    let src = "#[cfg(test)]\npub(crate) mod t;\nfn f() -> &'static str { \"azure\" }\n";
+    assert_eq!(provider_named(src).as_deref(), Some("azure"));
+}
+
+/// The guard keeps reading after a test-only block (FR-37).
+#[cfg(test)]
+#[test]
+fn guard_flags_a_provider_named_after_a_test_block() {
+    let src = "#[cfg(test)]\nthread_local! { static T: u8 = 0; }\n\
+               #[cfg(test)]\nmod tests { fn t() { let _ = \"}\"; } }\n\
+               const P: &str = \"kubectl\";\n";
+    assert_eq!(provider_named(src).as_deref(), Some("kubectl"));
+}
+
+/// A provider named only inside a test-gated item is not production code.
+#[cfg(test)]
+#[test]
+fn guard_ignores_a_provider_named_in_a_test_item() {
+    let src = "fn f() {}\n#[cfg(test)]\n#[test]\nfn t() { let _ = \"fly\"; }\n";
+    assert_eq!(provider_named(src), None);
 }
 
 #[cfg(test)]

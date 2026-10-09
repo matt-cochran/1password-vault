@@ -889,6 +889,54 @@ fn azure_sync_converges_after_interruption_at_every_call() {
     assert!(diverged.is_empty(), "{diverged:#?}");
 }
 
+/// NR-2, NR-28: a run that loses call k either finishes (the lost outcome reconciled by a
+/// read) or exits 9; never a "fix something" code for an outcome that is only unknown.
+#[test]
+fn azure_sync_interrupted_at_any_call_exits_9() {
+    let scenario = || {
+        let sim = converged();
+        sim.set_item(item_with(API_V2, LOG_V2));
+        sim
+    };
+    let clean = scenario();
+    sync_on(&clean, &fleet_b(), &deploy_prune()).0.unwrap();
+    let calls = clean.calls.borrow().len();
+    let mut bad = Vec::new();
+    for k in 0..calls {
+        for mode in [Fail::After, Fail::Before] {
+            let sim = scenario();
+            sim.fail_at.set(Some((k, mode)));
+            if let (Err(e), _) = sync_on(&sim, &fleet_b(), &deploy_prune())
+                && e.exit_code() != 9
+            {
+                bad.push(format!("k={k}: exit {}: {e}", e.exit_code()));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// FR-32, NR-1: after a prune deploy, no Container Apps secret references a Key Vault
+/// entry opv deleted.
+#[test]
+fn prune_deploy_leaves_no_secret_pointing_at_a_deleted_entry() {
+    let sim = converged();
+    sync_on(&sim, &fleet_b(), &deploy_prune()).0.unwrap();
+    let w = sim.world.borrow();
+    let dangling: Vec<String> = w.app["properties"]["configuration"]["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["keyVaultUrl"].as_str())
+        .filter(|url| {
+            let kv = url.rsplit('/').nth(1).unwrap_or_default();
+            !w.kv.contains_key(&kv.to_ascii_lowercase())
+        })
+        .map(String::from)
+        .collect();
+    assert!(dangling.is_empty(), "{dangling:?}");
+}
+
 /// NR-2: an update whose outcome is lost after Azure applied it is confirmed by reading
 /// the app back, and the run completes.
 #[test]

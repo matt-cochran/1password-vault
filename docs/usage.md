@@ -437,7 +437,7 @@ Lists follow the summary line's order and hold `{product, key, target_name}` obj
 ### Retries, timeouts and interruptions
 
 - **Reads are retried, writes are not.** A failed read (`op item get`, a list, a status check) is tried up to 3 times, with a 1 s then 2 s pause, printing `retrying az keyvault secret list (2/3) in 2 s`. A refusal such as not found or not signed in is never retried: when `op` says an item or vault does not exist, `kubectl` reports `NotFound`, or `az` reports a missing secret or resource, opv reports it at once (failure text it does not recognise keeps its retries). A write is never repeated blindly: opv reads the target back to see what happened.
-- **One time budget.** `--timeout <secs>` (default 900) caps the whole run, including waits for a revision or rollout. There is no separate deploy timeout.
+- **One time budget.** `--timeout <secs>` (default 1800) caps the whole run, including waits for a revision or rollout. There is no separate deploy timeout: a write that waits for a rollout (`flyctl secrets deploy`, `az containerapp update`, `kubectl apply`/`replace`) may run up to 15 minutes inside the budget and prints a progress line every 15 s.
 - **`--verbose`** prints one stderr line per external call: the program, its arguments, how long it took and the outcome. Under it come the call's own error output (`    stderr: ...`, every secret masked as `__SECRET__`) and the size and JSON shape of its result (`    stdout: 412 bytes, JSON object with keys: ...`). A result's content is never shown.
 - **Safe to re-run.** Stopping opv at any point (Ctrl-C, a CI cancel, a lost connection) leaves the app working. Run the same command again and it finishes the rest.
 - **Exit 9** means opv cannot tell what happened: a write may or may not have been applied, or 1Password, Fly, Azure or the cluster did not answer after 3 tries (nothing was written). Nothing is known to be broken. Check the provider's status page if one is named, then re-run the same command. CI may retry a job that exits 9.
@@ -457,6 +457,8 @@ A `--confirm` that names another environment is refused everywhere, guarded or n
 ### Pruning on Fly
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
+
+Known limitation: Fly hides an unset name as soon as `flyctl secrets unset --stage` runs, before any deploy. A run interrupted between that unset and the deploy (Ctrl-C, CI cancel, lost network, or a run without `--deploy`) leaves the name on the machines, and the next run cannot see it, so it neither reports nor deploys it. Any later deploy finishes the removal: run `opv sync <env> --deploy` again (it deploys when anything else changed or is pending), or `flyctl secrets deploy --app <app>`, which always deploys.
 
 ## Sign-in, accounts and deploy credentials
 
@@ -584,6 +586,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `item_changed` | 4 | after_fix | yes | opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history) |
 | `target_error` | 5 | after_fix | no | the target (Fly, Azure, Kubernetes) refused or failed |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
+| `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |
 | `policy_refused` | 6 | after_fix | no | opv refused the operation |
 | `keys_blocking` | 6 | after_fix | yes | sync refused: keys are missing or failing a rule; nothing was written |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; pass --confirm <env> |
@@ -627,7 +630,7 @@ opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 
 CI may retry a job that exited 9; codes 2 to 8 need a fix first.
 
-Global options: `--timeout <secs>` (default 900), `--verbose`, `--config` and `--color auto|always|never`. Retries, progress and the per-call limits are described in [Retries, timeouts and interruptions](#retries-timeouts-and-interruptions). Each `op`, `flyctl`, `az` or `kubectl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s).
+Global options: `--timeout <secs>` (default 1800), `--verbose`, `--config` and `--color auto|always|never`. Retries, progress and the per-call limits are described in [Retries, timeouts and interruptions](#retries-timeouts-and-interruptions). Each `op`, `flyctl`, `az` or `kubectl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s, a write that waits for a rollout 15 min).
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 

@@ -64,7 +64,7 @@ use crate::host::{Host, Tool};
 use crate::ports::{StagedRuntime, StagedStore, Store};
 use crate::provider::{Check, Preflight, Verdict};
 use crate::runner::{
-    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
+    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, Wait, status_text, unknown_text,
 };
 
 /// The Fly CLI binary.
@@ -80,6 +80,9 @@ pub const FLYCTL: Tool = Tool {
     linux: "install: curl -L https://fly.io/install.sh | sh",
     vendor: "Fly",
     status_page: "https://status.flyio.net",
+    pinned_env: &[("FLY_NO_UPDATE_CHECK", "1"), ("NO_COLOR", "1")],
+    not_found: &[],
+    aliases: &["fly"],
 };
 
 /// A Fly token in the environment, in the order they are tried (by name only).
@@ -316,7 +319,7 @@ pub const DEPLOY_WAIT_MAX: Duration = Duration::from_secs(600);
 
 /// Waits until the latest release is no longer running (see [`preflight`]).
 fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
-    let mut waited = Duration::ZERO;
+    let wait = Wait::new(r, DEPLOY_WAIT_MAX);
     let mut reported: Option<Duration> = None;
     loop {
         let releases: Vec<Release> = read_json(
@@ -332,8 +335,8 @@ fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error
         else {
             return Ok(());
         };
-        let budget_left = r.remaining().unwrap_or(DEPLOY_WAIT_MAX);
-        if waited >= DEPLOY_WAIT_MAX || budget_left <= DEPLOY_POLL {
+        let waited = wait.elapsed(r);
+        if wait.over(r, DEPLOY_POLL) {
             return Err(Error::Target(
                 format!(
                     "a Fly deploy is still running for {app} after {} s; nothing was changed",
@@ -346,7 +349,7 @@ fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error
                  finishes (or with a larger --timeout)"
             )));
         }
-        let note = if reported.is_none_or(|at| waited - at >= DEPLOY_PROGRESS) {
+        let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= DEPLOY_PROGRESS) {
             reported = Some(waited);
             let release = latest
                 .version
@@ -359,8 +362,7 @@ fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error
         } else {
             String::new()
         };
-        r.pause(DEPLOY_POLL, &note);
-        waited += DEPLOY_POLL;
+        wait.pause(r, DEPLOY_POLL, &note);
     }
 }
 
@@ -657,6 +659,13 @@ fn run_on(
     hint: &[&str],
 ) -> Result<Output, Error> {
     let call = Call::new(PROGRAM, args).with_stdin(stdin);
+    // `secrets deploy` restarts the machines one by one and waits for their health checks:
+    // minutes on a multi-machine app (NR-4).
+    let call = if args.starts_with(&["secrets", "deploy"]) {
+        call.rollout()
+    } else {
+        call
+    };
     let outcome = match effect {
         Effect::Read => r.read(&call, &[]),
         Effect::Write => r.write(&call),
@@ -669,8 +678,10 @@ fn run_on(
             )
             .into(),
         ),
-        // The runner's own message names the program (no child output).
-        io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}").into()),
+        // A spent run budget; the runner's own message names the program (no child output).
+        io::ErrorKind::TimedOut => FLYCTL
+            .budget_spent(r, &e)
+            .map_text(|m| format!("{what}: {m}")),
         kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})").into()),
     })?;
     match outcome {
@@ -688,8 +699,9 @@ fn run_on(
             )
             .into(),
         )),
-        // A read unanswered after its last attempt: Fly is unreachable (NR-28).
-        Outcome::Unknown { .. } => Err(FLYCTL.outage(what)),
+        // A read unanswered after its last attempt: Fly is unreachable (NR-28), or, after
+        // this run's first write, the run stopped half way (NR-2).
+        Outcome::Unknown { .. } => Err(FLYCTL.unanswered(r, what)),
     }
 }
 
@@ -1490,11 +1502,13 @@ mod tests {
             Output::success(STARTED),
             Output::success(RUNNING),
             Output::success(RUNNING),
+            Output::success(RUNNING),
         ]);
-        r.budget.set(DEPLOY_POLL * 2);
+        // Room for two polls, each with one read's limit to spare (NR-4).
+        r.budget.set(crate::runner::READ_TIMEOUT + DEPLOY_POLL * 2);
         assert!(matches!(
             preflight(&r, "app"),
-            Err(Error::Target(m)) if m.contains("still running for app after 5 s; nothing was changed")
+            Err(Error::Target(m)) if m.contains("still running for app after 10 s; nothing was changed")
         ));
     }
 

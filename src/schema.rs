@@ -362,7 +362,7 @@ fn exit_codes() -> Value {
         "2": {"meaning": "configuration or command-line usage", "retry": "after_fix"},
         "3": {"meaning": "dependency: op or the target CLI missing or unusable", "retry": "after_fix"},
         "4": {"meaning": "1Password (source)", "retry": "after_fix"},
-        "5": {"meaning": "target (Fly, Azure, Kubernetes)", "retry": "after_fix"},
+        "5": {"meaning": format!("target ({})", crate::adapters::registry::labels().join(", ")), "retry": "after_fix"},
         "6": {"meaning": "refused by policy (blocking keys, --confirm, needs a terminal, refused values)", "retry": "after_fix"},
         "7": {"meaning": "authentication (1Password or the target)", "retry": "after_fix"},
         "8": {"meaning": "findings: status, plan or check found blocking keys", "retry": "after_fix"},

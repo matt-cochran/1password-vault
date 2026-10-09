@@ -41,7 +41,7 @@ retries does not accept it).
 | # | Fallacy | Where it bites opv | Mechanism (poka-yoke first) | Observability |
 |---|---|---|---|---|
 | 1 | The network is reliable | Calls drop mid-flight; `az` reports failure for a change that succeeded | **Convergent steps** (NR-1): every step is idempotent or reconciled. **Outcome classes** (NR-2): a `Write` that fails is `Unknown`; opv reads the state back before reporting. **Bounded read retry** (NR-3) | Exit 9 "outcome unknown, safe to re-run" naming the step; reconciled state printed |
-| 2 | Latency is zero | Azure environments and revisions take minutes; a 300 s limit can kill a slow but healthy write | **Per-effect deadlines** (NR-4): probe 15 s, read 60 s, write 120 s, waits poll with their own deadline; a run budget `--timeout` (default 900 s) caps everything | A progress line on stderr at least every 15 s while waiting ("waiting for revision r3: Provisioning, 45 s") |
+| 2 | Latency is zero | Azure environments and revisions take minutes; a 300 s limit can kill a slow but healthy write | **Per-effect deadlines** (NR-4): probe 15 s, read 60 s, write 120 s, a rollout write (Fly deploy, Container Apps update, kubectl apply/replace) 15 min, waits poll with their own deadline in elapsed time; a run budget `--timeout` (default 1800 s) caps everything | A progress line on stderr at least every 15 s while waiting ("waiting for revision r3: Provisioning, 45 s") |
 | 3 | Bandwidth is infinite | A CLI printing an unexpected huge document fills memory | **Output cap** (NR-5): captured stdout over 8 MiB is killed and refused | Target error naming the program and the cap |
 | 4 | The network is secure | CLIs log argv to disk (`~/.azure/commands`); outputs could be tampered or malformed | Values only on stdin (SR-3); **validated outputs** (NR-6): every id, version and name read from a CLI is checked against a strict pattern before opv reuses it in argv or a document | Config/Target error naming the field, never the value |
 | 5 | Topology doesn't change | Default subscription or account switches under you; an app is moved; a revision replaced | **Explicit scope on every call** (NR-7): Azure `subscription` is required in config and passed as `--subscription`; Fly `--app`; 1Password IDs. No CLI default is ever relied on | `doctor` shows the resolved subscription/app per environment |
@@ -62,7 +62,11 @@ How each flow satisfies it:
 
 - **Fly** (stage → deploy): staging is invisible until `deploy`; a staged-but-not-deployed
   change shows as pending and triggers the next deploy; Fly's `Partial` deploy status is
-  the same trigger. Prune is staged like any change.
+  the same trigger. Prune is staged like any change, with one known gap: Fly hides an
+  unset name immediately, so a run interrupted between `flyctl secrets unset --stage` and
+  `deploy` leaves the name on the machines and the next run cannot see it as pending. The
+  target is still safe (the machines keep a value they already had); the remedy is
+  `opv sync <env> --deploy` again, or `flyctl secrets deploy --app <app>` (usage.md, Pruning on Fly).
 - **Clouds** (write versions → apply pinned refs → await health → prune): a written version
   is invisible until a revision pins it; apply is one document; prune happens only after a
   healthy revision no longer binds the name, and a crash between unbind and delete leaves a
@@ -72,15 +76,20 @@ How each flow satisfies it:
 
 The invariant is tested, not argued: an **interruption matrix** test runs each sync scenario
 with the fake runner failing call k (for every k) as `Unknown`, then re-runs it cleanly, and
-asserts the end state equals the uninterrupted run's and that no intermediate state binds a
-missing version.
+asserts the end state equals the uninterrupted run's, that no intermediate state binds a
+missing version, and that the interrupted run exits 0 or 9. Fly's staged flow has its own
+matrix (`src/app/staged_tests.rs`).
 
 ## 5. Exit code 9 (NR-2)
 
 A new category, `Error::Unknown`, exit **9**: "an external change may or may not have been
 applied; nothing is known to be broken; re-run the same command". It is returned only after
 at least one `Write` started, when the reconciling read itself failed or showed a partial
-state. CI can retry the whole job on 9 and must not retry on 2–8. Codes 0–8 keep their
+state. The runner records when the first target write started, so any read that times out
+or exhausts the run budget after it is exit 9 and never says "nothing was changed"; so is a
+sign-in probe that times out. A target that refused an update and applied nothing (Azure:
+no new revision, provisioning `Failed`) is exit 5 `update_refused`, not 9: re-running would
+repeat the refusal. CI can retry the whole job on 9 and must not retry on 2–8. Codes 0–8 keep their
 meaning (FR-10 is extended, not changed).
 
 ## 6. Every realistic issue as a requirement
@@ -94,7 +103,7 @@ that holds it.
 | NR-1 | Run stops anywhere (crash, Ctrl-C, CI cancel, lost network) | Convergence invariant (§4) | Next run reports and finishes the remaining work | Interruption matrix per flow |
 | NR-2 | A write fails with unknown outcome | Reconcile by read; exit 9 when still unknown (§5) | `outcome unknown after <step>; state now: <names>; safe to re-run` | Fake `Unknown` on each write |
 | NR-3 | Transient read failure, throttling (429/5xx) | Reads retried 3 times, backoff 1 s/2 s/4 s with jitter, within the run budget; a `Refused` (not found, auth) is never retried | One stderr line per retry: `retrying az keyvault secret list (2/3) in 2 s` | Read fails twice then succeeds; auth failure not retried |
-| NR-4 | Slow operations; hung CLI | Per-effect deadlines and a run budget `--timeout` (default 900 s); every wait polls with progress | Progress line ≥ every 15 s; timeout names the step and the last observed state | Fake clock: timeout message; progress cadence |
+| NR-4 | Slow operations; hung CLI | Per-effect deadlines (a rollout write up to 15 min) and a run budget `--timeout` (default 1800 s); every wait polls with progress against its own limit in elapsed time | Progress line ≥ every 15 s; timeout names the step and the last observed state | Fake clock: timeout message; progress cadence |
 | NR-5 | Oversized or runaway output | stdout cap 8 MiB, child killed | Target error naming program and cap | Fake 9 MiB output |
 | NR-6 | Malformed or hostile CLI output | Strict validation of every id/version/name reused; unknown JSON fields ignored, missing required ones refused | Error naming the field and program, never the value | Version with `/`, name with `..`, missing `id` |
 | NR-7 | User CLI config or defaults change behaviour; wrong subscription/account | Explicit scope flags on every call; required `azure.subscription`; pinned env per CLI (az: output json, no defaults, no prompts, no dynamic extension install, no color, no telemetry; flyctl: no update check, no color; op: no color) | `doctor` prints the resolved scope per environment | Every recorded call carries the pinned env and scope flags |

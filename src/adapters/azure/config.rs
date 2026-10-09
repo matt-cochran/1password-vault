@@ -188,6 +188,10 @@ impl Provider for AzureProvider {
         "Azure"
     }
 
+    fn tools(&self) -> &'static [&'static crate::host::Tool] {
+        &[&super::az::AZ_CLI]
+    }
+
     fn parse(
         &self,
         section: &Section<'_>,

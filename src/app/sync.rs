@@ -833,7 +833,7 @@ fn run_pinned(
     }
     let revision = if !pending.is_empty() {
         let left = |now: &RuntimeSnapshot| change_names(&diff(now).change(c.t, &written));
-        apply_reconciled(runtime, &change, &snap, &left, out)?
+        apply_reconciled(runtime, &change, &snap, &left, env_name, out)?
     } else if let Some(rev) = &snap.revision {
         // Nothing to change: confirm the revision of the current bindings is healthy, so a
         // run stopped before its health check, or a revision that failed, is never
@@ -938,23 +938,56 @@ fn run_pinned(
             .iter()
             .map(|(n, (_, v))| (n.as_str(), v.as_str())),
     );
+    // The deploy already succeeded: a collection that fails is a warning naming the fix,
+    // never the run's result; the next healthy deploy collects again (FR-32, NR-1).
     for name in want.store.keys() {
-        if let Some(version) = bound.get(name.as_str()) {
-            store.collect_superseded(name, version)?;
+        if let Some(version) = bound.get(name.as_str())
+            && let Err(e) = store.collect_superseded(name, version)
+        {
+            let line = format!(
+                "warning: superseded versions of {} were not removed: {}",
+                names.join([name]),
+                e.text().replace('\n', "\n  ")
+            );
+            if opts.json {
+                c.r.note(&line);
+            } else {
+                p(out, line)?;
+            }
         }
     }
     let mut pruned: Vec<String> = change.unbind.clone();
+    if !deletes.is_empty() {
+        // Nothing in the runtime may still point at an entry deleted below (FR-32).
+        runtime
+            .release(deletes)
+            .map_err(|e| with_note(e, "nothing pruned"))?;
+    }
+    let mut unbound_kept = Vec::new();
     for name in deletes {
-        store.delete(name).map_err(|e| {
+        let gone = store.delete(name).map_err(|e| {
             let done: Vec<&str> = pruned.iter().map(String::as_str).collect();
             with_note(e, &format!("already pruned: {}", none_or(&done)))
         })?;
-        if !pruned.contains(name) {
+        if !gone {
+            // Kept for rollback by an older revision: unbound, not pruned (FR-32).
+            pruned.retain(|n| n != name);
+            unbound_kept.push(name.clone());
+        } else if !pruned.contains(name) {
             pruned.push(name.clone());
         }
     }
     if !pruned.is_empty() {
         p(out, format!("pruned: {}", names.join(&pruned)))?;
+    }
+    if !unbound_kept.is_empty() {
+        p(
+            out,
+            format!(
+                "unbound, kept for rollback while an older revision references them: {}",
+                names.join(&unbound_kept)
+            ),
+        )?;
     }
     report.pruned = pruned;
     env_routed(out)?;
@@ -1006,18 +1039,24 @@ fn prune_names(
 }
 
 /// Applies `change`. An apply whose outcome is unknown (NR-2) is reconciled by reading the
-/// bindings back: when they show the change, the run goes on with the revision they name;
-/// otherwise the error stays `Unknown` (exit 9) and says what the read showed.
-/// `left` names what a snapshot still lacks of the change.
+/// bindings back (inside the diagnosis, so the failed apply's excerpt stays, NR-31): when
+/// they show the change, the run goes on with the revision they name; otherwise the error
+/// stays `Unknown` (exit 9) and says what the read showed. A refused apply (a target
+/// error: nothing applied) names `opv doctor` as its next step. `left` names what a
+/// snapshot still lacks of the change.
 fn apply_reconciled(
     runtime: &dyn PinnedRuntime,
     change: &RuntimeChange,
     snap: &RuntimeSnapshot,
     left: &dyn Fn(&RuntimeSnapshot) -> Vec<String>,
+    env_name: &str,
     out: &mut dyn Write,
 ) -> Result<Revision, Error> {
     let msg = match runtime.apply(change, snap) {
         Err(Error::Unknown(msg)) => msg,
+        Err(e) if e.code() == Code::UpdateRefused => {
+            return Err(e.or_next(|| format!("opv doctor --env {env_name}")));
+        }
         other => return other,
     };
     let still_unknown = |why: &str| {
@@ -1026,7 +1065,7 @@ fn apply_reconciled(
                 .map_text(|m| format!("{m}\n  read back: {why}; nothing pruned")),
         )
     };
-    let Ok(now) = runtime.bindings() else {
+    let Ok(now) = crate::runner::diagnosing(|| runtime.bindings()) else {
         return Err(still_unknown("could not read the bindings back"));
     };
     match (&now.revision, left(&now).is_empty()) {
@@ -1318,7 +1357,7 @@ fn confirm(
     label: &str,
     done: &[String],
 ) -> Result<Vec<StoreEntry>, Error> {
-    let mut waited = Duration::ZERO;
+    let wait = crate::runner::Wait::new(r, CONFIRM_LIMIT);
     let mut delay = Duration::from_secs(1);
     loop {
         let list = store.list().map_err(|e| match e {
@@ -1336,18 +1375,23 @@ fn confirm(
             .iter()
             .filter(|(n, _)| digest(&list, n).is_none())
             .count();
+        let waited = wait.elapsed(r);
         if unseen == 0 || waited >= CONFIRM_LIMIT {
             return Ok(list);
         }
         let d = delay.min(CONFIRM_LIMIT - waited);
-        r.pause(
+        // No room left in the run budget for another list: count the unseen as changed.
+        if wait.over(r, d) {
+            return Ok(list);
+        }
+        wait.pause(
+            r,
             d,
             &format!(
                 "confirming {unseen} staged secret(s) on {label} ({} s)",
                 waited.as_secs()
             ),
         );
-        waited += d;
         delay *= 2;
     }
 }

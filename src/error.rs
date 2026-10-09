@@ -180,7 +180,7 @@ impl Error {
     /// | 2 | configuration, and command-line usage (clap's own code) |
     /// | 3 | dependency (`op` or the target CLI missing or unusable) |
     /// | 4 | source (1Password) |
-    /// | 5 | target (Fly, Azure, Kubernetes) |
+    /// | 5 | target (a registered deployment provider) |
     /// | 6 | policy (refused: blocking keys, refused values, denied destructive operation) |
     /// | 7 | authentication (1Password or the target) |
     /// | 8 | findings (`status` / `plan` / `check` found blocking keys) |
@@ -477,6 +477,7 @@ codes! {
     ItemChanged => "item_changed", 4, AfterFix, true, "opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history)";
     TargetError => "target_error", 5, AfterFix, false, "the target (Fly, Azure, Kubernetes) refused or failed";
     TargetUnhealthy => "target_unhealthy", 5, AfterFix, false, "the new revision did not become healthy; the previous one keeps serving";
+    UpdateRefused => "update_refused", 5, AfterFix, false, "the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal";
     PolicyRefused => "policy_refused", 6, AfterFix, false, "opv refused the operation";
     KeysBlocking => "keys_blocking", 6, AfterFix, true, "sync refused: keys are missing or failing a rule; nothing was written";
     ConfirmRequired => "confirm_required", 6, Never, true, "the environment sets confirm_env; pass --confirm <env>";
@@ -503,11 +504,16 @@ pub struct Step {
     pub next: String,
 }
 
-/// Programs a `Next:` command may start with.
-const PROGRAMS: [&str; 15] = [
-    "opv", "op", "az", "kubectl", "flyctl", "fly", "helm", "brew", "winget", "scoop", "npm",
-    "cargo", "gh", "curl", "env",
+/// Programs a `Next:` command may start with besides the CLIs opv runs
+/// ([`crate::host::tools`], which brings each provider's own).
+const PROGRAMS: [&str; 10] = [
+    "opv", "helm", "brew", "winget", "scoop", "npm", "cargo", "gh", "curl", "env",
 ];
+
+/// Whether `p` is a program a `Next:` command may start with.
+fn known_program(p: &str) -> bool {
+    PROGRAMS.contains(&p) || crate::host::tools().any(|t| t.program == p || t.aliases.contains(&p))
+}
 
 /// Words that only prose has; a step containing one is an instruction, not a command.
 const PROSE: [&str; 33] = [
@@ -520,7 +526,7 @@ const PROSE: [&str; 33] = [
 /// are neither placeholders (`<env>`), shell syntax (`$(...)`, `;`, backticks) nor prose.
 pub fn is_runnable(step: &str) -> bool {
     let mut words = step.split_whitespace();
-    words.next().is_some_and(|p| PROGRAMS.contains(&p))
+    words.next().is_some_and(known_program)
         && !step.contains(['<', '>', '`', ';', '(', ')', '$', '|', '&'])
         && words.all(|w| !PROSE.contains(&w) && !w.ends_with([',', ':', '.']))
 }
@@ -614,7 +620,7 @@ pub fn split_step(raw: &str, rerun: &str) -> Step {
     }
     let action = match step.split_whitespace().next() {
         // A command with placeholders: the person fills them in.
-        Some(p) if PROGRAMS.contains(&p) => format!("fill in and run: {step}"),
+        Some(p) if known_program(p) => format!("fill in and run: {step}"),
         _ => step,
     };
     Step {

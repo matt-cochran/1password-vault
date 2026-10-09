@@ -131,6 +131,11 @@ struct World {
     keep_history: bool,
     /// Pods of a new ReplicaSet never start.
     broken_image: bool,
+    /// The operator retries a failed ExternalSecret (its error backoff): it reconciles it
+    /// again after the first read that shows the failure.
+    retries_failed: bool,
+    /// Reads of each failed ExternalSecret while `retries_failed`.
+    failed_reads: BTreeMap<String, u32>,
 }
 
 struct Rec {
@@ -229,6 +234,8 @@ impl Sim {
                 denied: false,
                 keep_history: true,
                 broken_image: false,
+                retries_failed: false,
+                failed_reads: BTreeMap::new(),
             }),
             calls: RefCell::default(),
             notes: RefCell::default(),
@@ -422,7 +429,16 @@ impl Sim {
                 if !w.externals.contains_key(*n) {
                     return ok(Vec::new());
                 }
-                if w.externals[*n].get("status").is_none() {
+                let failed = w.externals[*n].pointer("/status/conditions/0/reason")
+                    == Some(&json!("SecretSyncedError"));
+                let retry = failed && w.retries_failed && {
+                    let seen = w.failed_reads.entry(n.to_string()).or_default();
+                    *seen += 1;
+                    *seen > 1
+                };
+                if retry {
+                    Self::reconcile(&mut w, n);
+                } else if w.externals[*n].get("status").is_none() {
                     let limit = w.reads_before_sync;
                     let seen = w.pending_reads.entry(n.to_string()).or_default();
                     *seen += 1;
@@ -958,6 +974,21 @@ fn sync_error_leaves_the_deployment_unchanged() {
     assert_eq!(sim.count("kubectl", &["replace"]), 0);
 }
 
+/// M4: an ExternalSecret left failed by an earlier run, whose cause is fixed since, is
+/// re-applied unchanged; its old SecretSyncedError is not acted on before the operator
+/// reports again.
+#[test]
+fn stale_sync_error_from_an_earlier_run_does_not_fail_the_re_run() {
+    let (sim, _) = refused(|w| w.denied = true);
+    {
+        let mut w = sim.world.borrow_mut();
+        w.denied = false;
+        w.retries_failed = true;
+    }
+    let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
+    assert!(res.is_ok(), "{res:?}");
+}
+
 // ---- prune and collection (FR-32) ----
 
 #[test]
@@ -1203,6 +1234,50 @@ fn matrix(start: &dyn Fn() -> Sim, fleet: &Fleet, opts: &SyncOpts) -> Vec<String
         }
     }
     bad
+}
+
+/// The interrupted runs of [`matrix`]'s calls that neither finished nor exited 9 (NR-2,
+/// NR-28): an outcome that is only unknown never gets a "fix something" code.
+fn exit_matrix(start: &dyn Fn() -> Sim, fleet: &Fleet, opts: &SyncOpts) -> Vec<String> {
+    let reference = start();
+    let (res, _) = sync_on(&reference, fleet, opts);
+    assert!(res.is_ok(), "reference run failed: {res:?}");
+    let n = reference.calls.borrow().len();
+    let mut bad = Vec::new();
+    for k in 0..n {
+        for mode in [Fail::After, Fail::Before] {
+            let sim = start();
+            sim.fail_at.set(Some((k, mode)));
+            if let (Err(e), _) = sync_on(&sim, fleet, opts)
+                && e.exit_code() != 9
+            {
+                bad.push(format!("call {k} {mode:?}: exit {}: {e}", e.exit_code()));
+            }
+        }
+    }
+    bad
+}
+
+#[test]
+fn first_sync_interrupted_at_any_call_exits_9() {
+    let start = || Sim::new(item_with(API_V1));
+    let bad = exit_matrix(&start, &fleet_a(), &deploy_prune());
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[test]
+fn change_and_prune_interrupted_at_any_call_exits_9() {
+    let start = || {
+        let sim = converged();
+        {
+            let mut w = sim.world.borrow_mut();
+            w.keep_history = false;
+            w.item = item_with(API_V2);
+        }
+        sim
+    };
+    let bad = exit_matrix(&start, &fleet_b(), &deploy_prune());
+    assert!(bad.is_empty(), "{bad:#?}");
 }
 
 #[test]

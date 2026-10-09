@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, IgnoredAny};
 
 use super::external::{self, Bridge, ExternalStore};
-use super::runtime::{POLL_EVERY, WAIT_MAX};
+use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
 use super::{
     KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM, valid_label_value,
 };
@@ -236,6 +236,10 @@ impl Provider for KubernetesProvider {
         "Kubernetes"
     }
 
+    fn tools(&self) -> &'static [&'static crate::host::Tool] {
+        &[&KUBECTL]
+    }
+
     fn parse(
         &self,
         section: &Section<'_>,
@@ -432,8 +436,9 @@ impl TargetConfig for KubernetesTarget {
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
-        // The rollout wait ends inside the run budget (NR-4), not after a fixed 600 s.
-        let wait = r.remaining().unwrap_or(WAIT_MAX);
+        // The rollout and ExternalSecret waits have their own limit, and end earlier when
+        // the run budget runs short, so their own message comes first (NR-4).
+        let wait = WAIT_MAX;
         if let Some(store) = &self.store {
             let bridge = Bridge {
                 store: store.open(env, managed.clone(), r),
@@ -469,6 +474,9 @@ impl TargetConfig for KubernetesTarget {
     /// a named store (FR-39): the store's own checks, then the External Secrets Operator,
     /// the ClusterSecretStore and the right to create ExternalSecrets, before any write.
     fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error> {
+        if mode == PreflightMode::Mutate {
+            self.deploy_rights(r)?;
+        }
         let Some(store) = &self.store else {
             return Ok(Preflight::default());
         };
@@ -520,11 +528,11 @@ impl TargetConfig for KubernetesTarget {
         });
         checks.push(Check {
             name: CHECKS[3].into(),
-            outcome: Ok(if reachable {
+            outcome: if reachable {
                 self.access_check(r)
             } else {
-                Verdict::Warn("not checked (cluster not reachable)".into())
-            }),
+                Ok(Verdict::Warn("not checked (cluster not reachable)".into()))
+            },
         });
         if let Some(store) = &self.store {
             checks.extend(store.doctor(r, host));
@@ -712,7 +720,8 @@ impl KubernetesTarget {
 
     /// `kubectl auth can-i` for the rights sync needs. Advisory (R6): a missing right is a
     /// warning naming the exact grant, never a failure.
-    fn access_check(&self, r: &dyn CommandRunner) -> Verdict {
+    /// Every right sync needs (FR-32): a missing one fails, naming the grant.
+    fn access_check(&self, r: &dyn CommandRunner) -> Result<Verdict, Error> {
         let rt = KubeDeployment::new(r, &self.target, BTreeSet::new());
         // With a named store opv writes no Secrets itself; the ExternalSecret rights have
         // their own line (`external secrets access`).
@@ -722,13 +731,35 @@ impl KubernetesTarget {
             .check_access(&[])
             .map(|found| found.into_iter().filter(needed).collect::<Vec<_>>())
         {
-            Ok(found) if found.is_empty() => Verdict::Ok(format!(
+            Ok(found) if found.is_empty() => Ok(Verdict::Ok(format!(
                 "has every right sync needs in namespace {}",
                 self.target.namespace
-            )),
-            Ok(found) => Verdict::Warn(self.access_fix(&found).to_string()),
-            Err(e) => Verdict::Warn(format!("rights not checked: {e}")),
+            ))),
+            Ok(found) => Err(Error::Auth(self.access_fix(&found).to_string().into())),
+            Err(e) => Ok(Verdict::Warn(format!("rights not checked: {e}"))),
         }
+    }
+
+    /// `sync` (Mutate): the rights only a deploy uses after the new revision is live
+    /// ([`DEPLOY_RIGHTS`]), checked before the first write, so a missing one never fails a
+    /// deploy that succeeded (FR-32, NR-1).
+    fn deploy_rights(&self, r: &dyn CommandRunner) -> Result<(), Error> {
+        let external = self.store.is_some();
+        let pick = |verb: &str, resource: &str| {
+            DEPLOY_RIGHTS.contains(&(verb, resource))
+                || (external && verb == "delete" && resource == external::RESOURCE)
+        };
+        let found = missing_rights(&Kubectl::new(r, &self.target), external, pick)?;
+        if found.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Auth(
+            format!(
+                "sync refused, nothing was changed: {}",
+                self.access_fix(&found)
+            )
+            .into(),
+        ))
     }
 
     fn access_fix(&self, found: &[AccessFinding]) -> AccessFix<'_> {
@@ -748,7 +779,7 @@ struct AccessFix<'a> {
 impl fmt::Display for AccessFix<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reasons: Vec<&str> = self.found.iter().map(|a| a.reason.as_str()).collect();
-        write!(f, "{} (advisory; sync needs it)", reasons.join("; "))?;
+        write!(f, "{} (sync needs it)", reasons.join("; "))?;
         f.write_str("\n  fix (as a namespace admin):")?;
         for resource in [
             "secrets",
@@ -1208,8 +1239,9 @@ environments = ["dev"]
         );
     }
 
+    /// I4: every right sync needs is required; a missing one fails with the exact grant.
     #[test]
-    fn doctor_warns_a_missing_right_with_the_exact_grant() {
+    fn doctor_fails_a_missing_right_with_the_exact_grant() {
         let mut g = healthy();
         g[5] = Output {
             status: 1,
@@ -1218,12 +1250,57 @@ environments = ["dev"]
         let r = FakeRunner::new(g);
         assert_eq!(
             doctor_lines(&r)[3],
-            "kubernetes access: warn your kubectl identity cannot delete Secrets, so --prune \
-             cannot remove old versions (advisory; sync needs it)\n  fix (as a namespace admin):\
-             \n    kubectl --context kind-opv --namespace myapp create role opv-secrets \
+            "kubernetes access: FAIL authentication error: your kubectl identity cannot delete \
+             Secrets, so sync \
+             --deploy cannot remove superseded versions (sync needs it)\n  fix (as a namespace \
+             admin):\n    kubectl --context kind-opv --namespace myapp create role opv-secrets \
              --verb=delete --resource=secrets\n    kubectl --context kind-opv --namespace myapp \
              create rolebinding opv-secrets --role=opv-secrets --user=<your user>"
         );
+    }
+
+    /// The `kubectl auth can-i` answers of `preflight` (Mutate): `no` for `denied`.
+    fn deploy_rights(denied: &str) -> Vec<Output> {
+        DEPLOY_RIGHTS
+            .iter()
+            .map(|(verb, resource)| {
+                if format!("{verb} {resource}") == denied {
+                    Output {
+                        status: 1,
+                        stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
+                    }
+                } else {
+                    Output::success("yes\n")
+                }
+            })
+            .collect()
+    }
+
+    /// I4: sync refuses before its first write when a right only the deploy uses is missing.
+    #[test]
+    fn sync_preflight_refuses_without_the_right_to_list_pods() {
+        let r = FakeRunner::new(deploy_rights("list pods"));
+        assert!(matches!(
+            target().preflight(&r, PreflightMode::Mutate),
+            Err(Error::Auth(_))
+        ));
+    }
+
+    #[test]
+    fn sync_preflight_refusal_names_the_grant() {
+        let r = FakeRunner::new(deploy_rights("delete secrets"));
+        let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
+        assert!(
+            e.mentions("create role opv-secrets --verb=delete --resource=secrets"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn read_preflight_asks_for_no_rights() {
+        let r = FakeRunner::default();
+        target().preflight(&r, PreflightMode::Read).unwrap();
+        assert!(r.calls.borrow().is_empty());
     }
 
     #[test]
