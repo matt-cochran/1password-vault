@@ -8,6 +8,7 @@ allumata  OPENAI_API_KEY       secret  saved    potentially changed
 allumata  SIGNUP_POLICY        config  saved    -
 allumata  STRIPE_SECRET_KEY    secret  skipped  absent
 would stage: allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+plan 674d43e2 (1Password item v1): sync --expect-plan 674d43e2 applies exactly this plan and refuses if the item, the target or secrets.toml changed
 Next: opv sync prod --deploy
 --- result
 Ok(())
