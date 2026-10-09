@@ -473,7 +473,8 @@ pub(crate) fn open_target<'a>(
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
     let (_, t) = target(fleet, env_name)?;
     t.preflight(r)?;
-    Ok((t, t.open(env_name, r)?))
+    let managed = managed_names(fleet, env_name)?.into_iter().collect();
+    Ok((t, t.open(env_name, managed, r)?))
 }
 
 /// Every name the target renders for a declared key: the managed set (FR-8, §10).

@@ -2,9 +2,13 @@
 //! `TargetConfig` (FR-28, FR-30, FR-37).
 
 use std::any::Any;
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
+use super::az;
+use super::containerapp::ContainerApp;
+use super::keyvault::KeyVault;
 use crate::config::{check_ident, is_id};
 use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
@@ -228,11 +232,29 @@ impl TargetConfig for AzureTarget {
         )
     }
 
-    fn open<'a>(&'a self, _env: &'a str, _r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error> {
-        // Placeholder until keyvault.rs and containerapp.rs are wired in (FR-28).
-        Err(Error::Config(
-            "the Azure target is not supported yet".into(),
-        ))
+    fn open<'a>(
+        &'a self,
+        env: &'a str,
+        managed: BTreeSet<String>,
+        r: &'a dyn CommandRunner,
+    ) -> Result<Ports<'a>, Error> {
+        Ok(Ports::Pinned {
+            store: Box::new(KeyVault {
+                runner: r,
+                vault: &self.key_vault,
+                env,
+                managed: managed.clone(),
+                pacer: &az::SYSTEM_PACER,
+            }),
+            runtime: Box::new(ContainerApp::new(
+                r,
+                self,
+                None,
+                managed,
+                format!("https://{}.vault.azure.net", self.key_vault),
+                &az::SYSTEM_PACER,
+            )),
+        })
     }
 
     fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
@@ -317,6 +339,15 @@ environments = ["prod"]
 
     fn azure_err(text: &str) -> String {
         parse(text).unwrap_err().to_string()
+    }
+
+    /// FR-28: an Azure target opens the pinned flow (Key Vault + Container Apps).
+    #[test]
+    fn azure_target_opens_pinned_ports() {
+        let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
+        let r = crate::runner::fake::FakeRunner::new([]);
+        let ports = azure_of(&f, "prod").open("prod", BTreeSet::new(), &r);
+        assert!(matches!(ports, Ok(Ports::Pinned { .. })));
     }
 
     #[test]

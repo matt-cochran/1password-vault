@@ -34,6 +34,7 @@ use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
 use crate::runner::{CommandRunner, Outcome, unknown_text};
 
+use super::AzureTarget;
 use super::az::{self, Effect, invoke, read_output, write_output};
 
 /// Largest value Key Vault accepts, in bytes (FR-30).
@@ -57,7 +58,9 @@ pub struct KeyVault<'a> {
     pub runner: &'a dyn CommandRunner,
     pub vault: &'a str,
     pub env: &'a str,
-    pub template_names: &'a BTreeSet<String>,
+    /// The managed env names (from the template, FR-8). The ports speak env names; each
+    /// is stored under its Key Vault spelling ([`AzureTarget::key_vault_name`]).
+    pub managed: BTreeSet<String>,
     /// Waits and progress lines for the polling loops (NR-25, NR-30).
     pub pacer: &'a dyn az::Pacer,
 }
@@ -155,9 +158,9 @@ impl KeyVault<'_> {
             .collect())
     }
 
-    /// The template spelling of `e`'s name when opv owns it: the name is in the managed set
-    /// (Key Vault names are case-insensitive, R3) and carries this environment's tag
-    /// (FR-8, FR-32).
+    /// The managed env name stored as `e` when opv owns it: its Key Vault spelling matches
+    /// one of the managed names (Key Vault names are case-insensitive, R3) and it carries
+    /// this environment's tag (FR-8, FR-32).
     fn managed_name(&self, e: &ListEntry) -> Option<&str> {
         let tagged = e
             .tags
@@ -167,14 +170,15 @@ impl KeyVault<'_> {
         if !tagged {
             return None;
         }
-        self.template_names
+        self.managed
             .iter()
-            .find(|t| t.eq_ignore_ascii_case(&e.name))
+            .find(|t| AzureTarget::key_vault_name(t).eq_ignore_ascii_case(&e.name))
             .map(String::as_str)
     }
 
     /// The current value and version id, or `None` when Key Vault exits 3 (`SecretNotFound`).
     fn read_secret(&self, name: &str) -> Result<Option<(SecretValue, String)>, Error> {
+        let name = &AzureTarget::key_vault_name(name);
         const OP: &str = "keyvault secret show";
         let args = [
             "keyvault",
@@ -211,8 +215,9 @@ impl KeyVault<'_> {
     /// may be a role grant still propagating (NR-25). That one failure is retried once,
     /// but only after a read (`secret list`) proves the vault now answers.
     fn write_secret(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
+        let name = &AzureTarget::key_vault_name(name);
         const OP: &str = "keyvault secret set";
-        az::stdin_supported()?;
+        az::stdin_supported("writing to Key Vault")?;
         let tag = format!("opv-managed={}", self.env);
         let args = [
             "keyvault",
@@ -256,7 +261,7 @@ impl KeyVault<'_> {
                 return Err(soft_deleted_error(name, self.vault));
             }
             if !az::signed_in(self.runner)? {
-                return Err(Error::Auth("not logged in to Azure; run: az login".into()));
+                return Err(az::not_logged_in(None));
             }
             self.await_access()?;
             outcome = set()?;
@@ -401,6 +406,7 @@ impl KeyVault<'_> {
                 self.env
             )));
         }
+        let name = &AzureTarget::key_vault_name(name);
         let args = [
             "keyvault",
             "secret",
@@ -458,28 +464,21 @@ mod tests {
     const MARKER: &str = "opv-marker-kv";
     const NAME: &str = "FLEET--API--DB-URL";
     const VERSION: &str = "46687ce78b76487cb0c1da470360b638";
-    const LIST_FIXTURE: &str = include_str!("../../tests/fixtures/azure/keyvault-secret-list.json");
-    const SHOW_FIXTURE: &str = include_str!("../../tests/fixtures/azure/keyvault-secret-show.json");
+    const LIST_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/azure/keyvault-secret-list.json");
+    const SHOW_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/azure/keyvault-secret-show.json");
 
     fn names(set: &[&str]) -> BTreeSet<String> {
         set.iter().map(|s| (*s).to_string()).collect()
     }
-
-    struct NoWait;
-
-    impl az::Pacer for NoWait {
-        fn sleep(&self, _d: Duration) {}
-        fn note(&self, _line: &str) {}
-    }
-
-    static NO_WAIT: NoWait = NoWait;
 
     fn vault<'a>(
         r: &'a FakeRunner,
         env: &'a str,
         template_names: &'a BTreeSet<String>,
     ) -> KeyVault<'a> {
-        vault_paced(r, &NO_WAIT, env, template_names)
+        vault_paced(r, &az::NO_WAIT, env, template_names)
     }
 
     fn vault_paced<'a>(
@@ -492,7 +491,7 @@ mod tests {
             runner: r,
             vault: VAULT,
             env,
-            template_names,
+            managed: template_names.clone(),
             pacer,
         }
     }
@@ -673,6 +672,31 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(kept, vec![lower]);
+    }
+
+    /// The ports speak env names: a Key Vault entry is listed under the managed env name
+    /// whose Key Vault spelling it is.
+    #[test]
+    fn list_names_entries_by_their_managed_env_name() {
+        let r = FakeRunner::new([Output::success(LIST_FIXTURE)]);
+        let templates = names(&["FLEET__API__DB_URL"]);
+        let kept: Vec<String> = vault(&r, "dev", &templates)
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(kept, ["FLEET__API__DB_URL"]);
+    }
+
+    #[test]
+    fn read_asks_for_the_key_vault_spelling_of_an_env_name() {
+        let r = FakeRunner::new([Output::success(SHOW_FIXTURE)]);
+        let templates = names(&[]);
+        vault(&r, "dev", &templates)
+            .read("FLEET__API__DB_URL")
+            .unwrap();
+        assert!(r.calls.borrow()[0].args.iter().any(|a| a == NAME));
     }
 
     #[test]

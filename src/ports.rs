@@ -15,6 +15,10 @@ use crate::domain::{
 use crate::error::Error;
 
 /// Where secret values are written: the operations every flow shares.
+///
+/// Every name a store port takes or returns is a runtime env name, as the template renders
+/// it (FR-8). A store that spells names differently (Key Vault: `_` becomes `-`) maps them
+/// inside its adapter, so core code never handles store spellings.
 pub trait Store {
     /// Every entry with its version and pending flag. Never values.
     fn list(&self) -> Result<Vec<StoreEntry>, Error>;

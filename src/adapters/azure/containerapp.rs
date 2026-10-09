@@ -59,25 +59,22 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::adapters::azure::AzureTarget;
+use super::AzureTarget;
+use super::az::{self, Effect, Pacer};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
 use crate::error::Error;
 use crate::ports::PinnedRuntime;
-use crate::runner::{
-    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
-};
+use crate::runner::{CommandRunner, Outcome, Output, status_text, unknown_text};
 
-/// The Azure CLI binary.
-pub const PROGRAM: &str = "az";
 /// Delay between two health polls (R8).
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Longest wait for a new revision (R8); the run budget may end it sooner (NR-4).
@@ -107,13 +104,6 @@ const SECRETS: &str = "/properties/configuration/secrets";
 /// Changed paths named in one error before "and N more".
 const MAX_PATHS: usize = 5;
 
-/// Whether a call changes the app (NR-2): reads are retried by the runner, writes never are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Effect {
-    Read,
-    Write,
-}
-
 /// One Container App as the pinned-flow runtime (FR-28).
 pub struct ContainerApp<'a> {
     pub runner: &'a dyn CommandRunner,
@@ -121,11 +111,11 @@ pub struct ContainerApp<'a> {
     /// `azure.subscription` when configured; passed as `--subscription`.
     pub subscription: Option<&'a str>,
     /// Managed env names (from the template, FR-8).
-    pub managed: &'a BTreeSet<String>,
+    pub managed: BTreeSet<String>,
     /// `https://<vault>.vault.azure.net`, without a trailing slash.
     pub vault_uri: String,
-    sleep: Box<dyn Fn(Duration) + 'a>,
-    progress: Box<dyn Fn(&str) + 'a>,
+    /// Health-poll waits and progress lines (NR-4).
+    pacer: &'a dyn Pacer,
     poll_every: Duration,
     wait_max: Duration,
     /// The spec `apply` read just before its update, for the R9 check.
@@ -137,8 +127,9 @@ impl<'a> ContainerApp<'a> {
         runner: &'a dyn CommandRunner,
         target: &'a AzureTarget,
         subscription: Option<&'a str>,
-        managed: &'a BTreeSet<String>,
+        managed: BTreeSet<String>,
         vault_uri: String,
+        pacer: &'a dyn Pacer,
     ) -> Self {
         Self {
             runner,
@@ -146,30 +137,17 @@ impl<'a> ContainerApp<'a> {
             subscription,
             managed,
             vault_uri,
-            sleep: Box::new(std::thread::sleep),
-            progress: Box::new(|line| eprintln!("{line}")),
+            pacer,
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             applied_from: RefCell::new(None),
         }
     }
 
-    /// Replaces the health-poll sleep and limits (tests never sleep).
-    pub fn with_clock(
-        mut self,
-        sleep: Box<dyn Fn(Duration) + 'a>,
-        poll_every: Duration,
-        wait_max: Duration,
-    ) -> Self {
-        self.sleep = sleep;
+    /// Replaces the health-poll interval and limit ([`POLL_EVERY`], [`WAIT_MAX`]).
+    pub fn with_wait(mut self, poll_every: Duration, wait_max: Duration) -> Self {
         self.poll_every = poll_every;
         self.wait_max = wait_max;
-        self
-    }
-
-    /// Replaces the progress sink (stderr by default; NR-4).
-    pub fn with_progress(mut self, progress: Box<dyn Fn(&str) + 'a>) -> Self {
-        self.progress = progress;
         self
     }
 
@@ -196,7 +174,7 @@ impl<'a> ContainerApp<'a> {
     /// `base` plus `--only-show-errors` (R7) and `--subscription` when configured.
     fn argv(&self, base: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = base.iter().map(|s| s.to_string()).collect();
-        v.push("--only-show-errors".into());
+        v.push(az::ONLY_SHOW_ERRORS.into());
         if let Some(s) = self.subscription {
             v.extend(["--subscription".into(), s.into()]);
         }
@@ -216,25 +194,7 @@ impl<'a> ContainerApp<'a> {
     ) -> Result<Output, Error> {
         let owned = self.argv(base);
         let args: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let call = Call::new(PROGRAM, &args).with_stdin(stdin);
-        let outcome = match effect {
-            Effect::Read => self.runner.read(&call, &[]),
-            Effect::Write => self.runner.write(&call),
-        }
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(format!(
-                "{PROGRAM} (the Azure CLI) not found on PATH; nothing was changed\n  install: \
-                 https://learn.microsoft.com/cli/azure/install-azure-cli\n  then run opv again"
-            )),
-            // A spent run budget: the call never started.
-            io::ErrorKind::TimedOut => Error::Target(format!(
-                "{what}: {e}; nothing was changed\n  next: re-run with a larger --timeout"
-            )),
-            kind => Error::Target(format!(
-                "{what} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
-                 that `{PROGRAM} version` runs, then run opv again"
-            )),
-        })?;
+        let outcome = az::invoke(self.runner, effect, what, &args, stdin, &[])?;
         match outcome {
             Outcome::Done(out) => Ok(out),
             Outcome::Refused(out) => Err(self.diagnose(effect, what, subject, hint, out.status)),
@@ -244,15 +204,15 @@ impl<'a> ContainerApp<'a> {
             } => Err(self.diagnose(effect, what, subject, hint, status)),
             Outcome::Unknown { reason, .. } if effect == Effect::Write => {
                 Err(Error::Unknown(format!(
-                    "{what}: {}; the update may or may not have been applied, and Azure keeps \
+                    "az {what}: {}; the update may or may not have been applied, and Azure keeps \
                      the previous revision serving until a new one is ready\n  next: re-run \
                      the same command",
-                    unknown_text(PROGRAM, reason)
+                    unknown_text(az::PROGRAM, reason)
                 )))
             }
             Outcome::Unknown { reason, .. } => Err(Error::Target(format!(
-                "{what}: {}; nothing was changed\n  next: re-run the same command",
-                unknown_text(PROGRAM, reason)
+                "az {what}: {}; nothing was changed\n  next: re-run the same command",
+                unknown_text(az::PROGRAM, reason)
             ))),
         }
     }
@@ -260,7 +220,6 @@ impl<'a> ContainerApp<'a> {
     /// The error for a call that exited `status` (FR-26): `az account show`, exit status
     /// only, tells "not signed in" (Auth) from "signed in but refused" (Target; Unknown for
     /// the update, which may have reached Azure).
-    // consolidated at integration with az.rs
     fn diagnose(
         &self,
         effect: Effect,
@@ -269,20 +228,9 @@ impl<'a> ContainerApp<'a> {
         hint: &str,
         status: i32,
     ) -> Error {
-        let failed = format!("{what} failed ({})", status_text(status));
-        let probe = Call::new(
-            PROGRAM,
-            &["account", "show", "-o", "none", "--only-show-errors"],
-        );
-        let signed_in = self
-            .runner
-            .probe(&probe, PROBE_TIMEOUT)
-            .map(|o| o.status == 0);
-        match (signed_in, effect) {
-            (Ok(false), _) => Error::Auth(format!(
-                "not logged in to Azure ({failed}; az account show failed)\n  next: run `az \
-                 login` (in CI: sign in with azure/login first), then run opv again"
-            )),
+        let failed = format!("az {what} failed ({})", status_text(status));
+        match (az::signed_in(self.runner), effect) {
+            (Ok(false), _) => az::not_logged_in(Some(&failed)),
             (Ok(true), Effect::Read) => Error::Target(format!(
                 "{failed}: signed in to Azure, but {subject} could not be read; nothing was \
                  changed\n  next: check that it exists and that your account can read it: \
@@ -301,7 +249,7 @@ impl<'a> ContainerApp<'a> {
     }
 
     fn show(&self) -> Result<Value, Error> {
-        const WHAT: &str = "az containerapp show";
+        const WHAT: &str = "containerapp show";
         let out = self.az(
             Effect::Read,
             WHAT,
@@ -323,7 +271,7 @@ impl<'a> ContainerApp<'a> {
     }
 
     fn revision_show(&self, rev: &str) -> Result<Value, Error> {
-        const WHAT: &str = "az containerapp revision show";
+        const WHAT: &str = "containerapp revision show";
         let hint = format!(
             "az containerapp revision show -g {} -n {} --revision {rev}",
             self.rg(),
@@ -592,13 +540,13 @@ impl<'a> ContainerApp<'a> {
         }
         let out = self.az(
             Effect::Read,
-            "az identity show",
+            "identity show",
             &format!("managed identity {id}"),
             &format!("az identity show --ids {id}"),
             &["identity", "show", "--ids", id, "-o", "json"],
             None,
         )?;
-        Ok(parse(&out, "az identity show")?["principalId"]
+        Ok(parse(&out, "identity show")?["principalId"]
             .as_str()
             .filter(|p| !p.is_empty())
             .map(String::from)
@@ -617,7 +565,7 @@ impl PinnedRuntime for ContainerApp<'_> {
     }
 
     fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error> {
-        stdin_supported()?;
+        az::stdin_supported("updating a container app")?;
         if let Some(name) = change
             .pin
             .keys()
@@ -666,7 +614,7 @@ impl PinnedRuntime for ContainerApp<'_> {
                 self.app()
             ))
         })?);
-        const WHAT: &str = "az containerapp update";
+        const WHAT: &str = "containerapp update";
         let out = self.az(
             Effect::Write,
             WHAT,
@@ -695,7 +643,7 @@ impl PinnedRuntime for ContainerApp<'_> {
             .map(|r| Revision(r.into()))
             .ok_or_else(|| {
                 Error::Target(format!(
-                    "{WHAT} named no new revision for container app {}; {applied}\n  next: \
+                    "az {WHAT} named no new revision for container app {}; {applied}\n  next: \
                      `{}` to see its revisions, then run opv status",
                     self.app(),
                     self.show_hint()
@@ -752,14 +700,14 @@ impl PinnedRuntime for ContainerApp<'_> {
                 return Ok(Health::TimedOut);
             }
             if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
-                (self.progress)(&format!(
+                self.pacer.note(&format!(
                     "waiting for revision {rev} of container app {}: {last}, {} s",
                     self.app(),
                     waited.as_secs()
                 ));
                 reported = Some(waited);
             }
-            (self.sleep)(self.poll_every);
+            self.pacer.sleep(self.poll_every);
             waited += self.poll_every;
         }
     }
@@ -784,13 +732,13 @@ impl PinnedRuntime for ContainerApp<'_> {
         let kv_hint = format!("az keyvault show -n {kv}");
         let out = self.az(
             Effect::Read,
-            "az keyvault show",
+            "keyvault show",
             &kv_subject,
             &kv_hint,
             &["keyvault", "show", "-n", kv, "-o", "json"],
             None,
         )?;
-        let vault = parse(&out, "az keyvault show")?;
+        let vault = parse(&out, "keyvault show")?;
         let rbac = vault
             .pointer("/properties/enableRbacAuthorization")
             .and_then(Value::as_bool);
@@ -813,7 +761,7 @@ impl PinnedRuntime for ContainerApp<'_> {
         })?;
         let out = self.az(
             Effect::Read,
-            "az role assignment list",
+            "role assignment list",
             &kv_subject,
             &kv_hint,
             &[
@@ -831,7 +779,7 @@ impl PinnedRuntime for ContainerApp<'_> {
             ],
             None,
         )?;
-        let roles = parse(&out, "az role assignment list")?;
+        let roles = parse(&out, "role assignment list")?;
         let has_role = roles.as_array().is_some_and(|rs| {
             rs.iter()
                 .filter_map(|r| r["roleDefinitionName"].as_str())
@@ -879,19 +827,6 @@ pub fn secret_name(store_name: &str, version: &str) -> String {
     format!("{SECRET_PREFIX}{}", &digest[..16])
 }
 
-/// Native Windows has no `/dev/stdin`, and the update document must not touch disk (SR-4).
-// consolidated at integration with az.rs
-fn stdin_supported() -> Result<(), Error> {
-    if cfg!(windows) {
-        return Err(Error::Dependency(
-            "updating a container app needs /dev/stdin, which native Windows lacks; nothing \
-             was changed\n  next: run opv sync from WSL or Linux"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Parses a read's output; nothing has changed when it fails.
 fn parse(out: &Output, what: &str) -> Result<Value, Error> {
     parse_with(out, what, "nothing was changed")
@@ -902,7 +837,7 @@ fn parse_with(out: &Output, what: &str, state: &str) -> Result<Value, Error> {
     // serde_json messages can quote input fragments, so report only the position.
     serde_json::from_slice(&out.stdout).map_err(|e| {
         Error::Target(format!(
-            "{what} returned JSON opv cannot read (line {}, column {}); {state}\n  next: update \
+            "az {what} returned JSON opv cannot read (line {}, column {}); {state}\n  next: update \
              the Azure CLI (`az upgrade`), then run opv again",
             e.line(),
             e.column()
@@ -990,7 +925,6 @@ fn diff(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::io;
     use std::time::Duration;
@@ -1097,11 +1031,8 @@ mod tests {
         t: &'a AzureTarget,
         m: &'a BTreeSet<String>,
     ) -> ContainerApp<'a> {
-        ContainerApp::new(r, t, None, m, VAULT_URI.into()).with_clock(
-            Box::new(|_| {}),
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-        )
+        ContainerApp::new(r, t, None, m.clone(), VAULT_URI.into(), &az::NO_WAIT)
+            .with_wait(Duration::from_secs(5), Duration::from_secs(10))
     }
 
     fn no_change() -> RuntimeChange {
@@ -1615,9 +1546,16 @@ mod tests {
     fn subscription_is_passed_when_configured() {
         let (t, m) = (target(), managed());
         let r = FakeRunner::new([out(&show())]);
-        ContainerApp::new(&r, &t, Some("sub-fixture"), &m, VAULT_URI.into())
-            .bindings()
-            .unwrap();
+        ContainerApp::new(
+            &r,
+            &t,
+            Some("sub-fixture"),
+            m,
+            VAULT_URI.into(),
+            &az::NO_WAIT,
+        )
+        .bindings()
+        .unwrap();
         assert!(
             r.calls.borrow()[0]
                 .args
@@ -1698,22 +1636,18 @@ mod tests {
 
     #[test]
     fn await_healthy_sleeps_the_poll_interval_between_reads() {
-        let slept = RefCell::new(Vec::new());
+        let pacer = az::RecordingPacer::default();
         let (t, m) = (target(), managed());
         let r = FakeRunner::new([
             out(&revision("Provisioning", "Activating", "None")),
             out(&healthy_revision()),
             out(&show_ready()),
         ]);
-        ContainerApp::new(&r, &t, None, &m, VAULT_URI.into())
-            .with_clock(
-                Box::new(|d| slept.borrow_mut().push(d)),
-                Duration::from_secs(5),
-                Duration::from_secs(300),
-            )
+        ContainerApp::new(&r, &t, None, m, VAULT_URI.into(), &pacer)
+            .with_wait(Duration::from_secs(5), Duration::from_secs(300))
             .await_healthy(&Revision(REV.into()))
             .unwrap();
-        assert_eq!(*slept.borrow(), [Duration::from_secs(5)]);
+        assert_eq!(*pacer.sleeps.borrow(), [Duration::from_secs(5)]);
     }
 
     #[test]
@@ -1761,20 +1695,18 @@ mod tests {
 
     /// Progress lines printed while waiting `polls` reads that never get ready.
     fn progress_over(polls: usize) -> Vec<String> {
-        let lines = RefCell::new(Vec::new());
+        let pacer = az::RecordingPacer::default();
         let (t, m) = (target(), managed());
         let starting = revision("Provisioning", "Activating", "None");
         let r = FakeRunner::new((0..polls).map(|_| out(&starting)));
-        ContainerApp::new(&r, &t, None, &m, VAULT_URI.into())
-            .with_clock(
-                Box::new(|_| {}),
+        ContainerApp::new(&r, &t, None, m, VAULT_URI.into(), &pacer)
+            .with_wait(
                 Duration::from_secs(5),
                 Duration::from_secs(5 * (polls as u64 - 1)),
             )
-            .with_progress(Box::new(|l| lines.borrow_mut().push(l.to_string())))
             .await_healthy(&Revision(REV.into()))
             .unwrap();
-        lines.into_inner()
+        pacer.notes.into_inner()
     }
 
     #[test]

@@ -32,13 +32,15 @@ pub const AZ_CLI: Tool = Tool {
 /// Global flag that keeps `az` quiet apart from errors (R7).
 pub const ONLY_SHOW_ERRORS: &str = "--only-show-errors";
 
-/// Fail closed before any spawn when a Key Vault write would need `/dev/stdin` (SR-3):
-/// native Windows has no such device, so the user is pointed at WSL or Linux.
-pub fn stdin_supported() -> Result<(), Error> {
+/// Fail closed before any spawn when `action` (e.g. "writing to Key Vault") would need
+/// `/dev/stdin` (SR-3): native Windows has no such device, and the document must not touch
+/// disk (SR-4), so the user is pointed at WSL or Linux.
+pub fn stdin_supported(action: &str) -> Result<(), Error> {
     if cfg!(windows) {
-        return Err(Error::Dependency(
-            "writing to Key Vault needs /dev/stdin; run opv sync from WSL or Linux".into(),
-        ));
+        return Err(Error::Dependency(format!(
+            "{action} needs /dev/stdin, which native Windows lacks; nothing was changed\n  \
+             next: run opv sync from WSL or Linux"
+        )));
     }
     Ok(())
 }
@@ -95,8 +97,14 @@ pub(crate) fn invoke(
             "{PROGRAM} not found on PATH\n  {}",
             Host::detect().install_hint(AZ_CLI)
         )),
-        io::ErrorKind::TimedOut => Error::Target(format!("az {op}: {e}")),
-        kind => Error::Target(format!("az {op} could not start {PROGRAM} ({kind})")),
+        // A spent run budget: the call never started.
+        io::ErrorKind::TimedOut => Error::Target(format!(
+            "az {op}: {e}; nothing was changed\n  next: re-run with a larger --timeout"
+        )),
+        kind => Error::Target(format!(
+            "az {op} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
+             that `{PROGRAM} version` runs, then run opv again"
+        )),
     })
 }
 
@@ -169,10 +177,36 @@ pub(crate) fn signed_in(r: &dyn CommandRunner) -> Result<bool, Error> {
 pub fn diagnose(r: &dyn CommandRunner, op: &str, target: &str) -> Error {
     match signed_in(r) {
         Ok(true) => Error::Target(format!("az {op} failed for {target}")),
-        Ok(false) => Error::Auth("not logged in to Azure; run: az login".into()),
+        Ok(false) => not_logged_in(None),
         Err(e) => e,
     }
 }
+
+/// The sign-in error every Azure adapter returns (FR-26); `failed` names the call that
+/// failed first, when there is one.
+pub(crate) fn not_logged_in(failed: Option<&str>) -> Error {
+    let why = match failed {
+        Some(f) => format!("{f}; az account show failed"),
+        None => "az account show failed".into(),
+    };
+    Error::Auth(format!(
+        "not logged in to Azure ({why})\n  next: run `az login` (in CI: sign in with \
+         azure/login first), then run opv again"
+    ))
+}
+
+/// A [`Pacer`] for tests that neither waits nor prints.
+#[cfg(test)]
+pub(crate) struct NoWait;
+
+#[cfg(test)]
+impl Pacer for NoWait {
+    fn sleep(&self, _d: Duration) {}
+    fn note(&self, _line: &str) {}
+}
+
+#[cfg(test)]
+pub(crate) static NO_WAIT: NoWait = NoWait;
 
 /// A [`Pacer`] for tests: records every sleep and note, never waits.
 #[cfg(test)]

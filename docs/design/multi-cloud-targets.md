@@ -254,7 +254,8 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn name_rules(&self) -> NameRules;                        // patterns, case sensitivity, limits (FR-30)
     fn same_target(&self, other: &dyn TargetConfig) -> bool;  // two environments sharing one target
     fn shared_target_error(&self, first: &str, second: &str) -> String; // its FR-8 message
-    fn open<'a>(&'a self, env: &'a str, r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error>;
+    fn open<'a>(&'a self, env: &'a str, managed: BTreeSet<String>, r: &'a dyn CommandRunner)
+        -> Result<Ports<'a>, Error>;                           // managed: template env names (FR-8)
     fn preflight(&self, r: &dyn CommandRunner) -> Result<(), Error>;  // NR-23..NR-26, read-only
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)>;
@@ -279,6 +280,12 @@ preflight task (R2), which decides where warnings print. `tools()` had no caller
 provider's CLI is a `host::Tool` value (program and install line per platform) declared in its
 own module, and its credential variables come from `Provider::credential_vars`, so `host.rs`
 names no provider.
+
+Integration (Key Vault + Container Apps): `open` also takes the managed env names (FR-8), which
+the pinned adapters need to recognise what they own. Every store port speaks runtime env names;
+Key Vault maps them to its spelling (`_` → `-`) inside the adapter. The Azure adapters live in
+`src/adapters/azure/` (`keyvault.rs`, `containerapp.rs`, and `az.rs`, their shared spawn,
+diagnosis, `/dev/stdin` and pacing plumbing), and `AzureTarget::open` returns `Ports::Pinned`.
 
 - `config.rs` keeps the generic environment fields and dispatches each remaining table to the
   provider registered under that section name; an unknown section is a config error listing the
