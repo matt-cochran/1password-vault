@@ -526,7 +526,12 @@ pub fn status_all(
                 }
                 let o = status::overview_of(&fleet, product, r);
                 let lines = o.lines.clone();
-                let envs = serde_json::to_value(&o.envs).unwrap_or_default();
+                let mut envs = serde_json::to_value(&o.envs).unwrap_or_default();
+                for env in envs.as_array_mut().into_iter().flatten() {
+                    if let Some(next) = env["next"].as_str() {
+                        env["next"] = json!(project_step(next, &name));
+                    }
+                }
                 if let Err(e) = o.result(&fleet) {
                     let e = in_project(e.map_text(|t| format!("{name}: {t}")), &name);
                     first.get_or_insert(e);
@@ -540,7 +545,7 @@ pub fn status_all(
             Err(e) => {
                 let why = e.text().lines().next().unwrap_or_default().to_string();
                 let code = e.code().as_str();
-                first.get_or_insert(e);
+                first.get_or_insert(in_project(e, &name));
                 docs.push((
                     name,
                     store::vault_label(&l.row).to_string(),
@@ -592,14 +597,24 @@ pub fn status_all(
     first.map_or(Ok(()), Err)
 }
 
-/// `e` with its `Next:` run against project `name` from any directory.
+/// `e` with a `Next:` that runs as typed (its step split into `Do:` and a command, never
+/// the error's prose), run against project `name` from any directory.
 fn in_project(e: Error, name: &str) -> Error {
-    match e.next_step().filter(|n| n.starts_with("opv ")) {
-        Some(next) => {
-            let next = format!("env OPV_PROJECT={} {next}", crate::error::shell_word(name));
-            e.with_next(next)
-        }
-        None => e,
+    let step = e.step("opv status", "opv status --help");
+    let e = match step.action {
+        Some(a) if e.action().is_none() => e.with_do(a),
+        _ => e,
+    };
+    let next = project_step(&step.next, name);
+    e.with_next(next)
+}
+
+/// `next` run against project `name` from any directory, when it is an opv command.
+fn project_step(next: &str, name: &str) -> String {
+    if next.starts_with("opv ") {
+        format!("env OPV_PROJECT={} {next}", crate::error::shell_word(name))
+    } else {
+        next.to_string()
     }
 }
 

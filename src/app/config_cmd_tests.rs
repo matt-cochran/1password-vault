@@ -424,3 +424,30 @@ fn status_all_with_a_product_lists_only_projects_declaring_it() {
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["projects"].as_array().unwrap().len(), 1);
 }
+
+/// An environment `status --all` could not read: its `Next:` runs as typed.
+#[test]
+fn status_all_environment_error_next_is_runnable() {
+    let op = FakeOp::default();
+    put(&op, "myapp", TOML);
+    let e = status_all(&op, None, false, &mut Vec::new()).unwrap_err();
+    assert!(
+        crate::error::is_runnable(e.next_step().unwrap_or_default()),
+        "{:?}",
+        e.next_step()
+    );
+}
+
+/// Each unread environment of `status --all --json` carries its runnable `next`.
+#[test]
+fn status_all_json_environment_error_carries_a_runnable_next() {
+    let op = FakeOp::default();
+    put(&op, "myapp", TOML);
+    let mut out = Vec::new();
+    let _ = status_all(&op, None, true, &mut out);
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let next = v["projects"][0]["environments"][0]["next"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(crate::error::is_runnable(next), "{next}");
+}

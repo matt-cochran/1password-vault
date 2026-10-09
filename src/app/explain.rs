@@ -373,7 +373,10 @@ fn explain_in(
             "reference": format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
             "kind": kind_label(spec.kind),
             "field": field,
-            "target": target_lines
+            // The same `target_name` as a status/plan/check row; the provider's lines are
+            // `target_details`, since a row's `target` is a state word (A6).
+            "target_name": env.target_name(product, key),
+            "target_details": target_lines
                 .iter()
                 .map(|(l, v)| serde_json::json!({"label": l, "value": v}))
                 .collect::<Vec<_>>(),

@@ -51,6 +51,11 @@ pub struct StoreEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyState {
     Missing,
+    /// The field's stored kind differs from the declared one. Not produced by any command
+    /// since FR-43/I1: every read goes through the tolerant reader, which hands each
+    /// declared key over with its declared kind (and `concealed` for config kept concealed),
+    /// so this needs a caller passing fields typed as stored (the strict item parser, used
+    /// in tests only). Hence not in `opv schema`'s `row_state`.
     WrongKind,
     /// The failing rule's stable name and why it failed (FR-15, FR-22). Never the value.
     RuleFailed(&'static str, Reason),

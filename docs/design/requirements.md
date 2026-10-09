@@ -382,7 +382,7 @@ Since v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev ti
 
 Each declared key has a kind, `secret` or `config`. In 1Password the field type normally records it: concealed = secret, text = config. The declared kind decides how a key is delivered; the field type does not block.
 
-Decided in v0.5 (owner, final review I1): a config key stored in a concealed field is accepted and delivered as a plain value; opv never prints its value (`config export`, `status`, `plan` and every other output), and `status` warns about it once. A secret stored in a text field is accepted and delivered as a secret. There is no `wrong kind` finding: neither case is refused by `sync` or `config export`.
+Decided in v0.5 (owner, final review I1): a config key stored in a concealed field is accepted and delivered as a plain value; opv never prints its value (`config export` shows `<concealed in 1Password>`; `status`, `plan` and every other output name the key only), and `status` warns about it once. A secret stored in a text field is accepted and delivered as a secret. There is no `wrong kind` finding: neither case is refused by `sync` or `config export`.
 
 ## FR-15 — Declarative Validation Rules
 
@@ -414,7 +414,7 @@ The CLI shall provide:
 opv status <environment>
 ```
 
-One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
+One row per product × key: declared, saved, missing, extra (in the item but not declared), failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
 
 Decided in v0.5 (H1, H11): target words follow the shared vocabulary under FR-5's plan decisions; each missing or failing row also prints `open:` with 1Password's private item link (account UUID and sign-in host from `op whoami`, vault and item IDs; never a value) and the section and field to fix, and `opv open <[product/]KEY>` opens it. `opv status` without an environment reads every environment, run-only ones included (one item read each, FR-13), and takes `--product`, `OPV_PRODUCT` and `--json`. With `$GITHUB_STEP_SUMMARY` set, `status`, `plan` and `sync` append a names-and-states Markdown summary (H8; no value, reason or link).
 
@@ -497,7 +497,7 @@ stdout carries one JSON document with a top-level integer `schema_version` (1 in
 
 Acceptance:
 
-- The document contains names, states and counts only (value lengths are metadata about values, and guidance belongs in `explain`, FR-22): environment, product and key names, kind, row state (saved, missing, extra, wrong kind, failing rule, held, present, absent, would stage, would prune), the name of a failing rule, Fly names, and totals. It contains no value, no value fragment, no value length and no guidance text.
+- The document contains names, states and counts only (value lengths are metadata about values, and guidance belongs in `explain`, FR-22): environment, product and key names, kind, row state (saved, missing, extra, failing rule, held, present, absent, would stage, would prune), the name of a failing rule, Fly names, and totals. It contains no value, no value fragment, no value length and no guidance text.
 - Exit codes are unchanged (FR-10): with blocking findings the command still exits 8, and an error still exits with its category. An error before the document is produced is reported on stderr as text; stdout then carries no partial document.
 - Without `--json` the human output is unchanged.
 
@@ -921,7 +921,7 @@ A CI identity shall require only:
 
 Deploy identities are per environment (FR-40): each environment's `deploy_credentials` item holds only what a sync of that environment needs (a Fly deploy token for one app; an Azure service principal limited to that Key Vault's opv-tagged secrets and that Container App), never a person's or an organisation-wide credential. Break-glass credentials (owner, admin, emergency access) are for people only, kept in 1Password, and never referenced by opv. In CI, one service-account token reads the environment's vaults; the target credential is a `deploy_credentials` item or the CI provider's OIDC federation.
 
-The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. This write exception does not apply to synchronization or CI.
+The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. Because the owner may spend a long time at its prompts, `setup` reads the item again with `--cache=false` right before it writes: if the item's version moved since setup read it, nothing is overwritten; setup re-plans on the fresh item, keeps the values already entered in memory (they fill only fields that are still empty; a field filled elsewhere keeps its 1Password value and setup names it), says so and asks once more. A further change before the save writes nothing (`item_changed`). After the edit the same check as the tidy applies: exactly one version past the fresh read and every field setup wrote or kept present, else `item_changed` and a pointer to the item's history (final review, setup save). This write exception does not apply to synchronization or CI.
 
 A run by a signed-in person (not a service account, Connect or CI) may also tidy the item's layout (FR-43): one whole-item edit, JSON on stdin, nothing deleted, displaced values kept in `opv · kept`. Without write access the tidy is skipped with a note; no command needs write access to 1Password.
 

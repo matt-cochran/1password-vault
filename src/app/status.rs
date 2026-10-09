@@ -186,7 +186,7 @@ fn status_command(env_name: &str, product: Option<&str>) -> String {
 ///
 /// With `json`, one document instead of lines (A5):
 /// `{schema_version, product, environments: [{name, target, state, keys, saved, skipped,
-/// findings, error_code, error}], totals}`, where `state` is `checked`, `run_only` (read,
+/// findings, error_code, error, next}], totals}`, where `state` is `checked`, `run_only` (read,
 /// no target) or `not_checked`. Exit codes are the same.
 pub fn overview(
     fleet: &Fleet,
@@ -300,10 +300,16 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
                     findings: Some(n),
                     error_code: None,
                     error: None,
+                    next: None,
                 });
             }
             Err(e) => {
                 let first = e.to_string().lines().next().unwrap_or_default().to_string();
+                let rerun = match product {
+                    Some(p) => format!("opv status {name} --product {p}"),
+                    None => format!("opv status {name}"),
+                };
+                let next = e.step(&rerun, "opv status --help").next;
                 o.lines.push(format!("{name}: not checked ({first})"));
                 o.envs.push(OverviewEnv {
                     name: name.clone(),
@@ -315,6 +321,7 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
                     findings: None,
                     error_code: Some(e.code().as_str()),
                     error: Some(first),
+                    next: Some(next),
                 });
                 o.first_err.get_or_insert((name.clone(), e));
             }
@@ -375,6 +382,9 @@ pub(crate) struct OverviewEnv {
     findings: Option<usize>,
     error_code: Option<&'static str>,
     error: Option<String>,
+    /// For an environment that was not checked: the one command that runs as typed to get
+    /// past its error (A3), never the error's prose; `null` otherwise.
+    next: Option<String>,
 }
 
 /// One environment's rows, for [`overview`]: with a target as `status <env>` reads them

@@ -7,7 +7,8 @@
   "reference": "op://vprd/iprd/allumata/OPENAI_API_KEY",
   "kind": "secret",
   "field": "concealed field",
-  "target": [
+  "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+  "target_details": [
     {
       "label": "fly name",
       "value": "FLEET__ALLUMATA__OPENAI_API_KEY"

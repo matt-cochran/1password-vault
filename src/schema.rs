@@ -238,7 +238,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "meaning": c.meaning(),
         })).collect::<Vec<_>>(),
         "states": {
-            "row_state": ["saved", "missing", "wrong_kind", "failing_rule", "skipped", "source_blocked"],
+            "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
             "row_target": ["present", "absent", "would_change", null],
             "row_action": ["would_stage", "would_prune", "held", null],
@@ -411,7 +411,7 @@ fn documents() -> Value {
         ],
         "status_overview": [
             "product",
-            "environments: [{name, target, state, keys, saved, skipped, findings, error_code, error}]",
+            "environments: [{name, target, state, keys, saved, skipped, findings, error_code, error, next}]",
             "totals"
         ],
         "plan": [
@@ -429,7 +429,8 @@ fn documents() -> Value {
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
-            "environment", "product", "key", "reference", "kind", "field", "target: [{label, value}]",
+            "environment", "product", "key", "reference", "kind", "field", "target_name",
+            "target_details: [{label, value}]",
             "rules", "immutable", "guidance", "required_here", "inspect", "shared_from", "shared_by"
         ],
         "init": [

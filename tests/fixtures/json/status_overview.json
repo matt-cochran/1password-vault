@@ -13,7 +13,8 @@
       "skipped": 0,
       "findings": 0,
       "error_code": null,
-      "error": null
+      "error": null,
+      "next": null
     },
     {
       "name": "prod",
@@ -24,7 +25,8 @@
       "skipped": 1,
       "findings": 0,
       "error_code": null,
-      "error": null
+      "error": null,
+      "next": null
     },
     {
       "name": "staging",
@@ -35,7 +37,8 @@
       "skipped": 0,
       "findings": 1,
       "error_code": null,
-      "error": null
+      "error": null,
+      "next": null
     }
   ],
   "totals": {
