@@ -70,6 +70,12 @@ pub fn check(
     let mut plan = read_and_plan_products(&selected, env, runner)?;
     plan.extras.clear();
     let findings = plan.blocking();
+    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
+    let link = if findings > 0 {
+        Some(super::item_url(&selected, env, runner)?)
+    } else {
+        None
+    };
     if json {
         // The shared row shape (A6); no target is read, so `target` and `action` are null.
         let declared = fleet.environment(env)?;
@@ -78,7 +84,11 @@ pub fn check(
             .iter()
             .map(|row| {
                 let name = declared.target_name(&row.product, &row.key);
-                super::JsonRow::new(row, name, None, None)
+                super::JsonRow {
+                    // H1: the item link to fix a blocking row in; IDs only.
+                    open_url: link.as_ref().filter(|_| super::is_blocking(row)).cloned(),
+                    ..super::JsonRow::new(row, name, None, None)
+                }
             })
             .collect();
         let doc = serde_json::json!({
@@ -92,31 +102,24 @@ pub fn check(
         });
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
-        for row in &plan.rows {
+        for row in super::problems_first(&plan.rows) {
             let label = crate::domain::key_label(&row.product, &row.key);
-            let state = match &row.state {
-                KeyState::Ready => "saved".to_string(),
-                KeyState::Missing => "missing".to_string(),
-                KeyState::WrongKind => "wrong kind".to_string(),
-                KeyState::RuleFailed(rule, reason) => format!("failed {rule} ({reason})"),
-                KeyState::Skipped => "skipped".to_string(),
-            };
-            writeln!(out, "{label}: {state}").map_err(write_err)?;
+            writeln!(out, "{label}: {}", super::row_state_label(row)).map_err(write_err)?;
             if !matches!(row.state, KeyState::Ready | KeyState::Skipped) {
                 let guidance = &selected.products[&row.product].keys[&row.key].guidance;
                 if !guidance.is_empty() {
                     writeln!(out, "  guidance: {guidance}").map_err(write_err)?;
+                }
+                if let Some(url) = &link {
+                    writeln!(out, "  open: {url} ({})", super::field_locator(row))
+                        .map_err(write_err)?;
                 }
             }
         }
         writeln!(out, "{findings} finding(s); no deployment target checked").map_err(write_err)?;
     }
     if findings > 0 {
-        let cmd = match product {
-            Some(p) => format!("opv check {env} --product {p}"),
-            None => format!("opv check {env}"),
-        };
-        Err(Error::findings(findings, super::status::fix_then(&cmd)))
+        Err(Error::findings(findings, super::open_next(&plan.rows, env)))
     } else {
         Ok(())
     }

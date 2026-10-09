@@ -333,6 +333,7 @@ impl Harness {
 
     fn run_config(&self, config: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Run {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .arg("--config")
             .arg(config.as_ref())
             .args(args)
@@ -1086,6 +1087,7 @@ fn exit_codes() {
     fs::write(&bad, "[profile]\nkind = 42\n").unwrap();
     h.reset();
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", bad.to_str().unwrap(), "sync", "prod"])
         .env_clear()
         .env("PATH", &h.bin)
@@ -1197,6 +1199,7 @@ fn broken_stdout_returns_the_command_result() {
     ] {
         let h = Harness::new(&item_json);
         let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .arg("--config")
             .arg(CONFIG)
             .args(cmd)
@@ -2419,4 +2422,30 @@ fn status_without_env_prints_one_line_per_environment() {
         .map(|l| l.split(':').next().unwrap_or_default())
         .collect();
     assert_eq!(envs, ["prod", "staging"], "{}", r.all());
+}
+
+/// H8, SR-1: with `GITHUB_STEP_SUMMARY` set, status, plan and sync (missing keys and
+/// complete ones) append a names-only summary: no value, no identity, no link.
+#[test]
+fn step_summary_never_carries_a_value() {
+    let summary_dir = TempDir::new().unwrap();
+    let path = summary_dir.path().join("summary.md");
+    let mut h = Harness::new(&good_item());
+    h.set("GITHUB_STEP_SUMMARY", path.to_str().unwrap());
+    for item_json in [item(vec![]), good_item()] {
+        h.set_item(&item_json);
+        for cmd in [
+            &["status", "prod"][..],
+            &["plan", "prod"],
+            &["sync", "prod"],
+        ] {
+            h.reset();
+            h.run(cmd);
+        }
+    }
+    let md = fs::read_to_string(&path).unwrap();
+    assert!(
+        md.contains("### opv plan prod") && !md.contains(MARK) && !md.contains("1password.com"),
+        "{md}"
+    );
 }

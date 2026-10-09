@@ -97,7 +97,8 @@ impl<W: Write> Painter<W> {
             {
                 return p;
             }
-            if line.starts_with("    guidance: ") {
+            // Guidance and `open:` lines under a row keep the table going.
+            if line.starts_with("    ") {
                 return line.to_string();
             }
             self.state_col = None;

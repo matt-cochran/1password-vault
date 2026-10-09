@@ -106,6 +106,20 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "open",
+        effect: "opens_browser",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "help",
+        effect: "none",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
         command: "init",
         effect: "writes_file",
         needs_terminal: false,
@@ -185,6 +199,8 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "row_binding": ["current", "stale", "unbound"],
             "doctor_status": ["ok", "warn", "fail", "skip"],
             "overview_state": ["checked", "run_only", "not_checked"],
+            "changes": ["none", "some", "unknown"],
+            "text_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
         },
         "documents": documents(),
         "deprecated": [
@@ -306,7 +322,8 @@ fn documents() -> Value {
         "binding?",
         "pending_deploy?",
         "drift?",
-        "chain?"
+        "chain?",
+        "open_url?"
     ]);
     let key_ref = json!(["product", "key", "target_name"]);
     json!({
@@ -317,9 +334,13 @@ fn documents() -> Value {
         "row": row,
         "key_ref": key_ref,
         "error": ["code", "category", "message", "detail", "retry", "human_required", "do", "next"],
-        "status": ["environment", "product?", "rows", "extras", "stage", "held", "prune", "totals"],
-        "status_overview": ["environments: [{name, target, state, keys, findings, error_code}]", "totals"],
-        "plan": ["environment", "product?", "rows", "extras", "stage", "held", "prune", "totals"],
+        "status": ["environment", "product", "changes", "rows", "extras", "stage", "held", "prune", "totals"],
+        "status_overview": [
+            "product",
+            "environments: [{name, target, state, keys, saved, skipped, findings, error_code, error}]",
+            "totals"
+        ],
+        "plan": ["environment", "product", "changes", "rows", "extras", "stage", "held", "prune", "totals"],
         "check": ["environment", "product?", "target_checked", "rows", "findings", "totals"],
         "sync": [
             "environment", "provider", "product", "written", "unchanged", "held", "deployed",
@@ -333,6 +354,7 @@ fn documents() -> Value {
         ],
         "init": ["path", "environment", "profile", "vault_id", "item_id", "keys: [{product, key, kind}]", "skipped"],
         "item skeleton": ["environment", "added: [{product, key, kind}]"],
+        "open": ["environment", "product", "key", "section", "field", "open_url"],
         "config export": "the config-kind values: {KEY: value} (simple profile) or {product: {KEY: value}}; no frame on success",
         "schema": "this document",
     })

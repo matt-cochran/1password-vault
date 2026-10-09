@@ -12,8 +12,10 @@
 //!   set, is `Auth` (exit 7) with the sign-in step for the detected shell
 //!   ([`crate::host`]); a set credential that fails whoami is `Source` (exit 4, ambiguous:
 //!   rejected or unreachable); signed in is `Source` (exit 4) naming the IDs and the
-//!   identity type. The host is detected only on failure. Only `user_type` is parsed from `whoami`, and only the entry count from
-//!   `account list`; identity is never printed or kept.
+//!   identity type. The host is detected only on failure. For diagnosis only `user_type` is
+//!   parsed from `whoami`, and only the entry count from `account list`; identity is never
+//!   printed or kept. [`account`] parses `account_uuid` and the sign-in host, identifiers
+//!   only, to build 1Password's private item link ([`item_link`], H1).
 //! - [`write_skeleton`] (FR-19, the only write) pipes the full current item, with the missing
 //!   sections and empty fields appended, to `op item edit <item_id> --vault <vault_id>
 //!   --format json` on stdin. This is the invocation the D0 spike proved (attempt 1). A
@@ -76,7 +78,8 @@ impl fmt::Debug for Item {
 }
 
 /// The identity `op` is signed in as: its type only, from `op whoami`'s `user_type`
-/// field. Identity details (email, account URL, UUIDs) are never parsed or kept (SR-1).
+/// field. Identity details (email, user UUID) are never parsed or kept (SR-1); the account
+/// UUID and sign-in host are parsed only by [`account`], for a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityType {
     User,
@@ -180,6 +183,95 @@ fn account_count(stdout: &[u8]) -> Option<usize> {
     serde_json::from_slice::<Vec<de::IgnoredAny>>(stdout)
         .ok()
         .map(|v| v.len())
+}
+
+/// The 1Password account a private item link opens in (H1): `account_uuid` and the
+/// sign-in host from `op whoami`. Both are identifiers, not secrets, and are used only to
+/// build an `open:` link for the person who is already signed in; no email or user id is
+/// parsed (SR-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    uuid: String,
+    host: Option<String>,
+}
+
+/// The signed-in account from one `op whoami --format json` probe, or `None` when it fails
+/// or names no well-formed account (the link is then built without it). Never an item
+/// read (FR-13).
+pub fn account(r: &dyn CommandRunner) -> Option<Account> {
+    let who = r
+        .probe(
+            &Call::new(OP, &["whoami", "--format", "json"]),
+            PROBE_TIMEOUT,
+        )
+        .ok()?;
+    if who.status != 0 {
+        // A link without the account is still useful; this probe's stderr must not
+        // attach to the command's own result (NR-31).
+        let _ = crate::runner::take_failure_excerpt();
+        return None;
+    }
+    parse_account(&who.stdout)
+}
+
+/// `account_uuid` and the host of `url`, each checked against a strict character set so
+/// nothing but an identifier can reach a link.
+fn parse_account(stdout: &[u8]) -> Option<Account> {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        account_uuid: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+    }
+    let w = serde_json::from_slice::<Who>(stdout).ok()?;
+    let uuid = w.account_uuid.filter(|u| {
+        !u.is_empty() && u.len() <= 64 && u.bytes().all(|b| b.is_ascii_alphanumeric())
+    })?;
+    let host = w.url.and_then(|u| {
+        let h = u
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        (!h.is_empty()
+            && h.len() <= 253
+            && h.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'))
+        .then_some(h)
+    });
+    Some(Account { uuid, host })
+}
+
+/// 1Password's private item link, the form "Copy Private Link" produces:
+/// `https://start.1password.com/open/i?a=<account>&v=<vault>&i=<item>&h=<host>`. It opens
+/// the item in the 1Password app or web, the only place a value is typed. 1Password links
+/// to items, not to single fields, so callers name the section and field next to it. IDs
+/// only, never a value.
+pub fn item_link(account: Option<&Account>, vault_id: &str, item_id: &str) -> String {
+    let mut q = Vec::new();
+    if let Some(a) = account {
+        q.push(format!("a={}", a.uuid));
+    }
+    q.push(format!("v={}", url_part(vault_id)));
+    q.push(format!("i={}", url_part(item_id)));
+    if let Some(h) = account.and_then(|a| a.host.as_deref()) {
+        q.push(format!("h={h}"));
+    }
+    format!("https://start.1password.com/open/i?{}", q.join("&"))
+}
+
+/// Percent-encode everything but unreserved characters (IDs are alphanumeric in practice).
+fn url_part(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 /// The remediation for a session that is not usable, or `None` for `SignedIn` / `Unknown`.
@@ -2007,5 +2099,44 @@ mod tests {
         let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
         assert!(matches!(e, Error::Source(m) if m.contains("JWT_KEY")));
         assert!(r.calls.borrow().is_empty(), "nothing written");
+    }
+
+    // ------------------------------------------------------------ private item links (H1)
+
+    const WHOAMI_LINK: &[u8] = br#"{"url":"https://my.1password.com","email":"x-LINKMARKER@example.com","user_uuid":"ULINKMARKER","account_uuid":"ACCT123","user_type":"USER"}"#;
+
+    #[test]
+    fn item_link_carries_account_vault_item_and_host() {
+        let a = parse_account(WHOAMI_LINK);
+        assert_eq!(
+            item_link(a.as_ref(), "vprd", "iprd"),
+            "https://start.1password.com/open/i?a=ACCT123&v=vprd&i=iprd&h=my.1password.com"
+        );
+    }
+
+    #[test]
+    fn item_link_never_carries_email_or_user_id() {
+        let link = item_link(parse_account(WHOAMI_LINK).as_ref(), "v", "i");
+        assert!(!link.contains("LINKMARKER"), "{link}");
+    }
+
+    #[test]
+    fn item_link_without_account_names_vault_and_item() {
+        assert_eq!(
+            item_link(None, "vprd", "iprd"),
+            "https://start.1password.com/open/i?v=vprd&i=iprd"
+        );
+    }
+
+    #[test]
+    fn account_with_unexpected_characters_is_dropped() {
+        assert_eq!(parse_account(br#"{"account_uuid":"A&x=1"}"#), None);
+    }
+
+    #[test]
+    fn account_is_one_whoami_probe() {
+        let r = FakeRunner::new([Output::success(WHOAMI_LINK.to_vec())]);
+        account(&r);
+        assert_eq!(r.calls.borrow()[0].args, ["whoami", "--format", "json"]);
     }
 }

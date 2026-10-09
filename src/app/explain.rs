@@ -54,6 +54,18 @@ pub fn run_as(
     explain_in(fleet, &t, env_name, out, json)
 }
 
+/// The declared key and environment `opv open` names (H1), resolved exactly as `explain`
+/// resolves them: `(product, key, environment)`. Configuration only.
+pub(crate) fn locate<'a>(
+    fleet: &'a Fleet,
+    target: &str,
+    env: Option<&'a str>,
+) -> Result<(String, String, &'a str), Error> {
+    let t = resolve(fleet, target)?;
+    let env_name = environment(fleet, &t, env)?;
+    Ok((t.product.to_string(), t.key.to_string(), env_name))
+}
+
 /// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
 /// under the simple profile (FR-20). P8: a bare `<KEY>` under the fleet profile resolves to
 /// the one product that declares it, or lists every product that does; a `<product>/<KEY>`
@@ -337,6 +349,8 @@ fn explain_in(
         "inspect".into(),
         inspect_command(&env.item_id, &env.vault_id),
     ));
+    // H1: the command that opens the item in 1Password, where the value is typed.
+    rows.push(("open".into(), format!("opv open {label} --env {env_name}")));
     // One value column, however long a provider's label is (P4).
     let width = rows
         .iter()

@@ -91,10 +91,10 @@ Replace `fly.app` with the target section from [configuration.md](configuration.
 opv status staging
 ```
 
-Each row is `saved`, `missing`, `wrong kind`, `failing rule` or `skipped` (not wanted in this environment). For each row that is not `saved`:
+Problem rows come first. Each row's STATE is `saved`, `missing`, `wrong kind (...)`, `failed <rule> (<reason>)` or `skipped` (not wanted in this environment); `opv help states` defines every word. For each missing, wrong-kind or failed row:
 
-- tell the user which key it is, in which environment, and the `guidance` line printed under it;
-- run `opv explain <KEY> --env staging` (fleet: `<product>/<KEY>`) to show the field reference and its rules;
+- tell the user which key it is, in which environment, the `guidance` line printed under it, and the `open:` link under that (the 1Password item, with the section and field to fix; it holds IDs only, never a value). `opv open <KEY> --env staging --print` (fleet: `<product>/<KEY>`) prints the same link;
+- run `opv explain <KEY> --env staging` to show the field reference and its rules;
 - the user fills or fixes the field in 1Password; you re-run `status`.
 
 Never ask for the value to check it yourself. A failing rule prints the rule and a reason (for example `expected prefix sk-`), which is enough to tell the user what is wrong.

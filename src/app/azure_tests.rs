@@ -795,12 +795,12 @@ fn prune_without_deploy_only_reports() {
 }
 
 #[test]
-fn not_desired_without_prune_is_kept() {
+fn not_desired_without_prune_is_extra_not_pruned() {
     let sim = converged();
     let (_, out) = sync_on(&sim, &fleet_b(), &deploy());
     assert!(
         out.lines()
-            .any(|l| l == "not desired here, kept (pass --prune to remove): OLD_KEY"),
+            .any(|l| l == "extra, not pruned (pass --prune to remove): OLD_KEY"),
         "{out}"
     );
 }

@@ -70,14 +70,16 @@ fn status_unknown_environment() {
 #[test]
 fn status_overview_run_only_environment() {
     let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    // dev (run-only) is read too (H11): item only; then prod and staging, item and list.
     let r = FakeRunner::new([
+        complete_item(),
         complete_item(),
         fly(&[(OPENAI_FLY, "d1")]),
         complete_item(),
         fly_empty(),
     ]);
     let mut out = Vec::new();
-    let res = status::overview_as(&f, &r, &mut out, true);
+    let res = status::overview(&f, None, &r, &mut out, true);
     golden("status_overview", &framed(&out, &res, "opv status --json"));
 }
 

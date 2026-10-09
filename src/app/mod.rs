@@ -11,6 +11,7 @@
 mod azure_tests;
 #[cfg(test)]
 mod characterization_tests;
+pub(crate) mod ci_summary;
 pub mod config_export;
 pub mod doctor;
 pub mod explain;
@@ -20,6 +21,7 @@ pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;
 pub mod local;
+pub mod open;
 #[cfg(test)]
 mod pinned_tests;
 pub(crate) mod preflight;
@@ -34,6 +36,8 @@ pub mod skeleton;
 pub mod status;
 pub(crate) mod suggest;
 pub mod sync;
+#[cfg(test)]
+mod ux2_tests;
 #[cfg(test)]
 mod ux_tests;
 
@@ -213,6 +217,12 @@ pub(crate) fn json_product(product: &str) -> Option<String> {
 /// `target_name` is the row's name on the target for every provider; `fly_name` holds the
 /// same value and is kept for scripts written before 0.5.0 (deprecated, P4). `product` is
 /// set when `--product` scoped the document (NR-16).
+///
+/// Added in 0.5.0 (H1, H8): `open_url` on each blocking row, the 1Password item link to fix
+/// it in (`link`, IDs only); `changes` (`none`, `some` or `unknown`) says whether a sync
+/// would change the target. `unknown` means only keys whose values the target hides
+/// (Fly) would be staged, so a nightly drift check can tell "certainly in sync" apart.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
@@ -221,6 +231,7 @@ pub(crate) fn write_json(
     pinned: Option<&BTreeMap<String, PinnedRow>>,
     product: Option<&str>,
     next: Option<&str>,
+    link: Option<&str>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
@@ -257,15 +268,18 @@ pub(crate) fn write_json(
                 pending_deploy: bound.map(|b| b.pending_deploy),
                 drift: bound.map(|b| b.drift),
                 chain: bound.and_then(|b| b.chain.clone()),
+                open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
         .collect();
 
+    let changes = changes(plan, &rows, pinned);
     let doc = JsonDoc {
         schema_version: crate::json::SCHEMA_VERSION,
         environment: env_name.to_string(),
         product: product.map(str::to_string),
+        changes,
         rows,
         extras: plan
             .extras
@@ -302,12 +316,39 @@ pub(crate) fn write_json(
     writeln!(out, "{text}").map_err(write_err)
 }
 
+/// Whether a sync would change the target (H8): `some` when a key is new or certainly
+/// changed, a name would be pruned or a binding is pending; else `unknown` when keys whose
+/// values the target hides (Fly) would be staged; else `none`.
+fn changes(
+    plan: &SyncPlan,
+    rows: &[JsonRow],
+    pinned: Option<&BTreeMap<String, PinnedRow>>,
+) -> &'static str {
+    let staged: Vec<&JsonRow> = rows
+        .iter()
+        .filter(|r| r.action == Some("would_stage"))
+        .collect();
+    let certain = staged.iter().any(|r| r.target != Some("present"))
+        || !plan.prune.is_empty()
+        || pinned.is_some_and(|m| m.values().any(|b| b.pending_deploy));
+    if certain {
+        "some"
+    } else if staged.is_empty() {
+        "none"
+    } else {
+        // Staged although "present": the target cannot compare values (Fly, P1).
+        "unknown"
+    }
+}
+
 #[derive(serde::Serialize)]
 struct JsonDoc {
     schema_version: u32,
     environment: String,
     /// `--product`, or null for the whole environment.
     product: Option<String>,
+    /// `none`, `some` or `unknown` (H8).
+    changes: &'static str,
     rows: Vec<JsonRow>,
     extras: Vec<JsonName>,
     stage: Vec<String>,
@@ -341,6 +382,9 @@ pub(crate) struct JsonRow {
     drift: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chain: Option<String>,
+    /// The 1Password item link to fix a blocking row in (H1); IDs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_url: Option<String>,
 }
 
 impl JsonRow {
@@ -366,6 +410,7 @@ impl JsonRow {
             pending_deploy: None,
             drift: None,
             chain: None,
+            open_url: None,
         }
     }
 }
@@ -485,18 +530,71 @@ pub(crate) fn state_label(s: &KeyState) -> String {
     }
 }
 
+/// [`state_label`] with the full fix reason for a wrong kind (H4): which field type the
+/// key is stored in, and which one its declared kind needs. Field-type metadata only,
+/// never a value.
+pub(crate) fn row_state_label(r: &Row) -> String {
+    match (&r.state, r.kind) {
+        (KeyState::WrongKind, Kind::Secret) => {
+            "wrong kind (stored as text; declared secret: use a concealed field)".into()
+        }
+        (KeyState::WrongKind, Kind::Config) => {
+            "wrong kind (stored as concealed; declared config: use a text field)".into()
+        }
+        (s, _) => state_label(s),
+    }
+}
+
+/// The TARGET word of a row (H5), from one closed set on every provider and in both
+/// `status` and `plan`: `new`, `same`, `changed`, `unknown`, `pending`, `held`, `extra`,
+/// `drift` or `n/a`. `held` marks an immutable key kept as it is; `binding` is the row's
+/// binding on a pinned target, when known. `opv help states` defines each word.
+pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &'static str {
+    match (r.kind, r.target, &r.state) {
+        (Kind::Config, _, _) => "n/a",
+        (Kind::Secret, TargetState::Absent, KeyState::Skipped) => "n/a",
+        (Kind::Secret, _, KeyState::Skipped) => "extra",
+        (Kind::Secret, TargetState::Absent, _) => "new",
+        _ if held => "held",
+        (Kind::Secret, TargetState::WouldChange, _) => "changed",
+        _ if binding.is_some_and(|b| b.drift) => "drift",
+        _ if binding.is_some_and(|b| b.pending_deploy) => "pending",
+        (Kind::Secret, TargetState::Present, _) => "same",
+        (Kind::Secret, TargetState::Unknown, _) => "unknown",
+    }
+}
+
+/// The source and target words and what each means, one line per word (`opv help states`,
+/// H5). The JSON `state` and `target` fields keep their own stable spellings.
+pub const STATES_HELP: &str = "\
+SOURCE: the key in 1Password
+  saved       stored in the right kind of field and passes every rule
+  missing     no field with this name in the item's section
+  wrong kind  a text field where a secret needs a concealed one, or the reverse
+  failed      fails a rule; the rule and the reason follow, e.g. failed prefix (expected sk-)
+  skipped     not required in this environment (its rules leave it out)
+
+TARGET: the key on the deployment target
+  new         not on the target yet; the next sync writes it
+  same        on the target with the same value; nothing to write
+  changed     on the target with another value; the next sync writes it
+  unknown     on the target, but the target does not reveal values, so opv cannot compare;
+              sync stages it and compares digests
+  pending     written, not yet live; the next sync --deploy rolls it out
+  held        immutable and already set; kept as it is (replace with --rotate)
+  extra       on the target but not wanted in this environment; not pruned without --prune
+  drift       the running app is bound to something other than what opv last wrote
+  n/a         not a target secret (config keys, and skipped keys not on the target)
+
+Missing, wrong kind and failed are findings: status, plan and check exit 8 and print an
+open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
+
 /// `product/KEY` (`KEY` under the simple profile) of every row in `rows` matching `pred`,
 /// for names-only messages.
 pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String> {
     rows.iter()
         .filter(|r| pred(r))
-        .map(|r| {
-            format!(
-                "{} ({})",
-                key_label(&r.product, &r.key),
-                state_label(&r.state)
-            )
-        })
+        .map(|r| format!("{} ({})", key_label(&r.product, &r.key), row_state_label(r)))
         .collect()
 }
 
@@ -514,14 +612,18 @@ fn wants_guidance(r: &Row) -> bool {
     matches!(r.state, KeyState::Missing | KeyState::RuleFailed(..)) && !r.guidance.is_empty()
 }
 
-/// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, with guidance on the line after
-/// each missing row. `target` renders the last column. Rows hold names only. Under the
-/// simple profile (FR-20) there is no PRODUCT column: the table is `KEY KIND STATE TARGET`.
+/// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, problems first (H4): the
+/// blocking rows (missing, wrong kind, failed), then the rest, each group in declared
+/// order. Under each missing or failing row its guidance; under each blocking row, when
+/// `link` is given, `open:` and the 1Password item link with the section and field to fix
+/// (H1). `target` renders the last column. Rows hold names only. Under the simple profile
+/// (FR-20) there is no PRODUCT column: the table is `KEY KIND STATE TARGET`.
 pub(crate) fn print_rows(
     out: &mut dyn Write,
     fleet: &Fleet,
     rows: &[Row],
     target: impl Fn(&Row) -> String,
+    link: Option<&str>,
 ) -> Result<(), Error> {
     let skip = usize::from(fleet.is_simple());
     let header: Vec<String> = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"]
@@ -529,14 +631,15 @@ pub(crate) fn print_rows(
         .skip(skip)
         .map(|s| s.to_string())
         .collect();
-    let cells: Vec<Vec<String>> = rows
+    let ordered = problems_first(rows);
+    let cells: Vec<Vec<String>> = ordered
         .iter()
         .map(|r| {
             [
                 r.product.clone(),
                 r.key.clone(),
                 kind_label(r.kind).to_string(),
-                state_label(&r.state),
+                row_state_label(r),
                 target(r),
             ]
             .into_iter()
@@ -560,11 +663,76 @@ pub(crate) fn print_rows(
         s.trim_end().to_string()
     };
     writeln!(out, "{}", line(&header)).map_err(write_err)?;
-    for (r, c) in rows.iter().zip(&cells) {
+    for (r, c) in ordered.iter().zip(&cells) {
         writeln!(out, "{}", line(c)).map_err(write_err)?;
         if wants_guidance(r) {
             writeln!(out, "    guidance: {}", r.guidance).map_err(write_err)?;
         }
+        if let Some(url) = link.filter(|_| is_blocking(r)) {
+            writeln!(out, "    open: {url} ({})", field_locator(r)).map_err(write_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// The blocking rows first, then the others, each in their original order (H4).
+pub(crate) fn problems_first(rows: &[Row]) -> Vec<&Row> {
+    let (mut bad, good): (Vec<&Row>, Vec<&Row>) = rows.iter().partition(|r| is_blocking(r));
+    bad.extend(good);
+    bad
+}
+
+/// Where a key lives inside its item: `section api, field KEY`, or `field KEY` under the
+/// simple profile, whose fields are unsectioned (FR-20). 1Password links reach the item;
+/// this names the field to fix in it.
+pub(crate) fn field_locator(r: &Row) -> String {
+    if r.product == SIMPLE_PRODUCT {
+        format!("field {}", r.key)
+    } else {
+        format!("section {}, field {}", r.product, r.key)
+    }
+}
+
+/// The 1Password private link to `env_name`'s item (H1), with the signed-in account from
+/// one free `op whoami` probe when it answers. IDs only, never a value.
+pub(crate) fn item_url(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<String, Error> {
+    let env = fleet.environment(env_name)?;
+    let account = onepassword::account(r);
+    Ok(onepassword::item_link(
+        account.as_ref(),
+        &env.vault_id,
+        &env.item_id,
+    ))
+}
+
+/// The next step for findings (H1): open the first blocking key's field in 1Password.
+pub(crate) fn open_next(rows: &[Row], env_name: &str) -> String {
+    match rows.iter().find(|r| is_blocking(r)) {
+        Some(r) => format!(
+            "opv open {} --env {env_name}",
+            key_label(&r.product, &r.key)
+        ),
+        None => format!("opv status {env_name}"),
+    }
+}
+
+/// One line under a status or plan table explaining `unknown` when a row shows it (H5).
+pub(crate) fn print_legend(
+    out: &mut dyn Write,
+    words: &[&str],
+    target_label: &str,
+) -> Result<(), Error> {
+    if words.contains(&"unknown") {
+        writeln!(
+            out,
+            "unknown: {target_label} does not reveal stored values, so opv cannot compare them; \
+             sync stages them and compares digests (opv help states)"
+        )
+        .map_err(write_err)?;
     }
     Ok(())
 }
