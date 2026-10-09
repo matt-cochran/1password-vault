@@ -9,20 +9,22 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 3. **Never write a value to disk or argv.** No `.env` files, no `secrets.toml` values, no values in command arguments or CI logs. `secrets.toml` holds IDs, names, kinds and rules only.
 4. **Ask before anything that changes something outside the repo.** Get the user's explicit yes, for this run, before:
    - `opv item skeleton <env>` (adds empty fields to the 1Password item; the only opv command that writes to 1Password);
-   - `opv sync <env>` (stages values on the target);
-   - `--deploy` (restarts or redeploys the app), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed).
+   - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
+   - `--deploy` (restarts or redeploys the app, or starts a new revision or rollout), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed).
    `doctor`, `status`, `plan`, `explain` and `config export` change nothing.
-5. **Use exit codes, not guesses.** Every opv failure prints a typed error and, usually, the exact next command. Run that command or show it to the user; do not invent workarounds.
+5. **Use exit codes, not guesses.** Every opv failure prints a typed error and a `Next:` line with the exact next command. Run that command or show it to the user; do not invent workarounds.
 
 ## 1. Check the tools
 
 ```sh
 opv --version || curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 op --version        # 1Password CLI; tested with 2.40.0
-flyctl version      # Fly CLI, for a Fly target; tested with 0.4.112 and later 0.4.x patches
+flyctl version      # Fly target; tested with 0.4.112 and later 0.4.x patches
+az version          # Azure target; 2.60 or newer (on Windows, run opv in WSL)
+kubectl version --client   # Kubernetes target
 ```
 
-If `op` or `flyctl` is missing, `opv doctor` (step 3) prints the install command for the user's OS.
+If a tool the target needs is missing, `opv doctor` (step 3) prints the install command for the user's OS.
 
 ## 2. Choose the profile
 
@@ -52,6 +54,15 @@ opv doctor
 ```
 
 It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`), and ends with a `Next step` line. Do what that line says before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need.
+
+### Azure or Kubernetes instead of Fly
+
+Replace `fly.app` with the target section from [configuration.md](configuration.md#targets): `[environments.<env>.azure]` (`subscription`, `key_vault`, `resource_group`, `container_app`, `identity`) or `[environments.<env>.kubernetes]` (`context`, `namespace`, `deployment`). Ask the user for those names; they are not secrets. `opv init` writes the Fly section only, so add the block by hand. <!-- verify: init for azure/kubernetes -->
+
+- **Azure.** The user runs `az login`. The app's identity must be able to read the vault. If `opv doctor` warns about it, show the user the grant command it prints, which looks like `az role assignment create --assignee <principal> --role "Key Vault Secrets User" --scope <vault id>`. Run it only with their yes. The person running opv needs rights to write secrets to the vault and to update the Container App.
+- **Kubernetes.** The user's kubeconfig must contain the named `context`. `opv doctor` checks with `kubectl auth can-i` that they may manage Secrets and update the Deployment; if not, tell the user which right is missing.
+- On both, `opv sync <env>` only writes new versions. `opv sync <env> --deploy` makes the app use them and waits until it is healthy. `--prune` removes old entries only after that. If an environment has `confirm_env = true`, the user must also approve repeating the name: `--confirm <env>`.
+- Never copy secret values out of Key Vault or a Kubernetes Secret, and never run `az keyvault secret show` or `kubectl get secret -o yaml` to check them. Use `opv status` and `opv plan`.
 
 ## 4. Get every key to "saved"
 
@@ -116,10 +127,11 @@ More patterns: [usage.md](usage.md#local-development).
 |---|---|---|
 | 0 | ok | continue |
 | 2 | configuration or usage error | fix `secrets.toml` or the command; the message names the field |
-| 3 | `op` or `flyctl` missing | install it (`opv doctor` prints how) |
+| 3 | `op`, `flyctl`, `az` or `kubectl` missing | install it (`opv doctor` prints how) |
 | 4 | 1Password error | the message names the vault and item; the identity may need access |
-| 5 | target (Fly) error | the message names the app; check the token and that the app exists |
+| 5 | target error (Fly, Azure or Kubernetes) | the message names the app and, for a deploy, the unhealthy revision or rollout; the old one keeps serving; follow the `Next:` line |
 | 6 | refused | a key is missing, of the wrong kind or failing a rule; run `opv status` |
 | 7 | not signed in | run the sign-in command opv prints |
 | 8 | findings | `status`, `plan` or `check` found keys to fix; see step 4 |
-| 9 | outcome unknown | a change may or may not have been applied; re-run the same command |
+| 9 | outcome unknown, or a provider did not answer | a change may or may not have been applied, or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command (a CI job may retry it) |
+| 130 / 143 | interrupted | safe to re-run the same command |
