@@ -571,7 +571,7 @@ fn deploy_credentials(
 
 /// A sign-in address (`my.1password.com`), email or account ID: non-empty, no whitespace,
 /// not starting with `-`, and only characters those forms use (safe in env and argv).
-fn is_account(s: &str) -> bool {
+pub(crate) fn is_account(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 255
         && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())

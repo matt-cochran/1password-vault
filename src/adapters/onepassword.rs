@@ -76,6 +76,16 @@ impl Item {
     pub(crate) fn raw(&self) -> &[u8] {
         &self.raw
     }
+
+    /// An item from the JSON an `op item edit` printed (the item as written): no parsed
+    /// fields, its version read from the JSON.
+    pub(crate) fn from_raw(raw: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            fields: Vec::new(),
+            version: item_version(&raw),
+            raw,
+        }
+    }
 }
 
 impl fmt::Debug for Item {
@@ -509,7 +519,25 @@ pub fn read_item_in_sections(
 /// The environment's one item read (FR-13) with no field parsing: the tolerant reader
 /// ([`super::onepassword_tidy`], FR-43) parses the raw JSON itself. `fields` is empty.
 pub fn read_whole(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
-    let args = [
+    read_whole_as(r, env, false)
+}
+
+/// `op`'s global flag that bypasses its local cache (op 2.x; `OP_CACHE=false` is the same
+/// setting as an environment variable). `op` caches item reads by default on UNIX-like
+/// systems, so a read that feeds a write must not be served from that cache, or the write
+/// would put stale values over a newer edit (FR-43, FR-44). Accepted (and a no-op) on
+/// Windows, where op documents the flag but keeps no cache.
+pub const NO_CACHE: &str = "--cache=false";
+
+/// [`read_whole`] straight from 1Password, bypassing `op`'s local cache ([`NO_CACHE`]):
+/// every read a 1Password write is built from or checked against (the tidy, `item
+/// skeleton`).
+pub fn read_whole_fresh(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
+    read_whole_as(r, env, true)
+}
+
+fn read_whole_as(r: &dyn CommandRunner, env: &Environment, fresh: bool) -> Result<Item, Error> {
+    let mut args = vec![
         "item",
         "get",
         env.item_id.as_str(),
@@ -518,6 +546,9 @@ pub fn read_whole(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Erro
         "--format",
         "json",
     ];
+    if fresh {
+        args.push(NO_CACHE);
+    }
     let raw = read_diagnosed(r, env, &args, &Host::detect)?;
     Ok(Item {
         fields: Vec::new(),
@@ -801,12 +832,13 @@ fn read_diagnosed(
 /// existing section and field is sent back unchanged. Exactly one `op item edit` call, or
 /// none when `missing` is empty. An entry that already exists in the item, or is listed
 /// twice, is a `Source` error and nothing is written: skeleton never modifies a field.
+/// Returns the version of the item as written, when the edit printed one (I5).
 pub fn write_skeleton(
     r: &dyn CommandRunner,
     env: &Environment,
     item: &Item,
     missing: &[(String, String, Kind)],
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     write_skeleton_on(r, env, item, missing, &Host::detect)
 }
 
@@ -818,7 +850,7 @@ pub fn write_skeleton_with(
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &Host,
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     write_skeleton_on(r, env, item, missing, &|| *host)
 }
 
@@ -828,9 +860,9 @@ fn write_skeleton_on(
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &dyn Fn() -> Host,
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     if missing.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let mut doc = WipeOnDrop(serde_json::from_slice(&item.raw).map_err(|e| json_error(&e))?);
     add_missing(&mut doc.0, missing)?;
@@ -846,13 +878,14 @@ fn write_skeleton_on(
         "--format",
         "json",
     ];
-    // The edited item comes back on stdout (with values); it is dropped, zeroized, unread.
+    // The edited item comes back on stdout (with values); only its version is read (I5),
+    // then it is dropped and zeroized.
     // A write (NR-2): never retried. A non-zero exit keeps the session diagnosis (a
     // definite read-back for access and sign-in); anything else is an unknown outcome,
     // which is safe to re-run because the skeleton only adds what is still missing.
     let call = Call::new(OP, &args).with_stdin(Some(&template));
     let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
-        Outcome::Done(_) => return Ok(()),
+        Outcome::Done(o) => return Ok(item_version(&o.stdout)),
         Outcome::Refused(o) => o.status,
         Outcome::Unknown {
             status: Some(s), ..
@@ -879,7 +912,7 @@ fn write_skeleton_on(
             true,
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Last resort (FR-26), used only when the session could not be diagnosed: a value-free
@@ -946,7 +979,7 @@ pub(crate) fn json_error(e: &serde_json::Error) -> Error {
 
 /// The item's top-level `version` integer, when present. Every other field is skipped
 /// unread (`IgnoredAny`), so no value is copied (SR-8).
-fn item_version(json: &[u8]) -> Option<u64> {
+pub(crate) fn item_version(json: &[u8]) -> Option<u64> {
     #[derive(Deserialize)]
     struct Versioned {
         #[serde(default)]

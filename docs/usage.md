@@ -237,8 +237,11 @@ A shared key's row carries `shared_from` (`api/DATABASE_URL`) and, while its sou
 finding, the state `source_blocked`. When a person's run tidied the item (FR-43),
 `status`, `plan` and `check` documents carry `tidy`, a list of `{action, name}` (names
 only; omitted when nothing was tidied). A tidy that was tried and did not complete puts
-its error code in `tidy_error` (`tidy_conflict` when the item changed twice meanwhile);
-the command itself still succeeds or fails on its own result.
+its error code in `tidy_error` (`tidy_conflict` when the item changed twice meanwhile or
+another edit landed together with opv's, `tidy_unverified` when the item read back lacks
+a field opv wrote or kept); the command itself still succeeds or fails on its own result.
+opv never tidies an item holding an attachment, a website list, a one-time password, an
+SSH key or any other field type it does not rewrite exactly; it says so in one note.
 
 ### One product: `--product`
 
@@ -582,7 +585,8 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer; nothing was changed |
 | `interrupted` | 130/143 | safe | no | interrupted by SIGINT or SIGTERM |
-| `tidy_conflict` | 4 | safe | no | never a failure: in `tidy_error` when the item changed twice while opv was tidying it; nothing was written |
+| `tidy_conflict` | 4 | safe | no | never a failure: in `tidy_error` when the item changed twice while opv was tidying it (nothing was written), or another edit landed together with opv's (check the item's history) |
+| `tidy_unverified` | 4 | after_fix | yes | never a failure: in `tidy_error` when the item read back after a tidy lacks a field opv wrote or kept; restore it from the item's history |
 
 `opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
 

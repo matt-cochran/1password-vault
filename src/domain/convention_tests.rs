@@ -306,16 +306,16 @@ fn a_differently_spelled_product_section_is_relabelled() {
 
 #[test]
 fn a_duplicate_goes_to_kept_with_its_origin_and_date() {
-    let l = with(&[("", "LOG_LEVEL", "STRING", "debug")], "");
+    let l = with(&[("", "log level", "STRING", "debug")], "");
     let p = plan_of(&l);
     assert!(p.ops.iter().any(|op| matches!(op,
         Op::Place { index: 5, section: Some(s), label, .. }
-            if s == KEPT_SECTION && label == "LOG_LEVEL (from top level, 2026-10-08)")));
+            if s == KEPT_SECTION && label == "log level (from top level, 2026-10-08)")));
 }
 
 #[test]
 fn a_duplicate_of_a_secret_is_kept_concealed() {
-    let l = with(&[("", "OPENAI_API_KEY", "STRING", "sk-old")], "");
+    let l = with(&[("", "openai api key", "STRING", "sk-old")], "");
     let p = plan_of(&l);
     assert!(p.ops.iter().any(|op| matches!(
         op,
@@ -428,14 +428,14 @@ fn kept_fields_are_never_read() {
 #[test]
 fn a_simple_profile_key_in_a_section_is_moved_to_the_top_level() {
     let l = layout(&[
-        ("misc", "DB_URL", "CONCEALED", "x"),
+        ("Misc", "DB_URL", "CONCEALED", "x"),
         ("opv", "convention", "STRING", "1"),
     ]);
     assert_eq!(
         plan(&l, &simple(), "dev", DATE).changes,
         vec![Change::Moved {
             field: "DB_URL".into(),
-            from: "misc".into()
+            from: "Misc".into()
         }]
     );
 }

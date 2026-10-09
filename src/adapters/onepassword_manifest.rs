@@ -4,7 +4,8 @@
 //! Calls, all through the runner (reads retried, writes never retried; NR-2, NR-3):
 //! - [`list`]: `op item list --tags opv-manifest --format json` (item metadata only: IDs,
 //!   titles, tags, versions; no field values).
-//! - [`get`]: `op item get <item_id> --vault <vault_id> --format json`, by IDs (FR-13).
+//! - [`get`]: `op item get <item_id> --vault <vault_id> --format json`, by IDs (FR-13);
+//!   with `--cache=false` when a write is built from or checked against it (C1).
 //! - [`create`]: `op item create --vault <vault> --format json -`, the item JSON on stdin.
 //! - [`edit`]: `op item edit <item_id> --vault <vault_id> --format json`, the whole item
 //!   JSON on stdin (the same invocation as `item skeleton`, D0).
@@ -18,7 +19,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::onepassword::{Session, diagnose, json_error, session_error};
+use super::onepassword::{NO_CACHE, Session, diagnose, json_error, session_error};
 use crate::error::Error;
 use crate::host::{Host, OP_CLI};
 use crate::runner::{Call, CommandRunner, Outcome, status_text};
@@ -194,20 +195,23 @@ pub fn accounts(r: &dyn CommandRunner) -> Vec<Account> {
     }
 }
 
-/// Read one manifest by vault ID and item ID.
+/// Read one manifest by vault ID and item ID. `fresh` bypasses `op`'s local cache
+/// ([`NO_CACHE`]): every read a manifest write is built from or checked against (C1).
 pub fn get(
     r: &dyn CommandRunner,
     vault_id: &str,
     item_id: &str,
     account: Option<&str>,
+    fresh: bool,
     host: &dyn Fn() -> Host,
 ) -> Result<Manifest, Error> {
-    let args = argv(
-        &[
-            "item", "get", item_id, "--vault", vault_id, "--format", "json",
-        ],
-        account,
-    );
+    let mut base = vec![
+        "item", "get", item_id, "--vault", vault_id, "--format", "json",
+    ];
+    if fresh {
+        base.push(NO_CACHE);
+    }
+    let args = argv(&base, account);
     let out = read(
         r,
         &args,
@@ -273,6 +277,29 @@ fn write_failed(
     check: &str,
 ) -> Error {
     match outcome {
+        // M7: a refused call is a definite failure (nothing changed): diagnosed like a
+        // non-zero exit, never reported as an unknown outcome.
+        Outcome::Refused(o) => match crate::runner::diagnosing(|| diagnose(r, host)) {
+            Ok(Session::SignedIn(t)) => Error::Source(
+                format!(
+                    "{step} failed ({}): signed in to 1Password as {t}; the manifest was not \
+                     changed\n  next: check that this identity can write to the vault, then \
+                     {check}",
+                    status_text(o.status)
+                )
+                .into(),
+            ),
+            Ok(Session::Unknown) | Err(_) => Error::Source(
+                format!(
+                    "{step} failed ({}); the manifest was not changed: {check}",
+                    status_text(o.status)
+                )
+                .into(),
+            ),
+            Ok(other) => session_error(other, &host(), Some(step), None)
+                .expect("every other session fails")
+                .with_next(LOGIN),
+        },
         Outcome::Unknown {
             status: Some(s), ..
         } => {
@@ -334,8 +361,16 @@ pub fn create(
     }
 }
 
+/// What a manifest edit wrote, as `op item edit` printed it back: its version and notes
+/// (I5). `None` fields when op printed no item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Written {
+    pub version: Option<u64>,
+    pub text: Option<String>,
+}
+
 /// Replace the manifest's notes with `text`, sending the whole item back (`base` is the
-/// item as last read). One write, never retried.
+/// item as last read, fresh). One write, never retried. Returns what op says it wrote.
 pub fn edit(
     r: &dyn CommandRunner,
     vault_id: &str,
@@ -344,7 +379,7 @@ pub fn edit(
     text: &str,
     account: Option<&str>,
     host: &dyn Fn() -> Host,
-) -> Result<(), Error> {
+) -> Result<Written, Error> {
     let mut item = base.clone();
     let fields = item["fields"]
         .as_array_mut()
@@ -365,7 +400,13 @@ pub fn edit(
     let call = Call::new(OP, &args).with_stdin(Some(&body));
     let check = "check with `opv config export --toml`, then re-run".to_string();
     match r.write(&call) {
-        Ok(Outcome::Done(_)) => Ok(()),
+        Ok(Outcome::Done(o)) => Ok(match serde_json::from_slice::<Value>(&o.stdout) {
+            Ok(v) => Written {
+                version: v["version"].as_u64(),
+                text: parse(v, item_id).ok().map(|m| m.text),
+            },
+            Err(_) => Written::default(),
+        }),
         Ok(other) => Err(write_failed(r, host, "op item edit", other, &check)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(super::onepassword::op_missing(&host()))

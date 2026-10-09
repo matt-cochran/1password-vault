@@ -464,7 +464,7 @@ codes! {
     ManifestNotFound => "manifest_not_found", 2, AfterFix, false, "no 1Password manifest has the project's title (OPV_PROJECT or .opv)";
     ManifestAmbiguous => "manifest_ambiguous", 2, AfterFix, true, "several 1Password manifests match; a person keeps one and archives the others";
     ManifestExists => "manifest_exists", 2, Never, false, "a manifest for this project already exists; change it with opv config edit";
-    ConfigChanged => "config_changed", 2, Safe, false, "the configuration changed while opv was editing it; nothing was written; re-running is safe";
+    ConfigChanged => "config_changed", 2, Safe, false, "the configuration changed while opv was editing it: nothing was written and re-running is safe, or (when the error says so) another edit landed with opv's and a person checks the manifest's history";
     ConfigInvalid => "config_invalid", 2, AfterFix, false, "secrets.toml or a flag value is not valid";
     UnknownEnv => "unknown_env", 2, Never, false, "the environment is not defined in secrets.toml";
     UnknownProduct => "unknown_product", 2, Never, false, "the product is not declared, or the simple profile takes none";
@@ -490,7 +490,8 @@ codes! {
     OutcomeUnknown => "outcome_unknown", 9, Safe, false, "a change may or may not have been applied; re-running is safe";
     ProviderUnavailable => "provider_unavailable", 9, Safe, false, "a provider did not answer after its retries; nothing was changed";
     Interrupted => "interrupted", 130, Safe, false, "interrupted by SIGINT (130) or SIGTERM (143); re-running is safe";
-    TidyConflict => "tidy_conflict", 4, Safe, false, "the 1Password item changed twice while opv was tidying it, so nothing was written; never a failure: reported in a document's tidy_error while the command reads the item as it is";
+    TidyConflict => "tidy_conflict", 4, Safe, false, "the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); never a failure: reported in a document's tidy_error while the command reads the item as it is";
+    TidyUnverified => "tidy_unverified", 4, AfterFix, true, "opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; never a failure: reported in a document's tidy_error";
 }
 
 /// The end of a failure (A3): an optional human-only action (`Do:`) and one command that

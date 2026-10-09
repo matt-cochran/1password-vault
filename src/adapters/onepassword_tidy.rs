@@ -338,7 +338,13 @@ pub fn apply(raw: &[u8], plan: &TidyPlan) -> Result<Zeroizing<Vec<u8>>, Error> {
 /// Write the whole tidied item: one `op item edit` with `template` on stdin (see the
 /// module docs). A refused edit is diagnosed like any failed `op` call (FR-26); an edit
 /// whose outcome is unknown says the item is either untouched or fully tidied.
-pub fn write(r: &dyn CommandRunner, env: &Environment, template: &[u8]) -> Result<(), Error> {
+/// Returns what the edit printed: the item as written (with values, in a zeroizing buffer;
+/// the caller reads only its version and layout, I5), empty when `op` printed nothing.
+pub fn write(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    template: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     let host = &Host::detect;
     let args = [
         "item",
@@ -351,8 +357,12 @@ pub fn write(r: &dyn CommandRunner, env: &Environment, template: &[u8]) -> Resul
     ];
     let call = Call::new(OP, &args).with_stdin(Some(template));
     let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
-        // The edited item comes back on stdout (with values); dropped, zeroized, unread.
-        Outcome::Done(_) => return Ok(()),
+        // The edited item comes back on stdout (with values): registered with the stderr
+        // scrubber (NR-31) and handed back in its zeroizing buffer.
+        Outcome::Done(o) => {
+            crate::scrub::register_item_values(&o.stdout);
+            return Ok(o.stdout);
+        }
         Outcome::Refused(o) => o.status,
         Outcome::Unknown {
             status: Some(s), ..
@@ -376,6 +386,92 @@ pub fn write(r: &dyn CommandRunner, env: &Environment, template: &[u8]) -> Resul
         "grant this identity write access to the vault",
         true,
     ))
+}
+
+/// Field types a whole-item edit is known to keep exactly: plain string values (the
+/// convention's own types). Anything else (OTP, SSH key, date, menu, address, credit card,
+/// passkey, a type added later) is not proven to round-trip through `op item edit`.
+const ROUND_TRIP_TYPES: [&str; 5] = ["CONCEALED", "STRING", "URL", "EMAIL", "PHONE"];
+
+/// What in the item `op item edit` with the whole JSON is not proven to keep (I4), named
+/// for a note (never a value): an attachment, a website list, or a field of a type outside
+/// [`ROUND_TRIP_TYPES`]. `None`: every part of the item round-trips. JSON that cannot be
+/// read is never rewritten either.
+pub fn unprovable(raw: &[u8]) -> Option<&'static str> {
+    #[derive(Deserialize)]
+    struct Shape {
+        #[serde(default)]
+        files: Option<Vec<IgnoredAny>>,
+        #[serde(default)]
+        urls: Option<Vec<IgnoredAny>>,
+        #[serde(default)]
+        fields: Option<Vec<FieldShape>>,
+    }
+    #[derive(Deserialize)]
+    struct FieldShape {
+        #[serde(rename = "type", default)]
+        ty: Option<String>,
+    }
+    let Ok(shape) = serde_json::from_slice::<Shape>(raw) else {
+        return Some("content opv cannot read");
+    };
+    if shape.files.is_some_and(|f| !f.is_empty()) {
+        return Some("an attachment");
+    }
+    if shape.urls.is_some_and(|u| !u.is_empty()) {
+        return Some("a website list");
+    }
+    let odd = shape
+        .fields
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| f.ty.unwrap_or_default())
+        .find(|t| !ROUND_TRIP_TYPES.contains(&t.as_str()))?;
+    Some(match odd.as_str() {
+        "OTP" => "a one-time password field",
+        "SSHKEY" => "an SSH key field",
+        "PASSKEY" => "a passkey",
+        _ => "a field of a type opv does not rewrite",
+    })
+}
+
+/// How many fields of the tidy are missing from the item read back after the write (I4,
+/// I5): each field of `intended` (the template written: every original field, moved,
+/// relabelled or kept, plus the new ones) must be in `after` with the same section label,
+/// label and value; each field of `original` must still be there by id with its value, or
+/// its original value must be kept in another field. Values are compared in constant time
+/// and never printed.
+pub fn lost(original: &[u8], intended: &[u8], after: &[u8]) -> Result<usize, Error> {
+    use subtle::ConstantTimeEq;
+    let (original, _) = parse(original)?;
+    let (intended, _) = parse(intended)?;
+    let (after, _) = parse(after)?;
+    let same = |a: &SecretValue, b: &SecretValue| -> bool {
+        a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
+    };
+    let mut used = vec![false; after.fields.len()];
+    let mut missing = 0;
+    for f in &intended.fields {
+        let hit = after.fields.iter().enumerate().position(|(i, g)| {
+            !used[i]
+                && g.section_label() == f.section_label()
+                && g.label == f.label
+                && same(&g.value, &f.value)
+        });
+        match hit {
+            Some(i) => used[i] = true,
+            None => missing += 1,
+        }
+    }
+    for f in &original.fields {
+        let in_place = after.fields.iter().any(|g| g.id == f.id);
+        let value_kept =
+            f.value.expose().is_empty() || after.fields.iter().any(|g| same(&g.value, &f.value));
+        if !(in_place && value_kept) {
+            missing += 1;
+        }
+    }
+    Ok(missing)
 }
 
 #[cfg(test)]

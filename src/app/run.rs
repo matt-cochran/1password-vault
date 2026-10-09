@@ -88,6 +88,7 @@ pub fn run(
         .flatten();
     let by_id = read.as_ref().map(|r| &r.refs);
     let normalized = read.as_ref().map(|r| &r.normalized);
+    let who = read.as_ref().and_then(|r| r.identity);
     let refs: Vec<(&str, String)> = prod
         .keys
         .iter()
@@ -106,10 +107,23 @@ pub fn run(
             // Read-only and not yet normalized in 1Password (FR-43): still the reference, so
             // `op run` masks the value; the person who can tidy it is told how.
             if normalized.is_some_and(|m| m.contains_key(&id)) {
+                let name = crate::domain::key_label(fp, fk);
+                // M4: worded by why it is not tidied; a person whose own tidy did not
+                // complete is not told to sign in as themselves.
+                let how = match who {
+                    Some(super::tidy::Identity::Person) => {
+                        "opv could not tidy it in this run (see the note above)".to_string()
+                    }
+                    Some(super::tidy::Identity::DeployCredentials) => format!(
+                        "run opv check {env_name} (without deploy credentials) and opv will tidy it"
+                    ),
+                    Some(_) => {
+                        format!("run as yourself (opv login {env_name}) and opv will tidy it")
+                    }
+                    None => "opv does not tidy this item (see the note above)".to_string(),
+                };
                 runner.note(&format!(
-                    "{} has a fixable formatting problem in 1Password; run as yourself (opv \
-                     login {env_name}) and opv will tidy it",
-                    crate::domain::key_label(fp, fk)
+                    "{name} has a fixable formatting problem in 1Password; {how}"
                 ));
             }
             let reference = by_id

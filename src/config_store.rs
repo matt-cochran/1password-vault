@@ -67,6 +67,11 @@ pub trait ConfigStore {
     fn describe(&self) -> String;
     /// Read the current text.
     fn read(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error>;
+    /// Read the text an edit starts from (`add`, `init --add-env`, `config edit`): for the
+    /// manifest, refused unless a person runs opv (I3) and read past `op`'s cache (C1).
+    fn read_for_write(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
+        self.read(r)
+    }
     /// Replace the text with `text` if it is still at `base` (optimistic concurrency).
     fn replace(
         &self,
@@ -188,14 +193,52 @@ impl ManifestStore {
         }
     }
 
-    fn read_item(&self, r: &dyn CommandRunner) -> Result<manifest::Manifest, Error> {
+    fn read_item(&self, r: &dyn CommandRunner, fresh: bool) -> Result<manifest::Manifest, Error> {
         manifest::get(
             r,
             &self.vault_id,
             &self.item_id,
             self.account.as_deref(),
+            fresh,
             &Host::detect,
         )
+    }
+
+    /// I5: after the edit, the manifest must be exactly one version past the read it was
+    /// built from and hold `text`; otherwise another edit landed in between (one of the
+    /// two was lost). Reported, never retried.
+    fn confirm(
+        &self,
+        r: &dyn CommandRunner,
+        built_on: u64,
+        written: manifest::Written,
+        text: &str,
+    ) -> Result<(), Error> {
+        let (version, now) = match written {
+            manifest::Written {
+                version: Some(v),
+                text: Some(t),
+            } => (v, t),
+            _ => {
+                let m = self.read_item(r, true)?;
+                (m.version, m.text)
+            }
+        };
+        let expected = built_on + 1;
+        if version == expected && now == text {
+            return Ok(());
+        }
+        Err(Error::Config(
+            format!(
+                "{}: another edit landed while opv wrote it (version {version}, expected \
+                 {expected}); opv did not retry. Check the manifest's history in 1Password and \
+                 keep the right version",
+                self.describe()
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::ConfigChanged)
+        .with_next("opv config export --toml"))
     }
 }
 
@@ -216,30 +259,42 @@ impl ConfigStore for ManifestStore {
     }
 
     fn read(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
-        let m = self.read_item(r)?;
+        let m = self.read_item(r, false)?;
         Ok(Snapshot {
             text: m.text,
             version: Some(m.version),
         })
     }
 
-    /// Re-reads the item and refuses when its version moved since `base`; otherwise sends
-    /// the item just read back with the new notes. (op has no conditional write, so a
-    /// change in the moment between the re-read and the write is not detected.)
+    fn read_for_write(&self, r: &dyn CommandRunner) -> Result<Snapshot, Error> {
+        crate::app::tidy::require_person(r, "this command")?;
+        let m = self.read_item(r, true)?;
+        Ok(Snapshot {
+            text: m.text,
+            version: Some(m.version),
+        })
+    }
+
+    /// Refused unless a person runs opv (I3). Re-reads the item past `op`'s cache (C1) and
+    /// refuses when its version moved since `base`; otherwise sends the item just read back
+    /// with the new notes, then checks that the edit is exactly one version later and holds
+    /// `text` (I5: op has no conditional write, so a change in the moment between the
+    /// re-read and the write is detected afterwards and reported, not prevented).
     fn replace(
         &self,
         r: &dyn CommandRunner,
         base: &Snapshot,
         text: &str,
     ) -> Result<Replaced, Error> {
-        let now = self.read_item(r)?;
+        crate::app::tidy::require_person(r, "this command")?;
+        let now = self.read_item(r, true)?;
         if Some(now.version) != base.version {
             return Ok(Replaced::Changed(Snapshot {
                 text: now.text,
                 version: Some(now.version),
             }));
         }
-        manifest::edit(
+        let written = manifest::edit(
             r,
             &self.vault_id,
             &self.item_id,
@@ -248,6 +303,7 @@ impl ConfigStore for ManifestStore {
             self.account.as_deref(),
             &Host::detect,
         )?;
+        self.confirm(r, now.version, written, text)?;
         Ok(Replaced::Saved)
     }
     fn source(&self) -> config::Source<'_> {
@@ -303,10 +359,22 @@ impl Found {
         }
     }
 
-    /// Read and validate the configuration.
+    /// Read and validate the configuration. A manifest found in a given account (a `.opv`
+    /// pointer, `OP_ACCOUNT` or the multi-account search) passes that account to every
+    /// environment that names none of its own (I2), so the environments' item reads go to
+    /// the account the manifest lives in.
     pub fn load(&self, r: &dyn CommandRunner) -> Result<Fleet, Error> {
         let snap = self.store().read(r)?;
-        parse_from(self, &snap.text)
+        let mut fleet = parse_from(self, &snap.text)?;
+        if let Found::Manifest(ManifestStore {
+            account: Some(a), ..
+        }) = self
+        {
+            for env in fleet.environments.values_mut() {
+                env.account.get_or_insert_with(|| a.clone());
+            }
+        }
+        Ok(fleet)
     }
 }
 
@@ -340,7 +408,10 @@ pub fn account_env() -> Option<String> {
     if Host::detect().op_credential.is_some() {
         return None;
     }
-    std::env::var("OP_ACCOUNT").ok().filter(|a| !a.is_empty())
+    // Only a value `--account` can take as a value, never a flag (M5).
+    std::env::var("OP_ACCOUNT")
+        .ok()
+        .filter(|a| config::is_account(a))
 }
 
 /// `OPV_PROJECT`, when set and non-empty.
@@ -376,6 +447,20 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
                 "invalid {}: project {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
                 path.display(),
                 d.project
+            )
+            .into(),
+        ));
+    }
+    // M5: the account reaches `op` as `--account <account>`: a sign-in address, email or
+    // account ID only, never something `op` could read as a flag.
+    if let Some(a) = &d.account
+        && !config::is_account(a)
+    {
+        return Err(Error::Config(
+            format!(
+                "invalid {}: account {a:?} must be a sign-in address, email or account ID \
+                 (letters, digits, . - _ @ +, starting with a letter or digit)",
+                path.display()
             )
             .into(),
         ));
@@ -507,13 +592,35 @@ fn by_repo(
             Matched::Repo(repo.to_string()),
         )))
     };
-    match hits.as_slice() {
-        [] => return Err(not_found(start, Some(repo))),
-        [one] => return found(one),
-        _ => {}
+    if hits.is_empty() {
+        return Err(not_found(start, Some(repo)));
     }
     let rel = git_toplevel(r).and_then(|top| relative(start, &top));
     let rel = rel.as_deref().unwrap_or("");
+    // I1: even the only match is used only when it covers this directory: no path tags
+    // (the whole repository) or a path tag that is a prefix of it.
+    if let [one] = hits.as_slice() {
+        if path_score(&row_paths(one), rel).is_some() {
+            return found(one);
+        }
+        return Err(Error::Config(
+            format!(
+                "the only manifest matching {repo} does not cover {}: {}",
+                if rel.is_empty() {
+                    "the repository root"
+                } else {
+                    rel
+                },
+                listing_with_paths(&hits)
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::ManifestNotFound)
+        .with_next(format!(
+            "OPV_PROJECT={} opv <command>",
+            project_of(one).unwrap_or("<project>")
+        )));
+    }
     let scored: Vec<(usize, &Row)> = hits
         .iter()
         .filter_map(|row| path_score(&row_paths(row), rel).map(|s| (s, *row)))
@@ -826,6 +933,7 @@ pub fn create_manifest(
     text: &str,
     account: Option<&str>,
 ) -> Result<ManifestStore, Error> {
+    crate::app::tidy::require_person(r, "this command")?;
     let rows = manifest::list(r, account, &Host::detect)?;
     let title = manifest_title(project);
     let tag = repo.map(repo_tag);

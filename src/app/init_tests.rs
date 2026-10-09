@@ -1150,8 +1150,8 @@ fn add_env_without_a_target_points_at_check() {
 
 // --- init --add-env on a manifest (FR-44): the same edit through ConfigStore ---
 
-/// Manifest calls (`item get <manifest>`, `item edit`) go to the stateful fake; the item
-/// lookups `init` makes go to the scripted one.
+/// Manifest calls (`item get <manifest>`, `item edit`) and the identity probe (`whoami`) go
+/// to the stateful fake; the item lookups `init` makes go to the scripted one.
 struct Split<'a> {
     op: &'a crate::adapters::fake_op::FakeOp,
     rest: &'a FakeRunner,
@@ -1160,7 +1160,9 @@ struct Split<'a> {
 
 impl Split<'_> {
     fn to_op(&self, call: &crate::runner::Call) -> bool {
-        call.args.contains(&self.manifest.as_str()) || call.args.starts_with(&["item", "edit"])
+        call.args.contains(&self.manifest.as_str())
+            || call.args.starts_with(&["item", "edit"])
+            || call.args.starts_with(&["whoami"])
     }
 }
 
@@ -1288,4 +1290,39 @@ fn init_json_refusal_golden() {
     a.vault = "no-such-vault".into();
     let (_dir, out) = init_json(&fleet_fields(), &a);
     crate::app::json_tests::golden("init_unknown_vault", &out);
+}
+
+// ---- M6: `--add-env` and shared keys (FR-45) ----
+
+const SHARED: &str = "[profile]\nkind = \"fleet\"\n\n\
+[environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\n\
+[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.api.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.worker.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"api/OPENAI_API_KEY\"\n\n\
+[products.worker.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"api/LEGACY_TOKEN\"\n";
+
+#[test]
+fn add_env_adds_a_shared_key_with_its_source() {
+    let run = add_env_with(SHARED, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["worker"].keys["OPENAI_API_KEY"].environments,
+        vec!["prod", "staging"]
+    );
+}
+
+#[test]
+fn add_env_leaves_out_a_shared_key_whose_source_is_absent() {
+    let run = add_env_with(SHARED, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["worker"].keys["LEGACY_TOKEN"].environments,
+        vec!["prod"]
+    );
+}
+
+#[test]
+fn add_env_saves_despite_a_stray_field_for_a_shared_key() {
+    let mut fields = fleet_fields();
+    fields.push(secret("worker", "LEGACY_TOKEN", &v("stray")));
+    let run = add_env_with(SHARED, &staging(), &fields);
+    assert!(run.res.is_ok(), "{:?}", run.res);
 }

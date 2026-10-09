@@ -139,6 +139,11 @@ pub struct Resolution {
     pub chosen: BTreeMap<KeyId, usize>,
     /// The other fields claimed by each key, in item order.
     pub duplicates: BTreeMap<KeyId, Vec<usize>>,
+    /// Keys left without a field because the only field that matches sits where the
+    /// other profile's convention keeps it (M1: a simple and a fleet configuration may
+    /// share one item). That field is never claimed, moved or kept, so two configurations
+    /// never move it back and forth; the tidy names these keys in one note.
+    pub foreign: BTreeSet<KeyId>,
 }
 
 impl Resolution {
@@ -160,6 +165,16 @@ fn in_home(f: &Found, product: &str) -> bool {
     }
 }
 
+/// True when `f` sits where the other profile's convention keeps a key (M1), so a fleet
+/// and a simple configuration sharing one item never move it back and forth: for the fleet
+/// profile, a key-shaped label at the top level (the simple profile's home). The fleet
+/// profile still reads such a field, but its plan never moves, relabels, conceals,
+/// normalizes or keeps it. (The simple profile never claims a field in a product-shaped
+/// section at all, see [`resolve`].)
+fn foreign_home(f: &Found, fleet: &Fleet) -> bool {
+    !fleet.is_simple() && f.section_label().is_none() && key_shaped(&f.label)
+}
+
 /// Find each declared key's field (see the module docs). Pure and deterministic.
 pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
     let decls: Vec<(&str, &str)> = fleet
@@ -175,6 +190,7 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
         })
         .collect();
     let mut claims: BTreeMap<KeyId, Vec<usize>> = BTreeMap::new();
+    let mut foreign: BTreeSet<KeyId> = BTreeSet::new();
     for (i, f) in layout.fields.iter().enumerate() {
         if f.reserved() {
             continue;
@@ -206,10 +222,19 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
             .copied()
             .filter(|(p, _)| in_home(f, p))
             .collect();
-        let raidable = fleet.is_simple() || f.section_label().is_none_or(|l| !product_shaped(l));
+        // M1: a product-shaped section belongs to some product, so the simple profile
+        // never claims a field in one either (a fleet configuration may share the item).
+        let raidable = f.section_label().is_none_or(|l| !product_shaped(l));
         let claim = one(&home).or_else(|| if raidable { one(&cands) } else { None });
-        if let Some(id) = claim {
-            claims.entry(id).or_default().push(i);
+        match claim {
+            Some(id) => {
+                if foreign_home(f, fleet) {
+                    foreign.insert(id.clone());
+                }
+                claims.entry(id).or_default().push(i);
+            }
+            None if fleet.is_simple() && !raidable => foreign.extend(one(&cands)),
+            None => {}
         }
     }
     let mut res = Resolution::default();
@@ -227,6 +252,16 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
         }
         res.chosen.insert(id, best);
     }
+    // The simple profile's unclaimed keys, and the fleet profile's keys read from a field
+    // the plan leaves where it is.
+    foreign.retain(|id| {
+        let left = |i: &usize| foreign_home(&layout.fields[*i], fleet);
+        match res.chosen.get(id) {
+            None => fleet.is_simple(),
+            Some(c) => left(c) || res.duplicates.get(id).into_iter().flatten().any(left),
+        }
+    });
+    res.foreign = foreign;
     res
 }
 
@@ -622,6 +657,11 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
                 continue;
             };
             let f = &layout.fields[c];
+            let left = |i: usize| foreign_home(&layout.fields[i], fleet);
+            if left(c) {
+                // M1: read where it is; another configuration may keep it there.
+                continue;
+            }
             let at_home = match &home {
                 None => f.section_label().is_none(),
                 Some(h) => {
@@ -684,6 +724,9 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
                 p.kept = true;
             }
             for &d in res.duplicates.get(&id).into_iter().flatten() {
+                if left(d) {
+                    continue;
+                }
                 let dup = &layout.fields[d];
                 ensure_section(&mut p, KEPT_SECTION);
                 p.ops.push(Op::Place {

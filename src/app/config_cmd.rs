@@ -251,7 +251,8 @@ pub fn edit(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let s = found.store();
-    let mut base: Snapshot = s.read(r)?;
+    // Refused before the editor opens unless a person runs opv (I3); read past op's cache.
+    let mut base: Snapshot = s.read_for_write(r)?;
     let mut draft = base.text.clone();
     loop {
         let edited = ui.edit(&draft)?;

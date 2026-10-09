@@ -7,10 +7,15 @@
 //! - **A signed-in person** (`op whoami` says `USER`, no service-account or Connect token,
 //!   not CI): the item is tidied. The pure plan ([`convention::plan`]) is applied to the item
 //!   JSON in memory and written whole by one `op item edit` (values on stdin only, SR-3),
-//!   then re-read and verified. Before writing, the item is read again: if its version
-//!   changed (someone edited it), opv re-plans once on the new version; if it changed again,
-//!   nothing is written. Everything displaced or replaced goes to `opv · kept` (TRIZ #24);
-//!   nothing is deleted. One `tidied 1Password (<env>): ...` line on stderr per run.
+//!   then verified. Before writing, the item is read again past `op`'s local cache
+//!   (`--cache=false`, C1) and the template is built from that read: if its version changed
+//!   (someone edited it), opv re-plans once on the new version; if it changed again,
+//!   nothing is written. After the edit the item must be exactly one version later (I5,
+//!   else `tidy_conflict`, never retried) and hold every field opv wrote or kept (I4, else
+//!   `tidy_unverified`). An item holding an attachment, a website list or a field type a
+//!   whole-item edit is not proven to keep is never tidied. Everything displaced or
+//!   replaced goes to `opv · kept` (TRIZ #24); nothing is deleted. One
+//!   `tidied 1Password (<env>): ...` line on stderr per run.
 //! - **A service account, Connect, or CI**: 1Password stays read-only. The command reads
 //!   the item as it is and prints one note that the next run by a person tidies it.
 //!
@@ -95,6 +100,9 @@ pub(crate) enum Identity {
     Person,
     /// A service account, Connect, or CI: 1Password is read-only (FR-11, SR-5).
     ReadOnly,
+    /// This run signed in to the target with the environment's deploy credentials
+    /// (FR-40): 1Password is read-only for the run, even for a person (FR-43).
+    DeployCredentials,
     /// `op whoami` could not tell: treated as read-only, silently.
     Unknown,
 }
@@ -104,8 +112,11 @@ pub(crate) enum Identity {
 pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
     let host = Host::detect();
     // A service account, Connect, CI or a run under deploy credentials never tidies.
-    if host.op_credential.is_some() || host.ci || r.deploy_signed_in() {
+    if host.op_credential.is_some() || host.ci {
         return Identity::ReadOnly;
+    }
+    if r.deploy_signed_in() {
+        return Identity::DeployCredentials;
     }
     match onepassword::diagnose(r, &Host::detect) {
         Ok(Session::SignedIn(IdentityType::User)) => Identity::Person,
@@ -114,8 +125,34 @@ pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
     }
 }
 
+/// Refuse a write to the project manifest (FR-44: `init` creating one, `add`, `init
+/// --add-env`, `config import`, `config edit`) unless a person signed in with their own
+/// session runs opv: under a service account, Connect, CI or deploy credentials, or when
+/// `op whoami` cannot tell, 1Password stays read-only (FR-11, SR-5; requirements FR-23's
+/// `init` acceptance). Nothing is written; the error names `opv login`.
+pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Error> {
+    let why = match identity(r) {
+        Identity::Person => return Ok(()),
+        Identity::ReadOnly => {
+            "this run is a service account, Connect or CI, for which 1Password is read-only"
+        }
+        Identity::DeployCredentials => {
+            "this run signed in with deploy credentials, for which 1Password is read-only"
+        }
+        Identity::Unknown => "op whoami could not confirm a person signed in to 1Password",
+    };
+    Err(Error::Policy(
+        format!(
+            "{what} writes the project's manifest in 1Password, which only a person signed in \
+             with their own session may do; {why}; nothing written"
+        )
+        .into(),
+    )
+    .with_next(crate::adapters::onepassword_manifest::LOGIN))
+}
+
 /// True when the item JSON carries the manifest tag (FR-44).
-fn is_manifest(raw: &[u8]) -> bool {
+pub(crate) fn is_manifest(raw: &[u8]) -> bool {
     #[derive(serde::Deserialize)]
     struct Tagged {
         #[serde(default)]
@@ -172,6 +209,10 @@ pub(crate) struct Read {
     /// The item's `version` integer as last read (after a tidy, the tidied item's): an
     /// input of the plan id (FR-41).
     pub version: Option<u64>,
+    /// Who ran opv, when the item needed a tidy (`None` when it did not, or tidying is
+    /// off): `run` words its warning by it (a person whose tidy failed is not told to sign
+    /// in as themselves).
+    pub identity: Option<Identity>,
 }
 
 /// The environment's item, read tolerantly and tidied when a person runs opv (see the
@@ -182,14 +223,22 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
     let (layout, stamp) = onepassword_tidy::parse(item.raw())?;
     let date = today();
     let plan = convention::plan(&layout, fleet, env_name, &date);
-    let done = |layout: Layout, changes: Vec<Change>, error: Option<Code>, version: Option<u64>| {
+    let done = |layout: Layout,
+                changes: Vec<Change>,
+                error: Option<Code>,
+                version: Option<u64>,
+                who: Option<Identity>| {
         let mut res = finish(layout, fleet, env_name, env, changes, error);
         res.version = version;
+        res.identity = who;
         res
     };
     let first = item.version;
+    if active() {
+        foreign_note(r, &layout, fleet, env_name);
+    }
     if plan.is_empty() || !active() {
-        return Ok(done(layout, Vec::new(), None, first));
+        return Ok(done(layout, Vec::new(), None, first, None));
     }
     // The project manifest (FR-44) holds the configuration itself: its fields (`notesPlain`,
     // `project`, `convention`) are never renamed, moved or concealed, so an environment
@@ -199,9 +248,17 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
             "1Password ({env_name}) is the project's manifest item; opv never tidies it. Keep \
              the environment's values in an item of their own."
         ));
-        return Ok(done(layout, Vec::new(), None, first));
+        return Ok(done(layout, Vec::new(), None, first, None));
     }
-    match identity(r) {
+    // I4: an item holding something a whole-item edit is not proven to keep (an attachment,
+    // a one-time password, an SSH key, any field type opv does not fully understand) is
+    // never rewritten.
+    if let Some(what) = onepassword_tidy::unprovable(item.raw()) {
+        r.note(&unprovable_note(env_name, what));
+        return Ok(done(layout, Vec::new(), None, first, None));
+    }
+    let who = identity(r);
+    match who {
         Identity::Person => {}
         Identity::ReadOnly => {
             // Only a fix a person's run would make to existing fields is worth a note; once
@@ -212,22 +269,32 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
                      it is (read-only here). The next opv run by a signed-in person tidies it."
                 ));
             }
-            return Ok(done(layout, Vec::new(), None, first));
+            return Ok(done(layout, Vec::new(), None, first, Some(who)));
         }
-        Identity::Unknown => return Ok(done(layout, Vec::new(), None, first)),
+        Identity::DeployCredentials => {
+            if plan.fixes_layout() && first_note(env_name) {
+                r.note(&format!(
+                    "1Password ({env_name}) is not laid out the way opv expects; read it as \
+                     it is (this run signed in with the environment's deploy credentials, so \
+                     1Password stays read-only). opv check {env_name} tidies it."
+                ));
+            }
+            return Ok(done(layout, Vec::new(), None, first, Some(who)));
+        }
+        Identity::Unknown => return Ok(done(layout, Vec::new(), None, first, Some(who))),
     }
-    match tidy(r, fleet, env_name, env, &date, &item, stamp, plan) {
-        Ok(Some((after, changes, conflict, version))) => {
-            if !changes.is_empty() {
+    match tidy(r, fleet, env_name, env, &date, stamp, plan) {
+        Ok(Some(t)) => {
+            if !t.changes.is_empty() {
                 r.note(&format!(
                     "tidied 1Password ({env_name}): {}",
-                    convention::summary(&changes)
+                    convention::summary(&t.changes)
                 ));
-                missing_values(r, &after, fleet, env_name, env);
+                missing_values(r, &t.layout, fleet, env_name, env);
             }
-            Ok(done(after, changes, conflict, version))
+            Ok(done(t.layout, t.changes, t.error, t.version, Some(who)))
         }
-        Ok(None) => Ok(done(layout, Vec::new(), None, first)),
+        Ok(None) => Ok(done(layout, Vec::new(), None, first, Some(who))),
         Err(e) => {
             let text = e.to_string();
             r.note(&format!(
@@ -235,67 +302,149 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
                 text.lines().next().unwrap_or("")
             ));
             let code = e.code();
-            Ok(done(layout, Vec::new(), Some(code), first))
+            Ok(done(layout, Vec::new(), Some(code), first, Some(who)))
         }
     }
 }
 
-/// The item after a tidy attempt: its layout, what was written, `tidy_conflict` when
-/// nothing could be, and the version of the item as last read.
-type Tidied = (Layout, Vec<Change>, Option<Code>, Option<u64>);
+/// The one note for an item a tidy never rewrites (I4).
+fn unprovable_note(env_name: &str, what: &str) -> String {
+    format!(
+        "1Password ({env_name}) holds {what}, which opv cannot prove a rewrite keeps; opv \
+         never tidies such an item and reads it as it is. Keep opv's keys in an item of their \
+         own to let opv tidy them."
+    )
+}
 
-/// Check, write, verify (module docs). `Some((layout, changes, conflict))`: the item as it
-/// now is, what was written (empty when nothing was) and `tidy_conflict` when the item
-/// changed twice meanwhile. `None`: keep the first read.
-#[allow(clippy::too_many_arguments)]
+/// One note naming the keys whose only matching field sits where the other profile's
+/// convention keeps it (M1): opv leaves it there for that configuration.
+fn foreign_note(r: &dyn CommandRunner, layout: &Layout, fleet: &Fleet, env_name: &str) {
+    let res = convention::resolve(layout, fleet);
+    if res.foreign.is_empty() {
+        return;
+    }
+    let names: Vec<String> = res.foreign.iter().map(|(p, k)| key_label(p, k)).collect();
+    let (place, other, read) = if fleet.is_simple() {
+        (
+            "in a product section",
+            "a fleet-profile",
+            "does not read it",
+        )
+    } else {
+        ("at the top level", "a simple-profile", "reads it there")
+    };
+    r.note(&format!(
+        "1Password ({env_name}): a field for {} is {place}, where {other} configuration \
+         keeps it; opv {read} and never moves it. If it belongs to this configuration, move \
+         it in 1Password.",
+        names.join(", ")
+    ));
+}
+
+/// The item after a tidy attempt.
+struct Tidied {
+    /// Its layout as last read.
+    layout: Layout,
+    /// What was written (empty when nothing was).
+    changes: Vec<Change>,
+    /// `tidy_conflict` (changed twice before the write, or another edit landed with it) or
+    /// `tidy_unverified` (the item read back lacks a field opv wrote or kept).
+    error: Option<Code>,
+    /// The item's version as last read.
+    version: Option<u64>,
+}
+
+/// Check, write, verify (module docs). Every read here bypasses `op`'s cache (C1), and
+/// the template is always built from the latest such read. `None`: keep the first read.
 fn tidy(
     r: &dyn CommandRunner,
     fleet: &Fleet,
     env_name: &str,
     env: &Environment,
     date: &str,
-    first: &Item,
     mut stamp: Stamp,
     mut plan: TidyPlan,
 ) -> Result<Option<Tidied>, Error> {
-    let mut newer: Option<Item> = None;
+    let tidied = |layout, changes, error, version| {
+        Ok(Some(Tidied {
+            layout,
+            changes,
+            error,
+            version,
+        }))
+    };
     for attempt in 0..2 {
-        let check = onepassword::read_whole(r, env)?;
-        let (seen, seen_stamp) = onepassword_tidy::parse(check.raw())?;
+        let fresh = onepassword::read_whole_fresh(r, env)?;
+        let (seen, seen_stamp) = onepassword_tidy::parse(fresh.raw())?;
         if seen_stamp != stamp {
             if attempt == 1 {
                 r.note(&format!(
                     "1Password ({env_name}) changed twice while opv was tidying it; nothing \
                      written. Re-run when nobody is editing the item."
                 ));
-                return Ok(Some((
-                    seen,
-                    Vec::new(),
-                    Some(Code::TidyConflict),
-                    check.version,
-                )));
+                return tidied(seen, Vec::new(), Some(Code::TidyConflict), fresh.version);
             }
             stamp = seen_stamp;
             plan = convention::plan(&seen, fleet, env_name, date);
             if plan.is_empty() {
-                return Ok(Some((seen, Vec::new(), None, check.version)));
+                return tidied(seen, Vec::new(), None, fresh.version);
             }
-            newer = Some(check);
             continue;
         }
-        let raw = newer.as_ref().map_or(first.raw(), Item::raw);
-        let template = onepassword_tidy::apply(raw, &plan)?;
-        onepassword_tidy::write(r, env, &template)?;
-        drop(template);
-        let after = onepassword::read_whole(r, env)?;
+        if let Some(what) = onepassword_tidy::unprovable(fresh.raw()) {
+            r.note(&unprovable_note(env_name, what));
+            return tidied(seen, Vec::new(), None, fresh.version);
+        }
+        let template = onepassword_tidy::apply(fresh.raw(), &plan)?;
+        let echoed = onepassword_tidy::write(r, env, &template)?;
+        // I5: the edit echoes the item it wrote; without a version in it, read it back
+        // (fresh). Exactly one version later than the read it was built from means no
+        // other edit landed in between.
+        let after = match onepassword::item_version(&echoed) {
+            Some(_) => Item::from_raw(echoed),
+            None => onepassword::read_whole_fresh(r, env)?,
+        };
         let (layout, _) = onepassword_tidy::parse(after.raw())?;
+        let expected = fresh.version.map(|v| v + 1);
+        if expected.is_some() && after.version != expected {
+            r.note(&format!(
+                "1Password ({env_name}): another edit landed while opv was tidying it (version \
+                 {} instead of {}); opv did not retry. Check the item's history in 1Password.",
+                after
+                    .version
+                    .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                expected.unwrap_or_default()
+            ));
+            return tidied(
+                layout,
+                plan.changes,
+                Some(Code::TidyConflict),
+                after.version,
+            );
+        }
+        // I4: every field opv wrote or kept (so every original label and value, in place or
+        // in `opv · kept`) is in the item read back.
+        let lost = onepassword_tidy::lost(fresh.raw(), &template, after.raw())?;
+        drop(template);
+        if lost > 0 {
+            r.note(&format!(
+                "1Password ({env_name}) was tidied, but {lost} field(s) opv wrote or kept are \
+                 not in the item read back; restore them from the item's history in 1Password."
+            ));
+            return tidied(
+                layout,
+                plan.changes,
+                Some(Code::TidyUnverified),
+                after.version,
+            );
+        }
         if !convention::plan(&layout, fleet, env_name, date).is_empty() {
             r.note(&format!(
                 "1Password ({env_name}) was written but is not fully tidy yet; the next run \
                  finishes it"
             ));
         }
-        return Ok(Some((layout, plan.changes, None, after.version)));
+        return tidied(layout, plan.changes, None, after.version);
     }
     Ok(None)
 }
@@ -374,6 +523,7 @@ fn finish(
         normalized,
         tidy_error,
         version: None,
+        identity: None,
     }
 }
 
