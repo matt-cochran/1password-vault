@@ -86,7 +86,7 @@ pub fn run(
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
     store.validate(&batch)?;
     // Last read-only step before the first write (NR-23, NR-24).
-    preflight::run(t, r, out)?;
+    let skip_deploy = preflight::run(t, r, out)?;
     print_extras(out, &plan)?;
     print_counts(out, &plan)?;
 
@@ -163,6 +163,7 @@ pub fn run(
     match (needs_deploy, opts.deploy) {
         (false, true) => p(out, "nothing pending; not deploying".into()),
         (false, false) => p(out, "nothing pending".into()),
+        (true, true) if skip_deploy.is_some() => p(out, skip_deploy.unwrap_or_default()),
         (true, true) => {
             runtime.deploy().map_err(|e| after_writes(e, &done))?;
             p(out, "deployed staged secrets".into())
@@ -1337,15 +1338,8 @@ mod tests {
     }
 
     #[test]
-    fn preflight_failure_makes_no_write_calls_when_app_suspended() {
-        let r = after_list_a([fly_app("suspended", &["stopped"])]);
-        sync_err(&r);
-        assert_eq!(writes(&r), Vec::<String>::new());
-    }
-
-    #[test]
     fn preflight_failure_makes_no_write_calls_when_app_dead() {
-        let r = after_list_a([fly_app("dead", &[])]);
+        let r = after_list_a([fly_app_dead()]);
         sync_err(&r);
         assert_eq!(writes(&r), Vec::<String>::new());
     }
@@ -1403,43 +1397,82 @@ mod tests {
         assert_eq!(writes(&r), Vec::<String>::new());
     }
 
+    fn deploy_opts() -> SyncOpts {
+        SyncOpts {
+            deploy: true,
+            ..SyncOpts::default()
+        }
+    }
+    fn no_machines_warning() -> String {
+        format!(
+            "warn  fly app {APP}: no machines; secrets are staged and apply when machines \
+             start (fly scale count 1 --app {APP})\n"
+        )
+    }
+    fn staged_after(status: Out) -> (FakeRunner, Result<(), Error>, String) {
+        let r = after_list_a([status, fly_releases("complete")]);
+        spare(&r);
+        let (res, out) = sync_out(&f(), &r, &deploy_opts());
+        (r, res, out)
+    }
+
     #[test]
-    fn suspended_fly_app_refuses_with_resume_command() {
-        let r = after_list_a([fly_app("suspended", &["stopped"])]);
-        let e = sync_err(&r);
+    fn suspended_fly_app_stages_with_the_no_machines_warning() {
+        let (r, res, out) = staged_after(fly_status("suspended"));
         assert!(
-            e.to_string()
-                .contains(&format!("Next: flyctl apps resume {APP}, then re-run")),
-            "{e}"
+            res.is_ok() && out.contains(&no_machines_warning()) && import_stdin(&r).is_some(),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn suspended_fly_app_with_deploy_skips_the_deploy_and_exits_ok() {
+        let (r, res, out) = staged_after(fly_status("suspended"));
+        assert!(
+            res.is_ok()
+                && !called(&r, "flyctl", &["secrets", "deploy"])
+                && out.contains(&format!(
+                    "deploy skipped: {APP} has no machines; staged secrets apply when machines \
+                     start\n"
+                )),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn pending_fly_app_with_deploy_skips_the_deploy_and_exits_ok() {
+        let (r, res, out) = staged_after(fly_status("pending"));
+        assert!(
+            res.is_ok()
+                && !called(&r, "flyctl", &["secrets", "deploy"])
+                && out.contains(&no_machines_warning())
+                && out.contains("deploy skipped:"),
+            "{res:?}\n{out}"
         );
     }
 
     #[test]
     fn stopped_machines_are_reported_not_refused() {
-        let r = after_list_a([
-            fly_app("deployed", &["stopped", "stopped"]),
-            fly_releases("complete"),
-        ]);
-        spare(&r);
-        let (res, out) = sync_out(&f(), &r, &opts());
+        let (_r, res, out) = staged_after(fly_app_machines("stopped"));
         assert!(
             res.is_ok()
-                && out.contains(
-                    "warn  fly app: machines stopped: secrets still stage; deploy updates them \
-                     on next start\n"
-                ),
+                && out.contains(&format!(
+                    "warn  fly app {APP}: machines stopped; secrets are staged and apply when \
+                     machines start\n"
+                )),
             "{res:?}\n{out}"
         );
     }
 
     #[test]
-    fn app_without_machines_is_reported_not_refused() {
-        let r = after_list_a([fly_app("pending", &[]), fly_releases("complete")]);
-        spare(&r);
-        let (res, out) = sync_out(&f(), &r, &opts());
+    fn dead_fly_app_refuses_with_a_next_step() {
+        let r = after_list_a([fly_app_dead()]);
+        let e = sync_err(&r).to_string();
         assert!(
-            res.is_ok() && out.contains(&format!("warn  fly app: {APP} has no machines")),
-            "{res:?}\n{out}"
+            e.contains(&format!(
+                "Next: recreate it with `flyctl apps create {APP}`"
+            )),
+            "{e}"
         );
     }
 
@@ -1450,8 +1483,8 @@ mod tests {
         assert_eq!(
             e.to_string(),
             format!(
-                "target error: a deploy is already running on Fly app {APP} (release v2); \
-                 nothing was changed\n  Next: wait, then re-run"
+                "target error: a Fly deploy is already running for {APP}; nothing was \
+                 changed\n  Next: wait for it to finish, then re-run"
             )
         );
     }

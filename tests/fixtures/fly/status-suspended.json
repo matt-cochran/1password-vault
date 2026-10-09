@@ -1,0 +1,14 @@
+{
+  "AppURL": "FIXTURE",
+  "Deployed": false,
+  "Hostname": "FIXTURE",
+  "ID": "FIXTURE",
+  "Machines": [],
+  "Name": "FIXTURE",
+  "Organization": {
+    "Slug": "fixture-org"
+  },
+  "PlatformVersion": "machines",
+  "Status": "suspended",
+  "Version": 16
+}

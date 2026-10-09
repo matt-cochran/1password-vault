@@ -128,7 +128,7 @@ fn run_on(
         Some((used, without)) if !used.is_empty() => {
             for t in &used {
                 for c in t.doctor(r, host) {
-                    line(out, c.name, c.outcome)?;
+                    line(out, &c.name, c.outcome)?;
                 }
             }
             if !without.is_empty() {

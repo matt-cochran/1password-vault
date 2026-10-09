@@ -101,7 +101,7 @@ case "$1 $2" in
     [ -n "$FAKE_FLY_LIST_FAIL_AT" ] && [ "$l" -ge "$FAKE_FLY_LIST_FAIL_AT" ] && exit 1
     if [ "$l" = 1 ]; then cat "$FAKE_FIX/list_a.json"; else cat "$FAKE_FIX/list_b.json"; fi
     exit 0 ;;
-  # NR-24 preflight (shapes constructed from flyctl's --json rendering of its Go structs).
+  # NR-24 preflight (shapes follow the recorded flyctl output in tests/fixtures/fly/).
   "status --app") printf '{"ID":"app","Status":"deployed","Machines":[{"id":"m1","state":"started"}]}\n'; exit 0 ;;
   "releases --app") printf '[{"Version":1,"Status":"complete","User":{"Email":"S7MARKERVALUE@example.invalid"}}]\n'; exit 0 ;;
   "secrets import") exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;

@@ -26,15 +26,17 @@ use crate::provider::TargetConfig;
 use crate::runner::CommandRunner;
 
 /// Step 3: the target's own state checks. A failed check refuses the run; every other
-/// check returned prints one line in `doctor`'s format (`warn  fly app: ...`).
+/// check returned prints one line in `doctor`'s format (`warn  fly app <app>: ...`); the result is the line to print instead of a deploy when the
+/// runtime has nothing to restart.
 pub(crate) fn run(
     t: &dyn TargetConfig,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
-) -> Result<(), Error> {
-    for c in t.preflight(r)? {
-        let line = c.outcome?.line(c.name);
+) -> Result<Option<String>, Error> {
+    let pre = t.preflight(r)?;
+    for c in pre.checks {
+        let line = c.outcome?.line(&c.name);
         writeln!(out, "{line}").map_err(write_err)?;
     }
-    Ok(())
+    Ok(pre.skip_deploy)
 }

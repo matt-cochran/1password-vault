@@ -719,36 +719,53 @@ pub(crate) mod testutil {
         Output::success(Vec::new())
     }
 
-    /// `flyctl status --app <app> --json` of a deployed app with one started machine
-    /// (constructed from flyctl's `status --json` rendering: Go field names, NR-24).
+    /// Recorded `flyctl status --app <app> --json` of a deployed app with one started
+    /// machine (`tests/fixtures/fly/status-deployed.json`, NR-24).
     pub fn fly_app_ok() -> Output {
-        fly_app("deployed", &["started"])
+        fly_status("deployed")
     }
-    /// `flyctl status --json` with app `Status` and one machine per `state` (constructed).
-    pub fn fly_app(status: &str, machines: &[&str]) -> Output {
-        let m: Vec<Value> = machines
-            .iter()
-            .map(|st| json!({"id": "148e", "name": "m", "state": st, "region": "iad"}))
-            .collect();
+    /// Recorded `flyctl status --json` for `kind`: "deployed", "suspended" or "pending"
+    /// (`tests/fixtures/fly/status-<kind>.json`).
+    pub fn fly_status(kind: &str) -> Output {
+        let doc = match kind {
+            "deployed" => include_str!("../../tests/fixtures/fly/status-deployed.json"),
+            "suspended" => include_str!("../../tests/fixtures/fly/status-suspended.json"),
+            "pending" => include_str!("../../tests/fixtures/fly/status-pending.json"),
+            other => panic!("no recorded status fixture for {other}"),
+        };
+        Output::success(doc)
+    }
+    /// The recorded deployed status with every machine set to `state` (derived: the
+    /// recording has only a started machine).
+    pub fn fly_app_machines(state: &str) -> Output {
+        let mut v: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/fly/status-deployed.json"
+        ))
+        .unwrap();
+        for m in v["Machines"].as_array_mut().unwrap() {
+            m["state"] = json!(state);
+        }
+        Output::success(serde_json::to_vec(&v).unwrap())
+    }
+    /// `flyctl status --json` of a deleted app (constructed: no recording, `dead` is
+    /// documented by flyctl but not reproducible without deleting an app).
+    pub fn fly_app_dead() -> Output {
         Output::success(
-            serde_json::to_vec(&json!({
-                "ID": "app", "Name": "app", "Status": status, "Deployed": true,
-                "Hostname": "app.fly.dev", "PlatformVersion": "machines", "Machines": m
-            }))
-            .unwrap(),
+            r#"{"Name":"app","Status":"dead","Machines":[],"PlatformVersion":"machines"}"#,
         )
     }
-    /// `flyctl releases --app <app> --json` whose latest release has `status` (constructed).
+    /// Recorded `flyctl releases --json` (`tests/fixtures/fly/releases-deployed.json`).
+    /// `"running"` is derived from it by setting `InProgress` on the latest release (no
+    /// recording of a deploy under way).
     pub fn fly_releases(status: &str) -> Output {
-        Output::success(
-            serde_json::to_vec(&json!([
-                {"ID": "r2", "Version": 2, "Stable": false, "InProgress": false,
-                 "Status": status, "Reason": "change_secrets"},
-                {"ID": "r1", "Version": 1, "Stable": true, "InProgress": false,
-                 "Status": "complete", "Reason": "change_image"}
-            ]))
-            .unwrap(),
-        )
+        let doc = include_str!("../../tests/fixtures/fly/releases-deployed.json");
+        if status == "complete" {
+            return Output::success(doc);
+        }
+        let mut v: Value = serde_json::from_str(doc).unwrap();
+        v[0]["InProgress"] = json!(true);
+        v[0]["Status"] = json!(status);
+        Output::success(serde_json::to_vec(&v).unwrap())
     }
     /// The two Fly preflight reads of a healthy app with no deploy running (NR-24).
     pub fn fly_preflight_ok() -> [Output; 2] {

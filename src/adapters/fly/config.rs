@@ -13,7 +13,9 @@ use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
-use crate::provider::{Check, NameRules, Provider, Section, TargetConfig, Verdict, eq_as};
+use crate::provider::{
+    Check, NameRules, Preflight, Provider, Section, TargetConfig, Verdict, eq_as,
+};
 use crate::runner::CommandRunner;
 
 /// The `flyctl` release opv is tested with (its import parser is ported, see `mod.rs`).
@@ -199,18 +201,18 @@ impl TargetConfig for FlyTarget {
         })
     }
 
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<Vec<Check>, Error> {
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error> {
         super::preflight(r, &self.app)
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
         vec![
             Check {
-                name: "flyctl",
+                name: "flyctl".into(),
                 outcome: flyctl_version(r, host),
             },
             Check {
-                name: "fly auth",
+                name: "fly auth".into(),
                 outcome: fly_auth(r, host),
             },
         ]

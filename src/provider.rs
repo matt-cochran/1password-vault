@@ -97,7 +97,7 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// first write (NR-23, NR-24): `Err` refuses the run with nothing written, and so does
     /// a returned check that failed. The other returned checks are printed one line each,
     /// like `doctor`'s; return only those worth a line (warnings), a passing state is silent.
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<Vec<Check>, Error>;
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error>;
     /// `doctor` lines: tool versions and sign-in, never identities or values (FR-3).
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
@@ -156,8 +156,18 @@ pub struct StoreNameRules {
 /// One named `doctor` check line.
 #[derive(Debug)]
 pub struct Check {
-    pub name: &'static str,
+    pub name: std::borrow::Cow<'static, str>,
     pub outcome: Result<Verdict, Error>,
+}
+
+/// What a target's read-only state checks found (NR-24): lines to print, and whether a
+/// requested deploy has nothing to act on.
+#[derive(Debug, Default)]
+pub struct Preflight {
+    pub checks: Vec<Check>,
+    /// Set when the runtime has nothing to restart: `sync --deploy` skips the deploy and
+    /// prints this line instead (exit 0).
+    pub skip_deploy: Option<String>,
 }
 
 /// A passing check: ok, or ok with a warning.

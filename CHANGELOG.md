@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `opv sync` checks the Fly app before its first write (`flyctl status`, `flyctl releases`): a suspended or dead app, or a deploy already running, stops it with nothing written and the next command; stopped machines, or none, print a `warn` line and staging goes ahead (NR-23, NR-24).
+- `opv sync` checks the Fly app before its first write (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running stops it with nothing written and the next step; suspended, pending or stopped-machine apps print a `warn` line and staging goes ahead, and `--deploy` is skipped with a notice when the app has no machines (NR-23, NR-24).
 - After staging, `sync` re-reads Fly's list for up to 30 seconds until every staged name shows a digest, so a lagging list is never reported as unchanged (NR-30).
 
 ### Changed

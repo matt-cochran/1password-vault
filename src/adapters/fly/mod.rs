@@ -60,7 +60,7 @@ use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::ports::{StagedRuntime, StagedStore, Store};
-use crate::provider::{Check, Verdict};
+use crate::provider::{Check, Preflight, Verdict};
 use crate::runner::{
     Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
 };
@@ -249,22 +249,26 @@ struct Release {
 }
 
 /// Fly state before the first write (NR-24): two reads, `flyctl status --app <app> --json`
-/// and `flyctl releases --app <app> --json`.
+/// and `flyctl releases --app <app> --json` (shapes recorded from real flyctl output in
+/// `tests/fixtures/fly/`).
 ///
-/// - App `suspended` or `dead`: refused (`Target`) with `flyctl apps resume <app>`.
-/// - No machines, or none started: a warning; secrets still stage, and a deploy updates
-///   stopped machines on their next start (a deploy with no machine at all fails, D0).
-/// - Latest release `pending` / `running` (or `InProgress`): refused, a deploy is running.
+/// - App `dead`: refused (`Target`); it cannot hold secrets.
+/// - No machines (`suspended` and `pending` apps on the Machines platform have none): a
+///   warning; secrets are app-level so they still stage, and `skip_deploy` is set because
+///   there is nothing to restart.
+/// - Machines present but none started: a warning; secrets still stage.
+/// - Latest release `InProgress`, `pending` or `running`: refused, a deploy is running.
 ///
 /// A missing or unreachable app fails the read and is diagnosed like any flyctl call
 /// (FR-26); an unanswered read is the outage error (NR-28).
-pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Vec<Check>, Error> {
+pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Preflight, Error> {
     let status: AppStatus = read_json(r, "fly status", app, &["status", "--app", app, "--json"])?;
     let state = status.status.unwrap_or_default().to_ascii_lowercase();
-    if matches!(state.as_str(), "suspended" | "dead") {
+    if state == "dead" {
         return Err(Error::Target(format!(
-            "Fly app {app} is {state}; nothing was changed\n  Next: {PROGRAM} apps resume {app}, \
-             then re-run"
+            "Fly app {app} is dead (deleted) and cannot hold secrets; nothing was changed\n  \
+             Next: recreate it with `{PROGRAM} apps create {app}`, or correct the app name in \
+             secrets.toml, then re-run"
         )));
     }
     let machines = status.machines.unwrap_or_default();
@@ -272,19 +276,22 @@ pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Vec<Check>, Error> 
         .iter()
         .filter(|m| matches!(m.state.as_deref(), Some("started" | "starting")))
         .count();
-    let mut checks = Vec::new();
+    let mut pre = Preflight::default();
     let warn = |detail: String| Check {
-        name: "fly app",
+        name: format!("fly app {app}").into(),
         outcome: Ok(Verdict::Warn(detail)),
     };
-    if machines.is_empty() {
-        checks.push(warn(format!(
-            "{app} has no machines: secrets still stage; a deploy needs a machine \
-             ({PROGRAM} deploy --app {app})"
+    if machines.is_empty() || matches!(state.as_str(), "suspended" | "pending") {
+        pre.checks.push(warn(format!(
+            "no machines; secrets are staged and apply when machines start (fly scale \
+             count 1 --app {app})"
         )));
+        pre.skip_deploy = Some(format!(
+            "deploy skipped: {app} has no machines; staged secrets apply when machines start"
+        ));
     } else if started == 0 {
-        checks.push(warn(
-            "machines stopped: secrets still stage; deploy updates them on next start".into(),
+        pre.checks.push(warn(
+            "machines stopped; secrets are staged and apply when machines start".into(),
         ));
     }
     let releases: Vec<Release> = read_json(
@@ -296,17 +303,13 @@ pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Vec<Check>, Error> 
     let latest = releases
         .iter()
         .max_by_key(|r| r.version.unwrap_or(i64::MIN));
-    if let Some(rel) = latest.filter(|r| release_running(r)) {
-        let v = rel
-            .version
-            .map(|v| format!(" (release v{v})"))
-            .unwrap_or_default();
+    if latest.is_some_and(release_running) {
         return Err(Error::Target(format!(
-            "a deploy is already running on Fly app {app}{v}; nothing was changed\n  Next: \
-             wait, then re-run"
+            "a Fly deploy is already running for {app}; nothing was changed\n  Next: wait for it \
+             to finish, then re-run"
         )));
     }
-    Ok(checks)
+    Ok(pre)
 }
 
 fn release_running(r: &Release) -> bool {
@@ -1369,7 +1372,7 @@ mod tests {
             preflight(&r, "app")
                 .unwrap_err()
                 .to_string()
-                .contains("a deploy is already running on Fly app app (release v7)")
+                .contains("a Fly deploy is already running for app;")
         );
     }
 
