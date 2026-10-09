@@ -155,6 +155,7 @@ pub enum Shell {
 pub enum Tool {
     Op,
     Flyctl,
+    Az,
 }
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).
@@ -333,6 +334,9 @@ impl Host {
                 Tool::Flyctl => "install flyctl in the CI job (GitHub Actions: \
                                  uses: superfly/flyctl-actions/setup-flyctl@master)"
                     .into(),
+                Tool::Az => "install the Azure CLI in the CI job (GitHub Actions: \
+                             uses: azure/cli@v2)"
+                    .into(),
             };
         }
         let cmd = match (tool, self.platform) {
@@ -346,6 +350,9 @@ impl Host {
             (Tool::Flyctl, Platform::MacOs) => "brew install flyctl",
             (Tool::Flyctl, Platform::Windows) => "iwr https://fly.io/install.ps1 -useb | iex",
             (Tool::Flyctl, _) => "curl -L https://fly.io/install.sh | sh",
+            (Tool::Az, Platform::MacOs) => "brew install azure-cli",
+            (Tool::Az, Platform::Windows) => "winget install Microsoft.AzureCLI",
+            (Tool::Az, _) => "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash",
         };
         format!("install: {cmd}")
     }

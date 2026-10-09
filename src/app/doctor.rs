@@ -242,6 +242,7 @@ fn spawn_tool(
     let program = match tool {
         Tool::Op => OP,
         Tool::Flyctl => fly::PROGRAM,
+        Tool::Az => crate::adapters::az::PROGRAM,
     };
     spawn(r, program, args).map_err(|e| match e {
         Error::Dependency(m) if m.ends_with("not found on PATH") => {
