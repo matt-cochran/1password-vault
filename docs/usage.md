@@ -208,7 +208,7 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 - **An update already in progress.** If the Container App is being updated when opv starts (`provisioningState` `InProgress`), `sync` waits for it to finish, with a progress line, within `--timeout`. `status` and `plan` never wait: they print one `warn` line on stderr and show the current state.
 - **Superseded versions (Kubernetes).** After a healthy rollout, `--deploy` deletes the older version Secrets of each key that neither the Deployment nor any ReplicaSet still references (so `kubectl rollout undo` keeps working); Key Vault keeps old versions as history.
 - **Changed while applying.** opv changes only the variables it manages and checks that the rest of the app did not change under it. If it did, opv stops with the changed setting names (never values), and it is safe to re-run.
-- **Soft-deleted names (Key Vault).** A deleted secret name stays reserved until it is purged, so writing it again fails. opv prints the exact `az keyvault secret recover` command; it never recovers or purges anything itself. <!-- verify: exact recover command text -->
+- **Soft-deleted names (Key Vault).** A deleted secret name stays reserved until it is purged, so writing it again fails. opv prints the exact command, `az keyvault secret recover --vault-name <vault> --name <name>`; it never recovers or purges anything itself.
 - **Access.** The app's identity needs read access to the vault secrets. `opv doctor` warns, with the grant command, if it cannot confirm that. If the identity really cannot read a secret, Azure refuses the new revision, the old one keeps serving, and `sync` reports it.
 
 #### Key Vault → Kubernetes through External Secrets (`secrets_in`)
@@ -273,7 +273,7 @@ Names are target names. `held` lists immutable keys left alone, `kept` names not
 
 ### Guarded environments
 
-If an environment sets `confirm_env = true` ([configuration](configuration.md#guarding-an-environment-confirm_env)), `sync` refuses (exit 6) before any call unless you repeat the name: `opv sync prod --deploy --confirm prod`. The refusal ends with that exact command, with every flag you gave:
+If an environment sets `confirm_env = true` ([configuration](configuration.md#guarding-an-environment-confirm_env)), `sync` refuses (exit 6) before the first write unless you repeat the name (the read-only checks run first, so blocking keys are reported in the same refusal): `opv sync prod --deploy --confirm prod`. The refusal ends with that exact command, with every flag you gave:
 
 ```text
 opv: policy denied: environment prod is guarded (confirm_env = true): sync needs --confirm prod; nothing was changed
@@ -407,11 +407,16 @@ jobs:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       OP_CACHE: "false"
+      OPV_VERSION: v0.4.0   # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
+      - name: Install the 1Password CLI
+        uses: 1password/install-cli-action@v1
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Install opv
         run: |
-          base=https://github.com/matt-cochran/1password-vault/releases/download/v0.3.0
+          base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
           curl -fsSLO "$base/opv-x86_64-unknown-linux-musl"
           curl -fsSLO "$base/SHA256SUMS"
           sha256sum -c SHA256SUMS --ignore-missing
@@ -422,7 +427,7 @@ jobs:
 
 CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes either from `deploy_credentials` in that vault (opv reads it and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own) or from the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
 
-This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
+This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions); on Azure or Kubernetes, install `az` or `kubectl` instead of `flyctl` and sign the runner in to it (or use `deploy_credentials`). An environment with `confirm_env = true` also needs `--confirm <env>` in the job.
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
 ## Security model and limits

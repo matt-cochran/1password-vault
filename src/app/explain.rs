@@ -36,7 +36,7 @@ pub fn run(
     env: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let t = resolve(fleet, target)?;
+    let t = resolve(fleet, target).map_err(|e| runnable_next(fleet, env, e))?;
     let env_name = environment(fleet, &t, env)?;
     explain_in(fleet, &t, env_name, out)
 }
@@ -153,28 +153,76 @@ fn resolve_bare<'a>(fleet: &'a Fleet, key: &str) -> Result<Target<'a>, Error> {
                 &labels,
             ))
         }
-        many => Err(Error::Config(
-            format!(
-                "ambiguous key {key:?}: declared as {}; pass one of them",
-                many.iter()
-                    .map(|(p, k, _)| key_label(p, k))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        many => {
+            let (p, k, _) = many[0];
+            Err(Error::Config(
+                format!(
+                    "ambiguous key {key:?}: declared as {}; pass one of them",
+                    many.iter()
+                        .map(|(p, k, _)| key_label(p, k))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into(),
             )
-            .into(),
-        )),
+            .with_next(format!("opv explain {}", key_label(p, k))))
+        }
     }
 }
 
 /// A configuration error for a name `explain` does not know, with the close declared
-/// names (P8). One candidate becomes the single `Next:` step (NR-19); several are listed
-/// in the text and the category's default step stays.
+/// names (P8). The closest candidate becomes the `Next:` step (NR-19, H10); with none,
+/// [`runnable_next`] names a command that lists the declared keys.
 fn did_you_mean(text: String, close: &[&str]) -> Error {
     match close {
         [] => Error::Config(text.into()),
         [one] => Error::Config(format!("{text}; did you mean {one}?").into())
             .with_next(format!("opv explain {one}")),
-        many => Error::Config(format!("{text}; did you mean {}?", many.join(" or ")).into()),
+        many => Error::Config(format!("{text}; did you mean {}?", many.join(" or ")).into())
+            .with_next(format!("opv explain {}", many[0])),
+    }
+}
+
+/// `e` with a `Next:` step that runs as-is (H10): an `opv explain <label>` step gains the
+/// `--env` it needs when several environments are declared, and an error with no step gets
+/// the read-only command that lists the declared keys.
+fn runnable_next(fleet: &Fleet, env: Option<&str>, e: Error) -> Error {
+    let Some(label) = e
+        .next_step()
+        .and_then(|n| n.strip_prefix("opv explain "))
+        .map(str::to_string)
+    else {
+        let list = super::list_keys_command(fleet);
+        return e.or_next(|| list);
+    };
+    if label.contains(' ') {
+        return e;
+    }
+    let cmd = explain_command(fleet, &label, env);
+    e.with_next(cmd)
+}
+
+/// `opv explain <label>`, with `--env`: the one given, else none when only one environment
+/// is declared, else the first environment the key is declared for.
+fn explain_command(fleet: &Fleet, label: &str, env: Option<&str>) -> String {
+    if let Some(e) = env.filter(|e| fleet.environments.contains_key(*e)) {
+        return format!("opv explain {label} --env {e}");
+    }
+    if fleet.environments.len() <= 1 {
+        return format!("opv explain {label}");
+    }
+    let (product, key) = match label.split_once('/') {
+        Some((p, k)) => (p, k),
+        None => (SIMPLE_PRODUCT, label),
+    };
+    let declared = fleet
+        .products
+        .get(product)
+        .and_then(|p| p.keys.get(key))
+        .and_then(|spec| spec.environments.first());
+    match declared.or_else(|| fleet.environments.keys().next()) {
+        Some(e) => format!("opv explain {label} --env {e}"),
+        None => format!("opv explain {label}"),
     }
 }
 
@@ -196,26 +244,32 @@ fn environment<'a>(
                 (Some(only), None) => only.as_str(),
                 _ => {
                     let known: Vec<&str> = fleet.environments.keys().map(String::as_str).collect();
+                    let label = key_label(t.product, t.key);
                     return Err(Error::Config(
                         format!(
                             "several environments are declared ({}): pass --env <environment>",
                             known.join(", ")
                         )
                         .into(),
-                    ));
+                    )
+                    .with_next(explain_command(fleet, &label, None)));
                 }
             }
         }
     };
     if !t.spec.environments.iter().any(|e| e == name) {
-        return Err(Error::Config(
+        let label = key_label(t.product, t.key);
+        let mut err = Error::Config(
             format!(
-                "{} is not declared for environment {name:?} (declared for: {})",
-                key_label(t.product, t.key),
+                "{label} is not declared for environment {name:?} (declared for: {})",
                 t.spec.environments.join(", ")
             )
             .into(),
-        ));
+        );
+        if let Some(first) = t.spec.environments.first() {
+            err = err.with_next(format!("opv explain {label} --env {first}"));
+        }
+        return Err(err);
     }
     Ok(name)
 }
@@ -776,7 +830,7 @@ mod tests {
         let e = explain(&fleet(), "allumata/OPENAI_API_KY", Some("prod")).unwrap_err();
         assert_eq!(
             e.next_step(),
-            Some("opv explain allumata/OPENAI_API_KEY"),
+            Some("opv explain allumata/OPENAI_API_KEY --env prod"),
             "{e}"
         );
     }
@@ -786,7 +840,7 @@ mod tests {
         let e = explain(&fleet(), "alumata/OPENAI_API_KEY", Some("prod")).unwrap_err();
         assert_eq!(
             e.next_step(),
-            Some("opv explain allumata/OPENAI_API_KEY"),
+            Some("opv explain allumata/OPENAI_API_KEY --env prod"),
             "{e}"
         );
     }

@@ -2,6 +2,16 @@
 
 > opv is a Rust CLI that syncs secrets from 1Password into runtime targets (Fly.io, Azure Key Vault + Container Apps and Kubernetes today; Azure App Service, AWS and GCP planned) without ever printing, logging or writing a secret value. A committed `secrets.toml` declares IDs, key names, kinds and validation rules; values stay in 1Password.
 
+## Contract (read this first)
+
+- Safe without asking (change nothing): `opv doctor`, `opv status`, `opv plan`, `opv check`, `opv explain`, `opv guide agent`, `opv config export` (prints config values only, never secrets), `opv completions`, `--help`, `--version`.
+- Ask the user first, every time: `opv item skeleton` (the only 1Password write), `opv sync`, and the flags `--deploy`, `--prune`, `--rotate`, `--prune-immutable`, `--confirm`.
+- Hand to the user, never run yourself: `opv setup` and `opv login <env>` (they need the user's own terminal).
+- Never read or ask for a value: no `op read`, `op item get --reveal`, `op inject`, `op run -- env`.
+- Every failure ends with one `Next: <command>` line, the last line on stderr: a command that runs as-is. Run it (or show it); do not invent workarounds. A `Do:` line, when present, is a human action for the user (for example filling a field in 1Password). A configuration error names `file:line: field` and prints `fix:` with the edit.
+- Exit codes: 0 ok; 2 config or usage (fix first); 3 a CLI is missing (install it); 4 1Password; 5 target; 6 refused (read the message: blocking keys, `--confirm <env>` missing, needs the user's terminal, or `config export` refused); 7 not signed in; 8 findings from status, plan or check; 9 outcome unknown, safe to re-run as is (CI may retry); 130/143 interrupted, safe to re-run. Codes 2 to 8 need a fix before a retry.
+- `opv guide agent` prints the agent setup guide for the installed version. Prefer it to the web copies below, which follow `main`.
+
 Assistants setting opv up for a user: read the agent setup guide first and follow its rules. Never ask the user for a secret value, never read one (`op item get --reveal`, `op read`), and ask before `opv item skeleton`, `opv sync`, `--deploy`, `--prune`, `--rotate`, `--prune-immutable` or `--confirm`. On Azure and Kubernetes `sync` writes new secret versions and the app changes only with `--deploy`. Exit 9 means the outcome is unknown or a provider did not answer: nothing is known to be broken, re-run the same command.
 
 ## Docs

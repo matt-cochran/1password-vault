@@ -175,30 +175,122 @@ fn sync_json_holds_no_value() {
 
 #[test]
 fn confirm_env_requires_flag() {
-    let r = FakeRunner::new([]);
-    let (res, _) = sync_out(&guarded(), &r, &deploy());
+    let (res, _) = sync_out(&guarded(), &new_secrets(), &deploy());
     assert_eq!(res.unwrap_err().exit_code(), 6);
 }
 
 #[test]
 fn confirm_env_refusal_names_the_exact_command() {
-    let r = FakeRunner::new([]);
     let o = SyncOpts {
         prune: true,
         ..deploy()
     };
-    let (res, _) = sync_out(&guarded(), &r, &o);
+    let (res, _) = sync_out(&guarded(), &new_secrets(), &o);
     assert_eq!(
         res.unwrap_err().next_step(),
         Some("opv sync prod --deploy --prune --confirm prod")
     );
 }
 
+/// H12: the guard gates the first write; the read-only checks run before it.
 #[test]
-fn confirm_env_refuses_before_any_call() {
-    let r = FakeRunner::new([]);
+fn confirm_env_refuses_before_any_write() {
+    let r = new_secrets();
     let _ = sync_out(&guarded(), &r, &deploy());
+    assert!(!called(&r, "flyctl", &["secrets", "import"]));
+}
+
+/// H12: blocking keys and the missing --confirm are reported by one run.
+#[test]
+fn guarded_refusal_names_blocking_keys_and_the_confirm_flag() {
+    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), fly_empty()]);
+    let (res, _) = sync_out(&guarded(), &r, &deploy());
+    assert!(
+        matches!(&res, Err(Error::Policy(m))
+            if m.contains("allumata/OPENAI_API_KEY") && m.contains("add --confirm prod")),
+        "{res:?}"
+    );
+}
+
+/// H12: a --confirm naming another environment is still refused before any call.
+#[test]
+fn confirm_mismatch_refuses_before_any_call() {
+    let r = FakeRunner::new([]);
+    let o = SyncOpts {
+        confirm: Some("staging".into()),
+        ..deploy()
+    };
+    let _ = sync_out(&guarded(), &r, &o);
     assert!(r.calls.borrow().is_empty());
+}
+
+// ---- H10: usage errors name a runnable, read-only next step -------------------------
+
+#[test]
+fn unknown_environment_next_is_status_of_the_closest() {
+    let e = fleet().environment("prd").unwrap_err();
+    assert_eq!(e.next_step(), Some("opv status prod"));
+}
+
+#[test]
+fn unknown_environment_without_a_close_name_next_is_the_overview() {
+    let e = fleet().environment("nothing-like-it").unwrap_err();
+    assert_eq!(e.next_step(), Some("opv status"));
+}
+
+#[test]
+fn unknown_product_next_checks_the_closest_product() {
+    let e = super::local::select(&two_products(), "prod", Some("wb"), true).unwrap_err();
+    assert_eq!(e.next_step(), Some("opv check prod --product web"));
+}
+
+#[test]
+fn missing_product_next_checks_the_first_product() {
+    let e = super::local::select(&two_products(), "prod", None, true).unwrap_err();
+    assert_eq!(e.next_step(), Some("opv check prod --product allumata"));
+}
+
+#[test]
+fn undeclared_rotate_next_explains_the_closest_key() {
+    let o = SyncOpts {
+        rotate: vec!["allumata/INTEGRATION_ENC".into()],
+        ..SyncOpts::default()
+    };
+    let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
+    assert_eq!(
+        res.unwrap_err().next_step(),
+        Some("opv explain allumata/INTEGRATION_ENC_KEY --env prod")
+    );
+}
+
+#[test]
+fn prune_immutable_without_prune_next_is_plan() {
+    let o = SyncOpts {
+        prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
+        ..SyncOpts::default()
+    };
+    let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &o);
+    assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
+}
+
+#[test]
+fn explain_of_an_unknown_key_next_carries_the_env() {
+    let e =
+        super::explain::run(&fleet(), "allumata/OPENAI_KEY", None, &mut Vec::new()).unwrap_err();
+    assert_eq!(
+        e.next_step(),
+        Some("opv explain allumata/OPENAI_API_KEY --env prod")
+    );
+}
+
+#[test]
+fn explain_with_several_environments_next_names_one() {
+    let e =
+        super::explain::run(&fleet(), "allumata/SIGNUP_POLICY", None, &mut Vec::new()).unwrap_err();
+    assert_eq!(
+        e.next_step(),
+        Some("opv explain allumata/SIGNUP_POLICY --env staging")
+    );
 }
 
 #[test]

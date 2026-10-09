@@ -22,12 +22,22 @@ use crate::domain::{
 use crate::error::Error;
 use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetConfig};
 
-/// Read and validate the configuration at `path`.
+mod locate;
+
+/// Read and validate the configuration at `path`. An error names the file, the line and
+/// the field, and the fix when the message names what is allowed (H10, FR-2).
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
-    parse(&text)
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        Error::Config(
+            format!(
+                "cannot read {}: {e}\n  fix: check the path given with --config or OPV_CONFIG",
+                path.display()
+            )
+            .into(),
+        )
+    })?;
+    parse(&text).map_err(|e| locate::relocate(e, &text, path))
 }
 
 /// Walk up from `start`, returning the first directory that holds `secrets.toml`.

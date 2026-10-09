@@ -15,10 +15,12 @@ pub fn select(
     fleet.environment(env)?;
     if fleet.is_simple() && product.is_some() {
         return Err(Error::Config(
-            "--product is not used under the simple profile".into(),
-        ));
+            "--product is not used under the simple profile; run the command without it".into(),
+        )
+        .with_next(super::check_command(fleet, Some(env), None)));
     }
     if !fleet.is_simple() && required && product.is_none() {
+        let first = fleet.products.keys().next().map(String::as_str);
         return Err(Error::Config(format!(
             "--product is required because this configuration contains multiple products. Choose --product <name> (available: {}).",
             fleet
@@ -27,23 +29,13 @@ pub fn select(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        ).into()));
+        ).into())
+        .with_next(super::check_command(fleet, Some(env), first)));
     }
     if let Some(p) = product
         && !fleet.products.contains_key(p)
     {
-        return Err(Error::Config(
-            format!(
-                "undefined product {p:?}; choose one of: {}",
-                fleet
-                    .products
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-            .into(),
-        ));
+        return Err(super::undefined_product(fleet, p, Some(env)));
     }
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);

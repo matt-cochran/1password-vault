@@ -80,9 +80,9 @@ The install script and npm put `opv` in the same place, so either one can instal
 | OS | Location |
 |---|---|
 | Linux, macOS, WSL | `~/.local/bin/opv` |
-| Windows | `%LOCALAPPDATA%\Programs\opv\opv.exe` <!-- verify: Windows path and PATH handling --> |
+| Windows | `%LOCALAPPDATA%\Programs\opv\opv.exe` |
 
-`npm i -g @matthew-cochran/opv` copies the binary there when it installs, and `npm uninstall -g` removes it only if opv put it there. It never overwrites a file that is not an opv binary. If you installed with `--ignore-scripts`, opv still runs and tells you once to run `npm rebuild @matthew-cochran/opv`. If `~/.local/bin` is not on `PATH`, the installer prints the line to add. <!-- verify: exact messages -->
+`npm i -g @matthew-cochran/opv` copies the binary there when it installs, and `npm uninstall -g` removes it only if opv put it there. It never overwrites a file that is not an opv binary. If you installed with `--ignore-scripts`, opv still runs and tells you once: `opv is not installed at ~/.local/bin; run: npm rebuild @matthew-cochran/opv`. If `~/.local/bin` is not on `PATH`, the installer prints the line to add.
 
 `opv doctor` lists every `opv` it finds on `PATH` with its version. More than one different file is a warning with the command that removes the extra one. `cargo install` uses `~/.cargo/bin`, which is a different location: use it only if you do not use the others, then remove the extras:
 
@@ -129,7 +129,7 @@ Install only what your target needs; `opv doctor` checks exactly that and prints
 | 1Password CLI `op` | tested with 2.40.0 | everything |
 | `flyctl` | tested with 0.4.112 and later 0.4.x patches | Fly targets |
 | Azure CLI `az` | 2.60 or newer | Azure targets |
-| `kubectl` | a version that matches your cluster | Kubernetes targets <!-- verify: minimum version --> |
+| `kubectl` | a version that matches your cluster (opv checks only that it runs) | Kubernetes targets |
 
 `opv doctor` warns (exit code unchanged) when a version differs.
 

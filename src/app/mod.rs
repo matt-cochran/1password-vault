@@ -16,6 +16,7 @@ pub mod doctor;
 pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
+pub mod guide;
 pub mod init;
 pub mod local;
 pub mod login;
@@ -565,16 +566,66 @@ pub(crate) fn check_product(fleet: &Fleet, product: Option<&str>) -> Result<(), 
     let Some(p) = product else { return Ok(()) };
     if fleet.is_simple() {
         return Err(Error::Config(
-            "--product is not used under the simple profile".into(),
-        ));
+            "--product is not used under the simple profile; run the command without it".into(),
+        )
+        .with_next("opv status"));
     }
     if !fleet.products.contains_key(p) {
-        let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        return Err(Error::Config(
-            format!("undefined product {p:?}; choose one of: {}", all.join(", ")).into(),
-        ));
+        return Err(undefined_product(fleet, p, None));
     }
     Ok(())
+}
+
+/// An undeclared `--product`: the declared ones, the closest named, and a `Next:` step that
+/// checks the closest (else the first) product's keys, read-only (H10). `env` is the
+/// environment of the command when known; otherwise the first one declared.
+pub(crate) fn undefined_product(fleet: &Fleet, p: &str, env: Option<&str>) -> Error {
+    let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
+    let close = suggest::close(p, all.iter().copied());
+    let hint = close
+        .first()
+        .map(|c| format!("; did you mean {c}?"))
+        .unwrap_or_default();
+    let pick = close
+        .first()
+        .or(all.first())
+        .copied()
+        .unwrap_or("<product>");
+    Error::Config(
+        format!(
+            "undefined product {p:?}; choose one of: {}{hint}",
+            all.join(", ")
+        )
+        .into(),
+    )
+    .with_next(check_command(fleet, env, Some(pick)))
+}
+
+/// A read-only command that lists every declared key by name: `status` of the first
+/// environment with a target, else `check` of the first environment (and product).
+pub(crate) fn list_keys_command(fleet: &Fleet) -> String {
+    if let Some((name, _)) = fleet
+        .environments
+        .iter()
+        .find(|(_, e)| e.target().is_some())
+    {
+        return format!("opv status {name}");
+    }
+    let first = fleet.products.keys().next().map(String::as_str);
+    check_command(fleet, None, first)
+}
+
+/// `opv check <env> [--product <p>]`: a read-only look at one product's keys in `env` (the
+/// first environment declared when `env` is unknown), for `Next:` steps.
+pub(crate) fn check_command(fleet: &Fleet, env: Option<&str>, product: Option<&str>) -> String {
+    let env = env
+        .filter(|e| fleet.environments.contains_key(*e))
+        .or_else(|| fleet.environments.keys().next().map(String::as_str))
+        .unwrap_or("<env>");
+    match product.filter(|_| !fleet.is_simple()) {
+        Some(p) => format!("opv check {env} --product {p}"),
+        None => format!("opv check {env}"),
+    }
 }
 
 /// The target names `product`'s declared keys render in `env_name` (its share of the managed
@@ -692,12 +743,17 @@ pub(crate) fn target<'f>(
     Err(Error::Config(
         format!(
             "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add one target section ({}) to environment {env} in secrets.toml first.",
+             deploy, add one target section ({}) to environment {env} in secrets.toml first \
+             ({DOCS}/configuration.md).",
             sections.join(", ")
         )
         .into(),
     )
-    .with_next(format!("{DOCS}/configuration.md")))
+    .with_next(check_command(
+        fleet,
+        Some(env),
+        fleet.products.keys().next().map(String::as_str),
+    )))
 }
 
 /// Where the user documentation lives (for next steps that are a page to read).
