@@ -177,7 +177,10 @@ fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, E
                 Kind::Secret => "CONCEALED",
                 Kind::Config => "STRING",
             };
-            if doc["fields"][index].get("type").and_then(Value::as_str) != Some(expected) {
+            let ty = doc["fields"][index].get("type").and_then(Value::as_str);
+            // Config kept concealed is accepted as it is (FR-43).
+            if ty != Some(expected) && !(definition.kind == Kind::Config && ty == Some("CONCEALED"))
+            {
                 return Err(settings_error(&format!(
                     "{} has the wrong field type. In 1Password change it to {} while keeping the value, then rerun setup.",
                     definition.title,
@@ -351,10 +354,23 @@ pub fn run(
         ))?;
         Output::success(br#"{"category":"SECURE_NOTE","fields":[],"sections":[]}"#.to_vec())
     };
-    let mut doc = WipeOnDrop(serde_json::from_slice(&raw.stdout).map_err(|_| {
-        source_error("The item response is invalid. No contents printed; no item changed.")
-    })?);
-    let before = serialize_exact(&doc.0)?;
+    let invalid =
+        || source_error("The item response is invalid. No contents printed; no item changed.");
+    let before = {
+        let original = WipeOnDrop(serde_json::from_slice(&raw.stdout).map_err(|_| invalid())?);
+        serialize_exact(&original.0)?
+    };
+    // FR-43: lay an existing item out to the convention first (saved with the progress
+    // below, only if the owner confirms). Nothing is deleted; old copies go to "opv · kept".
+    let tidied = match &item_id {
+        Some(id) if super::tidy::active() => tidy_layout(&recipe, &vault, id, &raw.stdout, ui)?,
+        _ => None,
+    };
+    let mut doc = WipeOnDrop(
+        serde_json::from_slice(tidied.as_deref().map_or(&raw.stdout[..], |t| &t[..]))
+            .map_err(|_| invalid())?,
+    );
+    drop(tidied);
     let indices = field_indices(&mut doc.0, &active)?;
     let mut import = BTreeMap::new();
     if let Some(path) = &recipe.legacy_env {
@@ -483,6 +499,29 @@ pub fn run(
         ui.show(&format!("Saved progress. Still needed: {}.\nFill those fields privately in 1Password, or rerun this same setup command. No infrastructure changed.", missing.join(", ")))?;
         Ok(8)
     }
+}
+
+/// The existing item tidied to the convention (FR-43), or `None` when it already follows it.
+fn tidy_layout(
+    recipe: &Recipe,
+    vault: &str,
+    item_id: &str,
+    raw: &[u8],
+    ui: &mut dyn Interaction,
+) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+    use crate::adapters::onepassword_tidy;
+    use crate::domain::convention;
+    let fleet = config::parse(&recipe.manifest(vault, item_id)?)?;
+    let (layout, _) = onepassword_tidy::parse(raw)?;
+    let plan = convention::plan(&layout, &fleet, &recipe.environment, &super::tidy::today());
+    if plan.is_empty() {
+        return Ok(None);
+    }
+    ui.show(&format!(
+        "Tidying the item to opv's layout: {}.",
+        plan.summary()
+    ))?;
+    onepassword_tidy::apply(raw, &plan).map(Some)
 }
 
 fn quoted(path: &Path) -> String {

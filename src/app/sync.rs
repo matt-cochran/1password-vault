@@ -1655,20 +1655,16 @@ mod tests {
     }
 
     #[test]
-    fn sync_refuses_on_wrong_kind_and_rule_failure() {
-        for item in [
-            complete_with(text("allumata", "OPENAI_API_KEY", OPENAI)),
-            complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE")),
-            complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)),
-        ] {
-            let r = fake_with(item, fly_with_prunable());
-            let (res, out) = sync_out(&f(), &r, &all_flags());
-            let e = res.unwrap_err();
-            assert!(matches!(e, Error::Policy(_)), "{e}");
-            assert_no_values(&e.to_string());
-            assert_no_values(&out);
-            assert_nothing_mutated(&r);
-        }
+    fn sync_refuses_on_rule_failure() {
+        // A key stored as the other kind is read tolerantly (FR-43), so only rules block.
+        let item = complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE"));
+        let r = fake_with(item, fly_with_prunable());
+        let (res, out) = sync_out(&f(), &r, &all_flags());
+        let e = res.unwrap_err();
+        assert!(matches!(e, Error::Policy(_)), "{e}");
+        assert_no_values(&e.to_string());
+        assert_no_values(&out);
+        assert_nothing_mutated(&r);
     }
 
     /// A value Fly's import parser would mangle is refused before anything is staged, as a

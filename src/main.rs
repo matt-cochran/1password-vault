@@ -475,7 +475,7 @@ enum ConfigCmd {
 
 #[derive(Subcommand)]
 enum ItemCmd {
-    /// Add every missing declared field to the item, empty; the only 1Password write.
+    /// Add every missing declared field to the item, empty (a signed-in person's runs do this too).
     Skeleton {
         /// Environment name from the configuration (for example staging or prod).
         env: String,

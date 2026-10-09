@@ -151,15 +151,21 @@ fn status_lists_problem_rows_before_saved_rows() {
 
 #[test]
 fn wrong_kind_says_which_field_type_is_needed() {
-    let r = FakeRunner::new([
-        complete_with(text("allumata", "OPENAI_API_KEY", OPENAI)),
-        fly_empty(),
-        whoami(),
-    ]);
-    let (_, out) = status_text(&r);
-    assert!(
-        out.contains("wrong kind (stored as text; declared secret: use a concealed field)"),
-        "{out}"
+    // Since FR-43 a field opv finds is read whatever its type, so `wrong_kind` only comes
+    // from a planner that still reports it; the label keeps the full fix reason (H4).
+    let row = crate::domain::Row {
+        product: "allumata".into(),
+        key: "OPENAI_API_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state: crate::domain::KeyState::WrongKind,
+        target: crate::domain::TargetState::Absent,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    };
+    assert_eq!(
+        super::row_state_label(&row),
+        "wrong kind (stored as text; declared secret: use a concealed field)"
     );
 }
 

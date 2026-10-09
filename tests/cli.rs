@@ -393,7 +393,9 @@ mod run_with_fake_op {
             let op = dir.join("op");
             std::fs::write(
                 &op,
-                "#!/bin/sh\necho called >> \"$FAKE_OP_LOG\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+                // `run` first reads the item once (FR-43): an empty item, and a session
+                // whoami cannot classify, so nothing is tidied and nothing is printed.
+                "#!/bin/sh\necho \"$1\" >> \"$FAKE_OP_LOG\"\ncase \"$1\" in\n  item) echo '{\"fields\":[]}'; exit 0 ;;\n  whoami) exit 1 ;;\n  account) echo '[]'; exit 0 ;;\nesac\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
             )
             .unwrap();
             std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -461,7 +463,8 @@ mod run_with_fake_op {
         );
         assert_eq!(code, 7, "{err}");
         assert!(err.is_empty(), "no opv message for a child exit: {err}");
-        assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 1);
+        let log = std::fs::read_to_string(log).unwrap();
+        assert_eq!(log.lines().filter(|l| *l == "run").count(), 1, "{log}");
     }
 
     #[test]

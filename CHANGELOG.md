@@ -45,9 +45,12 @@ before upgrading.
 - `opv explain KEY` resolves the product when only one declares the key, lists the candidates when several do, and suggests close names for an unknown key or product; a single close name becomes the `Next:` command.
 - When an external call fails, its last stderr lines (at most 5, every secret masked as `__SECRET__`) follow opv's error line as `  <program> said: …`, before the `Next:` line (NR-31).
 - After staging, `sync` re-reads Fly's list for up to 30 seconds until every staged name shows a digest, so a lagging list is never reported as unchanged (NR-30).
+- Self-healing 1Password conventions (FR-43): you no longer lay out the item by hand. Every command finds each declared key wherever its field is (label spelled differently, wrong section, top level, saved as the other kind, given twice), so a layout difference never blocks a command. Run by a signed-in person, opv also tidies the item in one atomic edit: creates missing sections and empty fields, conceals secrets saved as text, renames and moves fields, sets duplicates aside, and fixes a trailing newline or a missing `ensure_prefix` where the rules make the intent unambiguous. Nothing is deleted: displaced or replaced copies go to section `opv · kept`. One `tidied 1Password (<env>): ...` line on stderr and a `tidy` array in `--json` say what changed. Service accounts, Connect and CI never write; they print one note instead. `opv init` creates a missing vault or item for a person. See [configuration](docs/configuration.md#store-layout).
 
 ### Changed
 
+- A key saved as the other field type, a duplicate label, or a field outside its section is no longer an error in `status`, `plan`, `sync`, `check`, `config export`, `init` or `setup`; it is read tolerantly (and tidied for a person). `wrong kind` no longer appears for a field opv can find (FR-43).
+- `run` reads the item once before `op run`, to tidy it (for a person) or to reference a misplaced field by its ID (FR-43).
 - A 1Password or Fly read that gets no answer after 3 attempts exits 9 naming the provider, the step and its status page (status.1password.com, status.flyio.net); nothing was changed. It was exit 4 (1Password) or 5 (Fly) (NR-28).
 - With no `secrets.toml`, opv offers both ways to start: `opv init` for an existing 1Password item, `opv setup` for a new project. `opv setup` without `opv.setup.toml` points to the generic recipe and the command that uses it.
 - On an interactive terminal the sign-in advice is `opv session   (or: eval $(op signin))`; CI and service-account wording is unchanged.

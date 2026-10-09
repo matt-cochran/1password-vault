@@ -417,17 +417,12 @@ fn invalid_section_names_are_skipped_by_name() {
 }
 
 #[test]
-fn duplicate_field_is_an_error_and_nothing_is_written() {
+fn duplicate_field_is_declared_once() {
+    // FR-43: a label given twice is read tolerantly, never an error.
     let mut fs_ = simple_fields();
     fs_.push(text("", "LOG_LEVEL", &v("debug")));
-    let (dir, run) = init_with(&fs_, &args(None, false));
-    assert_eq!(run.err().exit_code(), 4);
-    assert!(
-        run.err()
-            .to_string()
-            .contains("duplicate field \"LOG_LEVEL\"")
-    );
-    assert!(dir_entries(dir.path()).is_empty());
+    let (_dir, run) = init_with(&fs_, &args(None, false));
+    assert_eq!(run.file().matches("[keys.LOG_LEVEL]").count(), 1);
 }
 
 #[test]
@@ -716,7 +711,7 @@ fn wrong_type_note_uses_the_rejection_wording() {
 
 /// The readers reject a label given twice whatever the field types, so init does too.
 #[test]
-fn duplicates_are_found_across_skipped_types_and_sections() {
+fn duplicates_never_fail_init() {
     let bad = json!({"id": "s", "label": "My App"});
     let cases: Vec<(Vec<serde_json::Value>, &str)> = vec![
         (
@@ -739,12 +734,10 @@ fn duplicates_are_found_across_skipped_types_and_sections() {
             "duplicate field \"TOKEN\"",
         ),
     ];
-    for (fields, want) in cases {
-        let (dir, run) = init_raw(fields, &args(None, false));
-        let e = run.err();
-        assert_eq!(e.exit_code(), 4, "{e}");
-        assert!(e.to_string().contains(want), "{e}");
-        assert!(dir_entries(dir.path()).is_empty());
+    // FR-43: duplicates are read tolerantly; init writes the file.
+    for (fields, _was) in cases {
+        let (_dir, run) = init_raw(fields, &args(None, false));
+        assert!(run.res.is_ok(), "{:?}", run.res);
     }
 }
 

@@ -452,7 +452,7 @@ mod tests {
         (res, text_of(&out), r)
     }
 
-    /// Every value-bearing path: saved rows, rule failures, wrong kind, missing (with
+    /// Every value-bearing path: saved rows, rule failures, the other kind, missing (with
     /// guidance), extras, and the returned error. The marker must never appear.
     #[test]
     fn status_prints_names_never_values() {
@@ -469,11 +469,12 @@ mod tests {
             ),
             (
                 vec![
+                    // Stored as the other kind: read tolerantly (FR-43).
                     text("allumata", "OPENAI_API_KEY", OPENAI),
                     secret("allumata", "INTEGRATION_ENC_KEY", &enc()),
                     secret("allumata", "SIGNUP_POLICY", POLICY),
                 ],
-                "wrong kind",
+                "saved",
             ),
             (
                 vec![

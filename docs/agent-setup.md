@@ -8,7 +8,8 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 2. **Never read a value.** Do not run `op item get --reveal`, `op read`, `op inject`, `op run -- env`, or anything that prints a field's value. opv has no command that prints a secret; do not build one out of other commands.
 3. **Never write a value to disk or argv.** No `.env` files, no `secrets.toml` values, no values in command arguments or CI logs. `secrets.toml` holds IDs, names, kinds and rules only.
 4. **Ask before anything that changes something outside the repo.** Get the user's explicit yes, for this run, before:
-   - `opv item skeleton <env>` (adds empty fields to the 1Password item; the only opv command that writes to 1Password);
+   - `opv item skeleton <env>` (adds empty fields to the 1Password item);
+   - any opv command run in the user's own signed-in session, the first time: it tidies the 1Password item's layout (creates missing sections and empty fields, conceals secrets saved as text, renames and moves fields, sets duplicates aside in `opv · kept`). It never deletes or prints a value and says what it changed in one line; tell the user before the first run;
    - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
    - `--deploy` (restarts or redeploys the app, or starts a new revision or rollout), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed).
    `doctor`, `status`, `plan`, `explain` and `config export` change nothing.
@@ -33,7 +34,7 @@ Ask the user how their secrets are organised, or look at the 1Password item's sh
 - **simple**: one app per environment, fields directly in the item (no sections). Most projects.
 - **fleet**: several products on one app, one section per product, names built from a template such as `FLEET__{PRODUCT}__{KEY}`.
 
-A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own vault and item.
+A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own vault and item. Do not ask the user to rearrange 1Password: opv finds fields wherever they are, and the user's own runs tidy the layout (see [configuration.md](configuration.md#store-layout)).
 
 ## 3. Create `secrets.toml`
 
@@ -45,7 +46,7 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging
 
 Repeat per environment by adding the next `[environments.<env>]` block by hand (vault ID and item ID, plus `fly.app` only for an environment that deploys to Fly; a local-only `dev` environment has none), copying the IDs from `opv init` output or from `op vault list --format json` and `op item list --vault <vault> --format json` (these list IDs and titles, not values). Then add rules where the user knows the format of a value, for example `rules = { prefix = "sk-" }` or `rules = { base64_bytes = 32 }`; see [configuration.md](configuration.md#rules-reference). Mark keys that must never change once set (encryption keys) with `immutable = true`. When two products use the same value, declare it once and point the other key at it with `from = "<product>/<KEY>"` ([configuration.md](configuration.md#shared-keys-from)) instead of asking the user to fill in a second copy.
 
-If there is no item yet, write `secrets.toml` from the example in [configuration.md](configuration.md), then (with the user's yes) run `opv item skeleton <env>` to create the empty fields.
+If there is no item yet, `opv init` run by the user creates it (and the vault, if their account allows it) and writes the IDs. Otherwise write `secrets.toml` from the example in [configuration.md](configuration.md); the user's next opv run creates the empty fields (or, with the user's yes, run `opv item skeleton <env>`).
 
 Then:
 
@@ -142,7 +143,7 @@ More patterns: [usage.md](usage.md#local-development).
 
 - Create a 1Password service account with **read-only** access to each environment's vault, and a Fly deploy token. The user creates both and stores them as CI secrets (for example `OP_SERVICE_ACCOUNT_TOKEN` and `FLY_API_TOKEN`); you never see them.
 - Add `opv sync <env>` (and `--deploy` only if the user wants CI to deploy) to the workflow. A ready-made GitHub Actions job is in [usage.md](usage.md#github-actions-example).
-- `item skeleton` needs a write-capable identity; never give one to CI.
+- `item skeleton` needs a write-capable identity; never give one to CI. Under a service account opv never writes to 1Password; it reads the item as it is and notes that the next local run will tidy it.
 
 ## Exit codes
 

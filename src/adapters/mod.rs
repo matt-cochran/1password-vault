@@ -9,5 +9,7 @@ pub mod kubernetes;
 pub mod onepassword;
 /// Dev-time title lookup and value-free item read, for `opv init` only (FR-23).
 pub(crate) mod onepassword_init;
+/// Tolerant item parse and the tidy write (FR-43).
+pub mod onepassword_tidy;
 pub(crate) mod probe;
 pub mod registry;

@@ -76,7 +76,7 @@ pub fn check(
         .get_mut(env)
         .expect("selected env")
         .target = None;
-    let mut plan = read_and_plan_products(&selected, env, runner)?;
+    let mut plan = read_and_plan_products(&selected, fleet, env, runner)?;
     plan.extras.clear();
     let findings = plan.blocking();
     // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
@@ -100,7 +100,7 @@ pub fn check(
                 }
             })
             .collect();
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env,
             "product": product,
@@ -109,6 +109,10 @@ pub fn check(
             "findings": findings,
             "totals": {"rows": plan.rows.len(), "findings": findings},
         });
+        // FR-43: what opv tidied in 1Password before reading, names only; omitted when none.
+        if !plan.tidy.is_empty() {
+            doc["tidy"] = serde_json::json!(super::json_tidy(&plan.tidy));
+        }
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
         for row in super::problems_first(&plan.rows) {
@@ -210,13 +214,14 @@ mod tests {
     }
 
     #[test]
-    fn check_kind_failure_reports_names_not_values() {
+    fn check_reads_a_secret_stored_as_text_without_values() {
+        // FR-43: the other kind is read tolerantly, never a finding.
         let r = FakeRunner::new([item(&[text("allumata", "OPENAI_API_KEY", OPENAI)])]);
         let mut out = Vec::new();
         let _ = check(&fleet(), "prod", Some("allumata"), &r, &mut out, true);
         let text = text_of(&out);
         assert_no_values(&text);
-        assert!(text.contains("wrong_kind"));
+        assert!(!text.contains("wrong_kind"), "{text}");
     }
     #[test]
     fn malformed_field_in_another_products_section_does_not_fail_the_check() {

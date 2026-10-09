@@ -462,12 +462,8 @@ fn item_check(
         return report.skip(ITEM_CHECK, "not checked (undefined environment)".into());
     };
     let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
-    let item = if fleet.is_simple() {
-        onepassword::read_item_as(r, env, fleet.profile)
-    } else {
-        onepassword::read_item_in_sections(r, env, fleet.profile, &sections)
-    };
-    let item = match item {
+    // Tolerant, and tidied when a person runs doctor (FR-43).
+    let item = match super::tidy::read(fleet, env_name, r) {
         Ok(i) => i,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
