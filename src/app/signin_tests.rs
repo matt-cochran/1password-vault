@@ -208,3 +208,58 @@ environments = ["dev"]
     let target = fl.environment("dev").unwrap().target().unwrap();
     assert_eq!(crate::provider::deploy_provider(target).section(), "azure");
 }
+
+/// Signed out of 1Password, the deploy-credential read (the first call of `status prod`)
+/// is diagnosed at once and names the environment in its sign-in step, which is the
+/// error's `Next:` (FR-40, UX1).
+#[test]
+fn signed_out_deploy_read_names_opv_login_for_the_environment() {
+    let fl = fleet_with_credentials();
+    let r = FakeRunner::new([
+        crate::runner::Output::failure(1),
+        crate::runner::Output::failure(1),
+        crate::runner::Output::success(br#"[{"url":"x"}]"#.to_vec()),
+    ]);
+    let tty = Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").tty());
+    let res = crate::host::with_test_host(tty, || {
+        open_on(&fl, "prod", &r, Reach::Target, &linux).map(|_| ())
+    });
+    let e = res.expect_err("signed out");
+    assert_eq!(e.default_next("-"), "sign in: opv login prod", "{e:?}");
+}
+
+/// `doctor --env` keeps the failed deploy read's scrubbed stderr in `error::report`'s
+/// order: the error line, then `  op said: …`, then the rest (NR-31, UX1).
+#[test]
+fn doctor_deploy_failure_puts_the_excerpt_after_the_error_line() {
+    let e = doctor_signed_out_deploy_failure();
+    assert_eq!(
+        e.text().lines().nth(1),
+        Some("  op said: [ERROR] not signed in"),
+        "{e:?}"
+    );
+}
+
+/// The excerpt never replaces the sign-in step, which stays the error's `Next:`.
+#[test]
+fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
+    let e = doctor_signed_out_deploy_failure();
+    assert_eq!(e.next_step(), Some("sign in: opv login prod"), "{e:?}");
+}
+
+fn doctor_signed_out_deploy_failure() -> Error {
+    let fl = fleet_with_credentials();
+    let r = FakeRunner::new([]);
+    r.push_with_stderr(crate::runner::Output::failure(1), "[ERROR] not signed in");
+    r.responses
+        .borrow_mut()
+        .push_back(Ok(crate::runner::Output::failure(1)));
+    r.responses
+        .borrow_mut()
+        .push_back(Ok(crate::runner::Output::success(
+            br#"[{"url":"x"}]"#.to_vec(),
+        )));
+    let tty = Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").tty());
+    crate::host::with_test_host(tty, || open_for_doctor_on(&fl, "prod", &r, &linux).1)
+        .expect("signed out")
+}

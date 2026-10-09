@@ -161,13 +161,17 @@ pub fn overview(fleet: &Fleet, r: &dyn CommandRunner, out: &mut dyn Write) -> Re
     }
 }
 
-/// One environment's rows, for [`overview`].
+/// One environment's rows, for [`overview`]. Each environment uses its own 1Password
+/// account and deploy credentials, signed out again before the next one (FR-40).
 fn env_rows(
     fleet: &Fleet,
     env_name: &str,
     t: &dyn TargetConfig,
     r: &dyn CommandRunner,
 ) -> Result<Vec<Row>, Error> {
+    let signed_in =
+        crate::app::signin::open(fleet, env_name, r, crate::app::signin::Reach::Target)?;
+    let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, r)?;
     preflight::read(t, r)?;
     let none = BTreeSet::new();

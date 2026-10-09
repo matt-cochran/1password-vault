@@ -269,7 +269,7 @@ pub(crate) mod pipe {
             if self.served() == 0 {
                 return Err(Error::Target(
                     "az exited without reading the value from opv's private pipe; nothing was \
-                     sent\n  next: check that `az version` runs, then run opv again"
+                     sent\n  next: check that az version runs, then run opv again"
                         .into(),
                 ));
             }

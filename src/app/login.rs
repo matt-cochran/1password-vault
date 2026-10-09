@@ -22,8 +22,9 @@ pub fn account(
         return match env {
             Some(e) => Err(Error::Config(
                 format!(
-                    "no secrets.toml found, so environment {e:?} is unknown. Run opv login without \
-                 an environment to use your default 1Password account, or pass --config <path>."
+                    "no secrets.toml found, so environment {e:?} is unknown; opv login without \
+                 an environment uses your default 1Password account\n  next: opv --config \
+                 <path> login {e}"
                 )
                 .into(),
             )),

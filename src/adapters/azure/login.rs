@@ -437,7 +437,7 @@ impl DeployLogin for AzureLogin {
             } => Err(rejected(format!("exit {s}"))),
             Outcome::Unknown { reason, .. } => Err(Error::Target(
                 format!(
-                    "deploy credentials: {}; nothing was changed\n  next: re-run",
+                    "deploy credentials: {}; nothing was changed",
                     unknown_text("az login", reason)
                 )
                 .into(),

@@ -1581,6 +1581,13 @@ mod tests {
         assert_eq!(next_line(&t), "Next: check the item", "{t}");
     }
 
+    /// UX1: the failing line carries its fix under it, like every other check.
+    #[test]
+    fn deploy_failure_prints_its_fix_under_the_fail_line() {
+        let (_, out) = doctor_deploy_failed(false);
+        assert!(out.contains("\n  fix: check the item\n"), "{out}");
+    }
+
     /// The target checks that use the deploy identity are skipped, saying why.
     #[test]
     fn deploy_failure_skips_the_target_sign_in_check() {

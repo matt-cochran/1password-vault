@@ -105,14 +105,29 @@ pub fn open_for_doctor_on<'a>(
     (runner, failed)
 }
 
-/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) appended, as
-/// doctor runs more calls before it prints and the excerpt would otherwise be dropped. It
-/// goes last, so the error's own remediation stays its first indented line.
+/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) after its
+/// first line, as doctor runs more calls before it prints and the excerpt would otherwise
+/// be dropped. The order is the one `error::report` prints: error line, excerpt, the rest
+/// of the text; the next step stays the error's own.
 fn with_excerpt(e: Error) -> Error {
     let Some(x) = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call()) else {
         return e;
     };
-    e.map_text(|m| format!("{m}\n{}", x.render().trim_end()))
+    // A sign-in or dependency error's step is its first indented line (`default_next`):
+    // pin it before the excerpt becomes that line.
+    let e = match e {
+        Error::Auth(_) | Error::Dependency(_) if e.next_step().is_none() => {
+            let step = e.default_next("opv doctor");
+            e.with_next(step)
+        }
+        e => e,
+    };
+    let excerpt = x.render();
+    let excerpt = excerpt.trim_end();
+    e.map_text(|t| match t.split_once('\n') {
+        Some((head, rest)) => format!("{head}\n{excerpt}\n{rest}"),
+        None => format!("{t}\n{excerpt}"),
+    })
 }
 
 impl<'a> EnvRunner<'a> {
@@ -141,7 +156,7 @@ impl<'a> EnvRunner<'a> {
         reference: &ItemRef,
         fields: &[CredentialField],
     ) -> Result<Self, Error> {
-        self.sign_in_with(login, reference, fields)?;
+        self.sign_in_with(login, reference, fields, None)?;
         Ok(self)
     }
 
@@ -150,8 +165,9 @@ impl<'a> EnvRunner<'a> {
         mut login: Box<dyn DeployLogin>,
         reference: &ItemRef,
         fields: &[CredentialField],
+        env_name: Option<&str>,
     ) -> Result<(), Error> {
-        let values = onepassword::read_deploy_credentials(&*self, reference, fields)?;
+        let values = onepassword::read_deploy_credentials(&*self, reference, fields, env_name)?;
         login.sign_in(values, &*self)?;
         self.login = Some(login);
         Ok(())
@@ -171,7 +187,7 @@ impl<'a> EnvRunner<'a> {
             .deploy_credential_fields()
             .map_err(|why| Error::Config(format!("environment {env_name}: {why}").into()))?;
         let login = provider.deploy_login()?;
-        self.sign_in_with(login, reference, fields)
+        self.sign_in_with(login, reference, fields, Some(env_name))
     }
 
     /// The extra child environment for `program`.

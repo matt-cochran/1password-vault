@@ -446,19 +446,22 @@ fn read_profile_on(
 /// return exactly the conventional `fields`, keyed by label, as [`SecretValue`]s. Each must
 /// appear once (in any section), with its kind's field type (concealed = secret, text =
 /// config, FR-14) and a value; every other field is skipped unread. Errors name the
-/// reference and the field, never a value (SR-1).
+/// reference and the field, never a value (SR-1). `env` names the environment in the
+/// sign-in step (`opv login <env>`) when 1Password is signed out.
 pub fn read_deploy_credentials(
     r: &dyn CommandRunner,
     reference: &crate::domain::ItemRef,
     fields: &[crate::provider::CredentialField],
+    env: Option<&str>,
 ) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
-    read_deploy_credentials_on(r, reference, fields, &Host::detect)
+    read_deploy_credentials_on(r, reference, fields, env, &Host::detect)
 }
 
 fn read_deploy_credentials_on(
     r: &dyn CommandRunner,
     reference: &crate::domain::ItemRef,
     fields: &[crate::provider::CredentialField],
+    env: Option<&str>,
     host: &dyn Fn() -> Host,
 ) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
     let args = [
@@ -470,28 +473,54 @@ fn read_deploy_credentials_on(
         "--format",
         "json",
     ];
-    let Output { status, stdout } = read_op(r, &args, host)?;
-    if status != 0 {
-        let failed = format!(
-            "cannot read deploy credentials {reference} (op item get failed ({}))",
-            status_text(status)
-        );
+    // A failure is diagnosed at once, as for the environment's item: a signed-out user is
+    // told to sign in without blind retries; signed in, the read is retried (with backoff)
+    // before it is reported.
+    let call = Call::new(OP, &args);
+    let first = match r
+        .read(&call, &ANY_FAILURE)
+        .map_err(|e| op_spawn_error(&e, host))?
+    {
+        Outcome::Done(o) => {
+            crate::scrub::register_item_values(&o.stdout);
+            o
+        }
+        Outcome::Refused(o) => o,
+        Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
+    };
+    let Output { stdout, .. } = if first.status == 0 {
+        first
+    } else {
+        let failed = |status: i32| {
+            format!(
+                "cannot read deploy credentials {reference} (op item get failed ({}))",
+                status_text(status)
+            )
+        };
         // The probes explain the failed read; its excerpt stays with the error (NR-31).
-        return Err(match crate::runner::diagnosing(|| diagnose(r, host)) {
-            Err(e) => e,
-            Ok(Session::SignedIn(_) | Session::Unknown) => Error::Source(
+        match crate::runner::diagnosing(|| diagnose(r, host))? {
+            Session::SignedIn(_) | Session::Unknown => {}
+            s => {
+                return Err(session_error(s, &host(), Some(&failed(first.status)), env)
+                    .expect("every other session is an error"));
+            }
+        }
+        let again = read_op(r, &args, host)?;
+        if again.status != 0 {
+            return Err(Error::Source(
                 format!(
-                    "{failed}; nothing was changed\n  next: check deploy_credentials in \
-                 secrets.toml and that this identity can read that item: `{OP} item get \
-                 \"{}\" --vault \"{}\"`",
-                    reference.item, reference.vault
+                    "{}; nothing was changed\n  next: check deploy_credentials in \
+                     secrets.toml and that this identity can read that item: {OP} item get \
+                     \"{}\" --vault \"{}\"",
+                    failed(again.status),
+                    reference.item,
+                    reference.vault
                 )
                 .into(),
-            ),
-            Ok(s) => session_error(s, &host(), Some(&failed), None)
-                .expect("every other session is an error"),
-        });
-    }
+            ));
+        }
+        again
+    };
     let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| json_error(&e))?;
     let mut found: std::collections::BTreeMap<String, SecretValue> = Default::default();
     for f in raw.fields {
