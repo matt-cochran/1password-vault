@@ -412,3 +412,25 @@ secrets_in = "prod-vault"                  # optional; default = the runtime's o
   not Ready is a refusal before any write, naming its condition message.
 - **explain / status.** Show the chain per key: `DB_URL → Key Vault kv-myapp-prod (v4668…) →
   ExternalSecret opv-… → env`.
+
+As implemented (Task C): `Provider` gained `store_kinds`, `parse_store`, `bindings` (a list of
+`StoreBinding { store_kind, via }`) and `bind`; a store is a `StoreConfig` (kind, name,
+`describe`, `locator`, `bridge_name` = the ClusterSecretStore, `store_name`, `name_rules`,
+`open` → a `PinnedStore`, `preflight`, `doctor`, `explain`, `same_store`); `TargetConfig`
+gained `secrets_in`. `config.rs` parses `[stores.*]` (the name is a DNS label; the kind is the
+one key some provider declares), strips `secrets_in` from a runtime section before the
+provider reads it, checks the pair against `registry::binds` and calls `Provider::bind`;
+errors point at the line. Name checks run the runtime's rules (a Kubernetes name of ≤ 63,
+case-insensitive) and the store's (Key Vault), and a store name shared by two environments
+of one store is refused. Ports grew two defaulted methods: `PinnedStore::has_version` (Key
+Vault: `secret show --version`, diagnosis only) and `PinnedRuntime::chain` (status' `chain:`
+lines). In `src/adapters/kubernetes/external.rs`, `ExternalStore` wraps the store port:
+`collect_superseded` and `delete` remove unreferenced ExternalSecrets (Deployment and every
+ReplicaSet are checked) before the Key Vault delete, plus a once-per-run sweep of
+ExternalSecrets whose key Key Vault no longer holds; `KubeDeployment::with_external` applies
+and awaits the ExternalSecrets before the `replace`, and reads bound versions back from the
+ExternalSecrets' `remoteRef.version`. Preflight: the store's checks, discovery of
+`/apis/external-secrets.io/v1` (Dependency when absent), the ClusterSecretStore (missing
+refuses; not Ready refuses under Mutate, warns under Read; Ready but naming no vault warns)
+and `auth can-i create` (Auth under Mutate). Tests: `eso_tests.rs` (stateful op + az +
+kubectl + operator, interruption matrices) and the diagnosis unit tests in `external.rs`.

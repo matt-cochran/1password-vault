@@ -17,16 +17,17 @@
 //! `CreateContainerConfigError`, `ImagePullBackOff`, `ErrImagePull` or `CrashLoopBackOff`.
 //! The revision is the Deployment's `metadata.generation` after the replace.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use super::external::{self, Bridge, Listed, Sync, external_name, split_external_name};
 use super::{
-    Effect, KubeTarget, Kubectl, VALUE_KEY, container_env, container_index, digest_hex,
-    secret_name, secret_ref, split_secret_name, store_name, text, valid_label_value,
+    Effect, KubeTarget, Kubectl, LABEL_MANAGED, VALUE_KEY, container_env, container_index,
+    digest_hex, secret_name, secret_ref, split_secret_name, store_name, text, valid_label_value,
 };
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
@@ -97,6 +98,53 @@ const ACCESS: [(&str, &str, &str); 8] = [
     ),
 ];
 
+/// The rights opv needs on ExternalSecrets when secrets come from a named store (FR-39).
+const EXTERNAL_ACCESS: [(&str, &str, &str); 4] = [
+    (
+        "get",
+        external::RESOURCE,
+        "your kubectl identity cannot read ExternalSecrets, so opv cannot tell when one is Ready",
+    ),
+    (
+        "list",
+        external::RESOURCE,
+        "your kubectl identity cannot list ExternalSecrets, so opv cannot see which versions are bound",
+    ),
+    (
+        "create",
+        external::RESOURCE,
+        "your kubectl identity cannot create ExternalSecrets, so sync cannot bind a new version",
+    ),
+    (
+        "delete",
+        external::RESOURCE,
+        "your kubectl identity cannot delete ExternalSecrets, so superseded versions are never removed",
+    ),
+];
+
+/// Time between ExternalSecret readiness polls (the operator syncs within seconds, E1).
+const READY_POLL: Duration = Duration::from_secs(2);
+
+/// The Secret each pinned name binds in opv's own Secrets mode: `opv-<store>-<version>`.
+fn native_secrets(change: &RuntimeChange) -> Result<BTreeMap<String, String>, Error> {
+    change
+        .pin
+        .iter()
+        .map(|(name, (store, version))| {
+            if !valid_label_value(store)
+                || split_secret_name(&secret_name(store, version))
+                    != Some((store.as_str(), version.as_str()))
+            {
+                return Err(Error::Target(format!(
+                    "refusing to pin {name} to an invalid Secret version; nothing applied\n  \
+                     next: re-run the same command"
+                )));
+            }
+            Ok((name.clone(), secret_name(store, version)))
+        })
+        .collect()
+}
+
 /// The Deployment of one Kubernetes target.
 pub struct KubeDeployment<'a> {
     k: Kubectl<'a>,
@@ -108,6 +156,9 @@ pub struct KubeDeployment<'a> {
     wait_max: Duration,
     /// `kubernetes.config = "store"`: config keys are Secrets bound by reference.
     config_in_store: bool,
+    /// Secrets come from a named store through ExternalSecrets (FR-39); `None`: opv's own
+    /// immutable Secrets.
+    external: Option<Bridge<'a>>,
 }
 
 impl<'a> KubeDeployment<'a> {
@@ -125,7 +176,16 @@ impl<'a> KubeDeployment<'a> {
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             config_in_store: false,
+            external: None,
         }
+    }
+
+    /// Bind secrets from a named store through the External Secrets Operator (FR-39):
+    /// pinning version V of K applies the ExternalSecret of V, waits until it is Ready,
+    /// then binds its Secret.
+    pub fn with_external(mut self, bridge: Bridge<'a>) -> Self {
+        self.external = Some(bridge);
+        self
     }
 
     /// Route config keys through Secrets like secret keys (`kubernetes.config = "store"`).
@@ -307,6 +367,89 @@ impl<'a> KubeDeployment<'a> {
         Ok(None)
     }
 
+    /// Applies the ExternalSecret of every pinned version, then waits until each is Ready
+    /// (its Secret exists, E1), so the Deployment never binds a missing Secret (NR-1).
+    /// Returns env name → Secret name. `store` in a pin is the name in the named store.
+    fn bind_external(
+        &self,
+        bridge: &Bridge<'_>,
+        change: &RuntimeChange,
+    ) -> Result<BTreeMap<String, String>, Error> {
+        let t = self.t();
+        let mut names = BTreeMap::new();
+        for (name, (remote, version)) in &change.pin {
+            let store = store_name(remote);
+            let Some(es) = external_name(&store, version) else {
+                return Err(Error::Target(format!(
+                    "refusing to pin {name} to a store version that cannot name an \
+                     ExternalSecret; nothing applied\n  next: re-run the same command"
+                )));
+            };
+            let body = external::manifest(t, &es, &store, remote, version, &bridge.cluster_store);
+            external::apply(&self.k, &es, &body)?;
+            names.insert(name.clone(), (es, version.clone()));
+        }
+        for (name, (es, version)) in &names {
+            self.await_synced(bridge, es, name, version)?;
+        }
+        Ok(names.into_iter().map(|(n, (es, _))| (n, es)).collect())
+    }
+
+    /// Polls ExternalSecret `es` until it is Ready, within the run budget (NR-4), with a
+    /// progress line at least every [`PROGRESS_EVERY`]. `SecretSyncedError` fails at once
+    /// with opv's own diagnosis (E3).
+    fn await_synced(
+        &self,
+        bridge: &Bridge<'_>,
+        es: &str,
+        env_name: &str,
+        version: &str,
+    ) -> Result<(), Error> {
+        let d = self.t().deployment.as_str();
+        let poll = READY_POLL.min(self.poll_every);
+        let mut waited = Duration::ZERO;
+        let mut next_note = PROGRESS_EVERY;
+        loop {
+            let last = match external::get(&self.k, es)?
+                .as_ref()
+                .map(external::sync_state)
+            {
+                None => {
+                    return Err(Error::Target(format!(
+                        "ExternalSecret {es} disappeared after opv applied it; deployment {d} \
+                         was not changed\n  next: re-run the same command"
+                    )));
+                }
+                Some(Sync::Synced) => return Ok(()),
+                Some(Sync::Failed) => {
+                    return Err(external::diagnose_failed(
+                        &self.k, bridge, es, env_name, version,
+                    ));
+                }
+                Some(Sync::Waiting(state)) => state,
+            };
+            if waited >= self.wait_max {
+                return Err(Error::Target(format!(
+                    "ExternalSecret {es} was not Ready within {} s ({last}); deployment {d} was \
+                     not changed\n  next: `{}`, then run the same command again",
+                    self.wait_max.as_secs(),
+                    self.k
+                        .command(&format!("describe {} {es}", external::RESOURCE))
+                )));
+            }
+            if waited >= next_note {
+                (self.note)(&format!(
+                    "waiting for ExternalSecret {es} to sync from {} ({} s): {last}",
+                    bridge.describe,
+                    waited.as_secs()
+                ));
+                next_note += PROGRESS_EVERY;
+            }
+            (self.sleep)(poll);
+            waited += poll;
+        }
+    }
+
     fn generation(&self, out: &[u8], what: &str) -> Result<Revision, Error> {
         let s = std::str::from_utf8(out).unwrap_or("").trim();
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || s.len() > 19 {
@@ -350,20 +493,34 @@ fn selector(doc: &Value) -> Option<String> {
 }
 
 /// `kubectl auth can-i` printed "no" (possibly followed by a reason).
-fn answered_no(stdout: &[u8]) -> bool {
+pub(crate) fn answered_no(stdout: &[u8]) -> bool {
     std::str::from_utf8(stdout)
         .ok()
         .and_then(|s| s.split_whitespace().next())
         == Some("no")
 }
 
-/// How one managed env entry binds its name.
-fn binding_of(entry: &Value, env_name: &str) -> Binding {
+/// How one managed env entry binds its name. With `external` (the opv ExternalSecrets by
+/// name, FR-39), a bound Secret is an ExternalSecret's and its version is the store version
+/// the ExternalSecret pins; one whose ExternalSecret is gone shows its name's id, which no
+/// store version equals, so the next deploy re-pins it.
+fn binding_of(
+    entry: &Value,
+    env_name: &str,
+    external: Option<&BTreeMap<String, Listed>>,
+) -> Binding {
     if let Some(r) = secret_ref(entry) {
-        return match split_secret_name(r) {
+        let pinned = match external {
+            None => split_secret_name(r).map(|(s, v)| (s.to_string(), v.to_string())),
+            Some(es) => match es.get(r) {
+                Some(l) => Some((l.key.clone(), l.version.clone())),
+                None => split_external_name(r).map(|(s, id)| (s.to_string(), id.to_string())),
+            },
+        };
+        return match pinned {
             Some((store, version)) if store == store_name(env_name) => Binding::Pinned {
-                store_name: store.to_string(),
-                version: version.to_string(),
+                store_name: store,
+                version,
             },
             _ => Binding::Other,
         };
@@ -399,12 +556,24 @@ fn upsert(env: &mut Vec<Value>, entry: Value) {
 impl PinnedRuntime for KubeDeployment<'_> {
     fn bindings(&self) -> Result<RuntimeSnapshot, Error> {
         let doc = self.k.get_deployment()?;
+        let external = match &self.external {
+            None => None,
+            Some(_) => {
+                let selector = format!("{LABEL_MANAGED}={}", self.t().env);
+                Some(
+                    external::list(&self.k, &selector)?
+                        .into_iter()
+                        .map(|l| (l.name.clone(), l))
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            }
+        };
         let bindings = self
             .managed_env(&doc)?
             .iter()
             .filter_map(|e| {
                 let name = e.get("name")?.as_str()?;
-                Some((name.to_string(), binding_of(e, name)))
+                Some((name.to_string(), binding_of(e, name, external.as_ref())))
             })
             .collect();
         // The revision is the generation the current spec produced (`apply` returns the
@@ -450,25 +619,20 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 ))
             })?;
         let i = container_index(&doc, t)?;
+        let secrets = match &self.external {
+            None => native_secrets(change)?,
+            Some(bridge) => self.bind_external(bridge, change)?,
+        };
         let mut env = container_env(&doc, i);
         env.retain(|e| {
             let n = e.get("name").and_then(Value::as_str).unwrap_or("");
             !change.unbind.iter().any(|u| u == n)
         });
-        for (name, (store, version)) in &change.pin {
-            if !valid_label_value(store)
-                || super::split_secret_name(&secret_name(store, version))
-                    != Some((store.as_str(), version.as_str()))
-            {
-                return Err(Error::Target(format!(
-                    "refusing to pin {name} to an invalid Secret version; nothing applied\n  \
-                     next: re-run the same command"
-                )));
-            }
+        for (name, secret) in &secrets {
             upsert(
                 &mut env,
                 json!({"name": name, "valueFrom": {"secretKeyRef":
-                    {"name": secret_name(store, version), "key": VALUE_KEY}}}),
+                    {"name": secret, "key": VALUE_KEY}}}),
             );
         }
         for (name, value) in &change.set {
@@ -594,12 +758,31 @@ impl PinnedRuntime for KubeDeployment<'_> {
         ))
     }
 
+    fn chain(&self, name: &str, version: &str) -> Option<String> {
+        let bridge = self.external.as_ref()?;
+        let es = external_name(&store_name(name), version)?;
+        let id = external::external_id(version)?;
+        Some(format!(
+            "{name} → {} ({id}…) → ExternalSecret {es} → env {name}",
+            bridge.describe
+        ))
+    }
+
     /// The operator's own rights (`kubectl auth can-i`, K5): exit 0 yes, exit 1 no. Pods
     /// need no Secret access of their own (the kubelet resolves `secretKeyRef`), so `names`
     /// do not matter; each finding names the verb and resource. Advisory only (R6).
     fn check_access(&self, _names: &[String]) -> Result<Vec<AccessFinding>, Error> {
         let mut found = Vec::new();
-        for (verb, resource, reason) in ACCESS {
+        let rights: Vec<(&str, &str, &str)> = match self.external {
+            None => ACCESS.to_vec(),
+            Some(_) => ACCESS
+                .iter()
+                .copied()
+                .filter(|(_, resource, _)| *resource != "secrets")
+                .chain(EXTERNAL_ACCESS)
+                .collect(),
+        };
+        for (verb, resource, reason) in rights {
             let what = format!("kubectl auth can-i {verb} {resource}");
             match self.k.call(
                 Effect::Read,
@@ -634,7 +817,6 @@ impl PinnedRuntime for KubeDeployment<'_> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
 
     use super::super::testutil::*;
     use super::*;

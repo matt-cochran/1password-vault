@@ -176,25 +176,32 @@ impl<'a> KubeSecrets<'a> {
         Zeroizing::new(std::mem::take(&mut *doc).into_bytes())
     }
 
-    /// Every string in the Deployment and in every ReplicaSet of the namespace: a Secret
-    /// named by any of them is still referenced (FR-32; superset of "its ReplicaSets").
+    /// Every string in the Deployment and in every ReplicaSet of the namespace (read once).
     fn referenced(&self) -> Result<&BTreeSet<String>, Error> {
         if let Some(seen) = self.referenced.get() {
             return Ok(seen);
         }
-        let mut seen = BTreeSet::new();
-        strings(&self.k.get_deployment()?, &mut seen);
-        let what = "kubectl get replicasets";
-        let out = self.k.run(
-            Effect::Read,
-            what,
-            &["get", "replicasets", "-o", "json"],
-            None,
-            "get replicasets",
-        )?;
-        strings(&super::parse_json(&out, what)?, &mut seen);
+        let seen = referenced_names(&self.k)?;
         Ok(self.referenced.get_or_init(|| seen))
     }
+}
+
+/// Every string in the Deployment and in every ReplicaSet of the namespace: a Secret (or
+/// ExternalSecret) named by any of them is still referenced (FR-32; superset of "its
+/// ReplicaSets").
+pub(crate) fn referenced_names(k: &Kubectl<'_>) -> Result<BTreeSet<String>, Error> {
+    let mut seen = BTreeSet::new();
+    strings(&k.get_deployment()?, &mut seen);
+    let what = "kubectl get replicasets";
+    let out = k.run(
+        Effect::Read,
+        what,
+        &["get", "replicasets", "-o", "json"],
+        None,
+        "get replicasets",
+    )?;
+    strings(&super::parse_json(&out, what)?, &mut seen);
+    Ok(seen)
 }
 
 /// Collect every string value in `v`.

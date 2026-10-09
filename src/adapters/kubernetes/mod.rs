@@ -23,11 +23,14 @@
 //! exit 9, NR-28); otherwise the step itself was refused ([`Error::Target`]).
 
 pub mod config;
+pub mod external;
 pub mod runtime;
 pub mod store;
 
 #[cfg(test)]
 mod converge_tests;
+#[cfg(test)]
+mod eso_tests;
 
 use std::io;
 
