@@ -174,16 +174,32 @@ impl Fleet {
     }
 
     /// Look up an environment by a (possibly user-supplied) name.
+    ///
+    /// An unknown name suggests the closest defined one, and the `Next:` step is a read-only
+    /// command for it (`status`, or `doctor --env` for an environment without a target), or
+    /// the `status` overview when nothing is close (H10).
     pub fn environment(&self, env: &str) -> Result<&Environment, Error> {
         self.environments.get(env).ok_or_else(|| {
             let known: Vec<&str> = self.environments.keys().map(String::as_str).collect();
+            let close = crate::app::suggest::close(env, known.iter().copied());
+            let (hint, next) = match close.first() {
+                Some(c) => (
+                    format!("; did you mean {c}?"),
+                    match self.environments.get(*c).and_then(|e| e.target()) {
+                        Some(_) => format!("opv status {c}"),
+                        None => format!("opv doctor --env {c}"),
+                    },
+                ),
+                None => (String::new(), "opv status".to_string()),
+            };
             Error::Config(
                 format!(
-                    "undefined environment {env:?} (defined: {})",
+                    "undefined environment {env:?} (defined: {}){hint}",
                     known.join(", ")
                 )
                 .into(),
             )
+            .with_next(next)
         })
     }
 

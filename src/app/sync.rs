@@ -99,8 +99,11 @@ pub fn run(
     out: &mut dyn Write,
     opts: &SyncOpts,
 ) -> Result<(), Error> {
-    // Every check below happens before any subprocess call.
-    let guarded = confirm_env(fleet, env_name, opts)?;
+    // Every check below happens before any subprocess call, except the confirm_env guard
+    // for a missing --confirm: it gates the first write, so one run reports blocking keys
+    // and the guard together (H12).
+    let guard = confirm_env(fleet, env_name, opts)?;
+    let guarded = guard.guarded;
     check_product(fleet, opts.product.as_deref())?;
     let (t, ports) = open_target(fleet, env_name, r)?;
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
@@ -119,6 +122,7 @@ pub fn run(
         prune_immutable: &prune_immutable,
         scope: scope.as_ref(),
         names: KeyNames::new(fleet, env_name)?,
+        confirm_missing: guard.missing,
     };
     let mut sink = std::io::sink();
     // `--json`: the detail lines are dropped and preflight warnings go to stderr, so stdout
@@ -143,27 +147,31 @@ pub fn run(
     Ok(())
 }
 
+/// The `confirm_env` guard of one run (NR-20).
+struct Guard {
+    /// The environment sets `confirm_env = true`.
+    guarded: bool,
+    /// Guarded and `--confirm` was not given: refused right before the first write
+    /// ([`Ctx::require_confirm`]), after the read-only checks (H12).
+    missing: bool,
+}
+
 /// NR-20: an environment with `confirm_env = true` syncs only with `--confirm <env>`; a
-/// `--confirm` naming another environment is refused everywhere (a wrong-window typo).
-/// Before any call. Returns whether the environment is guarded.
-fn confirm_env(fleet: &Fleet, env_name: &str, opts: &SyncOpts) -> Result<bool, Error> {
+/// `--confirm` naming another environment is refused everywhere (a wrong-window typo),
+/// before any call. A missing `--confirm` is only recorded here: the read-only part of the
+/// run (item read, list, validation) goes first, so one refusal names both (H12).
+fn confirm_env(fleet: &Fleet, env_name: &str, opts: &SyncOpts) -> Result<Guard, Error> {
     let env = fleet.environment(env_name)?;
-    let rerun = || opts.command(env_name, true);
     match opts.confirm.as_deref() {
         Some(c) if c != env_name => Err(Error::Policy(
             format!("--confirm {c} does not match environment {env_name}; nothing was changed")
                 .into(),
         )
-        .with_next(rerun())),
-        None if env.confirm_env => Err(Error::Policy(
-            format!(
-                "environment {env_name} is guarded (confirm_env = true): sync needs --confirm \
-                 {env_name}; nothing was changed"
-            )
-            .into(),
-        )
-        .with_next(rerun())),
-        _ => Ok(env.confirm_env),
+        .with_next(opts.command(env_name, true))),
+        confirm => Ok(Guard {
+            guarded: env.confirm_env,
+            missing: env.confirm_env && confirm.is_none(),
+        }),
     }
 }
 
@@ -180,9 +188,39 @@ struct Ctx<'a> {
     /// unbound (P20).
     scope: Option<&'a HashSet<String>>,
     names: KeyNames,
+    /// `confirm_env = true` and no `--confirm` (H12).
+    confirm_missing: bool,
 }
 
 impl Ctx<'_> {
+    /// A refusal found before the first write; on a guarded environment run without
+    /// `--confirm` it also says the flag is needed, so one run reports both (H12).
+    fn refusal(&self, e: Error) -> Error {
+        if !self.confirm_missing || !matches!(e, Error::Policy(_)) {
+            return e;
+        }
+        let env = self.env_name;
+        e.map_text(|t| {
+            format!("{t}; {env} is also guarded (confirm_env = true): add --confirm {env} when you re-run")
+        })
+    }
+
+    /// The guard itself (NR-20), after every read-only check and before the first write.
+    fn require_confirm(&self) -> Result<(), Error> {
+        if !self.confirm_missing {
+            return Ok(());
+        }
+        let env = self.env_name;
+        Err(Error::Policy(
+            format!(
+                "environment {env} is guarded (confirm_env = true): sync needs --confirm \
+                 {env}; nothing was changed"
+            )
+            .into(),
+        )
+        .with_next(self.opts.command(env, true)))
+    }
+
     /// `plan` limited to `--product`, when given.
     fn scoped(&self, mut plan: SyncPlan) -> SyncPlan {
         if let (Some(p), Some(names)) = (&self.opts.product, self.scope) {
@@ -322,10 +360,11 @@ fn run_staged(
         c.prune_immutable,
     )?;
     let plan = c.scoped(plan);
-    refuse_blocking(&plan, env_name)?;
+    refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
-    store.validate(&batch)?;
+    store.validate(&batch).map_err(|e| c.refusal(e))?;
+    c.require_confirm()?;
     // Last read-only step before the first write (NR-23, NR-24).
     let skip_deploy = preflight::run(t, c.r, out, opts.json)?;
     print_extras(out, &plan)?;
@@ -489,7 +528,8 @@ fn run_pinned(
     refuse_blocking(
         &c.scoped(plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0),
         env_name,
-    )?;
+    )
+    .map_err(|e| c.refusal(e))?;
     // The target's state, read-only, before its first read (NR-23, NR-25).
     let skip_deploy = preflight::run(c.t, c.r, out, opts.json)?;
     let (plan, listed) = plan_item(
@@ -501,7 +541,7 @@ fn run_pinned(
         c.prune_immutable,
     )?;
     let plan = c.scoped(plan);
-    refuse_blocking(&plan, env_name)?;
+    refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     let want = pinned_want(
         fleet,
         env_name,
@@ -512,11 +552,14 @@ fn run_pinned(
     )?;
     if !want.refused.is_empty() {
         let first = want.refused[0].split(' ').next().unwrap_or_default();
-        return Err(Error::Policy(
-            format!("sync refused, nothing staged: {}", want.refused.join(", ")).into(),
-        )
-        .with_next(format!("opv explain {first} --env {env_name}")));
+        return Err(c.refusal(
+            Error::Policy(
+                format!("sync refused, nothing staged: {}", want.refused.join(", ")).into(),
+            )
+            .with_next(format!("opv explain {first} --env {env_name}")),
+        ));
     }
+    c.require_confirm()?;
     print_extras(out, &plan)?;
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     let mut report = Report {
@@ -1142,12 +1185,9 @@ fn explain_next(rows: &[Row], env_name: &str) -> String {
         .filter(|r| is_blocking(r))
         .map(|r| key_label(&r.product, &r.key))
         .collect();
-    let first = format!("opv explain {} --env {env_name}", keys[0]);
-    if keys.len() == 1 {
-        first
-    } else {
-        format!("{first} (and likewise for each key above)")
-    }
+    // A `Next:` step runs as-is (H10): the first key's explain. The refusal already names
+    // every key. U4: Do: "fix each key above in 1Password".
+    format!("opv explain {} --env {env_name}", keys[0])
 }
 
 /// The per-key change lists, `product/KEY (NAME)` (P19).
@@ -1342,6 +1382,48 @@ fn split_key_ref<'a>(fleet: &Fleet, entry: &'a str) -> Option<(&'a str, &'a str)
         .filter(|(p, k)| !p.is_empty() && !k.is_empty())
 }
 
+/// Every declared key as `--rotate` takes it: `product/KEY`, or `KEY` under the simple
+/// profile.
+fn declared_refs(fleet: &Fleet) -> Vec<String> {
+    fleet
+        .products
+        .iter()
+        .flat_map(|(p, spec)| spec.keys.keys().map(move |k| key_label(p, k)))
+        .collect()
+}
+
+/// The declared key closest to a `--rotate` / `--prune-immutable` entry.
+fn closest_ref(fleet: &Fleet, entry: &str) -> Option<String> {
+    let refs = declared_refs(fleet);
+    super::suggest::close(entry, refs.iter().map(String::as_str))
+        .first()
+        .map(|s| s.to_string())
+}
+
+/// "not a declared key", with the closest declared one when there is one.
+fn undeclared(fleet: &Fleet, entry: &str) -> String {
+    match closest_ref(fleet, entry) {
+        Some(c) => format!("not a declared key; did you mean {c}?"),
+        None => "not a declared key".into(),
+    }
+}
+
+/// The `Next:` step for a bad `--rotate` / `--prune-immutable` entry (H10): `explain` for
+/// the entry when it is declared, else for the closest declared key, else the status rows.
+/// Only ever a read-only command; a suggestion is never applied to the flag.
+fn key_next(fleet: &Fleet, env_name: &str, entry: &str) -> String {
+    let declared = declared_refs(fleet);
+    let target = if declared.iter().any(|d| d == entry) {
+        Some(entry.to_string())
+    } else {
+        closest_ref(fleet, entry)
+    };
+    match target {
+        Some(t) => format!("opv explain {t} --env {env_name}"),
+        None => format!("opv status {env_name}"),
+    }
+}
+
 /// The expected shape of a `--rotate` / `--prune-immutable` entry, for errors.
 fn expected(fleet: &Fleet) -> String {
     if fleet.is_simple() {
@@ -1370,13 +1452,16 @@ fn parse_rotate(
     let env = fleet.environment(env_name)?;
     let mut set = BTreeSet::new();
     for e in entries {
-        let bad = |why: String| Error::Config(format!("--rotate {e:?}: {why}").into());
+        let bad = |why: String| {
+            Error::Config(format!("--rotate {e:?}: {why}").into())
+                .with_next(key_next(fleet, env_name, e))
+        };
         let (product, key) = split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)))?;
         let spec = fleet
             .products
             .get(product)
             .and_then(|p| p.keys.get(key))
-            .ok_or_else(|| bad("not a declared key".into()))?;
+            .ok_or_else(|| bad(undeclared(fleet, e)))?;
         if !spec.immutable {
             return Err(bad(
                 "key is not immutable (other keys are staged on every sync)".into(),
@@ -1402,19 +1487,24 @@ fn parse_prune_immutable(
 ) -> Result<BTreeSet<(String, String)>, Error> {
     let env = fleet.environment(env_name)?;
     if !opts.prune_immutable.is_empty() && !opts.prune {
+        // U4: Do: add --prune to the sync command once the plan shows what it removes.
         return Err(Error::Config(
             "--prune-immutable requires --prune (nothing is pruned without it)".into(),
-        ));
+        )
+        .with_next(format!("opv plan {env_name}")));
     }
     let mut set = BTreeSet::new();
     for e in &opts.prune_immutable {
-        let bad = |why: String| Error::Config(format!("--prune-immutable {e:?}: {why}").into());
+        let bad = |why: String| {
+            Error::Config(format!("--prune-immutable {e:?}: {why}").into())
+                .with_next(key_next(fleet, env_name, e))
+        };
         let (product, key) = split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)))?;
         let spec = fleet
             .products
             .get(product)
             .and_then(|p| p.keys.get(key))
-            .ok_or_else(|| bad("not a declared key".into()))?;
+            .ok_or_else(|| bad(undeclared(fleet, e)))?;
         if !spec.immutable {
             return Err(bad(
                 "key is not immutable (other keys are pruned by --prune alone)".into(),

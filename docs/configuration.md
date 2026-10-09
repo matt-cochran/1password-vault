@@ -152,7 +152,7 @@ config         = "env"                       # default; "store" keeps config in 
 |---|---|
 | `subscription` | Required. opv passes it on every `az` call and never uses your default subscription. |
 | `key_vault` | The vault that holds the secrets. |
-| `resource_group` | The resource group of the Container App. <!-- verify: also used for the vault? --> |
+| `resource_group` | The resource group of the Container App. The vault is found by name in the subscription, so it may live in another resource group. |
 | `container_app` | The app that receives the variables. |
 | `container` | Optional. Required only when the app runs more than one container; opv then lists the names. |
 | `identity` | `system`, or the resource id of the user-assigned identity the app uses to read Key Vault. |
@@ -163,7 +163,7 @@ Names and limits are checked when the file loads, before any call:
 
 - The Key Vault name is the variable name with `_` changed to `-`, and must match `^[0-9A-Za-z-]{1,127}$`. `FLEET__ALLUMATA__OPENAI_API_KEY` is stored as `FLEET--ALLUMATA--OPENAI-API-KEY`.
 - Key Vault names ignore case, so two keys that map to the same name, even in different case, are an error naming both.
-- A Key Vault value may be at most 25 KB. <!-- verify: exact limit and wording of the failure -->
+- A Key Vault value may be at most 25 KB (25,600 bytes) and cannot be empty. A longer or empty value blocks the sync like a failed rule: `failed store_limit (longer than the Key Vault limit of 25 KB)`.
 - Every identifier is checked like `fly.app` (no leading `-`, no shell metacharacters).
 
 opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged secrets. `opv explain <KEY>` shows the Key Vault name and the variable it feeds.
@@ -180,7 +180,7 @@ env_name   = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
 config     = "env"                       # or "store"
 ```
 
-opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`, so it must be a valid DNS-1123 name (at most 253 characters with the suffix), and collisions are an error. A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused when the configuration loads, naming the key and its line. <!-- verify: name length/limit message -->
+opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`; that part is also the `opv-key` label value, so it must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with at most 63 characters, and collisions are an error. A longer name is refused when the configuration loads (`renders Kubernetes name of N characters, which must match …`). A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused the same way, naming the key and its line.
 
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
@@ -223,7 +223,7 @@ item_id  = "iprd1234example"
 confirm_env = true
 ```
 
-With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv refuses before any call (exit 6) and its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `check`, `run`) and `item skeleton` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
+With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the item and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `check`, `run`) and `item skeleton` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
 
 ## Rules reference
 

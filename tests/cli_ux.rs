@@ -35,7 +35,7 @@ const COMMANDS: [&str; 8] = [
 fn every_command_help_groups_global_options() {
     for c in COMMANDS {
         let (_, out, _) = opv_with(&[], &[c, "--help"]);
-        assert!(out.contains("\nGlobal options:\n"), "{c}: {out}");
+        assert!(out.contains("\nGlobal options: --config"), "{c}: {out}");
     }
 }
 
@@ -158,7 +158,7 @@ fn config_flag_overrides_opv_config() {
 
 #[test]
 fn config_help_shows_opv_config() {
-    let (_, out, _) = opv_with(&[], &["status", "--help"]);
+    let (_, out, _) = opv_with(&[], &["--help"]);
     assert!(out.contains("[env: OPV_CONFIG"), "{out}");
 }
 
@@ -326,6 +326,43 @@ fn opv_product_is_never_used_by_sync() {
 fn usage_error_ends_with_the_help_command() {
     let (_, _, err) = opv_with(&[], &["sync"]);
     assert_eq!(err.lines().last(), Some("Next: opv sync --help"), "{err}");
+}
+
+/// Every subcommand points at `opv --help` for the global options (H9).
+#[test]
+fn subcommand_help_points_at_root_help_for_global_options() {
+    let (_, out, _) = opv_with(&[], &["status", "--help"]);
+    assert!(out.contains("(details: opv --help)"), "{out}");
+}
+
+/// A10: `opv guide agent` prints the agent setup guide.
+#[test]
+fn guide_agent_prints_the_agent_setup_guide() {
+    let (code, out, _) = opv_with(&[], &["guide", "agent"]);
+    assert!(
+        code == 0 && out.starts_with("# Setting up opv for a user"),
+        "{code} {out}"
+    );
+}
+
+/// H10: a broken secrets.toml after `sync` names a read-only re-check, never the write.
+#[test]
+fn config_error_next_after_sync_is_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    let text = std::fs::read_to_string(CFG).unwrap();
+    std::fs::write(
+        &path,
+        text.replacen("kind = \"secret\"", "kind = \"secert\"", 1),
+    )
+    .unwrap();
+    let p = path.to_str().unwrap();
+    let (_, _, err) = opv_with(&[], &["--config", p, "sync", "prod", "--deploy"]);
+    assert_eq!(
+        err.lines().last(),
+        Some(format!("Next: opv --config {p} plan prod").as_str()),
+        "{err}"
+    );
 }
 
 /// P10: --confirm is documented on sync.

@@ -34,11 +34,17 @@ pub fn run_for(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        ).into())),
+        ).into())
+        .with_next(super::check_command(
+            fleet,
+            Some(env_name),
+            fleet.products.keys().next().map(String::as_str),
+        ))),
         (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
         (true, Some(_)) => Err(Error::Config(
             "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
-        )),
+        )
+        .with_next(super::check_command(fleet, Some(env_name), None))),
     }
 }
 
@@ -56,20 +62,15 @@ pub fn run(
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
     let env = fleet.environment(env_name)?;
-    let prod = fleet.products.get(product).ok_or_else(|| {
-        let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        Error::Config(
-            format!(
-                "undefined product {product:?} (defined: {})",
-                known.join(", ")
-            )
-            .into(),
-        )
-    })?;
+    let prod = fleet
+        .products
+        .get(product)
+        .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
     if command.is_empty() {
         return Err(Error::Config(
             "no command given (usage: run <env> --product <p> -- <cmd>...)".into(),
-        ));
+        )
+        .with_next("opv run --help"));
     }
 
     let refs: Vec<(&str, String)> = prod

@@ -344,3 +344,13 @@ fn extractor_ignores_other_languages_and_prose() {
     );
     assert_eq!(got.commands.len(), 0);
 }
+
+/// The GitHub Actions example pins the release this source builds, so a version bump
+/// cannot leave it installing an old opv.
+#[test]
+fn github_actions_example_pins_this_version() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let usage = std::fs::read_to_string(root.join("docs/usage.md")).expect("usage.md");
+    let want = format!("OPV_VERSION: v{}", env!("CARGO_PKG_VERSION"));
+    assert!(usage.contains(&want), "docs/usage.md must pin {want}");
+}
