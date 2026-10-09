@@ -50,6 +50,8 @@ pub struct RuntimeChange {
     pub set: BTreeMap<String, String>,
     /// env names to remove.
     pub unbind: Vec<String>,
+    /// opv's run metadata to record on what the apply writes (FR-42). Never a value.
+    pub stamp: Option<crate::domain::provenance::Stamp>,
 }
 
 impl fmt::Debug for RuntimeChange {
@@ -93,6 +95,7 @@ mod tests {
             pin: Default::default(),
             set: Default::default(),
             unbind: vec![],
+            stamp: None,
         };
         c.set.insert("LOG_LEVEL".into(), "opv-marker-config".into());
         assert!(!format!("{c:?}").contains("opv-marker-config"));

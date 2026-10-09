@@ -14,9 +14,10 @@ use std::io::Write;
 
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
-    KeyNames, PinnedRow, check_product, count_line, is_blocking, open_target, preflight,
+    JsonExtra, KeyNames, PinnedRow, check_product, count_line, is_blocking, open_target, preflight,
     print_extras, print_rows, product_names, read_and_plan, scope_plan, write_err, write_json,
 };
+use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, Kind, Row, StoreEntry, SyncPlan, TargetState};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
@@ -79,6 +80,8 @@ pub fn run_scoped(
     };
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     let findings = || Error::findings(n, fix_then(&status_command(env_name, product)));
+    // FR-42: the latest provenance stamp opv left on the target (pinned targets only).
+    let stamp = pinned.as_ref().and_then(|_| latest(&listed));
     if json {
         write_json(
             out,
@@ -87,6 +90,10 @@ pub fn run_scoped(
             &plan,
             pinned.as_ref().map(|p| &p.rows),
             product,
+            &JsonExtra {
+                plan_id: None,
+                provenance: stamp,
+            },
         )?;
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
@@ -101,6 +108,9 @@ pub fn run_scoped(
     print_extras(out, &plan)?;
     if let Some(p) = &pinned {
         p.print(out, env_name, &names)?;
+    }
+    if let Some(s) = stamp {
+        writeln!(out, "{}: {}", t.provider().label(), s.line()).map_err(write_err)?;
     }
     if n > 0 {
         return Err(findings());

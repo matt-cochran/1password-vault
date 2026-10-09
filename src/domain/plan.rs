@@ -40,6 +40,8 @@ pub struct StoreEntry {
     pub name: String,
     pub version: Option<String>,
     pub pending: bool,
+    /// opv's provenance stamp on the entry (FR-42), when the store records one.
+    pub stamp: Option<crate::domain::provenance::Stamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +413,7 @@ mod tests {
             name: name.into(),
             version: version.map(String::from),
             pending: false,
+            stamp: None,
         }
     }
     fn no_rotate() -> BTreeSet<(String, String)> {

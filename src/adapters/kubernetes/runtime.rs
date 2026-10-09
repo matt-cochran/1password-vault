@@ -391,7 +391,15 @@ impl<'a> KubeDeployment<'a> {
                     .into(),
                 ));
             };
-            let body = external::manifest(t, &es, &store, remote, version, &bridge.cluster_store);
+            let body = external::manifest(
+                t,
+                &es,
+                &store,
+                remote,
+                version,
+                &bridge.cluster_store,
+                change.stamp.as_ref(),
+            );
             external::apply(&self.k, &es, &body)?;
             names.insert(name.clone(), (es, version.clone()));
         }
@@ -659,6 +667,19 @@ impl PinnedRuntime for KubeDeployment<'_> {
         if let Some(o) = doc.as_object_mut() {
             o.remove("status");
         }
+        // opv's provenance stamp on the Deployment (FR-42), beside any other annotation.
+        if let Some(stamp) = &change.stamp
+            && let Some(meta) = doc.get_mut("metadata").and_then(Value::as_object_mut)
+        {
+            let notes = meta
+                .entry("annotations")
+                .or_insert_with(|| Value::Object(Default::default()));
+            if let (Some(notes), Value::Object(stamped)) =
+                (notes.as_object_mut(), super::annotations(stamp))
+            {
+                notes.extend(stamped);
+            }
+        }
         let body = Zeroizing::new(serde_json::to_vec(&doc).unwrap_or_default());
         let what = format!("kubectl replace deployment {d}");
         let replace = ["replace", "-f", "-", "-o", GENERATION_PATH];
@@ -864,6 +885,7 @@ mod tests {
             pin: BTreeMap::new(),
             set: BTreeMap::new(),
             unbind: vec![],
+            stamp: None,
         };
         c.pin.insert(
             "FLEET__API__DB_URL".into(),
@@ -1009,6 +1031,33 @@ mod tests {
         let r = FakeRunner::new([ok("6")]);
         with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap();
         assert!(!r.argv_contains(MARK) && sent_env(&r)[1]["value"] == json!(MARK));
+    }
+
+    fn stamped() -> RuntimeChange {
+        RuntimeChange {
+            stamp: Some(crate::domain::provenance::fixture()),
+            ..change()
+        }
+    }
+
+    /// FR-42: the Deployment records opv's provenance stamp as annotations.
+    #[test]
+    fn apply_annotates_the_deployment_with_the_provenance_stamp() {
+        let r = FakeRunner::new([ok("6")]);
+        with_rt(&r, |rt| rt.apply(&stamped(), &snapshot())).unwrap();
+        assert_eq!(sent(&r)["metadata"]["annotations"]["opv-plan"], "7f3c9a1e");
+    }
+
+    /// FR-42, SR-1: the stamp never carries a value (marker test: MARK is a config value).
+    #[test]
+    fn deployment_provenance_annotations_never_carry_a_value() {
+        let r = FakeRunner::new([ok("6")]);
+        with_rt(&r, |rt| rt.apply(&stamped(), &snapshot())).unwrap();
+        assert!(
+            !sent(&r)["metadata"]["annotations"]
+                .to_string()
+                .contains(MARK)
+        );
     }
 
     #[test]

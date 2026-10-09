@@ -8,7 +8,7 @@
 //! |---|---|
 //! | `list` | `keyvault secret list --vault-name <vault> -o json` |
 //! | `read` | `keyvault secret show --vault-name <vault> --name <name> -o json` |
-//! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
+//! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> opv-version=<v> opv-written=<utc> opv-env=<env> opv-plan=<id> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
 //! | `delete` | `keyvault secret delete --vault-name <vault> --name <name> -o none` |
 //! | `has_version` | `keyvault secret show --vault-name <vault> --name <name> --version <v> --query id -o tsv` (diagnosis only) |
 //!
@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
+use crate::domain::{SecretValue, Stamp};
 use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
 use crate::runner::{CommandRunner, Outcome, unknown_text};
@@ -98,8 +98,8 @@ impl PinnedStore for KeyVault<'_> {
         self.read_secret(name)
     }
 
-    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
-        self.write_secret(name, value)
+    fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error> {
+        self.write_secret(name, value, stamp)
     }
 
     fn delete(&self, name: &str) -> Result<(), Error> {
@@ -185,6 +185,10 @@ impl KeyVault<'_> {
                     name: name.to_owned(),
                     version: None,
                     pending: false,
+                    stamp: e
+                        .tags
+                        .as_ref()
+                        .and_then(|t| Stamp::parse(|k| t.get(k).map(String::as_str))),
                 })
             })
             .collect())
@@ -250,18 +254,29 @@ impl KeyVault<'_> {
         Ok(Some((SecretValue::new(entry.value), version)))
     }
 
-    /// One new version, value on stdin, tagged `opv-managed=<env>`; returns its version id
-    /// once Key Vault shows it (NR-30).
+    /// One new version, value on stdin, tagged `opv-managed=<env>` plus the provenance
+    /// stamp (`opv-version`, `opv-written`, `opv-env`, `opv-plan`; FR-42, never a value);
+    /// returns its version id once Key Vault shows it (NR-30).
     ///
     /// A `set` that exits non-zero while the name is not soft-deleted and `az` is signed in
     /// may be a role grant still propagating (NR-25). That one failure is retried once,
     /// but only after a read (`secret list`) proves the vault now answers.
-    fn write_secret(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
+    fn write_secret(
+        &self,
+        name: &str,
+        value: &SecretValue,
+        stamp: &Stamp,
+    ) -> Result<String, Error> {
         let name = &AzureTarget::key_vault_name(name);
         const OP: &str = "keyvault secret set";
         az::stdin_supported("writing to Key Vault")?;
         let tag = format!("opv-managed={}", self.env);
-        let args = [
+        let stamps: Vec<String> = stamp
+            .pairs()
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let mut args = vec![
             "keyvault",
             "secret",
             "set",
@@ -275,12 +290,9 @@ impl KeyVault<'_> {
             "utf-8",
             "--tags",
             tag.as_str(),
-            "--query",
-            "id",
-            "-o",
-            "tsv",
-            az::ONLY_SHOW_ERRORS,
         ];
+        args.extend(stamps.iter().map(String::as_str));
+        args.extend(["--query", "id", "-o", "tsv", az::ONLY_SHOW_ERRORS]);
         let set = || {
             invoke(
                 self.runner,
@@ -619,12 +631,44 @@ mod tests {
         SecretValue::new(MARKER.into())
     }
 
+    fn stamp() -> Stamp {
+        crate::domain::provenance::fixture()
+    }
+
+    /// FR-42: a write records opv's run metadata as tags on the new version.
+    #[test]
+    fn write_tags_version_with_provenance_stamp() {
+        let r = FakeRunner::new(written());
+        let templates = names(&[]);
+        vault(&r, "prod", &templates)
+            .write_one(NAME, &secret(), &stamp())
+            .unwrap();
+        assert!(
+            r.calls.borrow()[0]
+                .args
+                .iter()
+                .any(|a| a == "opv-plan=7f3c9a1e")
+        );
+    }
+
+    /// FR-42: `list` reads the provenance stamp back from an entry's tags.
+    #[test]
+    fn list_reads_provenance_stamp_from_tags() {
+        let doc = r#"[{"name":"FLEET--API--DB-URL","tags":{"opv-managed":"prod",
+            "opv-version":"0.5.0","opv-written":"2026-10-08T14:02:11Z","opv-env":"prod",
+            "opv-plan":"7f3c9a1e"}}]"#;
+        let r = FakeRunner::new([Output::success(doc)]);
+        let templates = names(&["FLEET__API__DB_URL"]);
+        let listed = vault(&r, "prod", &templates).list().unwrap();
+        assert_eq!(listed[0].stamp, Some(stamp()));
+    }
+
     #[test]
     fn write_sends_value_on_stdin() {
         let r = FakeRunner::new(written());
         let templates = names(&[]);
         vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         assert_eq!(
             r.calls.borrow()[0].stdin.as_deref(),
@@ -638,7 +682,7 @@ mod tests {
         let r = FakeRunner::new(written());
         let templates = names(&[]);
         vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         assert!(r.calls.borrow().iter().all(|c| {
             c.args
@@ -651,7 +695,7 @@ mod tests {
         let r = FakeRunner::new(written());
         let templates = names(&[]);
         vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         assert!(!r.argv_contains(MARKER));
     }
@@ -661,7 +705,7 @@ mod tests {
         let r = FakeRunner::new(written());
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
-        kv.write_one(NAME, &SecretValue::new(MARKER.into()))
+        kv.write_one(NAME, &SecretValue::new(MARKER.into()), &stamp())
             .unwrap();
         assert!(
             r.calls.borrow()[0]
@@ -677,7 +721,7 @@ mod tests {
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
         let version = kv
-            .write_one(NAME, &SecretValue::new(MARKER.into()))
+            .write_one(NAME, &SecretValue::new(MARKER.into()), &stamp())
             .unwrap();
         assert_eq!(version, VERSION);
     }
@@ -777,7 +821,7 @@ mod tests {
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
         let err = kv
-            .write_one("MY-SECRET", &SecretValue::new(MARKER.into()))
+            .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Target(msg) if msg.contains(
             "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET"
@@ -837,7 +881,7 @@ mod tests {
         r.push_unknown("timeout");
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Unknown(_)));
     }
@@ -847,7 +891,7 @@ mod tests {
         let r = FakeRunner::new([Output::success("")]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Target(m) if m.contains("returned no version for")));
     }
@@ -857,7 +901,7 @@ mod tests {
         let r = FakeRunner::new([Output::success(id("XYZ"))]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Target(m) if m.contains("nothing was bound")));
     }
@@ -873,7 +917,7 @@ mod tests {
         ]);
         let templates = names(&[]);
         let version = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         assert_eq!(version, VERSION);
     }
@@ -887,7 +931,7 @@ mod tests {
         ]);
         let templates = names(&[]);
         vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         assert_eq!(r.elapsed.get(), Duration::from_secs(2));
     }
@@ -898,7 +942,7 @@ mod tests {
         let r = FakeRunner::new(std::iter::once(Output::success(id(VERSION))).chain(stale));
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Unknown(m) if m.contains(
             "accepted version 46687ce78b76487cb0c1da470360b638 of FLEET--API--DB-URL but does not show it yet"
@@ -920,7 +964,7 @@ mod tests {
         let r = FakeRunner::new(responses);
         let templates = names(&[]);
         let version = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         assert_eq!(version, VERSION);
     }
@@ -935,7 +979,7 @@ mod tests {
         let r = FakeRunner::new(responses);
         let templates = names(&[]);
         vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         let sets = r
             .calls
@@ -956,7 +1000,7 @@ mod tests {
         let r = FakeRunner::new(responses);
         let templates = names(&[]);
         vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap();
         let notes = r.notes.borrow();
         let waits: Vec<&String> = notes.iter().filter(|n| n.starts_with("waiting")).collect();
@@ -972,7 +1016,7 @@ mod tests {
         let r = FakeRunner::new(failed_set().into_iter().chain(polls));
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Auth(m) if m.contains(
             "az role assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>"
@@ -984,7 +1028,7 @@ mod tests {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), Output::failure(1)]);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Auth(m) if m.mentions("az login")));
     }
@@ -995,7 +1039,7 @@ mod tests {
         r.push_unknowns("timeout", 3);
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
-            .write_one(NAME, &secret())
+            .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Unknown(m) if m.contains("soft-deleted")));
     }
@@ -1004,7 +1048,7 @@ mod tests {
     fn show_deleted_probe_of_a_new_name_is_not_retried() {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), Output::failure(1)]);
         let templates = names(&[]);
-        let _ = vault(&r, "prod", &templates).write_one(NAME, &secret());
+        let _ = vault(&r, "prod", &templates).write_one(NAME, &secret(), &stamp());
         let probes = r
             .calls
             .borrow()
@@ -1035,7 +1079,7 @@ mod tests {
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
         let err = kv
-            .write_one(NAME, &SecretValue::new(MARKER.into()))
+            .write_one(NAME, &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
         assert!(matches!(err, Error::Dependency(msg) if msg.contains("WSL")));
     }

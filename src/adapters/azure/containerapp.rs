@@ -1127,6 +1127,7 @@ mod tests {
             pin: BTreeMap::new(),
             set: BTreeMap::new(),
             unbind: vec![],
+            stamp: None,
         }
     }
 

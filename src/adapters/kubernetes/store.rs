@@ -29,7 +29,11 @@ use super::{
     container_index, new_version, secret_name, secret_ref, split_secret_name, store_name, text,
     valid_label_value,
 };
-use crate::domain::SecretValue;
+use crate::domain::provenance::{STAMP_ENV, STAMP_PLAN, STAMP_VERSION, STAMP_WRITTEN};
+use crate::domain::{SecretValue, Stamp};
+
+/// The annotation keys of a stamp, in [`LIST_PATH`]'s order.
+const STAMP_KEYS: [&str; 4] = [STAMP_VERSION, STAMP_WRITTEN, STAMP_ENV, STAMP_PLAN];
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
@@ -38,8 +42,11 @@ use crate::runner::{CommandRunner, Outcome};
 /// Largest value opv writes: a Secret object is limited to 1 MiB, minus room for metadata.
 pub const VALUE_LIMIT: usize = 1024 * 1024 - 16 * 1024;
 
-const LIST_PATH: &str =
-    r#"jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.opv-key}{"\n"}{end}"#;
+const LIST_PATH: &str = concat!(
+    r#"jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.opv-key}"#,
+    r#"{"\t"}{.metadata.annotations.opv-version}{"\t"}{.metadata.annotations.opv-written}"#,
+    r#"{"\t"}{.metadata.annotations.opv-env}{"\t"}{.metadata.annotations.opv-plan}{"\n"}{end}"#,
+);
 const VALUE_PATH: &str = r#"jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.value}"#;
 
 /// The Secrets of one Kubernetes target.
@@ -85,6 +92,15 @@ impl<'a> KubeSecrets<'a> {
     /// `(secret name, store name)` of every opv Secret matching `selector`. Entries whose
     /// name is not `opv-<opv-key>-<version>` are ignored (NR-6).
     fn names(&self, selector: &str) -> Result<Vec<(String, String)>, Error> {
+        Ok(self
+            .stamped(selector)?
+            .into_iter()
+            .map(|(name, key, _)| (name, key))
+            .collect())
+    }
+
+    /// [`Self::names`] with each Secret's provenance stamp (FR-42), when it carries one.
+    fn stamped(&self, selector: &str) -> Result<Vec<(String, String, Option<Stamp>)>, Error> {
         let what = "kubectl get secret";
         let out = self.k.run(
             Effect::Read,
@@ -96,9 +112,15 @@ impl<'a> KubeSecrets<'a> {
         Ok(text(&out, what)?
             .lines()
             .filter_map(|line| {
-                let (name, key) = line.split_once('\t')?;
+                let mut fields = line.split('\t');
+                let (name, key) = (fields.next()?, fields.next()?);
                 let (store, _) = split_secret_name(name)?;
-                (store == key).then(|| (name.to_string(), key.to_string()))
+                let rest: Vec<&str> = fields.collect();
+                let stamp = Stamp::parse(|k| {
+                    let at = STAMP_KEYS.iter().position(|s| *s == k)?;
+                    rest.get(at).copied()
+                });
+                (store == key).then(|| (name.to_string(), key.to_string(), stamp))
             })
             .collect())
     }
@@ -156,7 +178,14 @@ impl<'a> KubeSecrets<'a> {
     }
 
     /// The immutable Secret manifest for `value`; the only place a value is encoded.
-    fn manifest(&self, name: &str, store: &str, value: &SecretValue) -> Zeroizing<Vec<u8>> {
+    /// The Secret also carries opv's provenance stamp as annotations (FR-42; never a value).
+    fn manifest(
+        &self,
+        name: &str,
+        store: &str,
+        value: &SecretValue,
+        stamp: &Stamp,
+    ) -> Zeroizing<Vec<u8>> {
         let t = self.t();
         let head = json!({
             "apiVersion": "v1",
@@ -165,6 +194,7 @@ impl<'a> KubeSecrets<'a> {
                 "name": name,
                 "namespace": t.namespace,
                 "labels": { LABEL_MANAGED: t.env, LABEL_KEY: store },
+                "annotations": super::annotations(stamp),
             },
             "immutable": true,
             "type": "Opaque",
@@ -255,19 +285,25 @@ impl Store for KubeSecrets<'_> {
     /// listed). The version comes from `read` (the binding), never from the list.
     fn list(&self) -> Result<Vec<StoreEntry>, Error> {
         let selector = format!("{LABEL_MANAGED}={}", self.t().env);
-        let stores: BTreeSet<String> = self
-            .names(&selector)?
-            .into_iter()
-            .map(|(_, store)| store)
-            .collect();
+        // store name → the latest stamp among its versions (FR-42).
+        let mut stores: BTreeMap<String, Option<Stamp>> = BTreeMap::new();
+        for (_, store, stamp) in self.stamped(&selector)? {
+            let latest = stores.entry(store).or_default();
+            if stamp.as_ref().map(|s| &s.written) > latest.as_ref().map(|s| &s.written) {
+                *latest = stamp;
+            }
+        }
         Ok(self
             .managed
             .iter()
-            .filter(|n| stores.contains(&store_name(n)))
-            .map(|n| StoreEntry {
-                name: n.clone(),
-                version: None,
-                pending: false,
+            .filter_map(|n| {
+                let stamp = stores.get(&store_name(n))?;
+                Some(StoreEntry {
+                    name: n.clone(),
+                    version: None,
+                    pending: false,
+                    stamp: stamp.clone(),
+                })
             })
             .collect())
     }
@@ -294,7 +330,7 @@ impl PinnedStore for KubeSecrets<'_> {
     /// nothing and returns the bound version, so a matching value never gets a second version.
     /// A lost write is reconciled by reading the new Secret back (NR-2); if that fails too, the
     /// next run writes another id and the unreferenced one is collected after a healthy rollout.
-    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
+    fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error> {
         if let Some((rule, reason)) = refusal(name, value) {
             return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
         }
@@ -308,7 +344,7 @@ impl PinnedStore for KubeSecrets<'_> {
         let version = (self.ids)()?;
         let secret = secret_name(&store, &version);
         let what = format!("kubectl apply secret {secret}");
-        let body = self.manifest(&secret, &store, value);
+        let body = self.manifest(&secret, &store, value, stamp);
         let apply = [
             "apply",
             "-f",
@@ -483,7 +519,7 @@ mod tests {
     fn unchanged_bound_value_writes_nothing() {
         let r = FakeRunner::new([ok(DEPLOYMENT), held("opv-k8s-marker-1")]);
         with_store(&r, |s| {
-            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"))
+            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"), &stamp())
         })
         .unwrap();
         assert!(!all_argv(&r).contains("apply"));
@@ -493,7 +529,7 @@ mod tests {
     fn unchanged_bound_value_returns_the_bound_version() {
         let r = FakeRunner::new([ok(DEPLOYMENT), held("opv-k8s-marker-1")]);
         let v = with_store(&r, |s| {
-            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"))
+            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"), &stamp())
         });
         assert_eq!(v.unwrap(), "q3vz7kd2mx");
     }
@@ -507,7 +543,7 @@ mod tests {
             ok(&format!("secret/{secret}")),
         ]);
         let v = with_store(&r, |s| {
-            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-2"))
+            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-2"), &stamp())
         });
         assert_eq!(v.unwrap(), ID);
     }
@@ -515,8 +551,37 @@ mod tests {
     #[test]
     fn write_returns_the_new_id_as_version() {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok(&format!("secret/{}", new_key_secret()))]);
-        let v = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        let v = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp()));
         assert_eq!(v.unwrap(), ID);
+    }
+
+    fn stamp() -> crate::domain::Stamp {
+        crate::domain::provenance::fixture()
+    }
+
+    /// FR-42: the new Secret carries opv's provenance stamp as annotations.
+    #[test]
+    fn written_secret_carries_the_provenance_stamp() {
+        let doc = written(MARK, new_version);
+        assert_eq!(doc["metadata"]["annotations"]["opv-plan"], "7f3c9a1e");
+    }
+
+    /// FR-42, SR-1: the stamp never carries the value (marker test).
+    #[test]
+    fn provenance_annotations_never_carry_the_value() {
+        let doc = written(MARK, new_version);
+        assert!(!doc["metadata"]["annotations"].to_string().contains(MARK));
+    }
+
+    /// FR-42: `list` reads the latest provenance stamp back from the annotations.
+    #[test]
+    fn list_reads_the_provenance_stamp_from_annotations() {
+        let line = format!(
+            "{DB_URL_SECRET}\tfleet--api--db-url\t0.5.0\t2026-10-08T14:02:11Z\tprod\t7f3c9a1e\n"
+        );
+        let r = FakeRunner::new([ok(&line)]);
+        let listed = with_store(&r, |s| s.list()).unwrap();
+        assert_eq!(listed[0].stamp, Some(stamp()));
     }
 
     /// The manifest the write sent, as JSON (stdin of call 1: call 0 reads the Deployment).
@@ -524,7 +589,7 @@ mod tests {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
         let t = target();
         let s = KubeSecrets::new(&r, &t, managed()).with_ids(ids);
-        let _ = s.write_one("NEW_KEY", &sv(value));
+        let _ = s.write_one("NEW_KEY", &sv(value), &stamp());
         serde_json::from_str(&stdin_text(&r, 1)).unwrap()
     }
 
@@ -545,8 +610,9 @@ mod tests {
         assert!(!meta.contains(prefix), "{meta}");
     }
 
+    /// SR-1, FR-42: names, ownership labels and the provenance stamp; nothing else.
     #[test]
-    fn written_metadata_is_name_namespace_and_ownership_labels_only() {
+    fn written_metadata_is_name_namespace_ownership_labels_and_stamp_only() {
         let doc = written(MARK, fixed_id);
         assert_eq!(
             doc["metadata"],
@@ -554,6 +620,12 @@ mod tests {
                 "name": new_key_secret(),
                 "namespace": "opv-spike",
                 "labels": {"opv-managed": "dev", "opv-key": "new-key"},
+                "annotations": {
+                    "opv-version": "0.5.0",
+                    "opv-written": "2026-10-08T14:02:11Z",
+                    "opv-env": "prod",
+                    "opv-plan": "7f3c9a1e",
+                },
             })
         );
     }
@@ -561,7 +633,7 @@ mod tests {
     #[test]
     fn write_sends_manifest_on_stdin_and_no_value_in_argv() {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
-        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp()));
         assert!(!r.argv_contains(MARK) && stdin_text(&r, 1).contains(&STANDARD.encode(MARK)));
     }
 
@@ -578,7 +650,7 @@ mod tests {
         r.push_with_stderr(ok(""), "");
         r.push_with_stderr(ok("context/kind-opv\n"), "");
         r.push_with_stderr(ok("v1.36"), "");
-        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp()));
         assert_eq!(
             crate::runner::take_failure_excerpt().map(|x| x.lines),
             Some(vec![
@@ -592,7 +664,7 @@ mod tests {
     fn verbose_write_never_shows_the_manifest() {
         let r = FakeRunner::new([ok(""), ok("secret/x")]);
         r.verbose.set(true);
-        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp()));
         let notes = r.notes.take().join("\n");
         assert!(
             !notes.contains(&STANDARD.encode(MARK)) && !notes.contains("\"data\""),
@@ -606,7 +678,7 @@ mod tests {
             ok(DEPLOYMENT),
             ok(&format!("secret/{}\n", new_key_secret())),
         ]);
-        with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).unwrap();
+        with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap();
         assert_eq!(
             args(&r, 1)[5..],
             [
@@ -641,7 +713,7 @@ mod tests {
         r.responses
             .borrow_mut()
             .push_back(Ok(ok(&format!("dev\t{}", STANDARD.encode(MARK)))));
-        let v = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        let v = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp()));
         assert_eq!(v.unwrap(), ID);
     }
 
@@ -654,7 +726,7 @@ mod tests {
             Ok(ok("context/kind-opv")),
             Ok(ok("v1.36")),
         ]);
-        assert!(with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).is_err());
+        assert!(with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).is_err());
     }
 
     #[test]
@@ -664,7 +736,7 @@ mod tests {
         r.responses
             .borrow_mut()
             .extend([Ok(ok("")), Ok(ok("context/kind-opv")), Ok(ok("v1.36"))]);
-        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).unwrap_err();
+        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap_err();
         assert_eq!(e.exit_code(), 9);
     }
 
@@ -675,14 +747,14 @@ mod tests {
         r.responses
             .borrow_mut()
             .extend([Ok(ok("")), Ok(ok("context/kind-opv")), Ok(ok("v1.36"))]);
-        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).unwrap_err();
+        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap_err();
         assert!(!err_text(&e).contains(MARK));
     }
 
     #[test]
     fn refused_value_makes_no_call() {
         let r = FakeRunner::default();
-        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv("a\0b")));
+        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv("a\0b"), &stamp()));
         assert!(r.calls.borrow().is_empty());
     }
 

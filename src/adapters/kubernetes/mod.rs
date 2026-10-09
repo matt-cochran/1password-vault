@@ -68,6 +68,18 @@ pub const VALUE_KEY: &str = "value";
 pub const LABEL_MANAGED: &str = "opv-managed";
 /// The store name the Secret is a version of.
 pub const LABEL_KEY: &str = "opv-key";
+/// opv's provenance stamp as an annotations object (FR-42): names, a version, a UTC time
+/// and a plan id, never a value.
+pub fn annotations(stamp: &crate::domain::Stamp) -> Value {
+    Value::Object(
+        stamp
+            .pairs()
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect(),
+    )
+}
+
 /// Characters of the random version id in a Secret name.
 pub const VERSION_LEN: usize = 10;
 /// Alphabet of version ids: lower-case RFC 4648 base32 (5 bits per character, 50 in all).

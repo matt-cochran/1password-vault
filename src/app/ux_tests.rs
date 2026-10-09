@@ -628,3 +628,87 @@ fn check_findings_next_step_is_check_again() {
         Some("fix the keys above in 1Password, then run opv check prod --product allumata")
     );
 }
+
+// ---- A7 / FR-41: plan ids and --expect-plan (Fly) ---------------------------------------
+
+/// The plan id `opv plan prod --json` reports for the item and an empty Fly app.
+fn fly_plan_id(fleet: &Fleet) -> String {
+    let r = FakeRunner::new([complete_item(), fly_empty()]);
+    let mut out = Vec::new();
+    sync::plan_with(fleet, "prod", &r, &mut out, true).unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    doc["plan_id"].as_str().unwrap().to_string()
+}
+
+fn expect(id: &str) -> SyncOpts {
+    SyncOpts {
+        expect_plan: Some(id.into()),
+        ..SyncOpts::default()
+    }
+}
+
+fn imported(r: &FakeRunner) -> bool {
+    r.calls
+        .borrow()
+        .iter()
+        .any(|c| c.args.starts_with(&["secrets".into(), "import".into()]))
+}
+
+#[test]
+fn plan_names_its_plan_id_and_the_flag_that_applies_it() {
+    let id = fly_plan_id(&fleet());
+    let r = FakeRunner::new([complete_item(), fly_empty()]);
+    let (_, out) = plan_out(&fleet(), &r, None);
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with(&format!("plan {id} (1Password item v"))
+                && l.contains(&format!("--expect-plan {id}"))),
+        "{out}"
+    );
+}
+
+#[test]
+fn fly_plan_id_is_stable_across_runs() {
+    assert_eq!(fly_plan_id(&fleet()), fly_plan_id(&fleet()));
+}
+
+#[test]
+fn sync_with_the_reviewed_fly_plan_id_stages() {
+    let r = new_secrets();
+    let _ = sync_out(&fleet(), &r, &expect(&fly_plan_id(&fleet())));
+    assert!(imported(&r), "{:?}", r.calls.borrow());
+}
+
+#[test]
+fn sync_with_a_stale_fly_plan_id_stages_nothing() {
+    let r = new_secrets();
+    let _ = sync_out(&fleet(), &r, &expect("00000000"));
+    assert!(!imported(&r));
+}
+
+#[test]
+fn stale_plan_refusal_next_step_is_the_review() {
+    let (res, _) = sync_out(&fleet(), &new_secrets(), &expect("00000000"));
+    assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
+}
+
+#[test]
+fn expect_plan_satisfies_confirm_env() {
+    let (res, _) = sync_out(
+        &guarded(),
+        &new_secrets(),
+        &expect(&fly_plan_id(&guarded())),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn expect_plan_with_rotate_is_refused_before_any_call() {
+    let r = FakeRunner::new([]);
+    let o = SyncOpts {
+        rotate: vec!["allumata/OPENAI_API_KEY".into()],
+        ..expect("00000000")
+    };
+    let (res, _) = sync_out(&fleet(), &r, &o);
+    assert!(matches!(res, Err(Error::Config(_))) && r.calls.borrow().is_empty());
+}

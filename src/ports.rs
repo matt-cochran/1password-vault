@@ -10,7 +10,7 @@
 //! `docs/design/multi-cloud-targets.md` §3.
 
 use crate::domain::{
-    AccessFinding, Health, Revision, RuntimeChange, RuntimeSnapshot, SecretValue, StoreEntry,
+    AccessFinding, Health, Revision, RuntimeChange, RuntimeSnapshot, SecretValue, Stamp, StoreEntry,
 };
 use crate::error::Error;
 
@@ -41,8 +41,10 @@ pub trait StagedStore: Store {
 pub trait PinnedStore: Store {
     /// Current value and version, for compare-before-write (FR-31). None when absent.
     fn read(&self, name: &str) -> Result<Option<(SecretValue, String)>, Error>;
-    /// One new version, value on stdin, tagged opv-managed=<env>; returns the version id.
-    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error>;
+    /// One new version, value on stdin, tagged opv-managed=<env> and with `stamp`, opv's
+    /// run metadata (FR-42; never a value), where the store records metadata; returns the
+    /// version id.
+    fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error>;
     /// Refuses an entry without the ownership tag (FR-32).
     fn delete(&self, name: &str) -> Result<(), Error>;
     /// Removes versions of `name` other than `keep_version` once a healthy revision binds

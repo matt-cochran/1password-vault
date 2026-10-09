@@ -495,6 +495,14 @@ mod failure {
         });
     }
 
+    pub(super) fn not_found() -> bool {
+        LAST.with(|l| {
+            l.borrow().as_ref().is_some_and(|f| {
+                f.call == CALL.with(Cell::get) && super::says_not_found(&f.program, &f.stderr.bytes)
+            })
+        })
+    }
+
     pub(super) fn take() -> Option<crate::scrub::Excerpt> {
         let f = LAST.with(|l| l.borrow_mut().take())?;
         if f.call != CALL.with(Cell::get) {
@@ -517,6 +525,40 @@ mod failure {
             DIAGNOSING.with(|d| d.set(d.get().saturating_sub(1)));
         }
     }
+}
+
+/// Stable phrases each CLI prints on stderr for an object that does not exist (S2): `op`
+/// for an item or vault ID it cannot find, `kubectl` for a missing object (the API's
+/// `NotFound` reason), `az` for a missing secret or resource. Unrecognised text is not a
+/// match, so such a failure keeps its retries.
+const NOT_FOUND: &[(&str, &[&str])] = &[
+    ("op", &["isn't an item", "isn't a vault"]),
+    ("kubectl", &["(NotFound)"]),
+    (
+        "az",
+        &[
+            "SecretNotFound",
+            "ResourceNotFound",
+            "ResourceGroupNotFound",
+        ],
+    ),
+];
+
+/// True when `stderr` of a failed `program` call says the object does not exist (S2).
+/// Searched in place, never copied or printed (NR-31).
+fn says_not_found(program: &str, stderr: &[u8]) -> bool {
+    NOT_FOUND
+        .iter()
+        .filter(|(p, _)| *p == program)
+        .flat_map(|(_, phrases)| phrases.iter())
+        .any(|phrase| stderr.windows(phrase.len()).any(|w| w == phrase.as_bytes()))
+}
+
+/// True when the last failed captured call on this thread (the one the error at hand came
+/// from, as for [`take_failure_excerpt`]) said its object does not exist (S2), so the
+/// caller reports it at once instead of retrying.
+pub fn last_failure_not_found() -> bool {
+    failure::not_found()
 }
 
 /// The scrubbed stderr excerpt of the failed call the error at hand came from (a read
@@ -556,6 +598,11 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         let failed = match attempt {
             Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
             Attempt::Exited(o) if refused.contains(&o.status) => {
+                failure::record(id, call.program, stderr);
+                return Ok(Outcome::Refused(o));
+            }
+            // S2: a missing object is not transient; refused at once, never retried.
+            Attempt::Exited(o) if says_not_found(call.program, &stderr.bytes) => {
                 failure::record(id, call.program, stderr);
                 return Ok(Outcome::Refused(o));
             }
@@ -1508,6 +1555,63 @@ mod tests {
         let r = FakeRunner::new([Output::failure(3), Output::success("ok")]);
         let _ = r.read(&Call::new("az", &["keyvault", "secret", "show"]), &[3]);
         assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    /// S2: `op` saying the item does not exist is refused at once, never retried.
+    #[test]
+    fn read_of_missing_op_item_is_not_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| {
+            r.push_with_stderr(
+                Output::failure(1),
+                "[ERROR] \"i\" isn't an item in the \"v\" vault.\n",
+            )
+        });
+        let _ = read_fake(&r);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    /// S2: a missing Kubernetes object (`NotFound`) is refused at once, never retried.
+    #[test]
+    fn read_of_missing_kubernetes_object_is_not_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| {
+            r.push_with_stderr(
+                Output::failure(1),
+                "Error from server (NotFound): deployments.apps \"api\" not found\n",
+            )
+        });
+        let _ = r.read(&Call::new("kubectl", &["get", "deployment", "api"]), &[]);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    /// S2: a missing Azure secret or resource is refused at once, never retried.
+    #[test]
+    fn read_of_missing_azure_resource_is_not_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| {
+            r.push_with_stderr(Output::failure(1), "ERROR: (ResourceNotFound) gone\n")
+        });
+        let _ = r.read(&Call::new("az", &["containerapp", "show"]), &[]);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    /// S2: unrecognised failure text keeps its retries (matching op's text is brittle).
+    #[test]
+    fn read_with_unrecognised_failure_text_is_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| r.push_with_stderr(Output::failure(1), "connection reset\n"));
+        let _ = read_fake(&r);
+        assert_eq!(r.calls.borrow().len(), 3);
+    }
+
+    /// S2: one program's not-found phrase does not stop another program's retries.
+    #[test]
+    fn not_found_phrase_of_another_program_is_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| r.push_with_stderr(Output::failure(1), "(NotFound)\n"));
+        let _ = read_fake(&r);
+        assert_eq!(r.calls.borrow().len(), 3);
     }
 
     #[test]

@@ -389,6 +389,10 @@ struct SyncArgs {
     /// The environment's name again; required when it sets confirm_env = true.
     #[arg(long, value_name = "ENV")]
     confirm: Option<String>,
+    /// Apply only the plan `opv plan` showed with this id; refused (exit 6) if anything
+    /// changed since. Also satisfies confirm_env.
+    #[arg(long, value_name = "PLAN_ID")]
+    expect_plan: Option<String>,
     /// Print the run report as one JSON document (names only) instead of text.
     #[arg(long)]
     json: bool,
@@ -404,6 +408,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             product: a.product,
             confirm: a.confirm,
             json: a.json,
+            expect_plan: a.expect_plan,
         }
     }
 }

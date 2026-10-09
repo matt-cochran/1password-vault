@@ -26,15 +26,16 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use super::{
-    KeyNames, check_product, compare, is_blocking, managed_names, open_target, plan_item, plural,
-    preflight, print_extras, print_rows, product_names, read_and_plan, read_fields, row_names,
-    scope_plan, unmanaged_on_target, write_err, write_json,
+    KeyNames, check_product, compare, is_blocking, managed_names, open_target, plan_id_of,
+    plan_item, plural, preflight, print_extras, print_rows, product_names, read_and_plan_versioned,
+    read_item_fields, row_names, scope_plan, unmanaged_on_target, write_err, write_json,
 };
 use crate::domain::plan::CurrentState::Same;
 use crate::domain::rules;
 use crate::domain::{
     Binding, Fleet, Health, ItemField, KeyState, Kind, Revision, Row, RuntimeChange,
-    RuntimeSnapshot, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState, key_label,
+    RuntimeSnapshot, SIMPLE_PRODUCT, SecretValue, Stamp, StoreEntry, SyncPlan, TargetState,
+    key_label,
 };
 use crate::error::{Error, next_line};
 use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
@@ -61,6 +62,9 @@ pub struct SyncOpts {
     pub confirm: Option<String>,
     /// Print one JSON document (the run report) instead of text lines.
     pub json: bool,
+    /// `--expect-plan <id>`: refuse before any write unless the plan re-derives to this id
+    /// (FR-41). Also satisfies `confirm_env`: the id is bound to the environment.
+    pub expect_plan: Option<String>,
 }
 
 impl SyncOpts {
@@ -85,6 +89,9 @@ impl SyncOpts {
         if self.json {
             c.push_str(" --json");
         }
+        if let Some(id) = &self.expect_plan {
+            c.push_str(&format!(" --expect-plan {id}"));
+        }
         if confirm {
             c.push_str(&format!(" --confirm {env_name}"));
         }
@@ -101,6 +108,14 @@ pub fn run(
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
     let guarded = confirm_env(fleet, env_name, opts)?;
+    if opts.expect_plan.is_some() && !(opts.rotate.is_empty() && opts.prune_immutable.is_empty()) {
+        return Err(Error::Config(
+            "--expect-plan applies the plan `opv plan` showed, which never rotates or prunes an \
+             immutable key; nothing was changed\n  next: drop --expect-plan to use --rotate or \
+             --prune-immutable"
+                .into(),
+        ));
+    }
     check_product(fleet, opts.product.as_deref())?;
     let (t, ports) = open_target(fleet, env_name, r)?;
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
@@ -155,7 +170,8 @@ fn confirm_env(fleet: &Fleet, env_name: &str, opts: &SyncOpts) -> Result<bool, E
                 .into(),
         )
         .with_next(rerun())),
-        None if env.confirm_env => Err(Error::Policy(
+        // A plan id is bound to its environment, so it is confirmation enough (FR-41).
+        None if env.confirm_env && opts.expect_plan.is_none() => Err(Error::Policy(
             format!(
                 "environment {env_name} is guarded (confirm_env = true): sync needs --confirm \
                  {env_name}; nothing was changed"
@@ -194,6 +210,47 @@ impl Ctx<'_> {
     fn in_scope(&self, name: &str) -> bool {
         self.scope.is_none_or(|s| s.contains(name))
     }
+
+    /// This run's plan id (FR-41). With `--expect-plan`, a different id is refused before
+    /// any write (exit 6), naming the new id and the command that applies it.
+    fn expect(
+        &self,
+        plan: &SyncPlan,
+        listed: &[StoreEntry],
+        item_version: Option<u64>,
+        ports: &Ports<'_>,
+    ) -> Result<String, Error> {
+        let product = self.opts.product.as_deref();
+        let id = plan_id_of(self.env_name, product, item_version, plan, listed, ports);
+        let Some(expected) = self.opts.expect_plan.as_deref() else {
+            return Ok(id);
+        };
+        if expected.eq_ignore_ascii_case(&id) {
+            return Ok(id);
+        }
+        let review = match product {
+            Some(p) => format!("opv plan {} --product {p}", self.env_name),
+            None => format!("opv plan {}", self.env_name),
+        };
+        let apply = SyncOpts {
+            expect_plan: Some(id.clone()),
+            confirm: None,
+            ..self.opts.clone()
+        }
+        .command(self.env_name, false);
+        let item = item_version
+            .map(|v| format!(" (1Password item v{v})"))
+            .unwrap_or_default();
+        Err(Error::Policy(
+            format!(
+                "stale plan: the plan changed since {expected}; it is now {id}{item} (the \
+                 1Password item, the target or secrets.toml changed); nothing was changed\n  \
+                 review it, then apply exactly that plan with: {apply}"
+            )
+            .into(),
+        )
+        .with_next(review))
+    }
 }
 
 /// What one `sync` run did (NR-18): target names only, never a value. The same on every
@@ -216,6 +273,8 @@ struct Report {
     kept: Vec<String>,
     /// The deploy was skipped because the runtime has nothing to restart.
     deploy_skipped: bool,
+    /// The id of the plan this run applied (FR-41).
+    plan_id: String,
 }
 
 impl Report {
@@ -248,6 +307,7 @@ impl Report {
             product: opts.product.clone(),
             confirm: None,
             json: false,
+            expect_plan: None,
         };
         Some(o.command(env_name, guarded))
     }
@@ -275,6 +335,7 @@ impl Report {
             "held": self.held,
             "kept": self.kept,
             "next": next,
+            "plan_id": self.plan_id,
         });
         writeln!(out, "{doc}").map_err(write_err)
     }
@@ -313,7 +374,7 @@ fn run_staged(
     out: &mut dyn Write,
 ) -> Result<Report, Error> {
     let (fleet, env_name, t, opts) = (c.fleet, c.env_name, c.t, c.opts);
-    let (plan, list_a) = read_and_plan(
+    let (plan, list_a, item_version) = read_and_plan_versioned(
         fleet,
         env_name,
         c.r,
@@ -323,6 +384,7 @@ fn run_staged(
     )?;
     let plan = c.scoped(plan);
     refuse_blocking(&plan, env_name)?;
+    let plan_id = c.expect(&plan, &list_a, item_version, ports)?;
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
     store.validate(&batch)?;
@@ -335,6 +397,7 @@ fn run_staged(
     let mut report = Report {
         skipped: skipped_names(c, &plan)?,
         held: held_names(c, &plan)?,
+        plan_id,
         ..Report::default()
     };
     // Writes this run completed, named when a later step fails (NR-10).
@@ -483,7 +546,7 @@ fn run_pinned(
 ) -> Result<Report, Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
     let names = &c.names;
-    let fields = read_fields(fleet, env_name, c.r)?;
+    let (fields, item_version) = read_item_fields(fleet, env_name, c.r)?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
     refuse_blocking(
@@ -502,6 +565,9 @@ fn run_pinned(
     )?;
     let plan = c.scoped(plan);
     refuse_blocking(&plan, env_name)?;
+    let plan_id = c.expect(&plan, &listed, item_version, ports)?;
+    // FR-42: what every write below records on the target. Never a value.
+    let stamp = Stamp::now(env_name, &plan_id);
     let want = pinned_want(
         fleet,
         env_name,
@@ -522,6 +588,7 @@ fn run_pinned(
     let mut report = Report {
         skipped: skipped_names(c, &plan)?,
         held: held_names(c, &plan)?,
+        plan_id,
         ..Report::default()
     };
 
@@ -529,7 +596,7 @@ fn run_pinned(
     let mut written = BTreeMap::new();
     for (name, w) in &want.store {
         if let Some(value) = &w.write {
-            let version = store.write_one(name, value).map_err(|e| {
+            let version = store.write_one(name, value, &stamp).map_err(|e| {
                 let done: Vec<&str> = written.keys().map(String::as_str).collect();
                 with_note(e, &already_written(&done))
             })?;
@@ -582,7 +649,8 @@ fn run_pinned(
     print_held(out, fleet, &plan, names, &report.held)?;
 
     // 6. Deploy only with --deploy (FR-7, FR-9).
-    let change = d.change(c.t, &written);
+    let mut change = d.change(c.t, &written);
+    change.stamp = Some(stamp.clone());
     let pending = change_names(&change);
     let deletes: &[String] = if opts.prune && opts.deploy {
         &prune_set
@@ -871,6 +939,7 @@ impl PinnedDiff {
             } else {
                 Vec::new()
             },
+            stamp: None,
         }
     }
 
@@ -1203,11 +1272,14 @@ pub fn plan_scoped(
     // The target's state, read-only and never waiting (NR-23, NR-25).
     preflight::read(t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
+    let (mut plan, on_target, item_version) =
+        read_and_plan_versioned(fleet, env_name, r, Some(&ports), &none, &none)?;
     if let Some(p) = product {
         scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
     }
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+    // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
+    let id = plan_id_of(env_name, product, item_version, &plan, &on_target, &ports);
     let findings = || {
         let cmd = match product {
             Some(p) => format!("opv plan {env_name} --product {p}"),
@@ -1216,7 +1288,11 @@ pub fn plan_scoped(
         Error::findings(n, super::status::fix_then(&cmd))
     };
     if json {
-        write_json(out, fleet, env_name, &plan, None, product)?;
+        let extra = super::JsonExtra {
+            plan_id: (n == 0).then_some(id.as_str()),
+            provenance: None,
+        };
+        write_json(out, fleet, env_name, &plan, None, product, &extra)?;
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
     let names = KeyNames::new(fleet, env_name)?;
@@ -1283,6 +1359,7 @@ pub fn plan_scoped(
     if n > 0 {
         return Err(findings());
     }
+    line(plan_id_line(&id, item_version))?;
     let next = SyncOpts {
         deploy: true,
         prune: !plan.prune.is_empty(),
@@ -1295,6 +1372,18 @@ pub fn plan_scoped(
         next_line(&next.command(env_name, env.confirm_env))
     )
     .map_err(write_err)
+}
+
+/// `plan <id> (1Password item v<n>): sync --expect-plan <id> applies exactly this plan`
+/// (FR-41).
+fn plan_id_line(id: &str, item_version: Option<u64>) -> String {
+    let item = item_version
+        .map(|v| format!("1Password item v{v}"))
+        .unwrap_or_else(|| "1Password item".into());
+    format!(
+        "plan {id} ({item}): sync --expect-plan {id} applies exactly this plan and refuses \
+         if the item, the target or secrets.toml changed"
+    )
 }
 
 /// Target column of `plan`. A store that reads its values back is compared exactly

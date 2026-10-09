@@ -76,14 +76,62 @@ pub(crate) fn read_and_plan(
     plan_item(fleet, env_name, fields, ports, rotate, prune_immutable)
 }
 
+/// [`read_and_plan`] that also returns the item's `version` integer, for the plan id
+/// (FR-41). Still one item read (FR-13).
+pub(crate) fn read_and_plan_versioned(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    ports: Option<&Ports<'_>>,
+    rotate: &BTreeSet<(String, String)>,
+    prune_immutable: &BTreeSet<(String, String)>,
+) -> Result<(SyncPlan, Vec<StoreEntry>, Option<u64>), Error> {
+    let (fields, version) = read_item_fields(fleet, env_name, r)?;
+    let (plan, listed) = plan_item(fleet, env_name, fields, ports, rotate, prune_immutable)?;
+    Ok((plan, listed, version))
+}
+
 /// The environment's item fields: its one read by IDs (FR-13).
 pub(crate) fn read_fields(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
 ) -> Result<Vec<plan::ItemField>, Error> {
+    Ok(read_item_fields(fleet, env_name, r)?.0)
+}
+
+/// [`read_fields`] with the item's `version` integer (FR-41).
+pub(crate) fn read_item_fields(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<(Vec<plan::ItemField>, Option<u64>), Error> {
     let env = fleet.environment(env_name)?;
-    Ok(onepassword::read_item_as(r, env, fleet.profile)?.fields)
+    let item = onepassword::read_item_as(r, env, fleet.profile)?;
+    Ok((item.fields, item.version))
+}
+
+/// The plan id (FR-41) of `plan`, built against `listed` on the target behind `ports`
+/// from item version `item_version`. A staged store's versions are value digests (Fly), so
+/// only a pinned store's version ids go in (SR-1).
+pub(crate) fn plan_id_of(
+    env_name: &str,
+    product: Option<&str>,
+    item_version: Option<u64>,
+    plan: &SyncPlan,
+    listed: &[StoreEntry],
+    ports: &Ports<'_>,
+) -> String {
+    crate::domain::provenance::plan_id(
+        &crate::domain::provenance::PlanIdInput {
+            env: env_name,
+            product,
+            item_version,
+            listed,
+            version_ids: matches!(ports, Ports::Pinned { .. }),
+        },
+        plan,
+    )
 }
 
 /// [`read_and_plan`] for a local check of the products in `fleet` only, with no target: the
@@ -196,6 +244,15 @@ fn json_product(product: &str) -> Option<String> {
     (product != SIMPLE_PRODUCT).then(|| product.to_string())
 }
 
+/// Additive fields of the FR-21 document.
+#[derive(Default)]
+pub(crate) struct JsonExtra<'a> {
+    /// `plan --json`: the plan id `sync --expect-plan` checks (FR-41).
+    pub plan_id: Option<&'a str>,
+    /// `status --json` on a pinned target: opv's latest provenance stamp (FR-42).
+    pub provenance: Option<&'a crate::domain::Stamp>,
+}
+
 /// FR-21: one names-only JSON document for `status --json` and `plan --json`.
 ///
 /// Under the simple profile (FR-20) `product` is `null` in rows, extras and held entries,
@@ -210,7 +267,8 @@ fn json_product(product: &str) -> Option<String> {
 ///
 /// `target_name` is the row's name on the target for every provider; `fly_name` holds the
 /// same value and is kept for scripts written before 0.5.0 (deprecated, P4). `product` is
-/// set when `--product` scoped the document (NR-16).
+/// set when `--product` scoped the document (NR-16). `extra` adds `plan_id` (`plan`) and
+/// `provenance` (`status`), each left out when unset.
 pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
@@ -218,6 +276,7 @@ pub(crate) fn write_json(
     plan: &SyncPlan,
     pinned: Option<&BTreeMap<String, PinnedRow>>,
     product: Option<&str>,
+    extra: &JsonExtra<'_>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
@@ -301,6 +360,12 @@ pub(crate) fn write_json(
             held: plan.held_immutable.len(),
             to_prune: plan.prune.len(),
         },
+        plan_id: extra.plan_id.map(str::to_string),
+        provenance: extra.provenance.map(|s| JsonStamp {
+            opv_version: s.opv_version.clone(),
+            written: s.written.clone(),
+            plan_id: s.plan.clone(),
+        }),
     };
     let text = serde_json::to_string(&doc)
         .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
@@ -319,6 +384,19 @@ struct JsonDoc {
     held: Vec<JsonHeld>,
     prune: Vec<String>,
     totals: JsonTotals,
+    /// `plan --json` only: the plan id `sync --expect-plan` checks (FR-41).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_id: Option<String>,
+    /// `status --json` on a pinned target that opv stamped: the latest stamp (FR-42).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance: Option<JsonStamp>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonStamp {
+    opv_version: String,
+    written: String,
+    plan_id: String,
 }
 
 #[derive(serde::Serialize)]
