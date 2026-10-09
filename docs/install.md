@@ -71,23 +71,22 @@ npm i -g @matthew-cochran/opv
 npx @matthew-cochran/opv --version
 ```
 
-The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. It installs a tiny Node shim and, through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU automatically with no install scripts.
+The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. Through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU, and a postinstall script copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place `install.sh` uses. It never replaces a file that is not an opv binary, and never writes into a home directory under `sudo`: run `npm i -g` without sudo. With `--ignore-scripts` the `opv` command still works from its bundled copy; run `npm rebuild -g @matthew-cochran/opv` to install the shared copy.
 
-### Keep one install
+### One install location
 
-Use one install method per machine. Each one puts `opv` in a different directory
-(`install.sh` in `~/.local/bin`, npm in its global `bin`, `cargo install` in
-`~/.cargo/bin`), and updating one leaves the others alone. The shell runs the
-first `opv` on `PATH`, which may be an old copy:
+`install.sh` and npm put the same binary in `~/.local/bin/opv`, so either one
+installs or updates it and the shell never runs a stale copy. The npm `opv`
+command is a small wrapper that runs that file. `cargo install` uses
+`~/.cargo/bin`, a different copy. Check what runs:
 
 ```sh
 type -a opv        # every opv on PATH; the first one runs
-opv --version
+opv doctor         # the opv line warns about a real second copy
 ```
 
-If `type -a` lists more than one, remove the copies you do not update, for
-example `rm ~/.local/bin/opv`, `npm uninstall -g @matthew-cochran/opv` or
-`cargo uninstall opv`. Then run `hash -r` so the shell forgets the old path.
+If `opv doctor` warns, remove the copy you do not update, for example
+`cargo uninstall opv`, then run `hash -r` so the shell forgets the old path.
 
 ## Verify a download
 

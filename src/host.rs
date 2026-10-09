@@ -22,6 +22,7 @@
 //! Messages are text, never prompts (FR-9). Detection runs only on failure paths.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::adapters::registry;
 
@@ -379,6 +380,122 @@ pub(crate) fn with_test_host<T>(host: Host, f: impl FnOnce() -> T) -> T {
     let out = f();
     TEST_HOST.with(|h| h.set(None));
     out
+}
+
+/// One `opv` found on `PATH` (Task I).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpvCopy {
+    /// A native opv binary.
+    Binary(PathBuf),
+    /// The npm `bin` wrapper (`.../@matthew-cochran/opv/bin/opv.js`). It runs the
+    /// canonical binary when its version matches the package, so it is not a second
+    /// copy. `version` is the package version, when readable.
+    NpmWrapper {
+        path: PathBuf,
+        version: Option<String>,
+    },
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PATH: std::cell::RefCell<Option<Vec<OpvCopy>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with [`opv_copies_on_path`] returning `copies` on this thread (unit tests).
+#[cfg(test)]
+pub(crate) fn with_test_path<T>(copies: Vec<OpvCopy>, f: impl FnOnce() -> T) -> T {
+    TEST_PATH.with(|p| *p.borrow_mut() = Some(copies));
+    let out = f();
+    TEST_PATH.with(|p| *p.borrow_mut() = None);
+    out
+}
+
+/// True when `file` resolves to the npm package's `bin/opv.js`.
+fn is_npm_wrapper(file: &std::path::Path) -> bool {
+    let parts: Vec<_> = file
+        .components()
+        .rev()
+        .take(4)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts == ["opv.js", "bin", "opv", "@matthew-cochran"]
+}
+
+/// The `version` in the `package.json` that sits above a wrapper's `bin/` directory.
+#[cfg_attr(test, allow(dead_code))]
+fn wrapper_version(file: &std::path::Path) -> Option<String> {
+    let manifest = file.parent()?.parent()?.join("package.json");
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("version")?.as_str().map(str::to_owned)
+}
+
+/// Every distinct `opv` (`opv.exe` on Windows) in the directories on `PATH`, in `PATH`
+/// order. Symlinks to the same file count once, and the npm wrapper is reported as a
+/// wrapper, not as a native copy.
+///
+/// `doctor` uses this (Task I) to warn when the shell could run a different copy from
+/// the one npm or `install.sh` installed.
+pub fn opv_copies_on_path() -> Vec<OpvCopy> {
+    #[cfg(test)]
+    {
+        // Unit tests control the candidates; without an explicit list there are none, so
+        // no test depends on the developer's or the CI runner's PATH.
+        TEST_PATH.with(|p| p.borrow().clone()).unwrap_or_default()
+    }
+    #[cfg(not(test))]
+    {
+        let name = if cfg!(windows) { "opv.exe" } else { "opv" };
+        let Some(path) = std::env::var_os("PATH") else {
+            return Vec::new();
+        };
+        let mut out: Vec<OpvCopy> = Vec::new();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for dir in std::env::split_paths(&path) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let key = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key.clone());
+            if is_npm_wrapper(&key) {
+                out.push(OpvCopy::NpmWrapper {
+                    version: wrapper_version(&key),
+                    path: candidate,
+                });
+            } else {
+                out.push(OpvCopy::Binary(candidate));
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn npm_package_entry_point_is_a_wrapper() {
+        assert!(is_npm_wrapper(Path::new(
+            "/usr/lib/node_modules/@matthew-cochran/opv/bin/opv.js"
+        )));
+    }
+
+    #[test]
+    fn a_binary_named_opv_is_not_a_wrapper() {
+        assert!(!is_npm_wrapper(Path::new("/home/x/.local/bin/opv")));
+    }
 }
 
 impl fmt::Display for Platform {

@@ -20,8 +20,14 @@
   "bin": {
     "opv": "bin/opv.js"
   },
+  "scripts": {
+    "postinstall": "node install.js",
+    "preuninstall": "node uninstall.js"
+  },
   "files": [
-    "bin"
+    "bin",
+    "install.js",
+    "uninstall.js"
   ],
   "engines": {
     "node": ">=18"
