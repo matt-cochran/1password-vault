@@ -16,6 +16,14 @@ pub trait Backend {
     fn native(&self) -> Result<(), Error>;
     fn call(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error>;
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error>;
+    /// Use `account` for every later call (`opv login`, FR-40).
+    fn use_account(&mut self, _account: Option<&str>) {}
+    /// Run `command` signed in (a signed-in shell when empty); its exit code (`opv login`).
+    fn child(&self, _command: &[String]) -> Result<i32, Error> {
+        Err(Error::Dependency(
+            "[LOGIN-COMMAND] This backend cannot start a command.".into(),
+        ))
+    }
 }
 pub trait Interaction {
     fn show(&mut self, message: &str) -> Result<(), Error>;

@@ -595,7 +595,6 @@ impl PinnedRuntime for ContainerApp<'_> {
     }
 
     fn apply(&self, change: &RuntimeChange, snapshot: &RuntimeSnapshot) -> Result<Revision, Error> {
-        az::stdin_supported("updating a container app")?;
         if let Some(name) = change
             .pin
             .keys()

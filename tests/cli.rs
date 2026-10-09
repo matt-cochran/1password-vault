@@ -155,11 +155,11 @@ fn missing_discovered_config_offers_init_and_setup() {
     );
 }
 
-/// Review #8: `opv session` without a terminal names itself, not guided setup.
+/// Review #8: `opv login` without a terminal names itself, not guided setup.
 #[test]
-fn session_without_a_terminal_names_session() {
-    let (_, _, err) = opv(&["session"]);
-    assert!(err.contains("opv session"), "{err}");
+fn login_without_a_terminal_names_login() {
+    let (_, _, err) = opv(&["login"]);
+    assert!(err.contains("opv login"), "{err}");
 }
 
 #[test]
@@ -858,7 +858,7 @@ fn timeout_out_of_range_exits_2() {
 
 #[test]
 fn guided_commands_refuse_headless_execution_before_vendor_calls() {
-    for command in ["setup", "session"] {
+    for command in ["setup", "login"] {
         let (code, stdout, stderr) = opv(&[command]);
         assert_eq!(code, 6);
         assert!(stdout.is_empty());

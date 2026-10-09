@@ -229,6 +229,18 @@ impl Provider for KubernetesProvider {
         &CHECKS
     }
 
+    fn deploy_credential_fields(
+        &self,
+    ) -> Result<&'static [crate::provider::CredentialField], String> {
+        Err(
+            "deploy_credentials is not supported for Kubernetes: kubectl uses your \
+             kubeconfig (kubernetes.context) to sign in; remove deploy_credentials and give \
+             that context a least-privilege identity (with secrets_in naming a Key Vault, \
+             deploy_credentials signs in the az that writes it)"
+                .into(),
+        )
+    }
+
     fn setup_hint(&self, profile: Profile) -> String {
         match profile {
             Profile::Simple => {

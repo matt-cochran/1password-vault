@@ -16,7 +16,9 @@ use toml::de::{DeTable, DeValue};
 
 use crate::adapters::registry;
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
-use crate::domain::{Environment, Fleet, KeySpec, Product, Profile, SIMPLE_PRODUCT, key_label};
+use crate::domain::{
+    Environment, Fleet, ItemRef, KeySpec, Product, Profile, SIMPLE_PRODUCT, key_label,
+};
 use crate::error::Error;
 use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetConfig};
 
@@ -254,6 +256,12 @@ struct RawEnvironment<M> {
     /// `sync` needs `--confirm <env>` (NR-20).
     #[serde(default)]
     confirm_env: bool,
+    /// The 1Password account for this environment's `op` calls (FR-40).
+    #[serde(default)]
+    account: Option<String>,
+    /// `op://<vault>/<item>` holding the environment's deploy identity (FR-40).
+    #[serde(default)]
+    deploy_credentials: Option<String>,
     /// Optional: environments used only for `run`, `config export` and `item skeleton`
     /// need no target. At most one entry (FR-28).
     #[serde(flatten)]
@@ -344,7 +352,7 @@ fn target_of(
             } else {
                 format!(
                     "environment {name}: unknown field {unknown:?}; expected vault_id, item_id, \
-                 modes, confirm_env or a target section ({known})"
+                 modes, confirm_env, account, deploy_credentials or a target section ({known})"
                 )
             },
         ));
@@ -419,16 +427,68 @@ fn environment<M>(
 ) -> Result<(Environment, M), Error> {
     check_ids(name, &e.vault_id, &e.item_id)?;
     let target = target_of(name, &e.sections, profile, stores, doc)?;
+    if let Some(account) = &e.account
+        && !is_account(account)
+    {
+        return Err(doc.at(
+            name,
+            "account",
+            format!(
+                "environment {name}: account must be a 1Password sign-in address (for example \
+                 my.1password.com), an email or an account ID"
+            ),
+        ));
+    }
+    let deploy_credentials = match &e.deploy_credentials {
+        None => None,
+        Some(raw) => Some(deploy_credentials(name, raw, target.as_deref(), doc)?),
+    };
     Ok((
         Environment {
+            name: name.to_string(),
             vault_id: e.vault_id,
             item_id: e.item_id,
             target,
             modes: BTreeMap::new(),
             confirm_env: e.confirm_env,
+            account: e.account,
+            deploy_credentials,
         },
         e.modes,
     ))
+}
+
+/// `deploy_credentials` (FR-40): an `op://<vault>/<item>` reference, on an environment whose
+/// provider signs in with one. Errors point at the line.
+fn deploy_credentials(
+    name: &str,
+    raw: &str,
+    target: Option<&dyn TargetConfig>,
+    doc: &Doc<'_>,
+) -> Result<ItemRef, Error> {
+    let at = |msg: String| doc.at(name, "deploy_credentials", msg);
+    let reference = ItemRef::parse(raw)
+        .map_err(|why| at(format!("environment {name}: deploy_credentials {why}")))?;
+    let Some(target) = target else {
+        return Err(at(format!(
+            "environment {name}: deploy_credentials needs a deployment target; remove it, or \
+             add the target section it signs in to"
+        )));
+    };
+    crate::provider::deploy_provider(target)
+        .deploy_credential_fields()
+        .map_err(|why| at(format!("environment {name}: {why}")))?;
+    Ok(reference)
+}
+
+/// A sign-in address (`my.1password.com`), email or account ID: non-empty, no whitespace,
+/// not starting with `-`, and only characters those forms use (safe in env and argv).
+fn is_account(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | '+'))
 }
 
 fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
@@ -1546,8 +1606,76 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
-             confirm_env or a target section (azure, fly, kubernetes)\n"
+             confirm_env, account, deploy_credentials or a target section (azure, fly, kubernetes)\n"
         ));
+    }
+
+    /// `prod` with `line` added after its item_id.
+    fn prod_with(line: &str) -> String {
+        mutate("item_id = \"iprd\"", &format!("item_id = \"iprd\"\n{line}"))
+    }
+
+    #[test]
+    fn account_and_deploy_credentials_are_parsed() {
+        let f = parse(&prod_with(
+            "account = \"work.1password.com\"\ndeploy_credentials = \"op://Infra Prod/fly deploy\"",
+        ))
+        .unwrap();
+        let prod = f.environment("prod").unwrap();
+        assert_eq!(
+            (
+                prod.account.as_deref(),
+                prod.deploy_credentials.as_ref().map(ToString::to_string)
+            ),
+            (
+                Some("work.1password.com"),
+                Some("op://Infra Prod/fly deploy".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn invalid_account_points_at_its_line() {
+        let m = config_err(&prod_with("account = \"-work\""));
+        assert!(m.contains("line ") && m.contains("account must be"), "{m}");
+    }
+
+    #[test]
+    fn deploy_credentials_with_a_field_is_refused_at_its_line() {
+        let m = config_err(&prod_with(
+            "deploy_credentials = \"op://v/i/FLY_API_TOKEN\"",
+        ));
+        assert!(m.contains("line ") && m.contains("not a field"), "{m}");
+    }
+
+    #[test]
+    fn deploy_credentials_must_be_an_op_reference() {
+        let m = config_err(&prod_with("deploy_credentials = \"vault/item\""));
+        assert!(
+            m.contains("must be an op://<vault>/<item> reference"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn deploy_credentials_without_a_target_is_refused() {
+        let text = "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"v\"\n\
+                    item_id = \"i\"\ndeploy_credentials = \"op://v/deploy\"\n";
+        let m = config_err(text);
+        assert!(
+            m.contains("deploy_credentials needs a deployment target"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn kubernetes_deploy_credentials_is_a_configuration_error() {
+        let text = "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"v\"\n\
+                    item_id = \"i\"\ndeploy_credentials = \"op://v/deploy\"\n\
+                    [environments.dev.kubernetes]\ncontext = \"kind-dev\"\nnamespace = \"app\"\n\
+                    deployment = \"web\"\n";
+        let m = config_err(text);
+        assert!(m.contains("kubeconfig") && m.contains("line "), "{m}");
     }
 
     /// FR-2, FR-37: an unknown field in the Fly section reports line, column, the line and

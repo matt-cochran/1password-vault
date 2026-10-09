@@ -12,8 +12,12 @@
 mod az;
 pub mod config;
 pub mod containerapp;
+pub mod handoff;
 pub mod keyvault;
+pub mod login;
 pub mod preflight;
 pub mod store;
+#[cfg(windows)]
+pub(crate) mod winsec;
 
 pub use config::{AzureTarget, ConfigRoute, PROVIDER};

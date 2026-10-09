@@ -20,8 +20,6 @@
 //! against 1Password (FR-11, SR-5). A failed call is diagnosed as in every other command
 //! (FR-26, [`super::onepassword::diagnose`]).
 
-use std::collections::BTreeMap;
-
 use serde::Deserialize;
 
 use super::onepassword::{Session, diagnose, failed_op_error, json_error, read_op, session_error};
@@ -149,8 +147,7 @@ pub fn read_field_shapes(
             vault_id: vault_id.to_string(),
             item_id: item_id.to_string(),
             target: None,
-            modes: BTreeMap::new(),
-            confirm_env: false,
+            ..Default::default()
         };
         return Err(failed_op_error(
             r,
@@ -203,7 +200,9 @@ fn list(
         Ok(Session::Unknown) => {
             Error::Source(format!("{failed}; run `op {}` to see why", args.join(" ")).into())
         }
-        Ok(s) => session_error(s, &host(), Some(&failed)).expect("every other session is an error"),
+        Ok(s) => {
+            session_error(s, &host(), Some(&failed), None).expect("every other session is an error")
+        }
     })
 }
 

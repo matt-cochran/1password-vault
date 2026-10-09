@@ -427,8 +427,9 @@ mod tests {
 
     #[test]
     fn map_text_keeps_the_step() {
-        let e = Error::Auth("signed out\n  next: op signin".into()).map_text(|t| t + "\n  more");
-        assert_eq!(e.next_step(), Some("op signin"));
+        let e =
+            Error::Auth("signed out\n  next: opv login dev".into()).map_text(|t| t + "\n  more");
+        assert_eq!(e.next_step(), Some("opv login dev"));
     }
 
     #[test]

@@ -192,7 +192,12 @@ fn account_count(stdout: &[u8]) -> Option<usize> {
 ///   CI.
 /// - `CredentialFailed`: [`Error::Source`] (exit 4, the pre-FR-26 category, FR-10): the
 ///   token was rejected or 1Password could not be reached; no interactive command.
-pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Option<Error> {
+pub fn session_error(
+    session: Session,
+    host: &Host,
+    failed: Option<&str>,
+    env: Option<&str>,
+) -> Option<Error> {
     let ctx = match failed {
         Some(f) => format!("{f}; op whoami failed"),
         None => "op whoami failed".to_string(),
@@ -211,15 +216,15 @@ pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Opt
                 c.var()
             ).into()));
             }
-            Session::NotSignedIn => match host.signin_line("sign in") {
+            Session::NotSignedIn => match host.signin_line("sign in", env) {
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
                 Some(step) => format!(
-                    "not signed in to 1Password ({ctx})\n  {step}\n  (a session from op signin \
+                    "not signed in to 1Password ({ctx})\n  {step}\n  (a 1Password CLI session \
                  expires after 30 minutes idle; with the desktop app integration, unlock the \
                  1Password app instead)\n  {network}"
                 ),
             },
-            Session::NoAccount => match host.signin_line("then sign in") {
+            Session::NoAccount => match host.signin_line("then sign in", env) {
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
                 Some(step) => {
                     let wsl = if host.platform == Platform::Wsl {
@@ -292,7 +297,8 @@ fn failed_op_session_error(
             .into(),
         ),
         Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env)).into()),
-        s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
+        s => session_error(s, &host(), Some(failed), Some(env.name.as_str()))
+            .expect("every other session is an error"),
     }
 }
 
@@ -436,6 +442,120 @@ fn read_profile_on(
     })
 }
 
+/// Read a `deploy_credentials` item once (FR-40), by the IDs or names in `reference`, and
+/// return exactly the conventional `fields`, keyed by label, as [`SecretValue`]s. Each must
+/// appear once (in any section), with its kind's field type (concealed = secret, text =
+/// config, FR-14) and a value; every other field is skipped unread. Errors name the
+/// reference and the field, never a value (SR-1).
+pub fn read_deploy_credentials(
+    r: &dyn CommandRunner,
+    reference: &crate::domain::ItemRef,
+    fields: &[crate::provider::CredentialField],
+) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
+    read_deploy_credentials_on(r, reference, fields, &Host::detect)
+}
+
+fn read_deploy_credentials_on(
+    r: &dyn CommandRunner,
+    reference: &crate::domain::ItemRef,
+    fields: &[crate::provider::CredentialField],
+    host: &dyn Fn() -> Host,
+) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
+    let args = [
+        "item",
+        "get",
+        reference.item.as_str(),
+        "--vault",
+        reference.vault.as_str(),
+        "--format",
+        "json",
+    ];
+    let Output { status, stdout } = read_op(r, &args, host)?;
+    if status != 0 {
+        let failed = format!(
+            "cannot read deploy credentials {reference} (op item get failed ({}))",
+            status_text(status)
+        );
+        // The probes explain the failed read; its excerpt stays with the error (NR-31).
+        return Err(match crate::runner::diagnosing(|| diagnose(r, host)) {
+            Err(e) => e,
+            Ok(Session::SignedIn(_) | Session::Unknown) => Error::Source(
+                format!(
+                    "{failed}; nothing was changed\n  next: check deploy_credentials in \
+                 secrets.toml and that this identity can read that item: `{OP} item get \
+                 \"{}\" --vault \"{}\"`",
+                    reference.item, reference.vault
+                )
+                .into(),
+            ),
+            Ok(s) => session_error(s, &host(), Some(&failed), None)
+                .expect("every other session is an error"),
+        });
+    }
+    let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| json_error(&e))?;
+    let mut found: std::collections::BTreeMap<String, SecretValue> = Default::default();
+    for f in raw.fields {
+        let Some(want) = fields.iter().find(|w| w.label == f.label) else {
+            continue;
+        };
+        let expected = match want.kind {
+            Kind::Secret => "CONCEALED",
+            Kind::Config => "STRING",
+        };
+        if f.ty != expected {
+            return Err(Error::Source(
+                format!(
+                    "deploy credentials {reference}: field {} must be a {} field; nothing was \
+                 changed\n  next: change its type in 1Password, keeping the value",
+                    want.label,
+                    match want.kind {
+                        Kind::Secret => "Password (concealed)",
+                        Kind::Config => "Text",
+                    }
+                )
+                .into(),
+            ));
+        }
+        let value = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty());
+        let Some(value) = value else {
+            return Err(Error::Source(
+                format!(
+                    "deploy credentials {reference}: field {} is empty; nothing was changed\n  \
+                 next: fill it in 1Password",
+                    want.label
+                )
+                .into(),
+            ));
+        };
+        if found.insert(want.label.to_string(), value).is_some() {
+            return Err(Error::Source(
+                format!(
+                    "deploy credentials {reference}: field {} appears more than once; nothing was \
+                 changed\n  next: keep one field with that name in the item",
+                    want.label
+                )
+                .into(),
+            ));
+        }
+    }
+    if let Some(missing) = fields.iter().find(|w| !found.contains_key(w.label)) {
+        return Err(Error::Source(
+            format!(
+                "deploy credentials {reference}: field {} is missing; nothing was changed\n  \
+             next: add it to the item as a {} field named {}",
+                missing.label,
+                match missing.kind {
+                    Kind::Secret => "Password (concealed)",
+                    Kind::Config => "Text",
+                },
+                missing.label
+            )
+            .into(),
+        ));
+    }
+    Ok(found)
+}
+
 /// Every non-zero exit status: the first item read is refused on any failure so that it
 /// is diagnosed before it is retried (P16).
 const ANY_FAILURE: [i32; 255] = {
@@ -489,8 +609,10 @@ fn read_diagnosed(
                 ));
             }
             s => {
-                return Err(session_error(s, &host(), Some(&failed(status)))
-                    .expect("every other session is an error"));
+                return Err(
+                    session_error(s, &host(), Some(&failed(status)), Some(&env.name))
+                        .expect("every other session is an error"),
+                );
             }
         };
         let readable = vault_access(r, env);
@@ -973,7 +1095,6 @@ pub(crate) fn serialize_exact(v: &Value) -> Result<Zeroizing<Vec<u8>>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::io;
 
     use serde_json::{Value, json};
@@ -1007,6 +1128,7 @@ mod tests {
 
     fn test_env() -> Environment {
         Environment {
+            name: "staging".into(),
             vault_id: "vstg".into(),
             item_id: "istg".into(),
             target: Some(Box::new(crate::adapters::fly::FlyTarget {
@@ -1014,8 +1136,7 @@ mod tests {
                 secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
                 profile: crate::domain::Profile::Fleet,
             })),
-            modes: BTreeMap::new(),
-            confirm_env: false,
+            ..Default::default()
         }
     }
 
@@ -1415,7 +1536,7 @@ mod tests {
         let t = e.to_string();
         assert!(t.contains("not signed in to 1Password"), "{t}");
         assert!(t.contains("op item get failed (exit 1)"), "{t}");
-        assert!(t.contains("\n  sign in: eval $(op signin)\n"), "{t}");
+        assert!(t.contains("\n  sign in: opv login staging\n"), "{t}");
         assert!(!t.contains("to see why"), "{t}");
     }
 
@@ -1816,7 +1937,7 @@ mod tests {
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
         let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
-        assert!(e.to_string().contains("eval $(op signin)"), "{e}");
+        assert!(e.to_string().contains("opv login staging"), "{e}");
     }
 
     /// NR-2: an edit that timed out may or may not have happened: exit 9, safe to re-run.

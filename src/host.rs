@@ -12,7 +12,7 @@
 //! 3. Shell: the basename of `$SHELL` (`.exe` stripped): `fish`, `pwsh`/`powershell`, or a
 //!    POSIX shell (`bash`, `zsh`, `sh`, `dash`, `ksh`). Unset: PowerShell on Windows, POSIX
 //!    elsewhere. Any other shell (nu, tcsh, csh, ...): PowerShell on Windows (its default),
-//!    [`Shell::Other`] elsewhere, which gets a generic `op signin` hint, never POSIX syntax.
+//!    [`Shell::Other`] elsewhere. (The sign-in hint, `opv login <env>`, is the same in every shell.)
 //! 4. Non-interactive credentials, by name only: 1Password `OP_SERVICE_ACCOUNT_TOKEN`, or
 //!    Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`); each provider's own
 //!    (`Provider::credential_vars`, e.g. `FLY_API_TOKEN`). With one set, failures are never
@@ -247,15 +247,6 @@ impl OpCredential {
     }
 }
 
-/// How the user can sign `op` in from this shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignIn {
-    /// The exact command for this shell.
-    Command(&'static str),
-    /// A shell opv has no syntax for: point at `op signin` and its help.
-    Generic,
-}
-
 /// The detected host: platform, shell, CI, and which non-interactive credentials are set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Host {
@@ -264,7 +255,7 @@ pub struct Host {
     pub ci: bool,
     /// A non-interactive 1Password credential, if set (service account wins over Connect).
     pub op_credential: Option<OpCredential>,
-    /// Stdin and stdout are a terminal: `opv session` can sign in here (P7).
+    /// Stdin and stdout are a terminal: `opv login` can sign in here (P7).
     pub interactive: bool,
     /// Which of [`registry::credential_vars`] are set, one bit each (by name; values are
     /// never read). Read with [`Host::token`].
@@ -368,50 +359,24 @@ impl Host {
         })
     }
 
-    /// How to sign `op` in from this shell, or `None` when no interactive sign-in applies
-    /// (under CI, or with a non-interactive 1Password credential set).
-    pub fn signin(&self) -> Option<SignIn> {
+    /// The sign-in command, `opv login <env>` (or `opv login` when no environment is
+    /// known), the same on every platform and shell, or `None` when no interactive sign-in
+    /// applies (under CI, or with a non-interactive 1Password credential set). It signs in
+    /// to the account that environment uses (FR-40); no token is printed or evaluated.
+    pub fn signin_command(&self, env: Option<&str>) -> Option<String> {
         if self.ci || self.op_credential.is_some() {
             return None;
         }
-        Some(match self.shell {
-            Shell::Posix => SignIn::Command("eval $(op signin)"),
-            Shell::Fish => SignIn::Command("eval (op signin)"),
-            Shell::PowerShell => SignIn::Command("Invoke-Expression $(op signin)"),
-            Shell::Other => SignIn::Generic,
+        Some(match env {
+            Some(e) if !e.is_empty() => format!("opv login {e}"),
+            _ => "opv login".to_string(),
         })
-    }
-
-    /// The exact sign-in command, when there is one for this shell.
-    pub fn signin_command(&self) -> Option<&'static str> {
-        match self.signin()? {
-            SignIn::Command(c) => Some(c),
-            SignIn::Generic => None,
-        }
     }
 
     /// The sign-in step as a message line led by `lead` (`sign in`, `then sign in`):
-    /// `sign in: eval $(op signin)`, or for an unknown shell
-    /// ``sign in with `op signin` (see `op signin --help` for your shell)``.
-    ///
-    /// On an interactive terminal (P7) it leads with `opv session`, which signs in at op's
-    /// own prompts without an export: `sign in: opv session   (or: eval $(op signin))`. CI
-    /// and non-interactive credentials get no sign-in line at all (see [`Host::signin`]).
-    pub fn signin_line(&self, lead: &str) -> Option<String> {
-        let signin = self.signin()?;
-        if self.interactive {
-            let or = match signin {
-                SignIn::Command(c) => c.to_string(),
-                SignIn::Generic => "op signin; see op signin --help for your shell".into(),
-            };
-            return Some(format!("{lead}: opv session   (or: {or})"));
-        }
-        Some(match signin {
-            SignIn::Command(c) => format!("{lead}: {c}"),
-            SignIn::Generic => {
-                format!("{lead} with `op signin` (see `op signin --help` for your shell)")
-            }
-        })
+    /// `sign in: opv login prod`.
+    pub fn signin_line(&self, lead: &str, env: Option<&str>) -> Option<String> {
+        self.signin_command(env).map(|c| format!("{lead}: {c}"))
     }
 
     /// One line telling the user how to install `tool` on this platform.
@@ -588,7 +553,7 @@ mod tests {
         for var in ["CI", "GITHUB_ACTIONS"] {
             let h = host(FakeEnv::new("linux").shell("/bin/bash").var(var));
             assert!(h.ci, "{var}");
-            assert_eq!(h.signin_command(), None, "{var}");
+            assert_eq!(h.signin_command(Some("dev")), None, "{var}");
         }
         assert!(!host(FakeEnv::new("linux")).ci);
     }
@@ -645,14 +610,29 @@ mod tests {
         }
     }
 
+    /// The same `opv login <env>` on every platform and shell: no eval, no token.
     #[test]
-    fn signin_command_per_shell() {
-        let bash = host(FakeEnv::new("linux").shell("/bin/bash"));
-        assert_eq!(bash.signin_command(), Some("eval $(op signin)"));
-        let fish = host(FakeEnv::new("linux").shell("/usr/bin/fish"));
-        assert_eq!(fish.signin_command(), Some("eval (op signin)"));
-        let ps = host(FakeEnv::new("windows"));
-        assert_eq!(ps.signin_command(), Some("Invoke-Expression $(op signin)"));
+    fn signin_command_is_opv_login_on_every_shell() {
+        let shells = [
+            FakeEnv::new("linux").shell("/bin/bash"),
+            FakeEnv::new("linux").shell("/usr/bin/fish"),
+            FakeEnv::new("windows"),
+            FakeEnv::new("linux").shell("/usr/bin/nu"),
+        ];
+        let got: Vec<_> = shells
+            .into_iter()
+            .map(|e| host(e).signin_command(Some("prod")))
+            .collect();
+        assert_eq!(got, vec![Some("opv login prod".to_string()); 4]);
+    }
+
+    #[test]
+    fn signin_command_without_an_environment_is_plain_opv_login() {
+        let h = host(FakeEnv::new("linux").shell("/bin/bash"));
+        assert_eq!(
+            h.signin_line("sign in", None).as_deref(),
+            Some("sign in: opv login")
+        );
     }
 
     #[test]
@@ -692,8 +672,7 @@ mod tests {
             "OP_CONNECT_TOKEN",
         ] {
             let h = host(FakeEnv::new("linux").shell("/bin/bash").var(v));
-            assert_eq!(h.signin(), None, "{v}");
-            assert_eq!(h.signin_line("sign in"), None, "{v}");
+            assert_eq!(h.signin_line("sign in", Some("prod")), None, "{v}");
         }
     }
 
@@ -725,37 +704,11 @@ mod tests {
         assert!(!host(FakeEnv::new("linux").var_val("GITHUB_ACTIONS", "false")).ci);
     }
 
-    /// Unknown shells get no POSIX syntax, only the generic `op signin` pointer.
-    #[test]
-    fn unknown_shell_gets_generic_signin_hint() {
-        for sh in ["/usr/bin/nu", "/bin/tcsh", "/bin/csh", "/usr/bin/xonsh"] {
-            let h = host(FakeEnv::new("linux").shell(sh));
-            assert_eq!(h.signin(), Some(SignIn::Generic), "{sh}");
-            assert_eq!(h.signin_command(), None, "{sh}");
-            let l = h.signin_line("sign in").unwrap();
-            assert_eq!(
-                l,
-                "sign in with `op signin` (see `op signin --help` for your shell)"
-            );
-            assert!(!l.contains("$(") && !l.contains("eval"), "{l}");
-        }
-    }
-
-    /// P7: a person at a terminal is pointed at `opv session` first.
-    #[test]
-    fn interactive_signin_leads_with_opv_session() {
-        let h = host(FakeEnv::new("linux").shell("/bin/bash").tty());
-        assert_eq!(
-            h.signin_line("sign in").unwrap(),
-            "sign in: opv session   (or: eval $(op signin))"
-        );
-    }
-
-    /// P7: CI keeps the service-account wording even on a terminal.
+    /// CI keeps the service-account wording even on a terminal.
     #[test]
     fn interactive_ci_has_no_signin_line() {
         let h = host(FakeEnv::new("linux").shell("/bin/bash").tty().var("CI"));
-        assert_eq!(h.signin_line("sign in"), None);
+        assert_eq!(h.signin_line("sign in", Some("prod")), None);
     }
 
     #[test]

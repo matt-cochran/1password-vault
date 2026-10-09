@@ -3,8 +3,8 @@
 //! The Azure CLI exits non-zero for every failure and the runner discards child stderr
 //! (SR-1), so sign-in is told apart from a target failure by a separate, read-only
 //! `az account show -o none` probe ([`diagnose`]). Values never appear in argv or env:
-//! Key Vault writes go through `/dev/stdin` (SR-3), which on native Windows fails closed
-//! before any spawn ([`stdin_supported`]).
+//! a value goes to `az` through the platform's hand-off (SR-3): `/dev/stdin`, or on native
+//! Windows a user-only named pipe ([`super::handoff`]).
 //!
 //! Every adapter call must go through [`CommandRunner::read`] or
 //! [`CommandRunner::write`](crate::runner::CommandRunner::write); this module only builds
@@ -12,6 +12,7 @@
 
 use std::io;
 
+use super::handoff;
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, unknown_text};
@@ -33,22 +34,6 @@ pub const AZ_CLI: Tool = Tool {
 /// Global flag that keeps `az` quiet apart from errors (R7).
 pub const ONLY_SHOW_ERRORS: &str = "--only-show-errors";
 
-/// Fail closed before any spawn when `action` (e.g. "writing to Key Vault") would need
-/// `/dev/stdin` (SR-3): native Windows has no such device, and the document must not touch
-/// disk (SR-4), so the user is pointed at WSL or Linux.
-pub fn stdin_supported(action: &str) -> Result<(), Error> {
-    if cfg!(windows) {
-        return Err(Error::Dependency(
-            format!(
-                "{action} needs /dev/stdin, which native Windows lacks; nothing was changed\n  \
-             next: run opv sync from WSL or Linux"
-            )
-            .into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Whether a call changes the target (NR-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Effect {
@@ -66,11 +51,40 @@ pub(crate) fn invoke(
     stdin: Option<&[u8]>,
     refused: &[i32],
 ) -> Result<Outcome, Error> {
-    let call = Call::new(PROGRAM, args).with_stdin(stdin);
-    let res = match effect {
-        Effect::Read => r.read(&call, refused),
-        Effect::Write => r.write(&call),
+    invoke_env(r, effect, op, args, stdin, refused, &[])
+}
+
+/// [`invoke`] with extra child environment (`AZURE_CONFIG_DIR` of a deploy sign-in). A
+/// value in `stdin` reaches `az` through the platform's hand-off: callers write
+/// `/dev/stdin` where `az` takes the value's path ([`handoff::deliver`]).
+pub(crate) fn invoke_env(
+    r: &dyn CommandRunner,
+    effect: Effect,
+    op: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    refused: &[i32],
+    env: &[(&str, &str)],
+) -> Result<Outcome, Error> {
+    // Only a real child can read the platform's channel (a Windows pipe); a simulated
+    // runner records the value as the call's stdin on every platform.
+    let channel: &dyn handoff::Handoff = if r.spawns_processes() {
+        handoff::platform()
+    } else {
+        &handoff::Stdin
     };
+    let res = handoff::deliver(channel, args, stdin, &mut |args, stdin| {
+        let call = Call {
+            program: PROGRAM,
+            args,
+            stdin,
+            env,
+        };
+        match effect {
+            Effect::Read => r.read(&call, refused),
+            Effect::Write => r.write(&call),
+        }
+    })?;
     res.map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => Error::Dependency(
             format!(

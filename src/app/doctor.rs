@@ -79,6 +79,53 @@ pub fn run_scoped_as(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    let request = Request {
+        env,
+        product,
+        json,
+        deploy_failure: None,
+    };
+    run_request(config, request, r, out)
+}
+
+/// What `opv doctor` was asked for, from the command line.
+#[derive(Debug, Default)]
+pub struct Request<'a> {
+    /// `--env`.
+    pub env: Option<&'a str>,
+    /// `--product` (with `--env`).
+    pub product: Option<&'a str>,
+    /// `--json`.
+    pub json: bool,
+    /// The environment's deploy sign-in failed before doctor ran (FR-40). Doctor reports
+    /// it as one failing check, runs the other checks and skips the target checks that
+    /// need those credentials (owner ruling: doctor never aborts on it).
+    pub deploy_failure: Option<Error>,
+}
+
+/// [`run_scoped_as`] for a whole [`Request`].
+pub fn run_request(
+    config: Result<Fleet, Error>,
+    request: Request<'_>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    run_request_on(config, request, r, &Host::detect, out)
+}
+
+fn run_request_on(
+    config: Result<Fleet, Error>,
+    request: Request<'_>,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let Request {
+        env,
+        product,
+        json,
+        deploy_failure,
+    } = request;
     let config = match env {
         Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
         None if product.is_some() => Err(Error::Config("--product requires --env".into())),
@@ -96,7 +143,7 @@ pub fn run_scoped_as(
         local_only,
         json,
     };
-    run_on(config, r, &Host::detect, scope, out)
+    run_on_with(config, r, host, scope, deploy_failure, out)
 }
 
 pub fn run(
@@ -271,6 +318,24 @@ fn run_on(
     scope: Scope<'_>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_on_with(config, r, host, scope, None, out)
+}
+
+/// The check that reports a failed deploy sign-in (FR-40).
+const DEPLOY_CHECK: &str = "deploy credentials";
+
+/// Why a target check was not run after a failed deploy sign-in.
+const DEPLOY_SKIP: &str = "not checked (deploy credentials failed)";
+
+/// [`run_on`], with the environment's failed deploy sign-in, if any.
+fn run_on_with(
+    config: Result<Fleet, Error>,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    scope: Scope<'_>,
+    deploy_failure: Option<Error>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let mut report = Report::default();
     let (fleet, config_line) = match config {
         Ok(f) => {
@@ -295,7 +360,7 @@ fn run_on(
     let op_present = op_check.is_ok();
     report.push("op", op_check);
     if op_present {
-        report.push("op auth", op_auth(r, host).map(Check::Ok));
+        report.push("op auth", op_auth(r, host, scope.env).map(Check::Ok));
     } else {
         // One failure per cause: the op line already says why (review #12).
         report.skip("op auth", "op not available (see the op line above)".into());
@@ -312,12 +377,28 @@ fn run_on(
             None => report.skip(ITEM_CHECK, "not checked (configuration invalid)".into()),
         }
     }
+    // The checks that run the deploy identity's CLI, when its sign-in failed: every check
+    // of that provider but the first (its tool version).
+    let mut needs_deploy: Vec<&str> = Vec::new();
+    if let Some(e) = deploy_failure {
+        report.push(DEPLOY_CHECK, Err(e));
+        if let Some(f) = &fleet {
+            for t in f.environments.values().filter_map(|e| e.target()) {
+                let checks = crate::provider::deploy_provider(t).doctor_checks();
+                needs_deploy.extend(checks.iter().skip(1));
+            }
+        }
+    }
     let default = registry::DEFAULT;
     match targets {
         Some((used, without)) if !used.is_empty() => {
             for t in &used {
                 for c in t.doctor(r, host) {
-                    report.push(&c.name, c.outcome);
+                    if needs_deploy.iter().any(|n| *n == c.name) {
+                        report.skip(&c.name, DEPLOY_SKIP.into());
+                    } else {
+                        report.push(&c.name, c.outcome);
+                    }
                 }
             }
             if !without.is_empty() {
@@ -593,7 +674,11 @@ fn op_upgrade_hint(h: &Host) -> &'static str {
 }
 
 /// The 1Password session, classified exactly as a failed item read is (FR-26).
-fn op_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<String, Error> {
+fn op_auth(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    env: Option<&str>,
+) -> Result<String, Error> {
     use onepassword::Session;
     match onepassword::diagnose(r, host)? {
         Session::SignedIn(t) => Ok(format!("signed in ({t})")),
@@ -601,10 +686,8 @@ fn op_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<String, Err
             "op whoami did not run to completion; the 1Password session could not be checked"
                 .into(),
         )),
-        s => {
-            Err(onepassword::session_error(s, &host(), None)
-                .expect("every other session is an error"))
-        }
+        s => Err(onepassword::session_error(s, &host(), None, env)
+            .expect("every other session is an error")),
     }
 }
 
@@ -889,7 +972,7 @@ mod tests {
             lines[2].starts_with("FAIL  op auth: authentication error: not signed in"),
             "{out}"
         );
-        assert!(out.contains("\n  sign in: eval $(op signin)\n"), "{out}");
+        assert!(out.contains("\n  sign in: opv login\n"), "{out}");
         assert_eq!(lines.len(), CHECK_LINES, "{out}");
         // Doctor and the read path share one classification: whoami, then account list.
         assert_eq!(
@@ -1172,7 +1255,7 @@ mod tests {
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(next_line(&out), "Next: sign in: eval $(op signin)", "{out}");
+        assert_eq!(next_line(&out), "Next: sign in: opv login", "{out}");
     }
 
     #[test]
@@ -1403,9 +1486,14 @@ mod tests {
             ],
             &["1.2.3", "1.1.0"],
         );
+        let fix = if cfg!(windows) {
+            "del \"/home/x/.cargo/bin/opv\""
+        } else {
+            "rm /home/x/.cargo/bin/opv"
+        };
         assert!(
             out.lines()
-                .any(|l| l.starts_with("warn  opv:") && l.contains("rm /home/x/.cargo/bin/opv")),
+                .any(|l| l.starts_with("warn  opv:") && l.contains(fix)),
             "{out}"
         );
     }
@@ -1455,6 +1543,114 @@ mod tests {
             &mut out,
         );
         (res, text_of(&out), r)
+    }
+
+    /// `doctor --env prod` after the environment's deploy sign-in failed (FR-40).
+    fn doctor_deploy_failed(json: bool) -> (Result<(), Error>, String) {
+        let mut g = good();
+        g.insert(2, complete_item());
+        let r = FakeRunner::new(g);
+        let mut out = Vec::new();
+        let request = Request {
+            env: Some("prod"),
+            product: Some("allumata"),
+            json,
+            deploy_failure: Some(Error::Auth(
+                "deploy credentials: az login failed\n  next: check the item".into(),
+            )),
+        };
+        let res = run_request_on(Ok(fleet()), request, &r, &|| linux(), &mut out);
+        (res, text_of(&out))
+    }
+
+    /// Owner ruling: a failed deploy sign-in is one failing check line, not an abort.
+    #[test]
+    fn deploy_failure_is_one_fail_line() {
+        let (_, out) = doctor_deploy_failed(false);
+        assert!(
+            checks(&out).contains(&"FAIL  deploy credentials: authentication error: deploy credentials: az login failed"),
+            "{out}"
+        );
+    }
+
+    /// Its remediation is the next step.
+    #[test]
+    fn deploy_failure_names_its_fix() {
+        let (res, out) = doctor_deploy_failed(false);
+        let t = terminal(&res, out.as_bytes());
+        assert_eq!(next_line(&t), "Next: check the item", "{t}");
+    }
+
+    /// The target checks that use the deploy identity are skipped, saying why.
+    #[test]
+    fn deploy_failure_skips_the_target_sign_in_check() {
+        let (_, out) = doctor_deploy_failed(false);
+        assert!(
+            checks(&out).contains(&"skip  fly auth: not checked (deploy credentials failed)"),
+            "{out}"
+        );
+    }
+
+    /// The tool check needs no credentials and still runs.
+    #[test]
+    fn deploy_failure_still_checks_the_target_tool() {
+        let (_, out) = doctor_deploy_failed(false);
+        assert!(
+            checks(&out).contains(&"ok    flyctl: version v0.4.112"),
+            "{out}"
+        );
+    }
+
+    /// The non-target checks still run (the item is read).
+    #[test]
+    fn deploy_failure_still_checks_the_item() {
+        let (_, out) = doctor_deploy_failed(false);
+        assert!(
+            checks(&out)
+                .contains(&"ok    item: vprd/iprd readable (3 field(s) in section allumata)"),
+            "{out}"
+        );
+    }
+
+    /// The run fails with the deploy failure's category (exit 7 for a sign-in).
+    #[test]
+    fn deploy_failure_exits_with_its_category() {
+        let (res, _) = doctor_deploy_failed(false);
+        assert!(matches!(res, Err(Error::Auth(_))), "{res:?}");
+    }
+
+    /// The JSON output carries the same check.
+    #[test]
+    fn deploy_failure_json_check_fails_with_its_fix() {
+        let (_, out) = doctor_deploy_failed(true);
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let check = doc["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "deploy credentials")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (check["status"].clone(), check["next"].clone()),
+            ("fail".into(), "check the item".into()),
+            "{out}"
+        );
+    }
+
+    /// The JSON output marks the skipped target check.
+    #[test]
+    fn deploy_failure_json_skips_the_target_sign_in_check() {
+        let (_, out) = doctor_deploy_failed(true);
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let check = doc["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "fly auth")
+            .unwrap()
+            .clone();
+        assert_eq!(check["status"], "skip", "{out}");
     }
 
     /// P6: a readable item is one `ok item:` line naming the IDs and the field count.
@@ -1616,9 +1812,9 @@ mod tests {
         assert_no_values(&out);
     }
 
-    /// P7: on an interactive terminal the sign-in step is `opv session`.
+    /// P7, FR-40: on an interactive terminal the sign-in step is `opv login`.
     #[test]
-    fn next_step_on_a_terminal_names_opv_session() {
+    fn next_step_on_a_terminal_names_opv_login() {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
@@ -1626,10 +1822,7 @@ mod tests {
         let h = Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty());
         let mut out = Vec::new();
         let res = run_with(Ok(fleet()), &r, &h, &mut out);
-        assert_eq!(
-            next_line(&terminal(&res, &out)),
-            "Next: sign in: opv session   (or: eval $(op signin))"
-        );
+        assert_eq!(next_line(&terminal(&res, &out)), "Next: sign in: opv login");
     }
 
     /// #12: the returned error does not repeat a long check message printed above.

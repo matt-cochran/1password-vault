@@ -133,8 +133,8 @@ Install only what your target needs; `opv doctor` checks exactly that and prints
 
 `opv doctor` warns (exit code unchanged) when a version differs.
 
-- **Azure on Windows:** writing to Key Vault and the Container App uses `/dev/stdin`, which native Windows lacks. Run opv in WSL for `sync`; `plan`, `status` and `doctor` work natively.
+- **Azure on Windows:** works natively. Values reach `az` through a named pipe only your user can open (Linux, WSL and macOS use stdin).
 - **Kubernetes:** opv uses the cluster context named in `secrets.toml`, not your current one. Your kubeconfig must contain it.
-- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials (`FLY_API_TOKEN`; an Azure login such as `azure/login`; a kubeconfig).
-- **Locally:** the 1Password desktop app integration or `op signin`, plus `fly auth login`, `az login` or a working kubeconfig.
+- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials: a `deploy_credentials` item in that vault (Fly or Azure), the CI provider's OIDC federation (such as `azure/login`), `FLY_API_TOKEN`, or a kubeconfig.
+- **Locally:** `opv login <env>` (or the 1Password desktop app integration), plus `deploy_credentials` or `fly auth login`, `az login` or a working kubeconfig.
 - `item skeleton` is the only command that writes to 1Password; it needs a write-capable identity.

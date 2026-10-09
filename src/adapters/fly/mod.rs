@@ -46,6 +46,7 @@
 //! `flyctl auth whoami` call ([`auth_whoami`], shared with `doctor`), never by guessing.
 
 pub mod config;
+pub mod login;
 
 pub use config::{FLYCTL_TESTED, FlyTarget, PROVIDER};
 

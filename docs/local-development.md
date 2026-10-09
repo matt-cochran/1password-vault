@@ -5,8 +5,8 @@
 Use one development vault, an item with one section per product, concealed secret fields
 and text configuration fields. Keep operator credentials in a separate profile.
 
-Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (the desktop app integration
-or `op signin`). On WSL, `op` must be the Linux CLI installed inside WSL (see [WSL](#wsl)).
+Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`, or the desktop app
+integration). On WSL, `op` must be the Linux CLI installed inside WSL (see [WSL](#wsl)).
 
 **New configuration.** If there is no `secrets.toml` yet, let `init` write one from the item.
 Omitting `--fly-app` creates a run-only environment; no placeholder app is needed:
@@ -86,8 +86,7 @@ Do not use a wrapper that silently substitutes op.exe.
 Use Linux op with its own owner-authenticated session:
 
 ```sh
-op account add
-eval "$(op signin)"
+opv login dev        # adds the account at op's prompts if none is set up, then signs in
 opv doctor --env dev --product zonetico
 ```
 

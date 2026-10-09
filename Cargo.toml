@@ -39,6 +39,22 @@ clap_complete = "4.6"
 # SIGINT/SIGTERM forwarding to the running CLI (NR-12); libc is already in the tree.
 signal-hook = "0.3"
 libc = "0.2"
+# Azure deploy credentials (FR-40, SR-4): statfs (RAM-backed check), file owner and the
+# liveness of the run that left a stale directory. Already in the tree via tempfile.
+rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+# Azure value hand-off and private az directory on native Windows (FR-40, SR-3, SR-4): a
+# user-only named pipe and ACL. Already in the tree (rustix, errno).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

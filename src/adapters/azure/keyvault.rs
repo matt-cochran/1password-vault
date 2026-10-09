@@ -14,7 +14,8 @@
 //!
 //! Every call also carries `--subscription <azure.subscription>` (NR-7).
 //!
-//! Values travel on stdin only (`--file /dev/stdin --encoding utf-8`), never in argv, env
+//! Values travel on stdin only (`--file /dev/stdin --encoding utf-8`; on native Windows a
+//! user-only named pipe, see `handoff`), never in argv, env
 //! or a temp file (SR-1..SR-4). The write asks for `--query id -o tsv` because
 //! `keyvault secret set` echoes the value on stdout (R11), so the value never comes back.
 //!
@@ -259,7 +260,6 @@ impl KeyVault<'_> {
     fn write_secret(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
         let name = &AzureTarget::key_vault_name(name);
         const OP: &str = "keyvault secret set";
-        az::stdin_supported("writing to Key Vault")?;
         let tag = format!("opv-managed={}", self.env);
         let args = [
             "keyvault",
@@ -1026,17 +1026,5 @@ mod tests {
         let r = FakeRunner::new([Output::success("")]);
         let err = az::diagnose(&r, "keyvault secret show", VAULT);
         assert!(matches!(err, Error::Target(msg) if msg.contains(VAULT)));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn write_on_windows_fails_closed_naming_wsl() {
-        let r = FakeRunner::new([]);
-        let templates = names(&[]);
-        let kv = vault(&r, "prod", &templates);
-        let err = kv
-            .write_one(NAME, &SecretValue::new(MARKER.into()))
-            .unwrap_err();
-        assert!(matches!(err, Error::Dependency(msg) if msg.contains("WSL")));
     }
 }
