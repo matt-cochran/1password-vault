@@ -19,7 +19,10 @@ Examples:
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or flyctl missing), 4 1Password,
-  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan, check).
+  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan, check),
+  9 outcome unknown (a change may or may not have been applied) or provider
+  unavailable; safe to re-run,
+  130/143 interrupted (Ctrl-C / SIGTERM); safe to re-run.
   `run` exits with the command's own exit code.";
 
 /// Sync secrets from 1Password into runtime targets.

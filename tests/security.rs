@@ -685,8 +685,6 @@ fn failure_after_partial_plan_stages_nothing() {
     assert_clean_output(&["sync"], &r);
 }
 
-/// Review Focus 4: list B (after import) fails → Target (5); nothing further is mutated
-/// (no unset, no deploy) even with --prune --deploy.
 /// NR-3: a read that keeps failing prints one notice per retry, naming the step only.
 #[test]
 fn failing_read_prints_retry_notices() {
@@ -705,6 +703,8 @@ fn failing_read_prints_retry_notices() {
     );
 }
 
+/// Review Focus 4: list B (after import) fails → Target (5); nothing further is mutated
+/// (no unset, no deploy) even with --prune --deploy.
 #[test]
 fn list_b_failure_after_staging() {
     let mut h = Harness::new(&good_item());

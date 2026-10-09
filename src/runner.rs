@@ -155,9 +155,10 @@ impl Default for Budget {
 
 pub trait CommandRunner {
     /// Idempotent call. Retried up to [`READ_ATTEMPTS`] attempts (backoff 1 s, 2 s, ±25 %
-    /// jitter) on any failure whose exit code is not in `refused` (a timeout or a lost call
-    /// included), within the run budget. A spawn error (e.g. the program is missing) is an
-    /// `Err` and is not retried.
+    /// jitter) on any failure whose exit code is not in `refused` (a timeout, a kill or a
+    /// lost call included; not opv's own interrupt), within the run budget. A spawn error
+    /// (e.g. the program is missing) is an `Err` and is not retried, as is a read the
+    /// spent budget never let start (`TimedOut`).
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome>;
 
     /// Non-idempotent call. Never retried. A non-zero exit, timeout or kill is
@@ -308,14 +309,16 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
     loop {
         let limit = READ_TIMEOUT.min(left(e));
         if limit.is_zero() {
-            return Ok(Outcome::unknown("timeout"));
+            return Err(budget_spent(call));
         }
         let failed = match e.attempt(call, limit)? {
             Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
             Attempt::Exited(o) if refused.contains(&o.status) => return Ok(Outcome::Refused(o)),
             Attempt::Exited(o) => Outcome::Refused(o),
             Attempt::OverCap => return Ok(Outcome::Refused(Output::failure(OVER_CAP))),
-            Attempt::Killed => return Ok(Outcome::unknown("killed")),
+            // opv's own interrupt never retries: the run is stopping (NR-12).
+            Attempt::Killed if signals::stopping() => return Ok(Outcome::unknown("killed")),
+            Attempt::Killed => Outcome::unknown("killed"),
             Attempt::TimedOut => Outcome::unknown("timeout"),
             Attempt::Lost => Outcome::unknown("lost"),
         };
@@ -336,13 +339,18 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
     }
 }
 
+/// The call was never started: the run budget (`--timeout`) is spent.
+fn budget_spent(call: &Call) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("the run budget ran out before {} started", call.step()),
+    )
+}
+
 fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
     let limit = WRITE_TIMEOUT.min(left(e));
     if limit.is_zero() {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("the run budget ran out before {} started", call.step()),
-        ));
+        return Err(budget_spent(call));
     }
     Ok(match e.attempt(call, limit)? {
         Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
@@ -402,6 +410,19 @@ fn killed_by_signal(status: ExitStatus) -> bool {
     {
         let _ = status;
         false
+    }
+}
+
+/// How an exited child is classified before its stdout is collected. Over the cap wins
+/// over a signal: a child writing past the cap typically dies of SIGPIPE once the reader
+/// drops the pipe, and that is the cap's refusal (NR-5), not an unknown kill.
+fn exited_early(status: ExitStatus, over: bool) -> Option<Attempt> {
+    if over {
+        Some(Attempt::OverCap)
+    } else if killed_by_signal(status) {
+        Some(Attempt::Killed)
+    } else {
+        None
     }
 }
 
@@ -531,8 +552,8 @@ impl ProcessRunner {
         if signals::stopping() {
             signals::wait_for_exit();
         }
-        if killed_by_signal(status) {
-            return Ok(Attempt::Killed);
+        if let Some(early) = exited_early(status, over.load(Ordering::SeqCst)) {
+            return Ok(early);
         }
         let remaining = || deadline.saturating_duration_since(Instant::now());
         let stdout = match rrx.recv_timeout(remaining()) {
@@ -1074,6 +1095,27 @@ mod tests {
     }
 
     #[test]
+    fn read_retries_a_killed_attempt() {
+        let r = FakeRunner::default();
+        r.push_unknown("killed");
+        r.responses
+            .borrow_mut()
+            .push_back(Ok(Output::success("ok")));
+        assert!(matches!(read_fake(&r), Outcome::Done(_)));
+    }
+
+    #[test]
+    fn read_after_the_budget_ran_out_never_starts() {
+        let r = FakeRunner::new([Output::success("")]);
+        r.budget.set(Duration::ZERO);
+        let e = r.read(&Call::new("op", &["item", "get"]), &[]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "the run budget ran out before op item get started"
+        );
+    }
+
+    #[test]
     fn read_does_not_retry_refused_exit() {
         let r = FakeRunner::new([Output::failure(3), Output::success("ok")]);
         let _ = r.read(&Call::new("az", &["keyvault", "secret", "show"]), &[3]);
@@ -1204,6 +1246,29 @@ mod tests {
             .read(&Call::new("yes", &[]), &[])
             .unwrap();
         assert!(matches!(o, Outcome::Refused(o) if o.status == OVER_CAP));
+    }
+
+    /// NR-5: a child that dies of SIGPIPE after the reader dropped the pipe past the cap is
+    /// refused for the cap, not reported as killed.
+    #[cfg(unix)]
+    #[test]
+    fn sigpipe_after_cap_is_over_cap_not_killed() {
+        use std::os::unix::process::ExitStatusExt;
+        let sigpipe = ExitStatus::from_raw(13);
+        assert!(matches!(
+            exited_early(sigpipe, true),
+            Some(Attempt::OverCap)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_without_cap_is_killed() {
+        use std::os::unix::process::ExitStatusExt;
+        assert!(matches!(
+            exited_early(ExitStatus::from_raw(9), false),
+            Some(Attempt::Killed)
+        ));
     }
 
     #[test]
@@ -1444,33 +1509,47 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
-    /// A captured call that outlives its limit is killed and reported as a timeout; the
-    /// call returns promptly, with stdin too and with a grandchild holding stdout open.
+    #[cfg(unix)]
+    fn hung_write_outcome(call: &Call) -> (bool, bool) {
+        let t = Instant::now();
+        let o = ProcessRunner::with_timeout(Duration::from_millis(200))
+            .write(call)
+            .unwrap();
+        let timed_out = matches!(
+            o,
+            Outcome::Unknown {
+                reason: "timeout",
+                ..
+            }
+        );
+        (timed_out, t.elapsed() < Duration::from_secs(5))
+    }
+
+    /// A captured call that outlives its limit is killed promptly as a timeout.
     #[cfg(unix)]
     #[test]
     fn process_runner_kills_a_hung_child_at_the_timeout() {
-        let r = ProcessRunner::with_timeout(Duration::from_millis(200));
-        let is_timeout = |o: Outcome| {
-            matches!(
-                o,
-                Outcome::Unknown {
-                    reason: "timeout",
-                    ..
-                }
-            )
-        };
-        let t = Instant::now();
-        assert!(is_timeout(r.write(&Call::new("sleep", &["30"])).unwrap()));
+        assert_eq!(
+            hung_write_outcome(&Call::new("sleep", &["30"])),
+            (true, true)
+        );
+    }
+
+    /// The stdin writer must not hold the call open past its limit.
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_kills_a_hung_child_with_pending_stdin() {
         let big = vec![b'x'; 1 << 20];
-        assert!(is_timeout(
-            r.write(&Call::new("sleep", &["30"]).with_stdin(Some(&big)))
-                .unwrap()
-        ));
-        assert!(is_timeout(
-            r.write(&Call::new("sh", &["-c", "sleep 30 & exit 0"]))
-                .unwrap()
-        ));
-        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        let call = Call::new("sleep", &["30"]).with_stdin(Some(&big));
+        assert_eq!(hung_write_outcome(&call), (true, true));
+    }
+
+    /// A grandchild holding stdout open cannot keep the call past its limit.
+    #[cfg(unix)]
+    #[test]
+    fn grandchild_holding_stdout_cannot_outlive_the_timeout() {
+        let call = Call::new("sh", &["-c", "sleep 30 & exit 0"]);
+        assert_eq!(hung_write_outcome(&call), (true, true));
     }
 
     /// FR-26: a diagnosis call has its own short limit and is killed at it.
@@ -1481,8 +1560,15 @@ mod tests {
         let e = ProcessRunner::default()
             .probe(&Call::new("sleep", &["30"]), Duration::from_millis(200))
             .unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
-        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(
+            (e.kind(), t.elapsed() < Duration::from_secs(5)),
+            (io::ErrorKind::TimedOut, true)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_returns_a_failing_status_as_is() {
         let o = ProcessRunner::default()
             .probe(&Call::new("sh", &["-c", "exit 3"]), PROBE_TIMEOUT)
             .unwrap();

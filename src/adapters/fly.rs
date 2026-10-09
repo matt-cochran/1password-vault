@@ -1143,18 +1143,35 @@ mod tests {
     }
 
     /// NR-2: a write that timed out may or may not have happened: exit 9, safe to re-run.
-    #[test]
-    fn write_timeout_is_unknown_exit_9() {
-        for (attempts, call) in four_calls().into_iter().skip(1) {
-            let r = FakeRunner::default();
-            r.push_unknowns("timeout", attempts as u32);
-            let e = call(&r).unwrap_err();
-            assert_eq!(e.exit_code(), 9, "{e}");
-        }
+    fn timed_out_write(call: impl Fn(&FakeRunner) -> Result<(), Error>) -> i32 {
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        call(&r).unwrap_err().exit_code()
     }
 
-    /// NR-2: a failed write whose `auth whoami` cannot run is an unknown outcome (exit 9)
-    /// naming the re-run step; a failed read in the same case stays a target error.
+    #[test]
+    fn import_timeout_is_unknown_exit_9() {
+        let v = sv(MARK);
+        assert_eq!(
+            timed_out_write(|r| stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)])),
+            9
+        );
+    }
+
+    #[test]
+    fn unset_timeout_is_unknown_exit_9() {
+        assert_eq!(
+            timed_out_write(|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()])),
+            9
+        );
+    }
+
+    #[test]
+    fn deploy_timeout_is_unknown_exit_9() {
+        assert_eq!(timed_out_write(|r| deploy(r, "fleet-prod")), 9);
+    }
+
+    /// NR-2: a failed write whose `auth whoami` cannot run is an unknown outcome (exit 9).
     #[test]
     fn failed_write_without_diagnosis_is_unknown_exit_9() {
         let r = FakeRunner::new([Output::failure(1)]);
