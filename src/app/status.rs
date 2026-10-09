@@ -1,16 +1,17 @@
 //! `status <env>` use case (FR-17, spec §7.3, ruling P17).
 //!
-//! One row per product × key with its 1Password state and Fly state, guidance under each
+//! One row per product × key with its 1Password state and target state, guidance under each
 //! missing row, extras as warnings. Names only. Exits `Findings(n)` for the n rows that are
 //! missing, of the wrong kind or failing a rule; extras alone exit 0. A clean run ends with
-//! a summary line on stdout (FR-26). Read-only: one `op item get` and one `flyctl secrets
-//! list` (plus the free `op whoami` diagnosis when the read fails).
+//! a summary line on stdout (FR-26). Read-only: one `op item get` and one store list
+//! (plus the free `op whoami` diagnosis when the read fails).
 
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use super::{is_blocking, print_extras, print_rows, read_and_plan, write_err, write_json};
-use crate::adapters;
+use super::{
+    is_blocking, open_target, print_extras, print_rows, read_and_plan, write_err, write_json,
+};
 use crate::domain::{Fleet, KeyState, Kind, Row, TargetState};
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -33,8 +34,8 @@ pub fn run_with(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    // Needs a Fly target: `Error::Config` naming the environment otherwise, before any call.
-    let ports = adapters::open(fleet.target(env_name)?.1, r)?;
+    // Needs a target: `Error::Config` naming the environment otherwise, before any call.
+    let (t, ports) = open_target(fleet, env_name, r)?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, r, Some(ports.store()), &none, &none)?;
     if json {
@@ -57,27 +58,27 @@ pub fn run_with(
         .map_err(write_err)?;
         return Err(Error::Findings(n));
     }
-    writeln!(out, "{}", summary(&plan.rows)).map_err(write_err)?;
+    writeln!(out, "{}", summary(&plan.rows, t.provider())).map_err(write_err)?;
     Ok(())
 }
 
-/// The clean-run summary line (FR-26): `N saved, M not yet on Fly (staged by the next fly
+/// The clean-run summary line (FR-26): `N saved, M not yet on <target> (staged by the next
 /// sync), 0 findings`. N counts saved rows (secret and config); M counts saved secrets
-/// absent from Fly. Skipped rows count in neither. Names and counts only.
-fn summary(rows: &[Row]) -> String {
+/// absent from the target. Skipped rows count in neither. Names and counts only.
+fn summary(rows: &[Row], target: &str) -> String {
     let saved = rows.iter().filter(|r| r.state == KeyState::Ready);
     let pending = saved
         .clone()
         .filter(|r| r.kind == Kind::Secret && r.target == TargetState::Absent)
         .count();
     format!(
-        "{} saved, {pending} not yet on Fly (staged by the next sync), 0 findings",
+        "{} saved, {pending} not yet on {target} (staged by the next sync), 0 findings",
         saved.count()
     )
 }
 
-/// Fly state of a row. Digests cannot be compared locally (P1), so a secret on Fly is
-/// "present"; `fly sync` reports whether staging changed it.
+/// Target state of a row. Digests cannot be compared locally (P1), so a secret on the
+/// target is "present"; `sync` reports whether staging changed it.
 fn target(r: &Row) -> String {
     match (r.kind, r.target) {
         (Kind::Config, _) => "-",

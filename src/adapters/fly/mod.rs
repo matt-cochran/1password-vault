@@ -43,6 +43,10 @@
 //! every error, auth included, so authentication is told apart by the separate, read-only
 //! `flyctl auth whoami` call ([`auth_whoami`], shared with `doctor`), never by guessing.
 
+pub mod config;
+
+pub use config::{FLYCTL_TESTED, FlyTarget, PROVIDER};
+
 use std::collections::BTreeSet;
 use std::io;
 
@@ -700,7 +704,7 @@ mod tests {
     #[test]
     fn list_parses_names_and_digests() {
         let r = FakeRunner::new([Output::success(
-            &include_bytes!("../../tests/fixtures/fly_list.json")[..],
+            &include_bytes!("../../../tests/fixtures/fly_list.json")[..],
         )]);
         let s = list(&r, "app").unwrap();
         assert_eq!(

@@ -157,6 +157,16 @@ pub enum Tool {
     Flyctl,
 }
 
+impl Tool {
+    /// The program name on PATH.
+    pub fn program(self) -> &'static str {
+        match self {
+            Tool::Op => "op",
+            Tool::Flyctl => "flyctl",
+        }
+    }
+}
+
 /// A non-interactive 1Password credential in the environment (by name; value never read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCredential {

@@ -856,9 +856,10 @@ mod tests {
         Environment {
             vault_id: "vstg".into(),
             item_id: "istg".into(),
-            target: Some(crate::domain::Target::Fly(crate::domain::FlyTarget {
+            target: Some(Box::new(crate::adapters::fly::FlyTarget {
                 app: "fleet-staging".into(),
                 secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
+                profile: crate::domain::Profile::Fleet,
             })),
             modes: BTreeMap::new(),
         }

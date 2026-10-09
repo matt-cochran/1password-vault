@@ -236,8 +236,12 @@ changes no core code. Fly, Azure and Kubernetes all implement it.
 pub trait Provider: Sync {
     /// Config section name under `[environments.<env>]`: "fly", "azure", "kubernetes".
     fn section(&self) -> &'static str;
+    fn label(&self) -> &'static str;                          // "Fly", "Azure", "Kubernetes"
     /// Parses and validates that section (identifiers, templates, required fields, NR-7 scope).
     fn parse(&self, env: &str, section: &toml::Value, profile: Profile) -> Result<Box<dyn TargetConfig>, Error>;
+    fn doctor_checks(&self) -> &'static [&'static str];      // names, for doctor's "skip" lines
+    fn setup_hint(&self, profile: Profile) -> String;          // "configure fly.app ..." (no target)
+    fn init_section(&self, name: &str, profile: Profile) -> Option<String>; // `opv init` (FR-23)
 }
 
 /// A validated, provider-specific target. Core code sees only this trait.
@@ -247,13 +251,24 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn store_name(&self, env_name: &str) -> String;           // name in the store
     fn name_rules(&self) -> NameRules;                        // patterns, case sensitivity, limits (FR-30)
     fn same_target(&self, other: &dyn TargetConfig) -> bool;  // two environments sharing one target
+    fn shared_target_error(&self, first: &str, second: &str) -> String; // its FR-8 message
     fn tools(&self) -> &'static [Tool];                       // CLIs it needs (NR-27)
-    fn open<'a>(&'a self, env: &'a str, r: &'a dyn CommandRunner) -> Ports<'a>;
+    fn open<'a>(&'a self, env: &'a str, r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error>;
     fn preflight(&self, r: &dyn CommandRunner) -> Result<Vec<Check>, Error>;  // NR-23..NR-26
-    fn doctor(&self, r: &dyn CommandRunner) -> Vec<Check>;
+    fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)>;
+    fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;       // whole-config equality
+    fn as_any(&self) -> &dyn Any;
+    fn clone_box(&self) -> Box<dyn TargetConfig>;
 }
 ```
+
+As implemented (Task P): `open` returns `Result` (a provider whose adapters are not wired in
+yet refuses with `Error::Config`); `doctor` takes the host so install hints and token checks
+stay testable; `label`, `doctor_checks`, `setup_hint`, `shared_target_error` keep every Fly
+message byte-identical without core naming Fly; `eq_dyn`, `as_any`, `clone_box` let the
+configuration model keep `Clone`/`Eq`. `adapters::registry::DEFAULT` names the provider opv
+suggests when an environment has no target (and the one `init` writes): Fly in 0.5.0.
 
 - `config.rs` keeps the generic environment fields and dispatches each remaining table to the
   provider registered under that section name; an unknown section is a config error listing the

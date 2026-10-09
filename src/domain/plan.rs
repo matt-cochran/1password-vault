@@ -158,7 +158,7 @@ pub fn build(
     fleet: &Fleet,
     env_name: &str,
     item: Vec<ItemField>,
-    fly: &[StoreEntry],
+    on_store: &[StoreEntry],
     rotate: &BTreeSet<(String, String)>,
     digest: &dyn Fn(&SecretValue) -> Option<String>,
 ) -> SyncPlan {
@@ -167,7 +167,7 @@ pub fn build(
         fleet,
         env_name,
         item,
-        fly,
+        on_store,
         &PlanOptions {
             rotate,
             prune_immutable: &none,
@@ -185,14 +185,14 @@ pub fn build_with(
     fleet: &Fleet,
     env_name: &str,
     item: Vec<ItemField>,
-    fly: &[StoreEntry],
+    on_store: &[StoreEntry],
     opts: &PlanOptions<'_>,
 ) -> SyncPlan {
     let env = fleet
         .environments
         .get(env_name)
         .unwrap_or_else(|| panic!("undefined environment {env_name}"));
-    let on_fly: BTreeMap<&str, Option<&str>> = fly
+    let on_target: BTreeMap<&str, Option<&str>> = on_store
         .iter()
         .map(|s| (s.name.as_str(), s.version.as_deref()))
         .collect();
@@ -216,8 +216,10 @@ pub fn build_with(
 
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
-            let fly_name = env.target_name(product, key);
-            let fly_entry = fly_name.as_deref().and_then(|n| on_fly.get(n).copied());
+            let target_name = env.target_name(product, key);
+            let target_entry = target_name
+                .as_deref()
+                .and_then(|n| on_target.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
             let declared_here = spec.environments.iter().any(|e| e == env_name);
 
@@ -250,7 +252,7 @@ pub fn build_with(
             };
             // A ready secret the target cannot carry is a failing rule, in plan and status
             // exactly as in sync.
-            let outcome = match (outcome, spec.kind, fly_name.as_deref()) {
+            let outcome = match (outcome, spec.kind, target_name.as_deref()) {
                 (Ok(Some(v)), Kind::Secret, Some(name)) => match (opts.target_check)(name, &v) {
                     Some((rule, why)) => Err(KeyState::RuleFailed(rule, Reason::Fixed(why))),
                     None => Ok(Some(v)),
@@ -263,7 +265,7 @@ pub fn build_with(
                 key: key.clone(),
                 kind: spec.kind,
                 state: KeyState::Skipped,
-                target: match (spec.kind, fly_entry) {
+                target: match (spec.kind, target_entry) {
                     (Kind::Secret, None) => TargetState::Absent,
                     _ => TargetState::Unknown,
                 },
@@ -274,7 +276,9 @@ pub fn build_with(
                 Ok(None) => {
                     // Not desired in this environment: prune if it is a managed Fly name,
                     // unless it is immutable and not explicitly released.
-                    if let (Kind::Secret, Some(_), Some(name)) = (spec.kind, fly_entry, fly_name) {
+                    if let (Kind::Secret, Some(_), Some(name)) =
+                        (spec.kind, target_entry, target_name)
+                    {
                         let pair = (product.clone(), key.clone());
                         if spec.immutable && !opts.prune_immutable.contains(&pair) {
                             plan.held_from_prune.push((pair.0, pair.1, name));
@@ -298,8 +302,8 @@ pub fn build_with(
                                 .insert(key.clone(), value.expose().to_string());
                         }
                         Kind::Secret => {
-                            if let Some(fly_digest) = fly_entry {
-                                row.target = match ((opts.digest)(&value), fly_digest) {
+                            if let Some(target_digest) = target_entry {
+                                row.target = match ((opts.digest)(&value), target_digest) {
                                     (Some(local), Some(remote)) if local == remote => {
                                         TargetState::Present
                                     }
@@ -308,9 +312,9 @@ pub fn build_with(
                                 };
                             }
                             let rotated = opts.rotate.contains(&(product.clone(), key.clone()));
-                            if spec.immutable && fly_entry.is_some() && !rotated {
+                            if spec.immutable && target_entry.is_some() && !rotated {
                                 plan.held_immutable.push((product.clone(), key.clone()));
-                            } else if let Some(name) = fly_name
+                            } else if let Some(name) = target_name
                                 && (row.target != TargetState::Present || rotated)
                             {
                                 plan.stage.push((name, value));
@@ -347,7 +351,6 @@ pub fn build_with(
 mod tests {
     use super::*;
     use crate::config;
-    use crate::domain::model::Target;
     use base64::Engine as _;
 
     fn f() -> Fleet {
@@ -700,10 +703,17 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
         fleet.products.insert("q".into(), q);
         for env in fleet.environments.values_mut() {
             // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
-            match env.target.as_mut().unwrap() {
-                Target::Fly(f) => f.secret_name_template = "FLEET__{KEY}".into(),
-                Target::Azure(_) => unreachable!("fixture is Fly"),
-            }
+            let app = env
+                .target()
+                .and_then(|t| t.as_any().downcast_ref::<crate::adapters::fly::FlyTarget>())
+                .expect("fixture is Fly")
+                .app
+                .clone();
+            env.target = Some(Box::new(crate::adapters::fly::FlyTarget {
+                app,
+                secret_name_template: "FLEET__{KEY}".into(),
+                profile: crate::domain::Profile::Fleet,
+            }));
         }
         let fly = [fly_secret("FLEET__BOTH", None)];
         let item = vec![secret("p", "BOTH", "v1")];
