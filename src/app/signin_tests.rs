@@ -159,3 +159,52 @@ fn token_of_the_wrong_type_is_refused() {
     };
     assert!(e.contains("must be a Password (concealed) field"), "{e}");
 }
+
+/// Owner ruling: `doctor --env` gets the failed deploy sign-in back instead of stopping.
+#[test]
+fn doctor_gets_a_failed_deploy_sign_in_back() {
+    let fl = fleet_with_credentials();
+    let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)])]);
+    let (_, failed) = open_for_doctor_on(&fl, "prod", &r, &linux);
+    assert!(failed.is_some_and(|e| e.to_string().contains("field FLY_API_TOKEN is missing")));
+}
+
+/// After a failed deploy sign-in, doctor's `op` calls still carry the account.
+#[test]
+fn doctor_runner_keeps_the_account_after_a_failed_deploy_sign_in() {
+    let fl = fleet_with_credentials();
+    let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)]), complete_item()]);
+    let (runner, _) = open_for_doctor_on(&fl, "prod", &r, &linux);
+    crate::adapters::onepassword::read_item(&runner, fl.environment("prod").unwrap()).unwrap();
+    assert_eq!(env_of(&r.calls.borrow()[1], "OP_ACCOUNT"), Some(ACCOUNT));
+}
+
+/// A Kubernetes runtime keeping its secrets in a Key Vault (`secrets_in`) signs `az` in
+/// with the deploy credentials: `az` writes the secrets, kubectl uses the kubeconfig.
+#[test]
+fn key_vault_behind_kubernetes_signs_in_to_azure() {
+    let fl = config::parse(
+        r#"
+[profile]
+kind = "simple"
+[stores.kv]
+azure_key_vault = "kv-opv-fixture"
+subscription = "00000000-0000-0000-0000-000000000000"
+[environments.dev]
+vault_id = "vdev"
+item_id = "idev"
+deploy_credentials = "op://deploy/azure"
+[environments.dev.kubernetes]
+context = "kind-opv"
+namespace = "opv"
+deployment = "api"
+secrets_in = "kv"
+[keys.API_KEY]
+kind = "secret"
+environments = ["dev"]
+"#,
+    )
+    .unwrap();
+    let target = fl.environment("dev").unwrap().target().unwrap();
+    assert_eq!(crate::provider::deploy_provider(target).section(), "azure");
+}

@@ -68,17 +68,58 @@ pub fn open_on<'a>(
         .account
         .clone()
         .filter(|_| host().op_credential.is_none());
-    let runner = EnvRunner::new(r, account);
-    match (reach, env.target(), &env.deploy_credentials) {
-        (Reach::Target, Some(t), Some(reference)) => {
-            let provider = t.provider();
-            let fields = provider
-                .deploy_credential_fields()
-                .map_err(|why| Error::Config(format!("environment {env_name}: {why}")))?;
-            let login = provider.deploy_login()?;
-            runner.signed_in(login, reference, fields)
-        }
-        _ => Ok(runner),
+    let mut runner = EnvRunner::new(r, account);
+    if reach == Reach::Target {
+        runner.deploy_sign_in(fleet, env_name)?;
+    }
+    Ok(runner)
+}
+
+/// `doctor --env` (owner ruling): like [`open`] for a command that reaches the target, but
+/// a deploy sign-in that fails does not stop the run. The runner comes back without a
+/// deploy identity, beside the error, so doctor reports it as one check and skips only
+/// the target checks that need those credentials.
+pub fn open_for_doctor<'a>(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &'a dyn CommandRunner,
+) -> (EnvRunner<'a>, Option<Error>) {
+    open_for_doctor_on(fleet, env_name, r, &Host::detect)
+}
+
+/// [`open_for_doctor`] on a given host (tests).
+pub fn open_for_doctor_on<'a>(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &'a dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+) -> (EnvRunner<'a>, Option<Error>) {
+    let mut runner = match open_on(fleet, env_name, r, Reach::Store, host) {
+        Ok(runner) => runner,
+        Err(e) => return (EnvRunner::new(r, None), Some(e)),
+    };
+    let failed = runner
+        .deploy_sign_in(fleet, env_name)
+        .err()
+        .map(with_excerpt);
+    (runner, failed)
+}
+
+/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) appended, as
+/// doctor runs more calls before it prints and the excerpt would otherwise be dropped. It
+/// goes last, so the error's own remediation stays its first indented line.
+fn with_excerpt(e: Error) -> Error {
+    let Some(x) = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call()) else {
+        return e;
+    };
+    let add = |m: String| format!("{m}\n{}", x.render().trim_end());
+    match e {
+        Error::Dependency(m) => Error::Dependency(add(m)),
+        Error::Auth(m) => Error::Auth(add(m)),
+        Error::Source(m) => Error::Source(add(m)),
+        Error::Target(m) => Error::Target(add(m)),
+        Error::Unknown(m) => Error::Unknown(add(m)),
+        other => other,
     }
 }
 
@@ -104,14 +145,41 @@ impl<'a> EnvRunner<'a> {
     /// anything it kept.
     pub fn signed_in(
         mut self,
-        mut login: Box<dyn DeployLogin>,
+        login: Box<dyn DeployLogin>,
         reference: &ItemRef,
         fields: &[CredentialField],
     ) -> Result<Self, Error> {
-        let values = onepassword::read_deploy_credentials(&self, reference, fields)?;
-        login.sign_in(values, &self)?;
-        self.login = Some(login);
+        self.sign_in_with(login, reference, fields)?;
         Ok(self)
+    }
+
+    fn sign_in_with(
+        &mut self,
+        mut login: Box<dyn DeployLogin>,
+        reference: &ItemRef,
+        fields: &[CredentialField],
+    ) -> Result<(), Error> {
+        let values = onepassword::read_deploy_credentials(&*self, reference, fields)?;
+        login.sign_in(values, &*self)?;
+        self.login = Some(login);
+        Ok(())
+    }
+
+    /// Sign in with `env_name`'s `deploy_credentials`, when it has them and a target.
+    fn deploy_sign_in(&mut self, fleet: &Fleet, env_name: &str) -> Result<(), Error> {
+        let Some(env) = fleet.environments.get(env_name) else {
+            return Ok(());
+        };
+        let (Some(t), Some(reference)) = (env.target(), &env.deploy_credentials) else {
+            return Ok(());
+        };
+        // A Key Vault behind a Kubernetes runtime signs `az` in (FR-39, FR-40).
+        let provider = crate::provider::deploy_provider(t);
+        let fields = provider
+            .deploy_credential_fields()
+            .map_err(|why| Error::Config(format!("environment {env_name}: {why}")))?;
+        let login = provider.deploy_login()?;
+        self.sign_in_with(login, reference, fields)
     }
 
     /// The extra child environment for `program`.
@@ -167,6 +235,10 @@ impl CommandRunner for EnvRunner<'_> {
 
     fn remaining(&self) -> Option<Duration> {
         self.inner.remaining()
+    }
+
+    fn spawns_processes(&self) -> bool {
+        self.inner.spawns_processes()
     }
 
     fn local_run_supported(&self) -> io::Result<()> {

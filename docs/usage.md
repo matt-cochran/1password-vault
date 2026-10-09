@@ -200,7 +200,7 @@ Nothing is deleted by default. `--prune` unsets only names that the template pro
 |---|---|---|
 | Fly | `FLY_API_TOKEN` (concealed) | set only in the environment of each `flyctl` call (`FLY_API_TOKEN`, and `FLY_ACCESS_TOKEN` so it wins over a token in your shell) |
 | Azure | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text), `AZURE_CLIENT_SECRET` (concealed) | `az login --service-principal ... -p @<hand-off>` once, in a private `AZURE_CONFIG_DIR` used by every `az` call of the run and removed when it ends (also on Ctrl-C / SIGTERM; a directory left by a killed run is removed by the next one) |
-| Kubernetes | not supported | a configuration error: `kubectl` uses your kubeconfig (`kubernetes.context`) |
+| Kubernetes | only with `secrets_in` a Key Vault: the Azure fields, for the `az` that writes it | otherwise a configuration error: `kubectl` uses your kubeconfig (`kubernetes.context`) |
 
 Azure deploy credentials, by OS (the Azure CLI stores the service principal's secret in its configuration directory):
 

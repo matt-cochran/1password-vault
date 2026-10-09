@@ -124,6 +124,18 @@ pub trait DeployLogin {
     fn env(&self, program: &str) -> Vec<(&'static str, &str)>;
 }
 
+/// The provider whose CLI an environment's `deploy_credentials` sign in (FR-40): the
+/// target's own, or, for a runtime that signs in without them (Kubernetes uses its
+/// kubeconfig) but keeps its secrets in another provider's store (`secrets_in`, FR-39),
+/// that store's provider (Azure for a Key Vault), whose CLI writes the secrets.
+pub fn deploy_provider(target: &dyn TargetConfig) -> &'static dyn Provider {
+    let own = target.provider();
+    match target.secrets_in() {
+        Some(store) if own.deploy_credential_fields().is_err() => store.provider(),
+        _ => own,
+    }
+}
+
 /// One supported (store kind, runtime) pair for `secrets_in` (FR-39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreBinding {

@@ -209,6 +209,15 @@ pub trait CommandRunner {
             Err(io::ErrorKind::Unsupported.into())
         }
     }
+
+    /// True when calls start real child processes. A value handed over through an OS
+    /// channel (the Windows named pipe, SR-3) can only be read by a real child, so only
+    /// such a runner gets one; a simulated runner keeps the default and receives the value
+    /// as the call's stdin, which it records. A runner that wrongly keeps the default only
+    /// fails closed (`az` cannot open `/dev/stdin` on Windows); nothing leaks.
+    fn spawns_processes(&self) -> bool {
+        false
+    }
 }
 
 /// Limit for one diagnosis call ([`CommandRunner::probe`]).
@@ -998,6 +1007,10 @@ fn native_op_on(paths: &std::ffi::OsStr) -> io::Result<()> {
 impl CommandRunner for ProcessRunner {
     fn remaining(&self) -> Option<Duration> {
         Some(left(self))
+    }
+
+    fn spawns_processes(&self) -> bool {
+        true
     }
 
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {

@@ -1009,16 +1009,4 @@ mod tests {
         let err = az::diagnose(&r, "keyvault secret show", VAULT);
         assert!(matches!(err, Error::Target(msg) if msg.contains(VAULT)));
     }
-
-    #[cfg(windows)]
-    #[test]
-    fn write_on_windows_fails_closed_naming_wsl() {
-        let r = FakeRunner::new([]);
-        let templates = names(&[]);
-        let kv = vault(&r, "prod", &templates);
-        let err = kv
-            .write_one(NAME, &SecretValue::new(MARKER.into()))
-            .unwrap_err();
-        assert!(matches!(err, Error::Dependency(msg) if msg.contains("WSL")));
-    }
 }

@@ -66,7 +66,14 @@ pub(crate) fn invoke_env(
     refused: &[i32],
     env: &[(&str, &str)],
 ) -> Result<Outcome, Error> {
-    let res = handoff::deliver(handoff::platform(), args, stdin, &mut |args, stdin| {
+    // Only a real child can read the platform's channel (a Windows pipe); a simulated
+    // runner records the value as the call's stdin on every platform.
+    let channel: &dyn handoff::Handoff = if r.spawns_processes() {
+        handoff::platform()
+    } else {
+        &handoff::Stdin
+    };
+    let res = handoff::deliver(channel, args, stdin, &mut |args, stdin| {
         let call = Call {
             program: PROGRAM,
             args,

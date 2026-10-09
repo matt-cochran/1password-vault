@@ -632,7 +632,14 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     // Every call for the environment uses its 1Password account, and commands that reach
     // the target sign in with its deploy credentials for this run only (FR-40). Dropped
     // (signed out, its private directory removed) when this function returns.
+    // `doctor --env` reports a failed deploy sign-in as one check and keeps going.
+    let mut deploy_failure = None;
     let env_runner = match (&loaded, cmd.env()) {
+        (Ok(fleet), Some((env, _))) if matches!(cmd, Cmd::Doctor { .. }) => {
+            let (runner, failed) = signin::open_for_doctor(fleet, env, &r);
+            deploy_failure = failed;
+            Some(runner)
+        }
         (Ok(fleet), Some((env, reach))) => Some(signin::open(fleet, env, &r, reach)?),
         _ => None,
     };
@@ -648,7 +655,7 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     {
         return run_cmd::run_for(&loaded?, env, product.as_deref(), command, runner);
     }
-    run_other(cmd, loaded, runner, out).map(|()| 0)
+    run_other(cmd, loaded, runner, deploy_failure, out).map(|()| 0)
 }
 
 /// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
@@ -680,6 +687,7 @@ fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
     r: &dyn CommandRunner,
+    deploy_failure: Option<Error>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     match cmd {
@@ -689,7 +697,13 @@ fn run_other(
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Completions { .. } => unreachable!("handled by run"),
         Cmd::Doctor { env, product, json } => {
-            doctor::run_scoped_as(loaded, env.as_deref(), product.as_deref(), json, r, out)
+            let scope = doctor::Request {
+                env: env.as_deref(),
+                product: product.as_deref(),
+                json,
+                deploy_failure,
+            };
+            doctor::run_request(loaded, scope, r, out)
         }
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)

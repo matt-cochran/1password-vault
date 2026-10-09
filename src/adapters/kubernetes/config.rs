@@ -234,7 +234,8 @@ impl Provider for KubernetesProvider {
         Err(
             "deploy_credentials is not supported for Kubernetes: kubectl uses your \
              kubeconfig (kubernetes.context) to sign in; remove deploy_credentials and give \
-             that context a least-privilege identity"
+             that context a least-privilege identity (with secrets_in naming a Key Vault, \
+             deploy_credentials signs in the az that writes it)"
                 .into(),
         )
     }

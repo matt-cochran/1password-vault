@@ -468,8 +468,7 @@ fn deploy_credentials(
              add the target section it signs in to"
         )));
     };
-    target
-        .provider()
+    crate::provider::deploy_provider(target)
         .deploy_credential_fields()
         .map_err(|why| at(format!("environment {name}: {why}")))?;
     Ok(reference)
