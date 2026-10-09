@@ -1226,3 +1226,51 @@ fn change_and_prune_converge_after_interruption_at_every_call() {
     let bad = matrix(&start, &fleet_b(), &deploy_prune());
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+// ---- output contract (UX1) ----
+
+/// UX1 (NR-18): the External Secrets path ends with the summary line every provider prints.
+#[test]
+fn sync_through_external_secrets_ends_with_the_shared_summary_line() {
+    let sim = Sim::new(item_with(API_V1));
+    let (_, out) = sync_on(&sim, &fleet_a(), &deploy_prune());
+    let last = out.lines().last().unwrap_or_default();
+    let re = regex::Regex::new(
+        r"^summary: written \d+ · deployed \S+ · pruned \d+ · pending \d+ · unchanged \d+ · skipped \d+$",
+    )
+    .unwrap();
+    assert!(re.is_match(last), "{out}");
+}
+
+/// UX1 (FR-21): `status --json` carries each bound key's chain beside its `target_name`.
+#[test]
+fn status_json_carries_the_chain_beside_target_name() {
+    let sim = converged();
+    sim.reset();
+    let mut out = Vec::new();
+    let _ = status::run_scoped(&fleet_a(), "dev", None, &sim, &mut out, true);
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    let row = doc["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["key"] == "DB_URL"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        row["target_name"] == "DB_URL"
+            && row["chain"]
+                .as_str()
+                .is_some_and(|c| c.contains("→ ExternalSecret opv-db-url-")),
+        "{doc}"
+    );
+}
+
+/// UX1 (NR-19): a refusal on the External Secrets path names a runnable next step.
+#[test]
+fn cluster_secret_store_not_ready_refusal_names_a_next_step() {
+    let (_, e) = refused(not_ready);
+    assert!(
+        e.next_step()
+            .is_some_and(|n| n.contains("kubectl") && n.contains("describe")),
+        "{e:?}"
+    );
+}

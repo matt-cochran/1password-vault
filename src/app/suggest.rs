@@ -21,16 +21,6 @@ pub(crate) fn close<'a>(
     scored.into_iter().take(3).map(|(_, c)| c).collect()
 }
 
-/// `; did you mean A or B?`, or nothing when no candidate is close.
-pub(crate) fn hint<'a>(input: &str, candidates: impl IntoIterator<Item = &'a str>) -> String {
-    let close = close(input, candidates);
-    if close.is_empty() {
-        String::new()
-    } else {
-        format!("; did you mean {}?", close.join(" or "))
-    }
-}
-
 /// Levenshtein distance over chars.
 fn distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -74,10 +64,5 @@ mod tests {
     #[test]
     fn a_distant_name_is_not_suggested() {
         assert!(close("NOPE", ["OPENAI_API_KEY", "DATABASE_URL"]).is_empty());
-    }
-
-    #[test]
-    fn hint_is_empty_without_a_close_candidate() {
-        assert_eq!(hint("NOPE", ["DATABASE_URL"]), "");
     }
 }

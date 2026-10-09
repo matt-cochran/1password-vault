@@ -733,7 +733,7 @@ fn failed_revision_names_doctor_access_check() {
     sim.world.borrow_mut().fail_revisions = true;
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        matches!(&res, Err(Error::Target(m)) if m.contains("opv doctor --env prod")
+        matches!(&res, Err(Error::Target(m)) if m.mentions("opv doctor --env prod")
             && m.contains("previous revision keeps serving")),
         "{res:?}"
     );
@@ -1004,7 +1004,7 @@ fn no_change_deploy_with_failed_latest_revision_says_opv_changed_nothing() {
         matches!(&res, Err(Error::Target(m)) if m.starts_with("nothing to change; the latest revision")
             && m.contains("(with these settings) is unhealthy")
             && m.contains("opv changed nothing")
-            && m.contains("Next: `az containerapp revision show")),
+            && m.next().is_some_and(|n| n.starts_with("az containerapp revision show"))),
         "{res:?}"
     );
 }
@@ -1040,4 +1040,30 @@ fn withdrawn_config_entry_is_not_deleted_before_a_healthy_revision() {
     sim.world.borrow_mut().fail_revisions = true;
     let _ = sync_on(&sim, &fleet, &deploy_prune());
     assert!(!sim.called(&["keyvault", "secret", "delete"]));
+}
+
+// ---- UX1: the run summary is the same on every provider (P2, NR-18) ----
+
+#[test]
+fn azure_sync_summary_names_the_deployed_revision() {
+    let sim = api_changed();
+    let (_, out) = sync_on(&sim, &fleet_a(), &deploy());
+    assert!(
+        out.lines().any(
+            |l| l.starts_with("summary: written 1 · deployed opv-fixture-app--")
+                && l.ends_with(" · pruned 0 · pending 0 · unchanged 2 · skipped 0")
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn azure_sync_without_deploy_names_the_deploy_command_last() {
+    let sim = api_changed();
+    let (_, out) = sync_on(&sim, &fleet_a(), &SyncOpts::default());
+    assert_eq!(
+        out.lines().last(),
+        Some("Next: opv sync prod --deploy"),
+        "{out}"
+    );
 }

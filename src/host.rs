@@ -197,11 +197,14 @@ impl Tool {
     /// NR-28: a read of this service still unanswered after its last attempt (timed out,
     /// killed or lost every time). A read changes nothing, so re-running is safe: exit 9.
     pub fn outage(&self, step: &str) -> Error {
-        Error::Unknown(format!(
-            "{} did not respond after {READ_ATTEMPTS} attempts ({step}); nothing was changed. \
+        Error::Unknown(
+            format!(
+                "{} did not respond after {READ_ATTEMPTS} attempts ({step}); nothing was changed. \
              Check {}, then re-run",
-            self.vendor, self.status_page
-        ))
+                self.vendor, self.status_page
+            )
+            .into(),
+        )
     }
 }
 

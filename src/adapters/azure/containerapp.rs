@@ -193,18 +193,22 @@ impl<'a> ContainerApp<'a> {
                 status: Some(status),
                 ..
             } => Err(self.diagnose(effect, what, subject, hint, status)),
-            Outcome::Unknown { reason, .. } if effect == Effect::Write => {
-                Err(Error::Unknown(format!(
+            Outcome::Unknown { reason, .. } if effect == Effect::Write => Err(Error::Unknown(
+                format!(
                     "az {what}: {}; the update may or may not have been applied, and Azure keeps \
                      the previous revision serving until a new one is ready\n  next: re-run \
                      the same command",
                     unknown_text(az::PROGRAM, reason)
-                )))
-            }
-            Outcome::Unknown { reason, .. } => Err(Error::Target(format!(
-                "az {what}: {}; nothing was changed\n  next: re-run the same command",
-                unknown_text(az::PROGRAM, reason)
-            ))),
+                )
+                .into(),
+            )),
+            Outcome::Unknown { reason, .. } => Err(Error::Target(
+                format!(
+                    "az {what}: {}; nothing was changed\n  next: re-run the same command",
+                    unknown_text(az::PROGRAM, reason)
+                )
+                .into(),
+            )),
         }
     }
 
@@ -226,20 +230,26 @@ impl<'a> ContainerApp<'a> {
             effect,
         ) {
             (Ok(false), _) => az::not_logged_in(Some(&failed)),
-            (Ok(true), Effect::Read) => Error::Target(format!(
-                "{failed}: signed in to Azure, but {subject} could not be read; nothing was \
+            (Ok(true), Effect::Read) => Error::Target(
+                format!(
+                    "{failed}: signed in to Azure, but {subject} could not be read; nothing was \
                  changed\n  next: check that it exists and that your account can read it: \
                  `{hint}`"
-            )),
-            (Err(_), Effect::Read) => Error::Target(format!(
-                "{failed}; nothing was changed\n  next: run `{hint}` to see why"
-            )),
-            (_, Effect::Write) => Error::Unknown(format!(
-                "{failed} for {subject}; the update may or may not have been applied, and \
+                )
+                .into(),
+            ),
+            (Err(_), Effect::Read) => Error::Target(
+                format!("{failed}; nothing was changed\n  next: run `{hint}` to see why").into(),
+            ),
+            (_, Effect::Write) => Error::Unknown(
+                format!(
+                    "{failed} for {subject}; the update may or may not have been applied, and \
                  Azure keeps the previous revision serving until a new one is ready\n  next: \
                  check that the app identity can read the referenced Key Vault secrets (opv \
                  doctor checks this) and `{hint}`, then re-run the same command"
-            )),
+                )
+                .into(),
+            ),
         }
     }
 
@@ -309,21 +319,27 @@ impl<'a> ContainerApp<'a> {
         let next = "next: set azure.container in secrets.toml to one of those names";
         match &self.target.container {
             Some(want) => names.iter().position(|n| n == want).ok_or_else(|| {
-                Error::Config(format!(
-                    "container app {} has no container {want} (it has: {}); nothing was \
+                Error::Config(
+                    format!(
+                        "container app {} has no container {want} (it has: {}); nothing was \
                      changed\n  {next}",
-                    self.app(),
-                    names.join(", ")
-                ))
+                        self.app(),
+                        names.join(", ")
+                    )
+                    .into(),
+                )
             }),
             None if names.len() == 1 => Ok(0),
-            None => Err(Error::Config(format!(
-                "container app {} runs {} containers ({}) and opv cannot tell which one to \
+            None => Err(Error::Config(
+                format!(
+                    "container app {} runs {} containers ({}) and opv cannot tell which one to \
                  manage; nothing was changed\n  {next}",
-                self.app(),
-                names.len(),
-                names.join(", ")
-            ))),
+                    self.app(),
+                    names.len(),
+                    names.join(", ")
+                )
+                .into(),
+            )),
         }
     }
 
@@ -504,14 +520,17 @@ impl<'a> ContainerApp<'a> {
         if fingerprint(&self.stripped(&before)?) == fingerprint(&self.stripped(now)?) {
             return Ok(());
         }
-        Err(Error::Target(format!(
-            "container app {} changed while opv applied ({}); check those settings\n  revision \
+        Err(Error::Target(
+            format!(
+                "container app {} changed while opv applied ({}); check those settings\n  revision \
              {rev} is healthy and serving; opv changed only its managed env names and their \
              opv- secrets\n  next: find out who else changed the app (another deploy?), then \
              run opv status",
-            self.app(),
-            self.changed_paths(&before, now)?
-        )))
+                self.app(),
+                self.changed_paths(&before, now)?
+            )
+            .into(),
+        ))
     }
 
     /// The app identity's principal id (R6), or the finding when the app has none that opv
@@ -584,34 +603,43 @@ impl PinnedRuntime for ContainerApp<'_> {
             .chain(&change.unbind)
             .find(|n| !self.managed.contains(*n))
         {
-            return Err(Error::Config(format!(
-                "{name} is not a managed env name of container app {}; nothing was changed\n  \
+            return Err(Error::Config(
+                format!(
+                    "{name} is not a managed env name of container app {}; nothing was changed\n  \
                  next: run opv plan to see the managed names, then run opv again",
-                self.app()
-            )));
+                    self.app()
+                )
+                .into(),
+            ));
         }
         let fresh = self.show()?;
         single_revision_mode(self.target, &fresh)?;
         let fresh = self.snapshot_from(fresh)?;
         if fresh.unmanaged_fingerprint != snapshot.unmanaged_fingerprint {
-            return Err(Error::Target(format!(
-                "container app {} changed outside opv since it was read ({}); nothing was \
+            return Err(Error::Target(
+                format!(
+                    "container app {} changed outside opv since it was read ({}); nothing was \
                  changed\n  next: run opv plan to review the app as it is now, then run the \
                  same command again",
-                self.app(),
-                self.changed_paths(&snapshot.spec.0, &fresh.spec.0)?
-            )));
+                    self.app(),
+                    self.changed_paths(&snapshot.spec.0, &fresh.spec.0)?
+                )
+                .into(),
+            ));
         }
         let mut doc = fresh.spec.0.clone();
         let idx = self.container_index(&doc)?;
         self.edit(&mut doc, idx, change)?;
         prune_superseded(&mut doc, &self.serving_refs(&fresh.spec.0)?);
         let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| {
-            Error::Target(format!(
-                "could not encode the update for container app {}; nothing was changed\n  \
+            Error::Target(
+                format!(
+                    "could not encode the update for container app {}; nothing was changed\n  \
                  next: run opv again",
-                self.app()
-            ))
+                    self.app()
+                )
+                .into(),
+            )
         })?);
         const WHAT: &str = "containerapp update";
         let out = self.az(
@@ -641,12 +669,15 @@ impl PinnedRuntime for ContainerApp<'_> {
             .and_then(Value::as_str)
             .map(|r| Revision(r.into()))
             .ok_or_else(|| {
-                Error::Target(format!(
-                    "az {WHAT} named no new revision for container app {}; {applied}\n  next: \
+                Error::Target(
+                    format!(
+                        "az {WHAT} named no new revision for container app {}; {applied}\n  next: \
                      `{}` to see its revisions, then run opv status",
-                    self.app(),
-                    self.show_hint()
-                ))
+                        self.app(),
+                        self.show_hint()
+                    )
+                    .into(),
+                )
             })
     }
 
@@ -774,12 +805,13 @@ impl PinnedRuntime for ContainerApp<'_> {
                 ))
             });
         }
-        let scope = vault["id"].as_str().ok_or_else(|| {
-            Error::Target(format!(
+        let scope =
+            vault["id"].as_str().ok_or_else(|| {
+                Error::Target(format!(
                 "az keyvault show returned no id for Key Vault {kv}; nothing was changed\n  \
                  next: check it with `{kv_hint}`"
-            ))
-        })?;
+            ).into())
+            })?;
         let out = self.az(
             Effect::Read,
             "role assignment list",
@@ -827,15 +859,18 @@ pub(crate) fn single_revision_mode(t: &AzureTarget, app: &Value) -> Result<(), E
         .and_then(Value::as_str)
         .filter(|m| !m.eq_ignore_ascii_case("single"))
     {
-        Some(mode) => Err(Error::Config(format!(
-            "container app {app} runs in {mode} revision mode; opv supports single-revision \
+        Some(mode) => Err(Error::Config(
+            format!(
+                "container app {app} runs in {mode} revision mode; opv supports single-revision \
              mode only; nothing was changed\n  next: `az containerapp revision set-mode -g {rg} \
              -n {app} --mode single --subscription {sub}`, or keep managing this app's \
              revisions by hand",
-            app = t.container_app,
-            rg = t.resource_group,
-            sub = t.subscription
-        ))),
+                app = t.container_app,
+                rg = t.resource_group,
+                sub = t.subscription
+            )
+            .into(),
+        )),
         None => Ok(()),
     }
 }
@@ -883,7 +918,7 @@ fn parse_with(out: &Output, what: &str, state: &str) -> Result<Value, Error> {
              the Azure CLI (`az upgrade`), then run opv again",
             e.line(),
             e.column()
-        ))
+        ).into())
     })
 }
 

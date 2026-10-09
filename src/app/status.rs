@@ -1,9 +1,10 @@
 //! `status <env>` use case (FR-17, spec §7.3, ruling P17).
 //!
-//! One row per product × key with its 1Password state and target state, guidance under each
-//! missing row, extras as warnings. Names only. Exits `Findings(n)` for the n rows that are
-//! missing, of the wrong kind or failing a rule; extras alone exit 0. A clean run ends with
-//! a summary line on stdout (FR-26). Read-only: one `op item get` and one store list
+//! A one-line count summary first (NR-16), then one row per product × key with its
+//! 1Password state and target state, guidance under each missing row, extras as warnings.
+//! Names only. Exits `Findings(n)` for the n rows that are missing, of the wrong kind or
+//! failing a rule; extras alone exit 0. `--product` limits all of it to one product (P12);
+//! without an environment, one count line per environment (P22). Read-only: one `op item get` and one store list
 //! (plus the free `op whoami` diagnosis when the read fails). A pinned target is also read
 //! value by value (FR-31) and its bindings once, for the pending-deploy, drift and
 //! env-routed lines (FR-29).
@@ -13,10 +14,10 @@ use std::io::Write;
 
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
-    PinnedRow, is_blocking, open_target, preflight, print_extras, print_rows, read_and_plan,
-    write_err, write_json,
+    KeyNames, PinnedRow, check_product, count_line, is_blocking, open_target, preflight,
+    print_extras, print_rows, product_names, read_and_plan, scope_plan, write_err, write_json,
 };
-use crate::domain::{Binding, Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
+use crate::domain::{Binding, Fleet, Kind, Row, StoreEntry, SyncPlan, TargetState};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
 use crate::provider::TargetConfig;
@@ -31,8 +32,7 @@ pub fn run(
     run_with(fleet, env_name, r, out, false)
 }
 
-/// `status <env> [--json]`. With `json`, stdout carries one FR-21 document and no table or
-/// summary line; exit codes are unchanged (`Findings(n)` for blocking rows).
+/// `status <env> [--json]` for every product.
 pub fn run_with(
     fleet: &Fleet,
     env_name: &str,
@@ -40,12 +40,31 @@ pub fn run_with(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
+    run_scoped(fleet, env_name, None, r, out, json)
+}
+
+/// `status <env> [--product p] [--json]`. Text starts with the one-line count summary
+/// (NR-16), then the rows. With `json`, stdout carries one FR-21 document and nothing
+/// else. `product` limits rows, totals and findings to one product (P12). Exit codes are
+/// unchanged (`Findings` for blocking rows).
+pub fn run_scoped(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    check_product(fleet, product)?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
     // The target's state, read-only and never waiting (NR-23, NR-25).
     preflight::read(t, r)?;
     let none = BTreeSet::new();
-    let (plan, listed) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
+    let (mut plan, listed) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
+    if let Some(p) = product {
+        scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
+    }
     let pinned = match &ports {
         Ports::Pinned { store, runtime } => Some(pinned_status(
             fleet,
@@ -58,6 +77,8 @@ pub fn run_with(
         )?),
         Ports::Staged { .. } => None,
     };
+    let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
+    let findings = || Error::findings(n, fix_then(&status_command(env_name, product)));
     if json {
         write_json(
             out,
@@ -65,30 +86,96 @@ pub fn run_with(
             env_name,
             &plan,
             pinned.as_ref().map(|p| &p.rows),
+            product,
         )?;
-        let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
-        return if n > 0 {
-            Err(Error::Findings(n))
-        } else {
-            Ok(())
-        };
+        return if n > 0 { Err(findings()) } else { Ok(()) };
     }
+    let names = KeyNames::new(fleet, env_name)?;
+    writeln!(
+        out,
+        "{}",
+        count_line(env_name, &plan.rows, t.provider().label())
+    )
+    .map_err(write_err)?;
     print_rows(out, fleet, &plan.rows, target)?;
     print_extras(out, &plan)?;
     if let Some(p) = &pinned {
-        p.print(out, env_name)?;
+        p.print(out, env_name, &names)?;
     }
-    let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     if n > 0 {
-        writeln!(
-            out,
-            "{n} key(s) missing, of the wrong kind or failing a rule"
-        )
-        .map_err(write_err)?;
-        return Err(Error::Findings(n));
+        return Err(findings());
     }
-    writeln!(out, "{}", summary(&plan.rows, t.provider().label())).map_err(write_err)?;
     Ok(())
+}
+
+/// `opv status <env>[ --product p]`.
+fn status_command(env_name: &str, product: Option<&str>) -> String {
+    match product {
+        Some(p) => format!("opv status {env_name} --product {p}"),
+        None => format!("opv status {env_name}"),
+    }
+}
+
+/// The next step for findings: fix the values where they live, then look again.
+pub(crate) fn fix_then(command: &str) -> String {
+    format!("fix the keys above in 1Password, then run {command}")
+}
+
+/// `status` without an environment (P22): one count line per environment, in name order;
+/// an environment without a target is `run-only`. One item read per environment with a
+/// target (FR-13). An environment that cannot be read is one line naming the error, and the
+/// rest are still shown; the first such error is the result, else `Findings` when any
+/// environment has findings.
+pub fn overview(fleet: &Fleet, r: &dyn CommandRunner, out: &mut dyn Write) -> Result<(), Error> {
+    let mut first_err: Option<(String, Error)> = None;
+    let mut findings = 0;
+    let mut first_finding: Option<&str> = None;
+    for (name, env) in &fleet.environments {
+        let Some(t) = env.target() else {
+            writeln!(out, "{name}: run-only (no target)").map_err(write_err)?;
+            continue;
+        };
+        match env_rows(fleet, name, t, r) {
+            Ok(rows) => {
+                writeln!(out, "{}", count_line(name, &rows, t.provider().label()))
+                    .map_err(write_err)?;
+                let n = rows.iter().filter(|r| is_blocking(r)).count();
+                if n > 0 {
+                    findings += n;
+                    first_finding.get_or_insert(name);
+                }
+            }
+            Err(e) => {
+                let first = e.to_string().lines().next().unwrap_or_default().to_string();
+                writeln!(out, "{name}: not checked ({first})").map_err(write_err)?;
+                first_err.get_or_insert((name.clone(), e));
+            }
+        }
+    }
+    if let Some((name, e)) = first_err {
+        return Err(e.or_next(|| format!("opv status {name}")));
+    }
+    match first_finding {
+        Some(name) => Err(Error::findings(findings, format!("opv status {name}"))),
+        None => Ok(()),
+    }
+}
+
+/// One environment's rows, for [`overview`].
+fn env_rows(
+    fleet: &Fleet,
+    env_name: &str,
+    t: &dyn TargetConfig,
+    r: &dyn CommandRunner,
+) -> Result<Vec<Row>, Error> {
+    let (_, ports) = open_target(fleet, env_name, r)?;
+    preflight::read(t, r)?;
+    let none = BTreeSet::new();
+    Ok(
+        read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?
+            .0
+            .rows,
+    )
 }
 
 /// Bindings of a pinned target (FR-29): per desired name whether its binding is current,
@@ -99,31 +186,31 @@ struct PinnedStatus {
     drift: Vec<String>,
     env_routed: Vec<String>,
     runtime: String,
-    /// How each bound name reaches the app, when it passes through more than one object
-    /// (FR-39). Names and version ids only.
-    chains: Vec<String>,
 }
 
 impl PinnedStatus {
-    fn print(&self, out: &mut dyn Write, env_name: &str) -> Result<(), Error> {
+    fn print(&self, out: &mut dyn Write, env_name: &str, names: &KeyNames) -> Result<(), Error> {
         let mut line = |text: String| writeln!(out, "{text}").map_err(write_err);
         if !self.pending.is_empty() {
             line(format!(
                 "pending deploy (opv sync {env_name} --deploy): {}",
-                self.pending.join(", ")
+                names.join(&self.pending)
             ))?;
         }
         if !self.drift.is_empty() {
-            line(drift_line(env_name, &self.drift.join(", ")))?;
+            line(drift_line(env_name, &names.join(&self.drift)))?;
         }
-        for chain in &self.chains {
-            line(format!("chain: {chain}"))?;
+        for (name, row) in &self.rows {
+            if let Some(chain) = &row.chain {
+                let rest = chain.strip_prefix(name.as_str()).unwrap_or(chain);
+                line(format!("chain: {}{rest}", names.label(name)))?;
+            }
         }
         if !self.env_routed.is_empty() {
             line(format!(
                 "env-routed (visible to readers of {}): {}",
                 self.runtime,
-                self.env_routed.join(", ")
+                names.join(&self.env_routed)
             ))?;
         }
         Ok(())
@@ -162,10 +249,17 @@ fn pinned_status(
                 (true, true) => "stale",
                 (false, true) => "unbound",
             };
+            let chain = match snap.bindings.get(n) {
+                Some(Binding::Pinned { version, .. }) if want.store.contains_key(n) => {
+                    runtime.chain(n, version)
+                }
+                _ => None,
+            };
             let row = PinnedRow {
                 binding,
                 pending_deploy: is_pending,
                 drift: d.drift.contains(n),
+                chain,
             };
             (n.clone(), row)
         })
@@ -176,30 +270,7 @@ fn pinned_status(
         drift: d.drift.iter().cloned().collect(),
         env_routed: want.plain.keys().cloned().collect(),
         runtime: runtime.describe(),
-        chains: want
-            .store
-            .keys()
-            .filter_map(|n| match snap.bindings.get(n) {
-                Some(Binding::Pinned { version, .. }) => runtime.chain(n, version),
-                _ => None,
-            })
-            .collect(),
     })
-}
-
-/// The clean-run summary line (FR-26): `N saved, M not yet on <target> (staged by the next
-/// sync), 0 findings`. N counts saved rows (secret and config); M counts saved secrets
-/// absent from the target. Skipped rows count in neither. Names and counts only.
-fn summary(rows: &[Row], target: &str) -> String {
-    let saved = rows.iter().filter(|r| r.state == KeyState::Ready);
-    let pending = saved
-        .clone()
-        .filter(|r| r.kind == Kind::Secret && r.target == TargetState::Absent)
-        .count();
-    format!(
-        "{} saved, {pending} not yet on {target} (staged by the next sync), 0 findings",
-        saved.count()
-    )
 }
 
 /// Target state of a row. A store that reads its values back is compared exactly, so a
@@ -285,7 +356,7 @@ mod tests {
     #[test]
     fn status_missing_row_prints_guidance_on_next_line() {
         let (res, out, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
-        assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
         let lines: Vec<&str> = out.lines().collect();
         let i = lines
             .iter()
@@ -301,7 +372,7 @@ mod tests {
             complete_with(secret("allumata", "OPENAI_API_KEY", "sk-or-FIXTUREVALUE")),
             fly_empty(),
         );
-        assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
         let lines: Vec<&str> = out.lines().collect();
         let i = lines
             .iter()
@@ -316,7 +387,7 @@ mod tests {
     #[test]
     fn status_missing_section_reports_every_key_missing() {
         let (res, out, _) = status_of(item(&[]), fly_empty());
-        assert!(matches!(res, Err(Error::Findings(3))), "{res:?}");
+        assert!(matches!(res, Err(Error::Findings(3, _))), "{res:?}");
         for k in ["OPENAI_API_KEY", "INTEGRATION_ENC_KEY", "SIGNUP_POLICY"] {
             assert!(
                 out.lines().any(|l| l.contains(k) && l.contains("missing")),
@@ -387,7 +458,7 @@ mod tests {
         let mut out = Vec::new();
         let res = run(&fl, "staging", &r, &mut out);
         let out = text_of(&out);
-        assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+        assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
         assert!(
             out.lines().any(|l| l.starts_with("allumata")
                 && l.contains("SMTP_PASS")
@@ -406,7 +477,7 @@ mod tests {
             fly_empty(),
         );
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Findings(1)), "{e}");
+        assert!(matches!(e, Error::Findings(1, _)), "{e}");
         assert_eq!(e.exit_code(), 8);
         assert!(
             out.lines().any(|l| l.contains("OPENAI_API_KEY")
@@ -461,25 +532,43 @@ mod tests {
         );
     }
 
-    /// FR-26: a clean run ends with the summary line; exit stays 0.
+    /// NR-16: the first line is the count summary.
     #[test]
-    fn status_clean_run_prints_summary_line() {
+    fn status_starts_with_a_count_summary() {
         let (res, out, _) = status_of(complete_item(), fly(&[(OPENAI_FLY, "d1")]));
         res.unwrap();
         // prod: OPENAI_API_KEY (on Fly), INTEGRATION_ENC_KEY (absent), SIGNUP_POLICY
-        // (config); the Stripe key is skipped and counts in neither number.
+        // (config); the Stripe key is skipped.
         assert_eq!(
-            out.lines().last().unwrap(),
-            "3 saved, 1 not yet on Fly (staged by the next sync), 0 findings",
+            out.lines().next().unwrap(),
+            "prod: 4 keys · 3 saved · 1 skipped · 0 findings · 1 not yet on Fly",
             "{out}"
         );
     }
 
-    /// Findings: no summary line (the findings line is last) and exit 8 unchanged.
+    /// Findings are counted in the summary line, and exit 8 is unchanged.
     #[test]
-    fn status_with_findings_prints_no_summary_line() {
-        let (res, out, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
+    fn status_with_findings_counts_them_first() {
+        let (_, out, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
+        assert!(
+            out.lines().next().unwrap().contains(" · 1 finding · "),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn status_with_findings_exits_8() {
+        let (res, _, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
         assert_eq!(res.unwrap_err().exit_code(), 8);
-        assert!(!out.contains("0 findings"), "{out}");
+    }
+
+    /// NR-19: findings name the command to run after fixing them.
+    #[test]
+    fn status_findings_next_step_is_status_again() {
+        let (res, _, _) = status_of(item_without("allumata", "OPENAI_API_KEY"), fly_empty());
+        assert_eq!(
+            res.unwrap_err().next_step(),
+            Some("fix the keys above in 1Password, then run opv status prod")
+        );
     }
 }

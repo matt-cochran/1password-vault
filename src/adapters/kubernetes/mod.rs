@@ -99,11 +99,12 @@ pub fn store_name(env_name: &str) -> String {
 /// A fresh version id: [`VERSION_LEN`] base32 characters from the OS RNG. It is never
 /// derived from the value, so a Secret's name is no fingerprint of it (FR-38, SR-1).
 pub fn new_version() -> Result<String, Error> {
-    let mut bits = getrandom::u64().map_err(|e| {
-        Error::Dependency(format!(
+    let mut bits =
+        getrandom::u64().map_err(|e| {
+            Error::Dependency(format!(
             "the operating system's random number generator failed ({e}); nothing was written"
-        ))
-    })?;
+        ).into())
+        })?;
     let mut id = String::with_capacity(VERSION_LEN);
     for _ in 0..VERSION_LEN {
         id.push(char::from(ID_ALPHABET[(bits & 31) as usize]));
@@ -146,18 +147,21 @@ pub(crate) fn digest_hex(value: &str) -> String {
 /// Parse `out` as JSON; serde messages can quote input, so report the position only.
 pub(crate) fn parse_json(out: &Output, what: &str) -> Result<Value, Error> {
     serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(format!(
-            "{what} returned unexpected JSON (line {}, column {})",
-            e.line(),
-            e.column()
-        ))
+        Error::Target(
+            format!(
+                "{what} returned unexpected JSON (line {}, column {})",
+                e.line(),
+                e.column()
+            )
+            .into(),
+        )
     })
 }
 
 /// stdout as UTF-8 text (jsonpath outputs: names and labels only).
 pub(crate) fn text<'o>(out: &'o Output, what: &str) -> Result<&'o str, Error> {
     std::str::from_utf8(&out.stdout)
-        .map_err(|_| Error::Target(format!("{what} returned output that is not UTF-8")))
+        .map_err(|_| Error::Target(format!("{what} returned output that is not UTF-8").into()))
 }
 
 /// Read or write: decides retry (the runner's) and what a failure means (NR-2).
@@ -245,7 +249,7 @@ impl<'a> Kubectl<'a> {
     /// The typed error for a call that did not succeed (NR-2, NR-28, FR-26).
     pub fn fail(&self, effect: Effect, what: &str, outcome: Outcome, hint: &str) -> Error {
         let why = match outcome {
-            Outcome::Done(_) => return Error::Target(format!("{what}: unexpected success")),
+            Outcome::Done(_) => return Error::Target(format!("{what}: unexpected success").into()),
             Outcome::Refused(out) => status_text(out.status),
             Outcome::Unknown {
                 status: Some(status),
@@ -272,10 +276,13 @@ impl<'a> Kubectl<'a> {
         match self.probe(&contexts) {
             Err(e) => return e,
             Ok(Some(o)) if o.status != 0 => {
-                return Error::Config(format!(
-                    "kubectl context \"{ctx}\" is not in your kubeconfig ({what} failed); \
+                return Error::Config(
+                    format!(
+                        "kubectl context \"{ctx}\" is not in your kubeconfig ({what} failed); \
                      nothing was changed\n  next: kubectl config get-contexts"
-                ));
+                    )
+                    .into(),
+                );
             }
             _ => {}
         }
@@ -286,29 +293,35 @@ impl<'a> Kubectl<'a> {
             Effect::Write => "the change may or may not have been applied",
         };
         if !reachable {
-            return Error::Unknown(format!(
-                "provider unavailable: the Kubernetes API server for context \"{ctx}\" did \
+            return Error::Unknown(
+                format!(
+                    "provider unavailable: the Kubernetes API server for context \"{ctx}\" did \
                  not answer (unreachable, or your credentials for it expired); {what} failed \
                  ({why}); {preserved}\n  next: `kubectl --context {ctx} cluster-info` shows \
                  the cause; fix it, then re-run the same command"
-            ));
+                )
+                .into(),
+            );
         }
         if effect == Effect::Write && !why.starts_with("exit ") {
-            return Error::Unknown(format!(
-                "{what}: {why}; {preserved}\n  next: re-run the same command"
-            ));
+            return Error::Unknown(
+                format!("{what}: {why}; {preserved}\n  next: re-run the same command").into(),
+            );
         }
         let preserved = match effect {
             Effect::Read => preserved,
             Effect::Write => "kubectl refused the change",
         };
-        Error::Target(format!(
-            "{what} failed ({why}) for deployment {} in namespace {} (context {ctx}); \
+        Error::Target(
+            format!(
+                "{what} failed ({why}) for deployment {} in namespace {} (context {ctx}); \
              {preserved}\n  next: {}",
-            t.deployment,
-            t.namespace,
-            self.command(hint)
-        ))
+                t.deployment,
+                t.namespace,
+                self.command(hint)
+            )
+            .into(),
+        )
     }
 
     /// A diagnosis probe; `Ok(None)` when it could not run for a reason other than a
@@ -346,12 +359,15 @@ impl<'a> Kubectl<'a> {
 /// `kubectl` could not be started: missing ⇒ `Dependency` with the install command.
 fn spawn_error(what: &str, e: &io::Error) -> Error {
     match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!(
-            "{PROGRAM} not found on PATH\n  {}",
-            Host::detect().install_hint(KUBECTL)
-        )),
-        io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
-        kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
+        io::ErrorKind::NotFound => Error::Dependency(
+            format!(
+                "{PROGRAM} not found on PATH\n  {}",
+                Host::detect().install_hint(KUBECTL)
+            )
+            .into(),
+        ),
+        io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}").into()),
+        kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})").into()),
     }
 }
 
@@ -377,13 +393,16 @@ pub(crate) fn container_index(deployment: &Value, t: &KubeTarget) -> Result<usiz
             Some(c) => format!("has no container \"{c}\""),
             None => "has more than one container".to_string(),
         };
-        Error::Config(format!(
-            "deployment {} {want}; its containers: {}\n  next: set `container` in the \
+        Error::Config(
+            format!(
+                "deployment {} {want}; its containers: {}\n  next: set `container` in the \
              kubernetes section of environment {} to one of them",
-            t.deployment,
-            names.join(", "),
-            t.env
-        ))
+                t.deployment,
+                names.join(", "),
+                t.env
+            )
+            .into(),
+        )
     })
 }
 
@@ -598,7 +617,7 @@ mod tests {
         let r = FakeRunner::new(failed_read(1).chain([Output::failure(1)]));
         assert!(matches!(
             kubectl_get_deployment(&r),
-            Err(Error::Config(m)) if m.contains("kubectl config get-contexts")
+            Err(Error::Config(m)) if m.mentions("kubectl config get-contexts")
         ));
     }
 
@@ -608,7 +627,7 @@ mod tests {
         assert!(matches!(
             kubectl_get_deployment(&r),
             Err(Error::Target(m))
-                if m.contains("next: kubectl --context kind-opv --namespace opv-spike get deployment api")
+                if m.next() == Some("kubectl --context kind-opv --namespace opv-spike get deployment api")
         ));
     }
 

@@ -52,7 +52,7 @@ impl Runtime {
             command
         };
         let args: Vec<_> = command[1..].iter().map(String::as_str).collect();
-        self.runner.run_inherited(&command[0], &args, &self.environment()).map_err(|e| Error::Dependency(format!("[SESSION-COMMAND] Cannot start the requested command ({:?}). Check its installation and arguments.", e.kind())))
+        self.runner.run_inherited(&command[0], &args, &self.environment()).map_err(|e| Error::Dependency(format!("[SESSION-COMMAND] Cannot start the requested command ({:?}). Check its installation and arguments.", e.kind()).into()))
     }
 }
 
@@ -73,7 +73,7 @@ fn dependency(error: io::Error) -> Error {
         Error::Dependency(format!(
             "Cannot execute the 1Password CLI ({:?}). Check its installation and executable permissions.",
             error.kind()
-        ))
+        ).into())
     }
 }
 
@@ -137,7 +137,7 @@ impl Backend for Runtime {
             }),
             Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
                 "1Password did not answer in time ({reason}). Fields already saved are kept. Run opv setup again to check and resume."
-            ))),
+            ).into())),
         }
     }
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error> {
@@ -199,7 +199,8 @@ impl Console {
         {
             return Err(Error::Policy(format!(
                 "{what} needs your own interactive terminal. Automation should use init, doctor, check, item skeleton and run with declared configuration."
-            )));
+            ).into())
+            .with_next(format!("run opv {command} in your own terminal")));
         }
         for key in [
             "OP_SERVICE_ACCOUNT_TOKEN",
@@ -209,7 +210,8 @@ impl Console {
             if std::env::var_os(key).is_some_and(|v| !v.is_empty()) {
                 return Err(Error::Policy(format!(
                     "A service-account or Connect credential is active. Use a separate owner terminal for opv {command}; existing automation authentication is unchanged."
-                )));
+                ).into())
+                .with_next(format!("run opv {command} in a terminal without {key}")));
             }
         }
         Ok(())

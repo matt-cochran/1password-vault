@@ -150,6 +150,7 @@ pub fn read_field_shapes(
             item_id: item_id.to_string(),
             target: None,
             modes: BTreeMap::new(),
+            confirm_env: false,
         };
         return Err(failed_op_error(
             r,
@@ -192,12 +193,15 @@ fn list(
     let failed = format!("{failed} failed ({})", status_text(out.status));
     Err(match crate::runner::diagnosing(|| diagnose(r, host)) {
         Err(e) => e,
-        Ok(Session::SignedIn(t)) => Error::Source(format!(
-            "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \
+        Ok(Session::SignedIn(t)) => Error::Source(
+            format!(
+                "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \
              see {what}"
-        )),
+            )
+            .into(),
+        ),
         Ok(Session::Unknown) => {
-            Error::Source(format!("{failed}; run `op {}` to see why", args.join(" ")))
+            Error::Source(format!("{failed}; run `op {}` to see why", args.join(" ")).into())
         }
         Ok(s) => session_error(s, &host(), Some(&failed)).expect("every other session is an error"),
     })
@@ -219,19 +223,28 @@ fn pick(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Nam
         // The ID goes into argv next: check it like a hand-written ID (§10.2, SR-7) and never
         // echo an ID that fails the check.
         [one] if config::is_id(&one.id) => Ok((*one).clone()),
-        [_] => Err(Error::Source(format!(
-            "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
+        [_] => Err(Error::Source(
+            format!(
+                "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
              1Password ID (^[A-Za-z0-9][A-Za-z0-9._-]*$); not used"
-        ))),
-        [] => Err(Error::Config(format!(
-            "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
-            candidates(all.iter())
-        ))),
-        many => Err(Error::Config(format!(
-            "{} {what}s are titled {title:?}{scope}; rename all but one in 1Password: {}",
-            many.len(),
-            candidates(many.iter().copied())
-        ))),
+            )
+            .into(),
+        )),
+        [] => Err(Error::Config(
+            format!(
+                "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
+                candidates(all.iter())
+            )
+            .into(),
+        )),
+        many => Err(Error::Config(
+            format!(
+                "{} {what}s are titled {title:?}{scope}; rename all but one in 1Password: {}",
+                many.len(),
+                candidates(many.iter().copied())
+            )
+            .into(),
+        )),
     }
 }
 

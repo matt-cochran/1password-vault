@@ -51,7 +51,8 @@ Exit codes:
 
 Environment:
   OPV_CONFIG   default for --config
-  OPV_PRODUCT  default for --product on check, run, doctor and explain (never sync)
+  OPV_PRODUCT  default for --product on check, run, doctor, explain, status and plan
+               (never sync)
   NO_COLOR     no colour under --color auto
 
 Docs: https://github.com/matt-cochran/1password-vault/blob/main/docs/usage.md
@@ -63,7 +64,10 @@ Examples:
   opv sync staging                       # write changed settings; no deploy
   opv sync staging --deploy              # write, then deploy only if something changed
   opv sync staging --deploy --prune      # also remove managed names no longer declared
-  opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set";
+  opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set
+  opv sync prod --deploy --confirm prod  # an environment with confirm_env = true
+  opv sync prod --product api --deploy   # only api's names; other products untouched
+  opv sync staging --json                # the run report as one JSON document";
 
 const RUN_EXAMPLES: &str = "\
 Examples:
@@ -99,13 +103,16 @@ Examples:
 
 const STATUS_EXAMPLES: &str = "\
 Examples:
+  opv status                           # one line per environment
   opv status staging                   # one row per key: 1Password and the target
+  opv status prod --product api        # one product's rows and findings
   opv status prod --json               # the same, for scripts
   opv status prod || opv item skeleton prod   # add missing fields when status finds gaps";
 
 const PLAN_EXAMPLES: &str = "\
 Examples:
   opv plan staging                     # what a sync would write, hold and prune
+  opv plan prod --product api          # one product's rows and findings
   opv plan prod --json                 # the same, for scripts
   opv plan prod && opv sync prod --deploy     # sync only when nothing blocks it";
 
@@ -240,13 +247,19 @@ enum Cmd {
     },
     /// Inspect settings in 1Password and on the deployment target (names only).
     ///
-    /// Exits 8 when any key is missing, of the wrong kind or failing a rule.
+    /// Exits 8 when any key is missing, of the wrong kind or failing a rule. Without
+    /// <ENV>, prints one summary line per environment.
     #[command(after_help = STATUS_EXAMPLES)]
     Status {
-        /// Environment name from the configuration (for example staging or prod).
-        env: String,
+        /// Environment name from the configuration (for example staging or prod); without
+        /// it, one line per environment.
+        env: Option<String>,
+        /// Only this product's rows, totals and findings (fleet profile only).
+        /// [env: OPV_PRODUCT]
+        #[arg(long, requires = "env")]
+        product: Option<String>,
         /// Print one machine-readable JSON document instead of the table.
-        #[arg(long)]
+        #[arg(long, requires = "env")]
         json: bool,
     },
     /// Run your app with the selected product's 1Password settings.
@@ -341,6 +354,10 @@ enum Cmd {
 struct PlanArgs {
     /// Environment name from the configuration (for example staging or prod).
     env: String,
+    /// Only this product's rows, totals and findings (fleet profile only).
+    /// [env: OPV_PRODUCT]
+    #[arg(long)]
+    product: Option<String>,
     /// Print one machine-readable JSON document instead of the table.
     #[arg(long)]
     json: bool,
@@ -365,6 +382,16 @@ struct SyncArgs {
     /// Let --prune unset this immutable key (repeatable).
     #[arg(long, value_name = "PRODUCT/KEY")]
     prune_immutable: Vec<String>,
+    /// Write, prune and deploy only this product's names (fleet profile only). A deploy
+    /// still restarts the whole app. OPV_PRODUCT is never used here.
+    #[arg(long)]
+    product: Option<String>,
+    /// The environment's name again; required when it sets confirm_env = true.
+    #[arg(long, value_name = "ENV")]
+    confirm: Option<String>,
+    /// Print the run report as one JSON document (names only) instead of text.
+    #[arg(long)]
+    json: bool,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -374,6 +401,9 @@ impl From<SyncArgs> for sync::SyncOpts {
             prune: a.prune,
             rotate: a.rotate,
             prune_immutable: a.prune_immutable,
+            product: a.product,
+            confirm: a.confirm,
+            json: a.json,
         }
     }
 }
@@ -444,14 +474,23 @@ enum ConfigSource {
 }
 
 fn main() -> ExitCode {
-    // clap prints usage errors itself and exits 2 (shared with configuration errors).
-    let matches = Cli::command().get_matches();
+    // clap prints usage errors itself (exit 2, shared with configuration errors); opv adds
+    // the `Next:` line (NR-19).
+    let matches = match Cli::command().try_get_matches() {
+        Ok(m) => m,
+        Err(e) => return usage_error(e),
+    };
     let config_source = match matches.value_source("config") {
         Some(ValueSource::EnvVariable) => ConfigSource::Env,
         Some(_) => ConfigSource::Flag,
         None => ConfigSource::Discovered,
     };
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => return usage_error(e),
+    };
+    let rerun = rerun_command(&cli.cmd);
+    opv::runner::signals::set_rerun(&rerun);
     let mut stdout = PipeSafe {
         inner: io::stdout().lock(),
         closed: false,
@@ -476,11 +515,62 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(exit_byte(code)),
         Err(e) => {
             // Error messages never contain secret values (SR-1). The failed call's stderr
-            // follows only as a scrubbed excerpt of at most 5 lines (NR-31).
+            // follows the error's first line only as a scrubbed excerpt of at most 5 lines
+            // (NR-31); the `Next:` line is always the last line (NR-19).
             let excerpt = opv::runner::take_failure_excerpt();
-            let _ = write!(io::stderr(), "{}", opv::error::report(&e, excerpt.as_ref()));
+            let fallback = e.default_next(&rerun);
+            let _ = write!(
+                io::stderr(),
+                "{}",
+                opv::error::report(&e, &fallback, excerpt.as_ref())
+            );
             ExitCode::from(exit_byte(e.exit_code()))
         }
+    }
+}
+
+/// A clap usage error (or the help shown for a missing command, exit 2), then the `Next:`
+/// line naming the help to read (NR-19); `--help` and `--version` print as clap prints them
+/// and exit 0.
+fn usage_error(e: clap::Error) -> ExitCode {
+    use clap::error::ErrorKind;
+    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+        e.exit();
+    }
+    let _ = e.print();
+    let cmd = Cli::command();
+    let sub = std::env::args()
+        .skip(1)
+        .find(|a| cmd.get_subcommands().any(|s| s.get_name() == a));
+    let help = match sub {
+        Some(s) => format!("opv {s} --help"),
+        None => "opv --help".to_string(),
+    };
+    let _ = write!(io::stderr(), "{}", opv::error::next_line(&help));
+    ExitCode::from(exit_byte(e.exit_code()))
+}
+
+/// The command line as typed, for "run it again" next steps. Arguments are names, flags
+/// and paths, never values (SR-3); `run` and `session` carry the user's own command, which
+/// is never repeated.
+fn rerun_command(cmd: &Cmd) -> String {
+    if matches!(cmd, Cmd::Run { .. } | Cmd::Session { .. }) {
+        return "the same command".to_string();
+    }
+    let mut parts = vec!["opv".to_string()];
+    parts.extend(std::env::args().skip(1).map(|a| shell_word(&a)));
+    parts.join(" ")
+}
+
+/// `a`, single-quoted when the shell would split or expand it.
+fn shell_word(a: &str) -> String {
+    let plain = !a.is_empty()
+        && a.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@,+%".contains(c));
+    if plain {
+        a.to_string()
+    } else {
+        format!("'{}'", a.replace('\'', "'\\''"))
     }
 }
 
@@ -517,7 +607,14 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
     let fleet_profile = matches!(loaded, Ok(f) if !f.is_simple());
     let env = std::env::var("OPV_PRODUCT").ok();
     let used = match cmd {
-        Cmd::Check { product, .. } | Cmd::Run { product, .. } => {
+        Cmd::Check { product, .. }
+        | Cmd::Run { product, .. }
+        | Cmd::Plan(PlanArgs { product, .. })
+        | Cmd::Status {
+            env: Some(_),
+            product,
+            ..
+        } => {
             let (p, used) = product_or_env(product.take(), env, fleet_profile);
             *product = p;
             used.then(|| product.clone()).flatten()
@@ -595,8 +692,9 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     // own signals and its exit code is passed through (FR-4). `setup` and `session` are
     // interactive and returned above.
     if !matches!(cli.cmd, Cmd::Run { .. }) {
-        opv::runner::signals::install()
-            .map_err(|e| Error::Dependency(format!("cannot install signal handlers: {e}")))?;
+        opv::runner::signals::install().map_err(|e| {
+            Error::Dependency(format!("cannot install signal handlers: {e}").into())
+        })?;
     }
     if let Cmd::Init { .. } = &cli.cmd {
         return run_init(cli, config_source, &r, out).map(|()| 0);
@@ -611,9 +709,9 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
             config::load(path)
         }
         None => match std::env::current_dir() {
-            Err(e) => Err(Error::Config(format!(
-                "cannot read the current directory: {e}"
-            ))),
+            Err(e) => Err(Error::Config(
+                format!("cannot read the current directory: {e}").into(),
+            )),
             Ok(start) => match config::discover(&start) {
                 Some(found) => {
                     let _ = writeln!(io::stderr(), "using {}", found.display());
@@ -654,8 +752,17 @@ fn run_other(
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
-        Cmd::Status { env, json } => status::run_with(&loaded?, &env, r, out, json),
-        Cmd::Plan(a) => sync::plan_with(&loaded?, &a.env, r, out, a.json),
+        Cmd::Status {
+            env: None,
+            product: _,
+            json: _,
+        } => status::overview(&loaded?, r, out),
+        Cmd::Status {
+            env: Some(env),
+            product,
+            json,
+        } => status::run_scoped(&loaded?, &env, product.as_deref(), r, out, json),
+        Cmd::Plan(a) => sync::plan_scoped(&loaded?, &a.env, a.product.as_deref(), r, out, a.json),
         Cmd::Sync(a) => {
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())
@@ -692,12 +799,12 @@ fn run_init(
         } else {
             "--config is not used"
         };
-        return Err(Error::Config(format!(
-            "init writes secrets.toml in the current directory; {how}"
-        )));
+        return Err(Error::Config(
+            format!("init writes secrets.toml in the current directory; {how}").into(),
+        ));
     }
     let dir = std::env::current_dir()
-        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}")))?;
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
     let args = init::InitArgs {
         env,
         vault,

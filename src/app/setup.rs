@@ -30,10 +30,10 @@ pub trait Interaction {
 }
 
 fn settings_error(message: &str) -> Error {
-    Error::Config(message.to_string())
+    Error::Config(message.to_string().into())
 }
 fn source_error(message: &str) -> Error {
-    Error::Source(message.to_string())
+    Error::Source(message.to_string().into())
 }
 
 #[derive(Deserialize)]

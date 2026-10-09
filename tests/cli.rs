@@ -825,7 +825,9 @@ fn sigterm_forwards_and_exits_143() {
         (
             Some(143),
             "forwarded",
-            "opv: interrupted during op item get; safe to re-run"
+            "opv: interrupted during op item get; safe to re-run\n\
+             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata \
+             (safe to re-run)"
         )
     );
 }

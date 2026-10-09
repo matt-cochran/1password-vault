@@ -38,10 +38,13 @@ pub const ONLY_SHOW_ERRORS: &str = "--only-show-errors";
 /// disk (SR-4), so the user is pointed at WSL or Linux.
 pub fn stdin_supported(action: &str) -> Result<(), Error> {
     if cfg!(windows) {
-        return Err(Error::Dependency(format!(
-            "{action} needs /dev/stdin, which native Windows lacks; nothing was changed\n  \
+        return Err(Error::Dependency(
+            format!(
+                "{action} needs /dev/stdin, which native Windows lacks; nothing was changed\n  \
              next: run opv sync from WSL or Linux"
-        )));
+            )
+            .into(),
+        ));
     }
     Ok(())
 }
@@ -69,18 +72,25 @@ pub(crate) fn invoke(
         Effect::Write => r.write(&call),
     };
     res.map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!(
-            "{PROGRAM} not found on PATH\n  {}",
-            Host::detect().install_hint(AZ_CLI)
-        )),
+        io::ErrorKind::NotFound => Error::Dependency(
+            format!(
+                "{PROGRAM} not found on PATH\n  {}",
+                Host::detect().install_hint(AZ_CLI)
+            )
+            .into(),
+        ),
         // A spent run budget: the call never started.
-        io::ErrorKind::TimedOut => Error::Target(format!(
-            "az {op}: {e}; nothing was changed\n  next: re-run with a larger --timeout"
-        )),
-        kind => Error::Target(format!(
-            "az {op} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
+        io::ErrorKind::TimedOut => Error::Target(
+            format!("az {op}: {e}; nothing was changed\n  next: re-run with a larger --timeout")
+                .into(),
+        ),
+        kind => Error::Target(
+            format!(
+                "az {op} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
              that `{PROGRAM} version` runs, then run opv again"
-        )),
+            )
+            .into(),
+        ),
     })
 }
 
@@ -94,10 +104,9 @@ pub(crate) fn read_output(
     match outcome {
         Outcome::Done(out) => Ok(out),
         Outcome::Refused(_) => Err(diagnose(r, op, target)),
-        Outcome::Unknown { reason, .. } => Err(Error::Target(format!(
-            "az {op}: {}",
-            unknown_text(PROGRAM, reason)
-        ))),
+        Outcome::Unknown { reason, .. } => Err(Error::Target(
+            format!("az {op}: {}", unknown_text(PROGRAM, reason)).into(),
+        )),
     }
 }
 
@@ -118,7 +127,7 @@ pub(crate) fn write_output(
         Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
             "az {op}: {}; the change may or may not have been applied\n  next: re-run the same command",
             unknown_text(PROGRAM, reason)
-        ))),
+        ).into())),
     }
 }
 
@@ -150,13 +159,19 @@ pub(crate) fn sees_subscription(r: &dyn CommandRunner, subscription: &str) -> Re
 fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
     match r.probe(&Call::new(PROGRAM, args), PROBE_TIMEOUT) {
         Ok(o) => Ok(o.status == 0),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
-            "{PROGRAM} not found on PATH\n  {}",
-            Host::detect().install_hint(AZ_CLI)
-        ))),
-        Err(e) => Err(Error::Target(format!(
-            "could not check the Azure sign-in ({e}); nothing was changed; run az account show"
-        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
+            format!(
+                "{PROGRAM} not found on PATH\n  {}",
+                Host::detect().install_hint(AZ_CLI)
+            )
+            .into(),
+        )),
+        Err(e) => Err(Error::Target(
+            format!(
+                "could not check the Azure sign-in ({e}); nothing was changed; run az account show"
+            )
+            .into(),
+        )),
     }
 }
 
@@ -169,7 +184,7 @@ fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
 pub fn diagnose(r: &dyn CommandRunner, op: &str, target: &str) -> Error {
     // The probe explains the failed call; its excerpt stays with the error (NR-31).
     match crate::runner::diagnosing(|| signed_in(r)) {
-        Ok(true) => Error::Target(format!("az {op} failed for {target}")),
+        Ok(true) => Error::Target(format!("az {op} failed for {target}").into()),
         Ok(false) => not_logged_in(None),
         Err(e) => e,
     }
@@ -182,10 +197,13 @@ pub(crate) fn not_logged_in(failed: Option<&str>) -> Error {
         Some(f) => format!("{f}; az account show failed"),
         None => "az account show failed".into(),
     };
-    Error::Auth(format!(
-        "not logged in to Azure ({why})\n  next: run `az login` (in CI: sign in with \
+    Error::Auth(
+        format!(
+            "not logged in to Azure ({why})\n  next: run `az login` (in CI: sign in with \
          azure/login first), then run opv again"
-    ))
+        )
+        .into(),
+    )
 }
 
 #[cfg(test)]

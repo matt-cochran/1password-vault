@@ -230,7 +230,7 @@ subscription = "00000000-0000-0000-0000-000000000000""#;
 
     fn err(store: &str) -> String {
         match parse_config(&toml(store)) {
-            Err(Error::Config(m)) => m,
+            Err(Error::Config(m)) => m.to_string(),
             other => panic!("expected a config error, got {other:?}"),
         }
     }

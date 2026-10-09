@@ -125,11 +125,14 @@ impl<'a> KubeSecrets<'a> {
             return Ok(None);
         };
         let unreadable = || {
-            Error::Target(format!(
-                "secret {name} does not hold a UTF-8 value under data.{VALUE_KEY} (it was \
+            Error::Target(
+                format!(
+                    "secret {name} does not hold a UTF-8 value under data.{VALUE_KEY} (it was \
                  changed outside opv); nothing was changed\n  next: inspect it with `{}`",
-                self.k.command(&format!("get secret {name} --show-labels"))
-            ))
+                    self.k.command(&format!("get secret {name} --show-labels"))
+                )
+                .into(),
+            )
         };
         let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| unreadable())?);
         let value = std::str::from_utf8(&bytes).map_err(|_| unreadable())?;
@@ -293,7 +296,7 @@ impl PinnedStore for KubeSecrets<'_> {
     /// next run writes another id and the unreferenced one is collected after a healthy rollout.
     fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
         if let Some((rule, reason)) = refusal(name, value) {
-            return Err(Error::Policy(format!("{name}: {rule}: {reason}")));
+            return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
         }
         if let Some((current, version)) = self.read(name)?
             && same(&current, value)
@@ -322,12 +325,15 @@ impl PinnedStore for KubeSecrets<'_> {
             Outcome::Done(out) => {
                 let echoed = text(&out, &what)?.trim();
                 if echoed != format!("secret/{secret}") {
-                    return Err(Error::Target(format!(
-                        "{what} did not confirm the secret it wrote; it may or may not \
+                    return Err(Error::Target(
+                        format!(
+                            "{what} did not confirm the secret it wrote; it may or may not \
                          exist and nothing else was changed\n  next: check with `{}`, then \
                          re-run the same command",
-                        self.k.command(&format!("get secret {secret} -o name"))
-                    )));
+                            self.k.command(&format!("get secret {secret} -o name"))
+                        )
+                        .into(),
+                    ));
                 }
                 Ok(version)
             }
@@ -365,10 +371,13 @@ impl KubeSecrets<'_> {
         let t = self.t();
         let store = store_name(name);
         if !valid_label_value(&store) {
-            return Err(Error::Config(format!(
-                "{name}: kubernetes-name-invalid: not a valid Kubernetes name, so opv never \
+            return Err(Error::Config(
+                format!(
+                    "{name}: kubernetes-name-invalid: not a valid Kubernetes name, so opv never \
                  wrote it; nothing was deleted\n  next: run opv explain {name}"
-            )));
+                )
+                .into(),
+            ));
         }
         let kept = keep.map(|v| secret_name(&store, v));
         let selector = format!("{LABEL_MANAGED}={},{LABEL_KEY}={store}", t.env);

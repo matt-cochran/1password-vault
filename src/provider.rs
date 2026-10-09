@@ -59,11 +59,14 @@ pub trait Provider: Sync {
         kind: &str,
         section: &Section<'_>,
     ) -> Result<Box<dyn StoreConfig>, Error> {
-        Err(Error::Config(format!(
-            "store {}: {} declares no store kind {kind:?}",
-            section.env(),
-            self.label()
-        )))
+        Err(Error::Config(
+            format!(
+                "store {}: {} declares no store kind {kind:?}",
+                section.env(),
+                self.label()
+            )
+            .into(),
+        ))
     }
     /// The stores of other providers this provider's runtime can bind (`secrets_in`, FR-39).
     fn bindings(&self) -> &'static [StoreBinding] {
@@ -77,11 +80,14 @@ pub trait Provider: Sync {
         store: &dyn StoreConfig,
     ) -> Result<Box<dyn TargetConfig>, Error> {
         let _ = target;
-        Err(Error::Config(format!(
-            "{} cannot keep its secrets in {}",
-            self.label(),
-            store.describe()
-        )))
+        Err(Error::Config(
+            format!(
+                "{} cannot keep its secrets in {}",
+                self.label(),
+                store.describe()
+            )
+            .into(),
+        ))
     }
 }
 
@@ -179,7 +185,7 @@ impl<'a> Section<'a> {
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, Error> {
         T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|mut e| {
             e.set_input(Some(self.text));
-            Error::Config(format!("invalid secrets.toml: {e}"))
+            Error::Config(format!("invalid secrets.toml: {e}").into())
         })
     }
 }

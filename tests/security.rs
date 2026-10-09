@@ -104,7 +104,9 @@ case "$1 $2" in
   # NR-24 preflight (shapes follow the recorded flyctl output in tests/fixtures/fly/).
   "status --app") printf '{"ID":"app","Status":"deployed","Machines":[{"id":"m1","state":"started"}]}\n'; exit 0 ;;
   "releases --app") printf '[{"Version":1,"Status":"complete","User":{"Email":"S7MARKERVALUE@example.invalid"}}]\n'; exit 0 ;;
-  "secrets import") exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;
+  "secrets import")
+    [ -n "$FAKE_FLY_IMPORT_SLEEP" ] && /bin/sleep "$FAKE_FLY_IMPORT_SLEEP"
+    exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;
   "secrets unset") exit 0 ;;
   "secrets deploy") exit 0 ;;
 esac
@@ -943,9 +945,9 @@ fn clean_status_prints_summary_line() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 0, "{}", r.all());
-    let last = r.stdout.lines().last().unwrap();
+    let first = r.stdout.lines().next().unwrap();
     assert!(
-        last.ends_with(" not yet on Fly (staged by the next sync), 0 findings"),
+        first.starts_with("prod: ") && first.ends_with(" · 0 findings · 2 not yet on Fly"),
         "{}",
         r.stdout
     );
@@ -1346,6 +1348,7 @@ fn status_json_row_carries_the_contract_fields() {
             "rule": null,
             "reason": null,
             "fly_name": N_OPENAI,
+            "target_name": N_OPENAI,
             "target": "absent",
             "action": "would_stage",
         }),
@@ -2256,4 +2259,112 @@ fn verbose_never_shows_stdout_content() {
         "{}",
         runs.join("\n----\n")
     );
+}
+
+// ------------------------------------------------------------- NR-19: the Next line
+
+/// Every kind of non-zero exit the CLI has, as (label, run): a usage error, each error
+/// category (exit 2 to 9), a failing `doctor` and a `confirm_env` refusal.
+/// [`exit_paths_cover_every_category`] checks the exit codes.
+fn exit_paths() -> Vec<(&'static str, Run)> {
+    let mut v = Vec::new();
+    let h = Harness::new(&good_item());
+    v.push(("usage", h.run(&["sync"])));
+    v.push(("config", h.run(&["status", "qa"])));
+    let no_op = Harness::build(&good_item(), false, true);
+    v.push(("dependency", no_op.run(&["status", "prod"])));
+    v.push(("doctor", no_op.run(&["doctor"])));
+    let mut h4 = Harness::new(&good_item());
+    h4.set("FAKE_OP_ITEM_EXIT", "1");
+    v.push(("source", h4.run(&["status", "prod"])));
+    let mut h5 = Harness::new(&good_item());
+    h5.set("FAKE_FLY_LIST_FAIL_AT", "1");
+    v.push(("target", h5.run(&["status", "prod"])));
+    let missing = item(
+        good_fields(OPENAI)
+            .into_iter()
+            .filter(|f| f["label"] != "INTEGRATION_ENC_KEY")
+            .collect(),
+    );
+    let h6 = Harness::new(&missing);
+    v.push(("policy", h6.run(&["sync", "prod"])));
+    v.push(("findings", h6.run(&["status", "prod"])));
+    let mut h7 = Harness::new(&good_item());
+    h7.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_FLY_AUTH_EXIT", "1");
+    v.push(("auth", h7.run(&["status", "prod"])));
+    // A write cut off by the run budget: its outcome is unknown (NR-2).
+    let mut h9 = Harness::new(&good_item());
+    h9.set("FAKE_FLY_IMPORT_SLEEP", "5");
+    v.push(("unknown", h9.run(&["--timeout", "2", "sync", "prod"])));
+    let mut guarded = Harness::new(&good_item());
+    let text = fs::read_to_string(CONFIG).unwrap().replace(
+        "modes.allumata.payments = \"off\"",
+        "modes.allumata.payments = \"off\"\nconfirm_env = true",
+    );
+    guarded.use_config(&text);
+    v.push(("confirm_env", guarded.run(&["sync", "prod", "--deploy"])));
+    v
+}
+
+/// NR-19: every non-zero exit ends with exactly one `Next:` line, the last on stderr.
+#[test]
+fn every_error_exit_prints_one_next_line_last() {
+    let bad: Vec<String> = exit_paths()
+        .into_iter()
+        .filter(|(_, r)| {
+            let lines: Vec<&str> = r.stderr.lines().collect();
+            let nexts = lines.iter().filter(|l| l.starts_with("Next: ")).count();
+            r.code == 0 || nexts != 1 || !lines.last().is_some_and(|l| l.starts_with("Next: "))
+        })
+        .map(|(what, r)| format!("{what} (exit {}):\n{}", r.code, r.stderr))
+        .collect();
+    assert!(bad.is_empty(), "{}", bad.join("\n---\n"));
+}
+
+/// The exit paths above reach every error category's exit code (2 to 9).
+#[test]
+fn exit_paths_cover_every_category() {
+    let mut codes: Vec<i32> = exit_paths().iter().map(|(_, r)| r.code).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes, vec![2, 3, 4, 5, 6, 7, 8, 9]);
+}
+
+/// NR-20: a guarded environment's refusal names the exact command to run.
+#[test]
+fn confirm_env_refusal_ends_with_the_exact_command() {
+    let mut h = Harness::new(&good_item());
+    let text = fs::read_to_string(CONFIG).unwrap().replace(
+        "modes.allumata.payments = \"off\"",
+        "modes.allumata.payments = \"off\"\nconfirm_env = true",
+    );
+    h.use_config(&text);
+    let r = h.run(&["sync", "prod", "--deploy"]);
+    assert_eq!(
+        r.stderr.lines().last(),
+        Some("Next: opv sync prod --deploy --confirm prod")
+    );
+}
+
+/// P2: `sync --json` prints one document on stdout and nothing else.
+#[test]
+fn sync_json_stdout_is_one_document() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["sync", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["pending"], json!([N_ENC, N_OPENAI]), "{}", r.all());
+}
+
+/// P22: `status` without an environment prints one line per environment.
+#[test]
+fn status_without_env_prints_one_line_per_environment() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status"]);
+    let envs: Vec<&str> = r
+        .stdout
+        .lines()
+        .map(|l| l.split(':').next().unwrap_or_default())
+        .collect();
+    assert_eq!(envs, ["prod", "staging"], "{}", r.all());
 }

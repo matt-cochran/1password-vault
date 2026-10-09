@@ -32,16 +32,22 @@ use crate::runner::CommandRunner;
 /// Step 3 for a mutating command: the target's own state, waiting for an update in
 /// progress. A failed check refuses the run; every other check returned prints one line in
 /// `doctor`'s format (`warn  fly app <app>: ...`); the result is the line to print instead
-/// of a deploy when the runtime has nothing to restart.
+/// of a deploy when the runtime has nothing to restart. With `notes`, the lines go to
+/// stderr instead (`sync --json` keeps stdout one document).
 pub(crate) fn run(
     t: &dyn TargetConfig,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
+    notes: bool,
 ) -> Result<Option<String>, Error> {
     let pre = t.preflight(r, PreflightMode::Mutate)?;
     for c in pre.checks {
         let line = c.outcome?.line(&c.name);
-        writeln!(out, "{line}").map_err(write_err)?;
+        if notes {
+            r.note(&line);
+        } else {
+            writeln!(out, "{line}").map_err(write_err)?;
+        }
     }
     Ok(pre.skip_deploy)
 }

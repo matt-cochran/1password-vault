@@ -7,9 +7,9 @@ $ flyctl secrets import --app mcproductlabs-portfolio-production --stage
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
 $ flyctl secrets deploy --app mcproductlabs-portfolio-production
 --- stdout
-1 to stage, 1 held (immutable), 0 to prune
-staged: 1 changed, 0 unchanged
-  changed: FLEET__ALLUMATA__OPENAI_API_KEY
-deployed staged secrets
+written: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
+deployed: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+summary: written 1 · deployed yes · pruned 0 · pending 0 · unchanged 0 · skipped 1
 --- result
 Ok(())

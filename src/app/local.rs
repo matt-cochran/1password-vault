@@ -27,20 +27,23 @@ pub fn select(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        )));
+        ).into()));
     }
     if let Some(p) = product
         && !fleet.products.contains_key(p)
     {
-        return Err(Error::Config(format!(
-            "undefined product {p:?}; choose one of: {}",
-            fleet
-                .products
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Err(Error::Config(
+            format!(
+                "undefined product {p:?}; choose one of: {}",
+                fleet
+                    .products
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into(),
+        ));
     }
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
@@ -96,14 +99,18 @@ pub fn check(
             if !matches!(row.state, KeyState::Ready | KeyState::Skipped) {
                 let guidance = &selected.products[&row.product].keys[&row.key].guidance;
                 if !guidance.is_empty() {
-                    writeln!(out, "  Next: {guidance}").map_err(write_err)?;
+                    writeln!(out, "  guidance: {guidance}").map_err(write_err)?;
                 }
             }
         }
         writeln!(out, "{findings} finding(s); no deployment target checked").map_err(write_err)?;
     }
     if findings > 0 {
-        Err(Error::Findings(findings))
+        let cmd = match product {
+            Some(p) => format!("opv check {env} --product {p}"),
+            None => format!("opv check {env}"),
+        };
+        Err(Error::findings(findings, super::status::fix_then(&cmd)))
     } else {
         Ok(())
     }
@@ -131,7 +138,7 @@ mod tests {
         let r = FakeRunner::new([item(&[])]);
         let mut out = Vec::new();
         let result = check(&f, "dev", Some("allumata"), &r, &mut out, true);
-        assert!(matches!(result, Err(Error::Findings(1))));
+        assert!(matches!(result, Err(Error::Findings(1, _))));
         assert_no_values(&text_of(&out));
     }
 

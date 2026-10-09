@@ -185,11 +185,14 @@ pub(crate) fn apply(k: &Kubectl<'_>, name: &str, body: &[u8]) -> Result<(), Erro
             if echoed.rsplit('/').next() == Some(name) {
                 Ok(())
             } else {
-                Err(Error::Target(format!(
-                    "{what} did not confirm the ExternalSecret it wrote; nothing else was \
+                Err(Error::Target(
+                    format!(
+                        "{what} did not confirm the ExternalSecret it wrote; nothing else was \
                      changed\n  next: check with `{}`, then re-run the same command",
-                    k.command(&format!("get {RESOURCE} {name} -o name"))
-                )))
+                        k.command(&format!("get {RESOURCE} {name} -o name"))
+                    )
+                    .into(),
+                ))
             }
         }
         // The read-back explains the failure, so the apply's excerpt stays (NR-31).
@@ -340,19 +343,25 @@ pub(crate) fn diagnose_failed(
     let describe = k.command(&format!("describe {RESOURCE} {es}"));
     match bridge.store.has_version(env_name, version) {
         Ok(Some(false)) => {
-            return Error::Target(format!(
-                "{head}\n  cause: {} has no version {version} of {env_name} (deleted or purged \
+            return Error::Target(
+                format!(
+                    "{head}\n  cause: {} has no version {version} of {env_name} (deleted or purged \
                  after opv wrote it)\n  next: run opv sync {} --deploy again; it writes and pins a \
                  fresh version",
-                bridge.describe, t.env
-            ));
+                    bridge.describe, t.env
+                )
+                .into(),
+            );
         }
         Err(e) => {
-            return Error::Target(format!(
-                "{head}\n  cause not found: could not check the version in {} ({e})\n  next: \
+            return Error::Target(
+                format!(
+                    "{head}\n  cause not found: could not check the version in {} ({e})\n  next: \
                  `{describe}`",
-                bridge.describe
-            ));
+                    bridge.describe
+                )
+                .into(),
+            );
         }
         Ok(_) => {}
     }
@@ -363,27 +372,27 @@ pub(crate) fn diagnose_failed(
              docs/agent-setup.md), or set secret_store in the store's [stores.<name>] table to \
              the one that reads {}",
             bridge.describe
-        )),
+        ).into()),
         Ok(StoreState::NotReady(why)) => Error::Target(format!(
             "{head}\n  cause: ClusterSecretStore {css} is not Ready ({why})\n  next: `{css_cmd}`; \
              fix its credentials, then run the same command again"
-        )),
+        ).into()),
         Ok(StoreState::Ready { names_store: false }) => Error::Target(format!(
             "{head}\n  cause: ClusterSecretStore {css} is Ready but its settings never name {} \
              (a vault URL for another vault?)\n  next: `{css_cmd}`; point it at {}, or set \
              secret_store to the ClusterSecretStore that does",
             bridge.locator, bridge.describe
-        )),
+        ).into()),
         Ok(StoreState::Ready { names_store: true }) => Error::Target(format!(
             "{head}\n  cause: the version exists and ClusterSecretStore {css} is Ready, so its \
              identity most likely cannot read this secret (for Key Vault: no \"Key Vault Secrets \
              User\" role on the vault, or a vault firewall)\n  next: `{describe}`, then grant the \
              store's identity read access and run the same command again"
-        )),
+        ).into()),
         Err(e) => Error::Target(format!(
             "{head}\n  cause not found: could not read ClusterSecretStore {css} ({e})\n  next: \
              `{describe}`"
-        )),
+        ).into()),
     }
 }
 
@@ -502,7 +511,7 @@ pub(crate) fn preflight(
     let mut checks = Vec::new();
     let name = format!("cluster secret store {cluster_store}");
     let refuse_or_warn = |checks: &mut Vec<Check>, msg: String| match mode {
-        PreflightMode::Mutate => Err(Error::Target(msg)),
+        PreflightMode::Mutate => Err(Error::Target(msg.into())),
         PreflightMode::Read => {
             checks.push(Check {
                 name: name.clone().into(),
@@ -514,12 +523,15 @@ pub(crate) fn preflight(
     let css_cmd = k.command(&format!("describe {STORE_RESOURCE} {cluster_store}"));
     match store_state(k, cluster_store, locator)? {
         StoreState::Missing => {
-            return Err(Error::Target(format!(
-                "ClusterSecretStore {cluster_store} does not exist, so no ExternalSecret can \
+            return Err(Error::Target(
+                format!(
+                    "ClusterSecretStore {cluster_store} does not exist, so no ExternalSecret can \
                  read {describe}; nothing was changed\n  next: create it (see \
                  docs/agent-setup.md), or set secret_store in the store's [stores.<name>] \
                  table to the ClusterSecretStore that reads {describe}"
-            )));
+                )
+                .into(),
+            ));
         }
         StoreState::NotReady(why) => refuse_or_warn(
             &mut checks,
@@ -545,7 +557,7 @@ pub(crate) fn preflight(
             grant(k, "get,list,create,delete")
         );
         match mode {
-            PreflightMode::Mutate => return Err(Error::Auth(msg)),
+            PreflightMode::Mutate => return Err(Error::Auth(msg.into())),
             PreflightMode::Read => checks.push(Check {
                 name: "external secrets access".into(),
                 outcome: Ok(Verdict::Warn(msg)),
@@ -588,13 +600,16 @@ pub(crate) fn doctor(
     }
     let css_cmd = k.command(&format!("describe {STORE_RESOURCE} {cluster_store}"));
     let css = store_state(k, cluster_store, locator).and_then(|s| match s {
-        StoreState::Missing => Err(Error::Target(format!(
-            "{cluster_store} does not exist\n  next: create it (see docs/agent-setup.md), or \
+        StoreState::Missing => Err(Error::Target(
+            format!(
+                "{cluster_store} does not exist\n  next: create it (see docs/agent-setup.md), or \
              set secret_store in the store's [stores.<name>] table"
-        ))),
-        StoreState::NotReady(why) => Err(Error::Target(format!(
-            "{cluster_store} is not Ready ({why})\n  next: `{css_cmd}`"
-        ))),
+            )
+            .into(),
+        )),
+        StoreState::NotReady(why) => Err(Error::Target(
+            format!("{cluster_store} is not Ready ({why})\n  next: `{css_cmd}`").into(),
+        )),
         StoreState::Ready { names_store: false } => Ok(Verdict::Warn(format!(
             "{cluster_store} is Ready, but its settings never name {locator}; check that it \
              reads {describe} (`{css_cmd}`)"
@@ -759,7 +774,7 @@ impl PinnedStore for ExternalStore<'_> {
 
     fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
         if let Some((rule, reason)) = super::store::refusal(name, value) {
-            return Err(Error::Policy(format!("{name}: {rule}: {reason}")));
+            return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
         }
         self.inner.write_one(name, value)
     }
@@ -923,14 +938,14 @@ mod tests {
             locator: "kv-opv-fixture".into(),
         };
         let k = Kubectl::new(&r, &t);
-        diagnose_failed(
+        let e = diagnose_failed(
             &k,
             &bridge,
             "opv-db-url-46687ce78b",
             "DB_URL",
             "46687ce78b76487cb0c1da470360b638",
-        )
-        .to_string()
+        );
+        crate::error::report(&e, "opv doctor", None)
     }
 
     fn store_with(f: impl FnOnce(&mut Value)) -> Output {
@@ -949,7 +964,7 @@ mod tests {
 
     #[test]
     fn missing_version_names_sync_deploy_as_the_next_step() {
-        assert!(diagnosis(Some(false), vec![]).contains("next: run opv sync dev --deploy again"));
+        assert!(diagnosis(Some(false), vec![]).contains("Next: run opv sync dev --deploy again"));
     }
 
     #[test]

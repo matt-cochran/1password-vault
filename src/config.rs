@@ -24,7 +24,7 @@ use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetCon
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
+        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
     parse(&text)
 }
 
@@ -50,13 +50,16 @@ pub const NOT_FOUND: &str = "no secrets.toml found in ";
 /// No `secrets.toml` in `start` or a parent (P3): the first-run router, offering both
 /// starting paths and the explicit `--config`.
 pub fn not_found(start: &Path) -> Error {
-    Error::Config(format!(
-        "{NOT_FOUND}{} or any parent directory.\n  \
-         Have a 1Password item already?  opv init <env> --vault <vault title> --item <item title>\n  \
-         New project?                    opv setup   (guided; uses the project's opv.setup.toml)\n  \
-         Configured elsewhere?           pass --config <path> to select its configuration",
-        start.display()
-    ))
+    Error::Config(
+        format!(
+            "{NOT_FOUND}{} or any parent directory.\n  \
+             Project ships opv.setup.toml?   opv setup\n  \
+             Configured elsewhere?           opv --config <path> <command>",
+            start.display()
+        )
+        .into(),
+    )
+    .with_next("opv init <env> --vault <vault title> --item <item title>")
 }
 
 /// Parse and validate configuration text.
@@ -65,7 +68,7 @@ pub fn not_found(start: &Path) -> Error {
 /// file that does not parse, takes the fleet path exactly as in v0.1, which reports any
 /// other kind as a configuration error.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
-    let invalid = |e| Error::Config(format!("invalid secrets.toml: {e}"));
+    let invalid = |e| Error::Config(format!("invalid secrets.toml: {e}").into());
     if peek_kind(text).as_deref() == Some("simple") {
         let raw: RawSimpleConfig = toml::from_str(text).map_err(invalid)?;
         let doc = Doc::parse(text).map_err(invalid)?;
@@ -248,6 +251,9 @@ struct RawEnvironment<M> {
     item_id: String,
     #[serde(default)]
     modes: M,
+    /// `sync` needs `--confirm <env>` (NR-20).
+    #[serde(default)]
+    confirm_env: bool,
     /// Optional: environments used only for `run`, `config export` and `item skeleton`
     /// need no target. At most one entry (FR-28).
     #[serde(flatten)]
@@ -255,7 +261,7 @@ struct RawEnvironment<M> {
 }
 
 fn cfg(msg: String) -> Error {
-    Error::Config(msg)
+    Error::Config(msg.into())
 }
 
 /// The named stores of a file (FR-39), by name.
@@ -338,7 +344,7 @@ fn target_of(
             } else {
                 format!(
                     "environment {name}: unknown field {unknown:?}; expected vault_id, item_id, \
-                 modes or a target section ({known})"
+                 modes, confirm_env or a target section ({known})"
                 )
             },
         ));
@@ -419,6 +425,7 @@ fn environment<M>(
             item_id: e.item_id,
             target,
             modes: BTreeMap::new(),
+            confirm_env: e.confirm_env,
         },
         e.modes,
     ))
@@ -859,7 +866,7 @@ mod tests {
 
     fn config_err(text: &str) -> String {
         match parse(text) {
-            Err(Error::Config(m)) => m,
+            Err(Error::Config(m)) => m.to_string(),
             other => panic!("expected Config error, got {other:?}"),
         }
     }
@@ -1498,7 +1505,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         .unwrap();
         assert!(matches!(
             crate::app::target(&f, "dev"),
-            Err(Error::Config(m)) if m.contains("configure fly.app") && !m.contains("secret_name")
+            Err(Error::Config(m)) if m.contains("add one target section (fly, azure, kubernetes)")
         ));
     }
 
@@ -1538,8 +1545,8 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "vault = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
         assert!(config_err(&bad).ends_with(
-            "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes or a \
-             target section (azure, fly, kubernetes)\n"
+            "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
+             confirm_env or a target section (azure, fly, kubernetes)\n"
         ));
     }
 

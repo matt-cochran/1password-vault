@@ -59,15 +59,18 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
 /// item, the generic recipe (docs/guided-setup.md) with the exact command that uses it, and
 /// `--recipe` for a recipe kept elsewhere.
 pub fn missing(start: &Path) -> Error {
-    Error::Config(format!(
-        "this project has no setup recipe: no opv.setup.toml in {} or any parent directory.\n  \
-         Have a 1Password item already?  opv init <env> --vault <vault title> --item <item title>\n  \
-         New project?  copy the generic recipe from {}/guided-setup.md into opv.setup.toml \
-         (names and instructions only, never values), then run: opv setup\n  \
-         Recipe kept elsewhere?  opv setup --recipe <path>",
-        start.display(),
-        crate::DOCS_URL
-    ))
+    Error::Config(
+        format!(
+            "this project has no setup recipe: no opv.setup.toml in {} or any parent directory.\n  \
+             New project?  copy the generic recipe from {}/guided-setup.md into opv.setup.toml \
+             (names and instructions only, never values), then run: opv setup\n  \
+             Recipe kept elsewhere?  opv setup --recipe <path>",
+            start.display(),
+            crate::DOCS_URL
+        )
+        .into(),
+    )
+    .with_next("opv init <env> --vault <vault title> --item <item title>")
 }
 
 impl Recipe {
@@ -222,9 +225,10 @@ mod tests {
     /// P3: no recipe is not a dead end; init is offered for an existing item.
     #[test]
     fn missing_recipe_offers_init_for_an_existing_item() {
-        let e = missing(Path::new("/project")).to_string();
-        assert!(
-            e.contains("opv init <env> --vault <vault title> --item <item title>"),
+        let e = missing(Path::new("/project"));
+        assert_eq!(
+            e.next_step(),
+            Some("opv init <env> --vault <vault title> --item <item title>"),
             "{e}"
         );
     }

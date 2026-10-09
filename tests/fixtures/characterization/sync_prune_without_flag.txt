@@ -6,10 +6,10 @@ $ flyctl secrets import --app mcproductlabs-portfolio-production --stage
 <stdin 59 bytes sha256=0f98ecce2ef78b93e665c0dc9d435b61b1dbfe641cf7a7ac6515091c6a583caf>
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
 --- stdout
-1 to stage, 1 held (immutable), 1 to prune
-staged: 0 changed, 1 unchanged
-  unchanged: FLEET__ALLUMATA__OPENAI_API_KEY
-not desired here, kept (pass --prune to unset): FLEET__ALLUMATA__STRIPE_SECRET_KEY
-nothing pending
+unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+not desired here, kept (pass --prune to remove): allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
+held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
+summary: written 0 · deployed no · pruned 0 · pending 0 · unchanged 1 · skipped 1
+Next: opv sync prod --deploy --prune
 --- result
 Ok(())
