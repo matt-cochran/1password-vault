@@ -14,7 +14,8 @@ mod completions;
 
 const QUICK_START: &str = "\
 Start here:
-  opv setup                        Guided setup for this project
+  opv setup                        Guided setup for a new project
+  opv init dev --vault V --item I  Use a 1Password item you already set up
   opv doctor                       Find a setup problem and its next step
   opv session                      Sign in once for your terminal
 
@@ -85,15 +86,16 @@ Examples:
 
 const EXPLAIN_EXAMPLES: &str = "\
 Examples:
-  opv explain api/OPENAI_API_KEY             # fleet profile: PRODUCT/KEY
-  opv explain DATABASE_URL                   # simple profile: KEY
+  opv explain OPENAI_API_KEY                 # the one product that declares it
+  opv explain api/OPENAI_API_KEY             # pick a product when several declare it
   opv explain api/OPENAI_API_KEY --env prod  # when several environments exist";
 
 const DOCTOR_EXAMPLES: &str = "\
 Examples:
   opv doctor                           # every check, every environment
-  opv doctor --env dev                 # only what dev needs (no deployment CLI)
-  opv doctor --env prod --product api  # one product's configuration";
+  opv doctor --env dev                 # only what dev needs, plus one read of its item
+  opv doctor --env prod --product api  # one product's keys
+  opv doctor --json                    # the same checks as one JSON document";
 
 const STATUS_EXAMPLES: &str = "\
 Examples:
@@ -209,7 +211,8 @@ enum Cmd {
     /// Find setup problems and show the next step.
     ///
     /// Checks configuration, CLI installation and sign-in. --env limits checks to
-    /// what that environment needs, including whether op can start local commands.
+    /// what that environment needs, including whether op can start local commands, and
+    /// reads its item once to check the keys as `check` does (names only, never values).
     #[command(after_help = DOCTOR_EXAMPLES)]
     Doctor {
         /// Check only this environment.
@@ -289,8 +292,9 @@ enum Cmd {
     /// target call.
     #[command(after_help = EXPLAIN_EXAMPLES)]
     Explain {
-        /// The key: PRODUCT/KEY, or KEY under the simple profile. Under the fleet profile
-        /// a bare KEY means OPV_PRODUCT/KEY when OPV_PRODUCT is set.
+        /// The key. A bare KEY resolves to the one product that declares it (to
+        /// OPV_PRODUCT/KEY when OPV_PRODUCT is set); when several do, they are listed.
+        /// An unknown name suggests the closest declared ones.
         #[arg(value_name = "[PRODUCT/]KEY")]
         target: String,
         /// Environment name; may be omitted when only one environment is declared.

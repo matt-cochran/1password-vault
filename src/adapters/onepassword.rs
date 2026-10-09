@@ -463,28 +463,37 @@ fn read_diagnosed(
         .read(&call, &ANY_FAILURE)
         .map_err(|e| op_spawn_error(&e, host))?
     {
-        Outcome::Done(o) => return Ok(o.stdout),
+        Outcome::Done(o) => {
+            // Every item read registers its field values with the stderr scrubber (NR-31).
+            crate::scrub::register_item_values(&o.stdout);
+            return Ok(o.stdout);
+        }
         Outcome::Refused(o) => o.status,
         Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
     };
-    let t = match diagnose(r, host)? {
-        Session::SignedIn(t) => t,
-        Session::Unknown => {
-            return Err(Error::Source(format!(
-                "{}{}",
-                failed(status),
-                rerun_hint(env)
-            )));
+    // The probes explain the failed read; its excerpt stays with the error (NR-31). A
+    // retry below is a new call and owns its own excerpt.
+    let (t, readable) = crate::runner::diagnosing(|| -> Result<_, Error> {
+        let t = match diagnose(r, host)? {
+            Session::SignedIn(t) => t,
+            Session::Unknown => {
+                return Err(Error::Source(format!(
+                    "{}{}",
+                    failed(status),
+                    rerun_hint(env)
+                )));
+            }
+            s => {
+                return Err(session_error(s, &host(), Some(&failed(status)))
+                    .expect("every other session is an error"));
+            }
+        };
+        let readable = vault_access(r, env);
+        if readable != Some(true) {
+            return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
         }
-        s => {
-            return Err(session_error(s, &host(), Some(&failed(status)))
-                .expect("every other session is an error"));
-        }
-    };
-    let readable = vault_access(r, env);
-    if readable != Some(true) {
-        return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
-    }
+        Ok((t, readable))
+    })?;
     r.note(&format!(
         "{} failed; signed in with access to vault {}, so retrying",
         call.step(),
@@ -1290,6 +1299,32 @@ mod tests {
                 "op item get istg --vault vstg --format json",
             ]
         );
+    }
+
+    /// NR-31: the diagnosis probes after a failed first read keep that read's excerpt.
+    #[test]
+    fn diagnosed_first_read_keeps_its_stderr_excerpt() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] item istg isn't in vault vstg\n",
+        );
+        r.push_with_stderr(Output::failure(1), "[ERROR] not signed in\n");
+        r.push_with_stderr(accounts(1), "");
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(
+            crate::runner::take_failure_excerpt().map(|x| x.lines),
+            Some(vec!["[ERROR] item istg isn't in vault vstg".to_string()])
+        );
+    }
+
+    /// NR-31: a first read that succeeds registers its values with the stderr scrubber.
+    #[test]
+    fn first_read_registers_its_values_with_the_scrubber() {
+        let raw = br#"{"fields":[{"label":"K","value":"FirstReadMarker7Qz"}]}"#.to_vec();
+        let r = FakeRunner::new([Output::success(raw)]);
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert!(!crate::scrub::scrub("x FirstReadMarker7Qz").contains("FirstReadMarker7Qz"));
     }
 
     /// P16: signed in with vault access, the failure may be transient: a retry succeeds.
