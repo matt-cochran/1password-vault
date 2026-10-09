@@ -262,16 +262,39 @@ fn explain_in(
     };
     // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
+    // A shared key (FR-45) has no field: its reference is its source's field.
+    let source = spec
+        .source()
+        .map(|(p, k)| (p, k, &fleet.products[p].keys[k]));
+    let field_label = source.map_or_else(|| label.clone(), |(p, k, _)| key_label(p, k));
     let mut rows: Vec<(String, String)> = vec![
         (
             "reference".into(),
-            format!("op://{}/{}/{label}", env.vault_id, env.item_id),
+            format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
         ),
         (
             "kind".into(),
             format!("{} ({field})", kind_label(spec.kind)),
         ),
     ];
+    if let Some((_, _, src)) = source {
+        rows.push((
+            "shared from".into(),
+            format!("{field_label} (its field holds the value; {label} has none)"),
+        ));
+        let src_rules = describe_rules(&src.rules);
+        if !src_rules.is_empty() {
+            rows.push(("source rules".into(), src_rules.join(", ")));
+        }
+    }
+    let shared_by: Vec<String> = fleet
+        .shared_by(env_name, product, key)
+        .iter()
+        .map(|(p, k)| key_label(p, k))
+        .collect();
+    if !shared_by.is_empty() {
+        rows.push(("shared by".into(), shared_by.join(", ")));
+    }
     rows.extend(target_lines);
     rows.extend([
         (
@@ -284,7 +307,12 @@ fn explain_in(
         ),
         (
             "immutable".into(),
-            if spec.immutable { "yes" } else { "no" }.into(),
+            match (spec.immutable, source) {
+                (true, Some(_)) => format!("yes (follows {field_label})"),
+                (false, Some(_)) => format!("no (follows {field_label})"),
+                (true, None) => "yes".into(),
+                (false, None) => "no".into(),
+            },
         ),
         ("guidance".into(), guidance.to_string()),
     ]);

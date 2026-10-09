@@ -480,7 +480,7 @@ fn item_check(
                 KeyState::Missing => "missing".to_string(),
                 KeyState::WrongKind => "wrong kind".to_string(),
                 KeyState::RuleFailed(rule, _) => format!("failed {rule}"),
-                KeyState::Ready | KeyState::Skipped => return None,
+                KeyState::Ready | KeyState::Skipped | KeyState::SourceBlocked => return None,
             };
             Some(format!("{} ({state})", key_label(&row.product, &row.key)))
         })
@@ -495,7 +495,7 @@ fn item_check(
             let first = plan
                 .rows
                 .iter()
-                .find(|r| !matches!(r.state, KeyState::Ready | KeyState::Skipped))
+                .find(|r| super::is_blocking(r))
                 .map_or("<product>", |r| r.product.as_str());
             format!("opv check {env_name} --product {first}")
         }

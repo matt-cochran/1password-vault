@@ -836,6 +836,8 @@ impl Drop for WipeOnDrop {
     }
 }
 
+// Field creation. `missing` never holds a shared key (FR-45, `from = ...`): callers
+// filter them out (see `app::skeleton`), and any self-healing that creates fields must too.
 fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<(), Error> {
     let obj = doc
         .as_object_mut()

@@ -27,6 +27,8 @@ mod setup_import;
 pub mod setup_recipe;
 pub mod setup_runtime;
 #[cfg(test)]
+mod shared_tests;
+#[cfg(test)]
 mod simple_tests;
 pub mod skeleton;
 pub mod status;
@@ -254,6 +256,7 @@ pub(crate) fn write_json(
                 pending_deploy: bound.map(|b| b.pending_deploy),
                 drift: bound.map(|b| b.drift),
                 chain: bound.and_then(|b| b.chain.clone()),
+                shared_from: json_source(r),
                 product: json_product(&r.product),
                 key: r.key.clone(),
                 kind: kind_label(r.kind),
@@ -343,6 +346,14 @@ struct JsonRow {
     drift: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chain: Option<String>,
+    /// A shared key's source, `product/KEY` (`KEY` under the simple profile) (FR-45).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_from: Option<String>,
+}
+
+/// The `shared_from` of a JSON row (FR-45).
+pub(crate) fn json_source(r: &Row) -> Option<String> {
+    r.source.as_ref().map(|(p, k)| key_label(p, k))
 }
 
 /// One desired row's binding on a pinned target (R5): `binding` is `current` (bound as
@@ -389,6 +400,7 @@ fn json_state(s: &KeyState) -> &'static str {
         KeyState::RuleFailed(..) => "failing_rule",
         KeyState::Ready => "saved",
         KeyState::Skipped => "skipped",
+        KeyState::SourceBlocked => "source_blocked",
     }
 }
 
@@ -457,6 +469,7 @@ pub(crate) fn state_label(s: &KeyState) -> String {
         KeyState::RuleFailed(rule, reason) => format!("failed {rule} ({reason})"),
         KeyState::Ready => "saved".into(),
         KeyState::Skipped => "skipped".into(),
+        KeyState::SourceBlocked => "blocked by source".into(),
     }
 }
 
@@ -480,6 +493,28 @@ pub(crate) fn is_blocking(r: &Row) -> bool {
         r.state,
         KeyState::Missing | KeyState::WrongKind | KeyState::RuleFailed(..)
     )
+}
+
+/// A shared key's provenance (FR-45), for a row's own line: ` (shared from api/KEY)` on a
+/// key that shares another's value, ` (affects worker/KEY, ...)` on a source with a
+/// finding, so the finding is reported once with every key it holds up. Names only.
+pub(crate) fn shared_note(r: &Row) -> String {
+    match shared_text(r) {
+        Some(t) => format!(" ({t})"),
+        None => String::new(),
+    }
+}
+
+/// [`shared_note`] without the parentheses: `shared from api/KEY` or `affects worker/KEY`.
+pub(crate) fn shared_text(r: &Row) -> Option<String> {
+    if let Some((p, k)) = &r.source {
+        return Some(format!("shared from {}", key_label(p, k)));
+    }
+    if is_blocking(r) && !r.shared_by.is_empty() {
+        let keys: Vec<String> = r.shared_by.iter().map(|(p, k)| key_label(p, k)).collect();
+        return Some(format!("affects {}", keys.join(", ")));
+    }
+    None
 }
 
 /// Missing keys, and keys whose value fails a rule (including an empty skeleton field
@@ -537,6 +572,9 @@ pub(crate) fn print_rows(
     writeln!(out, "{}", line(&header)).map_err(write_err)?;
     for (r, c) in rows.iter().zip(&cells) {
         writeln!(out, "{}", line(c)).map_err(write_err)?;
+        if let Some(t) = shared_text(r) {
+            writeln!(out, "    {t}").map_err(write_err)?;
+        }
         if wants_guidance(r) {
             writeln!(out, "    guidance: {}", r.guidance).map_err(write_err)?;
         }
@@ -593,8 +631,19 @@ pub(crate) fn product_names(
 /// `plan` limited to one product: its rows, extras, writes, prunes and held keys only, so
 /// other products can neither block nor be touched (NR-16, P12, P20). `names` is the
 /// product's share of the managed set ([`product_names`]).
+///
+/// The rows of the sources its shared keys read (FR-45) stay too: a source's finding blocks
+/// the product's keys, and is reported on the source's row only. Their names are not the
+/// product's, so they are neither written nor pruned.
 pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<String>) {
-    plan.rows.retain(|r| r.product == product);
+    let sources: HashSet<(String, String)> = plan
+        .rows
+        .iter()
+        .filter(|r| r.product == product)
+        .filter_map(|r| r.source.clone())
+        .collect();
+    plan.rows
+        .retain(|r| r.product == product || sources.contains(&(r.product.clone(), r.key.clone())));
     plan.extras.retain(|(section, _)| section == product);
     plan.stage.retain(|(n, _)| names.contains(n));
     plan.held_immutable.retain(|(p, _)| p == product);

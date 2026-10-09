@@ -1,6 +1,6 @@
 //! Local-only validation. One item read, no deployment store, names-only output.
 use super::{read_and_plan_products, write_err};
-use crate::domain::{Fleet, KeyState};
+use crate::domain::Fleet;
 use crate::error::Error;
 use crate::runner::CommandRunner;
 use std::io::Write;
@@ -48,7 +48,16 @@ pub fn select(
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
     if let Some(p) = product {
-        selected.products.retain(|name, _| name == p);
+        // The sources of the product's shared keys (FR-45) stay, alone: the read then
+        // covers their sections too, and their findings are reported once, on them.
+        let sources = fleet.sources_of(p);
+        selected
+            .products
+            .retain(|name, _| name == p || sources.iter().any(|(s, _)| s == name));
+        for (name, prod) in selected.products.iter_mut().filter(|(n, _)| *n != p) {
+            prod.keys
+                .retain(|k, _| sources.contains(&(name.clone(), k.clone())));
+        }
     }
     Ok(selected)
 }
@@ -75,11 +84,15 @@ pub fn check(
             .rows
             .iter()
             .map(|row| {
-                serde_json::json!({
+                let mut v = serde_json::json!({
                     "product": super::json_product(&row.product), "key": row.key,
                     "state": super::json_state(&row.state), "rule": super::json_rule(&row.state),
                     "reason": super::json_reason(&row.state)
-                })
+                });
+                if let Some(from) = super::json_source(row) {
+                    v["shared_from"] = from.into();
+                }
+                v
             })
             .collect();
         let doc = serde_json::json!({"schema_version": 1, "environment": env,
@@ -88,15 +101,9 @@ pub fn check(
     } else {
         for row in &plan.rows {
             let label = crate::domain::key_label(&row.product, &row.key);
-            let state = match &row.state {
-                KeyState::Ready => "saved".to_string(),
-                KeyState::Missing => "missing".to_string(),
-                KeyState::WrongKind => "wrong kind".to_string(),
-                KeyState::RuleFailed(rule, reason) => format!("failed {rule} ({reason})"),
-                KeyState::Skipped => "skipped".to_string(),
-            };
-            writeln!(out, "{label}: {state}").map_err(write_err)?;
-            if !matches!(row.state, KeyState::Ready | KeyState::Skipped) {
+            let state = super::state_label(&row.state);
+            writeln!(out, "{label}: {state}{}", super::shared_note(row)).map_err(write_err)?;
+            if super::is_blocking(row) {
                 let guidance = &selected.products[&row.product].keys[&row.key].guidance;
                 if !guidance.is_empty() {
                     writeln!(out, "  guidance: {guidance}").map_err(write_err)?;
