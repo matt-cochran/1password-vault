@@ -81,6 +81,10 @@ impl Provider for FlyProvider {
         "Fly"
     }
 
+    fn tools(&self) -> &'static [&'static crate::host::Tool] {
+        &[&FLYCTL]
+    }
+
     fn parse(
         &self,
         section: &Section<'_>,

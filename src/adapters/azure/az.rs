@@ -29,6 +29,19 @@ pub const AZ_CLI: Tool = Tool {
     linux: "install: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash",
     vendor: "Azure",
     status_page: "https://azure.status.microsoft",
+    pinned_env: &[
+        ("AZURE_EXTENSION_USE_DYNAMIC_INSTALL", "no"),
+        ("AZURE_CORE_NO_COLOR", "true"),
+        ("AZURE_CORE_ONLY_SHOW_ERRORS", "true"),
+        ("AZURE_CORE_COLLECT_TELEMETRY", "no"),
+        ("AZURE_CORE_OUTPUT", "json"),
+    ],
+    not_found: &[
+        "SecretNotFound",
+        "ResourceNotFound",
+        "ResourceGroupNotFound",
+    ],
+    aliases: &[],
 };
 
 /// Global flag that keeps `az` quiet apart from errors (R7).
@@ -79,6 +92,13 @@ pub(crate) fn invoke_env(
             args,
             stdin,
             env,
+            limit: None,
+        };
+        // `containerapp update` waits for the provisioning operation: minutes (NR-4).
+        let call = if args.starts_with(&["containerapp", "update"]) {
+            call.rollout()
+        } else {
+            call
         };
         match effect {
             Effect::Read => r.read(&call, refused),
@@ -94,10 +114,9 @@ pub(crate) fn invoke_env(
             .into(),
         ),
         // A spent run budget: the call never started.
-        io::ErrorKind::TimedOut => Error::Target(
-            format!("az {op}: {e}; nothing was changed\n  next: re-run with a larger --timeout")
-                .into(),
-        ),
+        io::ErrorKind::TimedOut => AZ_CLI
+            .budget_spent(r, &e)
+            .map_text(|m| format!("az {op}: {m}")),
         kind => Error::Target(
             format!(
                 "az {op} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
@@ -118,9 +137,7 @@ pub(crate) fn read_output(
     match outcome {
         Outcome::Done(out) => Ok(out),
         Outcome::Refused(_) => Err(diagnose(r, op, target)),
-        Outcome::Unknown { reason, .. } => Err(Error::Target(
-            format!("az {op}: {}", unknown_text(PROGRAM, reason)).into(),
-        )),
+        Outcome::Unknown { .. } => Err(AZ_CLI.unanswered(r, &format!("az {op}"))),
     }
 }
 
@@ -180,9 +197,23 @@ fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
             )
             .into(),
         )),
-        Err(e) => Err(Error::Target(
+        // `az` did not answer in time (or was cut off): Azure or the network is not
+        // responding, which re-running can get past (NR-28); after a write, NR-2.
+        Err(e) if !r.writes_started() => Err(Error::Unknown(
             format!(
-                "could not check the Azure sign-in ({e}); nothing was changed; run az account show"
+                "could not check the Azure sign-in: az account show did not answer ({e}); \
+                 nothing was changed. Check {}, then re-run",
+                AZ_CLI.status_page
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::ProviderUnavailable)),
+        Err(e) => Err(Error::Unknown(
+            format!(
+                "could not check the Azure sign-in: az account show did not answer ({e}), after \
+                 this run had started changing the target; those changes may or may not be \
+                 complete. Check {}, then re-run the same command",
+                AZ_CLI.status_page
             )
             .into(),
         )),
@@ -200,6 +231,14 @@ pub fn diagnose(r: &dyn CommandRunner, op: &str, target: &str) -> Error {
     match crate::runner::diagnosing(|| signed_in(r)) {
         Ok(true) => Error::Target(format!("az {op} failed for {target}").into()),
         Ok(false) => not_logged_in(None),
+        // The call itself answered (non-zero); only the sign-in check did not.
+        Err(Error::Unknown(_)) => Error::Target(
+            format!(
+                "az {op} failed for {target}, and could not check the Azure sign-in (az account \
+                 show did not answer)\n  next: run az account show"
+            )
+            .into(),
+        ),
         Err(e) => e,
     }
 }

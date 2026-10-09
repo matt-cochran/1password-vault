@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use crate::adapters::registry;
 use crate::error::Error;
-use crate::runner::READ_ATTEMPTS;
+use crate::runner::{CommandRunner, READ_ATTEMPTS};
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -191,6 +191,30 @@ pub struct Tool {
     pub vendor: &'static str,
     /// The service's status page, named when it does not respond (NR-28).
     pub status_page: &'static str,
+    /// Environment added to every captured call of this program (NR-7, NR-11): it
+    /// neutralises user configuration that changes output or prompts. Never proxy or CA
+    /// variables (NR-29).
+    pub pinned_env: &'static [(&'static str, &'static str)],
+    /// Stable phrases this CLI prints on stderr for an object that does not exist (S2): a
+    /// read failing with one is refused at once, never retried.
+    pub not_found: &'static [&'static str],
+    /// Other names the program is installed under, for runnable `Next:` lines (`fly`).
+    pub aliases: &'static [&'static str],
+}
+
+/// Every CLI opv runs: the 1Password CLI, then each registered provider's
+/// (`Provider::tools`), so adding a provider needs no change here or in the runner.
+pub fn tools() -> impl Iterator<Item = &'static Tool> {
+    std::iter::once(&OP_CLI).chain(
+        registry::PROVIDERS
+            .iter()
+            .flat_map(|p| p.tools().iter().copied()),
+    )
+}
+
+/// The CLI whose program name is `program`, if opv runs it.
+pub fn tool(program: &str) -> Option<&'static Tool> {
+    tools().find(|t| t.program == program)
 }
 
 impl Tool {
@@ -207,6 +231,42 @@ impl Tool {
         )
         .with_code(crate::error::Code::ProviderUnavailable)
     }
+
+    /// A read of this service that never answered after its retries (NR-28): before this
+    /// run wrote to a target, the outage ([`Tool::outage`], exit 9 "provider unavailable");
+    /// after, exit 9 "outcome unknown" (NR-2), never "nothing was changed".
+    pub fn unanswered(&self, r: &dyn CommandRunner, step: &str) -> Error {
+        if !r.writes_started() {
+            return self.outage(step);
+        }
+        Error::Unknown(
+            format!(
+                "{} did not respond after {READ_ATTEMPTS} attempts ({step}), after this run had \
+                 started changing the target; those changes may or may not be complete. Check \
+                 {}, then re-run the same command",
+                self.vendor, self.status_page
+            )
+            .into(),
+        )
+    }
+
+    /// A call of this service the spent run budget never let start (`--timeout`, NR-4),
+    /// `e` saying which: before this run wrote to a target, a target error ("nothing was
+    /// changed"); after, exit 9 (NR-2), since the run stopped half way.
+    pub fn budget_spent(&self, r: &dyn CommandRunner, e: &std::io::Error) -> Error {
+        if !r.writes_started() {
+            return Error::Target(
+                format!("{e}; nothing was changed\n  next: re-run with a larger --timeout").into(),
+            );
+        }
+        Error::Unknown(
+            format!(
+                "{e}, after this run had started changing the target; those changes may or may \
+                 not be complete\n  next: re-run the same command with a larger --timeout"
+            )
+            .into(),
+        )
+    }
 }
 
 /// The 1Password CLI.
@@ -219,6 +279,9 @@ pub const OP_CLI: Tool = Tool {
             (apt, dnf or the zip for this Linux distribution)",
     vendor: "1Password",
     status_page: "https://status.1password.com",
+    pinned_env: &[("NO_COLOR", "1")],
+    not_found: &["isn't an item", "isn't a vault"],
+    aliases: &[],
 };
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).

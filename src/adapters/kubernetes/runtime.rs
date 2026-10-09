@@ -34,11 +34,12 @@ use crate::domain::{
 };
 use crate::error::Error;
 use crate::ports::PinnedRuntime;
-use crate::runner::{CommandRunner, Outcome};
+use crate::runner::{CommandRunner, Outcome, Wait};
 
 /// Time between rollout polls.
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
-/// Longest wait for a rollout; the integration passes the remaining run budget (NR-4).
+/// Longest wait for a rollout or an ExternalSecret; ends earlier when the run budget runs
+/// short (NR-4).
 pub const WAIT_MAX: Duration = Duration::from_secs(600);
 /// A progress line at least this often while waiting (NR-4).
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(15);
@@ -54,7 +55,9 @@ const GENERATION_PATH: &str = "jsonpath={.metadata.generation}";
 const PODS_PATH: &str = r#"jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].name}{"\t"}{range .status.initContainerStatuses[*]}{.state.waiting.reason}{" "}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}"#;
 const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 
-/// The operator rights opv needs, each with its fixed reason (advisory, R6).
+/// The operator rights opv needs, each with its fixed reason. Every one is required:
+/// `doctor` fails without it, and `sync` refuses before its first write without the ones
+/// only a deploy uses ([`DEPLOY_RIGHTS`]).
 const ACCESS: [(&str, &str, &str); 8] = [
     (
         "get",
@@ -69,7 +72,7 @@ const ACCESS: [(&str, &str, &str); 8] = [
     (
         "delete",
         "secrets",
-        "your kubectl identity cannot delete Secrets, so --prune cannot remove old versions",
+        "your kubectl identity cannot delete Secrets, so sync --deploy cannot remove superseded versions",
     ),
     (
         "get",
@@ -89,12 +92,12 @@ const ACCESS: [(&str, &str, &str); 8] = [
     (
         "list",
         "replicasets",
-        "your kubectl identity cannot list ReplicaSets, so --prune cannot tell which versions a rollback needs",
+        "your kubectl identity cannot list ReplicaSets, so sync --deploy cannot wait for the rollout or tell which versions a rollback needs",
     ),
     (
         "list",
         "pods",
-        "your kubectl identity cannot list Pods, so --deploy cannot see a stuck rollout early",
+        "your kubectl identity cannot list Pods, so sync --deploy cannot wait for the rollout",
     ),
 ];
 
@@ -118,9 +121,72 @@ const EXTERNAL_ACCESS: [(&str, &str, &str); 4] = [
     (
         "delete",
         external::RESOURCE,
-        "your kubectl identity cannot delete ExternalSecrets, so superseded versions are never removed",
+        "your kubectl identity cannot delete ExternalSecrets, so sync --deploy cannot remove superseded versions",
     ),
 ];
+
+/// The rights only `sync --deploy` uses, after the new revision is live: listing Pods and
+/// ReplicaSets for the health wait, deleting superseded versions (Secrets, or
+/// ExternalSecrets with a named store). `sync` checks them before its first write, so a
+/// missing one never turns a successful deploy into a failure (FR-32).
+pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 3] = [
+    ("delete", "secrets"),
+    ("list", "replicasets"),
+    ("list", "pods"),
+];
+
+/// Changed paths named in one error before "and N more".
+const MAX_PATHS: usize = 5;
+
+/// The JSON pointers under `spec`, `metadata.labels` and `metadata.annotations` that differ
+/// between two reads of a Deployment (FR-31): paths only, never values.
+fn changed_paths(before: &Value, after: &Value) -> String {
+    fn walk(a: &Value, b: &Value, at: &str, out: &mut Vec<String>) {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) => {
+                let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+                for k in keys {
+                    let next = format!("{at}/{}", k.replace('~', "~0").replace('/', "~1"));
+                    match (x.get(k), y.get(k)) {
+                        (Some(p), Some(q)) => walk(p, q, &next, out),
+                        _ => out.push(next),
+                    }
+                }
+            }
+            (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+                for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                    walk(p, q, &format!("{at}/{i}"), out);
+                }
+            }
+            _ if a != b => out.push(at.to_string()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for at in ["/spec", "/metadata/labels", "/metadata/annotations"] {
+        let none = Value::Null;
+        walk(
+            before.pointer(at).unwrap_or(&none),
+            after.pointer(at).unwrap_or(&none),
+            at,
+            &mut out,
+        );
+    }
+    if out.is_empty() {
+        return "only its resourceVersion moved".into();
+    }
+    let more = out.len().saturating_sub(MAX_PATHS);
+    out.truncate(MAX_PATHS);
+    let mut s = out.join(", ");
+    if more > 0 {
+        s.push_str(&format!(" and {more} more"));
+    }
+    s
+}
+
+/// How long an ExternalSecret that already showed `SecretSyncedError` on the first read
+/// after opv applied it gets to report again before that error counts (M4).
+const STALE_GRACE: Duration = Duration::from_secs(30);
 
 /// Time between ExternalSecret readiness polls (the operator syncs within seconds, E1).
 const READY_POLL: Duration = Duration::from_secs(2);
@@ -411,7 +477,10 @@ impl<'a> KubeDeployment<'a> {
 
     /// Polls ExternalSecret `es` until it is Ready, within the run budget (NR-4), with a
     /// progress line at least every [`PROGRESS_EVERY`]. `SecretSyncedError` fails at once
-    /// with opv's own diagnosis (E3).
+    /// with opv's own diagnosis (E3), unless the very first read already showed it: that
+    /// error may predate this apply (an ExternalSecret left by an earlier failed run), so it
+    /// counts only once the operator reports again (a new refresh or transition time) or
+    /// after [`STALE_GRACE`].
     fn await_synced(
         &self,
         bridge: &Bridge<'_>,
@@ -421,14 +490,35 @@ impl<'a> KubeDeployment<'a> {
     ) -> Result<(), Error> {
         let d = self.t().deployment.as_str();
         let poll = READY_POLL.min(self.poll_every);
-        let mut waited = Duration::ZERO;
+        let r = self.k.runner;
+        let wait = Wait::new(r, self.wait_max);
         let mut next_note = PROGRESS_EVERY;
+        // When the first read is already failed: when the operator last reported it.
+        let mut stale: Option<String> = None;
+        let mut first = true;
         loop {
-            let last =
-                match external::get(&self.k, es)?
-                    .as_ref()
-                    .map(external::sync_state)
+            let obj = external::get(&self.k, es)?;
+            let reported = obj.as_ref().map(external::reported_at);
+            let state = obj.as_ref().map(external::sync_state);
+            let state = match state {
+                Some(Sync::Failed) if first => {
+                    stale = reported;
+                    Some(Sync::Waiting(
+                        "Ready=False (SecretSyncedError, perhaps from before this apply)".into(),
+                    ))
+                }
+                Some(Sync::Failed)
+                    if stale.is_some() && reported == stale && wait.elapsed(r) < STALE_GRACE =>
                 {
+                    Some(Sync::Waiting(
+                        "Ready=False (SecretSyncedError, perhaps from before this apply)".into(),
+                    ))
+                }
+                other => other,
+            };
+            first = false;
+            let last =
+                match state {
                     None => {
                         return Err(Error::Target(format!(
                         "ExternalSecret {es} disappeared after opv applied it; deployment {d} \
@@ -443,11 +533,12 @@ impl<'a> KubeDeployment<'a> {
                     }
                     Some(Sync::Waiting(state)) => state,
                 };
-            if waited >= self.wait_max {
+            let waited = wait.elapsed(r);
+            if wait.over(r, poll) {
                 return Err(Error::Target(format!(
                     "ExternalSecret {es} was not Ready within {} s ({last}); deployment {d} was \
                      not changed\n  next: `{}`, then run the same command again",
-                    self.wait_max.as_secs(),
+                    waited.as_secs(),
                     self.k
                         .command(&format!("describe {} {es}", external::RESOURCE))
                 ).into()));
@@ -461,7 +552,7 @@ impl<'a> KubeDeployment<'a> {
                 next_note += PROGRESS_EVERY;
             }
             (self.sleep)(poll);
-            waited += poll;
+            wait.slept_for(poll);
         }
     }
 
@@ -725,8 +816,9 @@ impl PinnedRuntime for KubeDeployment<'_> {
         }
         Err(Error::Target(
             format!(
-                "deployment {d} changed while opv applied; nothing applied; safe to re-run\n  \
-             next: re-run the same command"
+                "deployment {d} changed while opv applied ({}); nothing applied; safe to re-run\n  \
+             next: re-run the same command",
+                changed_paths(&snapshot.spec.0, &fresh)
             )
             .into(),
         ))
@@ -746,7 +838,8 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 .into(),
             )
         })?;
-        let mut waited = Duration::ZERO;
+        let r = self.k.runner;
+        let wait = Wait::new(r, self.wait_max);
         let mut next_note = PROGRESS_EVERY;
         loop {
             let doc = self.k.get_deployment()?;
@@ -766,13 +859,14 @@ impl PinnedRuntime for KubeDeployment<'_> {
             {
                 return Ok(Health::Unhealthy(stuck));
             }
-            if waited >= self.wait_max {
+            let waited = wait.elapsed(r);
+            if wait.over(r, self.poll_every) {
                 return Err(Error::Target(
                     format!(
                         "deployment {d} did not finish rolling out generation {generation} within \
                      {} s ({last}); the previous ReplicaSet keeps serving; nothing pruned\n  \
                      next: {}",
-                        self.wait_max.as_secs(),
+                        waited.as_secs(),
                         self.k.command(&format!("rollout status deployment/{d}"))
                     )
                     .into(),
@@ -786,7 +880,7 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 next_note += PROGRESS_EVERY;
             }
             (self.sleep)(self.poll_every);
-            waited += self.poll_every;
+            wait.slept_for(self.poll_every);
         }
     }
 
@@ -818,48 +912,65 @@ impl PinnedRuntime for KubeDeployment<'_> {
 
     /// The operator's own rights (`kubectl auth can-i`, K5): exit 0 yes, exit 1 no. Pods
     /// need no Secret access of their own (the kubelet resolves `secretKeyRef`), so `names`
-    /// do not matter; each finding names the verb and resource. Advisory only (R6).
+    /// do not matter; each finding names the verb and resource. `doctor` fails on any;
+    /// `sync` checks [`DEPLOY_RIGHTS`] before its first write.
     fn check_access(&self, _names: &[String]) -> Result<Vec<AccessFinding>, Error> {
-        let mut found = Vec::new();
-        let rights: Vec<(&str, &str, &str)> = match self.external {
-            None => ACCESS.to_vec(),
-            Some(_) => ACCESS
-                .iter()
-                .copied()
-                .filter(|(_, resource, _)| *resource != "secrets")
-                .chain(EXTERNAL_ACCESS)
-                .collect(),
-        };
-        for (verb, resource, reason) in rights {
-            let what = format!("kubectl auth can-i {verb} {resource}");
-            match self.k.call(
-                Effect::Read,
-                &what,
-                &["auth", "can-i", verb, resource],
-                None,
-                &[1],
-            )? {
-                Outcome::Done(_) => {}
-                // Exit 1 with "no" is a denial (K5); exit 1 without it is a failed call
-                // (an unreachable cluster also exits 1, K6), diagnosed below.
-                Outcome::Refused(o) if o.status == 1 && answered_no(&o.stdout) => {
-                    found.push(AccessFinding {
-                        store_name: format!("{verb} {resource}"),
-                        reason: reason.into(),
-                    })
-                }
-                other => {
-                    return Err(self.k.fail(
-                        Effect::Read,
-                        &what,
-                        other,
-                        &format!("auth can-i {verb} {resource}"),
-                    ));
-                }
+        missing_rights(&self.k, self.external.is_some(), |_, _| true)
+    }
+}
+
+/// The rights of [`ACCESS`] (with a named store, the ExternalSecret rights instead of the
+/// Secret ones) that `pick` selects and the operator lacks (`kubectl auth can-i`, K5):
+/// exit 0 yes, exit 1 no. Pods need no Secret access of their own (the kubelet resolves
+/// `secretKeyRef`); each finding names the verb and resource.
+pub(crate) fn missing_rights(
+    k: &Kubectl<'_>,
+    external: bool,
+    pick: impl Fn(&str, &str) -> bool,
+) -> Result<Vec<AccessFinding>, Error> {
+    let mut found = Vec::new();
+    let rights: Vec<(&str, &str, &str)> = if external {
+        ACCESS
+            .iter()
+            .copied()
+            .filter(|(_, resource, _)| *resource != "secrets")
+            .chain(EXTERNAL_ACCESS)
+            .collect()
+    } else {
+        ACCESS.to_vec()
+    };
+    for (verb, resource, reason) in rights {
+        if !pick(verb, resource) {
+            continue;
+        }
+        let what = format!("kubectl auth can-i {verb} {resource}");
+        match k.call(
+            Effect::Read,
+            &what,
+            &["auth", "can-i", verb, resource],
+            None,
+            &[1],
+        )? {
+            Outcome::Done(_) => {}
+            // Exit 1 with "no" is a denial (K5); exit 1 without it is a failed call (an
+            // unreachable cluster also exits 1, K6), diagnosed below.
+            Outcome::Refused(o) if o.status == 1 && answered_no(&o.stdout) => {
+                found.push(AccessFinding {
+                    store_name: format!("{verb} {resource}"),
+                    reason: reason.into(),
+                })
+            }
+            other => {
+                return Err(k.fail(
+                    Effect::Read,
+                    &what,
+                    other,
+                    &format!("auth can-i {verb} {resource}"),
+                ));
             }
         }
-        Ok(found)
     }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -1105,7 +1216,19 @@ mod tests {
         let r = FakeRunner::new([Output::failure(1), json(&moved)]);
         let e = with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap_err();
         assert!(matches!(e, Error::Target(m)
-            if m.contains("deployment api changed while opv applied; nothing applied; safe to re-run")));
+            if m.contains("deployment api changed while opv applied (") && m.contains("); nothing applied; safe to re-run")));
+    }
+
+    /// M5 (FR-31): the concurrent-change error names the paths that changed.
+    #[test]
+    fn concurrent_change_names_the_changed_paths() {
+        let moved = deployment_with(|d| {
+            d["metadata"]["resourceVersion"] = json!("990");
+            d["spec"]["replicas"] = json!(7);
+        });
+        let r = FakeRunner::new([Output::failure(1), json(&moved)]);
+        let e = with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap_err();
+        assert!(e.mentions("(/spec/replicas)"), "{e}");
     }
 
     #[test]
@@ -1276,6 +1399,28 @@ mod tests {
         }
         let e = with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap_err();
         assert!(matches!(e, Error::Target(m) if m.mentions("rollout status deployment/api")));
+    }
+
+    /// I3: the rollout wait has its own limit and counts the time its reads take, so with
+    /// each read taking 60 s its own message (naming the rollout state) comes long before
+    /// the run budget runs out.
+    #[test]
+    fn slow_reads_end_the_rollout_wait_with_its_own_message() {
+        let (t, m) = (target(), managed());
+        let r = FakeRunner::default();
+        r.call_cost.set(Duration::from_secs(60));
+        for _ in 0..5 {
+            r.responses.borrow_mut().extend([
+                Ok(json(&rolling())),
+                Ok(ok(REPLICASETS)),
+                Ok(pods("")),
+            ]);
+        }
+        let e = KubeDeployment::new(&r, &t, m)
+            .with_progress(|_| {})
+            .await_healthy(&Revision("6".into()))
+            .unwrap_err();
+        assert!(e.mentions("did not finish rolling out"), "{e}");
     }
 
     #[test]

@@ -61,6 +61,19 @@ pub fn supported_pairs() -> Vec<String> {
         .collect()
 }
 
+/// Every provider's user-facing name, in registry order, for help and the schema.
+pub fn labels() -> Vec<&'static str> {
+    PROVIDERS.iter().map(|p| p.label()).collect()
+}
+
+/// Every provider's own CLI, in registry order, for help text.
+pub fn programs() -> Vec<&'static str> {
+    PROVIDERS
+        .iter()
+        .filter_map(|p| p.tools().first().map(|t| t.program))
+        .collect()
+}
+
 /// Every registered section name, sorted, for "known: ..." messages.
 pub fn sections() -> Vec<&'static str> {
     let mut s: Vec<&str> = PROVIDERS.iter().map(|p| p.section()).collect();

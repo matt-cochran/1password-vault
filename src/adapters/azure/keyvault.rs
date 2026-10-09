@@ -36,7 +36,7 @@ use crate::domain::plan::StoreEntry;
 use crate::domain::{SecretValue, Stamp};
 use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
-use crate::runner::{CommandRunner, Outcome, unknown_text};
+use crate::runner::{CommandRunner, Outcome, Wait, unknown_text};
 
 use super::AzureTarget;
 use super::az::{self, Effect, invoke, read_output, write_output};
@@ -103,8 +103,8 @@ impl PinnedStore for KeyVault<'_> {
         self.write_secret(name, value, stamp)
     }
 
-    fn delete(&self, name: &str) -> Result<(), Error> {
-        self.delete_secret(name)
+    fn delete(&self, name: &str) -> Result<bool, Error> {
+        self.delete_secret(name).map(|()| true)
     }
 
     /// Key Vault keeps every version inside one entry as history; superseded versions are
@@ -355,7 +355,7 @@ impl KeyVault<'_> {
             "none",
             az::ONLY_SHOW_ERRORS,
         ];
-        let mut waited = Duration::ZERO;
+        let wait = Wait::new(self.runner, ACCESS_WAIT);
         loop {
             if let Outcome::Done(_) = invoke(
                 self.runner,
@@ -367,7 +367,8 @@ impl KeyVault<'_> {
             )? {
                 return Ok(());
             }
-            if waited >= ACCESS_WAIT {
+            if wait.over(self.runner, ACCESS_POLL) {
+                let waited = wait.elapsed(self.runner);
                 return Err(Error::Auth(format!(
                     "Key Vault {vault} still refuses this account after {secs} s; nothing was \
                      changed; ask an owner to grant access, then re-run: az role assignment \
@@ -376,8 +377,9 @@ impl KeyVault<'_> {
                     secs = waited.as_secs()
                 ).into()));
             }
-            waited += ACCESS_POLL;
-            self.runner.pause(
+            let waited = wait.elapsed(self.runner) + ACCESS_POLL;
+            wait.pause(
+                self.runner,
                 ACCESS_POLL,
                 &format!(
                     "waiting for Key Vault access on {} ({} s)…",
@@ -407,7 +409,7 @@ impl KeyVault<'_> {
             az::ONLY_SHOW_ERRORS,
         ];
         let suffix = format!("/{version}");
-        let mut waited = Duration::ZERO;
+        let wait = Wait::new(self.runner, CONFIRM_WAIT);
         loop {
             match invoke(
                 self.runner,
@@ -428,7 +430,7 @@ impl KeyVault<'_> {
                     read_output(self.runner, OP, self.vault, other)?;
                 }
             }
-            if waited >= CONFIRM_WAIT {
+            if wait.over(self.runner, CONFIRM_POLL) {
                 return Err(Error::Unknown(
                     format!(
                         "Key Vault accepted version {version} of {name} but does not show it yet; \
@@ -437,8 +439,7 @@ impl KeyVault<'_> {
                     .into(),
                 ));
             }
-            self.runner.pause(CONFIRM_POLL, "");
-            waited += CONFIRM_POLL;
+            wait.pause(self.runner, CONFIRM_POLL, "");
         }
     }
 
@@ -1004,9 +1005,10 @@ mod tests {
             .unwrap();
         let notes = r.notes.borrow();
         let waits: Vec<&String> = notes.iter().filter(|n| n.starts_with("waiting")).collect();
+        // Elapsed time, the failed reads' backoff included (NR-4), not a sum of sleeps.
         assert_eq!(
             waits,
-            ["waiting for Key Vault access on kv-opv-fixture (15 s)…"]
+            ["waiting for Key Vault access on kv-opv-fixture (18 s)…"]
         );
     }
 

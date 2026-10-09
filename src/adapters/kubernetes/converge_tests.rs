@@ -85,6 +85,11 @@ struct Cluster {
     replicasets: RefCell<Vec<Value>>,
     /// Pods of the newest ReplicaSet never start (K4).
     broken_image: bool,
+    /// `kubectl delete secret` is refused (an admission webhook, say), though `auth can-i`
+    /// says yes.
+    refuse_delete: bool,
+    /// `auth can-i list pods` answers no.
+    deny_list_pods: bool,
     calls: Cell<usize>,
     cut: Cell<Option<(usize, Cut)>>,
     /// opv was killed at the cut: every later call is lost before its effect.
@@ -116,6 +121,8 @@ impl Cluster {
             deployment: RefCell::new(serde_json::from_str(DEPLOYMENT).unwrap()),
             replicasets: RefCell::new(rs["items"].as_array().unwrap().clone()),
             broken_image: false,
+            refuse_delete: false,
+            deny_list_pods: false,
             calls: Cell::new(0),
             cut: Cell::new(None),
             killed: Cell::new(false),
@@ -248,6 +255,7 @@ impl Cluster {
                 };
                 format!("{newest}-pod\t{newest}\t{reason}\n")
             }
+            ["delete", "secret", ..] if self.refuse_delete => return (1, String::new()),
             ["delete", "secret", rest @ ..] => {
                 let d = self.deployment.borrow();
                 let live = Self::template_refs(&d["spec"]["template"]);
@@ -258,6 +266,9 @@ impl Cluster {
                     self.secrets.borrow_mut().remove(*n);
                 }
                 String::new()
+            }
+            ["auth", "can-i", "list", "pods"] if self.deny_list_pods => {
+                return (1, "no\n".into());
             }
             ["auth", "can-i", ..] => "yes".into(),
             other => panic!("fake cluster: unexpected kubectl {other:?}"),
@@ -407,6 +418,26 @@ fn kubernetes_sync_converges_after_interruption_at_every_call() {
     assert!(diverged.is_empty(), "{diverged:?}");
 }
 
+/// NR-2, NR-28: a run cut at any call either finishes (the lost outcome reconciled by a
+/// read) or exits 9; never a "fix something" code for an outcome that is only unknown.
+#[test]
+fn kubernetes_sync_interrupted_at_any_call_exits_9() {
+    let (_, n) = reference();
+    let mut bad = Vec::new();
+    for k in 0..n {
+        for cut in [Cut::AfterEffect, Cut::BeforeEffect] {
+            let c = Cluster::new();
+            c.cut.set(Some((k, cut)));
+            if let Err(e) = sync(&c)
+                && e.exit_code() != 9
+            {
+                bad.push((k, cut, e.exit_code(), e.to_string()));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
 #[test]
 fn no_interruption_leaves_a_reference_to_a_missing_secret() {
     let (_, n) = reference();
@@ -420,6 +451,57 @@ fn no_interruption_leaves_a_reference_to_a_missing_secret() {
         })
         .collect();
     assert!(dangling.is_empty(), "{dangling:?}");
+}
+
+/// I4: a deploy that rolled out stays a success when removing superseded versions fails.
+#[test]
+fn failed_collection_after_a_healthy_deploy_still_succeeds() {
+    let c = Cluster {
+        refuse_delete: true,
+        ..Cluster::new()
+    };
+    let opts = SyncOpts {
+        deploy: true,
+        ..Default::default()
+    };
+    assert!(sync::run(&fleet(), "dev", &c, &mut Vec::new(), &opts).is_ok());
+}
+
+#[test]
+fn failed_collection_after_a_healthy_deploy_is_a_warning() {
+    let c = Cluster {
+        refuse_delete: true,
+        ..Cluster::new()
+    };
+    let opts = SyncOpts {
+        deploy: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let _ = sync::run(&fleet(), "dev", &c, &mut out, &opts);
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("warning: superseded versions of FLEET__API__DB_URL")),
+        "{text}"
+    );
+}
+
+/// I4: without the right to list Pods, sync refuses before its first write.
+#[test]
+fn missing_deploy_right_refuses_before_any_write() {
+    let c = Cluster {
+        deny_list_pods: true,
+        ..Cluster::new()
+    };
+    let _ = sync(&c);
+    let writes = c
+        .argv
+        .borrow()
+        .iter()
+        .filter(|a| ["apply", "replace", "delete"].contains(&a[5].as_str()))
+        .count();
+    assert_eq!(writes, 0);
 }
 
 #[test]

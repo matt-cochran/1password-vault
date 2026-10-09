@@ -239,6 +239,27 @@ pub(crate) fn ready(obj: &Value) -> Option<(String, String, String)> {
     Some((field("status"), field("reason"), field("message")))
 }
 
+/// When the operator last reported on `obj`: its `status.refreshTime` and the Ready
+/// condition's `lastTransitionTime` (the operator's clock), to tell a new report from one
+/// read before.
+pub(crate) fn reported_at(obj: &Value) -> String {
+    let refresh = obj
+        .pointer("/status/refreshTime")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let transition = obj
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .and_then(|cs| {
+            cs.iter()
+                .find(|c| c.get("type").and_then(Value::as_str) == Some("Ready"))
+        })
+        .and_then(|c| c.get("lastTransitionTime"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    format!("{refresh}|{transition}")
+}
+
 /// Where an ExternalSecret stands.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Sync {
@@ -790,7 +811,7 @@ impl PinnedStore for ExternalStore<'_> {
 
     /// The ExternalSecrets of `name` nothing references, then the store entry (FR-32): a
     /// run stopped in between finds the entry still listed and finishes the next time.
-    fn delete(&self, name: &str) -> Result<(), Error> {
+    fn delete(&self, name: &str) -> Result<bool, Error> {
         let selector = self.key_selector(name);
         let all = list(&self.k, &selector)?;
         self.delete_unreferenced(all, &selector)?;
@@ -947,7 +968,7 @@ mod tests {
         ) -> Result<String, Error> {
             unreachable!()
         }
-        fn delete(&self, _: &str) -> Result<(), Error> {
+        fn delete(&self, _: &str) -> Result<bool, Error> {
             unreachable!()
         }
         fn collect_superseded(&self, _: &str, _: &str) -> Result<(), Error> {

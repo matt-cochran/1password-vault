@@ -59,6 +59,9 @@ pub struct KubeSecrets<'a> {
     /// Every string of the Deployment and its ReplicaSets, read once, after the healthy
     /// rollout that precedes any delete.
     referenced: OnceCell<BTreeSet<String>>,
+    /// The opv Secrets of this environment as `list` read them this run: `(secret name,
+    /// store name, stamp)`.
+    listed: OnceCell<Vec<(String, String, Option<Stamp>)>>,
     /// Source of new version ids: the OS RNG ([`new_version`]); fixed in tests.
     ids: fn() -> Result<String, Error>,
 }
@@ -74,6 +77,7 @@ impl<'a> KubeSecrets<'a> {
             managed,
             bound: OnceCell::new(),
             referenced: OnceCell::new(),
+            listed: OnceCell::new(),
             ids: new_version,
         }
     }
@@ -209,6 +213,37 @@ impl<'a> KubeSecrets<'a> {
         Zeroizing::new(std::mem::take(&mut *doc).into_bytes())
     }
 
+    /// The newest version of `name` that this run's `list` saw and the Deployment does not
+    /// bind (written by an earlier `sync` without `--deploy`), when it holds exactly
+    /// `value` (constant-time compare): reused, so staged runs never pile up versions and
+    /// the next `--deploy` binds the one already written (FR-29).
+    fn pending_with(&self, name: &str, value: &SecretValue) -> Result<Option<String>, Error> {
+        let Some(listed) = self.listed.get() else {
+            return Ok(None);
+        };
+        let store = store_name(name);
+        let bound = self.bound()?.get(&store).cloned();
+        let newest = listed
+            .iter()
+            .filter(|(secret, key, _)| {
+                *key == store && split_secret_name(secret).map(|(_, v)| v) != bound.as_deref()
+            })
+            .max_by(|a, b| {
+                a.2.as_ref()
+                    .map(|s| &s.written)
+                    .cmp(&b.2.as_ref().map(|s| &s.written))
+            });
+        let Some((secret, _, _)) = newest else {
+            return Ok(None);
+        };
+        Ok(match self.held(secret)? {
+            Some((env, held)) if env == self.t().env && same(&held, value) => {
+                split_secret_name(secret).map(|(_, v)| v.to_string())
+            }
+            _ => None,
+        })
+    }
+
     /// Every string in the Deployment and in every ReplicaSet of the namespace (read once).
     fn referenced(&self) -> Result<&BTreeSet<String>, Error> {
         if let Some(seen) = self.referenced.get() {
@@ -287,12 +322,14 @@ impl Store for KubeSecrets<'_> {
         let selector = format!("{LABEL_MANAGED}={}", self.t().env);
         // store name → the latest stamp among its versions (FR-42).
         let mut stores: BTreeMap<String, Option<Stamp>> = BTreeMap::new();
-        for (_, store, stamp) in self.stamped(&selector)? {
-            let latest = stores.entry(store).or_default();
+        let listed = self.stamped(&selector)?;
+        for (_, store, stamp) in &listed {
+            let latest = stores.entry(store.clone()).or_default();
             if stamp.as_ref().map(|s| &s.written) > latest.as_ref().map(|s| &s.written) {
-                *latest = stamp;
+                *latest = stamp.clone();
             }
         }
+        let _ = self.listed.set(listed);
         Ok(self
             .managed
             .iter()
@@ -337,6 +374,9 @@ impl PinnedStore for KubeSecrets<'_> {
         if let Some((current, version)) = self.read(name)?
             && same(&current, value)
         {
+            return Ok(version);
+        }
+        if let Some(version) = self.pending_with(name, value)? {
             return Ok(version);
         }
         let t = self.t();
@@ -387,23 +427,24 @@ impl PinnedStore for KubeSecrets<'_> {
     /// Deletes every version of `name` labelled for this environment that neither the
     /// Deployment nor any ReplicaSet references (FR-32). Called only after a healthy
     /// rollout; a version still in a ReplicaSet's history is kept for `rollout undo`.
-    fn delete(&self, name: &str) -> Result<(), Error> {
-        self.delete_unreferenced(name, None)
+    fn delete(&self, name: &str) -> Result<bool, Error> {
+        self.delete_unreferenced(name, None).map(|kept| kept == 0)
     }
 
     /// Deletes the superseded versions of a re-pinned `name`: every version but
     /// `keep_version` that neither the Deployment nor any ReplicaSet references (FR-32).
     /// Only Secrets labelled for this environment are ever candidates.
     fn collect_superseded(&self, name: &str, keep_version: &str) -> Result<(), Error> {
-        self.delete_unreferenced(name, Some(keep_version))
+        self.delete_unreferenced(name, Some(keep_version)).map(drop)
     }
 }
 
 impl KubeSecrets<'_> {
     /// The versions of `name` labelled `opv-managed=<env>`, except `keep`, that no
     /// Deployment or ReplicaSet references, deleted in one call (reconciled by listing
-    /// again when its outcome is lost, NR-2).
-    fn delete_unreferenced(&self, name: &str, keep: Option<&str>) -> Result<(), Error> {
+    /// again when its outcome is lost, NR-2). Returns how many versions other than `keep`
+    /// are kept because a Deployment or ReplicaSet references them.
+    fn delete_unreferenced(&self, name: &str, keep: Option<&str>) -> Result<usize, Error> {
         let t = self.t();
         let store = store_name(name);
         if !valid_label_value(&store) {
@@ -423,7 +464,7 @@ impl KubeSecrets<'_> {
             .filter(|(n, _)| kept.as_ref() != Some(n))
             .collect();
         if versions.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let referenced = self.referenced()?;
         let doomed: Vec<&str> = versions
@@ -431,17 +472,18 @@ impl KubeSecrets<'_> {
             .map(|(n, _)| n.as_str())
             .filter(|n| !referenced.contains(*n))
             .collect();
+        let kept = versions.len() - doomed.len();
         if doomed.is_empty() {
-            return Ok(());
+            return Ok(kept);
         }
         let what = format!("kubectl delete secret ({store})");
         let mut args = vec!["delete", "secret"];
         args.extend(&doomed);
         args.push("--ignore-not-found");
         match self.k.call(Effect::Write, &what, &args, None, &[])? {
-            Outcome::Done(_) => Ok(()),
+            Outcome::Done(_) => Ok(kept),
             other => match crate::runner::diagnosing(|| self.names(&selector)) {
-                Ok(left) if !left.iter().any(|(n, _)| doomed.contains(&n.as_str())) => Ok(()),
+                Ok(left) if !left.iter().any(|(n, _)| doomed.contains(&n.as_str())) => Ok(kept),
                 _ => Err(self
                     .k
                     .fail(Effect::Write, &what, other, "auth can-i delete secrets")),
@@ -513,6 +555,41 @@ mod tests {
         let r = FakeRunner::new([ok(SECRET_NAMES)]);
         with_store(&r, |s| s.list()).unwrap();
         assert!(args(&r, 0).contains(&"opv-managed=dev".to_string()));
+    }
+
+    /// A version written by an earlier sync without `--deploy` (unbound) and listed.
+    const PENDING: &str = "opv-fleet--api--db-url-p3ndingv2x\tfleet--api--db-url\n";
+
+    /// M2: a second sync without `--deploy` reuses the unbound version holding the value.
+    #[test]
+    fn pending_version_with_the_same_value_writes_nothing() {
+        let r = FakeRunner::new([
+            ok(PENDING),
+            ok(DEPLOYMENT),
+            held("opv-k8s-marker-1"),
+            held(MARK),
+        ]);
+        with_store(&r, |s| {
+            s.list()?;
+            s.write_one("FLEET__API__DB_URL", &sv(MARK), &stamp())
+        })
+        .unwrap();
+        assert!(!all_argv(&r).contains("apply"));
+    }
+
+    #[test]
+    fn pending_version_with_the_same_value_is_returned() {
+        let r = FakeRunner::new([
+            ok(PENDING),
+            ok(DEPLOYMENT),
+            held("opv-k8s-marker-1"),
+            held(MARK),
+        ]);
+        let v = with_store(&r, |s| {
+            s.list()?;
+            s.write_one("FLEET__API__DB_URL", &sv(MARK), &stamp())
+        });
+        assert_eq!(v.unwrap(), "p3ndingv2x");
     }
 
     #[test]

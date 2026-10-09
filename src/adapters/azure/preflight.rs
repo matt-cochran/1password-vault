@@ -29,7 +29,7 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
 use crate::provider::{Check, Preflight, PreflightMode, Verdict};
-use crate::runner::{CommandRunner, Outcome, Output, unknown_text};
+use crate::runner::{CommandRunner, Outcome, Output, Wait};
 
 /// Oldest Azure CLI opv is tested with: `doctor` warns below it.
 pub const AZ_TESTED_MIN: (u64, u64, u64) = (2, 60, 0);
@@ -170,15 +170,9 @@ fn read(
     )
 }
 
-/// A read that never finished: nothing was changed.
-fn unfinished(op: &str, reason: &str) -> Error {
-    Error::Target(
-        format!(
-            "az {op}: {}; nothing was changed\n  next: re-run the same command",
-            unknown_text(az::PROGRAM, reason)
-        )
-        .into(),
-    )
+/// A read that never finished after its retries: Azure did not answer (NR-28).
+fn unfinished(r: &dyn CommandRunner, op: &str) -> Error {
+    AZ_CLI.unanswered(r, &format!("az {op}"))
 }
 
 fn parse(out: &Output, op: &str) -> Result<Value, Error> {
@@ -232,7 +226,7 @@ fn vault(v: &Vault, r: &dyn CommandRunner) -> Result<Value, Error> {
         &[3],
     )? {
         Outcome::Done(out) => parse(&out, OP),
-        Outcome::Unknown { reason, .. } => Err(unfinished(OP, reason)),
+        Outcome::Unknown { .. } => Err(unfinished(r, OP)),
         Outcome::Refused(_) => {
             const DELETED: &str = "keyvault show-deleted";
             let probe = ["keyvault", "show-deleted", "-n", kv, "-o", "none"];
@@ -245,7 +239,7 @@ fn vault(v: &Vault, r: &dyn CommandRunner) -> Result<Value, Error> {
                     )
                     .into(),
                 )),
-                Outcome::Unknown { reason, .. } => Err(unfinished(DELETED, reason)),
+                Outcome::Unknown { .. } => Err(unfinished(r, DELETED)),
                 Outcome::Refused(_) => Err(Error::Target(
                     format!(
                         "Key Vault {kv} was not found in subscription {s}, or this account cannot \
@@ -276,7 +270,7 @@ fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), 
     ];
     match read(s, r, OP, &base, &[])? {
         Outcome::Done(_) => Ok(()),
-        Outcome::Unknown { reason, .. } => Err(unfinished(OP, reason)),
+        Outcome::Unknown { .. } => Err(unfinished(r, OP)),
         Outcome::Refused(_) if network_restricted(vault) => Err(Error::Target(
             format!(
                 "Key Vault {kv} refused this request: it accepts connections only from allowed \
@@ -324,7 +318,7 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
     let app =
         match read(s, r, OP, &base, &[3])? {
             Outcome::Done(out) => parse(&out, OP)?,
-            Outcome::Unknown { reason, .. } => return Err(unfinished(OP, reason)),
+            Outcome::Unknown { .. } => return Err(unfinished(r, OP)),
             Outcome::Refused(_) => {
                 return Err(Error::Target(format!(
                 "container app {a} was not found in resource group {rg} (subscription {s}), \
@@ -348,14 +342,15 @@ fn provisioning(app: &Value) -> &str {
 /// [`WAIT_MAX`], never past the run budget (NR-4), with a progress line at least every
 /// [`PROGRESS_EVERY`].
 fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
-    let mut waited = Duration::ZERO;
+    let wait = Wait::new(r, WAIT_MAX);
     let mut reported: Option<Duration> = None;
     loop {
         let app = app(t, r)?;
         if provisioning(&app) != "InProgress" {
             return Ok(app);
         }
-        if waited >= WAIT_MAX {
+        let waited = wait.elapsed(r);
+        if wait.over(r, POLL_EVERY) {
             return Err(Error::Target(
                 format!(
                     "container app {a} is still being updated by someone else (provisioningState \
@@ -370,7 +365,7 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
                 .into(),
             ));
         }
-        let note = if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
+        let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= PROGRESS_EVERY) {
             reported = Some(waited);
             format!(
                 "waiting for container app {} to finish its current update (provisioningState \
@@ -381,8 +376,7 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         } else {
             String::new()
         };
-        r.pause(POLL_EVERY, &note);
-        waited += POLL_EVERY;
+        wait.pause(r, POLL_EVERY, &note);
     }
 }
 

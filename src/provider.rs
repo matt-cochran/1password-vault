@@ -15,7 +15,7 @@ use toml::de::{DeValue, ValueDeserializer};
 
 use crate::domain::{Kind, Profile, SecretValue};
 use crate::error::Error;
-use crate::host::Host;
+use crate::host::{Host, Tool};
 use crate::ports::{PinnedStore, Ports};
 use crate::runner::CommandRunner;
 
@@ -25,6 +25,10 @@ pub trait Provider: Sync {
     fn section(&self) -> &'static str;
     /// User-facing name: "Fly", "Azure", "Kubernetes".
     fn label(&self) -> &'static str;
+    /// The CLIs this provider runs, its own first: the runner takes each one's pinned
+    /// environment and not-found phrases from here, and `Next:` lines starting with one
+    /// count as runnable. A store another provider declares brings that provider's CLI.
+    fn tools(&self) -> &'static [&'static Tool];
     /// Parses and validates that section (identifiers, templates, required fields). Read
     /// the section with [`Section::deserialize`], so a shape error points at its line.
     fn parse(

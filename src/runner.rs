@@ -65,6 +65,9 @@ pub struct Call<'a> {
     pub args: &'a [&'a str],
     pub stdin: Option<&'a [u8]>,
     pub env: &'a [(&'a str, &'a str)],
+    /// A write's own limit (NR-4), for a write that waits for a rollout ([`Call::rollout`]);
+    /// `None` is [`WRITE_TIMEOUT`]. Always capped by the run budget. Reads ignore it.
+    pub limit: Option<Duration>,
 }
 
 impl<'a> Call<'a> {
@@ -75,6 +78,18 @@ impl<'a> Call<'a> {
             args,
             stdin: None,
             env: &[],
+            limit: None,
+        }
+    }
+
+    /// The same call as a write that waits for a rollout (`flyctl secrets deploy`, `az
+    /// containerapp update`, a `kubectl apply`): killed only after [`ROLLOUT_WRITE_TIMEOUT`]
+    /// or when the run budget runs out, with a progress line on stderr every
+    /// [`PROGRESS_EVERY`] while it runs (NR-4).
+    pub fn rollout(self) -> Self {
+        Self {
+            limit: Some(ROLLOUT_WRITE_TIMEOUT),
+            ..self
         }
     }
 
@@ -165,6 +180,14 @@ pub trait CommandRunner {
     /// [`Outcome::Unknown`]. `Err` only when the program could not be started (nothing ran).
     fn write(&self, call: &Call) -> io::Result<Outcome>;
 
+    /// True once this run started a write to a target, which a later read that fails or
+    /// never answers must not call "nothing was changed" (NR-2, NR-28). The 1Password tidy
+    /// (FR-43) rewrites an item's layout, never a target, so `op` writes do not count. A
+    /// runner that records nothing keeps the default, false.
+    fn writes_started(&self) -> bool {
+        false
+    }
+
     /// A short read-only diagnosis call (`op whoami`, `flyctl auth whoami`, version
     /// checks; FR-26): killed after `limit` (a `TimedOut` error), never retried; the exit
     /// status is returned as is.
@@ -247,8 +270,16 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Limit for one write.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
-/// Default run budget (`--timeout`).
-pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(900);
+/// Limit for one write that waits for a rollout ([`Call::rollout`]): a Fly rolling deploy
+/// restarts machines one by one and waits for their health checks; `az containerapp update`
+/// waits for the provisioning operation (NR-4). Capped by the run budget.
+pub const ROLLOUT_WRITE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Default run budget (`--timeout`): room for a rollout write of [`ROLLOUT_WRITE_TIMEOUT`]
+/// plus the reads and health waits around it.
+pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Longest silence on stderr while opv waits: a rollout write or a poll loop prints a
+/// progress line at least this often (NR-4).
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(15);
 /// Captured stdout above this many bytes is refused and the child killed (NR-5).
 pub const OUTPUT_CAP: usize = 8 * 1024 * 1024;
 /// Attempts per read, the first one included (NR-3).
@@ -265,20 +296,10 @@ pub const SIGNAL_GRACE: Duration = Duration::from_secs(5);
 
 /// Pinned per-CLI environment (NR-7, NR-11), added on top of the inherited environment for
 /// every captured call by program name: it neutralises user configuration that changes
-/// output or prompts. Proxy and CA variables are never set here (NR-29).
+/// output or prompts. Proxy and CA variables are never set here (NR-29). Each CLI declares
+/// its own ([`crate::host::Tool::pinned_env`]).
 pub fn pinned_env(program: &str) -> &'static [(&'static str, &'static str)] {
-    match program {
-        "az" => &[
-            ("AZURE_EXTENSION_USE_DYNAMIC_INSTALL", "no"),
-            ("AZURE_CORE_NO_COLOR", "true"),
-            ("AZURE_CORE_ONLY_SHOW_ERRORS", "true"),
-            ("AZURE_CORE_COLLECT_TELEMETRY", "no"),
-            ("AZURE_CORE_OUTPUT", "json"),
-        ],
-        "flyctl" => &[("FLY_NO_UPDATE_CHECK", "1"), ("NO_COLOR", "1")],
-        "op" => &[("NO_COLOR", "1")],
-        _ => &[],
-    }
+    crate::host::tool(program).map_or(&[], |t| t.pinned_env)
 }
 
 /// `exit N`, or the cap for [`OVER_CAP`]: the parenthesised part of "X failed (...)".
@@ -346,6 +367,14 @@ trait Engine {
     fn verbose(&self) -> bool;
     /// One attempt, with the child's stderr held in memory (NR-31).
     fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)>;
+    /// A write to `program` started (see [`CommandRunner::writes_started`]).
+    fn wrote(&self, program: &str);
+}
+
+/// Whether a write to `program` counts as a target write (see
+/// [`CommandRunner::writes_started`]).
+fn target_write(program: &str) -> bool {
+    program != crate::host::OP_CLI.program
 }
 
 /// One attempt through `e`, printing the `--verbose` lines: the call line (NR-22), then the
@@ -564,30 +593,14 @@ mod failure {
     }
 }
 
-/// Stable phrases each CLI prints on stderr for an object that does not exist (S2): `op`
-/// for an item or vault ID it cannot find, `kubectl` for a missing object (the API's
-/// `NotFound` reason), `az` for a missing secret or resource. Unrecognised text is not a
-/// match, so such a failure keeps its retries.
-const NOT_FOUND: &[(&str, &[&str])] = &[
-    ("op", &["isn't an item", "isn't a vault"]),
-    ("kubectl", &["(NotFound)"]),
-    (
-        "az",
-        &[
-            "SecretNotFound",
-            "ResourceNotFound",
-            "ResourceGroupNotFound",
-        ],
-    ),
-];
-
-/// True when `stderr` of a failed `program` call says the object does not exist (S2).
-/// Searched in place, never copied or printed (NR-31).
+/// True when `stderr` of a failed `program` call says the object does not exist (S2): one
+/// of the phrases its CLI declares ([`crate::host::Tool::not_found`]). Unrecognised text is
+/// not a match, so such a failure keeps its retries. Searched in place, never copied or
+/// printed (NR-31).
 fn says_not_found(program: &str, stderr: &[u8]) -> bool {
-    NOT_FOUND
-        .iter()
-        .filter(|(p, _)| *p == program)
-        .flat_map(|(_, phrases)| phrases.iter())
+    crate::host::tool(program)
+        .into_iter()
+        .flat_map(|t| t.not_found.iter())
         .any(|phrase| stderr.windows(phrase.len()).any(|w| w == phrase.as_bytes()))
 }
 
@@ -678,6 +691,61 @@ fn pause_on(e: &dyn Engine, d: Duration, note: &str) {
     e.sleep(d.min(left(e)));
 }
 
+/// A poll loop's clock (NR-4): a health, rollout or propagation wait measures elapsed
+/// monotonic time (the run budget's, so a fake clock works too), never the sum of its sleeps
+/// alone, which misses the time its reads take. It stops at its own limit, or earlier when
+/// the run budget has no room left for one more poll and its read, so the wait's own
+/// message (naming the state it last saw) comes before the budget error.
+pub struct Wait {
+    limit: Duration,
+    start_left: Option<Duration>,
+    slept: std::cell::Cell<Duration>,
+}
+
+impl Wait {
+    /// A wait of at most `limit` starting now.
+    pub fn new(r: &dyn CommandRunner, limit: Duration) -> Self {
+        Self {
+            limit,
+            start_left: r.remaining(),
+            slept: std::cell::Cell::new(Duration::ZERO),
+        }
+    }
+
+    /// The wait's own limit.
+    pub fn limit(&self) -> Duration {
+        self.limit
+    }
+
+    /// Time since the wait started: the run budget's clock, and at least the time slept (a
+    /// runner without a budget).
+    pub fn elapsed(&self, r: &dyn CommandRunner) -> Duration {
+        let measured = self
+            .start_left
+            .zip(r.remaining())
+            .map_or(Duration::ZERO, |(start, now)| start.saturating_sub(now));
+        measured.max(self.slept.get())
+    }
+
+    /// True when the wait must stop instead of sleeping `next` and polling again: its own
+    /// limit is reached, or the run budget cannot hold `next` plus one read.
+    pub fn over(&self, r: &dyn CommandRunner, next: Duration) -> bool {
+        self.elapsed(r) >= self.limit
+            || r.remaining().is_some_and(|left| left < next + READ_TIMEOUT)
+    }
+
+    /// Sleep `d` on the runner, printing `note` first (see [`CommandRunner::pause`]).
+    pub fn pause(&self, r: &dyn CommandRunner, d: Duration, note: &str) {
+        r.pause(d, note);
+        self.slept_for(d);
+    }
+
+    /// Count `d` slept some other way (a test's sleep hook).
+    pub fn slept_for(&self, d: Duration) {
+        self.slept.set(self.slept.get() + d);
+    }
+}
+
 /// The call was never started: the run budget (`--timeout`) is spent.
 fn budget_spent(call: &Call) -> io::Error {
     io::Error::new(
@@ -688,11 +756,12 @@ fn budget_spent(call: &Call) -> io::Error {
 
 fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
     let id = failure::begin();
-    let limit = WRITE_TIMEOUT.min(left(e));
+    let limit = call.limit.unwrap_or(WRITE_TIMEOUT).min(left(e));
     if limit.is_zero() {
         return Err(budget_spent(call));
     }
     let (attempt, stderr) = attempt_on(e, call, limit)?;
+    e.wrote(call.program);
     Ok(match attempt {
         Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
         Attempt::Exited(o) => {
@@ -829,12 +898,14 @@ pub(crate) fn read_to_end_zeroizing(r: impl Read) -> io::Result<Zeroizing<Vec<u8
 ///
 /// Each captured call is killed at the earlier of its effect's limit and the run budget.
 /// `run_inherited` (the user's own command under `op run`) has no limit.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ProcessRunner {
     budget: Budget,
     verbose: bool,
     /// Extra per-call limit (tests); `None` uses the effect limits only.
     cap: Option<Duration>,
+    /// A target write started ([`CommandRunner::writes_started`]).
+    wrote: Arc<AtomicBool>,
 }
 
 impl ProcessRunner {
@@ -845,6 +916,7 @@ impl ProcessRunner {
             budget,
             verbose,
             cap: None,
+            wrote: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -929,7 +1001,21 @@ impl ProcessRunner {
             let _ = rtx.send(read_capped(child_stdout, OUTPUT_CAP, &flag));
         });
 
+        // A rollout write runs for minutes: say it is still running (NR-4).
+        let started = Instant::now();
+        let mut said = started;
         let status = loop {
+            if call.limit.is_some() && said.elapsed() >= PROGRESS_EVERY {
+                said = Instant::now();
+                Engine::note(
+                    self,
+                    &format!(
+                        "still running {} ({} s)",
+                        call.step(),
+                        started.elapsed().as_secs()
+                    ),
+                );
+            }
             match signals::reap(child) {
                 Ok(Some(st)) => break st,
                 Ok(None) => {}
@@ -1050,6 +1136,11 @@ impl Engine for ProcessRunner {
     fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
         self.spawn_attempt(call, limit)
     }
+    fn wrote(&self, program: &str) {
+        if target_write(program) {
+            self.wrote.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Read only the executable header, never any credential source.
@@ -1086,6 +1177,10 @@ impl CommandRunner for ProcessRunner {
 
     fn spawns_processes(&self) -> bool {
         true
+    }
+
+    fn writes_started(&self) -> bool {
+        self.wrote.load(Ordering::SeqCst)
     }
 
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
@@ -1407,6 +1502,11 @@ pub mod fake {
         stderr: RefCell<HashMap<usize, Vec<u8>>>,
         /// Markdown passed to [`CommandRunner::step_summary`], in order.
         pub summaries: RefCell<Vec<String>>,
+        /// Fake time each captured call takes (zero by default), so a wait that counts
+        /// only its sleeps is caught (NR-4).
+        pub call_cost: Cell<Duration>,
+        /// A target write started ([`CommandRunner::writes_started`]).
+        pub target_writes: Cell<bool>,
     }
 
     impl Default for FakeRunner {
@@ -1422,6 +1522,8 @@ pub mod fake {
                 verbose: Cell::new(false),
                 stderr: RefCell::default(),
                 summaries: RefCell::default(),
+                call_cost: Cell::new(Duration::ZERO),
+                target_writes: Cell::new(false),
             }
         }
     }
@@ -1535,7 +1637,13 @@ pub mod fake {
         fn verbose(&self) -> bool {
             self.verbose.get()
         }
+        fn wrote(&self, program: &str) {
+            if super::target_write(program) {
+                self.target_writes.set(true);
+            }
+        }
         fn attempt(&self, call: &super::Call, _limit: Duration) -> io::Result<(Attempt, Stderr)> {
+            self.elapsed.set(self.elapsed.get() + self.call_cost.get());
             let index = self.calls.borrow().len();
             let attempt = match self.record(call.program, call.args, call.stdin, call.env, false) {
                 Ok(o) => Attempt::Exited(o),
@@ -1554,6 +1662,10 @@ pub mod fake {
     impl CommandRunner for FakeRunner {
         fn remaining(&self) -> Option<Duration> {
             Some(super::left(self))
+        }
+
+        fn writes_started(&self) -> bool {
+            self.target_writes.get()
         }
 
         fn read(&self, call: &super::Call, refused: &[i32]) -> io::Result<Outcome> {
@@ -1580,6 +1692,7 @@ pub mod fake {
                     .push_back(Ok(Output::failure(1)));
             }
             let id = super::failure::begin();
+            self.elapsed.set(self.elapsed.get() + self.call_cost.get());
             let index = self.calls.borrow().len();
             let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
             let stderr = self.stderr_of(index);
@@ -1858,9 +1971,10 @@ mod tests {
                 PROBE_TIMEOUT,
                 READ_TIMEOUT,
                 WRITE_TIMEOUT,
+                ROLLOUT_WRITE_TIMEOUT,
                 DEFAULT_RUN_TIMEOUT
             ],
-            [15, 60, 120, 900].map(Duration::from_secs)
+            [15, 60, 120, 900, 1800].map(Duration::from_secs)
         );
     }
 
@@ -1938,6 +2052,7 @@ mod tests {
             args: &["secrets", "import", "--app", "a", "--stage"],
             stdin: Some(b"K=VERBOSESTDINMARK"),
             env: &[("FLY_API_TOKEN", "VERBOSEENVMARK")],
+            limit: None,
         };
         let line = verbose_line(&call, Duration::from_millis(1500), "exit 0");
         assert!(!line.contains("MARK"), "{line}");
@@ -1968,6 +2083,7 @@ mod tests {
             args: &["item", "edit"],
             stdin: Some(b"sk-live-123"),
             env: &[("OP_TOKEN", "tok-secret")],
+            limit: None,
         };
         let d = format!("{call:?}");
         assert!(!d.contains("sk-live") && !d.contains("tok-secret"), "{d}");
@@ -1991,6 +2107,7 @@ mod tests {
             args: &["item", "edit"],
             stdin: Some(b"sk-live-123"),
             env: &[("OP_TOKEN", "tok-secret")],
+            limit: None,
         };
         let a = r.write(&call).unwrap();
         assert!(matches!(a, Outcome::Done(o) if o.stdout.as_slice() == b"one"));
@@ -2044,6 +2161,7 @@ mod tests {
             args: &["OPV_TEST_VAR"],
             stdin: None,
             env: &[("OPV_TEST_VAR", "v1")],
+            limit: None,
         };
         let o = ProcessRunner::default().read(&call, &[]).unwrap();
         assert!(matches!(o, Outcome::Done(o) if o.stdout.as_slice() == b"v1\n"));

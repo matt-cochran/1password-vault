@@ -92,7 +92,7 @@ fn short_help_about_is_provider_neutral() {
 fn exit_code_help_names_every_target_cli() {
     let (_, out, _) = opv_with(&[], &["--help"]);
     assert!(
-        out.contains("3 dependency (op or the target CLI (flyctl, az,\n  kubectl) missing)")
+        out.contains("3 dependency (op or the target CLI missing:\n  flyctl, az, kubectl)")
             && out.contains("5 target (Fly, Azure, Kubernetes)"),
         "{out}"
     );

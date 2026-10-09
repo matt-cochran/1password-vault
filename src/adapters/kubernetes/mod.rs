@@ -61,6 +61,10 @@ pub const KUBECTL: Tool = Tool {
             (the official instructions for this Linux distribution)",
     vendor: "the Kubernetes cluster",
     status_page: "your cluster provider's status page",
+    pinned_env: PINNED_ENV,
+    // The API's `NotFound` reason.
+    not_found: &["(NotFound)"],
+    aliases: &[],
 };
 /// The `data` key every opv Secret stores its value under.
 pub const VALUE_KEY: &str = "value";
@@ -235,12 +239,16 @@ impl<'a> Kubectl<'a> {
             args: &argv,
             stdin,
             env: PINNED_ENV,
+            limit: None,
         };
         match effect {
             Effect::Read => self.runner.read(&call, refused),
-            Effect::Write => self.runner.write(&call),
+            // An apply or replace can wait on admission webhooks and a busy API server; it
+            // is bounded per request by --request-timeout and as a whole by the rollout
+            // write limit and the run budget (NR-4), never killed at the plain write limit.
+            Effect::Write => self.runner.write(&call.rollout()),
         }
-        .map_err(|e| spawn_error(what, &e))
+        .map_err(|e| spawn_error(self.runner, what, &e))
     }
 
     /// [`Self::call`] whose every non-success is diagnosed into a typed error.
@@ -315,6 +323,11 @@ impl<'a> Kubectl<'a> {
                 .into(),
             );
         }
+        // A read that never answered after its retries (NR-28): after this run's first
+        // write the run stopped half way (NR-2); before it, the provider is unavailable.
+        if effect == Effect::Read && !why.starts_with("exit ") {
+            return KUBECTL.unanswered(self.runner, what);
+        }
         if effect == Effect::Write && !why.starts_with("exit ") {
             return Error::Unknown(
                 format!("{what}: {why}; {preserved}\n  next: re-run the same command").into(),
@@ -344,10 +357,13 @@ impl<'a> Kubectl<'a> {
             args,
             stdin: None,
             env: PINNED_ENV,
+            limit: None,
         };
         match self.runner.probe(&call, PROBE_TIMEOUT) {
             Ok(o) => Ok(Some(o)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(spawn_error("kubectl", &e)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Err(spawn_error(self.runner, "kubectl", &e))
+            }
             Err(_) => Ok(None),
         }
     }
@@ -369,7 +385,7 @@ impl<'a> Kubectl<'a> {
 }
 
 /// `kubectl` could not be started: missing ⇒ `Dependency` with the install command.
-fn spawn_error(what: &str, e: &io::Error) -> Error {
+fn spawn_error(r: &dyn CommandRunner, what: &str, e: &io::Error) -> Error {
     match e.kind() {
         io::ErrorKind::NotFound => Error::Dependency(
             format!(
@@ -378,7 +394,10 @@ fn spawn_error(what: &str, e: &io::Error) -> Error {
             )
             .into(),
         ),
-        io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}").into()),
+        // A spent run budget: the call never started (NR-2 once a write had).
+        io::ErrorKind::TimedOut => KUBECTL
+            .budget_spent(r, e)
+            .map_text(|m| format!("{what}: {m}")),
         kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})").into()),
     }
 }
