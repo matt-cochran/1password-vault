@@ -1274,3 +1274,50 @@ fn cluster_secret_store_not_ready_refusal_names_a_next_step() {
         "{e:?}"
     );
 }
+
+// ---- sync --json (P2, NR-18) ----
+
+fn deploy_json() -> SyncOpts {
+    SyncOpts {
+        deploy: true,
+        json: true,
+        ..Default::default()
+    }
+}
+
+/// `sync --deploy --json` on Key Vault → Kubernetes prints one document: the target names
+/// written and the deploy through the operator, with nothing left to do.
+#[test]
+fn sync_json_reports_key_vault_writes_and_the_deploy() {
+    let sim = Sim::new(item_with(API_V1));
+    let (res, out) = sync_on(&sim, &fleet_a(), &deploy_json());
+    let doc: Value = serde_json::from_str(&out).expect("one JSON document");
+    assert_eq!(
+        (
+            res.is_ok(),
+            doc["provider"].clone(),
+            doc["written"].clone(),
+            doc["deployed"].clone(),
+            doc["next"].clone()
+        ),
+        (
+            true,
+            json!("kubernetes"),
+            json!(["API_KEY", "DB_URL", "OLD_KEY"]),
+            json!(true),
+            Value::Null
+        ),
+        "{out}"
+    );
+}
+
+/// SR-1: the `sync --json` document carries names only, never a value.
+#[test]
+fn sync_json_carries_no_value() {
+    let sim = Sim::new(item_with(API_V1));
+    let (_, out) = sync_on(&sim, &fleet_a(), &deploy_json());
+    assert!(
+        SECRETS.iter().chain([&LOG]).all(|v| !out.contains(v)),
+        "{out}"
+    );
+}

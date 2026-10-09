@@ -596,6 +596,41 @@ mod tests {
         );
     }
 
+    /// NR-19 + NR-31: what opv prints for a failed `kubectl` read is the error line, then
+    /// the scrubbed `kubectl said:` excerpt, then exactly one `Next:` line, in that order.
+    #[test]
+    fn failed_kubectl_read_reports_error_then_excerpt_then_next() {
+        let r = FakeRunner::default();
+        for _ in 0..crate::runner::READ_ATTEMPTS {
+            r.push_with_stderr(
+                Output::failure(1),
+                "Error from server (Forbidden): deployments.apps \"api\" is forbidden\n",
+            );
+        }
+        r.push_with_stderr(ok("context/kind-opv\n"), "");
+        r.push_with_stderr(ok("v1.36"), "");
+        let e = kubectl_get_deployment(&r).unwrap_err();
+        let excerpt = crate::runner::take_failure_excerpt();
+        let text = crate::error::report(&e, &e.default_next("opv sync prod"), excerpt.as_ref());
+        let first = format!("opv: {}", e.to_string().lines().next().unwrap());
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            (
+                lines[0],
+                lines[1],
+                lines.last().copied(),
+                text.matches("\nNext: ").count()
+            ),
+            (
+                first.as_str(),
+                "  kubectl said: Error from server (Forbidden): deployments.apps \"api\" is forbidden",
+                Some(format!("Next: {}", e.next_step().unwrap_or("opv doctor")).as_str()),
+                1
+            ),
+            "{text}"
+        );
+    }
+
     #[test]
     fn unreachable_cluster_before_writes_exits_9() {
         let r =

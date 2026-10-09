@@ -235,6 +235,34 @@ mod tests {
         );
     }
 
+    /// NR-19 + NR-31: what opv prints for a failed `az` call is the error line, then the
+    /// scrubbed `az said:` excerpt, then exactly one `Next:` line, in that order.
+    #[test]
+    fn failed_az_call_reports_error_then_excerpt_then_next() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n",
+        );
+        r.push_with_stderr(Output::success(""), "");
+        let outcome = invoke(
+            &r,
+            Effect::Write,
+            "keyvault secret set",
+            &["keyvault"],
+            None,
+            &[],
+        );
+        let e = write_output(&r, "keyvault secret set", "kv-prod", outcome.unwrap()).unwrap_err();
+        let excerpt = crate::runner::take_failure_excerpt();
+        assert_eq!(
+            crate::error::report(&e, &e.default_next("opv sync prod"), excerpt.as_ref()),
+            "opv: target error: az keyvault secret set failed for kv-prod\n  \
+             az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n\
+             Next: opv doctor\n"
+        );
+    }
+
     #[test]
     fn probe_that_cannot_run_does_not_claim_signed_out() {
         let r = FakeRunner::default();
