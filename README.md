@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to local development (shell, IDE, Docker), Fly.io, Azure, AWS and GCP: opv run dev -- npm run dev" width="100%">
+  <img src="docs/assets/opv-header.webp" alt="opv bridges secrets from a 1Password vault to local development (shell, IDE, Docker), Fly.io, Azure, Kubernetes, AWS and GCP: opv run dev -- npm run dev" width="100%">
 </p>
 
 # opv
@@ -35,15 +35,19 @@ allumata  STRIPE_SECRET_KEY    secret  skipped  absent
 | Target | Status |
 |---|---|
 | Fly.io | supported |
-| Azure (Key Vault + Container Apps / App Service) | planned ([#39](https://github.com/matt-cochran/1password-vault/issues/39), [#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
+| Azure (Key Vault + Container Apps) | supported <!-- verify: preview until the live receipt in #39? --> |
+| Kubernetes (Secrets + Deployment) | supported |
+| Azure App Service | planned ([#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |
 
+Each environment names one target in `secrets.toml`; every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until you run `sync --deploy`.
+
 For local development, `opv run dev -- <command>` starts any command with the environment's keys set as variables, through `op run`, with no `.env` file ([patterns](docs/usage.md#local-development)).
 
-## Guided local setup (in development)
+## Guided local setup
 
-The next release adds `opv session` and `opv setup` for sign-in and resumable project onboarding, with plain instructions and private input. See [guided setup](docs/guided-setup.md) and the [CLI interaction review](docs/cli-ux-review.md). These commands are not in v0.4.0.
+`opv session` and `opv setup` handle sign-in and resumable project onboarding, with plain instructions and private input. See [guided setup](docs/guided-setup.md) and the [CLI interaction review](docs/cli-ux-review.md).
 
 ## Quickstart
 
@@ -53,7 +57,7 @@ Install on Linux or macOS ([docs/install.md](docs/install.md) covers npm, Window
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
-Then, with `op` and `flyctl` signed in:
+Then, with `op` and your target CLI (`flyctl`, `az` or `kubectl`) signed in:
 
 ```sh
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml from an existing item
@@ -92,14 +96,14 @@ rules = { base64_bytes = 32 }
 - [Installing](docs/install.md): install script, release binaries, npm, from source, verifying downloads, prerequisites.
 - [Configuration](docs/configuration.md): store layout, `secrets.toml`, the fleet and simple profiles, `opv init`, rules and failure reasons.
 - [Local development](docs/local-development.md): local-only environments, `opv check`, switching products, WSL.
-- [Usage](docs/usage.md): every command, JSON output, change detection, pruning, exit codes, security model, GitHub Actions.
+- [Usage](docs/usage.md): every command, how sync works on Fly, Azure and Kubernetes, JSON output, pruning, retries, exit codes, security model, GitHub Actions.
 - [Setting up with an AI assistant](docs/agent-setup.md): a step-by-step procedure and safety rules for Claude Code, Codex, Cursor and similar; [llms.txt](llms.txt) indexes the docs for them.
 - [Design](docs/design/): requirements, design decisions and plans, for contributors.
 - [Changelog](CHANGELOG.md).
 
 ## Security
 
-Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. The stderr of `op` and `flyctl` is suppressed because it could echo a value. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [docs/usage.md](docs/usage.md#security-model-and-limits).
+Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. The stderr of `op`, `flyctl`, `az` and `kubectl` is suppressed because it could echo a value. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [docs/usage.md](docs/usage.md#security-model-and-limits).
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
 

@@ -13,7 +13,7 @@ opv status staging                  # one row per product and key; exit 8 if any
 opv status staging --json           # the same state as one machine-readable JSON document
 opv plan staging                    # what a sync would stage, hold and prune; exit 8 if any blocks
 opv plan staging --json             # the same plan as one machine-readable JSON document
-opv sync staging [--deploy] [--prune] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
+opv sync staging [--deploy] [--prune] [--confirm staging] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
 opv check dev --product allumata    # each key saved, missing, wrong kind or failing a rule; exit 8 if any
@@ -24,7 +24,7 @@ opv run prod -- ./server            # simple profile: no --product
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
 2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values.
 3. `plan` shows the same rows plus the target side. It changes nothing.
-4. `sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running (`Next: wait for it to finish, then re-run`) stops it with nothing written. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
+4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running (`Next: wait for it to finish, then re-run`) stops it with nothing written. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
 7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. `--json` prints `schema_version`, `environment`, `target_checked: false`, `rows` (product, key, state, rule, reason) and `findings`.
@@ -102,13 +102,65 @@ failing rule when `state` is `failing_rule`, and `reason` says why (see
 `would_change` for a secret and `null` for a config key; `action` is `would_stage`,
 `would_prune`, `held` or `null`. The document is meant for the scheduled drift check.
 
-### Change detection
+### Change detection on Fly
 
 Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. `plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows "unchanged" or "changed" instead.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Deploying an app that has no machines exits 5.
 
-### Pruning
+### Sync on Azure and Kubernetes
+
+On Azure and Kubernetes `sync` works in two steps, and the running app only changes in the second:
+
+1. **Written.** Each changed secret is written to the store (Key Vault, or a Kubernetes Secret) as a new version. The app does not see it, even if it restarts or scales out, because it is bound to the old version.
+2. **Deployed.** With `--deploy`, opv points the app at the new versions and sets any changed config, which starts a new revision (Container Apps) or rollout (Kubernetes). It then waits until that revision is healthy.
+
+```sh
+opv plan prod                            # what would be written and re-pinned; changes nothing
+opv sync prod                            # step 1 only: secrets written, app unchanged ("pending deploy")
+opv sync prod --deploy                   # steps 1 and 2
+opv sync prod --deploy --prune           # also remove names no longer wanted, after the app is healthy
+```
+
+- **Pending deploy.** `status` and `plan` show a key as pending when the store holds a newer version than the app uses. Config values are only ever set by `--deploy`, so they are pending until then.
+- **Nothing changed.** If every store value matches 1Password and the app already uses the current versions, opv writes and deploys nothing, and creates no new version.
+- **Healthy means ready.** After a deploy opv waits for the new revision to be ready and healthy (Container Apps: the latest ready revision reports `Healthy`; Kubernetes: `kubectl rollout status` succeeds and no new pod is stuck). If it is not healthy, the old revision keeps serving, nothing is pruned, and opv exits 5 with the reason and a `Next:` line. <!-- verify: exit code and wording for an unhealthy revision -->
+- **Prune order.** `--prune` without `--deploy` only lists what it would remove. With `--deploy`, opv removes a name from the app first, waits for the healthy revision, and only then deletes it from the store. It deletes only entries it tagged `opv-managed=<env>`, and only names the configuration declares; other names are counted as unmanaged and left alone.
+- **Drift.** If someone re-pins a variable by hand to another version, `status` reports drift for that key. opv overwrites it only under `--deploy`.
+- **Changed while applying.** opv changes only the variables it manages and checks that the rest of the app did not change under it. If it did, opv stops with the changed setting names (never values), and it is safe to re-run.
+- **Soft-deleted names (Key Vault).** A deleted secret name stays reserved until it is purged, so writing it again fails. opv prints the exact `az keyvault secret recover` command; it never recovers or purges anything itself. <!-- verify: exact recover command text -->
+- **Access.** The app's identity needs read access to the vault secrets. `opv doctor` warns, with the grant command, if it cannot confirm that. If the identity really cannot read a secret, Azure refuses the new revision, the old one keeps serving, and `sync` reports it.
+
+Values reach `az` and `kubectl` only on stdin. On native Windows the Azure writes stop with a message that names WSL; `plan` and `status` work everywhere.
+
+### Progress, summary and next step
+
+Long steps print a progress line on stderr at least every 15 seconds (`waiting for revision ca-myapp--0000002: Provisioning, 45 s`).
+
+Every run that changes something ends with one summary block, then one `Next:` line:
+
+```text
+summary: written 2, deployed yes, pruned 0, pending 0, unchanged 5, skipped 1
+Next: opv status prod
+```
+
+<!-- verify: exact summary and Next: text -->
+Every failure also ends with exactly one `Next:` line holding a command you can run. `--json` carries the same summary object. <!-- verify: --json summary field name -->
+
+### Retries, timeouts and interruptions
+
+- **Reads are retried, writes are not.** A failed read (`op item get`, a list, a status check) is tried up to 3 times, with a 1 s then 2 s pause, printing `retrying az keyvault secret list (2/3) in 2 s`. A refusal such as not found or not signed in is never retried. A write is never repeated blindly: opv reads the target back to see what happened.
+- **One time budget.** `--timeout <secs>` (default 900) caps the whole run, including waits for a revision or rollout. There is no separate deploy timeout.
+- **`--verbose`** prints one stderr line per external call: the program, its arguments, how long it took and the outcome. Values never appear, because they are never in arguments.
+- **Safe to re-run.** Stopping opv at any point (Ctrl-C, a CI cancel, a lost connection) leaves the app working. Run the same command again and it finishes the rest.
+- **Exit 9** means opv cannot tell what happened: a write may or may not have been applied, or 1Password, Fly, Azure or the cluster did not answer after 3 tries (nothing was written). Nothing is known to be broken. Check the provider's status page if one is named, then re-run the same command. CI may retry a job that exits 9.
+- **Exit 130 / 143** means you pressed Ctrl-C or the job was terminated. opv names the step it stopped in.
+
+### Guarded environments
+
+If an environment sets `confirm_env = true` ([configuration](configuration.md#guarding-an-environment-confirm_env)), `sync` refuses (exit 6) unless you repeat the name: `opv sync prod --deploy --confirm prod`. The refusal prints that exact command. `--prune` always lists the names it will remove before it acts.
+
+### Pruning on Fly
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
 
@@ -151,19 +203,19 @@ There is no command that writes a `.env` file or prints `export` lines, on purpo
 |---|---|
 | 0 | success |
 | 2 | configuration error or command-line usage error |
-| 3 | dependency: `op` or `flyctl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
+| 3 | dependency: `op`, `flyctl`, `az` or `kubectl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
 | 4 | 1Password source error (including an `op` timeout) |
-| 5 | Fly target error (including a `flyctl secrets list` timeout, and deploy on an app with no machines) |
-| 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule), or `config export` refused |
+| 5 | target error: Fly, Azure or Kubernetes (including an unhealthy revision or rollout, a change made under opv while it applied, a `flyctl secrets list` timeout, and deploy on an app with no machines) |
+| 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule, or `--confirm` missing), or `config export` refused |
 | 7 | authentication |
 | 8 | findings: `status`, `plan` or `check` found blocking keys |
-| 9 | outcome unknown: a change to the target (or `op item edit`) may or may not have been applied, for example a `flyctl secrets deploy` that timed out; or 1Password or Fly did not respond to a read after 3 attempts (nothing was changed; the message names the step and the status page). Nothing is known to be broken; re-run the same command |
+| 9 | outcome unknown, or a provider did not answer: a change may or may not have been applied (a `flyctl secrets deploy` that timed out, an `az` call that lost its connection), or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command |
 | 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` |
 | 101 | internal panic (Rust default) |
 
 CI may retry a job that exited 9; codes 2 to 8 need a fix first.
 
-Global options: `--timeout <secs>` (default 900) caps the whole run; each `op`/`flyctl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s). A failed read is retried up to 3 attempts with backoff (1 s, then 2 s), printing `retrying <program> <subcommand> (n/3) in <s> s`; a write is never retried. `--verbose` prints one stderr line per call: program, arguments, duration and outcome, never a value.
+Global options: `--timeout <secs>` (default 900), `--verbose` and `--config`. Retries, progress and the per-call limits are described in [Retries, timeouts and interruptions](#retries-timeouts-and-interruptions). Each `op`, `flyctl`, `az` or `kubectl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s).
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 
@@ -173,7 +225,7 @@ Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) o
 - No account on the machine (fresh WSL or Linux) gives the `op account add` command first.
 - With `OP_SERVICE_ACCOUNT_TOKEN` or Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`) set, a failing `op whoami` is ambiguous (rejected token or no network), so it stays a source error (4): "1Password rejected the service-account (or Connect) token or could not be reached: check the token in <variable> and network access". No interactive command is printed.
 - Signed in but the read still failed is a source error (4) naming the vault and item IDs and the identity type (USER or SERVICE_ACCOUNT, never the identity) and saying to grant that identity access to the vault.
-- A failed `flyctl` call with `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` set is a Fly target error (5): "flyctl failed for app <app>: check that the token in <variable> can access it, that the app exists, and, for a deploy, that it has at least one machine". `flyctl auth whoami` is not consulted there, because app-scoped deploy tokens fail it. With no Fly token set, opv runs `flyctl auth whoami` (exit status only; its output names the account and is never shown): logged out is authentication (7), "not logged in to Fly", with `flyctl auth login`, or "set FLY_API_TOKEN" under CI; logged in is a target error (5) with the same app wording.
+- On Fly, a failed `flyctl` call with `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` set is a Fly target error (5): "flyctl failed for app <app>: check that the token in <variable> can access it, that the app exists, and, for a deploy, that it has at least one machine". `flyctl auth whoami` is not consulted there, because app-scoped deploy tokens fail it. With no Fly token set, opv runs `flyctl auth whoami` (exit status only; its output names the account and is never shown): logged out is authentication (7), "not logged in to Fly", with `flyctl auth login`, or "set FLY_API_TOKEN" under CI; logged in is a target error (5) with the same app wording.
 
 `doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. Child stderr is suppressed on purpose, because it could echo a value; a re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
 

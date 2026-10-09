@@ -75,18 +75,22 @@ The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name 
 
 ### One install location
 
-`install.sh` and npm put the same binary in `~/.local/bin/opv`, so either one
-installs or updates it and the shell never runs a stale copy. The npm `opv`
-command is a small wrapper that runs that file. `cargo install` uses
-`~/.cargo/bin`, a different copy. Check what runs:
+The install script and npm put `opv` in the same place, so either one can install or update it and your shell never runs a stale copy:
+
+| OS | Location |
+|---|---|
+| Linux, macOS, WSL | `~/.local/bin/opv` |
+| Windows | `%LOCALAPPDATA%\Programs\opv\opv.exe` <!-- verify: Windows path and PATH handling --> |
+
+`npm i -g @matthew-cochran/opv` copies the binary there when it installs, and `npm uninstall -g` removes it only if opv put it there. It never overwrites a file that is not an opv binary. If you installed with `--ignore-scripts`, opv still runs and tells you once to run `npm rebuild @matthew-cochran/opv`. If `~/.local/bin` is not on `PATH`, the installer prints the line to add. <!-- verify: exact messages -->
+
+`opv doctor` lists every `opv` it finds on `PATH` with its version. More than one different file is a warning with the command that removes the extra one. `cargo install` uses `~/.cargo/bin`, which is a different location: use it only if you do not use the others, then remove the extras:
 
 ```sh
 type -a opv        # every opv on PATH; the first one runs
-opv doctor         # the opv line warns about a real second copy
+rm ~/.cargo/bin/opv   # or: cargo uninstall opv
+hash -r
 ```
-
-If `opv doctor` warns, remove the copy you do not update, for example
-`cargo uninstall opv`, then run `hash -r` so the shell forgets the old path.
 
 ## Verify a download
 
@@ -118,7 +122,19 @@ gh attestation verify opv-x86_64-unknown-linux-musl --repo matt-cochran/1passwor
 
 ## Prerequisites
 
-- The 1Password CLI `op`, tested with 2.40.0. The Fly CLI `flyctl`, tested with 0.4.112 and later 0.4.x patches. `opv doctor` warns (exit code unchanged) when a version differs.
-- For CI: a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, and `FLY_API_TOKEN`.
-- Locally: the 1Password desktop app integration or `op signin`, and `fly auth login`.
+Install only what your target needs; `opv doctor` checks exactly that and prints the install command for your OS.
+
+| Need | Version | For |
+|---|---|---|
+| 1Password CLI `op` | tested with 2.40.0 | everything |
+| `flyctl` | tested with 0.4.112 and later 0.4.x patches | Fly targets |
+| Azure CLI `az` | 2.60 or newer | Azure targets |
+| `kubectl` | a version that matches your cluster | Kubernetes targets <!-- verify: minimum version --> |
+
+`opv doctor` warns (exit code unchanged) when a version differs.
+
+- **Azure on Windows:** writing to Key Vault and the Container App uses `/dev/stdin`, which native Windows lacks. Run opv in WSL for `sync`; `plan`, `status` and `doctor` work natively.
+- **Kubernetes:** opv uses the cluster context named in `secrets.toml`, not your current one. Your kubeconfig must contain it.
+- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials (`FLY_API_TOKEN`; an Azure login such as `azure/login`; a kubeconfig).
+- **Locally:** the 1Password desktop app integration or `op signin`, plus `fly auth login`, `az login` or a working kubeconfig.
 - `item skeleton` is the only command that writes to 1Password; it needs a write-capable identity.
