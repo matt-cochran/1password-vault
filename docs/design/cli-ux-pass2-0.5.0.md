@@ -1,5 +1,7 @@
 # opv CLI UX, pass 2: agents, humans, power and safety
 
+Status: done. Review input for 0.5.0; the adopted findings shipped (CHANGELOG 0.5.0). Kept as a record: the output it quotes predates the release.
+
 Read-only review. Nothing in the repo was edited. No real 1Password, Fly, Azure or cluster was contacted.
 
 **Evidence.** I used the debug binaries already built in the three worktrees, copied so a rebuild could not change them mid-review:
@@ -261,7 +263,7 @@ Effort: S ≤ 1 day, M ≤ 3 days, L > 3 days.
 - **Effort:** M. **Verdict: Recommend.**
 
 **H3. `init` for every provider**
-- **Before:** only `--fly-app` exists. Azure, Kubernetes and `secrets_in` blocks are written by hand (agent-setup has a `<!-- verify -->` marker for exactly this).
+- **Before:** only `--fly-app` exists. Azure, Kubernetes and `secrets_in` blocks are written by hand (agent-setup has a verify marker for exactly this).
 - **After:** one flag shape, `opv init prod --vault V --item I --target fly:myapp`, `--target azure:<rg>/<containerapp> --key-vault kv-x --subscription <guid>`, or `--target k8s:<context>/<namespace>/<deployment>`. Nothing is looked up, the same as `--fly-app` today. `--fly-app` stays as an alias.
 - **Who / journey:** first run on the two providers 0.5.0 adds.
 - **TRIZ:** none.
@@ -578,7 +580,7 @@ Refs are to `opv-ux1` unless marked p1 or login.
 10. `plan` prints `would stage: …` while findings block the sync (exit 8). Make it `would stage once the findings are fixed: …`, or leave the line out.
 11. `wrong kind` never says which way: stored as text against declared secret (status, plan, check, sync refusal).
 12. ux1 still prints `failed enum (not one of the allowed values)`. P9's `expected one of: debug, info` exists only on p1/login.
-13. The summary line omits `held` and `kept`, and does not say why a deploy happened when `written 0` (`src/app/sync.rs:222-236`). The usage.md example (`written 2, deployed yes, …`, commas) does not match the code's ` · ` format and still carries `<!-- verify -->`.
+13. The summary line omits `held` and `kept`, and does not say why a deploy happened when `written 0` (`src/app/sync.rs:222-236`). The usage.md example (`written 2, deployed yes, …`, commas) does not match the code's ` · ` format and still carries verify marker.
 14. `check` prints its count twice: `1 finding(s); no deployment target checked` and then `opv: 1 finding` (`src/app/local.rs:106`). `(s)` plurals remain in `local.rs:106` and in doctor (`field(s)`, `environment(s)`, `key(s)`), while a `plural()` helper exists in `app/mod.rs`.
 15. `confirm_env` is checked before validation, so a guarded env costs two round trips to learn about blocking keys (`src/app/sync.rs:150-167`).
 16. ux1 with no config: `New project? Run opv setup.` and `Next: opv doctor`. The P3 router exists only on p1/login.

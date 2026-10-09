@@ -26,7 +26,7 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 opv --version || curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 op --version        # 1Password CLI; tested with 2.40.0
 flyctl version      # Fly target; tested with 0.4.112 and later 0.4.x patches
-az version          # Azure target; 2.60 or newer (on Windows, run opv in WSL)
+az version          # Azure target; 2.60 or newer
 kubectl version --client   # Kubernetes target
 ```
 
@@ -41,15 +41,15 @@ Ask the user how their secrets are organised, or look at the 1Password item's sh
 
 A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own vault and item. Do not ask the user to rearrange 1Password: opv finds fields wherever they are, and the user's own runs tidy the layout (see [configuration.md](configuration.md#store-layout)).
 
-## 3. Create `secrets.toml`
+## 3. Create the configuration
 
-If the 1Password item already exists, let opv write the file. It looks the vault and item up by title once and writes their IDs, the field names and kinds, never values:
+First check whether the project already has one: `opv doctor` names it on its `config` line (a `secrets.toml`, or a manifest in 1Password found by the git remote). If it has none and the 1Password item already exists, let opv write it. `init` looks the vault and item up by title once and writes their IDs, the field names and kinds, never values. In a new project it saves a manifest in 1Password (ask first; it needs the user's own signed-in session), or with `--file` a `secrets.toml`:
 
 ```sh
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging
 ```
 
-Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same file (comments kept) and includes it in every declared key the item has; give a target only for an environment that deploys (a local-only `dev` environment has none):
+Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same configuration (comments kept) and includes it in every declared key the item has; give a target only for an environment that deploys (a local-only `dev` environment has none):
 
 ```sh
 opv init dev --vault myapp-dev --item myapp --add-env
@@ -63,13 +63,13 @@ opv add api/OPENAI_API_KEY --kind secret --env dev,prod --rule prefix=sk-
 opv add api/ENC_KEY --kind secret --rule base64_bytes=32 --immutable
 ```
 
-Both validate the file before writing and refuse a name that would collide on a target.
+Both validate the configuration before writing and refuse a name that would collide on a target.
 
-In a new project (no `secrets.toml` anywhere above the current directory), `opv init` saves the configuration in 1Password as a project manifest instead of a file, tagged with the git remote, so other checkouts need no file; pass `--file` when the user wants a committed `secrets.toml`. To move an existing file into 1Password, run (with the user's yes) `opv config import --vault <vault>`, then `opv config check --file secrets.toml`, and let the user delete the file. `opv config edit` is interactive: leave it to the user. Without a 1Password session, commands on a manifest end with `Next: opv login`.
+A manifest is tagged with the git remote, so other checkouts need no file; pass `--file` when the user wants a committed `secrets.toml`. To move an existing file into 1Password, run (with the user's yes) `opv config import --vault <vault>`, then `opv config check --file secrets.toml`, and let the user delete the file. `opv config edit` is interactive: leave it to the user. Without a 1Password session, commands on a manifest end with `Next: opv login`.
 
 When two products use the same value, declare it once and point the other key at it with `from = "<product>/<KEY>"` ([configuration.md](configuration.md#shared-keys-from)) instead of asking the user to fill in a second copy.
 
-If there is no item yet, `opv init` run by the user creates it (and the vault, if their account allows it) and writes the IDs. Otherwise write `secrets.toml` from the example in [configuration.md](configuration.md); the user's next opv run creates the empty fields (or, with the user's yes, run `opv item skeleton <env>`).
+If there is no item yet, `opv init` run by the user creates it (and the vault, if their account allows it) and writes the IDs. Otherwise write `secrets.toml` from the example in [configuration.md](configuration.md#the-secretstoml-schema); the user's next opv run creates the empty fields (or, with the user's yes, run `opv item skeleton <env>`).
 
 Then:
 
@@ -162,12 +162,12 @@ opv run dev -- docker compose up             # Compose reads ${VAR} from this en
 - Update the project's README or `package.json` scripts to call `opv run`, for example `"dev": "opv run dev -- next dev"`, so everyone uses the same entry point.
 - `op run` masks secret values the program prints. If the user asks to see a value, point them to the 1Password app; do not unmask it.
 
-More patterns: [usage.md](usage.md#local-development).
+More patterns: [local-development.md](local-development.md).
 
 ## Sign-in and accounts
 
 - If the environments use different 1Password accounts, add `account = "<sign-in address>"` to each environment (ask the user which account holds which vault). The user then signs in with `opv login <env>`; every opv command uses that environment's account.
-- To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that environment's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Not for Kubernetes; Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
+- To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that environment's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Kubernetes uses the user's kubeconfig instead (Azure fields only when its secrets are in a Key Vault through `secrets_in`); Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
 
 ## 7. CI
 

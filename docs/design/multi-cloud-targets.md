@@ -1,7 +1,10 @@
 # Multi-cloud targets: Azure, AWS and GCP
 
-Status: approved by the owner on 2026-10-08. Requirements FR-28 to FR-33 and §8 items 27 to 36 in
-`docs/design/requirements.md` are normative; this document is their argument and the delivery plan.
+Status: approved by the owner on 2026-10-08; as built for 0.5.0. Azure Key Vault + Container Apps,
+Kubernetes and Key Vault → Kubernetes (External Secrets) ship as **preview** until the live smoke
+tests pass; App Service, AWS and GCP are planned (P2 to P4). Requirements FR-28 to FR-33 and
+FR-37 to FR-39 and §8 in `docs/design/requirements.md` are normative; this document is their
+argument and the delivery plan. §11 to §13 describe what was built.
 
 ## 1. Intent
 
@@ -208,13 +211,13 @@ report: written, pending deploy, deployed, pruned, unchanged, unmanaged count
 
 Each phase is one feature branch → `dev` PR → release through staging → main.
 
-| Phase | Owner | Junior tasks |
-|---|---|---|
-| P0 ports + Fly | manager (judgment: interfaces, refactor) | characterization tests; renames once the ports exist |
-| P1 Key Vault + Container Apps | manager wires the engine | `recon` on `az` stdin, versioned refs and YAML update; Key Vault adapter; Container Apps adapter |
-| P2 App Service | Junior | adapter + contract tests |
-| P3 Secrets Manager + ECS | manager reviews | `recon`; two adapters |
-| P4 Secret Manager + Cloud Run | manager reviews | `recon`; two adapters; confirm Cloud Run functions coverage |
+| Phase | Owner | Junior tasks | Status |
+|---|---|---|---|
+| P0 ports + Fly | manager (judgment: interfaces, refactor) | characterization tests; renames once the ports exist | done (0.3.0) |
+| P1 Key Vault + Container Apps | manager wires the engine | `recon` on `az` stdin, versioned refs and YAML update; Key Vault adapter; Container Apps adapter | done (0.5.0, preview), with Kubernetes (§12) and Key Vault → Kubernetes (§13) |
+| P2 App Service | Junior | adapter + contract tests | planned (#40) |
+| P3 Secrets Manager + ECS | manager reviews | `recon`; two adapters | planned (#41) |
+| P4 Secret Manager + Cloud Run | manager reviews | `recon`; two adapters; confirm Cloud Run functions coverage | planned (#42) |
 
 The P1 `recon` result can change §6 details (exact commands, health signals). Any change goes back
 into this document and `docs/design/requirements.md` before the adapter is built.
@@ -232,40 +235,51 @@ ownership tag (FR-32), and P0 characterization tests.
 Decided 2026-10-08 (owner): every provider is pluggable behind one contract, so adding a provider
 changes no core code. Fly, Azure and Kubernetes all implement it.
 
+As built for 0.5.0 (`src/provider.rs`; signatures abbreviated):
+
 ```rust
 /// One deployment provider. Registered once in `adapters::registry::PROVIDERS`.
 pub trait Provider: Sync {
-    /// Config section name under `[environments.<env>]`: "fly", "azure", "kubernetes".
-    fn section(&self) -> &'static str;
+    fn section(&self) -> &'static str;                        // "fly", "azure", "kubernetes"
     fn label(&self) -> &'static str;                          // "Fly", "Azure", "Kubernetes"
-    /// Parses and validates that section (identifiers, templates, required fields, NR-7 scope).
-    /// `Section::deserialize` reports a shape error with the file's line and column (FR-2).
+    fn tools(&self) -> &'static [&'static Tool];              // its CLIs: install lines, status page,
+                                                              // pinned env, not-found phrases
     fn parse(&self, section: &Section<'_>, profile: Profile) -> Result<Box<dyn TargetConfig>, Error>;
-    fn credential_vars(&self) -> &'static [&'static str] { &[] } // e.g. FLY_API_TOKEN, by name
-    fn doctor_checks(&self) -> &'static [&'static str];      // names, for doctor's "skip" lines
-    fn setup_hint(&self, profile: Profile) -> String;          // "configure fly.app ..." (no target)
-    fn init_fields(&self) -> &'static [InitField];                           // `opv init` options (FR-23, H3)
+    fn credential_vars(&self) -> &'static [&'static str];     // e.g. FLY_API_TOKEN, by name
+    fn doctor_checks(&self) -> &'static [&'static str];       // names, for doctor's "skip" lines
+    fn setup_hint(&self, profile: Profile) -> String;         // "configure fly.app ..." (no target)
+    fn init_fields(&self) -> &'static [InitField];            // `opv init --<section>-<field>` (H3)
     fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String>;
+    fn deploy_credential_fields(&self) -> Result<&'static [CredentialField], String>; // FR-40
+    fn deploy_login(&self) -> Result<Box<dyn DeployLogin>, Error>;                    // FR-40
+    fn store_kinds(&self) -> &'static [&'static str];         // `[stores.<name>]` kinds (FR-39)
+    fn parse_store(/* section, kind */) -> Result<Box<dyn StoreConfig>, Error>;
+    fn bindings(&self) -> &'static [StoreBinding];            // other providers' stores it binds
+    fn bind(/* target, store */) -> Result<Box<dyn TargetConfig>, Error>;
 }
 
 /// A validated, provider-specific target. Core code sees only this trait.
 pub trait TargetConfig: fmt::Debug + Send + Sync {
-    fn provider(&self) -> &'static dyn Provider;               // its label names it: "on Fly"
+    fn provider(&self) -> &'static dyn Provider;
     fn env_name(&self, product: &str, key: &str) -> String;   // runtime env var name
     fn store_name(&self, env_name: &str) -> String;           // name in the store
-    fn name_rules(&self) -> NameRules;                        // patterns, case sensitivity, limits (FR-30)
+    fn name_rules(&self) -> NameRules;                        // patterns, case, limits (FR-30)
+    fn secrets_in(&self) -> Option<&dyn StoreConfig>;         // a named store (FR-39)
     fn same_target(&self, other: &dyn TargetConfig) -> bool;  // two environments sharing one target
-    fn shared_target_error(&self, first: &str, second: &str) -> String; // its FR-8 message
+    fn shared_target_error(&self, first: &str, second: &str) -> String;
     fn open<'a>(&'a self, env: &'a str, managed: BTreeSet<String>, r: &'a dyn CommandRunner)
-        -> Result<Ports<'a>, Error>;                           // managed: template env names (FR-8)
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<(), Error>;  // NR-23..NR-26, read-only
+        -> Result<Ports<'a>, Error>;                          // managed: template env names (FR-8)
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error>;
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)>;
-    fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;       // whole-config equality
+    fn explain_config(&self, product: &str, key: &str) -> Option<Vec<(&'static str, String)>>;
+    fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;
     fn as_any(&self) -> &dyn Any;
     fn clone_box(&self) -> Box<dyn TargetConfig>;
 }
 ```
+
+`preflight` runs in two modes (NR-25): `Mutate` (sync) may wait, with progress, for an update in progress; `Read` (status, plan, doctor) never waits and returns a warning instead. Warnings are returned as checks and printed one line each.
 
 As implemented (Task P): `open` returns `Result` (a provider whose adapters are not wired in
 yet refuses with `Error::Config`); `doctor` takes the host so install hints and token checks
@@ -277,11 +291,10 @@ suggests when an environment has no target (and the one `init` writes): Fly in 0
 Review fixes (Task P): a provider section is read through `Section::deserialize`, which keeps
 the TOML source positions, so a missing, unknown or mistyped field shows the line, column and
 field exactly as 0.4 did; unknown entries under an environment and the two-provider error point
-at their line too. `preflight` returns `Result<(), Error>`: the warning concept waits for the
-preflight task (R2), which decides where warnings print. `tools()` had no caller and is gone; a
-provider's CLI is a `host::Tool` value (program and install line per platform) declared in its
-own module, and its credential variables come from `Provider::credential_vars`, so `host.rs`
-names no provider.
+at their line too. A provider's CLI is a `host::Tool` value (program, install line per platform, status page,
+pinned environment, not-found phrases) declared in its own module and returned by
+`Provider::tools`, and its credential variables come from `Provider::credential_vars`, so
+`host.rs` names no provider.
 
 Integration (Key Vault + Container Apps): `open` also takes the managed env names (FR-8), which
 the pinned adapters need to recognise what they own. Every store port speaks runtime env names;
@@ -352,8 +365,11 @@ config     = "env"                         # or "store" (a ConfigMap-free design
 - **Access** (FR-33 as amended by R6): the Deployment's ServiceAccount needs no secret access
   (kubelet mounts the env); `doctor` checks the operator's own rights with
   `kubectl auth can-i` for get/create/delete/list secrets, get/update deployments and list
-  replicasets and pods; a missing right is a warning naming the `create role` /
-  `create rolebinding` commands that grant exactly it.
+  replicasets and pods. As built, every right a sync needs is required: `doctor` fails a
+  missing one naming the `create role` / `create rolebinding` commands that grant exactly it,
+  and `sync` refuses before its first write without the rights only a deploy uses (delete
+  Secrets or ExternalSecrets, list ReplicaSets and Pods). Removing superseded versions after a
+  healthy deploy is a warning when it fails, never the run's result.
 
 As implemented (provider plug-in): `src/adapters/kubernetes/config.rs` holds the section, its
 `TargetConfig` and the doctor checks (`kubectl`, `kubernetes context`, `kubernetes cluster`,

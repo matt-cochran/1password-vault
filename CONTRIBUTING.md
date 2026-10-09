@@ -11,8 +11,9 @@ cargo build
 ## Prerequisites
 
 - Rust 1.88 or newer (`rust-version` in `Cargo.toml`).
-- `op` (1Password CLI) and `flyctl` are only needed for manual testing. The test
-  suite uses fakes and does not call either tool.
+- `op` (1Password CLI), `flyctl`, `az` and `kubectl` are only needed for manual testing.
+  The test suite uses fakes and recorded CLI output and calls none of them.
+- Node.js, `shellcheck` and `bash` for the packaging and install-script checks.
 
 ## Checks
 
@@ -25,11 +26,12 @@ cargo test --locked --features fake
 cargo deny check
 ```
 
-When you change `install.sh`, also run:
+CI also runs the install-script and npm packaging checks:
 
 ```sh
 shellcheck install.sh
 bash tests/install/test_install.sh
+node --test 'packaging/npm/**/*.test.js'
 ```
 
 ## Branch flow
@@ -81,6 +83,21 @@ A provider is one module; no core code changes (FR-37, `docs/design/multi-cloud-
 3. Register it: `pub mod <provider>;` in `src/adapters/mod.rs` and one line in `src/adapters/registry.rs`.
 4. Extend the guard test so `app/`, `domain/` and `config.rs` do not name the new module.
 5. Add the marker-value test (no value in argv), the interruption matrix (a run cut at every call converges on a clean re-run, and the cut run exits 0 or 9), and the docs: a section in `docs/configuration.md`, the prerequisite in `docs/install.md`, and the changelog.
+
+## Documentation
+
+Generate, don't guess: copy command output from a real run (the fake CLIs in the tests, or stub scripts), never from memory. Each fact has one home, and other pages link to it:
+
+| Page | Holds |
+|---|---|
+| `README.md` | what opv is, the quick start, the target table |
+| `docs/usage.md` | every command and flag, the JSON contract, exit codes |
+| `docs/configuration.md` | configuration sources, the schema, every target section, rules |
+| `docs/how-opv-handles-failures.md` | retries, time limits, exit 9, `Next:`/`Do:`, interruptions |
+| `docs/local-development.md`, `docs/guided-setup.md` | the local and guided journeys |
+| `docs/agent-setup.md`, `llms.txt` | the AI assistant journey; `opv guide agent` prints `agent-setup.md` from the binary |
+
+`tests/docs_commands.rs` runs every `opv ...` line in a shell code block of these pages through the real parser, ties the GitHub Actions example's pin to `Cargo.toml`, and checks the error-code table in `docs/usage.md` against the code (regenerate it with `UPDATE_DOCS=1 cargo test --features fake --test docs_commands`).
 
 ## Design decisions
 

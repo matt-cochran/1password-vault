@@ -16,7 +16,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.3.0   # install exactly this release (default: latest)
+sh install.sh --version v0.5.0   # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -137,4 +137,4 @@ Install only what your target needs; `opv doctor` checks exactly that and prints
 - **Kubernetes:** opv uses the cluster context named in `secrets.toml`, not your current one. Your kubeconfig must contain it.
 - **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials: a `deploy_credentials` item in that vault (Fly or Azure), the CI provider's OIDC federation (such as `azure/login`), `FLY_API_TOKEN`, or a kubeconfig.
 - **Locally:** `opv login <env>` (or the 1Password desktop app integration), plus `deploy_credentials` or `fly auth login`, `az login` or a working kubeconfig.
-- `item skeleton` is the only command that writes to 1Password; it needs a write-capable identity.
+- **Writes to 1Password:** the layout tidy, `setup` and every manifest write (`init` in a new project, `add`, `config import`, `config edit`) need a person signed in with their own session; `item skeleton` needs an identity that may edit the item. A read-only service account is enough for everything else, CI included.

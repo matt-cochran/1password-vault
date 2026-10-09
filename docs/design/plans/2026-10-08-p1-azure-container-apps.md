@@ -1,5 +1,7 @@
 # 0.5.0: Resilience, Provider Plug-ins, Azure (Key Vault + Container Apps) and Kubernetes — Implementation Plan
 
+Status: done for 0.5.0, including Task 9 (docs, changelog, version). Task 10 (live smoke tests and the release) is the owner's; until it passes, Azure, Kubernetes and Key Vault → Kubernetes are documented as preview.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `opv plan|status|sync <env>` work for an environment whose target is Azure Key Vault (secrets) plus an Azure Container App (runtime), with pinned Key Vault references, config as env vars, and no change to Fly behaviour. Also: resilience NR-1..NR-30 for every provider, a provider plug-in contract (FR-37), and a Kubernetes target (FR-38). Released as opv 0.5.0 (issue #39; Kubernetes gets its own issue).
@@ -14,7 +16,7 @@
 
 ## Global Constraints
 
-- **CLI ergonomics first (owner, 2026-10-08).** The command surface set by PR #63 (`docs/cli-ux-review.md`) is the baseline: one visible starting point per task, ask only for choices that matter, every failure says what happened, what was preserved and the next safe step, automation contracts (row states, JSON, exit categories) stay stable. A new flag needs a reason a good default cannot meet; prefer one knob over two. Provider choice never changes the commands a user types: `opv check|status|plan|sync|run <env>` behave the same for Fly, Azure and Kubernetes.
+- **CLI ergonomics first (owner, 2026-10-08).** The command surface set by PR #63 (`docs/design/cli-ux-review.md`) is the baseline: one visible starting point per task, ask only for choices that matter, every failure says what happened, what was preserved and the next safe step, automation contracts (row states, JSON, exit categories) stay stable. A new flag needs a reason a good default cannot meet; prefer one knob over two. Provider choice never changes the commands a user types: `opv check|status|plan|sync|run <env>` behave the same for Fly, Azure and Kubernetes.
 
 - Fly behaviour is byte-identical except where an NR task changes it on purpose: the 14 golden transcripts in `tests/fixtures/characterization/` change only in Tasks R1–R3, each regenerated once with `UPDATE_GOLDEN=1` in its own commit whose message lists every transcript change and the NR it implements. Every other task leaves them untouched.
 - Provider plug-ins (FR-37): after Task P, `app/`, `domain/` and `config.rs` never name a provider; every provider lives under `src/adapters/<provider>/` and is registered in one line.
@@ -718,7 +720,7 @@ First-run router (no config → init vs setup choice; `opv setup` without a reci
 ### Task 9: Docs, requirements, changelog, version 0.5.0 (Azure, Kubernetes, resilience, plug-ins)
 
 Owner (2026-10-08): improve the documentation and align it with the current state before wrapping up. After every branch is merged:
-- Regenerate, don't guess: capture real `--help` and command output from the release binary (stub CLIs) for every command; rewrite README, docs/usage.md, configuration.md, install.md, local-development.md, guided-setup.md, agent-setup.md, llms.txt and CONTRIBUTING from it; resolve every `<!-- verify -->`.
+- Regenerate, don't guess: capture real `--help` and command output from the release binary (stub CLIs) for every command; rewrite README, docs/usage.md, configuration.md, install.md, local-development.md, guided-setup.md, agent-setup.md, llms.txt and CONTRIBUTING from it; resolve every verify marker.
 - Right content in the right place: README (what, quick start, accurate provider table: preview vs supported per Task 10), usage (all commands, exit codes incl. 9 and 130/143), configuration (every provider section, `[stores]`, `secrets_in`), a short "how opv handles failures" page (retries, exit 9, `Next:`, scrubbed stderr), CONTRIBUTING "adding a provider".
 - Design docs current: requirements FR-28..FR-39, NR-1..NR-31, SR-1 as amended; multi-cloud design = as built; plans/spikes marked done; docs/design/README index; CHANGELOG 0.5.0 complete with every contract change called out.
 - Drift guard: a test that extracts every `opv …` command line from the docs and checks the real CLI parser accepts it.

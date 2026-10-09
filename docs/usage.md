@@ -1,133 +1,85 @@
 # Using opv
 
-## Workflow
+Every command and flag, what each prints, the JSON contract and the exit codes. `opv <command> --help` shows the same for the version you run, and `opv schema` prints it as JSON. Where the configuration comes from and what it holds is in [configuration](configuration.md); retries, exit 9, `Next:`/`Do:` and interruptions are in [how opv handles failures](how-opv-handles-failures.md).
 
-Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the flag wins). Without either, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config` or `OPV_CONFIG`, the path is used exactly as given and no search is done; a path from `OPV_CONFIG` is announced as `using <path> (from OPV_CONFIG)` on stderr. `init` refuses both, because it always writes `./secrets.toml`; `init --add-env` and `add` edit the configuration found this way, file or [manifest](configuration.md#configuration-in-1password). `<ENV>` is an environment name from the file.
+## Commands
 
-`OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env`, `explain` and `open` (where a bare `KEY` means `$OPV_PRODUCT/KEY`), `status` (with or without `<ENV>`) and `plan`. It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
+| Command | What it does | Changes |
+|---|---|---|
+| `opv login [<env>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
+| `opv doctor [--env <env> [--product <p>]] [--json]` | find setup problems and show the next step | nothing |
+| `opv check <env> [--product <p>] [--json]` | are the keys saved and valid? no target is contacted | nothing |
+| `opv status [<env>] [--product <p>] [--all] [--json]` | 1Password and the target side by side, names only | nothing |
+| `opv plan <env> [--product <p>] [--json]` | what a sync would do, and its plan id | nothing |
+| `opv sync <env> [--deploy] [--prune] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json]` | write to the target; deploy only with `--deploy` | the target |
+| `opv run <env> [--product <p>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)) | nothing |
+| `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
+| `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
+| `opv init <env> --vault <title> --item <title> [target options]` | configuration from an existing item ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
+| `opv add <[product/]KEY> --kind secret\|config [...]` | declare a key, or add environments to one | the configuration |
+| `opv item skeleton <env> [--json]` | add every missing declared field to the item, empty | the 1Password item |
+| `opv config export [<env>] [--toml\|--json]` | print the configuration, or an environment's config values | nothing |
+| `opv config import --vault <v> [--file <f>] [--project <p>] [--path <dir>]...` | save a `secrets.toml` as the project manifest | 1Password (a new manifest) |
+| `opv config edit` | edit, validate, diff and save the configuration | the configuration; needs your own terminal |
+| `opv config check --file <f>` | compare a committed copy with the manifest | nothing |
+| `opv projects [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
+| `opv help states`, `opv help <command>` | what each state word means; a command's help | nothing |
+| `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
+| `opv schema` | the installed binary as one JSON document | nothing |
+| `opv guide agent` | the setup guide for AI assistants, for this version | nothing |
 
-Every command's `--help` lists its own options first, then the global options (`--config`, `--timeout`, `--verbose`, `--color`) under `Global options:`, then a few examples.
+"Nothing" means nothing on your targets and no change to what a value means. Run by a person signed in with their own session, a command that reads an item may also tidy its 1Password layout once (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
+
+`sync` also takes `--rotate <product/KEY>` and `--prune-immutable <product/KEY>` for immutable keys (both repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)).
+
+### Global options and environment
+
+| Option | Environment | Meaning |
+|---|---|---|
+| `--config <PATH>` | `OPV_CONFIG` | use this `secrets.toml`; otherwise the configuration is [discovered](configuration.md#how-opv-finds-the-configuration) and stderr says `using ...` |
+| | `OPV_PROJECT` | use the manifest of this project (`opv · <name>`) |
+| | `OP_ACCOUNT` | the 1Password account to find a manifest in (an environment's own `account` is used for its reads) |
+| | `OPV_PRODUCT` | default for `--product` on `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env`, never `sync`; stderr says `product <p> (from OPV_PRODUCT)` |
+| `--timeout <SECS>` | | budget for the whole run (default 1800); see [time limits](how-opv-handles-failures.md#time-limits-and-progress) |
+| `--verbose` | | one stderr line per call to `op` or the target CLI, with its scrubbed stderr |
+| `--color auto\|always\|never` | `NO_COLOR` | colour state words (`ok`, `warn`, `FAIL`, `saved`, `missing`, ...) on a terminal; JSON and values never |
+
+A typical session:
 
 ```sh
-opv login prod                      # sign in to prod's 1Password account; opens a signed-in terminal
-opv doctor                          # config, op and sign-in, flyctl and sign-in, op local run
-opv doctor --env dev --product allumata   # only what local work in dev needs, plus one read of its item
-opv doctor --json                   # the same checks as one JSON document
-opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # configuration from an existing item (manifest; --file for secrets.toml)
-opv init prod --vault myapp-prod --item myapp --add-env --target kubernetes \
-  --kubernetes-context prod --kubernetes-namespace myapp --kubernetes-deployment web   # one more environment
-opv add api/STRIPE_KEY --kind secret --env staging,prod --rule prefix=sk_   # declare a key; comments kept
-opv item skeleton staging           # add every missing declared field, empty (your own runs do this too)
-opv status                          # one line per environment, run-only ones included
-opv status --json                   # the same as one JSON document
-opv status staging                  # one row per product and key; exit 8 if any blocks
-opv status staging --product api    # one product's rows, totals and findings
-opv status staging --json           # the same state as one machine-readable JSON document
-opv plan staging                    # what a sync would stage, hold and prune, and the command to run
-opv plan staging --json             # the same plan as one machine-readable JSON document
-opv sync staging [--deploy] [--prune] [--product P] [--confirm staging] [--json] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
-opv config export staging --json    # config-kind values as JSON
-opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
-opv open allumata/OPENAI_API_KEY --env prod      # open the key's item in 1Password to fill it in
-opv help states                     # what each state word means
-opv check dev --product allumata    # each key saved, missing or failing a rule; exit 8 if any
-opv run dev --product allumata -- cargo run
-opv run prod -- ./server            # simple profile: no --product
+opv login dev                         # sign in to dev's 1Password account; type exit to leave
+opv doctor --env dev                  # what dev needs, plus one read of its item
+opv check dev --product api           # api's keys saved and valid? no target touched
+opv run dev --product api -- npm run dev
+opv status                            # one line per environment
+opv status staging                    # one row per key, problems first
+opv plan staging                      # what a sync would write, hold and prune, and its plan id
+opv sync staging --deploy --expect-plan 674d43e2   # exactly that plan, then deploy
 ```
 
-1. `init` writes the configuration from an existing item (in a new project, a manifest in 1Password; with `--file`, or when a `secrets.toml` is already there, that file), `init --add-env` adds an environment to it and `add` declares a key in it, all without hand-editing (see [configuration](configuration.md#declare-a-key-opv-add)). `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
-2. `status` shows what is missing or failing a rule, problems first, each with its reason, its declared `guidance` and an `open:` link to its item in 1Password ([Open a key in 1Password](#open-a-key-in-1password)). It prints names, never values. Its first line counts the rows: `staging: 12 keys · 10 saved · 1 skipped · 1 finding · 2 not yet on Fly`. The state words are listed in [States](#states).
-3. `plan` shows the same rows plus the target side, then names what a sync would do and ends with the command that does it (see [Plan](#plan)). It changes nothing on your targets; when you're signed in it may tidy the 1Password layout ([tidy](configuration.md#store-layout)).
-4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app stops it with nothing written. A Fly deploy already running is waited for: opv reads the releases again every 5 s, prints `waiting for the running Fly deploy of <app> (release vN) to finish, 15 s` on stderr at least every 15 s, and goes on once it has finished; if it is still running when the `--timeout` budget is nearly spent (or after 10 minutes), opv stops with nothing written and a `Next:` line. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
-5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
-6. `config export <ENV>` prints the config-kind values for deployment tooling as JSON, the only format with an environment (`--json` is accepted). A config key stored in a concealed field shows as `<concealed in 1Password>`, never its value (`status` warns about it once). On failure stdout is the [failure document](#json-contract) instead. Without an environment, `config export` prints the configuration itself (TOML, or JSON with `--json`; no values).
-7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing or failing a rule. A failing key's declared guidance is printed under it as `  guidance: <text>`. `--json` prints `schema_version`, `ok`, `environment`, `product`, `target_checked: false`, `rows` (the [shared row shape](#machine-readable-status-and-plan); `target` and `action` are `null`), `findings` and `totals`.
-8. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. It writes no `.env` file. opv's options go before `--`; a COMMAND that starts with `-` without `--` in front of it (`opv run dev --json -- true`) is refused as a usage error (exit 2) whose `Next:` drops the stray flag, and `run` takes no `--json`. See [Local development](#local-development).
+## Status, plan and sync
 
-### Next step
-
-Every command that fails (any exit code other than 0, except `run`, which passes the command's own code through) ends with exactly one `Next:` line, the last line on stderr. `Next:` is always one command that runs as typed: no prose, no placeholders, no parentheses. When something only a person can do comes first (fill a value in 1Password, sign in, approve a guarded environment), it is on its own `Do:` line right before `Next:`:
+`status` shows what is missing or failing a rule, problems first, each with its reason, its declared `guidance` and an `open:` link to its item in 1Password. `plan` adds what a sync would do and ends with the command that does it. `sync` writes. All three read the environment's item once, by IDs, and print names, never values.
 
 ```text
-opv: policy denied: sync refused, nothing staged: api/OPENAI_API_KEY (missing)
-Do: fix api/OPENAI_API_KEY in 1Password
-Next: opv explain api/OPENAI_API_KEY --env prod
-```
-
-```text
-opv: 1 finding
+$ opv status prod
+prod: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
+PRODUCT  KEY             KIND    STATE                                             TARGET
+api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
+    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field LOG_LEVEL)
+api      OPENAI_API_KEY  secret  missing                                           unknown
+    guidance: OpenAI platform / API keys
+    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field OPENAI_API_KEY)
+unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
+opv: 2 findings
 Do: fix the keys above in 1Password
-Next: opv open api/DATABASE_URL --env dev
+Next: opv open api/LOG_LEVEL --env prod
 ```
 
-For findings (`status`, `plan`, `check`; exit 8) the step opens the first key to fix in 1Password; the `open:` lines above it link every one.
+The first line counts the rows. `status`, `plan` and `check` exit 8 when a key is missing or failing a rule. On Azure and Kubernetes, `status` also prints when opv last changed the target (`Azure: last changed by opv 0.5.0 at 2026-10-08T14:02:11Z (plan 7f3c9a1e)`) and reports drift.
 
-When the failure came from an external call, what that program wrote on stderr (at most 5 lines, every secret masked as `__SECRET__`) sits between the error line and `Do:`/`Next:`:
-
-```text
-opv: target error: az keyvault secret list failed for kv-prod
-  az said: ERROR: (Forbidden) The user does not have secrets list permission
-Next: opv sync prod
-```
-
-When the fix is not a command, `Next:` is the command you ran, to run again once the `Do:` step is done. A usage error ends with the help of the command you ran instead (`Next: opv config check --help`), because running the same line again cannot work. A misspelt environment or product, or an undeclared key, ends with the same command on the closest declared name (`Next: opv status prod --product api`), or with `opv status` when no name is close. An outcome that is unknown (exit 9) or an interruption (130/143) ends with the same command line: re-running it is safe, `--expect-plan <id>` included. A command that needs your own terminal (`opv setup`, `opv login`, `opv config edit`) says so on `Do:` and names itself, with your arguments, on `Next:` (`Next: opv login prod`). Scripts and AI assistants can rely on the patterns `^Do: ` and `^Next: `. On Windows, words in `Next:` are quoted for PowerShell (a word with a space, `,`, `%` or a leading `@` is in double quotes); cmd.exe still expands `%NAME%` inside quotes, so run such a line from PowerShell. Guidance from the configuration is labelled `guidance:` and is never a `Next:` line. With `--json`, the same `do` and `next` are fields of the [failure document](#json-contract).
-
-`doctor` prints one line per check; a failing check has its fix on the line under it (`  fix: ...`) when the fix is not already in its text. When a check fails, `doctor` exits with the first failing check as the error, and its `Next:` line is that check's fix:
-
-```text
-FAIL  op auth: authentication error: not signed in to 1Password
-...
-opv: authentication error: op auth check failed (see the FAIL line above)
-Do: sign in: opv login
-Next: opv doctor
-```
-
-On a machine a person signs in from (not CI, no service-account token) the sign-in step is `opv login <env>` (`opv login` when doctor has no `--env`), the same in every shell. Under CI it is the service-account wording instead.
-
-With `--env`, doctor also reads that environment's item once, by IDs, and checks the selected product's keys as `check` does: `ok    item: <vault_id>/<item_id> readable (<n> fields in section <product>)`, or a `FAIL  item:` line naming each key that is missing or failing a rule, with `Do: fill them in 1Password` and `Next: opv check <env> --product <p>` (exit 8). So doctor is never all clear when `check` would fail. Without `--env` no item is read.
-
-`--json` prints `{"schema_version": 1, "ok", "checks": [{"name", "status": "ok"|"warn"|"fail"|"skip", "detail", "next", "do"}], "next", "do"}`: `detail` is the check's first line (names, versions and commands only); a check with something to do has `do` (the action only a person can take, or `null`) and `next` (a command), both `null` otherwise; the top-level pair is the first failing check's, or `null` when nothing is pending. On failure the document also carries `exit_code` and `error` ([JSON contract](#json-contract)). The exit code is the same as without `--json`; on failure stderr still ends with the `Do:`/`Next:` lines.
-
-With no `secrets.toml` at all, the step is `Do: fill in and run: opv init <env> --vault <vault title> --item <item title>` for an existing item; the config line also lists `opv setup` for a project that ships `opv.setup.toml` and `--config <path>`. An invalid configuration gets the specific edit on `Do:` (for example `Do: add environments = ... under [products.api.keys.A]`); another failure with no command of its own gets `Do: fix the <check> failure above`; both end with `Next: opv doctor`. When every check passes, the last line is `all clear: nothing pending`. The lines are text, never a prompt.
-
-### Shared keys
-
-A key declared with `from = "<product>/<KEY>"` ([configuration](configuration.md#shared-keys-from)) has a row of its own in `status`, `plan` and `check`, with the source under it:
-
-```text
-PRODUCT  KEY           KIND    STATE              TARGET
-api      DATABASE_URL  secret  missing            new
-    affects worker/DATABASE_URL
-    guidance: Neon / connection string
-worker   DATABASE_URL  secret  blocked by source  new
-    shared from api/DATABASE_URL
-```
-
-A missing or failing source is one finding, reported on the source with the keys it affects; the sharing keys read `blocked by source` and are not counted again. `check --product worker` and `status --product worker` include the source's row, because worker's key depends on it. JSON rows carry `"shared_from": "api/DATABASE_URL"` and the state `source_blocked`. `explain worker/DATABASE_URL` shows the source's `op://` reference and `shared from:`; `explain api/DATABASE_URL` lists `shared by:`.
-
-### Explain a key
-
-```sh
-opv explain <product>/<key> [--env <environment>]
-```
-
-`explain` prints what the configuration declares for one key in one environment: the `op://` reference, the field kind, the target name, the declared rules, `immutable` and `guidance`, plus an `op item get <item_id> --vault <vault_id>` command you can run in your own terminal to look at the item. That command never contains `--reveal`.
-
-```text
-allumata/OPENAI_API_KEY in prod
-  reference:  op://vprd/iprd/allumata/OPENAI_API_KEY
-  kind:       secret (concealed field)
-  fly name:   FLEET__ALLUMATA__OPENAI_API_KEY
-  rules:      prefix = "sk-", not_prefix = "sk-or-"
-  immutable:  no
-  guidance:   OpenAI platform / API keys
-  inspect:    op item get iprd --vault vprd
-  open:       opv open allumata/OPENAI_API_KEY --env prod
-```
-
-Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. Other providers show their own rows (`env name:`, `key vault name:`, ...), and every value starts in one column. An environment without a target section shows `target:     none (run-only)`. The fleet form `<product>/<key>` is a configuration error under the simple profile that names the bare key (`did you mean KEY?`). Under the fleet profile a bare `<KEY>` resolves to the one product that declares it; when several do, the error lists them (`ambiguous key "KEY": declared as api/KEY, web/KEY`). An undeclared key or product suggests the closest declared names; when exactly one is close, the `Next:` line is `opv explain <that name>`.
-
-It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
+`sync` refuses (exit 6) and writes nothing while any key is missing or failing a rule, naming every blocking key and the `opv explain` command for them, and it checks the target read-only before its first write ([checks before the first write](how-opv-handles-failures.md#checks-before-the-first-write)). Nothing is deployed without `--deploy` and nothing removed without `--prune`. `--rotate <product/KEY>` (repeatable) writes an immutable key that is already on the target; `--prune-immutable <product/KEY>` (repeatable) lets `--prune` remove one. On Fly, values are staged with `flyctl secrets import --stage`, values on stdin.
 
 ### States
 
@@ -170,87 +122,6 @@ The link is 1Password's private item link, the form "Copy Private Link" produces
 
 `opv open` resolves the key as `explain` does (a bare `KEY` under one product, `--env` optional with one environment), prints its section and field and the link, and opens the link with the desktop's opener: `xdg-open` (Linux with a display), `wslview` (WSL), `open` (macOS) or `rundll32 url.dll,FileProtocolHandler` (Windows). The opener gets the link as its only argument; no shell is involved. Over SSH, under CI, on a machine without a display, or with `--print` it only prints the link, which is what an assistant should show its user. It never reads the item. A shared key (`from = ...`) opens its source's field. `--json` prints `{environment, product, key, section, field, open_url}` and opens nothing.
 
-### Machine-readable status and plan
-
-`status <ENV> --json` and `plan <ENV> --json` print exactly one JSON document on stdout
-and nothing else. It contains names, states and counts only: no value, no value fragment,
-no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
-and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
-[failure document](#json-contract). The top-level `schema_version` is `1`; adding a field
-keeps it, while renaming or removing a field, or changing its meaning, increments it.
-
-```json
-{
-  "schema_version": 1,
-  "ok": true,
-  "environment": "prod",
-  "product": null,
-  "changes": "some",
-  "rows": [
-    {
-      "product": "allumata",
-      "key": "OPENAI_API_KEY",
-      "kind": "secret",
-      "state": "saved",
-      "rule": null,
-      "reason": null,
-      "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "target": "absent",
-      "action": "would_stage"
-    }
-  ],
-  "extras": [],
-  "stage": ["FLEET__ALLUMATA__OPENAI_API_KEY"],
-  "held": [],
-  "prune": [],
-  "totals": { "rows": 1, "findings": 0, "extras": 0, "to_stage": 1, "held": 0, "to_prune": 0 },
-  "plan_id": "7f3c9a1e",
-  "next": "opv sync prod --deploy --expect-plan 7f3c9a1e",
-  "do": null
-}
-```
-
-`state` is `saved`, `missing`, `failing_rule`, `skipped` or `source_blocked`; `rule` names the
-failing rule when `state` is `failing_rule`, and `reason` says why (see
-[Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
-target for every provider (`fly_name` holds the same value and is kept for older scripts; it
-is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
-a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
-in the same key order, is used by `status`, `plan` and `check`. With `--product`,
-the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
-totals. `next` is the sync command for `plan`, `null` for `status`. `plan --json` adds
-`"plan_id"` when nothing blocks ([`--expect-plan`](#review-then-apply-exactly-that-plan---expect-plan)),
-and `status --json` on Azure or Kubernetes adds `"provenance": {"opv_version", "written",
-"plan_id"}` once opv has stamped the target. The document is meant for the scheduled drift
-check.
-
-`opv status --json` without an environment prints one entry per environment:
-`{"product", "environments": [{"name", "target", "state": "checked"|"run_only"|"not_checked", "keys", "saved", "skipped", "findings", "error_code", "error"}], "totals": {"environments", "findings"}}`. Run-only environments are read too (`state: "run_only"`, `target: null`).
-
-Two fields arrived in 0.5.0. `changes` is `some` when a sync would certainly change the
-target (a new or changed key, a prune, a pending binding), `unknown` when only keys whose
-values the target hides (Fly) would be staged, and `none` otherwise; a nightly drift job
-can alert on `some`. A missing or failing row also carries `open_url`, the 1Password item
-link to fix it in (IDs only); `check --json` rows carry it too.
-
-A shared key's row carries `shared_from` (`api/DATABASE_URL`) and, while its source has a
-finding, the state `source_blocked`. When a person's run tidied the item (FR-43),
-`status`, `plan` and `check` documents carry `tidy`, a list of `{action, name}` (names
-only; omitted when nothing was tidied). A tidy that was tried and did not complete puts
-its error code in `tidy_error` (`tidy_conflict` when the item changed twice meanwhile or
-another edit landed together with opv's, `tidy_unverified` when the item read back lacks
-a field opv wrote or kept); the command itself still succeeds or fails on its own result.
-opv never tidies an item holding an attachment, a website list, a one-time password, an
-SSH key or any other field type it does not rewrite exactly; it says so in one note.
-
-### One product: `--product`
-
-`status`, `plan` and `sync` take `--product <p>` under the fleet profile:
-
-- `status` and `plan` show only that product's rows; the count line, the totals and the exit-8 findings count that product only, so another team's missing key does not turn your status red. `OPV_PRODUCT` is the default for both.
-- `sync --product <p>` writes, prunes and deploys only that product's managed names; `--prune` never removes another product's name, and another product's missing key does not block it. A Fly deploy still restarts the whole app with every staged change: when another product has staged changes waiting, sync prints `pending for other products: web/TOKEN (FLEET__WEB__TOKEN); a deploy restarts the app with them too`. `OPV_PRODUCT` is never used by `sync`.
-
 ### Every environment: `opv status`
 
 Without an environment, `status` prints one line per environment, in name order:
@@ -284,21 +155,11 @@ web: vault acme-dev; repo github.com/acme/platform; paths apps/web
 $ opv projects --long          # adds "environments dev, prod" (one read per project)
 $ opv status --all
 api (vault acme-dev):
-  dev: run-only (no target)
+  dev: run-only · 6 keys · 5 saved · 0 skipped · 1 finding
   prod: 14 keys · 13 saved · 1 skipped · 0 findings · 0 not yet on Fly
 ```
 
 `projects` makes one metadata listing per 1Password account op knows (no manifest is read unless `--long`). `status --all` reads each manifest once and then does what `opv status` does per environment, with the usual read retries; a project that cannot be read is one line `name (vault V): not read (<reason>)` and the others still run. `status --all --product <p>` (or `OPV_PRODUCT`) lists only the projects that declare `<p>` and counts only its keys. Its `Next:` is a command (never an error's prose) and names the project, so it runs from any directory: `Next: env OPV_PROJECT=myapp opv status dev`. In `--json`, an environment that could not be read carries that command as `next`. Both take `--json`. Names only, never values.
-
-### Configuration commands
-
-| Command | What it does |
-|---|---|
-| `opv config export [--toml\|--json]` | print the configuration (no values) |
-| `opv config export <env> --json` | that environment's config-kind values |
-| `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
-| `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
-| `opv config check --file F` | exit 8 with a diff when a committed copy differs from the manifest |
 
 ### Plan
 
@@ -349,7 +210,7 @@ Next: opv plan prod
 
 Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. `plan` therefore shows a desired key that is already on Fly as `unknown`. An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows `same` or `changed` instead.
 
-Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Deploying an app that has no machines exits 5.
+Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. An app with no machines skips the deploy with a notice ([checks before the first write](how-opv-handles-failures.md#checks-before-the-first-write)).
 
 ### Sync on Azure and Kubernetes
 
@@ -387,11 +248,9 @@ With `secrets_in` (see [configuration](configuration.md#secrets-in-a-named-store
 - **Clean-up.** After a healthy rollout opv deletes the ExternalSecrets (and with them their Secrets) that neither the Deployment nor any ReplicaSet references, so `kubectl rollout undo` keeps working. `--prune` deletes a pruned key's ExternalSecrets first and its Key Vault entry after. Key Vault keeps old versions as history.
 - **`status`** prints one `chain:` line per bound key, e.g. `chain: DB_URL → Key Vault kv-myapp-prod (46687ce78b…) → ExternalSecret opv-db-url-46687ce78b → env DB_URL`.
 
-Values reach `az` and `kubectl` only on stdin. On native Windows the Azure writes stop with a message that names WSL; `plan` and `status` work everywhere.
+Values reach `az` and `kubectl` only on stdin (on native Windows, `az` gets them through a named pipe only your user can open).
 
-### Progress, summary and next step
-
-Long steps print a progress line on stderr at least every 15 seconds (`waiting for revision ca-myapp--0000002: Provisioning, 45 s`).
+### Run summary
 
 `sync` names each key as `product/KEY (TARGET_NAME)` (`KEY` alone under the simple profile) and ends with one summary line, the same on Fly, Azure and Kubernetes:
 
@@ -432,16 +291,14 @@ The line is always `summary: written N · unchanged N · held N · deployed <rev
 }
 ```
 
-Lists follow the summary line's order and hold `{product, key, target_name}` objects (`product` is `null` under the simple profile). `deploy_reason` says why a deploy happened (`written`, `pruned`, `pending_from_earlier_run`), `deployed_names` and `written_names` are bare target names, and `next` is the `Next:` command or `null`. Every failure ends with one `Next:` line ([Next step](#next-step)); with `--json`, stdout is then the [failure document](#json-contract).
+Lists follow the summary line's order and hold `{product, key, target_name}` objects (`product` is `null` under the simple profile). `deploy_reason` says why a deploy happened (`written`, `pruned`, `pending_from_earlier_run`), `deployed_names` and `written_names` are bare target names, and `next` is the `Next:` command or `null`. Every failure ends with one `Next:` line ([what a failure looks like](how-opv-handles-failures.md#what-a-failure-looks-like)); with `--json`, stdout is then the [failure document](#json-contract).
 
-### Retries, timeouts and interruptions
+### One product: `--product`
 
-- **Reads are retried, writes are not.** A failed read (`op item get`, a list, a status check) is tried up to 3 times, with a 1 s then 2 s pause, printing `retrying az keyvault secret list (2/3) in 2 s`. A refusal such as not found or not signed in is never retried: when `op` says an item or vault does not exist, `kubectl` reports `NotFound`, or `az` reports a missing secret or resource, opv reports it at once (failure text it does not recognise keeps its retries). A write is never repeated blindly: opv reads the target back to see what happened.
-- **One time budget.** `--timeout <secs>` (default 1800) caps the whole run, including waits for a revision or rollout. There is no separate deploy timeout: a write that waits for a rollout (`flyctl secrets deploy`, `az containerapp update`, `kubectl apply`/`replace`) may run up to 15 minutes inside the budget and prints a progress line every 15 s.
-- **`--verbose`** prints one stderr line per external call: the program, its arguments, how long it took and the outcome. Under it come the call's own error output (`    stderr: ...`, every secret masked as `__SECRET__`) and the size and JSON shape of its result (`    stdout: 412 bytes, JSON object with keys: ...`). A result's content is never shown.
-- **Safe to re-run.** Stopping opv at any point (Ctrl-C, a CI cancel, a lost connection) leaves the app working. Run the same command again and it finishes the rest.
-- **Exit 9** means opv cannot tell what happened: a write may or may not have been applied, or 1Password, Fly, Azure or the cluster did not answer after 3 tries (nothing was written). Nothing is known to be broken. Check the provider's status page if one is named, then re-run the same command. CI may retry a job that exits 9.
-- **Exit 130 / 143** means you pressed Ctrl-C or the job was terminated. opv names the step it stopped in.
+`status`, `plan` and `sync` take `--product <p>` under the fleet profile:
+
+- `status` and `plan` show only that product's rows; the count line, the totals and the exit-8 findings count that product only, so another team's missing key does not turn your status red. `OPV_PRODUCT` is the default for both.
+- `sync --product <p>` writes, prunes and deploys only that product's managed names; `--prune` never removes another product's name, and another product's missing key does not block it. A Fly deploy still restarts the whole app with every staged change: when another product has staged changes waiting, sync prints `pending for other products: web/TOKEN (FLEET__WEB__TOKEN); a deploy restarts the app with them too`. `OPV_PRODUCT` is never used by `sync`.
 
 ### Guarded environments
 
@@ -460,64 +317,98 @@ Nothing is deleted by default. `--prune` unsets only names that the template pro
 
 Known limitation: Fly hides an unset name as soon as `flyctl secrets unset --stage` runs, before any deploy. A run interrupted between that unset and the deploy (Ctrl-C, CI cancel, lost network, or a run without `--deploy`) leaves the name on the machines, and the next run cannot see it, so it neither reports nor deploys it. Any later deploy finishes the removal: run `opv sync <env> --deploy` again (it deploys when anything else changed or is pending), or `flyctl secrets deploy --app <app>`, which always deploys.
 
-## Sign-in, accounts and deploy credentials
+### Shared keys
 
-`opv login <env>` signs in to the 1Password account that environment uses, at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Every sign-in hint opv prints, in `doctor` and in errors, is `opv login <env>`. Like `setup`, `login` needs your own interactive terminal; automation uses a service-account token instead.
+A key declared with `from = "<product>/<KEY>"` ([configuration](configuration.md#shared-keys-from)) has a row of its own in `status`, `plan` and `check`, with the source under it:
 
-`account = "<sign-in address or account ID>"` on an environment makes every `op` call for it use that account (`OP_ACCOUNT` in the child's environment). Logging in to two environments in different accounts in the same terminal keeps both sessions (`OP_SESSION_<account>` each), and `check`, `run`, `plan`, `status` and `sync` use the account of the environment they act on. With `OP_SERVICE_ACCOUNT_TOKEN` (or Connect) set, the token decides the account and `account` is not added.
+```text
+PRODUCT  KEY           KIND    STATE              TARGET
+api      DATABASE_URL  secret  missing            new
+    affects worker/DATABASE_URL
+    guidance: Neon / connection string
+worker   DATABASE_URL  secret  blocked by source  new
+    shared from api/DATABASE_URL
+```
 
-`deploy_credentials = "op://<vault>/<item>"` names an item that holds only that environment's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it once and sign the target CLI in for that run only; `check`, `run`, `config export` and `item skeleton` never read it. Fields, by provider:
+A missing or failing source is one finding, reported on the source with the keys it affects; the sharing keys read `blocked by source` and are not counted again. `check --product worker` and `status --product worker` include the source's row, because worker's key depends on it. JSON rows carry `"shared_from": "api/DATABASE_URL"` and the state `source_blocked`. `explain worker/DATABASE_URL` shows the source's `op://` reference and `shared from:`; `explain api/DATABASE_URL` lists `shared by:`.
 
-| Provider | Fields | How the run uses them |
-|---|---|---|
-| Fly | `FLY_API_TOKEN` (concealed) | set only in the environment of each `flyctl` call (`FLY_API_TOKEN`, and `FLY_ACCESS_TOKEN` so it wins over a token in your shell) |
-| Azure | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text), `AZURE_CLIENT_SECRET` (concealed) | `az login --service-principal ... -p @<hand-off>` once, in a private `AZURE_CONFIG_DIR` used by every `az` call of the run and removed when it ends (also on Ctrl-C / SIGTERM; a directory left by a killed run is removed by the next one) |
-| Kubernetes | only with `secrets_in` a Key Vault: the Azure fields, for the `az` that writes it | otherwise a configuration error: `kubectl` uses your kubeconfig (`kubernetes.context`) |
-
-Azure deploy credentials, by OS (the Azure CLI stores the service principal's secret in its configuration directory):
-
-| OS | Private `AZURE_CONFIG_DIR` | Supported |
-|---|---|---|
-| Linux, WSL | `$XDG_RUNTIME_DIR/opv-az.<pid>-<random>`, mode 0700; `$XDG_RUNTIME_DIR` must be on tmpfs (RAM) and owned by you | yes; without a RAM `$XDG_RUNTIME_DIR` opv refuses before reading anything |
-| Windows | `%LOCALAPPDATA%\Temp\opv-az-<pid>-<random>`, ACL for you only; az encrypts the stored secret with DPAPI (`service_principal_entries.bin`) | yes; a plaintext `service_principal_entries.json` makes opv remove the directory and refuse |
-| macOS | none | no: sign in with `az login` and remove `deploy_credentials`, or use OIDC in CI |
-
-On native Windows, values reach `az` (the service-principal secret, Key Vault values, the Container App update) through a named pipe `\\.\pipe\opv-<random>` that only your user can open, instead of `/dev/stdin`; Linux, WSL and macOS use stdin. Fly deploy credentials work on every OS.
-
-Keep break-glass (owner or admin) credentials out of opv: they are for people, in 1Password, and no `deploy_credentials` should reference them.
-
-## Local development
-
-`opv run` starts a command with the environment's keys set as environment variables, under their plain names (`DATABASE_URL`, `OPENAI_API_KEY`), secrets and config alike. opv never sees the values: it hands `op run` a list of `op://` references, and `op run` resolves them and starts the command. Nothing is written to disk, and the values are gone when the process exits. Every key is a reference, always, so `op run` masks the values in the command's output. When a stored value has a formatting problem opv can fix (a trailing newline or space, a missing `ensure_prefix`) and you run under a service account or CI, `run` passes it as stored and prints one warning per key: `api/KEY has a fixable formatting problem in 1Password; run as yourself (opv login <env>) and opv will tidy it`.
+### Explain a key
 
 ```sh
-opv run dev -- npm run dev                 # simple profile: every key desired in dev
-opv run dev --product api -- cargo run     # fleet profile: the keys of one product
+opv explain <product>/<key> [--env <environment>]
 ```
 
-Only keys whose `environments` include the environment are set. An environment used only for local work needs no target section:
+`explain` prints what the configuration declares for one key in one environment: the `op://` reference, the field kind, the target name, the declared rules, `immutable` and `guidance`, plus an `op item get <item_id> --vault <vault_id>` command you can run in your own terminal to look at the item. That command never contains `--reveal`.
 
-```toml
-[environments.dev]
-vault_id = "vdev1234example"
-item_id  = "idev1234example"
+```text
+allumata/OPENAI_API_KEY in prod
+  reference:  op://vprd/iprd/allumata/OPENAI_API_KEY
+  kind:       secret (concealed field)
+  fly name:   FLEET__ALLUMATA__OPENAI_API_KEY
+  rules:      prefix = "sk-", not_prefix = "sk-or-"
+  immutable:  no
+  guidance:   OpenAI platform / API keys
+  inspect:    op item get iprd --vault vprd
+  open:       opv open allumata/OPENAI_API_KEY --env prod
 ```
 
-Common setups:
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. Other providers show their own rows (`env name:`, `key vault name:`, ...), and every value starts in one column. An environment without a target section shows `target:     none (run-only)`. The fleet form `<product>/<key>` is a configuration error under the simple profile that names the bare key (`did you mean KEY?`). Under the fleet profile a bare `<KEY>` resolves to the one product that declares it; when several do, the error lists them (`ambiguous key "KEY": declared as api/KEY, web/KEY`). An undeclared key or product suggests the closest declared names; when exactly one is close, the `Next:` line is `opv explain <that name>`.
 
-| You want | Run |
+It reads only the configuration (when that is a manifest, the manifest itself): no item or target call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
+
+## Local development: `check` and `run`
+
+`check <env> [--product <p>]` reads the environment's item once and reports each key as saved, missing or failing a rule, by name; it never contacts a deployment target and exits 8 when a key needs fixing. A failing key's guidance is printed under it as `  guidance: <text>`. `--json` prints the [shared row shape](#machine-readable-status-and-plan) with `target_checked: false`.
+
+```text
+$ opv check dev --product api
+api/LOG_LEVEL: saved
+api/OPENAI_API_KEY: saved
+no findings; no deployment target checked
+```
+
+`run <env> [--product <p>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` takes no `--json` and exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
+
+## Doctor
+
+`doctor` prints one line per check: the configuration and where it came from, `op` and its sign-in, each target CLI the environments use (`flyctl`, `az` 2.60 or newer, `kubectl`) and its sign-in, whether `op` can start local commands (`op local run`), and every `opv` on `PATH` (more than one different file is a warning with the command that removes the extra).
+
+```text
+$ opv doctor --env prod
+ok    config: valid (1 environment, 1 product); source: /home/me/myapp/secrets.toml
+ok    op: version 2.40.0
+ok    op auth: signed in (USER)
+ok    item: vprd/iprd readable (2 fields in section api)
+ok    flyctl: version v0.4.112
+ok    fly auth: signed in
+ok    op local run: native op; opv run can start local commands
+ok    opv: /home/me/.local/bin/opv 0.5.0
+all clear: nothing pending
+```
+
+- A failing check has its fix under it as `  fix: ...`; `doctor` then exits with the first failing check as the error, and its `Do:`/`Next:` lines are that check's fix. An older tool is a `warn` line with the upgrade command (exit code unchanged).
+- `--env <env>` checks only what that environment needs (a run-only environment needs no target CLI) and reads its item once, by IDs, checking the keys as `check` does: a key missing or failing a rule is a `FAIL  item:` line naming it, with `Next: opv check <env> --product <p>` (exit 8). `--product` limits that to one product. Without `--env` no item is read.
+- With `deploy_credentials`, a failed sign-in is one `FAIL deploy credentials` line; the other checks still run.
+- `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
+- With no configuration at all, the config line lists both ways to start (`opv init` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
+
+## Sign-in: `opv login`
+
+`opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`.
+
+`login`, `setup` and `config edit` need your own interactive terminal; without one they refuse (exit 6, `terminal_required`) and name themselves on `Next:`. Automation uses a 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`) instead, which decides the account. Per-environment `account` and `deploy_credentials`: [configuration](configuration.md#account-and-deploy-credentials).
+
+## Configuration commands
+
+| Command | What it does |
 |---|---|
-| An app or test suite | `opv run dev -- npm test` |
-| A shell with every variable set (gone on `exit`) | `opv run dev -- $SHELL` |
-| Docker Compose (`${VAR}` in `compose.yaml` and `environment:` entries without a value read from the starting process) | `opv run dev -- docker compose up` |
-| An editor or debugger whose run configurations inherit the variables | `opv run dev -- code .` |
-| Config values (not secrets) as JSON for another tool | `opv config export dev --json` |
+| `opv config export [--toml\|--json]` | print the configuration (no values) |
+| `opv config export <env> --json` | that environment's config-kind values |
+| `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
+| `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
+| `opv config check --file F` | exit 8 with a diff when a committed copy differs from the manifest |
 
-Before the first run, `opv check dev` (fleet: `--product <p>`) tells you which keys are missing or failing a rule, by name only. `run` removes every key name declared in the configuration from the inherited environment before adding the selected keys, so switching products in one shell never leaks the previous product's keys; everything else (PATH, tool settings, the 1Password sign-in) is inherited, so this is not a sandbox. The full local guide, including WSL, is [local-development.md](local-development.md).
-
-`op run` masks secret values that the command prints to stdout. `run` needs a signed-in `op` (`opv login dev`, or the 1Password desktop app integration); it exits with the command's own exit code.
-
-There is no command that writes a `.env` file or prints `export` lines, on purpose: a secret never lands on disk (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead (most frameworks fall back to it, and Compose's `env_file` can be replaced by `environment:` entries without values).
+Details, discovery and the review trade-off: [configuration in 1Password](configuration.md#configuration-in-1password). `init`, `add` and `item skeleton`: [configuration](configuration.md#start-from-an-existing-item-opv-init).
 
 ## Shell completion
 
@@ -612,39 +503,96 @@ opv schema | jq '.commands[] | select(.ask_user_first) | .name'
 opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 ```
 
+### Machine-readable status and plan
+
+`status <ENV> --json` and `plan <ENV> --json` print exactly one JSON document on stdout
+and nothing else. It contains names, states and counts only: no value, no value fragment,
+no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
+and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
+[failure document](#json-contract). The top-level `schema_version` is `1`; adding a field
+keeps it, while renaming or removing a field, or changing its meaning, increments it.
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "environment": "prod",
+  "product": null,
+  "changes": "some",
+  "rows": [
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret",
+      "state": "saved",
+      "rule": null,
+      "reason": null,
+      "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "target": "absent",
+      "action": "would_stage"
+    }
+  ],
+  "extras": [],
+  "stage": ["FLEET__ALLUMATA__OPENAI_API_KEY"],
+  "held": [],
+  "prune": [],
+  "totals": { "rows": 1, "findings": 0, "extras": 0, "to_stage": 1, "held": 0, "to_prune": 0 },
+  "plan_id": "7f3c9a1e",
+  "next": "opv sync prod --deploy --expect-plan 7f3c9a1e",
+  "do": null
+}
+```
+
+`state` is `saved`, `missing`, `failing_rule`, `skipped` or `source_blocked`; `rule` names the
+failing rule when `state` is `failing_rule`, and `reason` says why (see
+[Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
+target for every provider (`fly_name` holds the same value and is kept for older scripts; it
+is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
+a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
+in the same key order, is used by `status`, `plan` and `check`. With `--product`,
+the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
+totals. `next` is the sync command for `plan`, `null` for `status`. `plan --json` adds
+`"plan_id"` when nothing blocks ([`--expect-plan`](#review-then-apply-exactly-that-plan---expect-plan)),
+and `status --json` on Azure or Kubernetes adds `"provenance": {"opv_version", "written",
+"plan_id"}` once opv has stamped the target. The document is meant for the scheduled drift
+check.
+
+`opv status --json` without an environment prints one entry per environment:
+`{"product", "environments": [{"name", "target", "state": "checked"|"run_only"|"not_checked", "keys", "saved", "skipped", "findings", "error_code", "error"}], "totals": {"environments", "findings"}}`. Run-only environments are read too (`state: "run_only"`, `target: null`).
+
+Two fields arrived in 0.5.0. `changes` is `some` when a sync would certainly change the
+target (a new or changed key, a prune, a pending binding), `unknown` when only keys whose
+values the target hides (Fly) would be staged, and `none` otherwise; a nightly drift job
+can alert on `some`. A missing or failing row also carries `open_url`, the 1Password item
+link to fix it in (IDs only); `check --json` rows carry it too.
+
+A shared key's row carries `shared_from` (`api/DATABASE_URL`) and, while its source has a
+finding, the state `source_blocked`. When a person's run tidied the item (FR-43),
+`status`, `plan` and `check` documents carry `tidy`, a list of `{action, name}` (names
+only; omitted when nothing was tidied). A tidy that was tried and did not complete puts
+its error code in `tidy_error` (`tidy_conflict` when the item changed twice meanwhile or
+another edit landed together with opv's, `tidy_unverified` when the item read back lacks
+a field opv wrote or kept); the command itself still succeeds or fails on its own result.
+opv never tidies an item holding an attachment, a website list, a one-time password, an
+SSH key or any other field type it does not rewrite exactly; it says so in one note.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 2 | configuration error or command-line usage error |
+| 2 | configuration or command-line usage error |
 | 3 | dependency: `op`, `flyctl`, `az` or `kubectl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
-| 4 | 1Password source error (including an `op` timeout) |
-| 5 | target error: Fly, Azure or Kubernetes (including an unhealthy revision or rollout, a change made under opv while it applied, a `flyctl secrets list` timeout, and deploy on an app with no machines) |
-| 6 | policy refusal: `sync` refused (a key missing or failing a rule, `--confirm <env>` missing or naming another environment, or a stale `--expect-plan`), or another refusal (`policy_refused`) |
-| 7 | authentication |
-| 8 | findings: `status`, `plan` or `check` found blocking keys |
-| 9 | outcome unknown, or a provider did not answer: a change may or may not have been applied (a `flyctl secrets deploy` that timed out, an `az` call that lost its connection), or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command |
-| 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` and `Next: <the same command>` (with `--json`, also the failure document with code `interrupted`) |
-| 101 | internal panic (Rust default) |
+| 4 | 1Password: the item or vault could not be read or written |
+| 5 | target (Fly, Azure, Kubernetes): refused or failed, including an unhealthy revision or rollout (the previous one keeps serving) and an update refused with nothing applied (`update_refused`) |
+| 6 | refused by policy: blocking keys, a missing or wrong `--confirm`, a stale `--expect-plan`, a command that needs your own terminal |
+| 7 | authentication: not signed in to 1Password or the target CLI, or `deploy_credentials` rejected |
+| 8 | findings: `status`, `plan`, `check` (or `doctor --env`) found keys missing or failing a rule |
+| 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
+| 130 / 143 | interrupted by Ctrl-C (SIGINT) or SIGTERM; safe to re-run |
 
-CI may retry a job that exited 9; codes 2 to 8 need a fix first.
-
-Global options: `--timeout <secs>` (default 1800), `--verbose`, `--config` and `--color auto|always|never`. Retries, progress and the per-call limits are described in [Retries, timeouts and interruptions](#retries-timeouts-and-interruptions). Each `op`, `flyctl`, `az` or `kubectl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s, a write that waits for a rollout 15 min).
-
-`run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
-
-Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) opv runs `op whoami`, and when that fails (with no service-account or Connect credential set, outside CI) `op account list`. These diagnosis calls are free under 1Password rate limits, have their own 15 s limit, and no item is read a second time.
-
-- Not signed in, with no non-interactive credential set (no session, an expired `OP_SESSION_*`, a locked desktop app), is authentication (7), with the sign-in command `opv login <env>` (the same in every shell; `opv login` from `doctor` without `--env`), plus "if you are signed in, check network access to 1Password". Under CI (`CI` or `GITHUB_ACTIONS` truthy, so `CI=false` does not count) it says "set OP_SERVICE_ACCOUNT_TOKEN" and gives no interactive command.
-- No account on the machine (fresh WSL or Linux) gives the `op account add` command first.
-- With `OP_SERVICE_ACCOUNT_TOKEN` or Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`) set, a failing `op whoami` is ambiguous (rejected token or no network), so it stays a source error (4): "1Password rejected the service-account (or Connect) token or could not be reached: check the token in <variable> and network access". No interactive command is printed.
-- Signed in but the read still failed is a source error (4) naming the vault and item IDs and the identity type (USER or SERVICE_ACCOUNT, never the identity) and saying to grant that identity access to the vault.
-- On Fly, a failed `flyctl` call with `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` set is a Fly target error (5): "flyctl failed for app <app>: check that the token in <variable> can access it, that the app exists, and, for a deploy, that it has at least one machine". `flyctl auth whoami` is not consulted there, because app-scoped deploy tokens fail it. With no Fly token set, opv runs `flyctl auth whoami` (exit status only; its output names the account and is never shown): logged out is authentication (7), "not logged in to Fly", with `flyctl auth login`, or "set FLY_API_TOKEN" under CI; logged in is a target error (5) with the same app wording.
-
-`doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. When a call fails, the last lines (at most 5) it wrote on stderr follow opv's error line, labelled with the program (`  az said: ...`), after every value opv read or staged and every token, key or password pattern is masked as `__SECRET__`; its output on stdout is never shown. A re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
-
-`status` starts with a count line, for example `prod: 62 keys · 49 saved · 0 skipped · 0 findings · 13 not yet on Fly`.
+CI may retry a job that exited 9; codes 2 to 8 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
 
 ## GitHub Actions example
 
@@ -656,7 +604,7 @@ jobs:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.4.0   # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.5.0   # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
@@ -681,15 +629,16 @@ This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`
 **Job summary.** When `$GITHUB_STEP_SUMMARY` is set (GitHub Actions sets it for every step), `status`, `plan` and `sync` append a Markdown section to the job's summary page: for `status` and `plan`, the count line, `changes` (plan) and one table row per key, problems first, with product, key, kind, state word (`failed <rule>`, without the reason) and target word; for `sync`, its summary line and the written, pruned, pending, held, extra and unchanged names. It holds names and state words only: no value, no rule reason and no 1Password link (the link names your account). Nothing to configure; outside GitHub Actions nothing is written. For a nightly drift check, run `opv plan prod --json` and alert when `changes` is `some`.
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
+
 ## Security model and limits
 
 - Values travel only on stdin (on native Windows, a user-only named pipe for `az`) or in the environment of a child process. They never appear in argv, files, logs, errors, `Debug` or `Display` output.
 - One documented exception to "no files" (SR-4): with Azure `deploy_credentials`, the Azure CLI stores the service principal's secret in opv's private per-run `AZURE_CONFIG_DIR`, which is RAM-only on Linux/WSL, DPAPI-encrypted on Windows, and removed when the run ends. macOS is not supported for Azure deploy credentials.
-- The stderr of `op` and `flyctl` is suppressed so it cannot leak a value.
+- The stderr of `op`, `flyctl`, `az` and `kubectl` is shown only scrubbed, at most 5 lines on failure (more with `--verbose`); their stdout and what opv sends on stdin are never shown ([details](how-opv-handles-failures.md#what-a-cli-said-without-the-secrets)).
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design, never secrets. A config key stored in a concealed field is accepted and delivered as a plain value, but opv never prints it: `config export` shows `<concealed in 1Password>` and `status` warns about it once per key.
 - `run` hands secret values to the child process through `op run`; the child can read them.
-- No multiline values. Two profiles: `fleet` (products, sections, a naming template) and `simple` (one app per environment, unsectioned fields, Fly name = key name). `--json` on `status` and `plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
+- No multiline values (a `pem_private_key` transform turns a PEM key into one line). `--json` documents hold names, states and counts only, except `config export <env>`, which prints config-kind values by design.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.

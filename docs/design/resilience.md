@@ -1,6 +1,6 @@
 # Resilience: the fallacies of distributed computing
 
-Status: proposed 2026-10-08, after the P1 Azure recon. Requirements NR-1 to NR-30 in
+Status: as built for 0.5.0 (proposed 2026-10-08, after the P1 Azure recon). Requirements NR-1 to NR-31 in
 `docs/design/requirements.md` §4a are normative; this document is their argument. Owner
 direction: every realistic issue is a true requirement, designed for resiliency,
 transparency, and to make the user effective.

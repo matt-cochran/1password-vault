@@ -1,5 +1,7 @@
 # K1 spike: Kubernetes Secrets + Deployment (local kind)
 
+Status: done; the findings are built into 0.5.0 and the recorded outputs are test fixtures.
+
 Date: 2026-10-08. kind v0.31.0 (checksum-verified), cluster `kind-opv`, namespace `opv-spike`,
 Deployment `api` (agnhost pause image), kubectl v1.36.1. Marker values only. Recorded outputs
 are in `tests/fixtures/kubernetes/` and are the adapter's test inputs.

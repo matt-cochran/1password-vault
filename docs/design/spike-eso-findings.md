@@ -1,5 +1,7 @@
 # Spike: Key Vault → Kubernetes via the External Secrets Operator (FR-39)
 
+Status: done; the findings are built into 0.5.0 and the recorded outputs are test fixtures.
+
 Date: 2026-10-08. kind cluster `kind-opv`; External Secrets Operator chart/app **2.11.0** (API
 `external-secrets.io/v1`; `v1beta1` not served); Helm 3.19.0 (checksum-verified). Store: the P1
 sandbox Key Vault, reached by a temporary service principal (`Key Vault Secrets User` on that vault

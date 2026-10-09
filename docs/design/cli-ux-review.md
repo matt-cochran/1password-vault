@@ -1,5 +1,7 @@
 # CLI interaction review
 
+Status: done (PR #63, shipped in 0.5.0). The baseline for the CLI surface; `opv session` shipped as `opv login`.
+
 Scope: ergonomics of existing local settings and deployment workflows, plus the explicitly requested guided owner setup. Provider integration, including the independently developed Azure work, is outside this change.
 
 ## Design principles
