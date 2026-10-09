@@ -17,6 +17,10 @@ before upgrading.
 - Plug-in providers: Fly, Azure and Kubernetes implement one contract, so a new provider is one module ([CONTRIBUTING.md](CONTRIBUTING.md#adding-a-provider); FR-37).
 - Resilience (NR-1 to NR-30): reads retry up to 3 times, writes never; progress lines during waits; `--timeout <secs>` (default 900) caps a run; `--verbose` prints one line per external call; every mutating run ends with a summary and every failure with one `Next:` line; Ctrl-C and SIGTERM leave the target safe to re-run (exit 130/143).
 - Exit code 9: outcome unknown, or a provider did not answer. Nothing is known to be broken; re-run the same command.
+- `opv completions <bash|zsh|fish|powershell>` prints a shell completion script ([usage](docs/usage.md#shell-completion)).
+- `OPV_CONFIG` sets the default for `--config`; `OPV_PRODUCT` sets the default for `--product` on `check`, `run`, `doctor` and `explain` (fleet profile, never `sync`), reported on stderr when used.
+- `--color auto|always|never`: state words are coloured on a terminal; `NO_COLOR` is honoured and piped output is unchanged.
+- Every command's help groups `Global options:` and ends with examples; exit-code help names Fly, Azure and Kubernetes. `config export` no longer needs `--json` (still accepted).
 - `confirm_env = true` on an environment requires `--confirm <env>` for `sync`.
 - `opv doctor` lists every `opv` on `PATH` and warns about more than one; it checks `az` (2.60 or newer) and `kubectl` for environments that use them. <!-- verify -->
 - `opv session` and `opv setup`: guided sign-in and resumable project onboarding ([guided setup](docs/guided-setup.md); [#63](https://github.com/matt-cochran/1password-vault/pull/63)).
