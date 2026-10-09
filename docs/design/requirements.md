@@ -767,6 +767,8 @@ Secret values shall never appear in:
 
 Debug logging shall redact conservatively.
 
+Child output: child stderr is held in memory only, scrubbed, and shown only on failure (≤5 lines) or with --verbose; stdout is never shown (NR-31).
+
 ## SR-2 — Secret-Safe Types
 
 Resolved secret values shall use a dedicated wrapper type whose `Debug` and `Display` implementations are redacted.
@@ -829,7 +831,7 @@ Copies of secret values should be minimized.
 
 Security-sensitive dependencies should be kept small and audited.
 
-# 4a. Resilience Requirements (NR-1 to NR-30)
+# 4a. Resilience Requirements (NR-1 to NR-31)
 
 Every realistic failure is a requirement (owner direction, 2026-10-08): designed for
 resiliency, transparency, and to keep the user effective. The argument, mechanisms and tests
@@ -856,7 +858,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-19 Next step on every error.** Every non-zero exit ends with exactly one `Next:` line holding a runnable command (extends FR-22); error constructors require it.
 - **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting; an environment with `confirm_env = true` requires `--confirm <env>` for mutating commands.
 - **NR-21 No clock assumptions.** No decision compares wall-clock times across machines; deadlines use monotonic local time.
-- **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call only; child stderr is still never captured (SR-1).
+- **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call; child stderr is shown only scrubbed (NR-31) and stdout never (SR-1).
 - **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written.
 - **NR-24 Fly state.** Suspended or deleted apps, missing or stopped machines, a deploy in progress and `Partial` deploys are detected and reported with the exact command.
 - **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported.
@@ -865,6 +867,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page; nothing written.
 - **NR-29 Network glitches and proxies.** Covered by NR-3/NR-2; proxy and CA environment variables pass through to CLIs untouched.
 - **NR-30 Eventual consistency.** After a write, the confirming read polls until it observes the written version or the deadline; a stale read is never reported as "unchanged".
+- **NR-31 CLI output transparency.** Every failure shows what the CLI said, without leaking a secret. (1) The stderr of each captured call (read, write, probe) is read into a bounded, zeroized in-memory buffer (the last 64 KiB) and never written to disk; interactive calls (`run`, `setup`, `session`) keep the terminal. (2) Before any of it is shown, a scrubber replaces with `__SECRET__` every registered value: all field values of every 1Password item read in the run and every `SecretValue` created (transformed by `ensure_prefix`, staged, read from a target), each matched raw, JSON-escaped (plain and ASCII-only), standard base64, base64url (padded and unpadded) and percent-encoded; values under 4 bytes only as whole tokens. Then pattern scrubbers mask secrets opv never handled: JWTs, `Bearer <token>`, `OP_SESSION_*=…`, `ops_…` service-account tokens, Azure `sig=`, `AccountKey=`, `SharedAccessSignature=` and `client_secret=`, PEM private-key blocks (also a block whose BEGIN line was cut off), well-known API key prefixes (`sk-`, `sk_live_`, `ghp_`, `xoxb-`, `AKIA…`), and `password=`, `token=`, `secret=`, `apikey=` assignments in `key=value` or `"key": "value"` form. Escape sequences and control characters are removed and lines cut at 240 characters. The registry holds values in `Zeroizing` memory; its `Debug` shows a count. (3) When a call fails (a refused read, a write or probe exiting non-zero) and opv exits with a dependency, authentication, source, target or unknown-outcome error, the last ≤5 non-empty scrubbed lines follow the error's first line, labelled `  <program> said: <line>`, so the error's `next:` step stays last; a later read or write clears the excerpt, a diagnosis probe does not. (4) With `--verbose`, each call line is followed by its scrubbed stderr (`    stderr: <line>`, at most 20) and its stdout shape (`    stdout: <n> bytes`, plus the top-level JSON keys or array length); stdout content is never shown. (5) The error's `Display` is unchanged (tests and `--json` too). Limit: a value opv has not read yet (a failure before or during the item read) is masked only by the patterns.
 
 ---
 

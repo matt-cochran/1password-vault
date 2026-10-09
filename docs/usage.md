@@ -163,7 +163,7 @@ There is no command that writes a `.env` file or prints `export` lines, on purpo
 
 CI may retry a job that exited 9; codes 2 to 8 need a fix first.
 
-Global options: `--timeout <secs>` (default 900) caps the whole run; each `op`/`flyctl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s). A failed read is retried up to 3 attempts with backoff (1 s, then 2 s), printing `retrying <program> <subcommand> (n/3) in <s> s`; a write is never retried. `--verbose` prints one stderr line per call: program, arguments, duration and outcome, never a value.
+Global options: `--timeout <secs>` (default 900) caps the whole run; each `op`/`flyctl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s). A failed read is retried up to 3 attempts with backoff (1 s, then 2 s), printing `retrying <program> <subcommand> (n/3) in <s> s`; a write is never retried. `--verbose` prints one stderr line per call: program, arguments, duration and outcome, then the call's own error output (`    stderr: ...`) with every secret masked as `__SECRET__`, and the size and JSON shape of its result (`    stdout: 412 bytes, JSON object with keys: ...`), never a value.
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 
@@ -175,7 +175,7 @@ Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) o
 - Signed in but the read still failed is a source error (4) naming the vault and item IDs and the identity type (USER or SERVICE_ACCOUNT, never the identity) and saying to grant that identity access to the vault.
 - A failed `flyctl` call with `FLY_API_TOKEN` or `FLY_ACCESS_TOKEN` set is a Fly target error (5): "flyctl failed for app <app>: check that the token in <variable> can access it, that the app exists, and, for a deploy, that it has at least one machine". `flyctl auth whoami` is not consulted there, because app-scoped deploy tokens fail it. With no Fly token set, opv runs `flyctl auth whoami` (exit status only; its output names the account and is never shown): logged out is authentication (7), "not logged in to Fly", with `flyctl auth login`, or "set FLY_API_TOKEN" under CI; logged in is a target error (5) with the same app wording.
 
-`doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. Child stderr is suppressed on purpose, because it could echo a value; a re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
+`doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. When a call fails, the last lines (at most 5) it wrote on stderr follow opv's error line, labelled with the program (`  az said: ...`), after every value opv read or staged and every token, key or password pattern is masked as `__SECRET__`; its output on stdout is never shown. A re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
 
 A clean `status` ends with a summary line, for example `49 saved, 13 not yet on Fly (staged by the next sync), 0 findings`.
 
