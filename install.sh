@@ -91,6 +91,28 @@ elif ! command -v wget >/dev/null 2>&1; then
   exit 1
 fi
 
+# --- hashing ---------------------------------------------------------------
+
+# Print the SHA-256 of a file with whichever tool is available; non-zero when neither
+# sha256sum nor shasum exists.
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# The record both install.sh and npm write so either method can tell what installed the
+# binary in the canonical location. `$want` is the version; `$1` is its SHA-256.
+write_installed_by() {
+  data_dir="${HOME:-/tmp}/.local/share/opv"
+  mkdir -p "$data_dir" 2>/dev/null || return 0
+  printf 'install.sh %s %s\n' "$want" "$1" > "$data_dir/installed-by" 2>/dev/null || true
+}
+
 # --- latest release tag ----------------------------------------------------
 
 fetch_latest_tag() {
@@ -227,6 +249,9 @@ print_path_hint() {
 
 if [ "$existing" = "$want" ]; then
   echo "opv $want is already installed"
+  if actual=$(hash_file "$exe"); then
+    write_installed_by "$actual"
+  fi
   print_path_hint
   exit 0
 fi
@@ -299,15 +324,10 @@ if [ -z "$expected" ]; then
   exit 1
 fi
 
-if command -v sha256sum >/dev/null 2>&1; then
-  sha_line=$(sha256sum "$tmp")
-elif command -v shasum >/dev/null 2>&1; then
-  sha_line=$(shasum -a 256 "$tmp")
-else
+if ! actual=$(hash_file "$tmp"); then
   echo "install.sh: sha256sum or shasum is required to verify the download" >&2
   exit 1
 fi
-actual=${sha_line%% *}
 
 if [ "$actual" != "$expected" ]; then
   echo "install.sh: checksum mismatch for $asset (expected $expected, got $actual)" >&2
@@ -333,6 +353,8 @@ fi
 chmod 755 "$tmp"
 mv -f "$tmp" "$exe"
 tmp=""
+
+write_installed_by "$actual"
 
 if [ -n "$existing" ]; then
   echo "opv $existing → $want"

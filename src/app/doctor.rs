@@ -175,6 +175,7 @@ fn run_on(
         )
         .map_err(write_err)?;
     }
+    line(out, "opv", opv_on_path(r))?;
     let next = next.unwrap_or_else(|| "Next step: nothing pending".into());
     writeln!(out, "{next}").map_err(write_err)?;
     match first {
@@ -342,6 +343,51 @@ fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
     }
 }
 
+/// Task I: every distinct `opv` on PATH with its version, one check line. More than one
+/// copy is a warning that names the removal command for the copies the shell will not
+/// run, so the user can make every `opv` the same file. Never fails the run: a doctor
+/// that cannot read a candidate still reports the others.
+fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
+    let paths = crate::host::distinct_opv_on_path();
+    if paths.is_empty() {
+        return Ok(Check::Ok("not found on PATH".into()));
+    }
+    let mut entries: Vec<String> = Vec::new();
+    for p in &paths {
+        let program = p.to_string_lossy().into_owned();
+        let call = crate::runner::Call::new(program.as_str(), &["--version"]);
+        let version = match r.probe(&call, crate::runner::PROBE_TIMEOUT) {
+            Ok(o) if o.status == 0 => {
+                version_in(o.stdout.as_slice()).unwrap_or_else(|| "version not recognised".into())
+            }
+            _ => "version not recognised".into(),
+        };
+        entries.push(format!("{program} {version}"));
+    }
+    if entries.len() > 1 {
+        let removal = paths
+            .iter()
+            .skip(1)
+            .map(|p| removal_command(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(Check::Warn(format!(
+            "{}; remove the copies you do not update: {removal}",
+            entries.join(", ")
+        )));
+    }
+    Ok(Check::Ok(entries.remove(0)))
+}
+
+/// The command that removes one opv copy on this platform.
+fn removal_command(p: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!("del \"{}\"", p.display())
+    } else {
+        format!("rm {}", p.display())
+    }
+}
+
 /// `2.40.0` / `v0.4.112` → (major, minor, patch). Missing parts count as 0; anything else
 /// (more than three parts, non-digits) is `None`.
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -427,8 +473,8 @@ mod tests {
         Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
     }
 
-    /// config, op, op auth, flyctl, fly auth, and (off Windows) op local run.
-    const CHECK_LINES: usize = if cfg!(windows) { 5 } else { 6 };
+    /// config, op, op auth, flyctl, fly auth, (off Windows) op local run, and opv.
+    const CHECK_LINES: usize = if cfg!(windows) { 6 } else { 7 };
 
     /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
     #[cfg(not(windows))]
@@ -982,6 +1028,46 @@ mod tests {
             out.ends_with(
                 "Next step (op local run): install the Linux 1Password CLI in WSL and sign in: see docs/local-development.md (WSL)\n"
             ),
+            "{out}"
+        );
+    }
+
+    /// Task I: doctor lists every distinct opv on PATH with its version.
+    #[test]
+    fn doctor_lists_each_opv_on_path_with_its_version() {
+        let r = FakeRunner::new(
+            good()
+                .into_iter()
+                .chain([Output::success(b"opv 1.2.3\n".to_vec())]),
+        );
+        let paths = vec![std::path::PathBuf::from("/opt/opv/bin/opv")];
+        let mut out = Vec::new();
+        let res =
+            crate::host::with_test_path(paths, || run_with(Ok(fleet()), &r, &linux(), &mut out));
+        res.unwrap();
+        let out = text_of(&out);
+        assert!(out.contains("ok    opv: /opt/opv/bin/opv 1.2.3"), "{out}");
+    }
+
+    /// Task I: more than one distinct opv is a warning naming the removal command.
+    #[test]
+    fn doctor_warns_on_two_opv_copies() {
+        let r = FakeRunner::new(good().into_iter().chain([
+            Output::success(b"opv 1.2.3\n".to_vec()),
+            Output::success(b"opv 1.1.0\n".to_vec()),
+        ]));
+        let paths = vec![
+            std::path::PathBuf::from("/home/x/.local/bin/opv"),
+            std::path::PathBuf::from("/home/x/.cargo/bin/opv"),
+        ];
+        let mut out = Vec::new();
+        let res =
+            crate::host::with_test_path(paths, || run_with(Ok(fleet()), &r, &linux(), &mut out));
+        res.unwrap();
+        let out = text_of(&out);
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("warn  opv:") && l.contains("rm /home/x/.cargo/bin/opv")),
             "{out}"
         );
     }

@@ -22,6 +22,7 @@
 //! Messages are text, never prompts (FR-9). Detection runs only on failure paths.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -363,6 +364,62 @@ pub(crate) fn with_test_host<T>(host: Host, f: impl FnOnce() -> T) -> T {
     let out = f();
     TEST_HOST.with(|h| h.set(None));
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PATH: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with [`distinct_opv_on_path`] returning `paths` on this thread (unit tests).
+#[cfg(test)]
+pub(crate) fn with_test_path<T>(paths: Vec<PathBuf>, f: impl FnOnce() -> T) -> T {
+    TEST_PATH.with(|p| *p.borrow_mut() = Some(paths));
+    let out = f();
+    TEST_PATH.with(|p| *p.borrow_mut() = None);
+    out
+}
+
+/// Every distinct file named `opv` (`opv.exe` on Windows) found in the directories on
+/// `PATH`, in `PATH` order. Symlinks to the same file count once.
+///
+/// `doctor` uses this (Task I) to warn when the shell could run a different copy from
+/// the one npm or `install.sh` installed.
+pub fn distinct_opv_on_path() -> Vec<PathBuf> {
+    #[cfg(test)]
+    {
+        // Unit tests control the candidates; without an explicit list there are none, so
+        // no test depends on the developer's or the CI runner's PATH.
+        TEST_PATH.with(|p| p.borrow().clone()).unwrap_or_default()
+    }
+    #[cfg(not(test))]
+    {
+        let name = if cfg!(windows) { "opv.exe" } else { "opv" };
+        let Some(path) = std::env::var_os("PATH") else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for dir in std::env::split_paths(&path) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let key = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            out.push(candidate);
+        }
+        out
+    }
 }
 
 impl fmt::Display for Platform {
