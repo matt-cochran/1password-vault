@@ -35,6 +35,7 @@ kind = "simple"
 vault_id = "vprd"
 item_id = "iprd"
 [environments.prod.azure]
+subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "{VAULT}"
 resource_group = "opv-fixture-rg"
 container_app = "{APP}"
@@ -278,6 +279,17 @@ impl Sim {
         if has(args, &["keyvault", "secret", "delete"]) {
             w.kv.remove(name.as_deref().unwrap());
             return Output::success(Vec::new());
+        }
+        if has(args, &["keyvault", "show"]) {
+            let path = format!(
+                "{}/tests/fixtures/azure/keyvault-show.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let mut v: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            v["name"] = json!(VAULT);
+            v["properties"]["vaultUri"] = json!(format!("https://{VAULT}.vault.azure.net/"));
+            return ok_json(&v);
         }
         if has(args, &["containerapp", "revision", "show"]) {
             return match w.revisions.get(flag(args, "--revision").unwrap()) {

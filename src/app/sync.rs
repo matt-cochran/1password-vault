@@ -229,6 +229,8 @@ fn run_pinned(
         &plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0,
         env_name,
     )?;
+    // The target's state, read-only, before its first read (NR-23, NR-25).
+    let skip_deploy = preflight::run(c.t, c.r, out)?;
     let (plan, listed) = plan_item(
         fleet,
         env_name,
@@ -252,8 +254,6 @@ fn run_pinned(
             want.refused.join(", ")
         )));
     }
-    // Last read-only step before the first write (NR-23, NR-24).
-    let skip_deploy = preflight::run(c.t, c.r, out)?;
     print_extras(out, &plan)?;
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
 

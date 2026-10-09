@@ -3,12 +3,14 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
 use super::az;
 use super::containerapp::ContainerApp;
 use super::keyvault::KeyVault;
+use super::preflight;
 use crate::config::{check_ident, is_id};
 use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
@@ -38,6 +40,9 @@ pub enum ConfigRoute {
 /// The Azure Key Vault + Container Apps target of one environment (FR-28, FR-30).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AzureTarget {
+    /// `azure.subscription`: a subscription id, passed as `--subscription` on every call
+    /// that reads or changes an Azure resource (NR-7).
+    pub subscription: String,
     pub key_vault: String,
     pub resource_group: String,
     pub container_app: String,
@@ -48,11 +53,69 @@ pub struct AzureTarget {
     /// Env-name template; `{KEY}` under the simple profile.
     pub env_name_template: String,
     pub config: ConfigRoute,
+    /// The vault's `properties.vaultUri`, read once per run (NR-6); not configuration.
+    pub vault_uri: ResolvedUri,
+}
+
+/// A value read from Azure once per run and kept for the rest of it. Never part of the
+/// configuration, so it never makes two targets unequal.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedUri(OnceLock<String>);
+
+impl ResolvedUri {
+    /// The value, once resolved.
+    pub fn get(&self) -> Option<&str> {
+        self.0.get().map(String::as_str)
+    }
+
+    /// Keeps `uri` unless a value is already kept.
+    pub fn set(&self, uri: String) {
+        let _ = self.0.set(uri);
+    }
+}
+
+impl PartialEq for ResolvedUri {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ResolvedUri {}
+
+/// `azure.subscription`: checked while the section is read, so a wrong value is reported at
+/// its line and column like any other field (FR-2, NR-7).
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+struct Subscription(String);
+
+impl TryFrom<String> for Subscription {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, String> {
+        if is_guid(&s) {
+            Ok(Self(s.to_ascii_lowercase()))
+        } else {
+            Err("azure.subscription must be a subscription id like \
+                 00000000-0000-0000-0000-000000000000 (az account list -o table shows yours)"
+                .into())
+        }
+    }
+}
+
+/// A GUID: 8-4-4-4-12 hex digits.
+fn is_guid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAzure {
+    subscription: Subscription,
     key_vault: String,
     resource_group: String,
     container_app: String,
@@ -109,11 +172,12 @@ impl Provider for AzureProvider {
     }
 
     fn doctor_checks(&self) -> &'static [&'static str] {
-        &[]
+        preflight::DOCTOR_CHECKS
     }
 
     fn setup_hint(&self, _profile: Profile) -> String {
-        "configure azure.key_vault, azure.resource_group, azure.container_app and azure.identity"
+        "configure azure.subscription, azure.key_vault, azure.resource_group, \
+         azure.container_app and azure.identity"
             .into()
     }
 
@@ -152,6 +216,7 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
         }
     };
     Ok(AzureTarget {
+        subscription: a.subscription.0,
         key_vault: a.key_vault,
         resource_group: a.resource_group,
         container_app: a.container_app,
@@ -159,6 +224,7 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
         identity: a.identity,
         env_name_template: template,
         config,
+        vault_uri: ResolvedUri::default(),
     })
 }
 
@@ -170,6 +236,12 @@ fn is_azure_identity(s: &str) -> bool {
         && s.chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
 }
+
+/// How a value reaches the app through Key Vault (FR-29), for `explain`.
+const REFERENCE_ROUTE: &str = "Key Vault reference pinned to one version (never a plain env value)";
+
+/// The Container Apps secret that carries the reference (R2), for `explain`.
+const APP_SECRET: &str = "opv-<16 hex> per Key Vault version (SHA-256 of key vault name/version); a new version is a new revision";
 
 fn key_vault_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-'
@@ -258,14 +330,7 @@ impl TargetConfig for AzureTarget {
         };
         #[cfg(not(test))]
         let pacer: &dyn az::Pacer = &az::SYSTEM_PACER;
-        let app = ContainerApp::new(
-            r,
-            self,
-            None,
-            managed.clone(),
-            format!("https://{}.vault.azure.net", self.key_vault),
-            pacer,
-        );
+        let app = ContainerApp::new(r, self, managed.clone(), pacer);
         #[cfg(test)]
         let app = match test_wait {
             Some((every, max)) => app.with_wait(every, max),
@@ -275,6 +340,7 @@ impl TargetConfig for AzureTarget {
             store: Box::new(KeyVault {
                 runner: r,
                 vault: &self.key_vault,
+                subscription: &self.subscription,
                 env,
                 managed,
                 pacer,
@@ -283,19 +349,50 @@ impl TargetConfig for AzureTarget {
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<Preflight, Error> {
-        // Vault and Container App state arrive with the Azure flow (NR-25).
-        Ok(Preflight::default())
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error> {
+        preflight::run(self, r, &az::SYSTEM_PACER)
     }
 
-    fn doctor(&self, _r: &dyn CommandRunner, _host: &dyn Fn() -> Host) -> Vec<Check> {
-        Vec::new()
+    fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
+        preflight::doctor(self, r, host)
     }
 
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)> {
         let env = self.env_name_of(product, key);
         let store = Self::key_vault_name(&env);
-        vec![("env name", env), ("key vault name", store)]
+        vec![
+            ("env name", env),
+            ("key vault", self.key_vault.clone()),
+            ("key vault name", store),
+            ("app secret", APP_SECRET.into()),
+            ("routing", REFERENCE_ROUTE.into()),
+        ]
+    }
+
+    fn explain_config(&self, product: &str, key: &str) -> Option<Vec<(&'static str, String)>> {
+        let env = self.env_name_of(product, key);
+        Some(match self.config {
+            ConfigRoute::Env => vec![
+                ("env name", env),
+                (
+                    "routing",
+                    "plain env value on the container app (azure.config = \"env\")".into(),
+                ),
+            ],
+            ConfigRoute::Store => {
+                let store = Self::key_vault_name(&env);
+                vec![
+                    ("env name", env),
+                    ("key vault", self.key_vault.clone()),
+                    ("key vault name", store),
+                    ("app secret", APP_SECRET.into()),
+                    (
+                        "routing",
+                        format!("{REFERENCE_ROUTE} (azure.config = \"store\")"),
+                    ),
+                ]
+            }
+        })
     }
 
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool {
@@ -330,6 +427,7 @@ mod tests {
 vault_id = "v"
 item_id = "i"
 [environments.prod.azure]
+subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "kv-myapp-prod"
 resource_group = "rg-myapp"
 container_app = "ca-myapp"
@@ -359,8 +457,8 @@ environments = ["prod"]
         let bad = azure_env_with("identity = \"system\"", "identity = 5");
         assert_eq!(
             parse(&bad).unwrap_err().to_string(),
-            "configuration error: invalid secrets.toml: TOML parse error at line 11, column 12\n   \
-             |\n11 | identity = 5\n   |            ^\ninvalid type: integer `5`, expected a string\n"
+            "configuration error: invalid secrets.toml: TOML parse error at line 12, column 12\n   \
+             |\n12 | identity = 5\n   |            ^\ninvalid type: integer `5`, expected a string\n"
         );
     }
 
@@ -368,11 +466,113 @@ environments = ["prod"]
         parse(text).unwrap_err().to_string()
     }
 
+    /// NR-7: the subscription is required, and its absence is reported at the section.
+    #[test]
+    fn missing_subscription_is_a_config_error_naming_the_field() {
+        let e = azure_err(&azure_env_with(
+            "subscription = \"00000000-0000-0000-0000-000000000000\"\n",
+            "",
+        ));
+        assert!(
+            e.contains("TOML parse error at line") && e.contains("missing field `subscription`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn subscription_that_is_not_a_guid_points_at_its_line_and_column() {
+        let e = azure_err(&azure_env_with(
+            "subscription = \"00000000-0000-0000-0000-000000000000\"",
+            "subscription = \"my-sub\"",
+        ));
+        assert!(
+            e.contains("line 8, column 16") && e.contains("must be a subscription id"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn subscription_is_kept_lower_case() {
+        let f = parse(&azure_env_with(
+            "00000000-0000-0000-0000-000000000000",
+            "ABCDEF00-0000-0000-0000-000000000000",
+        ))
+        .unwrap();
+        assert_eq!(
+            azure_of(&f, "prod").subscription,
+            "abcdef00-0000-0000-0000-000000000000"
+        );
+    }
+
+    fn explained(config: Option<&str>, secret: bool) -> Vec<(&'static str, String)> {
+        let doc = match config {
+            Some(c) => azure_env_with(
+                "identity = \"system\"",
+                &format!("identity = \"system\"\nconfig = \"{c}\""),
+            ),
+            None => azure_doc(AZURE_ENV, KEYS),
+        };
+        let f = parse(&doc).unwrap();
+        let t = azure_of(&f, "prod");
+        if secret {
+            t.explain("api", "DB_URL")
+        } else {
+            t.explain_config("api", "LOG_LEVEL").unwrap()
+        }
+    }
+
+    fn explained_line(lines: &[(&'static str, String)], label: &str) -> String {
+        lines.iter().find(|(l, _)| *l == label).unwrap().1.clone()
+    }
+
+    #[test]
+    fn explain_azure_key_shows_key_vault_name() {
+        assert_eq!(
+            explained_line(&explained(None, true), "key vault name"),
+            "FLEET--API--DB-URL"
+        );
+    }
+
+    #[test]
+    fn explain_azure_key_shows_the_app_secret_pattern() {
+        assert!(
+            explained_line(&explained(None, true), "app secret")
+                .starts_with("opv-<16 hex> per Key Vault version")
+        );
+    }
+
+    #[test]
+    fn explain_azure_secret_routes_through_a_key_vault_reference() {
+        assert!(
+            explained_line(&explained(None, true), "routing").starts_with("Key Vault reference")
+        );
+    }
+
+    #[test]
+    fn explain_azure_config_routes_to_a_plain_env_value_by_default() {
+        assert!(explained_line(&explained(None, false), "routing").starts_with("plain env value"));
+    }
+
+    #[test]
+    fn explain_azure_config_with_store_route_routes_through_key_vault() {
+        assert!(
+            explained_line(&explained(Some("store"), false), "routing")
+                .ends_with("(azure.config = \"store\")")
+        );
+    }
+
     /// FR-28: an Azure target opens the pinned flow (Key Vault + Container Apps).
     #[test]
     fn azure_target_opens_pinned_ports() {
         let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
-        let r = crate::runner::fake::FakeRunner::new([]);
+        let mut vault: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/azure/keyvault-show.json"
+        ))
+        .unwrap();
+        vault["properties"]["vaultUri"] = "https://kv-myapp-prod.vault.azure.net/".into();
+        let r = crate::runner::fake::FakeRunner::new([crate::runner::Output::success(
+            serde_json::to_vec(&vault).unwrap(),
+        )]);
         let ports = azure_of(&f, "prod").open("prod", BTreeSet::new(), &r);
         assert!(matches!(ports, Ok(Ports::Pinned { .. })));
     }
@@ -502,6 +702,7 @@ kind = "simple"
 vault_id = "v"
 item_id = "i"
 [environments.prod.azure]
+subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "kv-myapp-prod"
 resource_group = "rg-myapp"
 container_app = "ca-myapp"

@@ -7,7 +7,7 @@
 //! | `await_healthy` | `containerapp revision show -g <rg> -n <app> --revision <rev> -o json`, then `containerapp show …` | — |
 //! | `check_access` | `containerapp show …`, `identity show --ids <id> -o json` (user-assigned identity whose principal the app does not list), `keyvault show -n <vault> -o json`, `role assignment list --assignee <principal> --scope <vault id> --include-inherited --include-groups -o json` (RBAC vaults only) | — |
 //!
-//! Every call adds `--only-show-errors` (and `--subscription <s>` when configured); the
+//! Every call adds `--only-show-errors` and `--subscription <azure.subscription>` (NR-7); the
 //! runner adds the hardened `az` environment (R7). Reads go through `runner.read` (retried),
 //! the update through `runner.write` (never retried, NR-2). `az` records each command's argv
 //! under `~/.azure/commands/`, so argv holds names and ids only: config values travel inside
@@ -67,7 +67,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::az::{self, Effect, Pacer};
-use super::{AzureTarget, ConfigRoute};
+use super::{AzureTarget, ConfigRoute, preflight};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
@@ -108,12 +108,8 @@ const MAX_PATHS: usize = 5;
 pub struct ContainerApp<'a> {
     pub runner: &'a dyn CommandRunner,
     pub target: &'a AzureTarget,
-    /// `azure.subscription` when configured; passed as `--subscription`.
-    pub subscription: Option<&'a str>,
     /// Managed env names (from the template, FR-8).
     pub managed: BTreeSet<String>,
-    /// `https://<vault>.vault.azure.net`, without a trailing slash.
-    pub vault_uri: String,
     /// Health-poll waits and progress lines (NR-4).
     pacer: &'a dyn Pacer,
     poll_every: Duration,
@@ -126,17 +122,13 @@ impl<'a> ContainerApp<'a> {
     pub fn new(
         runner: &'a dyn CommandRunner,
         target: &'a AzureTarget,
-        subscription: Option<&'a str>,
         managed: BTreeSet<String>,
-        vault_uri: String,
         pacer: &'a dyn Pacer,
     ) -> Self {
         Self {
             runner,
             target,
-            subscription,
             managed,
-            vault_uri,
             pacer,
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
@@ -168,16 +160,19 @@ impl<'a> ContainerApp<'a> {
     }
 
     fn show_hint(&self) -> String {
-        format!("az containerapp show -g {} -n {}", self.rg(), self.app())
+        format!(
+            "az containerapp show -g {} -n {} --subscription {}",
+            self.rg(),
+            self.app(),
+            self.target.subscription
+        )
     }
 
-    /// `base` plus `--only-show-errors` (R7) and `--subscription` when configured.
+    /// `base` plus `--only-show-errors` (R7) and `--subscription` (NR-7).
     fn argv(&self, base: &[&str]) -> Vec<String> {
         let mut v: Vec<String> = base.iter().map(|s| s.to_string()).collect();
         v.push(az::ONLY_SHOW_ERRORS.into());
-        if let Some(s) = self.subscription {
-            v.extend(["--subscription".into(), s.into()]);
-        }
+        v.extend(["--subscription".into(), self.target.subscription.clone()]);
         v
     }
 
@@ -365,9 +360,16 @@ impl<'a> ContainerApp<'a> {
         Ok(self.strip(spec, self.container_index(spec)?))
     }
 
+    /// The vault's `properties.vaultUri` as read from Azure, without a trailing slash
+    /// (NR-6; `https://<vault>.vault.azure.net` in the public cloud): kept by the preflight,
+    /// else read once.
+    fn vault_uri(&self) -> Result<String, Error> {
+        preflight::vault_uri_of(self.target, self.runner)
+    }
+
     /// `Pinned` for `<vault_uri>/secrets/<name>/<version>`, else `None`.
-    fn reference(&self, url: &str) -> Option<Binding> {
-        let prefix = format!("{}/secrets/", self.vault_uri.trim_end_matches('/'));
+    fn reference(base: &str, url: &str) -> Option<Binding> {
+        let prefix = format!("{}/secrets/", base.trim_end_matches('/'));
         let head = url.get(..prefix.len())?;
         if !head.eq_ignore_ascii_case(&prefix) {
             return None;
@@ -386,6 +388,7 @@ impl<'a> ContainerApp<'a> {
 
     fn snapshot_from(&self, spec: Value) -> Result<RuntimeSnapshot, Error> {
         let idx = self.container_index(&spec)?;
+        let base = self.vault_uri()?;
         let empty = Vec::new();
         let secrets = spec
             .pointer(SECRETS)
@@ -406,7 +409,7 @@ impl<'a> ContainerApp<'a> {
                     .iter()
                     .find(|s| s["name"].as_str() == Some(r))
                     .and_then(|s| s["keyVaultUrl"].as_str())
-                    .and_then(|u| self.reference(u))
+                    .and_then(|u| Self::reference(&base, u))
                     .unwrap_or(Binding::Other)
             } else {
                 Binding::Other
@@ -447,7 +450,7 @@ impl<'a> ContainerApp<'a> {
 
     /// The fresh spec with `change` applied (R2, Q5). Superseded secrets stay; see
     /// [`prune_superseded`].
-    fn edit(&self, doc: &mut Value, idx: usize, change: &RuntimeChange) {
+    fn edit(&self, doc: &mut Value, idx: usize, change: &RuntimeChange) -> Result<(), Error> {
         let env = array_field(&mut doc["properties"]["template"]["containers"][idx], "env");
         for (name, (store, version)) in &change.pin {
             upsert(
@@ -463,7 +466,8 @@ impl<'a> ContainerApp<'a> {
                 .as_str()
                 .is_some_and(|n| change.unbind.iter().any(|u| u == n))
         });
-        let base = self.vault_uri.trim_end_matches('/');
+        let base = self.vault_uri()?;
+        let base = base.trim_end_matches('/');
         let secrets = array_field(&mut doc["properties"]["configuration"], "secrets");
         for (store, version) in change.pin.values() {
             upsert(
@@ -475,6 +479,7 @@ impl<'a> ContainerApp<'a> {
                 }),
             );
         }
+        Ok(())
     }
 
     /// The `secretRef`s of the revision serving now (`latestReadyRevisionName`), read from
@@ -586,19 +591,7 @@ impl PinnedRuntime for ContainerApp<'_> {
             )));
         }
         let fresh = self.show()?;
-        if let Some(mode) = fresh
-            .pointer("/properties/configuration/activeRevisionsMode")
-            .and_then(Value::as_str)
-            .filter(|m| !m.eq_ignore_ascii_case("single"))
-        {
-            return Err(Error::Config(format!(
-                "container app {app} runs in {mode} revision mode; opv supports single-revision \
-                 mode only; nothing was changed\n  next: `az containerapp revision set-mode -g \
-                 {rg} -n {app} --mode single`, or keep managing this app's revisions by hand",
-                app = self.app(),
-                rg = self.rg()
-            )));
-        }
+        single_revision_mode(self.target, &fresh)?;
         let fresh = self.snapshot_from(fresh)?;
         if fresh.unmanaged_fingerprint != snapshot.unmanaged_fingerprint {
             return Err(Error::Target(format!(
@@ -611,7 +604,7 @@ impl PinnedRuntime for ContainerApp<'_> {
         }
         let mut doc = fresh.spec.0.clone();
         let idx = self.container_index(&doc)?;
-        self.edit(&mut doc, idx, change);
+        self.edit(&mut doc, idx, change)?;
         prune_superseded(&mut doc, &self.serving_refs(&fresh.spec.0)?);
         let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| {
             Error::Target(format!(
@@ -752,7 +745,10 @@ impl PinnedRuntime for ContainerApp<'_> {
         };
         let kv = &self.target.key_vault;
         let kv_subject = format!("Key Vault {kv}");
-        let kv_hint = format!("az keyvault show -n {kv}");
+        let kv_hint = format!(
+            "az keyvault show -n {kv} --subscription {}",
+            self.target.subscription
+        );
         let out = self.az(
             Effect::Read,
             "keyvault show",
@@ -818,6 +814,27 @@ impl PinnedRuntime for ContainerApp<'_> {
                  Secrets User\" --scope {scope}` (a new grant can take a few minutes to apply)"
             ))
         })
+    }
+}
+
+/// Refuses an app not in single-revision mode (NR-25): opv pins by replacing the one
+/// active revision.
+pub(crate) fn single_revision_mode(t: &AzureTarget, app: &Value) -> Result<(), Error> {
+    match app
+        .pointer("/properties/configuration/activeRevisionsMode")
+        .and_then(Value::as_str)
+        .filter(|m| !m.eq_ignore_ascii_case("single"))
+    {
+        Some(mode) => Err(Error::Config(format!(
+            "container app {app} runs in {mode} revision mode; opv supports single-revision \
+             mode only; nothing was changed\n  next: `az containerapp revision set-mode -g {rg} \
+             -n {app} --mode single --subscription {sub}`, or keep managing this app's \
+             revisions by hand",
+            app = t.container_app,
+            rg = t.resource_group,
+            sub = t.subscription
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -965,6 +982,7 @@ mod tests {
     const CONFIG_MARK: &str = "opv-fixture-config-marker";
     const NEW_CONFIG: &str = "opv-marker-config-new";
     const VAULT_URI: &str = "https://kv-opv-fixture.vault.azure.net";
+    const SUBSCRIPTION: &str = "00000000-0000-0000-0000-000000000000";
     const DB_URL: &str = "FLEET__API__DB_URL";
     const DB_STORE: &str = "FLEET--API--DB-URL";
     /// Version id bound in the show fixture, and the one the update fixture repins to.
@@ -1030,8 +1048,16 @@ mod tests {
         Output::success(serde_json::to_vec(v).unwrap())
     }
 
+    /// A vault URI the preflight already read.
+    fn kept(uri: &str) -> super::super::config::ResolvedUri {
+        let kept = super::super::config::ResolvedUri::default();
+        kept.set(uri.into());
+        kept
+    }
+
     fn target() -> AzureTarget {
         AzureTarget {
+            subscription: SUBSCRIPTION.into(),
             key_vault: "kv-opv-fixture".into(),
             resource_group: "opv-fixture-rg".into(),
             container_app: "opv-fixture-app".into(),
@@ -1039,6 +1065,7 @@ mod tests {
             identity: "system".into(),
             env_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
             config: ConfigRoute::Env,
+            vault_uri: kept(VAULT_URI),
         }
     }
 
@@ -1054,7 +1081,7 @@ mod tests {
         t: &'a AzureTarget,
         m: &'a BTreeSet<String>,
     ) -> ContainerApp<'a> {
-        ContainerApp::new(r, t, None, m.clone(), VAULT_URI.into(), &az::NO_WAIT)
+        ContainerApp::new(r, t, m.clone(), &az::NO_WAIT)
             .with_wait(Duration::from_secs(5), Duration::from_secs(10))
     }
 
@@ -1336,7 +1363,9 @@ mod tests {
                 "/dev/stdin",
                 "-o",
                 "json",
-                "--only-show-errors"
+                "--only-show-errors",
+                "--subscription",
+                SUBSCRIPTION
             ]
         );
     }
@@ -1565,25 +1594,14 @@ mod tests {
         ));
     }
 
+    /// NR-7: the configured subscription scopes every call.
     #[test]
-    fn subscription_is_passed_when_configured() {
-        let (t, m) = (target(), managed());
-        let r = FakeRunner::new([out(&show())]);
-        ContainerApp::new(
-            &r,
-            &t,
-            Some("sub-fixture"),
-            m,
-            VAULT_URI.into(),
-            &az::NO_WAIT,
-        )
-        .bindings()
-        .unwrap();
-        assert!(
-            r.calls.borrow()[0]
-                .args
-                .ends_with(&["--subscription".into(), "sub-fixture".into()])
-        );
+    fn every_az_call_carries_the_configured_subscription() {
+        let (r, _) = apply_on(&show(), &show(), &repin());
+        assert!(r.calls.borrow().iter().all(|c| {
+            c.args
+                .ends_with(&["--subscription".into(), SUBSCRIPTION.into()])
+        }));
     }
 
     #[test]
@@ -1666,7 +1684,7 @@ mod tests {
             out(&healthy_revision()),
             out(&show_ready()),
         ]);
-        ContainerApp::new(&r, &t, None, m, VAULT_URI.into(), &pacer)
+        ContainerApp::new(&r, &t, m, &pacer)
             .with_wait(Duration::from_secs(5), Duration::from_secs(300))
             .await_healthy(&Revision(REV.into()))
             .unwrap();
@@ -1722,7 +1740,7 @@ mod tests {
         let (t, m) = (target(), managed());
         let starting = revision("Provisioning", "Activating", "None");
         let r = FakeRunner::new((0..polls).map(|_| out(&starting)));
-        ContainerApp::new(&r, &t, None, m, VAULT_URI.into(), &pacer)
+        ContainerApp::new(&r, &t, m, &pacer)
             .with_wait(
                 Duration::from_secs(5),
                 Duration::from_secs(5 * (polls as u64 - 1)),
@@ -1855,7 +1873,9 @@ mod tests {
                 "--include-groups",
                 "-o",
                 "json",
-                "--only-show-errors"
+                "--only-show-errors",
+                "--subscription",
+                SUBSCRIPTION
             ]
         );
     }

@@ -134,7 +134,13 @@ fn explain_in(
         .target()
         .map_or(registry::DEFAULT.label(), |t| t.provider().label());
     let name_label = format!("{} name", label_of.to_lowercase());
+    let config_lines = env.target().and_then(|t| t.explain_config(product, key));
     let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
+        (Kind::Config, _) if config_lines.is_some() => config_lines
+            .into_iter()
+            .flatten()
+            .map(|(l, v)| (l.to_string(), v))
+            .collect(),
         (Kind::Config, _) => vec![(name_label, format!("- (config: not a {label_of} secret)"))],
         (Kind::Secret, Some(t)) => t
             .explain(product, key)
@@ -329,7 +335,8 @@ mod tests {
         let fleet = crate::config::parse(
             "[profile]\nkind = \"fleet\"\n\
              [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nkey_vault = \"kv\"\nresource_group = \"rg\"\n\
+             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+             key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
              [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
@@ -340,6 +347,23 @@ mod tests {
             out.contains("  key vault name: FLEET--API--TOKEN\n"),
             "{out}"
         );
+    }
+
+    /// FR-37: a config key on a target that routes config shows that target's lines.
+    #[test]
+    fn prints_the_routing_of_a_config_key_on_an_azure_target() {
+        let fleet = crate::config::parse(
+            "[profile]\nkind = \"fleet\"\n\
+             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
+             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+             key_vault = \"kv\"\nresource_group = \"rg\"\n\
+             container_app = \"ca\"\nidentity = \"system\"\n\
+             env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+             [products.api.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let out = explain(&fleet, "api/LOG_LEVEL", Some("prod")).unwrap();
+        assert!(out.contains("  routing:    plain env value"), "{out}");
     }
 
     #[test]

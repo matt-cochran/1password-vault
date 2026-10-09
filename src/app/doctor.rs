@@ -729,6 +729,40 @@ mod tests {
         );
     }
 
+    const AZURE: &str = "[profile]\nkind = \"simple\"\n\
+        [environments.prod]\nvault_id = \"v\"\nitem_id = \"i\"\n\
+        [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+        key_vault = \"kv\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\n";
+
+    /// FR-37: az is only checked when an environment has an azure section.
+    #[test]
+    fn doctor_checks_az_only_with_azure_target() {
+        let r = FakeRunner::new(good());
+        let _ = doctor(Ok(fleet()), &r);
+        assert!(!r.calls.borrow().iter().any(|c| c.program == "az"));
+    }
+
+    /// FR-26: signed out of Azure is a failing `az login` line naming the command.
+    #[test]
+    fn doctor_signed_out_of_azure_names_az_login() {
+        let version = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/azure/az-version.json"
+        ))
+        .unwrap();
+        let r = FakeRunner::new(
+            good()
+                .into_iter()
+                .take(2)
+                .chain([Output::success(version), Output::failure(1)]),
+        );
+        let (_, out) = doctor(crate::config::parse(AZURE), &r);
+        assert!(
+            out.contains("FAIL  az login: authentication error: not logged in to Azure"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn simple_profile_config_line_counts_keys_not_products() {
         let simple = crate::config::load("tests/fixtures/simple.toml").unwrap();

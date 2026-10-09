@@ -17,6 +17,7 @@ kind = "simple"
 vault_id = "vprd"
 item_id = "iprd"
 [environments.prod.azure]
+subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "kv-app"
 resource_group = "rg-app"
 container_app = "ca-app"
@@ -35,6 +36,27 @@ const VERSION: &str = "46687ce78b76487cb0c1da470360b638";
 
 fn azure() -> Fleet {
     config::parse(AZURE).unwrap()
+}
+
+/// The recorded `az` output `name` (R10).
+fn recorded(name: &str) -> Value {
+    let path = format!("{}/tests/fixtures/azure/{name}", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The preflight's answers (NR-23, NR-25): subscription visible, the recorded vault (renamed
+/// to kv-app), its data plane answering, the recorded app.
+fn preflight() -> Vec<Output> {
+    let mut vault = recorded("keyvault-show.json");
+    vault["name"] = json!("kv-app");
+    vault["properties"]["vaultUri"] = json!("https://kv-app.vault.azure.net/");
+    let json = |v: &Value| Output::success(serde_json::to_vec(v).unwrap());
+    vec![
+        Output::success(""),
+        json(&vault),
+        Output::success(""),
+        json(&recorded("containerapp-show.json")),
+    ]
 }
 
 fn azure_item() -> Output {
@@ -58,17 +80,14 @@ fn kv_show(name: &str, value: &str) -> Output {
 
 /// `az containerapp show -o json` (the recorded fixture): `status` reads the bindings.
 fn ca_show() -> Output {
-    let path = format!(
-        "{}/tests/fixtures/azure/containerapp-show.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    Output::success(std::fs::read(path).unwrap())
+    Output::success(serde_json::to_vec(&recorded("containerapp-show.json")).unwrap())
 }
 
-/// `status prod --json` on `responses` (then the app's bindings): the TARGET of each row
-/// by key, and the runner.
+/// `status prod --json` on `responses` (then the app's bindings and the vault URI): the
+/// TARGET of each row by key, and the runner.
 fn azure_status(mut responses: Vec<Output>) -> (Vec<(String, String)>, FakeRunner) {
     responses.push(ca_show());
+    responses.push(preflight().swap_remove(1));
     let r = FakeRunner::new(responses);
     let mut out = Vec::new();
     super::status::run_with(&azure(), "prod", &r, &mut out, true).unwrap();
@@ -155,6 +174,7 @@ fn azure_status_prints_no_store_value() {
         kv_show("API-KEY", "api-FIXTUREVALUE-old"),
         kv_show("DB-URL", DB_URL),
         ca_show(),
+        preflight().swap_remove(1),
     ]);
     let mut out = Vec::new();
     let _ = super::status::run(&azure(), "prod", &r, &mut out);
