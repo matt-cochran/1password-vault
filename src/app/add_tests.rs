@@ -289,12 +289,12 @@ fn a_declared_key_already_in_every_environment_changes_nothing() {
 }
 
 #[test]
-fn the_next_step_adds_the_field_to_the_item() {
+fn the_next_step_checks_the_environment_which_adds_the_field() {
     let mut args = new_key("api/STRIPE_KEY");
     args.envs = vec!["prod".into()];
     let a = add_to(COMMENTED, args);
     assert!(
-        a.out.ends_with("Next: opv item skeleton prod\n"),
+        a.out.ends_with("Next: opv check prod --product api\n"),
         "{}",
         a.out
     );

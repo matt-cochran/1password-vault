@@ -421,6 +421,10 @@ enum Cmd {
     Login {
         /// Environment name from the configuration (for example dev or prod).
         env: Option<String>,
+        /// 1Password account (email or ID) this project uses; kept in .opv. Asked for when
+        /// several accounts are on this machine.
+        #[arg(long)]
+        account: Option<String>,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -549,7 +553,7 @@ enum Cmd {
         #[arg(value_name = "TOPIC")]
         topic: Vec<String>,
     },
-    /// Generate configuration from a 1Password item you have already set up.
+    /// Write the configuration from an environment's 1Password item (created if missing).
     #[command(before_help = INIT_QUICK)]
     Init {
         /// Environment name to declare (for example staging or prod).
@@ -578,7 +582,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
         /// Print what was written (names and kinds) as one JSON document.
-        #[arg(long)]
+        #[arg(long, hide_long_help = true)]
         json: bool,
         /// Write ./secrets.toml even for a new project (without it, a new project's
         /// configuration is saved as a manifest in the item's vault).
@@ -587,6 +591,9 @@ enum Cmd {
         /// Project name of a new manifest; defaults to the repository's name.
         #[arg(long, conflicts_with = "file")]
         project: Option<String>,
+        /// 1Password account (email or ID) when several are on this machine; kept in .opv.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Declare a key in the configuration, or add environments to a declared key.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
@@ -1310,9 +1317,25 @@ fn run(
         }
         return Ok(0);
     }
-    if let Cmd::Login { env, command } = &cli.cmd {
+    if let Cmd::Login {
+        env,
+        command,
+        account,
+    } = &cli.cmd
+    {
         use opv::app::{login, setup_runtime};
         setup_runtime::Console::require_terminal("login", &typed_command())?;
+        let here = std::env::current_dir().unwrap_or_default();
+        let probe = ProcessRunner::new(
+            Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
+            cli.verbose,
+        );
+        login::choose_account(
+            &probe,
+            account.as_deref(),
+            &here,
+            &mut setup_runtime::Console,
+        )?;
         let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
             Some(f) => Some(f),
             None => manifest_for_login(&cli, config_source),
@@ -1355,6 +1378,12 @@ fn run(
         Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
         cli.verbose,
     );
+    // FR-40, NR-7: the account recorded for this checkout (.opv) or OP_ACCOUNT; a manifest
+    // found in another account replaces it below. Never op's default when one is known.
+    r.use_account(
+        config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
+            .or_else(config_store::account_env),
+    );
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
@@ -1391,6 +1420,12 @@ fn run(
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
     let found = request(&cli, config_source, false).and_then(|req| config_store::locate(&req, &r));
+    // A manifest found in a chosen account: every later op call uses that account.
+    if let Ok(config_store::Found::Manifest(m)) = &found
+        && m.account.is_some()
+    {
+        r.use_account(m.account.clone());
+    }
     if let Ok(f) = &found
         && let Some(line) = f.announce()
     {
@@ -1422,6 +1457,15 @@ fn run(
         return run_edit(cli.cmd, &found?, init_options, &r, out).map(|()| 0);
     }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
+    // The project's account (its manifest's, or the one recorded in .opv): `doctor`
+    // without --env checks the sign-in of that account, never op's default (FR-40).
+    let run_account = match &found {
+        Ok(config_store::Found::Manifest(m)) => m.account.clone(),
+        _ => None,
+    }
+    .or_else(|| config_store::pointer_account(&std::env::current_dir().unwrap_or_default()))
+    .or_else(config_store::account_env);
+    r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
     // A file that does not load: re-check it with a read-only command (H10). A manifest
@@ -1449,6 +1493,9 @@ fn run(
             Some(runner)
         }
         (Ok(fleet), Some((env, reach))) => Some(signin::open(fleet, env, &r, reach)?),
+        (_, None) if matches!(cmd, Cmd::Doctor { .. }) && run_account.is_some() => {
+            Some(signin::EnvRunner::with_account(&r, run_account))
+        }
         _ => None,
     };
     let runner: &dyn CommandRunner = match &env_runner {
@@ -1775,17 +1822,43 @@ fn run_init(
     }
     let dir = std::env::current_dir()
         .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
-    let (file, project) = match &cli.cmd {
-        Cmd::Init { file, project, .. } => (*file, project.clone()),
+    let (file, project, account) = match &cli.cmd {
+        Cmd::Init {
+            file,
+            project,
+            account,
+            ..
+        } => (*file, project.clone(), account.clone()),
         _ => unreachable!("called for init only"),
     };
+    // FR-40, NR-7: every op call of init goes to one chosen account, never op's default
+    // when several accounts are on this machine; a choice given here is recorded in .opv.
+    let given = account
+        .clone()
+        .or_else(|| config_store::pointer_account(&dir))
+        .or_else(config_store::account_env);
+    let chosen = config_store::pick_account(r, given)?;
+    if account.is_some()
+        && let Some(a) = &chosen
+    {
+        let path = config_store::record_account(&dir, a)?;
+        if !json {
+            writeln!(
+                out,
+                "using 1Password account {a}; recorded in {} (commit it)",
+                path.display()
+            )
+            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))?;
+        }
+    }
+    let scoped = signin::EnvRunner::with_account(r, chosen);
     let args = init_args(cli.cmd, init_options)?;
     // A project that already has a secrets.toml keeps it; a new one gets a manifest
     // unless --file asks for the file (FR-44).
     if file || config::discover(&dir).is_some() {
-        init::run_as(&args, &dir, r, out, json)
+        init::run_as(&args, &dir, &scoped, out, json)
     } else {
-        init::run_manifest(&args, project.as_deref(), &dir, r, out, json)
+        init::run_manifest(&args, project.as_deref(), &dir, &scoped, out, json)
     }
 }
 
@@ -1844,6 +1917,7 @@ fn init_args(
         file: _,
         project: _,
         json: _,
+        account: _,
     } = cmd
     else {
         unreachable!("called for init only")
@@ -1966,7 +2040,7 @@ mod tests {
     fn login_takes_an_environment_and_a_command_after_dashes() {
         let cli =
             Cli::try_parse_from(["opv", "login", "prod", "--", "opv", "check", "prod"]).unwrap();
-        let Cmd::Login { env, command } = cli.cmd else {
+        let Cmd::Login { env, command, .. } = cli.cmd else {
             panic!("not login")
         };
         assert_eq!(

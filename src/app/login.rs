@@ -104,6 +104,60 @@ pub fn run_or(
     backend.child(command)
 }
 
+/// FR-40: the 1Password account this checkout uses, chosen once. `given` (`--account`: an
+/// email, account ID, user ID or sign-in address) is resolved to an account ID; without it,
+/// and with no account recorded yet (`.opv`, `OP_ACCOUNT`), a person with several accounts
+/// picks one from the list. The choice is recorded in `.opv` (see
+/// [`crate::config_store::record_account`]), so later commands never fall back to op's
+/// default account. `None`: nothing to choose (one account, or already recorded).
+pub fn choose_account(
+    r: &dyn crate::runner::CommandRunner,
+    given: Option<&str>,
+    start: &std::path::Path,
+    ui: &mut dyn Interaction,
+) -> Result<Option<String>, Error> {
+    use crate::adapters::onepassword_manifest as manifest;
+    let accounts = manifest::accounts(r);
+    let uuid = match given {
+        Some(who) => manifest::resolve(&accounts, who)?,
+        None if crate::config_store::pointer_account(start).is_some()
+            || crate::config_store::account_env().is_some()
+            || accounts.len() < 2 =>
+        {
+            return Ok(None);
+        }
+        None => {
+            let labels: Vec<String> = accounts
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{} ({})",
+                        if a.email.is_empty() {
+                            &a.account_uuid
+                        } else {
+                            &a.email
+                        },
+                        a.url.trim_start_matches("https://").trim_end_matches('/')
+                    )
+                })
+                .collect();
+            let picked = ui.choose(
+                "Several 1Password accounts are on this machine. Which one holds this \
+                 project's secrets?",
+                &labels,
+            )?;
+            let at = labels.iter().position(|l| *l == picked).unwrap_or(0);
+            accounts[at].account_uuid.clone()
+        }
+    };
+    let path = crate::config_store::record_account(start, &uuid)?;
+    ui.show(&format!(
+        "This project uses 1Password account {uuid}; recorded in {} (commit it).",
+        path.display()
+    ))?;
+    Ok(Some(uuid))
+}
+
 #[cfg(test)]
 #[path = "login_tests.rs"]
 mod tests;

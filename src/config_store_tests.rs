@@ -732,3 +732,77 @@ fn an_environments_own_account_wins_over_the_manifests() {
     let fleet = in_account(&FakeOp::default(), &text);
     assert_eq!(fleet.environments["dev"].account.as_deref(), Some("home"));
 }
+
+// --- the project's 1Password account (FR-40, NR-7; found in a live run-through) ---
+
+const TWO_ACCOUNTS: &str = r#"[
+  {"url":"my.1password.com","email":"me@family.example","user_uuid":"UFAMILY0000000000000000001","account_uuid":"AFAMILY0000000000000000001"},
+  {"url":"my.1password.com","email":"me@labs.example","user_uuid":"ULABS000000000000000000001","account_uuid":"ALABS000000000000000000001"}
+]"#;
+
+fn accounts_runner(json: &str) -> crate::runner::fake::FakeRunner {
+    crate::runner::fake::FakeRunner::new([crate::runner::Output::success(json.to_string())])
+}
+
+#[test]
+fn several_accounts_and_none_chosen_is_account_required() {
+    let e = pick_account(&accounts_runner(TWO_ACCOUNTS), None).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::AccountRequired);
+}
+
+/// opv never searches every account: the only call is `op account list`.
+#[test]
+fn several_accounts_and_none_chosen_searches_no_account() {
+    let r = accounts_runner(TWO_ACCOUNTS);
+    let _ = pick_account(&r, None);
+    assert_eq!(r.calls.borrow().len(), 1);
+}
+
+#[test]
+fn an_email_resolves_to_its_account_id() {
+    let got = pick_account(
+        &accounts_runner(TWO_ACCOUNTS),
+        Some("me@labs.example".into()),
+    );
+    assert_eq!(got.unwrap().as_deref(), Some("ALABS000000000000000000001"));
+}
+
+/// Two accounts on my.1password.com: the sign-in address alone names neither.
+#[test]
+fn a_shared_sign_in_address_is_ambiguous() {
+    let e = pick_account(
+        &accounts_runner(TWO_ACCOUNTS),
+        Some("my.1password.com".into()),
+    );
+    assert_eq!(e.unwrap_err().code(), crate::error::Code::AccountRequired);
+}
+
+#[test]
+fn the_only_account_is_used() {
+    let one = r#"[{"url":"my.1password.com","email":"me@labs.example","account_uuid":"ALABS000000000000000000001"}]"#;
+    let got = pick_account(&accounts_runner(one), None).unwrap();
+    assert_eq!(got.as_deref(), Some("ALABS000000000000000000001"));
+}
+
+#[test]
+fn a_pointer_may_name_only_the_account() {
+    let d = parse_dot_opv(
+        "account = \"ALABS000000000000000000001\"\n",
+        Path::new(".opv"),
+    )
+    .unwrap();
+    assert_eq!(d.project, None);
+}
+
+#[test]
+fn recording_the_account_keeps_the_pointers_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "project = \"myapp\"\n").unwrap();
+    record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    let text = std::fs::read_to_string(dir.path().join(DOT_FILE)).unwrap();
+    let d = parse_dot_opv(&text, Path::new(".opv")).unwrap();
+    assert_eq!(
+        (d.project.as_deref(), d.account.as_deref()),
+        (Some("myapp"), Some("ALABS000000000000000000001"))
+    );
+}

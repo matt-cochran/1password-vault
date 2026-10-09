@@ -363,6 +363,10 @@ fn run_on_with(
         }
         Err(e) => (None, Err(e)),
     };
+    // No account chosen among several: any sign-in check would ask the 1Password app about
+    // op's default account, which this project was never pointed at (found live).
+    let no_account =
+        matches!(&config_line, Err(e) if e.code() == crate::error::Code::AccountRequired);
     // (one target per provider in use, environments without a target)
     let targets = fleet.as_ref().map(|f| {
         (
@@ -378,7 +382,12 @@ fn run_on_with(
     let op_check = op_version(r, host);
     let op_present = op_check.is_ok();
     report.push("op", op_check);
-    if op_present {
+    if no_account {
+        report.skip(
+            "op auth",
+            "not checked (choose the project's account first, see the config line above)".into(),
+        );
+    } else if op_present {
         report.push("op auth", op_auth(r, host, scope.env).map(Check::Ok));
     } else {
         // One failure per cause: the op line already says why (review #12).

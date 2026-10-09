@@ -219,8 +219,10 @@ fn run_inner(
     config_store::save(store, r, &base, &text)?;
 
     let first = &envs[0];
+    // A person's check creates the empty field and links to it (found in a run-through:
+    // `item skeleton` was a step `check` already does).
     if args.json {
-        let next = format!("opv item skeleton {first}");
+        let next = check_command(first, product);
         return write_json(out, product, key, &kind, &envs, &place, true, &next);
     }
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
@@ -228,13 +230,13 @@ fn run_inner(
     w(
         out,
         format!(
-            "then: opv item skeleton <env> adds the empty field to each environment's item ({}); \
-             type the value in 1Password and run {}",
-            envs.join(", "),
-            check_command(first, product)
+            "then: {} adds the empty field to the item and links to it ({}); type the value \
+             in 1Password and run it again",
+            check_command(first, product),
+            envs.join(", ")
         ),
     )?;
-    w(out, format!("Next: opv item skeleton {first}"))
+    w(out, format!("Next: {}", check_command(first, product)))
 }
 
 fn check_command(env: &str, product: Option<&str>) -> String {

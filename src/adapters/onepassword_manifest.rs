@@ -168,13 +168,103 @@ pub fn list(
     Ok(rows)
 }
 
-/// An account op knows on this machine: its ID (for `--account`) and sign-in address.
+/// An account op knows on this machine: its ID (for `--account`), sign-in address, and the
+/// person's own email and user ID, used only to match what they type and to list their
+/// accounts back to them when they must choose (never logged or sent anywhere).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Account {
     #[serde(default)]
     pub account_uuid: String,
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub user_uuid: String,
+    #[serde(default)]
+    pub shorthand: String,
+}
+
+/// The account `who` names among `accounts`: an account ID, user ID, email, shorthand or
+/// sign-in address (matched ignoring case). `op` itself takes no email, and a sign-in
+/// address is shared by every account on `my.1password.com`, so opv resolves `who` to the
+/// account ID once and uses that (found live). None, or several, is a configuration error
+/// that lists the accounts.
+pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
+    let w = who.trim().to_ascii_lowercase();
+    let host = |u: &str| {
+        u.trim_start_matches("https://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let hits: Vec<&Account> = accounts
+        .iter()
+        .filter(|a| {
+            [&a.account_uuid, &a.user_uuid, &a.email, &a.shorthand]
+                .iter()
+                .any(|f| !f.is_empty() && f.to_ascii_lowercase() == w)
+                || host(&a.url) == host(&w)
+        })
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok(one.account_uuid.clone()),
+        [] => Err(Error::Config(
+            format!(
+                "no 1Password account on this machine matches {who:?}; the accounts op knows:\n{}",
+                listing(accounts)
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::AccountRequired)
+        .with_do("add the account in the 1Password app (and turn on Settings > Developer > Integrate with 1Password CLI), then re-run")),
+        many => Err(Error::Config(
+            format!(
+                "{} 1Password accounts match {who:?}; name one by its email or account ID:\n{}",
+                many.len(),
+                listing(&many.iter().map(|a| (*a).clone()).collect::<Vec<_>>())
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::AccountRequired)),
+    }
+}
+
+/// One line per account: email, sign-in address and account ID (the person's own accounts,
+/// shown so they can choose).
+fn listing(accounts: &[Account]) -> String {
+    if accounts.is_empty() {
+        return "  (none: add one in the 1Password app)".into();
+    }
+    accounts
+        .iter()
+        .map(|a| {
+            format!(
+                "  {}  {}  {}",
+                if a.email.is_empty() { "-" } else { &a.email },
+                a.url.trim_start_matches("https://").trim_end_matches('/'),
+                a.account_uuid
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Several accounts on this machine and none chosen for the project: opv never guesses and
+/// never searches them all (each search asks the 1Password app about that account, and
+/// none of them was granted to this project). The person picks one.
+pub fn choose_error(accounts: &[Account]) -> Error {
+    Error::Config(
+        format!(
+            "{} 1Password accounts are on this machine and this project names none; opv uses \
+             only the account you choose, never op's default:\n{}",
+            accounts.len(),
+            listing(accounts)
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::AccountRequired)
+    .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
+    .with_next("opv login --account <email>")
 }
 
 /// The accounts op knows (`op account list`, a free probe); empty when it fails.

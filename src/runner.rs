@@ -908,9 +908,34 @@ pub struct ProcessRunner {
     cap: Option<Duration>,
     /// A target write started ([`CommandRunner::writes_started`]).
     wrote: Arc<AtomicBool>,
+    /// The project's 1Password account (FR-40, NR-7): every `op` call that names no account
+    /// of its own (an environment's `OP_ACCOUNT`) uses it, never op's default.
+    account: Arc<Mutex<Option<String>>>,
 }
 
 impl ProcessRunner {
+    /// Use `account` for every `op` call that names none (see the field).
+    pub fn use_account(&self, account: Option<String>) {
+        *lock(&self.account) = account;
+    }
+
+    /// `env` plus the run's account for an `op` call that names none.
+    fn with_default_account<'e>(
+        &'e self,
+        program: &str,
+        env: &[(&'e str, &'e str)],
+        held: &'e Option<String>,
+    ) -> Vec<(&'e str, &'e str)> {
+        let mut all = env.to_vec();
+        if program == crate::host::OP_CLI.program
+            && !env.iter().any(|(k, _)| *k == "OP_ACCOUNT")
+            && let Some(a) = held
+        {
+            all.push(("OP_ACCOUNT", a.as_str()));
+        }
+        all
+    }
+
     /// A runner for one opv run: `budget` caps every call, `verbose` prints one stderr line
     /// per call (NR-22).
     pub fn new(budget: Budget, verbose: bool) -> Self {
@@ -919,6 +944,7 @@ impl ProcessRunner {
             verbose,
             cap: None,
             wrote: Arc::new(AtomicBool::new(false)),
+            account: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -937,7 +963,9 @@ impl ProcessRunner {
         }
         let limit = self.cap.map_or(limit, |c| c.min(limit));
         let deadline = Instant::now() + limit;
-        let mut child = command_for(call).spawn()?;
+        let held = lock(&self.account).clone();
+        let env = self.with_default_account(call.program, call.env, &held);
+        let mut child = command_for(&Call { env: &env, ..*call }).spawn()?;
         signals::track(&child, call.step());
         let child_stderr = child.stderr.take().expect("stderr is piped");
         // stderr is read on its own thread into a bounded, zeroizing buffer held in memory
@@ -1078,7 +1106,7 @@ impl Default for ProcessRunner {
 /// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
 fn command_for(call: &Call) -> Command {
     let mut cmd = Command::new(call.program);
-    cmd.args(call.args)
+    cmd.args(with_account(call.program, call.args, call.env))
         .envs(pinned_env(call.program).iter().copied())
         .envs(call.env.iter().copied())
         .stdin(if call.stdin.is_some() {
@@ -1089,6 +1117,32 @@ fn command_for(call: &Call) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     cmd
+}
+
+/// `args` for `program`, with `--account <a>` added to an `op` call whose env names an
+/// account (`OP_ACCOUNT`, set per environment, FR-40) and whose argv names none. The flag
+/// reaches `op` where an environment variable may not (a Windows `op.exe` started from
+/// WSL sees no Linux variables), so the call never falls back to op's default account
+/// (NR-7). It goes before any `--`, which starts the child command of `op run`.
+fn with_account<'a>(program: &str, args: &[&'a str], env: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    let mut out = args.to_vec();
+    // `op --version` and `op account ...` are about no one account; op refuses the flag
+    // on `--version` (found live).
+    let accountless = matches!(args.first(), Some(&"--version") | Some(&"account"));
+    if program != crate::host::OP_CLI.program || accountless || args.contains(&"--account") {
+        return out;
+    }
+    let Some(account) = env
+        .iter()
+        .rev()
+        .find(|(k, _)| *k == "OP_ACCOUNT")
+        .map(|(_, v)| *v)
+    else {
+        return out;
+    };
+    let at = out.iter().position(|a| *a == "--").unwrap_or(out.len());
+    out.splice(at..at, ["--account", account]);
+    out
 }
 
 /// Pseudo-random jitter without a dependency: a randomly keyed hash of the current instant.
@@ -1228,12 +1282,14 @@ impl CommandRunner for ProcessRunner {
         env: &[(&str, &str)],
         remove: &[String],
     ) -> io::Result<i32> {
+        let held = lock(&self.account).clone();
+        let env = &self.with_default_account(program, env, &held);
         let mut cmd = Command::new(program);
         for key in remove {
             cmd.env_remove(key);
         }
         let status = cmd
-            .args(args)
+            .args(with_account(program, args, env))
             .envs(env.iter().copied())
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -1243,8 +1299,10 @@ impl CommandRunner for ProcessRunner {
     }
 
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
+        let held = lock(&self.account).clone();
+        let env = &self.with_default_account(program, env, &held);
         let status = Command::new(program)
-            .args(args)
+            .args(with_account(program, args, env))
             .envs(env.iter().copied())
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -2740,5 +2798,43 @@ mod tests {
             .run_inherited("sh", &["-c", "exit 3"], &[])
             .unwrap();
         assert_eq!((code, take_failure_excerpt()), (3, None));
+    }
+}
+
+#[cfg(test)]
+mod account_arg_tests {
+    use super::with_account;
+
+    /// Found live: an account given only as `OP_ACCOUNT` never reached a Windows `op.exe`
+    /// started from WSL, which then asked the 1Password app about the default account.
+    #[test]
+    fn an_op_call_with_an_account_in_its_env_carries_it_in_argv() {
+        let args = with_account("op", &["item", "get", "i"], &[("OP_ACCOUNT", "AID")]);
+        assert_eq!(args, ["item", "get", "i", "--account", "AID"]);
+    }
+
+    #[test]
+    fn the_account_goes_before_the_child_command_of_op_run() {
+        let args = with_account(
+            "op",
+            &["run", "--", "npm", "start"],
+            &[("OP_ACCOUNT", "AID")],
+        );
+        assert_eq!(args, ["run", "--account", "AID", "--", "npm", "start"]);
+    }
+
+    /// Found live: `op --version --account X` fails, so doctor reported op as broken.
+    #[test]
+    fn op_version_carries_no_account() {
+        assert_eq!(
+            with_account("op", &["--version"], &[("OP_ACCOUNT", "AID")]),
+            ["--version"]
+        );
+    }
+
+    #[test]
+    fn an_explicit_account_flag_is_kept_as_it_is() {
+        let given = ["item", "list", "--account", "X"];
+        assert_eq!(with_account("op", &given, &[("OP_ACCOUNT", "AID")]), given);
     }
 }

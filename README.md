@@ -28,7 +28,19 @@ opv login dev                    # sign in to dev's 1Password account (your own 
 opv run dev -- npm run dev       # your app, with dev's settings as environment variables
 ```
 
-opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk. Starting a project instead: `opv init dev --vault <vault> --item <item>` writes the configuration from an existing 1Password item ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
+opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk.
+
+Starting from nothing: install the 1Password app, add your account, and turn on **Settings > Developer > Integrate with 1Password CLI** (or [install `op`](docs/install.md)). Then, in your project:
+
+```sh
+opv login --account you@example.com            # the project's 1Password account; asked for when you have several
+opv init dev --vault myapp-dev --item myapp    # creates the vault and item if missing; saves the configuration in 1Password
+opv add API_KEY --kind secret --env dev
+opv check dev                                  # adds the empty field and links to it: type the value in 1Password
+opv run dev -- npm run dev
+```
+
+`opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
 
 Then, for a deployed environment:
 

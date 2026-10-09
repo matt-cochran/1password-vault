@@ -31,6 +31,18 @@ pub struct EnvRunner<'a> {
     login: Option<Box<dyn DeployLogin>>,
 }
 
+impl<'a> EnvRunner<'a> {
+    /// A runner whose `op` calls all use `account` and nothing else (`init` in a chosen
+    /// account, before any configuration exists, FR-40).
+    pub fn with_account(inner: &'a dyn CommandRunner, account: Option<String>) -> Self {
+        EnvRunner {
+            inner,
+            account,
+            login: None,
+        }
+    }
+}
+
 /// Whether the command reaches the deployment target (`status`, `plan`, `sync`), and so
 /// signs in with the environment's `deploy_credentials`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

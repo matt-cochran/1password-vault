@@ -1184,15 +1184,15 @@ pub(crate) fn target<'f>(
     Err(Error::Config(
         format!(
             "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add one target section ({}) to environment {env} in secrets.toml first \
-             ({DOCS}/configuration.md).",
+             deploy, add one target section ({}) to environment {env} in the configuration \
+             first: secrets.toml, or opv config edit for a manifest ({DOCS}/configuration.md).",
             sections.join(", ")
         )
         .into(),
     )
     .with_code(crate::error::Code::NoTarget)
     .with_do(format!(
-        "to deploy, add a {} section to environment {env} in secrets.toml ({DOCS}/configuration.md)",
+        "to deploy, add a {} section to environment {env} in the configuration (secrets.toml, or opv config edit) ({DOCS}/configuration.md)",
         sections.join(", ")
     ))
     .with_next(check_command(

@@ -461,6 +461,7 @@ macro_rules! codes {
 codes! {
     Usage => "usage", 2, Never, false, "the command line is not valid (unknown flag, missing argument)";
     ConfigNotFound => "config_not_found", 2, AfterFix, false, "no secrets.toml in this directory or a parent, and no 1Password manifest for this checkout";
+    AccountRequired => "account_required", 2, AfterFix, true, "several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account";
     ManifestNotFound => "manifest_not_found", 2, AfterFix, false, "no 1Password manifest has the project's title (OPV_PROJECT or .opv)";
     ManifestAmbiguous => "manifest_ambiguous", 2, AfterFix, true, "several 1Password manifests match; a person keeps one and archives the others";
     ManifestExists => "manifest_exists", 2, Never, false, "a manifest for this project already exists; change it with opv config edit";
