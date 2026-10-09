@@ -39,7 +39,7 @@ function platformTuple() {
 function setup({ version = '1.2.3', binary = '#!/bin/sh\necho "opv 1.2.3"\n' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opv-npm-test-'));
   roots.push(root);
-  const home = path.join(root, 'home');
+  const home = path.join(root, 'my home');
   const pkgDir = path.join(root, 'pkg');
   fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
   fs.mkdirSync(path.join(pkgDir, 'bin'), { recursive: true });

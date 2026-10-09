@@ -22,7 +22,7 @@ function uninstall() {
   if (!fs.existsSync(target)) return;
 
   const record = readRecord();
-  if (record === null) return;
+  if (record === null || record.manager !== 'npm') return;
 
   let hash;
   try {
@@ -40,8 +40,7 @@ if (require.main === module) {
   try {
     uninstall();
   } catch (e) {
-    process.stderr.write(`opv: ${e.message}\n`);
-    process.exit(1);
+    process.stderr.write(`opv: could not remove the shared copy (${e.message}); remove it by hand if wanted.\n`);
   }
 }
 

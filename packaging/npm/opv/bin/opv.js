@@ -26,7 +26,7 @@ const version = pkg.version;
 
 // Print the install hint once per home: with --ignore-scripts the canonical binary is
 // never written, and every run would otherwise repeat the same line.
-function printInstallHintOnce() {
+function printInstallHintOnce(stale) {
   let marker;
   try {
     marker = path.join(install.dataDir(), 'npm-hint-shown');
@@ -42,9 +42,10 @@ function printInstallHintOnce() {
   }
   const where =
     process.platform === 'win32' ? '%LOCALAPPDATA%\\Programs\\opv' : '~/.local/bin';
-  process.stderr.write(
-    `opv is not installed at ${where}; run: npm rebuild @matthew-cochran/opv\n`,
-  );
+  const what = stale
+    ? `opv at ${where} is ${stale}, not ${version}`
+    : `opv is not installed at ${where}`;
+  process.stderr.write(`${what}; run: npm rebuild @matthew-cochran/opv\n`);
 }
 
 function bundledBinary() {
@@ -57,7 +58,7 @@ function bundledBinary() {
     console.error(`opv: expected the optional dependency ${dep} to be installed.`);
     console.error(`opv: supported platforms: ${SUPPORTED.join(', ')}`);
     console.error(
-      'opv: reinstall with "npm i -g opv" on a supported platform, or use a release binary.',
+      'opv: reinstall with "npm i -g @matthew-cochran/opv" on a supported platform, or use a release binary.',
     );
     process.exit(1);
   }
@@ -66,10 +67,11 @@ function bundledBinary() {
 function main() {
   const target = install.canonicalPath();
   let bin = null;
-  if (fs.existsSync(target) && install.versionOf(target) === version) {
+  const have = fs.existsSync(target) ? install.versionOf(target) : null;
+  if (have === version) {
     bin = target;
   } else {
-    if (!fs.existsSync(target)) printInstallHintOnce();
+    printInstallHintOnce(have);
     bin = bundledBinary();
   }
 
@@ -80,6 +82,8 @@ function main() {
     process.exit(1);
   }
   if (result.signal) {
+    // Die by the same signal so the caller sees what the child saw.
+    process.kill(process.pid, result.signal);
     process.exit(1);
   }
   process.exit(result.status === null ? 1 : result.status);

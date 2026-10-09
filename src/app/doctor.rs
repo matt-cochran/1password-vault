@@ -343,40 +343,80 @@ fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
     }
 }
 
-/// Task I: every distinct `opv` on PATH with its version, one check line. More than one
-/// copy is a warning that names the removal command for the copies the shell will not
-/// run, so the user can make every `opv` the same file. Never fails the run: a doctor
-/// that cannot read a candidate still reports the others.
+/// Task I: every `opv` on PATH, one check line. The npm `bin` wrapper runs the canonical
+/// binary, so a wrapper beside the binary is the intended state and reads `ok`. A second
+/// native copy, or a wrapper whose package version differs from the binary, is a warning
+/// naming the command that fixes it. Never fails the run: a candidate that cannot be read
+/// still leaves the others reported.
 fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
-    let paths = crate::host::distinct_opv_on_path();
-    if paths.is_empty() {
-        return Ok(Check::Ok("not found on PATH".into()));
-    }
-    let mut entries: Vec<String> = Vec::new();
-    for p in &paths {
-        let program = p.to_string_lossy().into_owned();
-        let call = crate::runner::Call::new(program.as_str(), &["--version"]);
-        let version = match r.probe(&call, crate::runner::PROBE_TIMEOUT) {
-            Ok(o) if o.status == 0 => {
-                version_in(o.stdout.as_slice()).unwrap_or_else(|| "version not recognised".into())
+    use crate::host::OpvCopy;
+    let copies = crate::host::opv_copies_on_path();
+    let mut binaries: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut wrappers: Vec<(std::path::PathBuf, Option<String>)> = Vec::new();
+    for copy in copies {
+        match copy {
+            OpvCopy::Binary(p) => {
+                let program = p.to_string_lossy().into_owned();
+                let call = crate::runner::Call::new(program.as_str(), &["--version"]);
+                let version = match r.probe(&call, crate::runner::PROBE_TIMEOUT) {
+                    Ok(o) if o.status == 0 => version_in(o.stdout.as_slice())
+                        .unwrap_or_else(|| "version not recognised".into()),
+                    _ => "version not recognised".into(),
+                };
+                binaries.push((p, version));
             }
-            _ => "version not recognised".into(),
-        };
-        entries.push(format!("{program} {version}"));
+            OpvCopy::NpmWrapper { path, version } => wrappers.push((path, version)),
+        }
     }
-    if entries.len() > 1 {
-        let removal = paths
-            .iter()
-            .skip(1)
-            .map(|p| removal_command(p))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Ok(Check::Warn(format!(
-            "{}; remove the copies you do not update: {removal}",
-            entries.join(", ")
+    let Some((first, first_version)) = binaries.first() else {
+        return Ok(match wrappers.first() {
+            None => Check::Ok("not found on PATH".into()),
+            Some((p, v)) => Check::Ok(format!(
+                "{} {} (npm wrapper running its bundled copy; run: npm rebuild -g @matthew-cochran/opv)",
+                p.display(),
+                v.as_deref().unwrap_or("version not recognised")
+            )),
+        });
+    };
+    let mut fixes: Vec<String> = binaries
+        .iter()
+        .skip(1)
+        .map(|(p, _)| removal_command(p))
+        .collect();
+    let stale_wrapper = wrappers.iter().any(|(_, v)| {
+        v.as_deref()
+            .is_some_and(|v| v != first_version.trim_start_matches('v'))
+    });
+    if stale_wrapper || wrappers.len() > 1 {
+        fixes.push("npm update -g @matthew-cochran/opv".into());
+    }
+    if fixes.is_empty() {
+        let also = if wrappers.is_empty() {
+            ""
+        } else {
+            " (also run by the npm wrapper)"
+        };
+        return Ok(Check::Ok(format!(
+            "{} {first_version}{also}",
+            first.display()
         )));
     }
-    Ok(Check::Ok(entries.remove(0)))
+    let mut listed: Vec<String> = binaries
+        .iter()
+        .map(|(p, v)| format!("{} {v}", p.display()))
+        .collect();
+    listed.extend(wrappers.iter().map(|(p, v)| {
+        format!(
+            "{} {} (npm wrapper)",
+            p.display(),
+            v.as_deref().unwrap_or("version not recognised")
+        )
+    }));
+    Ok(Check::Warn(format!(
+        "{}; make them one install: {}",
+        listed.join(", "),
+        fixes.join(", ")
+    )))
 }
 
 /// The command that removes one opv copy on this platform.
@@ -1032,43 +1072,97 @@ mod tests {
         );
     }
 
-    /// Task I: doctor lists every distinct opv on PATH with its version.
-    #[test]
-    fn doctor_lists_each_opv_on_path_with_its_version() {
+    fn binary(p: &str) -> crate::host::OpvCopy {
+        crate::host::OpvCopy::Binary(std::path::PathBuf::from(p))
+    }
+
+    fn wrapper(p: &str, v: Option<&str>) -> crate::host::OpvCopy {
+        crate::host::OpvCopy::NpmWrapper {
+            path: std::path::PathBuf::from(p),
+            version: v.map(str::to_owned),
+        }
+    }
+
+    /// Doctor output with `copies` on PATH and `versions` answering each binary probe.
+    fn doctor_with_opv_copies(copies: Vec<crate::host::OpvCopy>, versions: &[&str]) -> String {
         let r = FakeRunner::new(
-            good()
-                .into_iter()
-                .chain([Output::success(b"opv 1.2.3\n".to_vec())]),
+            good().into_iter().chain(
+                versions
+                    .iter()
+                    .map(|v| Output::success(format!("opv {v}\n").into_bytes())),
+            ),
         );
-        let paths = vec![std::path::PathBuf::from("/opt/opv/bin/opv")];
         let mut out = Vec::new();
         let res =
-            crate::host::with_test_path(paths, || run_with(Ok(fleet()), &r, &linux(), &mut out));
+            crate::host::with_test_path(copies, || run_with(Ok(fleet()), &r, &linux(), &mut out));
         res.unwrap();
-        let out = text_of(&out);
+        text_of(&out)
+    }
+
+    #[test]
+    fn doctor_lists_one_opv_on_path_with_its_version() {
+        let out = doctor_with_opv_copies(vec![binary("/opt/opv/bin/opv")], &["1.2.3"]);
         assert!(out.contains("ok    opv: /opt/opv/bin/opv 1.2.3"), "{out}");
     }
 
-    /// Task I: more than one distinct opv is a warning naming the removal command.
+    #[test]
+    fn doctor_accepts_the_npm_wrapper_beside_the_matching_binary() {
+        let out = doctor_with_opv_copies(
+            vec![
+                binary("/home/x/.local/bin/opv"),
+                wrapper("/usr/bin/opv", Some("1.2.3")),
+            ],
+            &["1.2.3"],
+        );
+        assert!(
+            out.contains("ok    opv: /home/x/.local/bin/opv 1.2.3 (also run by the npm wrapper)"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn doctor_warns_on_two_opv_copies() {
-        let r = FakeRunner::new(good().into_iter().chain([
-            Output::success(b"opv 1.2.3\n".to_vec()),
-            Output::success(b"opv 1.1.0\n".to_vec()),
-        ]));
-        let paths = vec![
-            std::path::PathBuf::from("/home/x/.local/bin/opv"),
-            std::path::PathBuf::from("/home/x/.cargo/bin/opv"),
-        ];
-        let mut out = Vec::new();
-        let res =
-            crate::host::with_test_path(paths, || run_with(Ok(fleet()), &r, &linux(), &mut out));
-        res.unwrap();
-        let out = text_of(&out);
+        let out = doctor_with_opv_copies(
+            vec![
+                binary("/home/x/.local/bin/opv"),
+                binary("/home/x/.cargo/bin/opv"),
+            ],
+            &["1.2.3", "1.1.0"],
+        );
         assert!(
             out.lines()
                 .any(|l| l.starts_with("warn  opv:") && l.contains("rm /home/x/.cargo/bin/opv")),
             "{out}"
         );
+    }
+
+    #[test]
+    fn doctor_warns_when_the_npm_wrapper_is_a_different_version() {
+        let out = doctor_with_opv_copies(
+            vec![
+                binary("/home/x/.local/bin/opv"),
+                wrapper("/usr/bin/opv", Some("1.1.0")),
+            ],
+            &["1.2.3"],
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("warn  opv:")
+                    && l.contains("npm update -g @matthew-cochran/opv")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn doctor_does_not_run_the_npm_wrapper_to_read_its_version() {
+        // One probe answer only: a second probe would exhaust the fake runner.
+        let out = doctor_with_opv_copies(
+            vec![
+                binary("/home/x/.local/bin/opv"),
+                wrapper("/usr/bin/opv", Some("1.2.3")),
+            ],
+            &["1.2.3"],
+        );
+        assert!(!out.contains("fail"), "{out}");
     }
 }

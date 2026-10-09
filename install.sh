@@ -107,7 +107,10 @@ hash_file() {
 
 # The record both install.sh and npm write so either method can tell what installed the
 # binary in the canonical location. `$want` is the version; `$1` is its SHA-256.
+# Only the canonical location has a record: a `--dir` install elsewhere must not
+# overwrite the record of the copy npm and install.sh share.
 write_installed_by() {
+  [ "$dir" = "$DEFAULT_DIR" ] || return 0
   data_dir="${HOME:-/tmp}/.local/share/opv"
   mkdir -p "$data_dir" 2>/dev/null || return 0
   printf 'install.sh %s %s\n' "$want" "$1" > "$data_dir/installed-by" 2>/dev/null || true
@@ -249,7 +252,8 @@ print_path_hint() {
 
 if [ "$existing" = "$want" ]; then
   echo "opv $want is already installed"
-  if actual=$(hash_file "$exe"); then
+  # Keep an existing record (npm may own this copy); write one only when none exists.
+  if [ ! -e "${HOME:-/tmp}/.local/share/opv/installed-by" ] && actual=$(hash_file "$exe"); then
     write_installed_by "$actual"
   fi
   print_path_hint

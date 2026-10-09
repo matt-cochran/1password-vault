@@ -48,3 +48,17 @@ test('uninstall removes the installed-by record with the binary', unix, () => {
 });
 
 void sha256;
+
+test('uninstall keeps a binary whose record names install.sh', unix, () => {
+  const h = setup();
+  installThen(h);
+  const record = fs.readFileSync(h.record, 'utf8').replace(/^npm/, 'install.sh');
+  fs.writeFileSync(h.record, record);
+  uninstall(h);
+  assert.equal(fs.existsSync(h.target), true);
+});
+
+test('uninstall with nothing installed exits 0', unix, () => {
+  const h = setup();
+  assert.equal(uninstall(h).status, 0);
+});

@@ -74,3 +74,60 @@ test('install leaves no temporary file behind', unix, () => {
     .filter((name) => name.startsWith('.opv.tmp'));
   assert.deepEqual(leftovers, []);
 });
+
+test('install works when HOME contains a space', unix, () => {
+  const h = setup();
+  assert.match(h.home, / /);
+  install(h);
+  assert.equal(fs.existsSync(h.target), true);
+});
+
+test('install run twice leaves the same binary hash in the record', unix, () => {
+  const h = setup();
+  install(h);
+  const first = fs.readFileSync(h.record, 'utf8');
+  install(h);
+  assert.equal(fs.readFileSync(h.record, 'utf8'), first);
+});
+
+test('install run twice prints nothing the second time', unix, () => {
+  const h = setup();
+  install(h);
+  assert.equal(install(h).stdout.replace(/Add .*\n.*export PATH.*\n/, ''), '');
+});
+
+test('install leaves a foreign file in place and still exits 0', unix, () => {
+  const h = setup();
+  fs.writeFileSync(h.target, 'not opv\n');
+  fs.chmodSync(h.target, 0o755);
+  assert.equal(install(h).status, 0);
+});
+
+test('install names the next step when it leaves a foreign file alone', unix, () => {
+  const h = setup();
+  fs.writeFileSync(h.target, 'not opv\n');
+  fs.chmodSync(h.target, 0o755);
+  assert.match(install(h).stderr, /npm rebuild -g @matthew-cochran\/opv/);
+});
+
+test('install under sudo is refused for the invoking user', () => {
+  const { sudoProblem } = require('./install.js');
+  assert.match(sudoProblem({ SUDO_USER: 'mc' }, 0), /without sudo: npm rebuild -g/);
+});
+
+test('install as root without sudo is allowed', () => {
+  const { sudoProblem } = require('./install.js');
+  assert.equal(sudoProblem({}, 0), null);
+});
+
+test('install as a normal user with SUDO_USER set is allowed', () => {
+  const { sudoProblem } = require('./install.js');
+  assert.equal(sudoProblem({ SUDO_USER: 'mc' }, 1000), null);
+});
+
+test('install replaces a broken symlink at the canonical path', unix, () => {
+  const h = setup();
+  fs.symlinkSync(path.join(h.root, 'missing'), h.target);
+  install(h);
+  assert.equal(fs.lstatSync(h.target).isSymbolicLink(), false);
+});

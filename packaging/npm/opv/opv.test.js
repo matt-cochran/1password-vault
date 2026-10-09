@@ -53,3 +53,29 @@ test('wrapper prints the install hint once when scripts were ignored', unix, () 
   const hits = `${first.stderr}${second.stderr}`.split('npm rebuild @matthew-cochran/opv').length - 1;
   assert.equal(hits, 1);
 });
+
+test('wrapper passes the child exit code through', unix, () => {
+  const h = setup();
+  fs.writeFileSync(path.join(h.platformDir, 'bin', h.exe), '#!/bin/sh\nexit 7\n');
+  fs.chmodSync(path.join(h.platformDir, 'bin', h.exe), 0o755);
+  assert.equal(wrapper(h, []).status, 7);
+});
+
+test('wrapper passes arguments with spaces and quotes through unchanged', unix, () => {
+  const h = setup();
+  const marker = path.join(h.root, 'argv');
+  writeCanonical(h, '1.2.3', marker);
+  wrapper(h, ['a b', "c'd", '$HOME']);
+  assert.equal(fs.readFileSync(marker, 'utf8'), "a b c'd $HOME");
+});
+
+test('wrapper hint says the canonical copy is stale when versions differ', unix, () => {
+  const h = setup();
+  writeCanonical(h, '9.9.9', path.join(h.root, 'unused'));
+  assert.match(wrapper(h, ['x']).stderr, /is 9\.9\.9, not 1\.2\.3/);
+});
+
+test('wrapper never uses a shell', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'bin', 'opv.js'), 'utf8');
+  assert.doesNotMatch(source, /shell:\s*true|execSync|exec\(/);
+});

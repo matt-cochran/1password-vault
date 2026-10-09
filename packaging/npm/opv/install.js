@@ -35,6 +35,10 @@ function canonicalPath(platform = process.platform) {
 
 // The shared metadata directory: what installed the binary, and its hash.
 function dataDir() {
+  if (isWindows()) {
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'Programs', 'opv', 'data');
+  }
   return path.join(os.homedir(), '.local', 'share', 'opv');
 }
 
@@ -83,7 +87,7 @@ function bundledBinary() {
 
 // The version a file reports (`opv 1.2.3` -> `1.2.3`), or `null` when it cannot run.
 function versionOf(file) {
-  const result = spawnSync(file, ['--version'], { encoding: 'utf8' });
+  const result = spawnSync(file, ['--version'], { encoding: 'utf8', timeout: 10000 });
   if (result.error || result.status !== 0) return null;
   return (result.stdout || '').trim().split(/\s+/).pop() || null;
 }
@@ -91,7 +95,7 @@ function versionOf(file) {
 // A file is an opv binary when `--version` prints `opv ...` (brief). This is what lets
 // npm replace a copy install.sh wrote without clobbering an unrelated file.
 function isOpvBinary(file) {
-  const result = spawnSync(file, ['--version'], { encoding: 'utf8' });
+  const result = spawnSync(file, ['--version'], { encoding: 'utf8', timeout: 10000 });
   return (
     !result.error && result.status === 0 && /^opv\s+/.test((result.stdout || '').trim())
   );
@@ -104,7 +108,25 @@ function printPathHint(dir) {
   process.stdout.write(`  export PATH="${dir}:$PATH"\n`);
 }
 
+// Under `sudo npm i -g`, HOME may be the invoking user's, and a root-owned
+// ~/.local/bin/opv would block later updates. Refuse, say why, and name the safe command.
+function sudoProblem(env = process.env, uid = process.getuid ? process.getuid() : null) {
+  if (uid === 0 && env.SUDO_USER) {
+    return (
+      `npm is running as root for ${env.SUDO_USER}, so opv was not copied to their ` +
+      'home (it would become root-owned). The npm command still works. ' +
+      'To install the shared copy, run without sudo: npm rebuild -g @matthew-cochran/opv'
+    );
+  }
+  return null;
+}
+
 function install() {
+  const problem = sudoProblem();
+  if (problem) {
+    process.stderr.write(`opv: ${problem}\n`);
+    return;
+  }
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
   const version = pkg.version;
   const target = canonicalPath();
@@ -115,7 +137,10 @@ function install() {
     const record = readRecord();
     const ours = record !== null && hashOrNull(target) === record.sha;
     if (!ours && !isOpvBinary(target)) {
-      throw new Error(`refusing to overwrite ${target}: it is not an opv binary`);
+      throw new Error(
+        `${target} is not an opv binary, so it was left untouched. The npm command still ` +
+          'works. Move that file, then run: npm rebuild -g @matthew-cochran/opv',
+      );
     }
     oldVersion = versionOf(target);
   }
@@ -152,12 +177,16 @@ if (require.main === module) {
   try {
     install();
   } catch (e) {
-    process.stderr.write(`opv: ${e.message}\n`);
-    process.exit(1);
+    // Never fail `npm install`: the wrapper falls back to its bundled binary.
+    process.stderr.write(
+      `opv: could not install to the shared location (${e.message}). ` +
+        'The npm command still works; fix the cause, then run: npm rebuild -g @matthew-cochran/opv\n',
+    );
   }
 }
 
 module.exports = {
+  sudoProblem,
   canonicalPath,
   dataDir,
   recordPath,
