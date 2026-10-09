@@ -24,6 +24,43 @@ pub fn credential_vars() -> Vec<&'static str> {
         .collect()
 }
 
+/// The provider that declares store kind `kind` (FR-39).
+pub fn store_kind(kind: &str) -> Option<&'static dyn Provider> {
+    PROVIDERS
+        .iter()
+        .copied()
+        .find(|p| p.store_kinds().contains(&kind))
+}
+
+/// Every declared store kind, sorted, for "known: ..." messages.
+pub fn store_kinds() -> Vec<&'static str> {
+    let mut k: Vec<&str> = PROVIDERS
+        .iter()
+        .flat_map(|p| p.store_kinds())
+        .copied()
+        .collect();
+    k.sort_unstable();
+    k
+}
+
+/// Whether the runtime of `section` can keep its secrets in a store of `kind`.
+pub fn binds(section: &str, kind: &str) -> bool {
+    find(section).is_some_and(|p| p.bindings().iter().any(|b| b.store_kind == kind))
+}
+
+/// Every supported `secrets_in` pair, e.g. `azure_key_vault → kubernetes (External Secrets
+/// Operator)`, in registry order.
+pub fn supported_pairs() -> Vec<String> {
+    PROVIDERS
+        .iter()
+        .flat_map(|p| {
+            p.bindings()
+                .iter()
+                .map(move |b| format!("{} → {} ({})", b.store_kind, p.section(), b.via))
+        })
+        .collect()
+}
+
 /// Every registered section name, sorted, for "known: ..." messages.
 pub fn sections() -> Vec<&'static str> {
     let mut s: Vec<&str> = PROVIDERS.iter().map(|p| p.section()).collect();
@@ -38,6 +75,22 @@ mod tests {
     #[test]
     fn registry_lists_azure_fly_and_kubernetes() {
         assert_eq!(sections(), ["azure", "fly", "kubernetes"]);
+    }
+
+    #[test]
+    fn the_only_secrets_in_pair_is_key_vault_to_kubernetes() {
+        assert_eq!(
+            supported_pairs(),
+            ["azure_key_vault → kubernetes (External Secrets Operator)"]
+        );
+    }
+
+    #[test]
+    fn azure_declares_the_key_vault_store_kind() {
+        assert_eq!(
+            store_kind("azure_key_vault").map(|p| p.section()),
+            Some("azure")
+        );
     }
 
     /// `Host` keeps one bit per credential variable.

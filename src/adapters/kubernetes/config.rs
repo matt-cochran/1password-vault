@@ -11,16 +11,19 @@ use std::fmt;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, IgnoredAny};
 
+use super::external::{self, Bridge, ExternalStore};
 use super::runtime::{POLL_EVERY, WAIT_MAX};
-use super::{KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, PROGRAM, valid_label_value};
+use super::{
+    KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM, valid_label_value,
+};
 use crate::adapters::probe::{spawn_tool, version_in};
 use crate::domain::{AccessFinding, Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::{PinnedRuntime, Ports};
 use crate::provider::{
-    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreNameRules, TargetConfig,
-    Verdict, eq_as,
+    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding, StoreConfig,
+    StoreNameRules, TargetConfig, Verdict, eq_as,
 };
 use crate::runner::CommandRunner;
 
@@ -61,7 +64,16 @@ pub struct KubernetesTarget {
     /// Env-name template; `{KEY}` under the simple profile.
     pub env_name_template: String,
     pub config: ConfigRoute,
+    /// The named store secrets live in (`secrets_in`, FR-39), bound through the External
+    /// Secrets Operator; `None`: opv's own immutable Secrets.
+    pub store: Option<Box<dyn StoreConfig>>,
 }
+
+/// The `secrets_in` pairs this runtime supports (FR-39).
+static BINDINGS: [StoreBinding; 1] = [StoreBinding {
+    store_kind: "azure_key_vault",
+    via: "External Secrets Operator",
+}];
 
 /// The section as written. `E` is how `env_name` is read: a template under the fleet
 /// profile, a refusal under the simple one.
@@ -173,6 +185,7 @@ impl<E> Raw<E> {
             },
             env_name_template,
             config: self.config,
+            store: None,
         }
     }
 }
@@ -230,6 +243,24 @@ impl Provider for KubernetesProvider {
     fn init_section(&self, _name: &str, _profile: Profile) -> Option<String> {
         None
     }
+
+    fn bindings(&self) -> &'static [StoreBinding] {
+        &BINDINGS
+    }
+
+    fn bind(
+        &self,
+        target: Box<dyn TargetConfig>,
+        store: &dyn StoreConfig,
+    ) -> Result<Box<dyn TargetConfig>, Error> {
+        let Some(t) = target.as_any().downcast_ref::<KubernetesTarget>() else {
+            return Err(Error::Config("kubernetes: not a Kubernetes target".into()));
+        };
+        Ok(Box::new(KubernetesTarget {
+            store: Some(store.clone_box()),
+            ..t.clone()
+        }))
+    }
 }
 
 /// A store name character: lower-case letters, digits and `-` (DNS-1123).
@@ -266,10 +297,34 @@ impl TargetConfig for KubernetesTarget {
     }
 
     fn store_name(&self, env_name: &str) -> String {
-        super::store_name(env_name)
+        match &self.store {
+            Some(s) => s.store_name(env_name),
+            None => super::store_name(env_name),
+        }
+    }
+
+    fn secrets_in(&self) -> Option<&dyn StoreConfig> {
+        self.store.as_deref()
     }
 
     fn name_rules(&self) -> NameRules {
+        if self.store.is_some() {
+            // The store's own rules are checked too (config.rs); here, its spelling must
+            // also name the ExternalSecret `opv-<lower-cased name>-<10>` and be the `opv-key`
+            // label value.
+            return NameRules {
+                env_label: "env name",
+                store: Some(StoreNameRules {
+                    label: "Kubernetes name",
+                    max_len: 63,
+                    allowed: |c| c.is_ascii_alphanumeric() || c == '-',
+                    edge: |c| c.is_ascii_alphanumeric(),
+                    pattern: "^[0-9A-Za-z]([-0-9A-Za-z]*[0-9A-Za-z])?$ (at most 63 characters; \
+                              it names the ExternalSecret once lower-cased)",
+                    case_insensitive: true,
+                }),
+            };
+        }
         NameRules {
             env_label: "env name",
             store: Some(StoreNameRules {
@@ -310,12 +365,33 @@ impl TargetConfig for KubernetesTarget {
 
     fn open<'a>(
         &'a self,
-        _env: &'a str,
+        env: &'a str,
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
         // The rollout wait ends inside the run budget (NR-4), not after a fixed 600 s.
         let wait = r.remaining().unwrap_or(WAIT_MAX);
+        if let Some(store) = &self.store {
+            let bridge = Bridge {
+                store: store.open(env, managed.clone(), r),
+                cluster_store: store.bridge_name().to_string(),
+                describe: store.describe(),
+                locator: store.locator().to_string(),
+            };
+            return Ok(Ports::Pinned {
+                store: Box::new(ExternalStore::new(
+                    store.open(env, managed.clone(), r),
+                    r,
+                    &self.target,
+                )),
+                runtime: Box::new(
+                    KubeDeployment::new(r, &self.target, managed)
+                        .with_wait(POLL_EVERY, wait, move |d| r.pause(d, ""))
+                        .with_config_in_store(self.config == ConfigRoute::Store)
+                        .with_external(bridge),
+                ),
+            });
+        }
         Ok(Ports::Pinned {
             store: Box::new(KubeSecrets::new(r, &self.target, managed.clone())),
             runtime: Box::new(
@@ -326,9 +402,25 @@ impl TargetConfig for KubernetesTarget {
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner, _mode: PreflightMode) -> Result<Preflight, Error> {
-        // Every kubectl failure is diagnosed per call (context, reachability, refusal).
-        Ok(Preflight::default())
+    /// Every kubectl failure is diagnosed per call (context, reachability, refusal). With
+    /// a named store (FR-39): the store's own checks, then the External Secrets Operator,
+    /// the ClusterSecretStore and the right to create ExternalSecrets, before any write.
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error> {
+        let Some(store) = &self.store else {
+            return Ok(Preflight::default());
+        };
+        store.preflight(r)?;
+        let checks = external::preflight(
+            &Kubectl::new(r, &self.target),
+            store.bridge_name(),
+            store.locator(),
+            &store.describe(),
+            mode,
+        )?;
+        Ok(Preflight {
+            checks,
+            skip_deploy: None,
+        })
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
@@ -371,17 +463,67 @@ impl TargetConfig for KubernetesTarget {
                 Verdict::Warn("not checked (cluster not reachable)".into())
             }),
         });
+        if let Some(store) = &self.store {
+            checks.extend(store.doctor(r, host));
+            if reachable {
+                checks.extend(external::doctor(
+                    &Kubectl::new(r, &self.target),
+                    store.bridge_name(),
+                    store.locator(),
+                    &store.describe(),
+                ));
+            } else {
+                checks.extend(external::DOCTOR_CHECKS.iter().map(|&name| Check {
+                    name: name.into(),
+                    outcome: Ok(Verdict::Warn("not checked (cluster not reachable)".into())),
+                }));
+            }
+        }
         checks
     }
 
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)> {
         let env = self.env_name_of(product, key);
-        let store = super::store_name(&env);
+        let k8s = super::store_name(&env);
+        if let Some(store) = &self.store {
+            let mut lines = vec![("env name", env.clone())];
+            lines.extend(store.explain(&env));
+            lines.extend([
+                (
+                    "external secret",
+                    format!(
+                        "opv-{k8s}-<first {} characters of the pinned version id>, refreshInterval \
+                         0, through ClusterSecretStore {}",
+                        external::ID_LEN,
+                        store.bridge_name()
+                    ),
+                ),
+                (
+                    "kubernetes target",
+                    format!(
+                        "deployment {} in namespace {} (context {})",
+                        self.target.deployment, self.target.namespace, self.target.context
+                    ),
+                ),
+                (
+                    "chain",
+                    format!(
+                        "{env} → {} (pinned version) → ExternalSecret opv-{k8s}-<version> → \
+                         Secret of the same name → env {env}",
+                        store.describe()
+                    ),
+                ),
+            ]);
+            return lines;
+        }
         vec![
             ("env name", env),
             (
                 "kubernetes secret",
-                format!("opv-{store}-<10 hex of the value's SHA-256>"),
+                format!(
+                    "opv-{k8s}-<{} random characters per version>",
+                    super::VERSION_LEN
+                ),
             ),
             (
                 "kubernetes target",
@@ -404,10 +546,18 @@ impl TargetConfig for KubernetesTarget {
             ],
             ConfigRoute::Store => {
                 let mut lines = self.explain(product, key);
-                lines.push((
-                    "routing",
-                    "Secret reference pinned to one version (kubernetes.config = \"store\")".into(),
-                ));
+                let routing = match &self.store {
+                    Some(s) => format!(
+                        "{} version pinned through an ExternalSecret (kubernetes.config = \
+                         \"store\")",
+                        s.describe()
+                    ),
+                    None => {
+                        "Secret reference pinned to one version (kubernetes.config = \"store\")"
+                            .into()
+                    }
+                };
+                lines.push(("routing", routing));
                 lines
             }
         })
@@ -496,7 +646,14 @@ impl KubernetesTarget {
     /// warning naming the exact grant, never a failure.
     fn access_check(&self, r: &dyn CommandRunner) -> Verdict {
         let rt = KubeDeployment::new(r, &self.target, BTreeSet::new());
-        match rt.check_access(&[]) {
+        // With a named store opv writes no Secrets itself; the ExternalSecret rights have
+        // their own line (`external secrets access`).
+        let needed =
+            |f: &AccessFinding| self.store.is_none() || !f.store_name.ends_with(" secrets");
+        match rt
+            .check_access(&[])
+            .map(|found| found.into_iter().filter(needed).collect::<Vec<_>>())
+        {
             Ok(found) if found.is_empty() => Verdict::Ok(format!(
                 "has every right sync needs in namespace {}",
                 self.target.namespace
@@ -525,7 +682,13 @@ impl fmt::Display for AccessFix<'_> {
         let reasons: Vec<&str> = self.found.iter().map(|a| a.reason.as_str()).collect();
         write!(f, "{} (advisory; sync needs it)", reasons.join("; "))?;
         f.write_str("\n  fix (as a namespace admin):")?;
-        for resource in ["secrets", "deployments", "replicasets", "pods"] {
+        for resource in [
+            "secrets",
+            external::RESOURCE,
+            "deployments",
+            "replicasets",
+            "pods",
+        ] {
             let verbs: Vec<&str> = self
                 .found
                 .iter()
@@ -537,7 +700,7 @@ impl fmt::Display for AccessFix<'_> {
             if verbs.is_empty() {
                 continue;
             }
-            let role = format!("opv-{resource}");
+            let role = format!("opv-{}", resource.split('.').next().unwrap_or(resource));
             write!(
                 f,
                 "\n    {}\n    {}",
@@ -859,7 +1022,7 @@ environments = ["dev"]
                 ("env name", "FLEET__API__DB_URL".to_string()),
                 (
                     "kubernetes secret",
-                    "opv-fleet--api--db-url-<10 hex of the value's SHA-256>".to_string()
+                    "opv-fleet--api--db-url-<10 random characters per version>".to_string()
                 ),
                 (
                     "kubernetes target",
@@ -1005,5 +1168,182 @@ environments = ["dev"]
             .filter(|c| c.args.iter().any(|a| a == "can-i"))
             .count();
         assert_eq!(can_i, 8);
+    }
+
+    // named stores and secrets_in (FR-39) ------------------------------------------------
+
+    const STORE: &str = r#"[stores.prod-vault]
+azure_key_vault = "kv-myapp-prod"
+subscription = "00000000-0000-0000-0000-000000000000"
+"#;
+
+    /// A simple-profile file: `[stores.prod-vault]`, environment `dev` on Kubernetes with
+    /// `extra` added to its section, and keys `keys`.
+    fn bound(extra: &str, keys: &str) -> String {
+        format!(
+            r#"[profile]
+kind = "simple"
+{STORE}[environments.dev]
+vault_id = "v"
+item_id = "i"
+[environments.dev.kubernetes]
+context = "kind-opv"
+namespace = "myapp"
+deployment = "api"
+{extra}
+{keys}"#
+        )
+    }
+
+    const DB_URL: &str = "[keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+
+    fn bound_target(extra: &str) -> KubernetesTarget {
+        kube_of(&parse(&bound(extra, DB_URL)).unwrap(), "dev").clone()
+    }
+
+    #[test]
+    fn secrets_in_binds_the_named_store() {
+        let t = bound_target("secrets_in = \"prod-vault\"");
+        assert_eq!(
+            t.secrets_in().map(|s| s.describe()),
+            Some("Key Vault kv-myapp-prod".into())
+        );
+    }
+
+    #[test]
+    fn without_secrets_in_the_target_keeps_its_own_store() {
+        assert!(bound_target("").secrets_in().is_none());
+    }
+
+    #[test]
+    fn bound_target_names_entries_in_the_store_spelling() {
+        let t = bound_target("secrets_in = \"prod-vault\"");
+        assert_eq!(t.store_name("DB_URL"), "DB-URL");
+    }
+
+    #[test]
+    fn bound_store_defaults_its_cluster_secret_store_to_the_store_name() {
+        let t = bound_target("secrets_in = \"prod-vault\"");
+        assert_eq!(
+            t.secrets_in().map(|s| s.bridge_name().to_string()),
+            Some("prod-vault".into())
+        );
+    }
+
+    #[test]
+    fn unknown_store_lists_the_defined_ones() {
+        let e = err(&bound("secrets_in = \"staging-vault\"", DB_URL));
+        assert!(e.contains("names no store; defined: prod-vault"), "{e}");
+    }
+
+    #[test]
+    fn unknown_store_points_at_the_secrets_in_line() {
+        let e = err(&bound("secrets_in = \"staging-vault\"", DB_URL));
+        assert!(e.contains("line 13, column 1"), "{e}");
+    }
+
+    #[test]
+    fn secrets_in_that_is_not_a_string_is_refused() {
+        let e = err(&bound("secrets_in = 3", DB_URL));
+        assert!(
+            e.contains("secrets_in must be the name of a [stores.<name>] table"),
+            "{e}"
+        );
+    }
+
+    fn on(section: &str, body: &str) -> String {
+        format!(
+            "[profile]\nkind = \"simple\"\n{STORE}[environments.dev]\nvault_id = \"v\"\nitem_id \
+             = \"i\"\n[environments.dev.{section}]\n{body}\nsecrets_in = \"prod-vault\"\n{DB_URL}"
+        )
+    }
+
+    #[test]
+    fn secrets_in_on_fly_lists_the_supported_pairs() {
+        let e = err(&on("fly", "app = \"my-app\""));
+        assert!(
+            e.contains("supported secrets_in pairs: azure_key_vault → kubernetes (External Secrets Operator)"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn secrets_in_on_azure_is_an_unsupported_pair() {
+        let body = "subscription = \"00000000-0000-0000-0000-000000000000\"\nkey_vault = \
+                    \"kv-a\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"";
+        let e = err(&on("azure", body));
+        assert!(
+            e.contains("azure cannot keep its secrets in store \"prod-vault\""),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn store_without_a_kind_lists_the_known_kinds() {
+        let text = bound("", DB_URL).replace("azure_key_vault = \"kv-myapp-prod\"\n", "");
+        assert!(err(&text).contains("names no store kind; add one of: azure_key_vault"));
+    }
+
+    #[test]
+    fn store_name_that_is_not_a_dns_label_is_refused_at_its_line() {
+        let text = bound("", DB_URL).replace("[stores.prod-vault]", "[stores.Prod_Vault]");
+        let e = err(&text);
+        assert!(
+            e.contains("line 3") && e.contains("store \"Prod_Vault\""),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn key_whose_store_spelling_ends_in_a_dash_is_refused() {
+        let keys = "[keys.DB_URL_]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+        let e = err(&bound("secrets_in = \"prod-vault\"", keys));
+        assert!(
+            e.contains("must start and end with a letter or digit"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn two_environments_sharing_a_store_and_names_are_refused() {
+        let text = format!(
+            "{}[environments.prod]\nvault_id = \"v2\"\nitem_id = \"i2\"\n\
+             [environments.prod.kubernetes]\ncontext = \"kind-opv\"\nnamespace = \"other\"\n\
+             deployment = \"api\"\nsecrets_in = \"prod-vault\"\n",
+            bound("secrets_in = \"prod-vault\"", "")
+        ) + "[keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n";
+        let e = err(&text);
+        assert!(
+            e.contains("environments dev and prod both keep Key Vault name db-url in Key Vault kv-myapp-prod"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_long_key_that_fits_key_vault_but_not_a_kubernetes_label_is_refused() {
+        let long = format!("K{}", "A".repeat(70));
+        let keys = format!("[keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
+        let e = err(&bound("secrets_in = \"prod-vault\"", &keys));
+        assert!(
+            e.contains("renders Kubernetes name of 71 characters"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn bound_target_explains_the_chain() {
+        let t = bound_target("secrets_in = \"prod-vault\"");
+        let chain = t
+            .explain(SIMPLE_PRODUCT, "DB_URL")
+            .into_iter()
+            .find(|(label, _)| *label == "chain")
+            .map(|(_, v)| v);
+        assert_eq!(
+            chain.as_deref(),
+            Some(
+                "DB_URL → Key Vault kv-myapp-prod (pinned version) → ExternalSecret \
+                 opv-db-url-<version> → Secret of the same name → env DB_URL"
+            )
+        );
     }
 }

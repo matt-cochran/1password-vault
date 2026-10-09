@@ -16,7 +16,7 @@ use super::{
     PinnedRow, is_blocking, open_target, preflight, print_extras, print_rows, read_and_plan,
     write_err, write_json,
 };
-use crate::domain::{Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
+use crate::domain::{Binding, Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
 use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports};
 use crate::provider::TargetConfig;
@@ -99,6 +99,9 @@ struct PinnedStatus {
     drift: Vec<String>,
     env_routed: Vec<String>,
     runtime: String,
+    /// How each bound name reaches the app, when it passes through more than one object
+    /// (FR-39). Names and version ids only.
+    chains: Vec<String>,
 }
 
 impl PinnedStatus {
@@ -112,6 +115,9 @@ impl PinnedStatus {
         }
         if !self.drift.is_empty() {
             line(drift_line(env_name, &self.drift.join(", ")))?;
+        }
+        for chain in &self.chains {
+            line(format!("chain: {chain}"))?;
         }
         if !self.env_routed.is_empty() {
             line(format!(
@@ -170,6 +176,14 @@ fn pinned_status(
         drift: d.drift.iter().cloned().collect(),
         env_routed: want.plain.keys().cloned().collect(),
         runtime: runtime.describe(),
+        chains: want
+            .store
+            .keys()
+            .filter_map(|n| match snap.bindings.get(n) {
+                Some(Binding::Pinned { version, .. }) => runtime.chain(n, version),
+                _ => None,
+            })
+            .collect(),
     })
 }
 

@@ -22,7 +22,7 @@ use crate::domain::Fleet;
 use crate::error::Error;
 use crate::runner::{Call, CommandRunner, Outcome, Output};
 
-const STALE: &str = "opv-fleet--api--db-url-0123456789";
+const STALE: &str = "opv-fleet--api--db-url-s7aw2ylfpc";
 const DESIRED: [(&str, &str); 2] = [
     ("FLEET__API__DB_URL", "opv-k8s-marker-2"),
     ("NEW_KEY", "opv-k8s-marker-3"),
@@ -87,6 +87,8 @@ struct Cluster {
     broken_image: bool,
     calls: Cell<usize>,
     cut: Cell<Option<(usize, Cut)>>,
+    /// opv was killed at the cut: every later call is lost before its effect.
+    killed: Cell<bool>,
     /// A Deployment template referenced a Secret that did not exist.
     dangling: Cell<bool>,
     argv: RefCell<Vec<Vec<String>>>,
@@ -103,11 +105,11 @@ impl Cluster {
             );
         };
         add(
-            "opv-fleet--api--db-url-f85b191f16",
+            "opv-fleet--api--db-url-q3vz7kd2mx",
             "fleet--api--db-url",
             "opv-k8s-marker-1",
         );
-        add("opv-k7-73571418f2", "k7", "opv-k8s-k7");
+        add("opv-k7-h6tn4wbr5e", "k7", "opv-k8s-k7");
         add(STALE, "fleet--api--db-url", "opv-k8s-stale");
         Self {
             secrets: RefCell::new(secrets),
@@ -116,18 +118,40 @@ impl Cluster {
             broken_image: false,
             calls: Cell::new(0),
             cut: Cell::new(None),
+            killed: Cell::new(false),
             dangling: Cell::new(false),
             argv: RefCell::new(Vec::new()),
         }
     }
 
-    /// What `sync` leaves behind: Secret names and the managed env entries.
-    fn state(&self) -> (BTreeSet<String>, Vec<Value>) {
-        let env = self.deployment.borrow()["spec"]["template"]["spec"]["containers"][0]["env"]
+    /// What `sync` leaves behind, independent of the random version ids: every Secret as
+    /// (opv-managed, opv-key, data), duplicates kept, and the managed env entries with each
+    /// Secret reference replaced by the content it names.
+    fn state(&self) -> (Vec<(String, String, String)>, Vec<Value>) {
+        let secrets = self.secrets.borrow();
+        let mut held: Vec<_> = secrets.values().cloned().collect();
+        held.sort();
+        let mut env = self.deployment.borrow()["spec"]["template"]["spec"]["containers"][0]["env"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        (self.secrets.borrow().keys().cloned().collect(), env)
+        for e in &mut env {
+            if let Some(r) = e.pointer_mut("/valueFrom/secretKeyRef/name") {
+                let name = r.as_str().unwrap_or_default();
+                *r = json!(secrets.get(name).map(|(_, k, d)| format!("{k}={d}")));
+            }
+        }
+        (held, env)
+    }
+
+    /// Names of the Secrets holding versions of store name `key`.
+    fn versions_of(&self, key: &str) -> Vec<String> {
+        self.secrets
+            .borrow()
+            .iter()
+            .filter(|(_, (_, k, _))| k == key)
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 
     fn template_refs(template: &Value) -> Vec<String> {
@@ -297,6 +321,7 @@ impl Cluster {
         let args: Vec<String> = call.args.iter().map(|s| s.to_string()).collect();
         self.argv.borrow_mut().push(args.clone());
         match self.cut.get() {
+            Some((k, _)) if self.killed.get() && n > k => (true, (0, String::new())),
             Some((k, Cut::BeforeEffect)) if k == n => (true, (0, String::new())),
             Some((k, Cut::AfterEffect)) if k == n => {
                 (true, self.exec(call.program, &args, call.stdin))
@@ -437,4 +462,40 @@ fn sync_binds_every_desired_key_by_reference() {
             .any(|e| e["name"] == name && e.pointer("/valueFrom/secretKeyRef/name").is_some())
     };
     assert!(DESIRED.iter().all(|(n, _)| bound(n)), "{env:?}");
+}
+
+/// A write whose outcome is lost (opv killed right after `apply` took effect) leaves an
+/// unreferenced version; the re-run writes a fresh id, binds it, and collects the orphan
+/// after the healthy rollout: one bound version remains (NR-1).
+#[test]
+fn lost_write_then_rerun_leaves_one_bound_version() {
+    let (want, _) = reference();
+    // Writes run in name order, so the last `apply` is NEW_KEY's (unbound before the run).
+    let new_key_apply = want
+        .argv
+        .borrow()
+        .iter()
+        .rposition(|a| a[5] == "apply")
+        .unwrap();
+    let c = Cluster::new();
+    c.cut.set(Some((new_key_apply, Cut::AfterEffect)));
+    c.killed.set(true);
+    let _ = sync(&c);
+    c.cut.set(None);
+    sync(&c).unwrap();
+    let left = c.versions_of("new-key");
+    let bound = Cluster::template_refs(&c.deployment.borrow()["spec"]["template"]);
+    assert!(
+        left.len() == 1 && bound.contains(&left[0]),
+        "{left:?} {bound:?}"
+    );
+}
+
+#[test]
+fn second_sync_writes_no_new_version() {
+    let (c, _) = reference();
+    let before: BTreeSet<String> = c.secrets.borrow().keys().cloned().collect();
+    sync(&c).unwrap();
+    let after: BTreeSet<String> = c.secrets.borrow().keys().cloned().collect();
+    assert_eq!(after, before);
 }

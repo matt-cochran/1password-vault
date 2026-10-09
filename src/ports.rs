@@ -51,6 +51,11 @@ pub trait PinnedStore: Store {
     /// stay as history and are never disabled or deleted; a store whose versions are
     /// separate objects (Kubernetes Secrets) deletes the unreferenced ones.
     fn collect_superseded(&self, name: &str, keep_version: &str) -> Result<(), Error>;
+    /// Whether `version` of `name` exists, to diagnose a binding that cannot resolve it
+    /// (read-only). `None` when the store cannot tell.
+    fn has_version(&self, _name: &str, _version: &str) -> Result<Option<bool>, Error> {
+        Ok(None)
+    }
 }
 
 /// What runs the app in the staged flow: the Fly app.
@@ -76,6 +81,12 @@ pub trait PinnedRuntime {
     fn describe(&self) -> String;
     /// The command that shows why `revision` is not healthy, for the "next:" line (FR-26).
     fn inspect_hint(&self, revision: &Revision) -> String;
+    /// How env name `name`, pinned to `version` of the store, reaches the app, when it
+    /// passes through more than one object (FR-39), e.g. `DB_URL → Key Vault kv (v…) →
+    /// ExternalSecret opv-… → env DB_URL`. Names and version ids only.
+    fn chain(&self, _name: &str, _version: &str) -> Option<String> {
+        None
+    }
 }
 
 /// A target's store and runtime adapters, returned by `TargetConfig::open`. The variant is

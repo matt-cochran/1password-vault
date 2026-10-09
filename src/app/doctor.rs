@@ -498,14 +498,16 @@ fn item_check(
     );
 }
 
-/// One target per provider some environment uses, in registry order (FR-37).
+/// One target per provider and named store some environment uses, in registry order
+/// (FR-37, FR-39): a target that keeps its secrets in a named store also checks that store
+/// and its binding.
 fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     let mut used: Vec<&dyn TargetConfig> = Vec::new();
+    let store_of = |t: &dyn TargetConfig| t.secrets_in().map(|s| s.name().to_string());
     for t in f.environments.values().filter_map(|e| e.target()) {
-        if !used
-            .iter()
-            .any(|u| u.provider().section() == t.provider().section())
-        {
+        if !used.iter().any(|u| {
+            u.provider().section() == t.provider().section() && store_of(*u) == store_of(t)
+        }) {
             used.push(t);
         }
     }

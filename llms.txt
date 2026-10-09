@@ -9,7 +9,7 @@ Assistants setting opv up for a user: read the agent setup guide first and follo
 - [Agent setup guide](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/agent-setup.md): step-by-step setup for AI assistants, with safety rules and exit codes
 - [README](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/README.md): what opv is, quickstart, minimal configuration
 - [Installing](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/install.md): install script, binaries, npm, source, checksum verification, prerequisites
-- [Configuration](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/configuration.md): store layout, `secrets.toml`, simple and fleet profiles, Fly, Azure and Kubernetes targets, `opv init`, rules and failure reasons
+- [Configuration](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/configuration.md): store layout, `secrets.toml`, simple and fleet profiles, Fly, Azure and Kubernetes targets, named stores (`[stores.<name>]` + `secrets_in`: Key Vault → Kubernetes via the External Secrets Operator), `opv init`, rules and failure reasons
 - [Local development](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/local-development.md): local-only environments, `opv check`, switching products, WSL
 - [Usage](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/usage.md): commands, sync on Fly, Azure and Kubernetes, JSON output, pruning, retries, exit codes, security model, GitHub Actions
 
