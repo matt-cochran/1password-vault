@@ -5,6 +5,7 @@
 
 pub mod az;
 pub mod azure;
+pub mod containerapp;
 pub mod fly;
 pub mod keyvault;
 pub mod onepassword;

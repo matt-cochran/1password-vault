@@ -1,0 +1,38 @@
+{
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/opv-fixture-rg/providers/Microsoft.KeyVault/vaults/kv-opv-fixture",
+  "location": "eastus",
+  "name": "kv-opv-fixture",
+  "properties": {
+    "accessPolicies": [],
+    "createMode": null,
+    "enablePurgeProtection": null,
+    "enableRbacAuthorization": true,
+    "enableSoftDelete": true,
+    "enabledForDeployment": false,
+    "enabledForDiskEncryption": false,
+    "enabledForTemplateDeployment": false,
+    "hsmPoolResourceId": null,
+    "networkAcls": null,
+    "privateEndpointConnections": null,
+    "provisioningState": "Succeeded",
+    "publicNetworkAccess": "Enabled",
+    "sku": {
+      "family": "A",
+      "name": "standard"
+    },
+    "softDeleteRetentionInDays": 90,
+    "tenantId": "11111111-1111-1111-1111-111111111111",
+    "vaultUri": "https://kv-opv-fixture.vault.azure.net/"
+  },
+  "resourceGroup": "opv-fixture-rg",
+  "systemData": {
+    "createdAt": "2026-10-08T21:13:14.963000+00:00",
+    "createdBy": "admin@outboundlabs.com",
+    "createdByType": "User",
+    "lastModifiedAt": "2026-10-08T21:13:14.963000+00:00",
+    "lastModifiedBy": "admin@outboundlabs.com",
+    "lastModifiedByType": "User"
+  },
+  "tags": {},
+  "type": "Microsoft.KeyVault/vaults"
+}
