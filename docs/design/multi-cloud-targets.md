@@ -244,7 +244,8 @@ pub trait Provider: Sync {
     fn credential_vars(&self) -> &'static [&'static str] { &[] } // e.g. FLY_API_TOKEN, by name
     fn doctor_checks(&self) -> &'static [&'static str];      // names, for doctor's "skip" lines
     fn setup_hint(&self, profile: Profile) -> String;          // "configure fly.app ..." (no target)
-    fn init_section(&self, name: &str, profile: Profile) -> Option<String>; // `opv init` (FR-23)
+    fn init_fields(&self) -> &'static [InitField];                           // `opv init` options (FR-23, H3)
+    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String>;
 }
 
 /// A validated, provider-specific target. Core code sees only this trait.
@@ -294,7 +295,8 @@ diagnosis, `/dev/stdin` and pacing plumbing), and `AzureTarget::open` returns `P
 - `Target` (the enum) is replaced by `Box<dyn TargetConfig>`. `app/`, `domain/` and `config.rs`
   never name a provider; the existing guard test is extended to every provider module name.
 - `init` stays provider-aware by design (it writes a provider section) through
-  `Provider::init_section`, added when a provider supports `init`.
+  `Provider::init_fields` (its `--<section>-<field>` options, added to the CLI from the
+  registry) and `Provider::init_section`; Fly, Azure and Kubernetes support it (H3).
 - Adding a provider = one module under `src/adapters/<provider>/` (declared with `pub mod` in
   `src/adapters/mod.rs`) + one line in the registry + docs. Nothing else.
 

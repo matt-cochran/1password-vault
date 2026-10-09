@@ -7,6 +7,7 @@
 //!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26).
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
+pub mod add;
 #[cfg(test)]
 mod azure_tests;
 #[cfg(test)]

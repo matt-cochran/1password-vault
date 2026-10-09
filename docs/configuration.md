@@ -118,11 +118,50 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--p
 - It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
 - The profile follows the item's shape: only unsectioned fields gives a simple file, only sectioned fields gives a fleet file (one product per section, `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"`). An item with both is an error naming both shapes; `--profile` then decides, and the fields of the other shape are ignored with a note.
 - A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed: rename the field in 1Password and run `init --force` again. When `status` and `sync` would reject such a field (a wrong type, a field in a section without a label, a sectioned field without a label), the note says so. A label given twice where opv reads the item is an error and nothing is written.
-- `--fly-app` is optional; omitting it creates a run-only environment. flyctl is not called.
+- The target is optional; omitting it creates a run-only environment. `--target fly|azure|kubernetes` picks the provider and its options are `--<provider>-<field>`, one per field of that provider's section below. Nothing is looked up (no flyctl, az or kubectl call); the section is validated like a hand-written one before any 1Password call, so a bad value or a missing required option is refused first. `--target` can be left out when the options name one provider, and `--fly-app` alone still means a Fly target. Under the fleet profile the name template (`fly.secret_name`, `azure.env_name`, `kubernetes.env_name`) defaults to `FLEET__{PRODUCT}__{KEY}`; `azure.identity` defaults to `system`. `opv init --help` lists every option.
+
+  | Target | Required | Optional |
+  |---|---|---|
+  | `fly` | `--fly-app` | `--fly-secret-name` |
+  | `azure` | `--azure-subscription`, `--azure-key-vault`, `--azure-resource-group`, `--azure-container-app` | `--azure-container`, `--azure-identity`, `--azure-env-name`, `--azure-config` |
+  | `kubernetes` | `--kubernetes-context`, `--kubernetes-namespace`, `--kubernetes-deployment` | `--kubernetes-container`, `--kubernetes-env-name`, `--kubernetes-config` |
+
+  ```sh
+  opv init prod --vault myapp-prod --item app --target azure \
+    --azure-subscription 00000000-0000-0000-0000-000000000000 --azure-key-vault kv-myapp-prod \
+    --azure-resource-group rg-myapp --azure-container-app myapp
+  opv init prod --vault myapp-prod --item app --target kubernetes \
+    --kubernetes-context prod-cluster --kubernetes-namespace myapp --kubernetes-deployment web
+  ```
+
+  A `secrets_in` store (`[stores.<name>]`) is still written by hand.
 - It writes `./secrets.toml` in the current directory (`--config` and `OPV_CONFIG` are not accepted). If the file exists, it refuses (exit 2) unless `--force` is given; it never merges. If a parent directory already holds a `secrets.toml`, a note names it: the new file takes precedence for commands run from here down. The file is validated like a hand-written one and written atomically (a temporary file in the same directory, then a rename).
 - It writes nothing to 1Password. It costs three 1Password requests (`op vault list`, `op item list`, `op item get`), at dev time only.
 
-It ends with the path, the counts (`N secret, M config, skipped K`) and `Next: opv plan <env>`.
+It ends with the path, the counts (`N secret, M config, skipped K`) and `Next: opv plan <env>` (with a target) or `Next: opv check <env>`.
+
+### Add an environment: `opv init --add-env`
+
+```sh
+opv init staging --vault myapp-staging --item myapp --add-env [--target … | --fly-app …]
+```
+
+Adds one `[environments.<env>]` to the existing `secrets.toml` (found like every other command's: `--config`, `OPV_CONFIG`, or the nearest one up from the current directory) instead of writing a new file. It looks up and reads the item the same way, writes the IDs and the target options above, and adds the environment to each declared key whose field the item has (the profile is the file's). It prints the keys left out because the item lacks them and the item's fields that are not declared, each with the `opv add` command that includes or declares one. It refuses an environment that already exists and never changes anything else. `--force` and `--profile` do not apply.
+
+### Declare a key: `opv add`
+
+```sh
+opv add api/STRIPE_KEY --kind secret --env dev,prod --rule prefix=sk_ --guidance "Stripe › Developers › API keys"
+opv add LOG_LEVEL --kind config --rule enum=debug,info,warn      # simple profile: no product
+opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable
+opv add api/STRIPE_KEY --env staging                             # a declared key, one more environment
+```
+
+- The name is `PRODUCT/KEY` under the fleet profile and `KEY` under the simple one; `--kind secret|config` is required for a new key. `--env` (repeat it or separate with commas) defaults to every declared environment.
+- `--rule NAME=VALUE` is repeatable and uses the [rules reference](#rules-reference) names. The value is read as a TOML value when the rule takes one (`base64_bytes=32`, `enum=["a","b"]`), else as text (`prefix=sk_`), else as a comma-separated list (`enum=debug,info`). A flag rule is given by name alone (`--rule https_url`). `--guidance` and `--immutable` set those fields.
+- On a key that is already declared, `opv add` only adds the environments it lacks; a different `--kind`, or any rule, guidance or `--immutable`, is refused (change those by hand). When nothing is missing it says so and changes nothing (exit 0).
+- The file is edited in place: its comments, blank lines and order are kept, and the new key goes after its product's last key. The edited file is validated like a hand-written one before anything is written, so a name that would collide on any environment's target, an unknown rule, a bad rule value or an unknown environment is refused (exit 2) and the file is left byte for byte. The write is atomic (a temporary file in the same directory, then a rename).
+- It makes no 1Password or target call. It ends with `Next: opv item skeleton <env>`, which adds the empty field to that environment's item; type the value in 1Password, then run `opv check <env>`.
 
 ### Account and deploy credentials
 

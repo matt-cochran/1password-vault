@@ -6,7 +6,7 @@
 //! `config.rs`) sees only these traits, so adding a provider changes no core code.
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::de::DeserializeOwned;
@@ -43,9 +43,21 @@ pub trait Provider: Sync {
     /// What a person adds to deploy with this provider, e.g. `configure fly.app`. Only the
     /// default provider (`adapters::registry::DEFAULT`) is ever asked.
     fn setup_hint(&self, profile: Profile) -> String;
-    /// The TOML lines `opv init` writes for a target named `name` (FR-23), or `None` when
-    /// the provider does not support `init`.
-    fn init_section(&self, name: &str, profile: Profile) -> Option<String>;
+    /// The fields `opv init --target <section>` takes (FR-23, H3), each as the option
+    /// `--<section>-<field>` ([`init_flag`]). Empty when the provider does not support
+    /// `init`. A new provider adds its options here; core and the CLI need no change.
+    fn init_fields(&self) -> &'static [InitField] {
+        &[]
+    }
+    /// The TOML lines `opv init` writes under `[environments.<env>]` for this target, from
+    /// the given `values` (field → value; every required field present), or `None` when the
+    /// provider does not support `init`. Fill what the profile needs and the user did not
+    /// give (a fleet name template). Nothing is looked up; the result is validated with the
+    /// same loader as a hand-written file.
+    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
+        let _ = (values, profile);
+        None
+    }
     /// The fields a `deploy_credentials` item holds for this provider, by convention
     /// (FR-40), or the configuration error explaining why it takes none.
     fn deploy_credential_fields(&self) -> Result<&'static [CredentialField], String> {
@@ -139,6 +151,40 @@ pub fn deploy_provider(target: &dyn TargetConfig) -> &'static dyn Provider {
         Some(store) if own.deploy_credential_fields().is_err() => store.provider(),
         _ => own,
     }
+}
+
+/// One `opv init` option of a provider (H3): `--<section>-<field>` writes
+/// `<section>.<field> = "<value>"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitField {
+    /// The field under the provider's section, e.g. `key_vault`.
+    pub field: &'static str,
+    /// What to give, for `opv init --help`.
+    pub help: &'static str,
+    /// Whether `init --target <section>` needs it.
+    pub required: bool,
+}
+
+/// The `opv init` option of `field`: `--azure-key-vault` is `azure-key-vault`.
+pub fn init_flag(p: &dyn Provider, field: &InitField) -> String {
+    format!("{}-{}", p.section(), field.field.replace('_', "-"))
+}
+
+/// `<section>.<field> = "<value>"` lines, in the order given, for
+/// [`Provider::init_section`]. Values are TOML basic strings.
+pub fn init_lines<'a>(
+    section: &str,
+    values: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    values
+        .into_iter()
+        .map(|(field, value)| {
+            format!(
+                "{section}.{field} = {}\n",
+                toml::Value::String(value.to_string())
+            )
+        })
+        .collect()
 }
 
 /// One supported (store kind, runtime) pair for `secrets_in` (FR-39).

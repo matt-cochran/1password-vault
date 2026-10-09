@@ -34,6 +34,17 @@ Omit every `product` for a single app. All fields must consistently use sections
 
 A missing vault requires creation in the 1Password app, or selecting the account that owns it; setup does not guess where to store credentials. Duplicate titles require a rename. An existing item must be a Secure Note. Wrong field types require changing the field to Password/concealed or Text, keeping its value. A conflicting configuration is left intact: review it or choose a separate `--config PATH`.
 
+## Adding a setting later
+
+Declare a new key without editing `secrets.toml` by hand, then add its empty field to the item and fill it:
+```sh
+opv add api/STRIPE_KEY --kind secret --env dev --rule prefix=sk_
+opv item skeleton dev
+opv check dev --product api
+```
+
+`opv add` keeps the file's comments and order, validates the result like a hand-written file and writes nothing to 1Password. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv init <env> --vault … --item … --add-env` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-add).
+
 ## Existing local settings
 
 A recipe may declare `legacy_env = "~/.config/platform/r2.env"`. Setup offers to copy only missing declared settings after your confirmation. It accepts literal assignments, including single-quoted multiline values, and never executes the file. On Unix, the original must be private to its owner. Shell expressions, duplicate keys, symlinks and files above 1 MiB are refused; setup continues with private prompts. A recipe importing a file must cover at most one product.

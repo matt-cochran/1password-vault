@@ -5,7 +5,7 @@
 //! like any other TOML error: line, column, the line itself (FR-2).
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::Deserialize;
@@ -22,8 +22,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::{PinnedRuntime, Ports};
 use crate::provider::{
-    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding, StoreConfig,
-    StoreNameRules, TargetConfig, Verdict, eq_as,
+    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding,
+    StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as, init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -40,6 +40,43 @@ const CHECKS: [&str; 4] = [
     "kubernetes context",
     "kubernetes cluster",
     "kubernetes access",
+];
+
+/// The env-name template `opv init` writes under the fleet profile.
+const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
+
+/// `opv init --target kubernetes` options (H3), in the order they are written.
+static INIT_FIELDS: [InitField; 6] = [
+    InitField {
+        field: "context",
+        help: "kubeconfig context (kubectl config get-contexts -o name)",
+        required: true,
+    },
+    InitField {
+        field: "namespace",
+        help: "Namespace of the Deployment",
+        required: true,
+    },
+    InitField {
+        field: "deployment",
+        help: "Deployment that reads the secrets",
+        required: true,
+    },
+    InitField {
+        field: "container",
+        help: "Container in the Deployment (only when it has more than one)",
+        required: false,
+    },
+    InitField {
+        field: "env_name",
+        help: "Env-name template (fleet profile; default FLEET__{PRODUCT}__{KEY})",
+        required: false,
+    },
+    InitField {
+        field: "config",
+        help: "Where config keys go: env (default) or store",
+        required: false,
+    },
 ];
 
 /// A DNS-1123 label as shown to the user.
@@ -253,8 +290,21 @@ impl Provider for KubernetesProvider {
         }
     }
 
-    fn init_section(&self, _name: &str, _profile: Profile) -> Option<String> {
-        None
+    fn init_fields(&self) -> &'static [InitField] {
+        &INIT_FIELDS
+    }
+
+    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
+        let mut lines: Vec<(&str, &str)> = Vec::new();
+        for f in &INIT_FIELDS {
+            let v = match (values.get(f.field), f.field, profile) {
+                (Some(v), _, _) => v.as_str(),
+                (None, "env_name", Profile::Fleet) => INIT_FLEET_TEMPLATE,
+                (None, _, _) => continue,
+            };
+            lines.push((f.field, v));
+        }
+        Some(init_lines("kubernetes", lines))
     }
 
     fn bindings(&self) -> &'static [StoreBinding] {
