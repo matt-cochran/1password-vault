@@ -4,12 +4,16 @@
 //! |---|---|---|
 //! | `list` | `get secret -l opv-managed=<env> -o jsonpath=<name, opv-key>` | read |
 //! | `read` | `get deployment <d> -o json`, then `get secret <s> --ignore-not-found -o jsonpath=<opv-managed, data.value>` | read |
-//! | `write_one` | `get secret <s> --ignore-not-found -o jsonpath=<name, opv-managed>`, then if absent `apply -f - --server-side --field-manager=opv -o name` (manifest on stdin) | read, write |
+//! | `write_one` | `read` (above); if the bound value differs or none is bound, `apply -f - --server-side --field-manager=opv -o name` of a new `opv-<store>-<random id>` (manifest on stdin); a lost apply is reconciled with `get secret <s> --ignore-not-found -o jsonpath=<opv-managed, data.value>` | reads, write |
 //! | `delete` | `get secret -l opv-managed=<env>,opv-key=<store> …`, `get deployment`, `get replicasets -o json`, then `delete secret <names…> --ignore-not-found` | reads, write |
 //!
 //! Lists never ask for `-o json` (it returns `data`, K2) and writes ask for `-o name` (`-o
-//! json` echoes `data`, K1). The desired version is computed from the value hash, so
-//! compare-before-write is a name lookup: an existing Secret is never re-written.
+//! json` echoes `data`, K1). Version ids are random (FR-38, SR-1): nothing in a name, label or
+//! annotation is derived from a value, so listing Secrets cannot confirm a guessed value.
+//! Compare-before-write therefore reads the value the Deployment binds and compares it in
+//! constant time; a matching value is never written again. A write whose outcome is lost and
+//! cannot be confirmed may leave one unreferenced version behind; `collect_superseded` deletes it
+//! after the next healthy rollout (NR-1).
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,12 +21,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use super::{
     Effect, KubeTarget, Kubectl, LABEL_KEY, LABEL_MANAGED, VALUE_KEY, container_env,
-    container_index, secret_name, secret_ref, split_secret_name, store_name, text,
-    valid_label_value, version_of,
+    container_index, new_version, secret_name, secret_ref, split_secret_name, store_name, text,
+    valid_label_value,
 };
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
@@ -35,7 +40,6 @@ pub const VALUE_LIMIT: usize = 1024 * 1024 - 16 * 1024;
 
 const LIST_PATH: &str =
     r#"jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.opv-key}{"\n"}{end}"#;
-const OWNER_PATH: &str = r#"jsonpath={.metadata.name}{"\t"}{.metadata.labels.opv-managed}"#;
 const VALUE_PATH: &str = r#"jsonpath={.metadata.labels.opv-managed}{"\t"}{.data.value}"#;
 
 /// The Secrets of one Kubernetes target.
@@ -48,6 +52,8 @@ pub struct KubeSecrets<'a> {
     /// Every string of the Deployment and its ReplicaSets, read once, after the healthy
     /// rollout that precedes any delete.
     referenced: OnceCell<BTreeSet<String>>,
+    /// Source of new version ids: the OS RNG ([`new_version`]); fixed in tests.
+    ids: fn() -> Result<String, Error>,
 }
 
 impl<'a> KubeSecrets<'a> {
@@ -61,7 +67,15 @@ impl<'a> KubeSecrets<'a> {
             managed,
             bound: OnceCell::new(),
             referenced: OnceCell::new(),
+            ids: new_version,
         }
+    }
+
+    /// The same store drawing version ids from `ids` (tests pin them).
+    #[cfg(test)]
+    pub(crate) fn with_ids(mut self, ids: fn() -> Result<String, Error>) -> Self {
+        self.ids = ids;
+        self
     }
 
     fn t(&self) -> &KubeTarget {
@@ -89,9 +103,9 @@ impl<'a> KubeSecrets<'a> {
             .collect())
     }
 
-    /// The `opv-managed` label of Secret `name`, `Some("")` when unlabelled, `None` when
-    /// it does not exist.
-    fn owner(&self, name: &str) -> Result<Option<String>, Error> {
+    /// `(opv-managed label, value)` of Secret `name` (`""` when unlabelled), `None` when it
+    /// does not exist. The value is decoded into zeroized memory only (K2).
+    fn held(&self, name: &str) -> Result<Option<(String, SecretValue)>, Error> {
         let what = format!("kubectl get secret {name}");
         let out = self.k.run(
             Effect::Read,
@@ -102,17 +116,24 @@ impl<'a> KubeSecrets<'a> {
                 name,
                 "--ignore-not-found",
                 "-o",
-                OWNER_PATH,
+                VALUE_PATH,
             ],
             None,
-            &format!("get secret {name}"),
+            &format!("get secret {name} -o name"),
         )?;
-        let s = text(&out, &what)?.trim_end_matches('\n');
-        Ok(match s.split_once('\t') {
-            Some((n, env)) if n == name => Some(env.to_string()),
-            _ if s.is_empty() => None,
-            _ => Some(String::new()),
-        })
+        let Some((env, b64)) = text(&out, &what)?.split_once('\t') else {
+            return Ok(None);
+        };
+        let unreadable = || {
+            Error::Target(format!(
+                "secret {name} does not hold a UTF-8 value under data.{VALUE_KEY} (it was \
+                 changed outside opv); nothing was changed\n  next: inspect it with `{}`",
+                self.k.command(&format!("get secret {name} --show-labels"))
+            ))
+        };
+        let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| unreadable())?);
+        let value = std::str::from_utf8(&bytes).map_err(|_| unreadable())?;
+        Ok(Some((env.to_string(), SecretValue::new(value.to_string()))))
     }
 
     /// store name → version bound by the managed container (one Deployment read).
@@ -188,6 +209,11 @@ fn strings(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Exact, constant-time equality of two values (FR-31, SR-1).
+fn same(a: &SecretValue, b: &SecretValue) -> bool {
+    a.expose().as_bytes().ct_eq(b.expose().as_bytes()).into()
+}
+
 /// The first rule a Kubernetes target refuses `(name, value)` for, with its fixed reason
 /// (FR-22). Never inspects more than the value's length and NUL bytes.
 pub fn refusal(name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)> {
@@ -249,73 +275,28 @@ impl PinnedStore for KubeSecrets<'_> {
         let Some(version) = self.bound()?.get(&store).cloned() else {
             return Ok(None);
         };
-        let secret = secret_name(&store, &version);
-        let what = format!("kubectl get secret {secret}");
-        let out = self.k.run(
-            Effect::Read,
-            &what,
-            &[
-                "get",
-                "secret",
-                &secret,
-                "--ignore-not-found",
-                "-o",
-                VALUE_PATH,
-            ],
-            None,
-            &format!("get secret {secret} -o name"),
-        )?;
-        let Some((_, b64)) = text(&out, &what)?.split_once('\t') else {
-            return Ok(None);
-        };
-        let corrupt = || {
-            Error::Target(format!(
-                "secret {secret} does not hold the value its name promises (it was replaced \
-                 outside opv); nothing was changed\n  next: inspect it with `{}`; to repair, \
-                 delete it and re-run at once (pods starting in between cannot read it)",
-                self.k
-                    .command(&format!("get secret {secret} --show-labels"))
-            ))
-        };
-        let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| corrupt())?);
-        let value = std::str::from_utf8(&bytes).map_err(|_| corrupt())?;
-        let value = SecretValue::new(value.to_string());
-        if version_of(&value) != version {
-            return Err(corrupt());
-        }
-        Ok(Some((value, version)))
+        let held = self.held(&secret_name(&store, &version))?;
+        Ok(held.map(|(_, value)| (value, version)))
     }
 
-    /// Writes `opv-<store>-<hash>` unless it exists; returns the hash (the version). An
-    /// existing Secret of this environment is never re-written; one labelled for another
-    /// environment (or none) is refused (FR-32).
+    /// Writes a new version `opv-<store>-<random id>` and returns the id, unless the
+    /// Deployment already binds this exact value (constant-time compare): then it writes
+    /// nothing and returns the bound version, so a matching value never gets a second version.
+    /// A lost write is reconciled by reading the new Secret back (NR-2); if that fails too, the
+    /// next run writes another id and the unreferenced one is collected after a healthy rollout.
     fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
         if let Some((rule, reason)) = refusal(name, value) {
             return Err(Error::Policy(format!("{name}: {rule}: {reason}")));
         }
+        if let Some((current, version)) = self.read(name)?
+            && same(&current, value)
+        {
+            return Ok(version);
+        }
         let t = self.t();
         let store = store_name(name);
-        let version = version_of(value);
+        let version = (self.ids)()?;
         let secret = secret_name(&store, &version);
-        match self.owner(&secret)? {
-            Some(env) if env == t.env => return Ok(version),
-            Some(env) => {
-                let owner = if env.is_empty() {
-                    "no opv environment (it has no opv-managed label)".to_string()
-                } else {
-                    format!("opv environment \"{env}\"")
-                };
-                return Err(Error::Target(format!(
-                    "secret {secret} in namespace {} belongs to {owner}, not \"{}\"; nothing \
-                     was written\n  next: give each environment its own namespace, or {}",
-                    t.namespace,
-                    t.env,
-                    self.k
-                        .command(&format!("label secret {secret} {LABEL_MANAGED}={}", t.env))
-                )));
-            }
-            None => {}
-        }
         let what = format!("kubectl apply secret {secret}");
         let body = self.manifest(&secret, &store, value);
         let apply = [
@@ -344,8 +325,8 @@ impl PinnedStore for KubeSecrets<'_> {
                 Ok(version)
             }
             // Reconcile by reading back (NR-2): the Secret may have been written.
-            other => match self.owner(&secret) {
-                Ok(Some(env)) if env == t.env => Ok(version),
+            other => match self.held(&secret) {
+                Ok(Some((env, held))) if env == t.env && same(&held, value) => Ok(version),
                 _ => Err(self
                     .k
                     .fail(Effect::Write, &what, other, "auth can-i create secrets")),
@@ -429,7 +410,24 @@ mod tests {
 
     fn with_store<T>(r: &FakeRunner, f: impl FnOnce(&KubeSecrets) -> T) -> T {
         let t = target();
-        f(&KubeSecrets::new(r, &t, managed()))
+        f(&KubeSecrets::new(r, &t, managed()).with_ids(fixed_id))
+    }
+
+    /// The version id every test write draws.
+    const ID: &str = "abcdefghij";
+
+    fn fixed_id() -> Result<String, Error> {
+        Ok(ID.to_string())
+    }
+
+    /// The Secret a test write of `NEW_KEY` creates.
+    fn new_key_secret() -> String {
+        secret_name("new-key", ID)
+    }
+
+    /// The bound K1 Secret's `get` output when it holds `value`.
+    fn held(value: &str) -> Output {
+        ok(&format!("dev\t{}", STANDARD.encode(value)))
     }
 
     fn stdin_text(r: &FakeRunner, i: usize) -> String {
@@ -437,7 +435,7 @@ mod tests {
     }
 
     /// The K1 Secret's name for value `opv-k8s-marker-1`.
-    const DB_URL_SECRET: &str = "opv-fleet--api--db-url-f85b191f16";
+    const DB_URL_SECRET: &str = "opv-fleet--api--db-url-q3vz7kd2mx";
 
     #[test]
     fn list_returns_one_entry_per_store_name() {
@@ -465,35 +463,97 @@ mod tests {
     }
 
     #[test]
-    fn write_is_skipped_when_hash_named_secret_exists() {
-        let r = FakeRunner::new([ok(&format!("{DB_URL_SECRET}\tdev"))]);
+    fn unchanged_bound_value_writes_nothing() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), held("opv-k8s-marker-1")]);
         with_store(&r, |s| {
             s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"))
         })
         .unwrap();
-        assert_eq!(r.calls.borrow().len(), 1);
+        assert!(!all_argv(&r).contains("apply"));
     }
 
     #[test]
-    fn write_returns_the_hash_as_version() {
-        let r = FakeRunner::new([ok(&format!("{DB_URL_SECRET}\tdev"))]);
+    fn unchanged_bound_value_returns_the_bound_version() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), held("opv-k8s-marker-1")]);
         let v = with_store(&r, |s| {
             s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"))
         });
-        assert_eq!(v.unwrap(), "f85b191f16");
+        assert_eq!(v.unwrap(), "q3vz7kd2mx");
+    }
+
+    #[test]
+    fn changed_bound_value_writes_a_new_version() {
+        let secret = secret_name("fleet--api--db-url", ID);
+        let r = FakeRunner::new([
+            ok(DEPLOYMENT),
+            held("opv-k8s-marker-1"),
+            ok(&format!("secret/{secret}")),
+        ]);
+        let v = with_store(&r, |s| {
+            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-2"))
+        });
+        assert_eq!(v.unwrap(), ID);
+    }
+
+    #[test]
+    fn write_returns_the_new_id_as_version() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok(&format!("secret/{}", new_key_secret()))]);
+        let v = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        assert_eq!(v.unwrap(), ID);
+    }
+
+    /// The manifest the write sent, as JSON (stdin of call 1: call 0 reads the Deployment).
+    fn written(value: &str, ids: fn() -> Result<String, Error>) -> Value {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
+        let t = target();
+        let s = KubeSecrets::new(&r, &t, managed()).with_ids(ids);
+        let _ = s.write_one("NEW_KEY", &sv(value));
+        serde_json::from_str(&stdin_text(&r, 1)).unwrap()
+    }
+
+    #[test]
+    fn same_value_written_twice_gets_different_names() {
+        let name = |d: Value| d["metadata"]["name"].as_str().unwrap().to_string();
+        assert_ne!(
+            name(written(MARK, new_version)),
+            name(written(MARK, new_version))
+        );
+    }
+
+    #[test]
+    fn no_value_hash_prefix_appears_in_secret_metadata() {
+        use sha2::{Digest as _, Sha256};
+        let prefix = &hex::encode(Sha256::digest(MARK.as_bytes()))[..6];
+        let meta = written(MARK, new_version)["metadata"].to_string();
+        assert!(!meta.contains(prefix), "{meta}");
+    }
+
+    #[test]
+    fn written_metadata_is_name_namespace_and_ownership_labels_only() {
+        let doc = written(MARK, fixed_id);
+        assert_eq!(
+            doc["metadata"],
+            json!({
+                "name": new_key_secret(),
+                "namespace": "opv-spike",
+                "labels": {"opv-managed": "dev", "opv-key": "new-key"},
+            })
+        );
     }
 
     #[test]
     fn write_sends_manifest_on_stdin_and_no_value_in_argv() {
-        let r = FakeRunner::new([ok(""), ok("secret/x")]);
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
         let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
         assert!(!r.argv_contains(MARK) && stdin_text(&r, 1).contains(&STANDARD.encode(MARK)));
     }
 
     #[test]
     fn write_applies_server_side_as_opv_asking_for_names_only() {
-        let name = secret_name("new-key", &version_of(&sv(MARK)));
-        let r = FakeRunner::new([ok(""), ok(&format!("secret/{name}\n"))]);
+        let r = FakeRunner::new([
+            ok(DEPLOYMENT),
+            ok(&format!("secret/{}\n", new_key_secret())),
+        ]);
         with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).unwrap();
         assert_eq!(
             args(&r, 1)[5..],
@@ -510,55 +570,44 @@ mod tests {
     }
 
     #[test]
-    fn written_secret_is_immutable_and_labelled() {
-        let name = secret_name("new-key", &version_of(&sv(MARK)));
-        let r = FakeRunner::new([ok(""), ok(&format!("secret/{name}"))]);
-        with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).unwrap();
-        let doc: Value = serde_json::from_str(&stdin_text(&r, 1)).unwrap();
-        assert_eq!(
-            (&doc["immutable"], &doc["metadata"]["labels"]),
-            (
-                &json!(true),
-                &json!({"opv-managed": "dev", "opv-key": "new-key"})
-            )
-        );
+    fn written_secret_is_immutable() {
+        assert_eq!(written(MARK, fixed_id)["immutable"], json!(true));
     }
 
     #[test]
     fn written_value_round_trips_byte_exact() {
         let value = "ü\r\n  trailing\n";
-        let name = secret_name("new-key", &version_of(&sv(value)));
-        let r = FakeRunner::new([ok(""), ok(&format!("secret/{name}"))]);
-        with_store(&r, |s| s.write_one("NEW_KEY", &sv(value))).unwrap();
-        let doc: Value = serde_json::from_str(&stdin_text(&r, 1)).unwrap();
+        let doc = written(value, fixed_id);
         let b64 = doc["data"]["value"].as_str().unwrap();
         assert_eq!(STANDARD.decode(b64).unwrap(), value.as_bytes());
     }
 
     #[test]
-    fn write_refuses_secret_owned_by_another_environment() {
-        let r = FakeRunner::new([ok(&format!("{DB_URL_SECRET}\tprod"))]);
-        let e = with_store(&r, |s| {
-            s.write_one("FLEET__API__DB_URL", &sv("opv-k8s-marker-1"))
-        });
-        assert!(matches!(e, Err(Error::Target(m)) if m.contains("\"prod\"")));
-    }
-
-    #[test]
     fn lost_write_is_reconciled_by_reading_the_secret_back() {
-        let name = secret_name("new-key", &version_of(&sv(MARK)));
-        let r = FakeRunner::new([ok("")]);
+        let r = FakeRunner::new([ok(DEPLOYMENT)]);
         r.push_unknown("lost");
         r.responses
             .borrow_mut()
-            .push_back(Ok(ok(&format!("{name}\tdev"))));
+            .push_back(Ok(ok(&format!("dev\t{}", STANDARD.encode(MARK)))));
         let v = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
-        assert_eq!(v.unwrap(), version_of(&sv(MARK)));
+        assert_eq!(v.unwrap(), ID);
+    }
+
+    #[test]
+    fn lost_write_found_holding_another_value_is_not_confirmed() {
+        let r = FakeRunner::new([ok(DEPLOYMENT)]);
+        r.push_unknown("lost");
+        r.responses.borrow_mut().extend([
+            Ok(ok(&format!("dev\t{}", STANDARD.encode("other")))),
+            Ok(ok("context/kind-opv")),
+            Ok(ok("v1.36")),
+        ]);
+        assert!(with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK))).is_err());
     }
 
     #[test]
     fn lost_write_still_absent_exits_9() {
-        let r = FakeRunner::new([ok("")]);
+        let r = FakeRunner::new([ok(DEPLOYMENT)]);
         r.push_unknown("lost");
         r.responses
             .borrow_mut()
@@ -569,7 +618,7 @@ mod tests {
 
     #[test]
     fn write_error_never_names_the_value() {
-        let r = FakeRunner::new([ok("")]);
+        let r = FakeRunner::new([ok(DEPLOYMENT)]);
         r.push_unknown("lost");
         r.responses
             .borrow_mut()
@@ -620,7 +669,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (v.expose(), ver.as_str()),
-            ("opv-k8s-marker-1", "f85b191f16")
+            ("opv-k8s-marker-1", "q3vz7kd2mx")
         );
     }
 
@@ -641,11 +690,8 @@ mod tests {
     }
 
     #[test]
-    fn read_refuses_content_that_does_not_match_its_hash() {
-        let r = FakeRunner::new([
-            ok(DEPLOYMENT),
-            ok(&format!("dev\t{}", STANDARD.encode(MARK))),
-        ]);
+    fn read_of_undecodable_secret_never_names_its_content() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok(&format!("dev\t{MARK}"))]);
         let e = with_store(&r, |s| s.read("FLEET__API__DB_URL")).unwrap_err();
         assert!(matches!(e, Error::Target(m) if m.contains(DB_URL_SECRET) && !m.contains(MARK)));
     }
@@ -680,7 +726,7 @@ mod tests {
 
     #[test]
     fn prune_deletes_unreferenced_versions_of_the_key_only() {
-        let stale = "opv-fleet--api--db-url-0123456789";
+        let stale = "opv-fleet--api--db-url-s7aw2ylfpc";
         let r = FakeRunner::new([
             ok(&format!(
                 "{DB_URL_SECRET}\tfleet--api--db-url\n{stale}\tfleet--api--db-url\n"
@@ -705,7 +751,7 @@ mod tests {
 
     #[test]
     fn lost_delete_is_reconciled_by_listing_again() {
-        let stale = "opv-fleet--api--db-url-0123456789";
+        let stale = "opv-fleet--api--db-url-s7aw2ylfpc";
         let r = FakeRunner::new([
             ok(&format!("{stale}\tfleet--api--db-url\n")),
             ok(DEPLOYMENT),
@@ -720,7 +766,7 @@ mod tests {
     /// is never a candidate (FR-32).
     #[test]
     fn collect_superseded_deletes_unreferenced_versions_but_the_pinned_one() {
-        let stale = "opv-fleet--api--db-url-0123456789";
+        let stale = "opv-fleet--api--db-url-s7aw2ylfpc";
         let pinned = "opv-fleet--api--db-url-aaaaaaaaaa";
         let r = FakeRunner::new([
             ok(&format!(
@@ -756,7 +802,7 @@ mod tests {
 
     #[test]
     fn list_names_only_managed_env_names() {
-        let r = FakeRunner::new([ok("opv-other-0123456789\tother\n")]);
+        let r = FakeRunner::new([ok("opv-other-s7aw2ylfpc\tother\n")]);
         assert!(with_store(&r, |s| s.list()).unwrap().is_empty());
     }
 }

@@ -313,16 +313,24 @@ config     = "env"                         # or "store" (a ConfigMap-free design
 ```
 
 - **Pinned flow.** Kubernetes Secrets have no versions, so opv creates an immutable Secret per
-  value version: name `opv-<store name>-<first 10 hex of SHA-256(value)>`, `immutable: true`,
-  labels `opv-managed=<env>`, `opv-key=<store name>`. The hash suffix is the version (FR-29); a pod
+  value version: name `opv-<store name>-<id>`, `immutable: true`, labels `opv-managed=<env>`,
+  `opv-key=<store name>`. The id is the version (FR-29): 10 lower-case base32 characters (50
+  bits) from the OS RNG. It is never derived from the value: a content-hash name would let anyone
+  allowed to list Secrets confirm a guess of a short or low-entropy value, so no name, label or
+  annotation carries anything value-derived (SR-1, SR-2; owner decision 2026-10-08). A pod
   sees a new value only when the Deployment is repinned. Store names follow DNS-1123
   (`_` → `-`, lower case, ≤ 253 with the suffix) and are collision-checked at load.
 - **Writes** go through `kubectl apply -f - --server-side --field-manager=opv` with the manifest on
   stdin (SR-3); values are base64 in `data`, never in argv.
 - **Compare before write** lists `kubectl get secret -l opv-key=<name>,opv-managed=<env>` with a
   jsonpath of names and labels only (`-o json` returns `data`, recon K2); the current version is
-  the one the Deployment binds; the desired version's name is computable locally from the value
-  hash, so an unchanged value is a name lookup, with no value read back.
+  the one the Deployment binds. opv reads that Secret's `data.value` (jsonpath, zeroized) and
+  compares it with the desired value in constant time; it writes a new version only when they
+  differ or nothing is bound, so a matching value never gets a second version.
+- **Convergence (NR-1).** A write whose outcome is lost is reconciled by reading the new Secret
+  back. If that fails too, the re-run writes another id; the unreferenced version left behind is
+  labelled `opv-managed=<env>` and deleted by `collect_superseded` after the next healthy
+  rollout, so the end state is one bound version.
 - **Runtime apply** reads the Deployment (`kubectl get deployment -o json`), edits only managed
   env entries (`valueFrom.secretKeyRef` for secrets, `value` for config), and writes it back with
   `kubectl replace -f -` carrying `metadata.resourceVersion`: Kubernetes rejects the write if anyone

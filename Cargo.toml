@@ -30,6 +30,8 @@ hex = "0.4"
 regex = "1"
 sha2 = "0.10"
 subtle = "2"
+# Random Kubernetes Secret version ids (FR-38, SR-1); already in the tree via tempfile.
+getrandom = "0.4"
 rpassword = "7.5"
 
 [target.'cfg(unix)'.dependencies]

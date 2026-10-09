@@ -651,8 +651,13 @@ provider changes no core code. Owner decision 2026-10-08.
 ## FR-38 — Kubernetes Target
 
 `[environments.<env>.kubernetes]` targets a Deployment through `kubectl` with explicit
-`--context` and `--namespace`. Values are stored as immutable, content-hash-named Secrets (the
-version, FR-29), bound through `secretKeyRef`; the Deployment is updated with its
+`--context` and `--namespace`. Values are stored as immutable Secrets named
+`opv-<store name>-<random id>` (the id is the version, FR-29), bound through `secretKeyRef`. The id
+comes from the OS RNG and is never derived from the value: a content-hash name would let anyone
+who can list Secrets confirm a guessed value, so no name, label or annotation carries anything
+value-derived (SR-1, SR-2). Compare-before-write reads the bound value and compares it in
+constant time; an unchanged value writes nothing, and a version orphaned by a lost write is
+collected after the next healthy rollout (NR-1); the Deployment is updated with its
 `resourceVersion` (optimistic concurrency, FR-31); health is the rollout status (FR-33); old
 Secrets are pruned only after a successful rollout (FR-32). Design: §12 of the multi-cloud design.
 

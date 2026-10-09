@@ -662,7 +662,7 @@ mod tests {
         };
         c.pin.insert(
             "FLEET__API__DB_URL".into(),
-            ("fleet--api--db-url".into(), "0123456789".into()),
+            ("fleet--api--db-url".into(), "s7aw2ylfpc".into()),
         );
         c.set.insert("LOG_LEVEL".into(), MARK.into());
         c
@@ -699,7 +699,7 @@ mod tests {
             snapshot().bindings["FLEET__API__DB_URL"],
             Binding::Pinned {
                 store_name: "fleet--api--db-url".into(),
-                version: "f85b191f16".into()
+                version: "q3vz7kd2mx".into()
             }
         );
     }
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(
             sent_env(&r)[0],
             json!({"name": "FLEET__API__DB_URL", "valueFrom": {"secretKeyRef":
-                {"name": "opv-fleet--api--db-url-0123456789", "key": "value"}}})
+                {"name": "opv-fleet--api--db-url-s7aw2ylfpc", "key": "value"}}})
         );
     }
 
@@ -810,7 +810,7 @@ mod tests {
     fn apply_appends_a_new_binding() {
         let mut c = change();
         c.pin
-            .insert("NEW_KEY".into(), ("new-key".into(), "abcdef0123".into()));
+            .insert("NEW_KEY".into(), ("new-key".into(), "abcdef2345".into()));
         let r = FakeRunner::new([ok("6")]);
         with_rt(&r, |rt| rt.apply(&c, &snapshot())).unwrap();
         assert_eq!(sent_env(&r)[3]["name"], json!("NEW_KEY"));
