@@ -14,7 +14,7 @@ When the project's configuration lives in 1Password (a manifest, see [configurat
 
 Signing in to environments in different accounts from the same terminal keeps both sessions, and `check`, `run`, `plan` and `sync` each use the account of the environment they act on. Every sign-in hint opv prints (from `doctor` and from errors) is `opv login <env>`.
 
-`setup` finds `opv.setup.toml` in your current directory or its parents. It explains each setting, where to find it, and how to finish later. Several products produce a numbered choice; `--product NAME` selects directly. Filled values are kept. Enter skips a missing value. One final confirmation saves progress in 1Password; rerun the same command to resume.
+`setup` finds `opv.setup.toml` in your current directory or its parents. It explains each setting, where to find it, and how to finish later. Several products produce a numbered choice; `--product NAME` selects directly. Filled values are kept. Enter skips a missing value. One final confirmation saves progress in 1Password; rerun the same command to resume. If someone changed the item in 1Password while setup was open, setup does not overwrite it: it reads the item again, keeps what is there, fills only the settings still empty with what you already entered (without asking for it again), tells you, and asks once more before saving.
 
 A project maintainer checks in the recipe once. It contains instructions and names only:
 ```toml

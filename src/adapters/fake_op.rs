@@ -1,5 +1,6 @@
 //! A stateful fake `op` (and `git remote get-url origin`) for manifest tests: it stores
-//! items with their tags, fields and versions, answers `item list --tags`, `item get`,
+//! items with their tags, fields and versions, answers `vault list`, `item list --tags`,
+//! `item list --vault`, `item get`,
 //! `item create -` and `item edit` from that state, and records every call with its stdin.
 //!
 //! It models `op`'s local cache (op 2.x on UNIX): an `item get` without `--cache=false`
@@ -184,6 +185,24 @@ impl FakeOp {
             ["whoami", ..] => Output::failure(1),
             ["account", "list", ..] => Output::success(r#"[{"url":"my.1password.com"}]"#),
             _ if !self.signed_in.get() => Output::failure(1),
+            ["vault", "list", ..] => {
+                let rows: Vec<Value> = self
+                    .vaults
+                    .iter()
+                    .map(|(id, name)| json!({"id": id, "name": name}))
+                    .collect();
+                Output::success(serde_json::to_vec(&rows).unwrap())
+            }
+            ["item", "list", "--vault", vault, ..] => {
+                let rows: Vec<Value> = self
+                    .items
+                    .borrow()
+                    .iter()
+                    .filter(|i| i["vault"]["id"] == *vault)
+                    .map(|i| json!({"id": i["id"], "title": i["title"], "version": i["version"]}))
+                    .collect();
+                Output::success(serde_json::to_vec(&rows).unwrap())
+            }
             ["item", "list", "--tags", tag, ..] => {
                 let rows: Vec<Value> = self
                     .items
@@ -258,6 +277,9 @@ impl FakeOp {
                 };
                 let version = i["version"].as_u64().unwrap_or(0) + 1;
                 i["fields"] = new["fields"].clone();
+                if new.get("sections").is_some() {
+                    i["sections"] = new["sections"].clone();
+                }
                 i["tags"] = new["tags"].clone();
                 i["title"] = new["title"].clone();
                 i["version"] = json!(version);

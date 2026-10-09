@@ -378,18 +378,14 @@ pub fn run(
         let original = WipeOnDrop(serde_json::from_slice(&raw.stdout).map_err(|_| invalid())?);
         serialize_exact(&original.0)?
     };
-    // FR-43: lay an existing item out to the convention first (saved with the progress
-    // below, only if the owner confirms). Nothing is deleted; old copies go to "opv · kept".
-    let tidied = match &item_id {
-        Some(id) if super::tidy::active() => tidy_layout(&recipe, &vault, id, &raw.stdout, ui)?,
-        _ => None,
-    };
-    let mut doc = WipeOnDrop(
-        serde_json::from_slice(tidied.as_deref().map_or(&raw.stdout[..], |t| &t[..]))
-            .map_err(|_| invalid())?,
-    );
-    drop(tidied);
-    let indices = field_indices(&mut doc.0, &active)?;
+    let (mut doc, mut indices) = laid_out(
+        &recipe,
+        &vault,
+        item_id.as_deref(),
+        &raw.stdout,
+        &active,
+        ui,
+    )?;
     let mut import = BTreeMap::new();
     if let Some(path) = &recipe.legacy_env {
         let path = expanded(path)?;
@@ -408,13 +404,17 @@ pub fn run(
             }
         }
     }
-    for (field, &index) in active.iter().zip(&indices) {
+    // The values copied or typed in this run, by position in `active`: kept in memory (and
+    // wiped on drop) so a re-plan on a fresher item does not ask for them again.
+    let mut entered: Vec<(usize, SecretValue)> = Vec::new();
+    for (n, (field, &index)) in active.iter().zip(&indices).enumerate() {
         if has_value(&doc.0, index) {
             ui.show(&format!("Saved: {} (existing value kept)", field.title))?;
             continue;
         }
         if let Some(value) = import.get(&field.key).filter(|v| !v.expose().is_empty()) {
             doc.0["fields"][index]["value"] = Value::String(value.expose().to_owned());
+            entered.push((n, SecretValue::new(value.expose().to_owned())));
             ui.show(&format!("Copied: {} (value hidden)", field.title))?;
             continue;
         }
@@ -429,36 +429,73 @@ pub fn run(
             let value = ui.secret(&field.title)?;
             if !value.expose().is_empty() {
                 doc.0["fields"][index]["value"] = Value::String(value.expose().to_owned());
+                entered.push((n, value));
             }
         }
     }
     drop(import);
-    let missing: Vec<_> = active
-        .iter()
-        .zip(&indices)
-        .filter(|(_, i)| !has_value(&doc.0, **i))
-        .map(|(f, _)| f.title.as_str())
-        .collect();
     let payload = serialize_exact(&doc.0)?;
     if item_id.is_none() || *payload != *before {
-        ui.show(&format!(
-            "\nSave {} in {}. {} of {} settings filled. Existing filled values are kept.",
-            recipe.item,
-            recipe.vault,
-            indices.len() - missing.len(),
-            indices.len()
-        ))?;
-        if !ui.confirm("Save this progress in 1Password?")? {
+        if !confirm_save(&recipe, &active, &indices, &doc.0, ui)? {
             ui.show("Stopped. Nothing saved.")?;
             return Ok(6);
         }
         if let Some(id) = &item_id {
             config_compatible(&output, &recipe.manifest(&vault, id)?)?;
-            successful(
-                backend,
-                &["item", "edit", id, "--vault", &vault, "--format", "json"],
-                Some(&payload),
-            )?;
+            // The owner may have spent a long time at the prompts: the item is read again,
+            // fresh, and never overwritten if it moved on since setup read it.
+            let mut base = read_fresh(backend, id, &vault)?;
+            if changed_since(&raw.stdout, &base.stdout)? {
+                ui.show("\nThe item changed in 1Password while setup was open, so nothing was saved. Setup read it again: what 1Password holds now is kept, and your entries fill only the settings that are still empty.")?;
+                (doc, indices) = laid_out(
+                    &recipe,
+                    &vault,
+                    item_id.as_deref(),
+                    &base.stdout,
+                    &active,
+                    ui,
+                )?;
+                let mut theirs = Vec::new();
+                for (n, value) in &entered {
+                    let index = indices[*n];
+                    if has_value(&doc.0, index) {
+                        theirs.push(active[*n].title.as_str());
+                    } else {
+                        doc.0["fields"][index]["value"] = Value::String(value.expose().to_owned());
+                    }
+                }
+                if !theirs.is_empty() {
+                    ui.show(&format!(
+                        "Already filled in 1Password, so your entry was not used: {}.",
+                        theirs.join(", ")
+                    ))?;
+                }
+                if !confirm_save(&recipe, &active, &indices, &doc.0, ui)? {
+                    ui.show("Stopped. Nothing saved.")?;
+                    return Ok(6);
+                }
+                let again = read_fresh(backend, id, &vault)?;
+                if changed_since(&base.stdout, &again.stdout)? {
+                    return Err(item_changed(
+                        "The setup item changed in 1Password again while setup was saving it; nothing was saved. Run opv setup again.",
+                    ));
+                }
+                base = again;
+            }
+            drop(entered);
+            let payload = serialize_exact(&doc.0)?;
+            let unchanged = {
+                let now = WipeOnDrop(serde_json::from_slice(&base.stdout).map_err(|_| invalid())?);
+                *serialize_exact(&now.0)? == *payload
+            };
+            if !unchanged {
+                let echoed = successful(
+                    backend,
+                    &["item", "edit", id, "--vault", &vault, "--format", "json"],
+                    Some(&payload),
+                )?;
+                verify_saved(backend, id, &vault, &base.stdout, &payload, echoed)?;
+            }
         } else {
             let created = successful(
                 backend,
@@ -489,6 +526,7 @@ pub fn run(
             }
         }
     }
+    let missing = missing_titles(&active, &indices, &doc.0);
     let manifest = recipe.manifest(&vault, item_id.as_deref().expect("existing or created"))?;
     config::parse(&manifest)?;
     config_compatible(&output, &manifest)?;
@@ -517,6 +555,131 @@ pub fn run(
         ui.show(&format!("Saved progress. Still needed: {}.\nFill those fields privately in 1Password, or rerun this same setup command. No infrastructure changed.", missing.join(", ")))?;
         Ok(8)
     }
+}
+
+/// The setup item laid out for `active`: tidied to the convention first when a person runs
+/// setup on an existing item (FR-43; saved with the progress, only if the owner confirms;
+/// nothing is deleted, old copies go to "opv · kept"), then every active field found or
+/// added. Returns the document and each active field's index in it.
+fn laid_out(
+    recipe: &Recipe,
+    vault: &str,
+    item_id: Option<&str>,
+    raw: &[u8],
+    active: &[Field],
+    ui: &mut dyn Interaction,
+) -> Result<(WipeOnDrop, Vec<usize>), Error> {
+    let invalid =
+        || source_error("The item response is invalid. No contents printed; no item changed.");
+    let tidied = match item_id {
+        Some(id) if super::tidy::active() => tidy_layout(recipe, vault, id, raw, ui)?,
+        _ => None,
+    };
+    let mut doc = WipeOnDrop(
+        serde_json::from_slice(tidied.as_deref().map_or(raw, |t| &t[..])).map_err(|_| invalid())?,
+    );
+    drop(tidied);
+    let indices = field_indices(&mut doc.0, active)?;
+    Ok((doc, indices))
+}
+
+/// The titles of the active fields still without a value.
+fn missing_titles<'a>(active: &'a [Field], indices: &[usize], doc: &Value) -> Vec<&'a str> {
+    active
+        .iter()
+        .zip(indices)
+        .filter(|(_, i)| !has_value(doc, **i))
+        .map(|(f, _)| f.title.as_str())
+        .collect()
+}
+
+/// Say what a save would hold and ask the owner once.
+fn confirm_save(
+    recipe: &Recipe,
+    active: &[Field],
+    indices: &[usize],
+    doc: &Value,
+    ui: &mut dyn Interaction,
+) -> Result<bool, Error> {
+    let missing = missing_titles(active, indices, doc).len();
+    ui.show(&format!(
+        "\nSave {} in {}. {} of {} settings filled. Existing filled values are kept.",
+        recipe.item,
+        recipe.vault,
+        indices.len() - missing,
+        indices.len()
+    ))?;
+    ui.confirm("Save this progress in 1Password?")
+}
+
+/// The setup item read straight from 1Password, never from `op`'s cache (C1).
+fn read_fresh(backend: &dyn Backend, id: &str, vault: &str) -> Result<Output, Error> {
+    successful(
+        backend,
+        &[
+            "item",
+            "get",
+            id,
+            "--vault",
+            vault,
+            "--format",
+            "json",
+            crate::adapters::onepassword::NO_CACHE,
+        ],
+        None,
+    )
+}
+
+/// True when `now` is a later state of the item than `then`: another version, or (when
+/// either has no version) different content.
+fn changed_since(then: &[u8], now: &[u8]) -> Result<bool, Error> {
+    use crate::adapters::onepassword::item_version;
+    if let (Some(a), Some(b)) = (item_version(then), item_version(now)) {
+        return Ok(a != b);
+    }
+    let invalid =
+        || source_error("The item response is invalid. No contents printed; no item changed.");
+    let a = WipeOnDrop(serde_json::from_slice(then).map_err(|_| invalid())?);
+    let b = WipeOnDrop(serde_json::from_slice(now).map_err(|_| invalid())?);
+    Ok(a.0 != b.0)
+}
+
+fn item_changed(message: &str) -> Error {
+    source_error(message).with_code(crate::error::Code::ItemChanged)
+}
+
+/// After the edit (as the tidy does, I5): the item must be exactly one version past `base`,
+/// the read the edit was built from, and hold every field setup wrote or kept. The echoed
+/// item is used when it carries a version, else the item is read again, fresh.
+fn verify_saved(
+    backend: &dyn Backend,
+    id: &str,
+    vault: &str,
+    base: &[u8],
+    payload: &[u8],
+    echoed: Output,
+) -> Result<(), Error> {
+    use crate::adapters::onepassword::item_version;
+    let after = match item_version(&echoed.stdout) {
+        Some(_) => echoed,
+        None => read_fresh(backend, id, vault)?,
+    };
+    let expected = item_version(base).map(|v| v + 1);
+    let got = item_version(&after.stdout);
+    if expected.is_some() && got != expected {
+        return Err(item_changed(&format!(
+            "Saved, but another edit landed in 1Password together with setup's (version {} instead of {}); setup did not retry. Check the item's history in 1Password, then run opv setup again.",
+            got.map_or_else(|| "unknown".into(), |v| v.to_string()),
+            expected.unwrap_or_default()
+        )));
+    }
+    let lost = crate::adapters::onepassword_tidy::lost(base, payload, &after.stdout)?;
+    if lost > 0 {
+        return Err(item_changed(&format!(
+            "Saved, but {lost} field(s) setup wrote or kept are not in the item read back. Restore them from the item's history in 1Password, then run opv setup again."
+        )));
+    }
+    Ok(())
 }
 
 /// The existing item tidied to the convention (FR-43), or `None` when it already follows it.
