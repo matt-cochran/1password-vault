@@ -243,6 +243,8 @@ fn doctor_expired(p: P) {
         r.responses
             .borrow_mut()
             .push_back(Ok(Output::success(ONE_ACCOUNT)));
+        // The 1Password app does not approve doctor's vault list.
+        r.responses.borrow_mut().push_back(Ok(Output::failure(1)));
     }
     let no_fly = crate::config::parse(
         "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n",

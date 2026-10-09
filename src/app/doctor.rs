@@ -732,14 +732,20 @@ fn op_upgrade_hint(h: &Host) -> &'static str {
     }
 }
 
-/// The 1Password session, classified exactly as a failed item read is (FR-26).
+/// The 1Password session, classified exactly as a failed item read is (FR-26). Before
+/// reporting "not signed in" outside CI, it asks the 1Password app once ([`onepassword::wake`]),
+/// as a real read would: with the app integration, `op whoami` fails until then.
 fn op_auth(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
     env: Option<&str>,
 ) -> Result<String, Error> {
     use onepassword::Session;
-    match onepassword::diagnose(r, host)? {
+    let mut session = onepassword::diagnose(r, host)?;
+    if session == Session::NotSignedIn && !host().ci && onepassword::wake(r) {
+        session = onepassword::diagnose(r, host)?;
+    }
+    match session {
         Session::SignedIn(t) => Ok(format!("signed in ({t})")),
         Session::Unknown => Err(Error::Dependency(
             "op whoami did not run to completion; the 1Password session could not be checked"
@@ -1034,6 +1040,7 @@ mod tests {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g.insert(3, Output::failure(1));
         let r = FakeRunner::new(g);
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
@@ -1046,10 +1053,32 @@ mod tests {
         );
         assert!(out.contains("\n  sign in: opv login\n"), "{out}");
         assert_eq!(lines.len(), CHECK_LINES, "{out}");
-        // Doctor and the read path share one classification: whoami, then account list.
+        // Doctor and the read path share one classification: whoami, then account list;
+        // doctor then asks the 1Password app once.
         assert_eq!(
-            argvs(&r)[1..3],
-            ["op whoami --format json", "op account list --format json"]
+            argvs(&r)[1..4],
+            [
+                "op whoami --format json",
+                "op account list --format json",
+                "op vault list --format json"
+            ]
+        );
+    }
+
+    /// With the app integration, whoami fails until the app approves a command: doctor's
+    /// vault list asks it, and the session it then finds is reported.
+    #[test]
+    fn op_auth_passes_once_the_app_approves() {
+        let mut g = good();
+        g[1] = Output::failure(1);
+        g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g.insert(3, Output::success(b"[]".to_vec()));
+        g.insert(4, Output::success(WHOAMI.as_bytes().to_vec()));
+        let r = FakeRunner::new(g);
+        let (_, out) = doctor(Ok(fleet()), &r);
+        assert!(
+            checks(&out)[2].starts_with("ok    op auth: signed in"),
+            "{out}"
         );
     }
 
@@ -1325,6 +1354,7 @@ mod tests {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g.insert(3, Output::failure(1)); // the 1Password app does not approve
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(do_line(&out), "Do: sign in: opv login", "{out}");
@@ -1358,6 +1388,7 @@ mod tests {
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
         g[4] = Output::failure(1); // fly auth fails too
+        g.insert(3, Output::failure(1)); // the 1Password app does not approve
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
         assert!(do_line(&out).starts_with("Do: sign in"), "{out}");
@@ -1409,6 +1440,7 @@ mod tests {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g.insert(3, Output::failure(1)); // the 1Password app does not approve
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
         let next = next_line(&out);
@@ -1837,6 +1869,7 @@ mod tests {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g.insert(3, Output::failure(1)); // the 1Password app does not approve
         let r = FakeRunner::new(g);
         let mut out = Vec::new();
         let _ = run_scoped(Ok(fleet()), Some("prod"), None, &r, &mut out);
@@ -1960,6 +1993,7 @@ mod tests {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
+        g.insert(3, Output::failure(1)); // the 1Password app does not approve
         let r = FakeRunner::new(g);
         let h = Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty());
         let mut out = Vec::new();

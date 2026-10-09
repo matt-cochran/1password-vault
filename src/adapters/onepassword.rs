@@ -42,6 +42,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
@@ -172,6 +173,27 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
             _ => Session::NotSignedIn,
         },
     )
+}
+
+/// Limit for [`wake`]: long enough for a person to approve the 1Password app's prompt.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Ask the 1Password app to authorize this terminal: `op whoami` never does, so with the
+/// app integration it reports "not signed in" until some other command has been approved.
+/// One `op vault list --format json` probe (exit status only; its output names vaults and
+/// is dropped unread, SR-1); `true` when it succeeded. Never an item read (FR-13).
+pub fn wake(r: &dyn CommandRunner) -> bool {
+    let ok = r
+        .probe(
+            &Call::new(OP, &["vault", "list", "--format", "json"]),
+            APPROVAL_TIMEOUT,
+        )
+        .is_ok_and(|o| o.status == 0);
+    if !ok {
+        // Its stderr must not attach to the error the caller reports (NR-31).
+        let _ = crate::runner::take_failure_excerpt();
+    }
+    ok
 }
 
 /// `user_type` from `op whoami --format json`, nothing else. Unknown fields (identity) are
@@ -331,11 +353,19 @@ pub fn session_error(
             }
             Session::NotSignedIn => match host.signin_line("sign in", env) {
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-                Some(step) => format!(
-                    "not signed in to 1Password ({ctx})\n  {step}\n  (a 1Password CLI session \
-                 expires after 30 minutes idle; with the desktop app integration, unlock the \
-                 1Password app instead)\n  {network}"
-                ),
+                Some(step) => {
+                    // op in WSL cannot use the Windows app, so only other platforms name it.
+                    let app = if host.platform == Platform::Wsl {
+                        ""
+                    } else {
+                        "\n  or use the 1Password app: Settings > Developer > Integrate with \
+                         1Password CLI, then unlock the app and approve its prompt"
+                    };
+                    format!(
+                        "not signed in to 1Password ({ctx})\n  {step}{app}\n  (a 1Password CLI \
+                         session expires after 30 minutes idle)\n  {network}"
+                    )
+                }
             },
             Session::NoAccount => match host.signin_line("then sign in", env) {
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),

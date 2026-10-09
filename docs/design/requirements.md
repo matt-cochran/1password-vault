@@ -630,6 +630,11 @@ Acceptance:
 - Remediation text never asks for a secret to be pasted anywhere but the owning tool's own prompt.
 - Detection makes no extra 1Password item reads (FR-13). `op whoami` and `op account list`
   have no rate-limit cost.
+- With the 1Password app integration, `op whoami` fails until some other command has been
+  approved in the app. Before `doctor` reports "not signed in" outside CI, it makes one
+  `op vault list` call (output dropped unread), which asks the app to approve as a real read
+  would, and classifies again. The not-signed-in text names the app setting, except in WSL,
+  where `op` cannot use the Windows app.
 
 Constraints kept: SR-1, SR-2, FR-9 (text, never a prompt), FR-10 (stable exit categories), FR-13.
 

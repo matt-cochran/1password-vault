@@ -413,7 +413,11 @@ enum Cmd {
         product: Option<String>,
     },
     /// Sign in to 1Password for an environment, then open a signed-in terminal.
-    #[command(before_help = LOGIN_QUICK, after_help = LOGIN_MORE)]
+    #[command(
+        before_help = LOGIN_QUICK,
+        after_help = LOGIN_MORE,
+        aliases = ["signin", "sign-in", "auth"]
+    )]
     Login {
         /// Environment name from the configuration (for example dev or prod).
         env: Option<String>,
@@ -1972,6 +1976,21 @@ mod tests {
                 vec!["opv".into(), "check".into(), "prod".into()]
             )
         );
+    }
+
+    /// The names people guess for signing in reach `login` (hidden aliases).
+    #[test]
+    fn sign_in_guesses_are_login() {
+        let parsed: Vec<bool> = ["signin", "sign-in", "auth"]
+            .iter()
+            .map(|a| {
+                matches!(
+                    Cli::try_parse_from(["opv", a, "prod"]).map(|c| c.cmd),
+                    Ok(Cmd::Login { .. })
+                )
+            })
+            .collect();
+        assert_eq!(parsed, [true, true, true]);
     }
 
     #[test]
