@@ -12,7 +12,9 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
    - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
    - `--deploy` (restarts or redeploys the app, or starts a new revision or rollout), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed).
    `doctor`, `status`, `plan`, `explain` and `config export` change nothing.
-5. **Use exit codes, not guesses.** Every opv failure prints a typed error and a `Next:` line with the exact next command. Run that command or show it to the user; do not invent workarounds.
+5. **Sign-in is the user's, at 1Password's own prompts.** When opv says `sign in: opv login <env>`, ask the user to run exactly that in their own terminal (it needs one, and the password goes only to op's prompt). Never ask for a password, token or Secret Key, and never script `op signin` or `eval`.
+6. **Never point opv at a break-glass credential.** `deploy_credentials` names an item holding only that environment's least-privilege deploy identity, created by the user; owner or admin credentials stay with people.
+7. **Use exit codes, not guesses.** Every opv failure prints a typed error and a `Next:` line with the exact next command. Run that command or show it to the user; do not invent workarounds.
 
 ## 1. Check the tools
 
@@ -115,9 +117,14 @@ opv run dev -- docker compose up             # Compose reads ${VAR} from this en
 
 More patterns: [usage.md](usage.md#local-development).
 
+## Sign-in and accounts
+
+- If the environments use different 1Password accounts, add `account = "<sign-in address>"` to each environment (ask the user which account holds which vault). The user then signs in with `opv login <env>`; every opv command uses that environment's account.
+- To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that environment's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Not for Kubernetes; Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
+
 ## 7. CI
 
-- Create a 1Password service account with **read-only** access to each environment's vault, and a Fly deploy token. The user creates both and stores them as CI secrets (for example `OP_SERVICE_ACCOUNT_TOKEN` and `FLY_API_TOKEN`); you never see them.
+- CI uses one 1Password service account with **read-only** access to each environment's vault (`OP_SERVICE_ACCOUNT_TOKEN`). The target credential is either a `deploy_credentials` item in that vault (no separate CI secret) or the CI provider's OIDC federation (for example `azure/login` with a federated credential). Without either, the user stores a Fly deploy token as `FLY_API_TOKEN`. The user creates every credential; you never see them.
 - Add `opv sync <env>` (and `--deploy` only if the user wants CI to deploy) to the workflow. A ready-made GitHub Actions job is in [usage.md](usage.md#github-actions-example).
 - `item skeleton` needs a write-capable identity; never give one to CI.
 

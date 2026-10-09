@@ -9,6 +9,7 @@ Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the 
 Every command's `--help` lists its own options first, then the global options (`--config`, `--timeout`, `--verbose`, `--color`) under `Global options:`, then a few examples.
 
 ```sh
+opv login prod                      # sign in to prod's 1Password account; opens a signed-in terminal
 opv doctor                          # config, op and sign-in, flyctl and sign-in, op local run
 opv doctor --env dev --product allumata   # only what local work in dev needs; no deployment CLIs
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
@@ -39,7 +40,7 @@ opv run prod -- ./server            # simple profile: no --product
 `doctor` ends with one `Next step` line. When a check fails it names the first failing check and the safe command that addresses it, the same command the failure prints under it:
 
 ```text
-Next step (op auth): sign in: eval $(op signin)
+Next step (op auth): sign in: opv login
 ```
 
 An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
@@ -170,6 +171,32 @@ If an environment sets `confirm_env = true` ([configuration](configuration.md#gu
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
 
+## Sign-in, accounts and deploy credentials
+
+`opv login <env>` signs in to the 1Password account that environment uses, at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Every sign-in hint opv prints, in `doctor` and in errors, is `opv login <env>`. Like `setup`, `login` needs your own interactive terminal; automation uses a service-account token instead.
+
+`account = "<sign-in address or account ID>"` on an environment makes every `op` call for it use that account (`OP_ACCOUNT` in the child's environment). Logging in to two environments in different accounts in the same terminal keeps both sessions (`OP_SESSION_<account>` each), and `check`, `run`, `plan`, `status` and `sync` use the account of the environment they act on. With `OP_SERVICE_ACCOUNT_TOKEN` (or Connect) set, the token decides the account and `account` is not added.
+
+`deploy_credentials = "op://<vault>/<item>"` names an item that holds only that environment's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it once and sign the target CLI in for that run only; `check`, `run`, `config export` and `item skeleton` never read it. Fields, by provider:
+
+| Provider | Fields | How the run uses them |
+|---|---|---|
+| Fly | `FLY_API_TOKEN` (concealed) | set only in the environment of each `flyctl` call (`FLY_API_TOKEN`, and `FLY_ACCESS_TOKEN` so it wins over a token in your shell) |
+| Azure | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text), `AZURE_CLIENT_SECRET` (concealed) | `az login --service-principal ... -p @<hand-off>` once, in a private `AZURE_CONFIG_DIR` used by every `az` call of the run and removed when it ends (also on Ctrl-C / SIGTERM; a directory left by a killed run is removed by the next one) |
+| Kubernetes | not supported | a configuration error: `kubectl` uses your kubeconfig (`kubernetes.context`) |
+
+Azure deploy credentials, by OS (the Azure CLI stores the service principal's secret in its configuration directory):
+
+| OS | Private `AZURE_CONFIG_DIR` | Supported |
+|---|---|---|
+| Linux, WSL | `$XDG_RUNTIME_DIR/opv-az.<pid>-<random>`, mode 0700; `$XDG_RUNTIME_DIR` must be on tmpfs (RAM) and owned by you | yes; without a RAM `$XDG_RUNTIME_DIR` opv refuses before reading anything |
+| Windows | `%LOCALAPPDATA%\Temp\opv-az-<pid>-<random>`, ACL for you only; az encrypts the stored secret with DPAPI (`service_principal_entries.bin`) | yes; a plaintext `service_principal_entries.json` makes opv remove the directory and refuse |
+| macOS | none | no: sign in with `az login` and remove `deploy_credentials`, or use OIDC in CI |
+
+On native Windows, values reach `az` (the service-principal secret, Key Vault values, the Container App update) through a named pipe `\\.\pipe\opv-<random>` that only your user can open, instead of `/dev/stdin`; Linux, WSL and macOS use stdin. Fly deploy credentials work on every OS.
+
+Keep break-glass (owner or admin) credentials out of opv: they are for people, in 1Password, and no `deploy_credentials` should reference them.
+
 ## Local development
 
 `opv run` starts a command with the environment's keys set as environment variables, under their plain names (`DATABASE_URL`, `OPENAI_API_KEY`), secrets and config alike. opv never sees the values: it hands `op run` a list of `op://` references, and `op run` resolves them and starts the command. Nothing is written to disk, and the values are gone when the process exits.
@@ -199,7 +226,7 @@ Common setups:
 
 Before the first run, `opv check dev` (fleet: `--product <p>`) tells you which keys are missing, of the wrong kind or failing a rule, by name only. `run` removes every key name declared in the configuration from the inherited environment before adding the selected keys, so switching products in one shell never leaks the previous product's keys; everything else (PATH, tool settings, the 1Password sign-in) is inherited, so this is not a sandbox. The full local guide, including WSL, is [local-development.md](local-development.md).
 
-`op run` masks secret values that the command prints to stdout. `run` needs a signed-in `op` (the 1Password desktop app integration or `op signin`); it exits with the command's own exit code.
+`op run` masks secret values that the command prints to stdout. `run` needs a signed-in `op` (`opv login dev`, or the 1Password desktop app integration); it exits with the command's own exit code.
 
 There is no command that writes a `.env` file or prints `export` lines, on purpose: a secret never lands on disk (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead (most frameworks fall back to it, and Compose's `env_file` can be replaced by `environment:` entries without values).
 
@@ -245,7 +272,7 @@ Global options: `--timeout <secs>` (default 900), `--verbose`, `--config` and `-
 
 Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) opv runs `op whoami`, and when that fails (with no service-account or Connect credential set, outside CI) `op account list`. These diagnosis calls are free under 1Password rate limits, have their own 15 s limit, and no item is read a second time.
 
-- Not signed in, with no non-interactive credential set (no session, an expired `OP_SESSION_*`, a locked desktop app), is authentication (7), with the sign-in command for your shell: `eval $(op signin)` for bash and zsh, `eval (op signin)` for fish, `Invoke-Expression $(op signin)` for PowerShell (the default on Windows), or "sign in with `op signin` (see `op signin --help` for your shell)" for any other shell, plus "if you are signed in, check network access to 1Password". Under CI (`CI` or `GITHUB_ACTIONS` truthy, so `CI=false` does not count) it says "set OP_SERVICE_ACCOUNT_TOKEN" and gives no interactive command.
+- Not signed in, with no non-interactive credential set (no session, an expired `OP_SESSION_*`, a locked desktop app), is authentication (7), with the sign-in command `opv login <env>` (the same in every shell; `opv login` from `doctor` without `--env`), plus "if you are signed in, check network access to 1Password". Under CI (`CI` or `GITHUB_ACTIONS` truthy, so `CI=false` does not count) it says "set OP_SERVICE_ACCOUNT_TOKEN" and gives no interactive command.
 - No account on the machine (fresh WSL or Linux) gives the `op account add` command first.
 - With `OP_SERVICE_ACCOUNT_TOKEN` or Connect (`OP_CONNECT_HOST` / `OP_CONNECT_TOKEN`) set, a failing `op whoami` is ambiguous (rejected token or no network), so it stays a source error (4): "1Password rejected the service-account (or Connect) token or could not be reached: check the token in <variable> and network access". No interactive command is printed.
 - Signed in but the read still failed is a source error (4) naming the vault and item IDs and the identity type (USER or SERVICE_ACCOUNT, never the identity) and saying to grant that identity access to the vault.
@@ -278,12 +305,15 @@ jobs:
         run: opv sync prod
 ```
 
+CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes either from `deploy_credentials` in that vault (opv reads it and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own) or from the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
+
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions).
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
 ## Security model and limits
 
-- Values travel only on stdin or in the environment of a child process. They never appear in argv, files, logs, errors, `Debug` or `Display` output.
+- Values travel only on stdin (on native Windows, a user-only named pipe for `az`) or in the environment of a child process. They never appear in argv, files, logs, errors, `Debug` or `Display` output.
+- One documented exception to "no files" (SR-4): with Azure `deploy_credentials`, the Azure CLI stores the service principal's secret in opv's private per-run `AZURE_CONFIG_DIR`, which is RAM-only on Linux/WSL, DPAPI-encrypted on Windows, and removed when the run ends. macOS is not supported for Azure deploy credentials.
 - The stderr of `op` and `flyctl` is suppressed so it cannot leak a value.
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.

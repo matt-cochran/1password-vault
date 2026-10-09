@@ -100,14 +100,68 @@ pub struct Product {
 
 /// One deployment environment: one 1Password item (by IDs, FR-13) and, optionally, one
 /// deployment target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environment {
+    /// The environment's name in the configuration (for messages: `opv login <name>`).
+    pub name: String,
     pub vault_id: String,
     pub item_id: String,
     /// The deployment target (FR-28, FR-37): `None` when the environment declares none.
     pub target: Option<Box<dyn TargetConfig>>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
+    /// The 1Password account every `op` call for this environment uses (FR-40): a sign-in
+    /// address or account ID. `None`: op's default (or the service account in CI).
+    pub account: Option<String>,
+    /// The item holding this environment's least-privilege deploy identity (FR-40), read
+    /// by `status`, `plan` and `sync` to sign the target CLI in for the run only.
+    pub deploy_credentials: Option<ItemRef>,
+}
+
+/// An `op://<vault>/<item>` reference to a whole item, by IDs or names (FR-40).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemRef {
+    pub vault: String,
+    pub item: String,
+}
+
+impl std::fmt::Display for ItemRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "op://{}/{}", self.vault, self.item)
+    }
+}
+
+impl ItemRef {
+    /// Parse `op://<vault>/<item>`: exactly a vault and an item, each non-empty, unpadded,
+    /// free of control characters and not starting with `-` (safe as an argument). A field,
+    /// a query (`?attribute=`) or any other form is refused with the reason.
+    pub fn parse(s: &str) -> Result<Self, &'static str> {
+        let rest = s
+            .strip_prefix("op://")
+            .ok_or("must be an op://<vault>/<item> reference")?;
+        if rest.contains('?') {
+            return Err("must name an item, without a query (op://<vault>/<item>)");
+        }
+        let parts: Vec<&str> = rest.split('/').collect();
+        let [vault, item] = parts.as_slice() else {
+            return Err("must name exactly a vault and an item (op://<vault>/<item>), not a field");
+        };
+        for part in [vault, item] {
+            if part.is_empty() {
+                return Err("needs a non-empty vault and item (op://<vault>/<item>)");
+            }
+            if part.trim() != *part {
+                return Err("has leading or trailing whitespace in the vault or item");
+            }
+            if part.starts_with('-') || part.chars().any(char::is_control) {
+                return Err("vault and item may not start with - or hold control characters");
+            }
+        }
+        Ok(Self {
+            vault: (*vault).to_string(),
+            item: (*item).to_string(),
+        })
+    }
 }
 
 impl Environment {

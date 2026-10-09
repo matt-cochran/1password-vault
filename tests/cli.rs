@@ -830,7 +830,7 @@ fn timeout_out_of_range_exits_2() {
 
 #[test]
 fn guided_commands_refuse_headless_execution_before_vendor_calls() {
-    for command in ["setup", "session"] {
+    for command in ["setup", "login"] {
         let (code, stdout, stderr) = opv(&[command]);
         assert_eq!(code, 6);
         assert!(stdout.is_empty());

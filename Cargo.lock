@@ -296,6 +296,7 @@ dependencies = [
  "libc",
  "regex",
  "rpassword",
+ "rustix",
  "secrecy",
  "serde",
  "serde_json",
@@ -305,6 +306,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "windows-sys",
  "zeroize",
 ]
 

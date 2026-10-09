@@ -47,7 +47,7 @@ For local development, `opv run dev -- <command>` starts any command with the en
 
 ## Guided local setup
 
-`opv session` and `opv setup` handle sign-in and resumable project onboarding, with plain instructions and private input. See [guided setup](docs/guided-setup.md) and the [CLI interaction review](docs/cli-ux-review.md).
+`opv login <env>` and `opv setup` handle sign-in and resumable project onboarding, with plain instructions and private input. See [guided setup](docs/guided-setup.md) and the [CLI interaction review](docs/cli-ux-review.md).
 
 ## Quickstart
 

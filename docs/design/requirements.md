@@ -304,7 +304,7 @@ Prune scope: only template names of declared keys that are not desired in this e
 
 Commands used by CI shall not prompt for input.
 
-Automation commands require explicit flags for confirmation and never fall back to prompts. The owner-only `setup` and `session` commands are explicit interactive entry points: they require a terminal, refuse CI and service-account/Connect authentication, and do not deploy or prune.
+Automation commands require explicit flags for confirmation and never fall back to prompts. The owner-only `setup` and `login` commands (FR-40) are explicit interactive entry points: they require a terminal, refuse CI and service-account/Connect authentication, and do not deploy or prune.
 
 CI behavior must be predictable from arguments and configuration alone.
 
@@ -684,6 +684,17 @@ opv check <environment> [--product <product>] [--json]
 - On Linux and macOS, `doctor` reports `op local run`: the first `op` on PATH must be a native binary, because a Windows `op.exe` reached from WSL cannot start a Linux child. It fails a scope of environments without a target and warns otherwise, always with the remaining checks and a `Next step` line. `run` refuses such an `op` before starting anything (exit 3).
 - Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op` and its own sign-in; native Linux, macOS and Windows. Automatic Windows desktop-to-Linux execution is not provided.
 
+## FR-40 — Sign-In, Per-Environment Account and Deploy Credentials
+
+Adopted by the owner on 2026-10-08 for 0.5.0. Goal: a user does not think about sign-in mechanics and ends up more secure; nothing secret lives outside 1Password except process memory (and the one SR-4 exception below).
+
+- **`opv login [<env>] [-- <command>]`** (replaces `opv session`, no alias) signs in to the 1Password account the environment uses, at op's own prompts, then opens a signed-in shell or runs `<command>` and exits with its code. No token is printed and nothing is evaluated; the session stays in opv's process and its child. Without `<env>`: the one account all environments use (or op's default, also when there is no configuration); when they differ, opv lists the environments with their accounts and asks. Like `setup` it needs an interactive terminal and refuses CI and service-account/Connect authentication (FR-9). Signing in to two environments in different accounts in one shell keeps both sessions (`OP_SESSION_<account>` only, no generic `OP_SESSION`, when an account is named).
+- **`account = "<sign-in address, email or account ID>"`** (optional, per environment): every `op` call for that environment carries it (`OP_ACCOUNT` in the child's environment), so `run`, `check`, `status`, `plan`, `sync`, `config export`, `item skeleton` and `doctor --env` act in the right account. Not added when a service-account or Connect credential is set (the credential decides). An invalid value is a configuration error with line and column (FR-2).
+- **`deploy_credentials = "op://<vault>/<item>"`** (optional, per environment): an item holding only that environment's least-privilege deploy identity (SR-5), read once by IDs or names (an `op://` reference with exactly a vault and an item; a field, a query or another form is a configuration error with line and column). Read only by commands that reach the target (`status`, `plan`, `sync`, `doctor --env`). Fields by convention: Fly `FLY_API_TOKEN` (concealed), set only in each `flyctl` call's environment (`FLY_API_TOKEN` and `FLY_ACCESS_TOKEN`); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed), signed in once with `az login --service-principal -u <client> -t <tenant> -p @<hand-off> --only-show-errors -o none` in a private per-run `AZURE_CONFIG_DIR` that every `az` call of the run uses and that is removed on every exit path, Ctrl-C and SIGTERM included (stale directories of killed runs are swept by the next run). Kubernetes: not supported in 0.5.0 (a configuration error: `kubectl` uses the kubeconfig). A missing, duplicate, empty or wrongly typed field is a source error naming the field, never a value. Values are `SecretValue`s and never reach argv, files (except az's own private directory, SR-4), logs or `Debug`.
+- **Azure per OS.** Linux/WSL: `$XDG_RUNTIME_DIR` must be RAM-backed (statfs `TMPFS_MAGIC`/`RAMFS_MAGIC`) and owned by the user; otherwise opv refuses before reading the credential ("deploy credentials for Azure need a private RAM directory ($XDG_RUNTIME_DIR on tmpfs), which this machine doesn't have; nothing was read or changed", next: `az login` and remove `deploy_credentials`, or OIDC in CI); the run directory is `opv-az.<pid>-<random>`, mode 0700. Windows: `%LOCALAPPDATA%\Temp\opv-az-<pid>-<random>` with a protected user-only ACL; az stores the secret DPAPI-encrypted (`service_principal_entries.bin`; `AZURE_CORE_ENCRYPT_TOKEN_CACHE=true` is set), and a plaintext `service_principal_entries.json` makes opv delete the directory and refuse; removal is retried for up to about 10 s because az's helper processes hold files briefly. macOS: refused with the same next step (no RAM directory, no verified encrypted store).
+- **Windows value hand-off (SR-3).** On native Windows, a value for `az` (the service-principal secret, Key Vault values, the Container App update) goes through a named pipe `\\.\pipe\opv-<random>` whose DACL grants only the current user and which rejects remote clients: opv waits for the connection, writes the bytes and closes the handle (never a disconnect, which corrupts the reader inside az), serving up to 3 connections; a call that succeeds without az ever reading the pipe is an error. Elsewhere values go on stdin (`/dev/stdin`). This replaces the earlier "use WSL for Key Vault writes" refusal.
+- **Sign-in advice.** Every sign-in hint in `doctor`, errors and `Next` lines is `opv login <env>` (`opv login` when no environment is known), the same in every shell.
+
 # 4. Security Requirements
 
 ## FR-26 — Diagnose and Guide
@@ -694,7 +705,7 @@ rollout (2026-10-07); each has a test.
 
 | Situation | Detection (no value is read) | Message and exit |
 |---|---|---|
-| 1Password session expired or never started | after any failed `op` call, run `op whoami` (free under rate limits, D0) | "not signed in to 1Password", then the sign-in command for the detected shell (bash/zsh: `eval $(op signin)`; PowerShell: `Invoke-Expression $(op signin)`), or "set OP_SERVICE_ACCOUNT_TOKEN" under CI; exit 7 (auth), not 4 |
+| 1Password session expired or never started | after any failed `op` call, run `op whoami` (free under rate limits, D0) | "not signed in to 1Password", then `sign in: opv login <env>` (the same in every shell, FR-40), or "set OP_SERVICE_ACCOUNT_TOKEN" under CI; exit 7 (auth), not 4 |
 | No 1Password account on this machine (fresh WSL or Linux) | `op account list --format json` is empty | `op account add --address <sign-in address> --email <email>`, then sign in; "type the Secret Key and password only at op's prompts, never into chat, tickets or files"; exit 7 |
 | Signed in, but the item or vault is not visible to this identity | `op whoami` succeeds and the item read fails | names the vault and item IDs and the identity type (user or service account, never the identity itself) and says to grant that identity access to the vault; exit 4 |
 | `op` or `flyctl` missing or untested version | existing `doctor` checks | the install command for the detected OS |
@@ -800,6 +811,8 @@ Secret transmission to external tools shall use:
 
 The CLI shall not create plaintext files containing resolved secrets, including temporary files.
 
+One documented exception (FR-40): with Azure `deploy_credentials`, the Azure CLI itself stores the service principal's secret in opv's per-run `AZURE_CONFIG_DIR`. That directory is private to the user and removed when the run ends (success, error, Ctrl-C and SIGTERM; a killed run's directory is swept by the next run). Linux/WSL: RAM-only private dir (`$XDG_RUNTIME_DIR` on tmpfs, mode 0700). Windows: private dir (protected user-only ACL) with az's DPAPI-encrypted store; plaintext refuses. macOS: not supported for Azure deploy credentials. opv itself still writes no secret to any file.
+
 ## SR-5 — Least Privilege
 
 A CI identity shall require only:
@@ -807,6 +820,8 @@ A CI identity shall require only:
 - read access to the required 1Password vault/items;
 - the minimum Fly permissions required to manage secrets for the target application;
 - on cloud targets, read and write on the opv-tagged store entries and update on the one runtime service. Read is needed for compare-before-write (FR-31); it adds no exposure, because the same values are readable through the CI 1Password token.
+
+Deploy identities are per environment (FR-40): each environment's `deploy_credentials` item holds only what a sync of that environment needs (a Fly deploy token for one app; an Azure service principal limited to that Key Vault's opv-tagged secrets and that Container App), never a person's or an organisation-wide credential. Break-glass credentials (owner, admin, emergency access) are for people only, kept in 1Password, and never referenced by opv. In CI, one service-account token reads the environment's vaults; the target credential is a `deploy_credentials` item or the CI provider's OIDC federation.
 
 The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. This write exception does not apply to synchronization or CI.
 
@@ -905,6 +920,12 @@ opv [--config <path>] sync <environment> [--deploy] [--prune] [--rotate <product
 ```
 
 `plan` and `sync` work for every target. `fly plan` and `fly sync` are deprecated aliases for one minor release. Removed in 0.4.0.
+
+Since v0.5 (FR-40), in addition to the above:
+
+```text
+opv login [<environment>] [-- <command>]
+```
 
 There should be no generic `secret get` command in the initial release because printing raw values conflicts with the tool's primary safety goals.
 

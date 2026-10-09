@@ -175,6 +175,16 @@ impl Provider for AzureProvider {
         preflight::DOCTOR_CHECKS
     }
 
+    fn deploy_credential_fields(
+        &self,
+    ) -> Result<&'static [crate::provider::CredentialField], String> {
+        Ok(super::login::FIELDS)
+    }
+
+    fn deploy_login(&self) -> Result<Box<dyn crate::provider::DeployLogin>, Error> {
+        Ok(Box::new(super::login::start()?))
+    }
+
     fn setup_hint(&self, _profile: Profile) -> String {
         "configure azure.subscription, azure.key_vault, azure.resource_group, \
          azure.container_app and azure.identity"

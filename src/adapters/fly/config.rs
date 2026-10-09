@@ -129,6 +129,16 @@ impl Provider for FlyProvider {
         CREDENTIAL_VARS
     }
 
+    fn deploy_credential_fields(
+        &self,
+    ) -> Result<&'static [crate::provider::CredentialField], String> {
+        Ok(super::login::FIELDS)
+    }
+
+    fn deploy_login(&self) -> Result<Box<dyn crate::provider::DeployLogin>, Error> {
+        Ok(Box::<super::login::FlyLogin>::default())
+    }
+
     fn setup_hint(&self, profile: Profile) -> String {
         match profile {
             Profile::Simple => "configure fly.app".into(),

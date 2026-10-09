@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeValue, ValueDeserializer};
 
-use crate::domain::Profile;
+use crate::domain::{Kind, Profile, SecretValue};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -46,6 +46,45 @@ pub trait Provider: Sync {
     /// The TOML lines `opv init` writes for a target named `name` (FR-23), or `None` when
     /// the provider does not support `init`.
     fn init_section(&self, name: &str, profile: Profile) -> Option<String>;
+    /// The fields a `deploy_credentials` item holds for this provider, by convention
+    /// (FR-40), or the configuration error explaining why it takes none.
+    fn deploy_credential_fields(&self) -> Result<&'static [CredentialField], String> {
+        Err(format!(
+            "{} does not support deploy_credentials",
+            self.label()
+        ))
+    }
+    /// Start a deploy sign-in for one run (FR-40). Runs before the credential is read, so a
+    /// machine that cannot hold it safely refuses with nothing read or changed.
+    fn deploy_login(&self) -> Result<Box<dyn DeployLogin>, Error> {
+        Err(Error::Config(format!(
+            "{} does not support deploy_credentials",
+            self.label()
+        )))
+    }
+}
+
+/// One field of a `deploy_credentials` item (FR-40): its label and kind (concealed = secret,
+/// text = config, as for every item field, FR-14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialField {
+    pub label: &'static str,
+    pub kind: Kind,
+}
+
+/// A target CLI signed in with an environment's deploy identity for one run (FR-40).
+/// Dropping it ends the sign-in and removes anything it kept (SR-4).
+pub trait DeployLogin {
+    /// Sign in with the item's values, keyed by field label. `r`'s `op` calls already carry
+    /// the environment's 1Password account. Values go only to stdin or a child's env (SR-3).
+    fn sign_in(
+        &mut self,
+        values: std::collections::BTreeMap<String, SecretValue>,
+        r: &dyn CommandRunner,
+    ) -> Result<(), Error>;
+    /// Extra environment for every call of `program` in this run (a token for the target
+    /// CLI, its private configuration directory). Never argv, never a file.
+    fn env(&self, program: &str) -> Vec<(&'static str, &str)>;
 }
 
 /// One provider section of `secrets.toml` (`[environments.<env>.<section>]`), with its

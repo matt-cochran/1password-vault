@@ -839,7 +839,7 @@ fn expired_session_is_auth_with_signin_command() {
             r.stderr
         );
         assert!(
-            r.stderr.contains("\n  sign in: eval $(op signin)\n"),
+            r.stderr.contains("\n  sign in: opv login prod\n"),
             "{}",
             r.stderr
         );
@@ -859,17 +859,21 @@ fn expired_session_is_auth_with_signin_command() {
         );
         assert_eq!(h.fly_calls("import"), 0);
     }
-    // fish users get fish syntax.
+    // fish users get the same command: `opv login` needs no shell syntax (FR-40).
     h.set("SHELL", "/usr/bin/fish");
     h.reset();
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(
-        r.stderr.contains("\n  sign in: eval (op signin)\n"),
+        r.stderr.contains("\n  sign in: opv login prod\n"),
         "{}",
         r.stderr
     );
-    assert!(!r.stderr.contains("$("), "{}", r.stderr);
+    assert!(
+        !r.stderr.contains("$(") && !r.stderr.contains("eval"),
+        "{}",
+        r.stderr
+    );
 }
 
 /// FR-26: no account on this machine → `op account add`, then sign in; exit 7.
@@ -887,7 +891,7 @@ fn no_account_is_auth_with_account_add() {
         for want in [
             "no 1Password account is set up for op on this machine",
             "\n  add one: op account add --address <sign-in address> --email <email>\n",
-            "\n  then sign in: eval $(op signin)\n",
+            "\n  then sign in: opv login",
             "type the Secret Key and password only at op's prompts",
         ] {
             assert!(r.all().contains(want), "{cmd:?}: {want}: {}", r.all());
@@ -911,7 +915,11 @@ fn ci_not_signed_in_advises_service_account_token() {
         "{}",
         r.stderr
     );
-    assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+    assert!(
+        !r.stderr.contains("op signin") && !r.stderr.contains("opv login"),
+        "{}",
+        r.stderr
+    );
     assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
     assert_eq!(
         op_subcommands(&h),
@@ -1007,7 +1015,11 @@ fn rejected_credential_keeps_source_category() {
             "{}",
             r.stderr
         );
-        assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+        assert!(
+            !r.stderr.contains("op signin") && !r.stderr.contains("opv login"),
+            "{}",
+            r.stderr
+        );
         assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
         assert_eq!(
             op_subcommands(&h),
@@ -1026,11 +1038,7 @@ fn ci_false_is_not_ci() {
         .set("FAKE_OP_EXIT", "1");
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(
-        r.stderr.contains("sign in: eval $(op signin)"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("sign in: opv login prod"), "{}", r.stderr);
 }
 
 /// FR-26 / FR-10: with FLY_API_TOKEN set, a failed flyctl call is a target error (5) naming

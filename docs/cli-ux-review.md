@@ -15,7 +15,7 @@ The journey is: choose project → sign in → set up missing settings → check
 | Root help | Find a starting point | Short quick-start groups setup, everyday use and deployment; advanced commands remain listed. |
 | Command help | Find exact options | Plain task descriptions, examples and preserved advanced flags. |
 | setup | Complete and resume onboarding | Recipe discovery, numbered product choice, native sign-in, hidden input, one save confirmation, existing values kept, partial progress saved. |
-| session | Authenticate without shell expertise | No copied tokens or evaluated shell output; owner terminal or one child command, child exit code retained. |
+| login | Authenticate without shell expertise | `opv login <env>` signs in to that environment's account; no copied tokens or evaluated shell output; owner terminal or one child command, child exit code retained; sessions for several accounts coexist. |
 | init | Connect an already prepared item | Preserved expert path, metadata-only configuration and explicit overwrite flag. |
 | doctor | Diagnose installation and access | Existing checks and next-step output retained; guided entry points complement rather than silently prompt within doctor. |
 | check | Know whether local settings are usable | Human findings include declaration guidance; product mistakes list choices. JSON stays unchanged. |
@@ -26,7 +26,7 @@ The journey is: choose project → sign in → set up missing settings → check
 | config export | Inspect configuration | Metadata-only machine output retained. |
 | item skeleton | Prepare empty fields | Existing noninteractive advanced path retained. |
 | explain | Understand one declaration | Existing offline reference, rules and guidance retained. |
-| Errors/exit codes | Recover and automate | Existing categories retained; setup/session refusal is 6, partial progress is 8. No provider response or credential value echoed. |
+| Errors/exit codes | Recover and automate | Existing categories retained; setup/login refusal is 6, partial progress is 8. No provider response or credential value echoed. |
 
 ## Walkthroughs used to vet the design
 

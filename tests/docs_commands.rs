@@ -217,7 +217,7 @@ fn every_documented_opv_command_parses() {
         for cmd in found.commands {
             if matches!(
                 cmd.args.first().map(String::as_str),
-                Some("setup" | "session")
+                Some("setup" | "login")
             ) {
                 skipped.push(format!("{}:{}: needs a TTY", cmd.file, cmd.line));
                 continue;

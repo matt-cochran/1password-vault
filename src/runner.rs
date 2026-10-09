@@ -482,7 +482,7 @@ fn read_capped(
     res.map(|complete| complete.then_some(out))
 }
 
-/// Read an interactive child's stdout (the owner-run `op signin` in `setup`/`session`) into
+/// Read an interactive child's stdout (the owner-run `op signin` in `setup`/`login`) into
 /// a zeroized buffer, capped at [`OUTPUT_CAP`] like every captured call (NR-5).
 pub(crate) fn read_to_end_zeroizing(r: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
     let over = AtomicBool::new(false);
@@ -795,6 +795,9 @@ pub mod signals {
     static CHILD: Mutex<Option<u32>> = Mutex::new(None);
     /// The step of the most recent captured call.
     static STEP: Mutex<String> = Mutex::new(String::new());
+    /// Private directories to remove before the process exits on a signal (SR-4: the
+    /// Azure CLI's RAM-only configuration directory of a deploy sign-in, FR-40).
+    static CLEANUP: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -838,6 +841,36 @@ pub mod signals {
         }
     }
 
+    /// Remove `dir` (recursively) if opv exits on a signal before it is removed normally.
+    pub fn register_cleanup(dir: std::path::PathBuf) {
+        lock(&CLEANUP).push(dir);
+    }
+
+    /// `dir` was removed normally: forget it.
+    pub fn unregister_cleanup(dir: &std::path::Path) {
+        lock(&CLEANUP).retain(|d| d != dir);
+    }
+
+    /// Remove every registered directory (best effort): what the signal handler does before
+    /// it exits, after the running child was stopped.
+    pub fn run_cleanups() {
+        run_cleanups_where(|_| true);
+    }
+
+    /// [`run_cleanups`] for the registered directories `pick` selects (tests run in
+    /// parallel, so one test cleans only its own).
+    pub fn run_cleanups_where(pick: impl Fn(&std::path::Path) -> bool) {
+        let mut dirs = lock(&CLEANUP);
+        dirs.retain(|d| {
+            if pick(d) {
+                let _ = std::fs::remove_dir_all(d);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// The line printed when opv is interrupted during `step` (empty: before any call).
     pub fn interrupted_message(step: &str) -> String {
         if step.is_empty() {
@@ -856,6 +889,7 @@ pub mod signals {
             if let Some(sig) = signals.forever().next() {
                 STOPPING.store(true, Ordering::SeqCst);
                 forward(sig);
+                run_cleanups();
                 let step = lock(&STEP).clone();
                 eprintln!("opv: {}", interrupted_message(&step));
                 std::process::exit(128 + sig);

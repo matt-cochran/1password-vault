@@ -33,7 +33,7 @@ impl Runtime {
         env.extend([("OP_DEBUG", "false"), ("OP_RUN_NO_MASKING", "false")]);
         env
     }
-    pub fn child(&self, command: &[String]) -> Result<i32, Error> {
+    fn spawn_child(&self, command: &[String]) -> Result<i32, Error> {
         let default;
         let command = if command.is_empty() {
             #[cfg(windows)]
@@ -52,7 +52,7 @@ impl Runtime {
             command
         };
         let args: Vec<_> = command[1..].iter().map(String::as_str).collect();
-        self.runner.run_inherited(&command[0], &args, &self.environment()).map_err(|e| Error::Dependency(format!("[SESSION-COMMAND] Cannot start the requested command ({:?}). Check its installation and arguments.", e.kind())))
+        self.runner.run_inherited(&command[0], &args, &self.environment()).map_err(|e| Error::Dependency(format!("[LOGIN-COMMAND] Cannot start the requested command ({:?}). Check its installation and arguments.", e.kind())))
     }
 }
 
@@ -106,7 +106,33 @@ pub fn session_assignment(output: &[u8]) -> Result<Option<(String, SecretValue)>
     Ok(session)
 }
 
+/// The session variables to keep from one `op signin` assignment. With an account, only
+/// the account's own `OP_SESSION_<account>`: a later login to another account adds its own
+/// and both stay usable, each selected by `OP_ACCOUNT` (FR-40). Without one, also the
+/// generic `OP_SESSION`, so op finds the session when no account selects it.
+pub fn session_vars(
+    account: Option<&str>,
+    name: String,
+    value: SecretValue,
+) -> Vec<(String, SecretValue)> {
+    let mut vars = Vec::new();
+    if account.is_none() && name != "OP_SESSION" {
+        vars.push((
+            "OP_SESSION".to_string(),
+            SecretValue::new(value.expose().to_string()),
+        ));
+    }
+    vars.push((name, value));
+    vars
+}
+
 impl Backend for Runtime {
+    fn use_account(&mut self, account: Option<&str>) {
+        self.account = account.map(str::to_owned);
+    }
+    fn child(&self, command: &[String]) -> Result<i32, Error> {
+        self.spawn_child(command)
+    }
     fn native(&self) -> Result<(), Error> {
         super::run::ensure_native(&self.runner)
     }
@@ -170,13 +196,7 @@ impl Backend for Runtime {
             return Err(Error::Auth("[SETUP-SIGNIN] 1Password could not sign in. Check the account and password at its prompts, then rerun opv setup. Session output was not printed.".into()));
         }
         if !add_account && let Some((name, value)) = session_assignment(&output)? {
-            self.session = vec![(
-                "OP_SESSION".into(),
-                SecretValue::new(value.expose().to_string()),
-            )];
-            if name != "OP_SESSION" {
-                self.session.push((name, value));
-            }
+            self.session = session_vars(self.account.as_deref(), name, value);
         }
         Ok(())
     }
@@ -190,7 +210,7 @@ impl Console {
             || std::env::var_os("CI").is_some_and(|v| !v.is_empty() && v != "false" && v != "0")
             || std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true")
         {
-            return Err(Error::Policy("[SETUP-TERMINAL] Guided setup needs your own interactive terminal. Automation should use init, doctor, check, item skeleton and run with declared configuration.".into()));
+            return Err(Error::Policy("[SETUP-TERMINAL] opv setup and opv login need your own interactive terminal. Automation signs in with OP_SERVICE_ACCOUNT_TOKEN and uses init, doctor, check, item skeleton, run and sync with declared configuration.".into()));
         }
         for key in [
             "OP_SERVICE_ACCOUNT_TOKEN",
@@ -198,7 +218,7 @@ impl Console {
             "OP_CONNECT_TOKEN",
         ] {
             if std::env::var_os(key).is_some_and(|v| !v.is_empty()) {
-                return Err(Error::Policy("[SETUP-AUTH-MODE] A service-account or Connect credential is active. Use a separate owner terminal for guided setup; existing automation authentication is unchanged.".into()));
+                return Err(Error::Policy("[SETUP-AUTH-MODE] A service-account or Connect credential is active. Use a separate owner terminal for opv setup or opv login; existing automation authentication is unchanged.".into()));
             }
         }
         Ok(())
@@ -257,7 +277,7 @@ impl Interaction for Console {
             {
                 return Ok(choice.clone());
             }
-            println!("Choose one of the numbered products above.");
+            println!("Choose one of the numbered choices above.");
         }
     }
 }
@@ -284,6 +304,27 @@ mod tests {
             let error = session_assignment(input.as_bytes()).err().unwrap();
             assert!(!error.to_string().contains("synthetic-private"));
         }
+    }
+    /// FR-40: logging in to a second account keeps the first account's session.
+    #[test]
+    fn account_login_keeps_only_the_account_session_variable() {
+        let vars = session_vars(
+            Some("work.1password.com"),
+            "OP_SESSION_work".into(),
+            SecretValue::new("synthetic-token".into()),
+        );
+        let names: Vec<_> = vars.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["OP_SESSION_work"]);
+    }
+    #[test]
+    fn default_account_login_also_sets_the_generic_session_variable() {
+        let vars = session_vars(
+            None,
+            "OP_SESSION_me".into(),
+            SecretValue::new("synthetic-token".into()),
+        );
+        let names: Vec<_> = vars.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["OP_SESSION", "OP_SESSION_me"]);
     }
     #[test]
     fn empty_output_supports_desktop_authentication() {

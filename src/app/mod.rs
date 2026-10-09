@@ -18,6 +18,7 @@ pub mod explain;
 mod guidance_tests;
 pub mod init;
 pub mod local;
+pub mod login;
 #[cfg(test)]
 mod pinned_tests;
 pub(crate) mod preflight;
@@ -26,6 +27,7 @@ pub mod setup;
 mod setup_import;
 pub mod setup_recipe;
 pub mod setup_runtime;
+pub mod signin;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;

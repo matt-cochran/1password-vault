@@ -56,7 +56,7 @@ pub fn run_scoped(
         && config
             .as_ref()
             .is_ok_and(|f| f.environments.values().all(|e| e.target().is_none()));
-    run_on(config, r, &Host::detect, local_only, out)
+    run_on(config, r, &Host::detect, local_only, env, out)
 }
 
 pub fn run(
@@ -64,7 +64,7 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(config, r, &Host::detect, false, out)
+    run_on(config, r, &Host::detect, false, None, out)
 }
 
 /// [`run`] on a given host (tests).
@@ -74,7 +74,7 @@ pub fn run_with(
     host: &Host,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(config, r, &|| *host, false, out)
+    run_on(config, r, &|| *host, false, None, out)
 }
 
 /// The host is detected only when a check needs it (a failure or a credential decision).
@@ -83,6 +83,7 @@ fn run_on(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
     local_only: bool,
+    env: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
@@ -122,7 +123,7 @@ fn run_on(
     let op_check = op_version(r, host);
     let op_present = op_check.is_ok();
     line(out, "op", op_check)?;
-    line(out, "op auth", op_auth(r, host).map(Check::Ok))?;
+    line(out, "op auth", op_auth(r, host, env).map(Check::Ok))?;
     let default = registry::DEFAULT;
     match targets {
         Some((used, without)) if !used.is_empty() => {
@@ -265,7 +266,11 @@ fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, E
 }
 
 /// The 1Password session, classified exactly as a failed item read is (FR-26).
-fn op_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<String, Error> {
+fn op_auth(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    env: Option<&str>,
+) -> Result<String, Error> {
     use onepassword::Session;
     match onepassword::diagnose(r, host)? {
         Session::SignedIn(t) => Ok(format!("signed in ({t})")),
@@ -273,10 +278,8 @@ fn op_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<String, Err
             "op whoami did not run to completion; the 1Password session could not be checked"
                 .into(),
         )),
-        s => {
-            Err(onepassword::session_error(s, &host(), None)
-                .expect("every other session is an error"))
-        }
+        s => Err(onepassword::session_error(s, &host(), None, env)
+            .expect("every other session is an error")),
     }
 }
 
@@ -426,7 +429,7 @@ mod tests {
     #[cfg(not(windows))]
     fn doctor_local_only(r: &FakeRunner) -> (Result<(), Error>, String) {
         let mut out = Vec::new();
-        let res = run_on(Ok(fleet()), r, &|| linux(), true, &mut out);
+        let res = run_on(Ok(fleet()), r, &|| linux(), true, None, &mut out);
         (res, text_of(&out))
     }
 
@@ -546,7 +549,7 @@ mod tests {
             lines[2].starts_with("FAIL  op auth: authentication error: not signed in"),
             "{out}"
         );
-        assert!(out.contains("\n  sign in: eval $(op signin)\n"), "{out}");
+        assert!(out.contains("\n  sign in: opv login\n"), "{out}");
         assert_eq!(lines.len(), CHECK_LINES, "{out}");
         // Doctor and the read path share one classification: whoami, then account list.
         assert_eq!(
@@ -832,7 +835,7 @@ mod tests {
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
             next_line(&out),
-            "Next step (op auth): sign in: eval $(op signin)",
+            "Next step (op auth): sign in: opv login",
             "{out}"
         );
     }

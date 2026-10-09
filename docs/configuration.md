@@ -124,6 +124,24 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--p
 
 It ends with the path, the counts (`N secret, M config, skipped K`) and `Next step: opv plan <env>`.
 
+### Account and deploy credentials
+
+Two optional settings per environment:
+
+```toml
+[environments.prod]
+vault_id = "vprd1234example"
+item_id  = "iprd1234example"
+account  = "mycompany.1password.com"            # sign-in address, email or account ID
+deploy_credentials = "op://infra-prod/fly-deploy" # the deploy identity's item, by ID or name
+fly.app  = "example-portfolio-production"
+```
+
+- `account`: every `op` call for this environment uses this 1Password account, and `opv login prod` signs in to it. Set it when your environments live in different accounts. It must look like a sign-in address, an email or an account ID (no spaces, no leading `-`); a bad value is a configuration error pointing at its line and column. Under a service-account token in CI the token decides the account.
+- `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this environment's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig): `deploy_credentials` there, or on an environment without a target, is a configuration error. Platform support and how each value is handled: [usage](usage.md#sign-in-accounts-and-deploy-credentials).
+
+Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App. Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
+
 ## Targets
 
 Each environment names at most one target: `fly` (above), `azure` or `kubernetes`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).

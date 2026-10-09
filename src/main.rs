@@ -5,9 +5,11 @@ use std::process::ExitCode;
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
-use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
+use opv::app::{
+    config_export, doctor, explain, init, run as run_cmd, signin, skeleton, status, sync,
+};
 use opv::config;
-use opv::runner::{Budget, ProcessRunner};
+use opv::runner::{Budget, CommandRunner, ProcessRunner};
 
 mod colour;
 mod completions;
@@ -16,7 +18,7 @@ const QUICK_START: &str = "\
 Start here:
   opv setup                        Guided setup for this project
   opv doctor                       Find a setup problem and its next step
-  opv session                      Sign in once for your terminal
+  opv login dev                    Sign in to 1Password for an environment
 
 Everyday use:
   opv check dev --product api      Check that your app's settings are ready
@@ -31,7 +33,7 @@ Every command is listed above. Use opv <command> --help for its options and exam
 const EXAMPLES: &str = "\
 Examples:
   opv setup                        # guided owner setup; resumes saved progress
-  opv session                      # authenticated owner terminal; type exit to leave
+  opv login prod                   # signed-in terminal for prod's account; type exit to leave
   opv item skeleton staging        # add the missing (empty) fields to the 1Password item
   opv status staging               # one row per product and key; fill what is missing
   opv plan staging                 # what a sync would write, hold and prune
@@ -55,6 +57,12 @@ Environment:
 
 Docs: https://github.com/matt-cochran/1password-vault/blob/main/docs/usage.md
 AI assistants: https://github.com/matt-cochran/1password-vault/blob/main/llms.txt";
+
+const LOGIN_EXAMPLES: &str = "\
+Examples:
+  opv login prod                         # signed-in terminal for prod; type exit to leave
+  opv login                              # the one account all environments use, or choose
+  opv login prod -- opv sync prod --deploy   # one signed-in command, then back";
 
 const SYNC_EXAMPLES: &str = "\
 Examples:
@@ -184,25 +192,19 @@ enum Cmd {
         #[arg(long)]
         product: Option<String>,
     },
-    /// Sign in once for a terminal or a command; no token copying or shell exports.
+    /// Sign in to 1Password for an environment, then open a signed-in terminal.
     ///
-    /// With no command, opens an owner terminal. Exit that terminal to end the session.
-    /// With a command after --, returns its exit code. Requires your interactive terminal.
-    #[command(
-        after_help = "Examples:\n  opv session                      # signed-in terminal; type exit to leave\n  opv session -- opv check dev     # one signed-in command, then back"
-    )]
-    Session {
-        /// 1Password account to sign in to (sign-in address, email or account ID);
-        /// without it, op's default account is used.
-        #[arg(long)]
-        account: Option<String>,
+    /// Signs in to the account the environment uses (its `account` setting). Without an
+    /// environment: the one account every environment uses, or a choice when they differ.
+    /// With a command after --, runs it signed in and returns its exit code. No token is
+    /// printed and nothing needs eval. Requires your interactive terminal.
+    #[command(after_help = LOGIN_EXAMPLES)]
+    Login {
+        /// Environment name from the configuration (for example dev or prod).
+        env: Option<String>,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
-        #[arg(
-            value_name = "COMMAND",
-            trailing_var_arg = true,
-            allow_hyphen_values = true
-        )]
+        #[arg(value_name = "COMMAND", last = true)]
         command: Vec<String>,
     },
     /// Find setup problems and show the next step.
@@ -475,6 +477,23 @@ fn main() -> ExitCode {
 }
 
 impl Cmd {
+    /// The environment the command acts on, and whether it reaches the deployment target
+    /// (and so signs in with the environment's deploy credentials, FR-40).
+    fn env(&self) -> Option<(&str, signin::Reach)> {
+        use signin::Reach;
+        match self {
+            Cmd::Check { env, .. }
+            | Cmd::Run { env, .. }
+            | Cmd::Config(ConfigCmd::Export { env, .. })
+            | Cmd::Item(ItemCmd::Skeleton { env }) => Some((env, Reach::Store)),
+            Cmd::Status { env, .. } => Some((env, Reach::Target)),
+            Cmd::Plan(a) => Some((&a.env, Reach::Target)),
+            Cmd::Sync(a) => Some((&a.env, Reach::Target)),
+            Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
+            _ => None,
+        }
+    }
+
     /// Text output with state words worth colouring (never JSON, never values).
     fn has_state_words(&self) -> bool {
         match self {
@@ -541,17 +560,17 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
         completions::write(*shell, &mut Cli::command(), out);
         return Ok(0);
     }
-    if let Cmd::Session { account, command } = &cli.cmd {
-        use opv::app::{setup, setup_runtime};
-        use setup::Interaction;
+    if let Cmd::Login { env, command } = &cli.cmd {
+        use opv::app::{login, setup_runtime};
         setup_runtime::Console::require_terminal()?;
-        let mut runtime = setup_runtime::Runtime::with_account(account.as_deref());
-        let mut console = setup_runtime::Console;
-        setup::prepare(account.as_deref(), &mut runtime, &mut console)?;
-        if command.is_empty() {
-            console.show("Signed in. This terminal can run opv setup, check and run. Type exit to leave the session.")?;
-        }
-        return runtime.child(command);
+        let fleet = find_config(cli.config.as_ref(), config_source).transpose()?;
+        return login::run(
+            fleet.as_ref(),
+            env.as_deref(),
+            command,
+            &mut setup_runtime::Runtime::default(),
+            &mut setup_runtime::Console,
+        );
     }
     if let Cmd::Setup {
         recipe,
@@ -580,7 +599,7 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
         cli.verbose,
     );
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
-    // own signals and its exit code is passed through (FR-4). `setup` and `session` are
+    // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
     if !matches!(cli.cmd, Cmd::Run { .. }) {
         opv::runner::signals::install()
@@ -591,51 +610,71 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     }
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
-    let loaded = match &cli.config {
-        Some(path) => {
-            if config_source == ConfigSource::Env {
-                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
-            }
-            config::load(path)
-        }
-        None => match std::env::current_dir() {
-            Err(e) => Err(Error::Config(format!(
-                "cannot read the current directory: {e}"
-            ))),
-            Ok(start) => match config::discover(&start) {
-                Some(found) => {
-                    let _ = writeln!(io::stderr(), "using {}", found.display());
-                    config::load(&found)
-                }
-                None => Err(Error::Config(format!(
-                    "no secrets.toml found in {} or any parent directory. New project? Run opv setup. Already configured? Pass --config <path> to select its configuration.",
-                    start.display()
-                ))),
-            },
-        },
-    };
+    let loaded = find_config(cli.config.as_ref(), config_source).unwrap_or_else(|| {
+        let start = std::env::current_dir().unwrap_or_default();
+        Err(Error::Config(format!(
+            "no secrets.toml found in {} or any parent directory. New project? Run opv setup. Already configured? Pass --config <path> to select its configuration.",
+            start.display()
+        )))
+    });
     let mut cmd = cli.cmd;
     apply_product_env(&mut cmd, &loaded);
+    // Every call for the environment uses its 1Password account, and commands that reach
+    // the target sign in with its deploy credentials for this run only (FR-40). Dropped
+    // (signed out, its private directory removed) when this function returns.
+    let env_runner = match (&loaded, cmd.env()) {
+        (Ok(fleet), Some((env, reach))) => Some(signin::open(fleet, env, &r, reach)?),
+        _ => None,
+    };
+    let runner: &dyn CommandRunner = match &env_runner {
+        Some(e) => e,
+        None => &r,
+    };
     if let Cmd::Run {
         env,
         product,
         command,
     } = &cmd
     {
-        return run_cmd::run_for(&loaded?, env, product.as_deref(), command, &r);
+        return run_cmd::run_for(&loaded?, env, product.as_deref(), command, runner);
     }
-    run_other(cmd, loaded, &r, out).map(|()| 0)
+    run_other(cmd, loaded, runner, out).map(|()| 0)
+}
+
+/// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
+/// current directory up (printed as `using <path>`). `None` when none was found.
+fn find_config(
+    config: Option<&PathBuf>,
+    config_source: ConfigSource,
+) -> Option<Result<opv::domain::Fleet, Error>> {
+    match config {
+        Some(path) => {
+            if config_source == ConfigSource::Env {
+                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
+            }
+            Some(config::load(path))
+        }
+        None => match std::env::current_dir() {
+            Err(e) => Some(Err(Error::Config(format!(
+                "cannot read the current directory: {e}"
+            )))),
+            Ok(start) => config::discover(&start).map(|found| {
+                let _ = writeln!(io::stderr(), "using {}", found.display());
+                config::load(&found)
+            }),
+        },
+    }
 }
 
 fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
-    r: &ProcessRunner,
+    r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     match cmd {
         Cmd::Setup { .. } => unreachable!("handled before configuration discovery"),
-        Cmd::Session { .. } => unreachable!("handled before configuration discovery"),
+        Cmd::Login { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Completions { .. } => unreachable!("handled by run"),
@@ -794,6 +833,35 @@ mod tests {
             product_or_env(None, Some(String::new()), true),
             (None, false)
         );
+    }
+
+    /// FR-40: `session` was renamed to `login` with no alias; it is a usage error (exit 2).
+    #[test]
+    fn session_is_no_longer_a_command() {
+        let e = Cli::try_parse_from(["opv", "session"]).err().unwrap();
+        assert_eq!(e.exit_code(), 2);
+    }
+
+    #[test]
+    fn login_takes_an_environment_and_a_command_after_dashes() {
+        let cli =
+            Cli::try_parse_from(["opv", "login", "prod", "--", "opv", "check", "prod"]).unwrap();
+        let Cmd::Login { env, command } = cli.cmd else {
+            panic!("not login")
+        };
+        assert_eq!(
+            (env.as_deref(), command),
+            (
+                Some("prod"),
+                vec!["opv".into(), "check".into(), "prod".into()]
+            )
+        );
+    }
+
+    #[test]
+    fn login_without_an_environment_parses() {
+        let cli = Cli::try_parse_from(["opv", "login"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Login { env: None, .. }));
     }
 
     #[test]

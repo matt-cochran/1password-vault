@@ -57,10 +57,10 @@ fn command_options_come_before_global_options_in_sync_help() {
 }
 
 #[test]
-fn session_help_documents_account_and_command() {
-    let (_, out, _) = opv_with(&[], &["session", "--help"]);
+fn login_help_documents_environment_and_command() {
+    let (_, out, _) = opv_with(&[], &["login", "--help"]);
     assert!(
-        out.contains("1Password account to sign in to") && out.contains("Command and arguments"),
+        out.contains("account the environment uses") && out.contains("Command and arguments"),
         "{out}"
     );
 }
