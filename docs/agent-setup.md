@@ -53,7 +53,7 @@ Then:
 opv doctor
 ```
 
-It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`), and ends with a `Next step` line. Do what that line says before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need.
+It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`), and ends with a `Next step` line. Do what that line says before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks and the next step as JSON.
 
 ### Azure or Kubernetes instead of Fly
 

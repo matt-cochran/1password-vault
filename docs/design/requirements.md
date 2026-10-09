@@ -201,6 +201,8 @@ The command shall not resolve or print secret values unless necessary to verify 
 
 Decided in v0.4: `doctor --env <environment> [--product <product>]` checks only what that scope needs; an environment without a target needs no deployment CLI. Every `doctor` run on Linux and macOS also reports whether `op` can start a local child (FR-36).
 
+Decided in v0.5 (UX review P6, P18): `doctor --env` makes the environment's one item read by IDs (FR-13) and evaluates the selected keys as `check` does, reporting names, counts and states only, so it is never all clear when `check` would fail. Unscoped `doctor` reads no item. `doctor --json` prints `{schema_version: 1, checks: [{name, status, detail, next}], next}`.
+
 ## FR-4 — Local Process Execution
 
 The CLI shall provide:
@@ -838,7 +840,7 @@ are in `docs/design/resilience.md`; each NR below is normative.
 
 - **NR-1 Convergence.** Every command is safe to interrupt after any external call; re-running it reaches the same end state, and no intermediate state leaves a live reference to a missing or half-written value. Proven by an interruption-matrix test per flow.
 - **NR-2 Unknown outcomes.** A write that fails, times out or is killed has an unknown outcome; opv reconciles by reading the state back before reporting. When it stays unknown, opv exits **9** ("outcome unknown; safe to re-run"), naming the step and the reconciled state. Extends FR-10.
-- **NR-3 Bounded read retry.** Reads (never writes) are retried up to 3 attempts with jittered backoff (1 s, 2 s, 4 s) inside the run budget; a definite refusal (not found, auth) is never retried. The runner's API makes write-retry unrepresentable.
+- **NR-3 Bounded read retry.** Reads (never writes) are retried up to 3 attempts with jittered backoff (1 s, 2 s, 4 s) inside the run budget; a definite refusal (not found, auth) is never retried. The runner's API makes write-retry unrepresentable. Since v0.5 (UX review P16) the 1Password item read is diagnosed after its first failed attempt (`op whoami`, then `op vault get <vault_id>`) and retried only when the identity is signed in and can open the vault; otherwise the diagnosis is reported at once.
 - **NR-4 Deadlines and progress.** Per-effect deadlines (probe 15 s, read 60 s, write 120 s; waits poll with their own deadline) and a run budget `--timeout` (default 900 s). Any wait prints progress on stderr at least every 15 s.
 - **NR-5 Output cap.** Captured CLI output over 8 MiB is refused and the child killed.
 - **NR-6 Validated outputs.** Every id, version and name read from a CLI is validated before reuse in argv or a document; unknown fields are ignored, missing required fields refused.

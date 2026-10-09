@@ -58,6 +58,9 @@ pub enum Reason {
     ModeUnmapped(String),
     /// `base64_bytes` / `hex_bytes`: decodes, but not to the configured byte count.
     NotBytes(usize),
+    /// `enum`: the allowed values, as declared in the configuration (never the stored
+    /// value, which is not one of them).
+    NotOneOf(Vec<String>),
 }
 
 impl fmt::Display for Reason {
@@ -69,6 +72,7 @@ impl fmt::Display for Reason {
             Reason::ModeNotSet(m) => write!(f, "mode {m} is not set in this environment"),
             Reason::ModeUnmapped(m) => write!(f, "no prefix is configured for mode {m}"),
             Reason::NotBytes(n) => write!(f, "does not decode to {n} bytes"),
+            Reason::NotOneOf(allowed) => write!(f, "expected one of: {}", allowed.join(", ")),
         }
     }
 }
@@ -89,7 +93,7 @@ pub const REASON_REFUSED_PREFIX: &str = "starts with a refused prefix";
 pub const REASON_BAD_PATTERN: &str = "configured pattern does not compile";
 /// `regex`.
 pub const REASON_NO_REGEX_MATCH: &str = "does not match the configured regex";
-/// `enum`.
+/// `enum` with an empty allowed list (the configuration names no value).
 pub const REASON_NOT_ALLOWED: &str = "not one of the allowed values";
 /// `base64_bytes`.
 pub const REASON_NOT_BASE64: &str = "not standard base64";
@@ -351,7 +355,12 @@ pub fn check(
     if let Some(allowed) = &r.r#enum
         && !allowed.iter().any(|a| a == v)
     {
-        return Err(fail("enum", REASON_NOT_ALLOWED));
+        // The allowed list is public configuration (P9); the value is never echoed.
+        return Err(if allowed.is_empty() {
+            fail("enum", REASON_NOT_ALLOWED)
+        } else {
+            fail_with("enum", Reason::NotOneOf(allowed.clone()))
+        });
     }
     if let Some(n) = r.base64_bytes {
         match base64::engine::general_purpose::STANDARD
@@ -601,6 +610,16 @@ mod tests {
         assert_eq!(rule_of(r(), "sk-ant-x"), "not_prefix");
         assert!(with(r(), "sk-proj-x").unwrap().is_some());
     }
+    /// P9: the failure lists the declared values, never the stored one.
+    #[test]
+    fn enum_failure_lists_the_declared_values() {
+        let reason = chk("prod", "SIGNUP_POLICY", "closed")
+            .unwrap_err()
+            .reason
+            .to_string();
+        assert_eq!(reason, "expected one of: open, invite_only");
+    }
+
     #[test]
     fn enum_rule() {
         assert_eq!(

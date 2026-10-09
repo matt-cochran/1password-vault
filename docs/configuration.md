@@ -234,7 +234,7 @@ Every rule failure carries a reason. `status`, `plan` and `sync` print it after 
 journeeze/GITHUB_APP_PRIVATE_KEY: failed transform (BEGIN/END labels differ)
 ```
 
-The rule name is the stable identifier to match on; a reason may be added or reworded in a minor release. Each reason comes from a fixed set per rule, or is built only from the configuration (a configured prefix, mode or byte count). It never contains anything read from the value: no length, position, character, actual prefix or label.
+The rule name is the stable identifier to match on; a reason may be added or reworded in a minor release. Each reason comes from a fixed set per rule, or is built only from the configuration (a configured prefix, mode, byte count or list of allowed values). It never contains anything read from the value: no length, position, character, actual prefix or label.
 
 | Rule | Reasons |
 |---|---|
@@ -247,7 +247,7 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | `not_prefix` | `starts with a refused prefix` (never which one) |
 | `prefix_by_mode` | `wrong prefix for mode <mode>`, `mode <mode name> is not set in this environment`, `no prefix is configured for mode <mode>` |
 | `regex` | `does not match the configured regex` |
-| `enum` | `not one of the allowed values` |
+| `enum` | `expected one of: <declared values>` (from `secrets.toml`, never the stored value) |
 | `base64_bytes` | `not standard base64`, `does not decode to <N> bytes` |
 | `hex_bytes` | `not hex`, `does not decode to <N> bytes` |
 | `email_list` | `not a comma-separated list of email addresses` |

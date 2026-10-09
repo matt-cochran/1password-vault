@@ -6,7 +6,8 @@ Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in th
 
 ```sh
 opv doctor                          # config, op and sign-in, flyctl and sign-in, op local run
-opv doctor --env dev --product allumata   # only what local work in dev needs; no deployment CLIs
+opv doctor --env dev --product allumata   # only what local work in dev needs, plus one read of its item
+opv doctor --json                   # the same checks as one JSON document
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status staging                  # one row per product and key; exit 8 if any blocks
@@ -38,7 +39,13 @@ opv run prod -- ./server            # simple profile: no --product
 Next step (op auth): sign in: eval $(op signin)
 ```
 
-An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
+On an interactive terminal (not CI, no service-account token) the sign-in step is `opv session   (or: eval $(op signin))`.
+
+With `--env`, doctor also reads that environment's item once, by IDs, and checks the selected product's keys as `check` does: `ok    item: <vault_id>/<item_id> readable (<n> field(s) in section <product>)`, or a `FAIL  item:` line naming each key that is missing, of the wrong kind or failing a rule, with `opv check <env> --product <p>` as the next step (exit 8). So doctor is never all clear when `check` would fail. Without `--env` no item is read.
+
+`--json` prints `{"schema_version": 1, "checks": [{"name", "status": "ok"|"warn"|"fail"|"skip", "detail", "next"}], "next"}`: `detail` is the check's first line (names, versions and commands only), `next` its remediation or `null`, and the top-level `next` is the first failing check's step, or `null` when nothing is pending. The exit code is the same as without `--json`.
+
+With no `secrets.toml` at all, the step offers both ways to start: `opv init <env> --vault <vault title> --item <item title>` for an existing item, `opv setup` for a new project. An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
 
 ### Explain a key
 
@@ -59,7 +66,7 @@ allumata/OPENAI_API_KEY in prod
   inspect:    op item get iprd --vault vprd
 ```
 
-Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile that names the bare key (`did you mean KEY?`). Under the fleet profile a bare `<KEY>` resolves to the one product that declares it; when several do, the error lists them (`ambiguous key "KEY": declared as api/KEY, web/KEY`). An undeclared key or product suggests the closest declared names.
 
 It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
 

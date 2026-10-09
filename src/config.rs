@@ -44,6 +44,21 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// How the error for a missing configuration starts; `doctor` keys its next step on it.
+pub const NOT_FOUND: &str = "no secrets.toml found in ";
+
+/// No `secrets.toml` in `start` or a parent (P3): the first-run router, offering both
+/// starting paths and the explicit `--config`.
+pub fn not_found(start: &Path) -> Error {
+    Error::Config(format!(
+        "{NOT_FOUND}{} or any parent directory.\n  \
+         Have a 1Password item already?  opv init <env> --vault <vault title> --item <item title>\n  \
+         New project?                    opv setup   (guided; uses the project's opv.setup.toml)\n  \
+         Configured elsewhere?           pass --config <path> to select its configuration",
+        start.display()
+    ))
+}
+
 /// Parse and validate configuration text.
 ///
 /// `profile.kind = "simple"` selects the simple profile (FR-20). Anything else, including a

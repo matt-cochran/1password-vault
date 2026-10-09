@@ -594,8 +594,10 @@ fn child_stderr_suppressed() {
         let r = h.run(cmd);
         assert_eq!(r.code, 4, "{cmd:?}: {}", r.all());
         assert!(
+            // P16: a retry note may come first (signed in, vault readable).
             r.stderr
-                .starts_with("opv: source error: op item get failed (exit 1)"),
+                .lines()
+                .any(|l| l.starts_with("opv: source error: op item get failed (exit 1)")),
             "{cmd:?}: {}",
             r.stderr
         );
@@ -848,13 +850,7 @@ fn expired_session_is_auth_with_signin_command() {
         assert_clean_output(cmd, &r);
         assert_eq!(
             op_subcommands(&h),
-            vec![
-                "item get",
-                "item get",
-                "item get",
-                "whoami --format",
-                "account list"
-            ],
+            vec!["item get", "whoami --format", "account list"],
             "{cmd:?}"
         );
         assert_eq!(h.fly_calls("import"), 0);
@@ -913,10 +909,7 @@ fn ci_not_signed_in_advises_service_account_token() {
     );
     assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
     assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
-    assert_eq!(
-        op_subcommands(&h),
-        vec!["item get", "item get", "item get", "whoami --format"]
-    );
+    assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
 }
 
 /// FR-26: a clean `status` ends with the summary line on stdout; exit 0.
@@ -1009,10 +1002,7 @@ fn rejected_credential_keeps_source_category() {
         );
         assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
         assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
-        assert_eq!(
-            op_subcommands(&h),
-            vec!["item get", "item get", "item get", "whoami --format"]
-        );
+        assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
     }
 }
 
@@ -1804,12 +1794,7 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             "regex",
             "does not match the configured regex",
         ),
-        (
-            "ENUM",
-            format!("{m}enum"),
-            "enum",
-            "not one of the allowed values",
-        ),
+        ("ENUM", format!("{m}enum"), "enum", "expected one of: a, b"),
         (
             "B64_NOT",
             format!("{m}!!"),

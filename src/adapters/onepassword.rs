@@ -4,6 +4,8 @@
 //!   call per environment, by ID only (FR-13). It returns the fields that live inside a
 //!   section, typed by field type (FR-14: CONCEALED = secret, STRING = config), plus the raw
 //!   item JSON so that [`write_skeleton`] needs no second read.
+//! - The item read is diagnosed after its first failed attempt, before any retry (P16):
+//!   it is retried only when the identity is signed in and can open the vault.
 //! - A failed `op` call is diagnosed with [`diagnose`] (FR-26): `op whoami`, then
 //!   `op account list` when it fails (both free under rate limits; never a second item
 //!   read; own 15 s limit). Not signed in, with no service-account or Connect credential
@@ -286,23 +288,45 @@ fn item_unavailable(
     t: IdentityType,
     grant: &str,
 ) -> Error {
-    let (item, vault) = (&env.item_id, &env.vault_id);
-    let probe = r.probe(
-        &Call::new(OP, &["vault", "get", vault.as_str(), "--format", "json"]),
+    unavailable_for(env, failed, t, grant, vault_access(r, env))
+}
+
+/// `op vault get <vault_id>`: `Some(true)` when the vault is readable, `Some(false)` when
+/// this identity cannot access it, `None` when the probe could not run. Exit status only;
+/// its output names the vault and is dropped unread (SR-1).
+fn vault_access(r: &dyn CommandRunner, env: &Environment) -> Option<bool> {
+    r.probe(
+        &Call::new(
+            OP,
+            &["vault", "get", env.vault_id.as_str(), "--format", "json"],
+        ),
         PROBE_TIMEOUT,
-    );
-    Error::Source(match probe {
-        Ok(o) if o.status == 0 => format!(
+    )
+    .ok()
+    .map(|o| o.status == 0)
+}
+
+/// The signed-in item-read error for a known vault probe result (NR-26).
+fn unavailable_for(
+    env: &Environment,
+    failed: &str,
+    t: IdentityType,
+    grant: &str,
+    vault_readable: Option<bool>,
+) -> Error {
+    let (item, vault) = (&env.item_id, &env.vault_id);
+    Error::Source(match vault_readable {
+        Some(true) => format!(
             "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
              (moved, archived or deleted?)\n  next: check item_id in secrets.toml, then \
              `{OP} item get {item} --vault {vault}`"
         ),
-        Ok(_) => format!(
+        Some(false) => format!(
             "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
              {vault}\n  next: {grant} (vault {vault}), or check vault_id in secrets.toml, \
              then `{OP} vault get {vault}`"
         ),
-        Err(_) => not_available(env, failed, t, grant),
+        None => not_available(env, failed, t, grant),
     })
 }
 
@@ -380,16 +404,7 @@ fn read_profile_on(
         "--format",
         "json",
     ];
-    let Output { status, stdout } = read_op(r, &args, host)?;
-    if status != 0 {
-        return Err(failed_op_error(
-            r,
-            env,
-            host,
-            &format!("op item get failed ({})", status_text(status)),
-            "grant this identity access to the vault",
-        ));
-    }
+    let stdout = read_diagnosed(r, env, &args, host)?;
     let fields = match profile {
         Profile::Fleet => parse_fields(&stdout, sections)?,
         Profile::Simple => parse_unsectioned_fields(&stdout)?,
@@ -398,6 +413,73 @@ fn read_profile_on(
         fields,
         raw: stdout,
     })
+}
+
+/// Every non-zero exit status: the first item read is refused on any failure so that it
+/// is diagnosed before it is retried (P16).
+const ANY_FAILURE: [i32; 255] = {
+    let mut codes = [0; 255];
+    let mut i = 0;
+    while i < 255 {
+        codes[i] = i as i32 + 1;
+        i += 1;
+    }
+    codes
+};
+
+/// The environment's one item read (FR-13), diagnosed before it is retried (P16).
+///
+/// `op` exits 1 for "not signed in", "no access" and "not found" alike, so a failed first
+/// attempt is followed by the free diagnosis (`op whoami`, then `op vault get <vault_id>`)
+/// instead of the runner's blind retries. Only when that shows a signed-in identity that
+/// can read the vault (the failure may be transient) is the read retried, with the
+/// runner's usual attempts and backoff (NR-3); every other outcome is reported at once.
+/// A timed-out, killed or lost attempt is still retried by the runner itself, and one
+/// that never finished is the outage error (NR-28, exit 9).
+fn read_diagnosed(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    args: &[&str],
+    host: &dyn Fn() -> Host,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    const GRANT: &str = "grant this identity access to the vault";
+    let call = Call::new(OP, args);
+    let failed = |status: i32| format!("op item get failed ({})", status_text(status));
+    let status = match r
+        .read(&call, &ANY_FAILURE)
+        .map_err(|e| op_spawn_error(&e, host))?
+    {
+        Outcome::Done(o) => return Ok(o.stdout),
+        Outcome::Refused(o) => o.status,
+        Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
+    };
+    let t = match diagnose(r, host)? {
+        Session::SignedIn(t) => t,
+        Session::Unknown => {
+            return Err(Error::Source(format!(
+                "{}{}",
+                failed(status),
+                rerun_hint(env)
+            )));
+        }
+        s => {
+            return Err(session_error(s, &host(), Some(&failed(status)))
+                .expect("every other session is an error"));
+        }
+    };
+    let readable = vault_access(r, env);
+    if readable != Some(true) {
+        return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
+    }
+    r.note(&format!(
+        "{} failed; signed in with access to vault {}, so retrying",
+        call.step(),
+        env.vault_id
+    ));
+    match read_op(r, args, host)? {
+        Output { status: 0, stdout } => Ok(stdout),
+        Output { status, .. } => Err(unavailable_for(env, &failed(status), t, GRANT, readable)),
+    }
 }
 
 /// Add the `missing` (section label, field label, kind) entries to the item as empty fields
@@ -1135,7 +1217,7 @@ mod tests {
     /// IDs and the identity type, with the grant instruction; never "to see why".
     #[test]
     fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), vault_ok()]));
+        let r = signed_in_vault_ok_item_missing();
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         let m = match &e {
             Error::Source(m) => m.clone(),
@@ -1153,27 +1235,79 @@ mod tests {
             !m.contains("example.com") && !m.contains("OPHINTMARKER"),
             "{m}"
         );
-        assert_eq!(
-            argvs(&r),
-            vec![
-                "op item get istg --vault vstg --format json",
-                "op item get istg --vault vstg --format json",
-                "op item get istg --vault vstg --format json",
-                "op whoami --format json",
-                "op vault get vstg --format json"
-            ]
-        );
     }
 
     fn vault_ok() -> Output {
         Output::success(br#"{"id":"vstg","name":"OPHINTMARKER"}"#.to_vec())
     }
 
+    /// The first read fails, whoami and the vault probe pass, every retry fails too.
+    fn signed_in_vault_ok_item_missing() -> FakeRunner {
+        FakeRunner::new(
+            std::iter::once(Output::failure(1))
+                .chain([Output::success(WHOAMI_SA), vault_ok()])
+                .chain(failed_read(1)),
+        )
+    }
+
+    fn item_reads(r: &FakeRunner) -> usize {
+        argvs(r).iter().filter(|a| a.starts_with("op item")).count()
+    }
+
+    /// P16: a failed first read is diagnosed before any retry.
+    #[test]
+    fn failed_read_is_diagnosed_before_it_is_retried() {
+        let r = signed_in_vault_ok_item_missing();
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(
+            argvs(&r)[..4],
+            [
+                "op item get istg --vault vstg --format json",
+                "op whoami --format json",
+                "op vault get vstg --format json",
+                "op item get istg --vault vstg --format json",
+            ]
+        );
+    }
+
+    /// P16: signed in with vault access, the failure may be transient: a retry succeeds.
+    #[test]
+    fn signed_in_with_vault_access_retries_and_reads_the_item() {
+        let item_json = serde_json::to_vec(&json!({"fields": []})).unwrap();
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            vault_ok(),
+            Output::success(item_json),
+        ]);
+        assert!(read_item_with(&r, &test_env(), &linux()).is_ok());
+    }
+
+    /// P16: not signed in is reported at once, without retrying the read.
+    #[test]
+    fn not_signed_in_is_reported_without_a_retry() {
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
+    }
+
+    /// P16: a vault this identity cannot open is reported at once, without retrying.
+    #[test]
+    fn vault_without_access_is_reported_without_a_retry() {
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            Output::failure(1),
+        ]);
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
+    }
+
     /// NR-26: signed in, the item read fails and the vault is readable: the item was moved,
     /// archived or deleted, named by IDs with the command to check it.
     #[test]
     fn item_missing_from_readable_vault_is_named() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), vault_ok()]));
+        let r = signed_in_vault_ok_item_missing();
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             e.to_string()
@@ -1185,8 +1319,11 @@ mod tests {
     /// NR-26: signed in, the item read fails and so does `op vault get`: vault access.
     #[test]
     fn op_vault_without_access_is_named() {
-        let r =
-            FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), Output::failure(1)]));
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            Output::failure(1),
+        ]);
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             e.to_string()
@@ -1198,7 +1335,7 @@ mod tests {
     /// NR-26: the vault probe's output names the vault; it is never echoed (SR-1).
     #[test]
     fn vault_probe_output_is_never_echoed() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), vault_ok()]));
+        let r = signed_in_vault_ok_item_missing();
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(!format!("{e} {e:?}").contains("OPHINTMARKER"), "{e}");
     }
@@ -1207,7 +1344,7 @@ mod tests {
     /// variables are set (the motivating bug: an expired OP_SESSION_*).
     #[test]
     fn non_zero_exit_not_signed_in_is_auth_with_signin_command() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1), accounts(1)]));
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         let t = e.to_string();
@@ -1217,30 +1354,24 @@ mod tests {
         assert!(!t.contains("to see why"), "{t}");
     }
 
-    /// FR-13: diagnosis never reads the item a second time (the one read's own retries,
-    /// NR-3, are attempts of the same read).
+    /// FR-13: diagnosis never reads the item itself; the retries after it (P16, NR-3)
+    /// are attempts of the same read: at most one first attempt plus READ_ATTEMPTS.
     #[test]
     fn diagnosis_makes_no_extra_item_read() {
-        for whoami in [Output::success(WHOAMI_SA), Output::failure(1)] {
-            let r = FakeRunner::new(failed_read(1).chain([whoami, accounts(0)]));
-            let _ = read_item_with(&r, &test_env(), &linux());
-            let reads = argvs(&r)
-                .iter()
-                .filter(|a| a.starts_with("op item"))
-                .count();
-            assert_eq!(
-                reads,
-                crate::runner::READ_ATTEMPTS as usize,
-                "{:?}",
-                argvs(&r)
-            );
-        }
+        let r = signed_in_vault_ok_item_missing();
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(
+            item_reads(&r),
+            1 + crate::runner::READ_ATTEMPTS as usize,
+            "{:?}",
+            argvs(&r)
+        );
     }
 
     /// The re-run hint survives only as the last resort: when whoami itself cannot run.
     #[test]
     fn rerun_hint_only_when_session_cannot_be_diagnosed() {
-        let r = FakeRunner::new(failed_read(1));
+        let r = FakeRunner::new([Output::failure(1)]);
         r.push_unknown("timeout");
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
@@ -1266,7 +1397,7 @@ mod tests {
             ]
         };
         for s in sessions() {
-            let r = FakeRunner::new((0..crate::runner::READ_ATTEMPTS).map(|_| leaky()).chain(s));
+            let r = FakeRunner::new(std::iter::once(leaky()).chain(s));
             let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
             let t = format!("{e} {e:?}");
             assert!(!t.contains(MARK) && !t.contains("--reveal"), "{t}");
@@ -1318,7 +1449,7 @@ mod tests {
         let r = FakeRunner::new([Output::success(item_json)]);
         read_item_on(&r, &test_env(), &host).unwrap();
         assert_eq!(called.get(), 0);
-        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1), accounts(1)]));
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
         let _ = read_item_on(&r, &test_env(), &host);
         assert!(called.get() > 0);
     }

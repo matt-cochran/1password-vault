@@ -110,6 +110,9 @@ enum Cmd {
         /// Limit configuration checks to one product; requires --env.
         #[arg(long, requires = "env")]
         product: Option<String>,
+        /// Print one JSON document (check names, states and next steps) instead of lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Check whether your required settings are ready; contacts no deployment target.
     Check {
@@ -325,7 +328,7 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
     if let Cmd::Session { account, command } = &cli.cmd {
         use opv::app::{setup, setup_runtime};
         use setup::Interaction;
-        setup_runtime::Console::require_terminal()?;
+        setup_runtime::Console::require_terminal("session")?;
         let mut runtime = setup_runtime::Runtime::with_account(account.as_deref());
         let mut console = setup_runtime::Console;
         setup::prepare(account.as_deref(), &mut runtime, &mut console)?;
@@ -341,12 +344,13 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
     } = &cli.cmd
     {
         use opv::app::{setup, setup_recipe, setup_runtime};
-        setup_runtime::Console::require_terminal()?;
+        setup_runtime::Console::require_terminal("setup")?;
         let start = std::env::current_dir()
             .map_err(|_| Error::Config("Cannot locate the current directory.".into()))?;
-        let recipe = recipe.clone().or_else(|| setup_recipe::discover(&start)).ok_or_else(|| Error::Config(
-            "[SETUP-RECIPE] This project has no setup recipe yet. Add opv.setup.toml, or use opv setup --recipe <path>. See docs/guided-setup.md for the reusable recipe format.".into()
-        ))?;
+        let recipe = recipe
+            .clone()
+            .or_else(|| setup_recipe::discover(&start))
+            .ok_or_else(|| setup_recipe::missing(&start))?;
         return setup::run(
             &recipe,
             cli.config.as_deref(),
@@ -383,10 +387,7 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
                     let _ = writeln!(io::stderr(), "using {}", found.display());
                     config::load(&found)
                 }
-                None => Err(Error::Config(format!(
-                    "no secrets.toml found in {} or any parent directory. New project? Run opv setup. Already configured? Pass --config <path> to select its configuration.",
-                    start.display()
-                ))),
+                None => Err(config::not_found(&start)),
             },
         },
     };
@@ -412,8 +413,8 @@ fn run_other(
         Cmd::Session { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
-        Cmd::Doctor { env, product } => {
-            doctor::run_scoped(loaded, env.as_deref(), product.as_deref(), r, out)
+        Cmd::Doctor { env, product, json } => {
+            doctor::run_scoped_as(loaded, env.as_deref(), product.as_deref(), json, r, out)
         }
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)

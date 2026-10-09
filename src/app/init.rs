@@ -118,19 +118,29 @@ fn run_on(
     if let Some(note) = ancestor_note(dir) {
         w(out, note)?;
     }
+    // A URL: the rules reference moved to docs/configuration.md (review #16, #17).
     w(
         out,
-        "add rules and guidance by hand; see the README (Rules reference)".into(),
+        format!(
+            "add rules and guidance by hand; see {}/configuration.md#rules-reference",
+            crate::DOCS_URL
+        ),
     )?;
     let next = if args.fly_app.is_some() {
         "plan"
     } else {
         "check"
     };
-    let product = if args.fly_app.is_none() && decl.profile == Profile::Fleet {
-        " --product <product>"
-    } else {
-        ""
+    // One product: its name, not a placeholder (review #16).
+    let product = match (args.fly_app.is_none(), decl.profile, decl.keys.len()) {
+        (true, Profile::Fleet, 1) => {
+            format!(
+                " --product {}",
+                decl.keys.keys().next().expect("one product")
+            )
+        }
+        (true, Profile::Fleet, _) => " --product <product>".to_string(),
+        _ => String::new(),
     };
     w(out, format!("Next step: opv {next} {}{product}", args.env))
 }

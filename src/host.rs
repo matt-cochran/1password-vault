@@ -42,6 +42,10 @@ pub trait HostEnv {
     fn shell(&self) -> Option<String>;
     /// Contents of `/proc/sys/kernel/osrelease`, if readable.
     fn kernel_osrelease(&self) -> Option<String>;
+    /// True when stdin and stdout are both a terminal (a person at the keyboard).
+    fn interactive(&self) -> bool {
+        false
+    }
 }
 
 /// The running process's environment.
@@ -68,6 +72,11 @@ impl HostEnv for ProcessEnv {
     fn kernel_osrelease(&self) -> Option<String> {
         std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()
     }
+
+    fn interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    }
 }
 
 /// A fixed environment for tests.
@@ -79,6 +88,8 @@ pub struct FakeEnv {
     pub set: Vec<(String, String)>,
     pub shell: Option<String>,
     pub osrelease: Option<String>,
+    /// Stdin and stdout are a terminal.
+    pub tty: bool,
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -110,6 +121,12 @@ impl FakeEnv {
         self.osrelease = Some(s.into());
         self
     }
+
+    /// Stdin and stdout are a terminal.
+    pub fn tty(mut self) -> Self {
+        self.tty = true;
+        self
+    }
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -131,6 +148,9 @@ impl HostEnv for FakeEnv {
     }
     fn kernel_osrelease(&self) -> Option<String> {
         self.osrelease.clone()
+    }
+    fn interactive(&self) -> bool {
+        self.tty
     }
 }
 
@@ -241,6 +261,8 @@ pub struct Host {
     pub ci: bool,
     /// A non-interactive 1Password credential, if set (service account wins over Connect).
     pub op_credential: Option<OpCredential>,
+    /// Stdin and stdout are a terminal: `opv session` can sign in here (P7).
+    pub interactive: bool,
     /// Which of [`registry::credential_vars`] are set, one bit each (by name; values are
     /// never read). Read with [`Host::token`].
     tokens: u64,
@@ -328,6 +350,7 @@ impl Host {
             shell,
             ci,
             op_credential,
+            interactive: env.interactive(),
             tokens,
         }
     }
@@ -367,8 +390,20 @@ impl Host {
     /// The sign-in step as a message line led by `lead` (`sign in`, `then sign in`):
     /// `sign in: eval $(op signin)`, or for an unknown shell
     /// ``sign in with `op signin` (see `op signin --help` for your shell)``.
+    ///
+    /// On an interactive terminal (P7) it leads with `opv session`, which signs in at op's
+    /// own prompts without an export: `sign in: opv session   (or: eval $(op signin))`. CI
+    /// and non-interactive credentials get no sign-in line at all (see [`Host::signin`]).
     pub fn signin_line(&self, lead: &str) -> Option<String> {
-        Some(match self.signin()? {
+        let signin = self.signin()?;
+        if self.interactive {
+            let or = match signin {
+                SignIn::Command(c) => c.to_string(),
+                SignIn::Generic => "op signin; see op signin --help for your shell".into(),
+            };
+            return Some(format!("{lead}: opv session   (or: {or})"));
+        }
+        Some(match signin {
             SignIn::Command(c) => format!("{lead}: {c}"),
             SignIn::Generic => {
                 format!("{lead} with `op signin` (see `op signin --help` for your shell)")
@@ -701,6 +736,23 @@ mod tests {
             );
             assert!(!l.contains("$(") && !l.contains("eval"), "{l}");
         }
+    }
+
+    /// P7: a person at a terminal is pointed at `opv session` first.
+    #[test]
+    fn interactive_signin_leads_with_opv_session() {
+        let h = host(FakeEnv::new("linux").shell("/bin/bash").tty());
+        assert_eq!(
+            h.signin_line("sign in").unwrap(),
+            "sign in: opv session   (or: eval $(op signin))"
+        );
+    }
+
+    /// P7: CI keeps the service-account wording even on a terminal.
+    #[test]
+    fn interactive_ci_has_no_signin_line() {
+        let h = host(FakeEnv::new("linux").shell("/bin/bash").tty().var("CI"));
+        assert_eq!(h.signin_line("sign in"), None);
     }
 
     #[test]

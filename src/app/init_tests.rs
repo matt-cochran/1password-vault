@@ -822,3 +822,31 @@ fn targetless_fleet_init_points_to_product_check() {
     let (_dir, run) = init_with(&fleet_fields(), &a);
     assert!(run.out.contains("opv check staging --product <product>"));
 }
+
+/// Review #16: with one product, the next step names it instead of a placeholder.
+#[test]
+fn targetless_single_product_init_names_the_product() {
+    let mut a = args(None, false);
+    a.fly_app = None;
+    let one: Vec<Field> = fleet_fields()
+        .into_iter()
+        .filter(|f| f.0 == "api")
+        .collect();
+    let (_dir, run) = init_with(&one, &a);
+    assert!(
+        run.out.contains("opv check staging --product api"),
+        "{}",
+        run.out
+    );
+}
+
+/// Review #16, #17: the rules reference is a URL a binary install can open.
+#[test]
+fn init_points_to_the_rules_reference_url() {
+    let (_dir, run) = init_with(&fleet_fields(), &args(None, false));
+    assert!(
+        run.out.contains("configuration.md#rules-reference"),
+        "{}",
+        run.out
+    );
+}
