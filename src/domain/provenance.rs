@@ -11,12 +11,13 @@
 //!   tags, Kubernetes annotations): opv's version, the UTC time, the environment and the
 //!   plan id. Nothing else: no value and no identity (FR-42).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
 use crate::domain::model::Kind;
-use crate::domain::plan::{KeyState, StoreEntry, SyncPlan, TargetState};
+use crate::domain::plan::{KeyState, Row, StoreEntry, SyncPlan, TargetState};
 
 /// Hex digits of a plan id.
 pub const PLAN_ID_LEN: usize = 8;
@@ -33,6 +34,11 @@ pub struct PlanIdInput<'a> {
     /// True when [`StoreEntry::version`] is a store version id (a pinned store). False when
     /// it is a digest of the value (Fly): then it is left out (SR-1).
     pub version_ids: bool,
+    /// The store name of `(product, key)` in this environment, when it has one.
+    pub name_of: &'a dyn Fn(&str, &str) -> Option<String>,
+    /// `--expect-plan`: a value stamped with this id was written by a run of this very plan
+    /// (FR-42), so it is this plan's own partial apply, not a change to the plan.
+    pub own_plan: Option<&'a str>,
 }
 
 /// The short plan id (FR-41): [`PLAN_ID_LEN`] hex digits of SHA-256 over names, states,
@@ -50,6 +56,39 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
         .item_version
         .map(|v| v.to_string())
         .unwrap_or_default());
+    // What this plan writes: the names it stages, plus the names a run of the same plan
+    // already wrote and that wait for a deploy (pending, or stamped with this plan id) and
+    // are not known to differ from the desired value. Both end the same way (the desired
+    // value, deployed), so `sync --expect-plan <id>` re-run after an interrupted deploy
+    // (exit 9) still matches. Only a boolean per name goes in, never a value.
+    let listed: BTreeMap<&str, &StoreEntry> =
+        input.listed.iter().map(|e| (e.name.as_str(), e)).collect();
+    let converging = |r: &Row| -> Option<String> {
+        if r.state != KeyState::Ready
+            || matches!(r.target, TargetState::Absent | TargetState::WouldChange)
+        {
+            return None;
+        }
+        let name = (input.name_of)(&r.product, &r.key)?;
+        let e = listed.get(name.as_str())?;
+        let own = input
+            .own_plan
+            .zip(e.stamp.as_ref())
+            .is_some_and(|(id, s)| s.plan.eq_ignore_ascii_case(id));
+        (e.pending || own).then_some(name)
+    };
+    let converged: BTreeSet<(&str, &str)> = plan
+        .rows
+        .iter()
+        .filter(|r| converging(r).is_some())
+        .map(|r| (r.product.as_str(), r.key.as_str()))
+        .collect();
+    let apply: BTreeSet<String> = plan
+        .stage
+        .iter()
+        .map(|(n, _)| n.clone())
+        .chain(plan.rows.iter().filter_map(converging))
+        .collect();
     put("rows");
     for r in &plan.rows {
         put(&r.product);
@@ -66,7 +105,11 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             KeyState::Skipped => "skipped",
             KeyState::SourceBlocked => "source-blocked",
         });
+        let applies = r.kind == Kind::Secret
+            && r.state == KeyState::Ready
+            && (input.name_of)(&r.product, &r.key).is_some_and(|n| apply.contains(&n));
         put(match r.target {
+            _ if applies => "apply",
             TargetState::Absent => "absent",
             TargetState::Present => "present",
             TargetState::WouldChange => "would-change",
@@ -81,12 +124,13 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             put(n);
         }
     };
-    sorted("stage", plan.stage.iter().map(|(n, _)| n.clone()).collect());
+    sorted("stage", apply.iter().cloned().collect());
     sorted("prune", plan.prune.clone());
     sorted(
         "held",
         plan.held_immutable
             .iter()
+            .filter(|(p, k)| !converged.contains(&(p.as_str(), k.as_str())))
             .map(|(p, k)| format!("{p}/{k}"))
             .collect(),
     );
@@ -104,11 +148,14 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             .map(|(p, k)| format!("{p}/{k}"))
             .collect(),
     );
+    // A name this plan writes is left out of the listing: whether it is there yet, and its
+    // version, is this plan's own progress.
     sorted(
         "listed",
         input
             .listed
             .iter()
+            .filter(|e| !apply.contains(&e.name))
             .map(|e| {
                 let version = if input.version_ids {
                     e.version.as_deref().unwrap_or("")
@@ -241,7 +288,6 @@ pub fn utc(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Row;
     use crate::domain::SecretValue;
     use std::collections::BTreeMap;
 
@@ -295,6 +341,8 @@ mod tests {
                 item_version: Some(item_version),
                 listed,
                 version_ids: true,
+                name_of: &|_, k| Some(k.to_string()),
+                own_plan: None,
             },
             plan,
         )
@@ -315,7 +363,7 @@ mod tests {
 
     #[test]
     fn plan_id_changes_with_a_target_version() {
-        let p = plan_with(&[("DB_URL", MARKER)]);
+        let p = plan_with(&[]);
         assert_ne!(
             id(41, &[entry("DB_URL", "v1")], &p),
             id(41, &[entry("DB_URL", "v2")], &p)
@@ -351,11 +399,76 @@ mod tests {
                     item_version: Some(1),
                     listed: &[entry("DB_URL", digest)],
                     version_ids: false,
+                    name_of: &|_, k| Some(k.to_string()),
+                    own_plan: None,
                 },
                 &p,
             )
         };
         assert_eq!(fly("d1"), fly("d2"));
+    }
+
+    /// The plan after a run of it wrote `DB_URL` (`target`, the entry's pending flag and
+    /// stamp) without deploying it.
+    fn written(target: TargetState, pending: bool, stamp: Option<&str>) -> (SyncPlan, StoreEntry) {
+        let mut p = plan_with(&[]);
+        p.rows[0].target = target;
+        if target != TargetState::Present {
+            p.stage = vec![("DB_URL".into(), SecretValue::new(MARKER.to_string()))];
+        }
+        let mut e = entry("DB_URL", "v2");
+        e.pending = pending;
+        e.stamp = stamp.map(|id| Stamp {
+            plan: id.into(),
+            ..fixture()
+        });
+        (p, e)
+    }
+
+    fn own_id(listed: &[StoreEntry], plan: &SyncPlan, own: Option<&str>) -> String {
+        plan_id(
+            &PlanIdInput {
+                env: "prod",
+                product: None,
+                item_version: Some(41),
+                listed,
+                version_ids: true,
+                name_of: &|_, k| Some(k.to_string()),
+                own_plan: own,
+            },
+            plan,
+        )
+    }
+
+    /// I2: Fly staged the value and the deploy was interrupted (exit 9).
+    #[test]
+    fn plan_id_ignores_its_own_pending_write() {
+        let before = own_id(&[], &plan_with(&[("DB_URL", MARKER)]), None);
+        let (p, e) = written(TargetState::Unknown, true, None);
+        assert_eq!(before, own_id(&[e], &p, None));
+    }
+
+    /// I2: a pinned store holds the desired value at a version stamped with this plan id.
+    #[test]
+    fn plan_id_ignores_a_version_stamped_with_it() {
+        let before = own_id(
+            &[entry("DB_URL", "v1")],
+            &plan_with(&[("DB_URL", MARKER)]),
+            Some("7f3c9a1e"),
+        );
+        let (p, e) = written(TargetState::Present, false, Some("7f3c9a1e"));
+        assert_eq!(before, own_id(&[e], &p, Some("7f3c9a1e")));
+    }
+
+    #[test]
+    fn plan_id_counts_a_version_stamped_by_another_plan() {
+        let before = own_id(
+            &[entry("DB_URL", "v1")],
+            &plan_with(&[("DB_URL", MARKER)]),
+            Some("7f3c9a1e"),
+        );
+        let (p, e) = written(TargetState::Present, false, Some("00000000"));
+        assert_ne!(before, own_id(&[e], &p, Some("7f3c9a1e")));
     }
 
     #[test]

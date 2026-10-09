@@ -124,7 +124,8 @@ pub fn run(
         )
         .with_next(without.command(env_name, guarded)));
     }
-    check_product(fleet, opts.product.as_deref())?;
+    // A write is never suggested on a guessed product: the step is its plan.
+    check_product(fleet, opts.product.as_deref(), "plan", Some(env_name))?;
     let (t, ports) = open_target(fleet, env_name, r)?;
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
@@ -270,8 +271,18 @@ impl Ctx<'_> {
         ports: &Ports<'_>,
     ) -> Result<String, Error> {
         let product = self.opts.product.as_deref();
-        let id = plan_id_of(self.env_name, product, item_version, plan, listed, ports);
-        let Some(expected) = self.opts.expect_plan.as_deref() else {
+        let expected = self.opts.expect_plan.as_deref();
+        let id = plan_id_of(
+            self.fleet,
+            self.env_name,
+            product,
+            item_version,
+            plan,
+            listed,
+            ports,
+            expected,
+        );
+        let Some(expected) = expected else {
             return Ok(id);
         };
         if expected.eq_ignore_ascii_case(&id) {
@@ -1403,7 +1414,7 @@ pub fn plan_scoped(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    check_product(fleet, product)?;
+    check_product(fleet, product, "plan", Some(env_name))?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
     // The target's state, read-only and never waiting (NR-23, NR-25).
@@ -1416,7 +1427,16 @@ pub fn plan_scoped(
     }
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
-    let id = plan_id_of(env_name, product, item_version, &plan, &on_target, &ports);
+    let id = plan_id_of(
+        fleet,
+        env_name,
+        product,
+        item_version,
+        &plan,
+        &on_target,
+        &ports,
+        None,
+    );
     // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
     let link = if n > 0 {
         Some(item_url(fleet, env_name, r)?)
@@ -1437,13 +1457,17 @@ pub fn plan_scoped(
         )
         .to_string()
     };
+    // A clean plan is applied by its id (M13); `--expect-plan` also stands for a guarded
+    // environment's `--confirm`.
+    let clean = n == 0;
     let sync_next = SyncOpts {
         deploy: true,
         prune: !plan.prune.is_empty(),
         product: product.map(str::to_string),
+        expect_plan: clean.then(|| id.clone()),
         ..SyncOpts::default()
     }
-    .command(env_name, fleet.environment(env_name)?.confirm_env);
+    .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
     let verb = match ports {
         Ports::Staged { .. } => "stage",
         Ports::Pinned { .. } => "write",

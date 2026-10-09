@@ -67,8 +67,8 @@ Environment:
   OPV_PROJECT  project whose manifest in 1Password to use (title opv · <name>)
   OP_ACCOUNT   1Password account to find a manifest in (an environment's own
                `account` setting is used for its reads)
-  OPV_PRODUCT  default for --product on check, run, doctor, explain, status and plan
-               (never sync)
+  OPV_PRODUCT  default for --product on check, run, open, explain, status, plan and
+               doctor --env (never sync, never doctor without --env)
   NO_COLOR     no colour under --color auto
 
 Docs: https://github.com/matt-cochran/1password-vault/blob/main/docs/usage.md
@@ -123,7 +123,8 @@ Examples:
 const DOCTOR_MORE: &str = "\
 Checks configuration, CLI installation and sign-in. --env limits the checks to what that
 environment needs, including whether op can start local commands, and reads its item once
-to check the keys as `check` does (names only, never values). Changes nothing.
+to check the keys as `check` does (names only, never values). Changes nothing on your
+targets; may tidy the 1Password layout when you're signed in.
 
 More examples:
   opv doctor --env prod --product api   # one product's keys";
@@ -145,8 +146,9 @@ Examples:
   opv status prod --json       # the same, for scripts";
 
 const STATUS_MORE: &str = "\
-Changes nothing. Problems come first, each with its reason and a link to its item in
-1Password. Exits 8 when any key is missing, of the wrong kind or failing a rule; opv explain
+Changes nothing on your targets; may tidy the 1Password layout when you're signed in.
+Problems come first, each with its reason and a link to its item in 1Password. Exits 8 when
+any key is missing or failing a rule; opv explain
 <product>/<KEY> --env <ENV> shows how to fix one. Without <ENV>, one line per environment,
 run-only ones included.
 
@@ -175,19 +177,20 @@ Examples:
   opv plan prod --json             # the same, for scripts";
 
 const PLAN_MORE: &str = "\
-Changes nothing. Exits 8 when any row (missing, wrong kind, failing a rule) would block a
-sync, and ends with the exact sync command to run once it is clean. A clean plan prints its
-plan id: opv sync <ENV> --expect-plan <id> applies exactly that plan or refuses (exit 6).";
+Changes nothing on your targets; may tidy the 1Password layout when you're signed in.
+Exits 8 when any row (missing, failing a rule) would block a sync. A clean plan prints its
+plan id and ends with opv sync <ENV> --deploy --expect-plan <id>, which applies exactly that
+plan or refuses (exit 6).";
 
 const SYNC_QUICK: &str = "\
 Examples:
-  opv plan staging                       # preview first; changes nothing
+  opv plan staging                       # preview first; changes nothing on the target
   opv sync staging --deploy              # write, then deploy only if something changed
   opv sync prod --deploy --confirm prod  # an environment with confirm_env = true";
 
 const SYNC_MORE: &str = "\
-Refuses (exit 6) and stages nothing when a key is missing, of the wrong kind or failing a
-rule, naming a missing --confirm too. Nothing is deployed or removed without --deploy/--prune.
+Refuses (exit 6) and stages nothing when a key is missing or failing a rule, naming a
+missing --confirm too. Nothing is deployed or removed without --deploy/--prune.
 
 More examples:
   opv sync prod --deploy --expect-plan 674d43e2  # exactly the plan opv plan showed
@@ -202,8 +205,9 @@ Examples:
 
 const EXPORT_MORE: &str = "\
 Without <ENV>, prints the configuration itself: IDs, names, kinds and rules, never a value.
-With <ENV>, prints the values of config-kind keys by design, never secrets; refuses (exit 6)
-when a config key is stored concealed or a secret key as text.";
+With <ENV>, prints the values of config-kind keys by design, never secrets. A config key
+stored in a concealed field is accepted and delivered as a plain value, but opv never prints
+its value (opv status warns about it once).";
 
 const IMPORT_QUICK: &str = "\
 Examples:
@@ -1021,14 +1025,23 @@ fn usage_error(e: clap::Error) -> ExitCode {
 
 /// `opv <command> --help` for the subcommand on the command line, else `opv --help`.
 fn help_command() -> String {
-    let cmd = cli_command();
-    let sub = std::env::args()
-        .skip(1)
-        .find(|a| cmd.get_subcommands().any(|s| s.get_name() == a));
-    match sub {
-        Some(s) => format!("opv {s} --help"),
-        None => "opv --help".to_string(),
+    help_command_for(&std::env::args().skip(1).collect::<Vec<_>>())
+}
+
+/// [`help_command`] for `args`: the deepest subcommand named (`opv config check --help`,
+/// M10), in order.
+fn help_command_for(args: &[String]) -> String {
+    let root = cli_command();
+    let mut cmd = &root;
+    let mut path = vec!["opv".to_string()];
+    for a in args {
+        if let Some(sub) = cmd.get_subcommands().find(|s| s.get_name() == a) {
+            path.push(a.clone());
+            cmd = sub;
+        }
     }
+    path.push("--help".to_string());
+    path.join(" ")
 }
 
 /// The command line as typed, for "run it again" next steps. Arguments are names, flags
@@ -1052,6 +1065,53 @@ fn rerun_command(cmd: &Cmd) -> String {
         }
         _ => {}
     }
+    typed_command()
+}
+
+/// `opv run ... --json -- cmd`: clap takes an unknown opv flag before `--` as the start
+/// of the child command. A COMMAND whose first word starts with `-` and did not come right
+/// after `--` is refused (M8): opv's flags go before `--`, and `run` has no `--json`.
+fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
+    let first = command.first().filter(|w| w.starts_with('-'))?;
+    let after_dashes = argv
+        .iter()
+        .position(|a| a == "--")
+        .and_then(|i| argv.get(i + 1));
+    if after_dashes == Some(first) {
+        return None;
+    }
+    let child: Vec<String> = match command.iter().position(|w| w == "--") {
+        Some(i) => command[i + 1..].to_vec(),
+        None => command[1..].to_vec(),
+    };
+    let mut words: Vec<String> = argv
+        .iter()
+        .take_while(|a| *a != first)
+        .map(|a| shell_word(a))
+        .collect();
+    if let Some(w) = words.first_mut() {
+        *w = "opv".to_string();
+    }
+    if !child.is_empty() {
+        words.push("--".to_string());
+        words.extend(child.iter().map(|a| shell_word(a)));
+    }
+    let hint = if first == "--json" {
+        "run takes no --json (the command's own output is passed through)"
+    } else {
+        "opv's options go before --"
+    };
+    Some(
+        Error::Config(
+            format!("{first} is not an option of opv run; {hint}; nothing was run").into(),
+        )
+        .with_code(opv::error::Code::Usage)
+        .with_next(words.join(" ")),
+    )
+}
+
+/// The command line as the user typed it, each word quoted for this shell.
+fn typed_command() -> String {
     let mut parts = vec!["opv".to_string()];
     parts.extend(std::env::args().skip(1).map(|a| shell_word(&a)));
     parts.join(" ")
@@ -1216,6 +1276,12 @@ fn run(
         completions::write(*shell, &mut command_line(), out);
         return Ok(0);
     }
+    if let Cmd::Run { command, .. } = &cli.cmd {
+        let argv: Vec<String> = std::env::args().collect();
+        if let Some(e) = misplaced_run_flag(command, &argv) {
+            return Err(e);
+        }
+    }
     if let Cmd::Schema = &cli.cmd {
         let doc = opv::schema::describe(&cli_command(), env!("CARGO_PKG_VERSION"));
         writeln!(out, "{doc}")
@@ -1233,7 +1299,7 @@ fn run(
     }
     if let Cmd::Login { env, command } = &cli.cmd {
         use opv::app::{login, setup_runtime};
-        setup_runtime::Console::require_terminal("login")?;
+        setup_runtime::Console::require_terminal("login", &typed_command())?;
         let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
             Some(f) => Some(f),
             None => manifest_for_login(&cli, config_source),
@@ -1256,7 +1322,7 @@ fn run(
     } = &cli.cmd
     {
         use opv::app::{setup, setup_recipe, setup_runtime};
-        setup_runtime::Console::require_terminal("setup")?;
+        setup_runtime::Console::require_terminal("setup", &typed_command())?;
         let start = std::env::current_dir()
             .map_err(|_| Error::Config("Cannot locate the current directory.".into()))?;
         let recipe = recipe
@@ -1292,8 +1358,18 @@ fn run(
             return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
         }
         Cmd::Status {
-            all: true, json, ..
-        } => return config_cmd::status_all(&r, *json, out).map(|()| 0),
+            all: true,
+            json,
+            product,
+            ..
+        } => {
+            let (product, used) =
+                product_or_env(product.clone(), std::env::var("OPV_PRODUCT").ok(), true);
+            if used && let Some(p) = &product {
+                let _ = writeln!(io::stderr(), "product {p} (from OPV_PRODUCT)");
+            }
+            return config_cmd::status_all(&r, product.as_deref(), *json, out).map(|()| 0);
+        }
         Cmd::Config(ConfigCmd::Import { .. }) | Cmd::Config(ConfigCmd::Check { .. }) => {
             return run_config_manifest(cli, &r, out).map(|()| 0);
         }
@@ -1310,7 +1386,7 @@ fn run(
     let source = found.as_ref().ok().map(|f| f.store().describe());
     if let (Cmd::Config(ConfigCmd::Edit), Ok(f)) = (&cli.cmd, &found) {
         use opv::app::setup_runtime;
-        setup_runtime::Console::require_terminal("config edit")?;
+        setup_runtime::Console::require_terminal("config edit", &typed_command())?;
         return config_cmd::edit(f, &r, &mut config_cmd::TerminalUi, out).map(|()| 0);
     }
     if let (
@@ -1481,11 +1557,33 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
                 manifest_only: true,
                 account: config_store::account_env(),
             };
-            let found = config_store::locate(&req, r)?;
+            // The file is right here; what is missing is the manifest to compare it with (M9).
+            let found = config_store::locate(&req, r).map_err(|e| match e.code() {
+                opv::error::Code::ConfigNotFound => manifest_missing_for_check(&file),
+                _ => e,
+            })?;
             config_cmd::check(&found, &file, r, out)
         }
         _ => unreachable!("called for config import and check only"),
     }
+}
+
+/// `config check --file F` with no manifest for this checkout (M9).
+fn manifest_missing_for_check(file: &std::path::Path) -> Error {
+    let f = shell_word(&file.display().to_string());
+    Error::Config(
+        format!(
+            "no 1Password manifest for this checkout to compare {} with",
+            file.display()
+        )
+        .into(),
+    )
+    .with_code(opv::error::Code::ManifestNotFound)
+    .with_do(format!(
+        "save it as this project's manifest (opv config import --file {f} --vault <vault>), \
+         or name the project with OPV_PROJECT=<name>"
+    ))
+    .with_next("opv projects")
 }
 
 fn run_other(
@@ -2040,6 +2138,114 @@ mod tests {
             .map(|c| c["name"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(got, want);
+    }
+
+    fn words(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// M10: a usage error in a nested subcommand points to that subcommand's help.
+    #[test]
+    fn usage_help_names_the_nested_subcommand() {
+        assert_eq!(
+            help_command_for(&words("config check --json")),
+            "opv config check --help"
+        );
+    }
+
+    /// M9: config check names the missing manifest, not a missing file.
+    #[test]
+    fn config_check_without_a_manifest_names_the_manifest() {
+        let e = manifest_missing_for_check(std::path::Path::new("secrets.toml"));
+        assert!(
+            e.to_string()
+                .contains("no 1Password manifest for this checkout"),
+            "{e}"
+        );
+    }
+
+    /// M8: a mistyped opv flag before `--` is refused, never run as the child command.
+    #[test]
+    fn run_refuses_an_opv_flag_before_the_dashes() {
+        let argv = words("opv run dev --product api --json -- true");
+        let e = misplaced_run_flag(&words("--json -- true"), &argv).unwrap();
+        assert_eq!(e.next_step(), Some("opv run dev --product api -- true"));
+    }
+
+    #[test]
+    fn run_accepts_a_child_word_with_a_dash_after_the_dashes() {
+        let argv = words("opv run dev -- -x");
+        assert!(misplaced_run_flag(&words("-x"), &argv).is_none());
+    }
+
+    /// I6: every flag a command parses is in the schema, the registry-built (hidden)
+    /// provider options of `init` included.
+    #[test]
+    fn schema_lists_every_flag_including_provider_options() {
+        fn leaves<'a>(
+            cmd: &'a clap::Command,
+            prefix: &str,
+            out: &mut Vec<(String, &'a clap::Command)>,
+        ) {
+            for sub in cmd.get_subcommands() {
+                let path = format!("{prefix}{}", sub.get_name());
+                if sub.has_subcommands() {
+                    leaves(sub, &format!("{path} "), out);
+                } else {
+                    out.push((path, sub));
+                }
+            }
+        }
+        let root = cli_command();
+        let mut cmds = Vec::new();
+        leaves(&root, "", &mut cmds);
+        let doc = opv::schema::describe(&root, "test");
+        let listed: std::collections::BTreeSet<(String, String)> = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| {
+                let name = c["name"].as_str().unwrap().to_string();
+                c["flags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |f| (name.clone(), f["name"].as_str().unwrap().to_string()))
+            })
+            .collect();
+        let missing: Vec<(String, String)> = cmds
+            .iter()
+            .flat_map(|(path, c)| {
+                c.get_arguments()
+                    .filter(|a| !a.is_positional() && !a.is_global_set())
+                    .filter_map(|a| a.get_long())
+                    .filter(|l| !matches!(*l, "help" | "version"))
+                    .map(move |l| (path.clone(), format!("--{l}")))
+            })
+            .filter(|f| !listed.contains(f))
+            .collect();
+        assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    /// I6: the provider options come from the registry, so a new provider is listed too.
+    #[test]
+    fn schema_lists_each_provider_init_option_with_its_provider() {
+        use opv::adapters::registry::PROVIDERS;
+        let doc = opv::schema::describe(&cli_command(), "test");
+        let init = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "init")
+            .unwrap();
+        let listed = init["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["provider"].is_string())
+            .count();
+        let want: usize = PROVIDERS.iter().map(|p| p.init_fields().len()).sum();
+        assert_eq!(listed, want);
     }
 
     /// A4: every flag effect in the schema table names a flag that exists.

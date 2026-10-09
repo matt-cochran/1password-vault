@@ -9,7 +9,7 @@ allumata  SIGNUP_POLICY        config  saved    n/a
 allumata  STRIPE_SECRET_KEY    secret  skipped  n/a
 unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
 would stage: allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
-plan 674d43e2 (1Password item v1): sync --expect-plan 674d43e2 applies exactly this plan and refuses if the item, the target or secrets.toml changed
-Next: opv sync prod --deploy
+plan 4fe9a87d (1Password item v1): sync --expect-plan 4fe9a87d applies exactly this plan and refuses if the item, the target or secrets.toml changed
+Next: opv sync prod --deploy --expect-plan 4fe9a87d
 --- result
 Ok(())

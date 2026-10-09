@@ -16,8 +16,8 @@
 //!
 //! With `--env` (P6) one more check, `item`, reads that environment's item once by vault
 //! and item ID (FR-13; skipped when op is not signed in) and plans it against the declared
-//! keys of the selected product(s) exactly as `check` does: `ok item: <vault>/<item>
-//! readable (<n> field(s) in section <p>)`, or a failing line naming each key that is not
+//! keys of the selected products exactly as `check` does: `ok item: <vault>/<item>
+//! readable (<n> fields in section <p>)`, or a failing line naming each key that is not
 //! ready (names and states only, never a value) and the `opv check` command. So doctor is
 //! never all clear when `check` would fail.
 //!
@@ -433,7 +433,12 @@ fn run_on_with(
                 report.skip(
                     section,
                     format!(
-                        "no {section} section in environment(s) {} (run, config export and item skeleton only)",
+                        "no {section} section in {} {} (run, config export and item skeleton only)",
+                        if without.len() == 1 {
+                            "environment"
+                        } else {
+                            "environments"
+                        },
                         without.join(", ")
                     ),
                 );
@@ -593,10 +598,10 @@ fn item_check(
         )
     };
     let readable = format!(
-        "{}/{} readable ({} field(s){where_})",
+        "{}/{} readable ({}{where_})",
         env.vault_id,
         env.item_id,
-        item.fields.len()
+        super::plural(item.fields.len(), "field", "fields")
     );
     let mut selected = fleet.clone();
     for e in selected.environments.values_mut() {
@@ -638,8 +643,8 @@ fn item_check(
     report.fail(
         ITEM_CHECK,
         format!(
-            "{readable}, but {} key(s) not ready: {}",
-            blocking.len(),
+            "{readable}, but {} not ready: {}",
+            super::plural(blocking.len(), "key", "keys"),
             blocking.join(", ")
         ),
         Error::findings(
@@ -670,17 +675,17 @@ fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     used
 }
 
-/// `valid (N environment(s), M product(s))`, or under the simple profile, whose one
-/// product is hidden (FR-20), `valid (N environment(s), M key(s))`.
+/// `valid (N environments, M products)`, or under the simple profile, whose one product
+/// is hidden (FR-20), `valid (N environments, M keys)`.
 fn config_summary(f: &Fleet) -> String {
-    let envs = f.environments.len();
+    let envs = super::plural(f.environments.len(), "environment", "environments");
     if f.is_simple() {
         let keys: usize = f.products.values().map(|p| p.keys.len()).sum();
-        format!("valid ({envs} environment(s), {keys} key(s))")
+        format!("valid ({envs}, {})", super::plural(keys, "key", "keys"))
     } else {
         format!(
-            "valid ({envs} environment(s), {} product(s))",
-            f.products.len()
+            "valid ({envs}, {})",
+            super::plural(f.products.len(), "product", "products")
         )
     }
 }
@@ -1217,7 +1222,7 @@ mod tests {
         res.unwrap();
         assert!(out.contains("ok    fly auth"), "{out}");
         assert!(
-            out.contains("skip  fly: no fly section in environment(s) dev"),
+            out.contains("skip  fly: no fly section in environment dev"),
             "{out}"
         );
     }
@@ -1263,7 +1268,7 @@ mod tests {
         let (_, out) = doctor(Ok(simple), &r);
         assert_eq!(
             checks(&out)[0],
-            "ok    config: valid (2 environment(s), 5 key(s))",
+            "ok    config: valid (2 environments, 5 keys)",
             "{out}"
         );
     }
@@ -1274,7 +1279,7 @@ mod tests {
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
             checks(&out)[0],
-            "ok    config: valid (2 environment(s), 1 product(s))",
+            "ok    config: valid (2 environments, 1 product)",
             "{out}"
         );
     }
@@ -1682,8 +1687,7 @@ mod tests {
     fn deploy_failure_still_checks_the_item() {
         let (_, out) = doctor_deploy_failed(false);
         assert!(
-            checks(&out)
-                .contains(&"ok    item: vprd/iprd readable (3 field(s) in section allumata)"),
+            checks(&out).contains(&"ok    item: vprd/iprd readable (3 fields in section allumata)"),
             "{out}"
         );
     }
@@ -1759,8 +1763,7 @@ mod tests {
     fn scoped_doctor_reports_the_item_readable() {
         let (_, out, _) = doctor_scoped(complete_item(), false);
         assert!(
-            checks(&out)
-                .contains(&"ok    item: vprd/iprd readable (3 field(s) in section allumata)"),
+            checks(&out).contains(&"ok    item: vprd/iprd readable (3 fields in section allumata)"),
             "{out}"
         );
     }
@@ -1789,7 +1792,7 @@ mod tests {
     fn scoped_doctor_names_the_key_that_check_would_report() {
         let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), false);
         assert!(
-            out.contains("but 1 key(s) not ready: allumata/OPENAI_API_KEY (missing)"),
+            out.contains("but 1 key not ready: allumata/OPENAI_API_KEY (missing)"),
             "{out}"
         );
     }

@@ -6,7 +6,7 @@
     {
       "name": "config",
       "status": "ok",
-      "detail": "valid (1 environment(s), 1 product(s))",
+      "detail": "valid (1 environment, 1 product)",
       "next": null,
       "do": null
     },
@@ -27,7 +27,7 @@
     {
       "name": "item",
       "status": "ok",
-      "detail": "vprd/iprd readable (3 field(s) in section allumata)",
+      "detail": "vprd/iprd readable (3 fields in section allumata)",
       "next": null,
       "do": null
     },

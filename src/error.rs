@@ -477,7 +477,7 @@ codes! {
     TargetError => "target_error", 5, AfterFix, false, "the target (Fly, Azure, Kubernetes) refused or failed";
     TargetUnhealthy => "target_unhealthy", 5, AfterFix, false, "the new revision did not become healthy; the previous one keeps serving";
     PolicyRefused => "policy_refused", 6, AfterFix, false, "opv refused the operation";
-    KeysBlocking => "keys_blocking", 6, AfterFix, true, "sync refused: keys are missing, of the wrong kind or failing a rule; nothing was written";
+    KeysBlocking => "keys_blocking", 6, AfterFix, true, "sync refused: keys are missing or failing a rule; nothing was written";
     ConfirmRequired => "confirm_required", 6, Never, true, "the environment sets confirm_env; pass --confirm <env>";
     ConfirmMismatch => "confirm_mismatch", 6, Never, false, "--confirm names another environment";
     StalePlan => "stale_plan", 6, Never, false, "sync --expect-plan: the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed; review the new plan";
@@ -486,7 +486,7 @@ codes! {
     AuthRequired => "auth_required", 7, AfterFix, true, "not signed in to 1Password or the target CLI";
     OpNotSignedIn => "op_not_signed_in", 7, AfterFix, true, "not signed in to 1Password";
     DeployCredentialsFailed => "deploy_credentials_failed", 7, AfterFix, true, "the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed";
-    Findings => "findings", 8, AfterFix, true, "keys are missing, of the wrong kind or failing a rule (values are filled in 1Password by a person)";
+    Findings => "findings", 8, AfterFix, true, "keys are missing or failing a rule (values are filled in 1Password by a person)";
     OutcomeUnknown => "outcome_unknown", 9, Safe, false, "a change may or may not have been applied; re-running is safe";
     ProviderUnavailable => "provider_unavailable", 9, Safe, false, "a provider did not answer after its retries; nothing was changed";
     Interrupted => "interrupted", 130, Safe, false, "interrupted by SIGINT (130) or SIGTERM (143); re-running is safe";
@@ -534,12 +534,17 @@ pub fn shell_word(a: &str) -> String {
     shell_word_for(a, cfg!(windows))
 }
 
-/// [`shell_word`] for Windows (`windows`) or Unix quoting.
+/// [`shell_word`] for Windows (`windows`, quoted for PowerShell) or Unix quoting. On
+/// Windows a word with `,` (an array in PowerShell), `%` or a leading `@` (splatting) is
+/// quoted too (M12). cmd.exe still expands `%NAME%` inside quotes; usage.md notes it.
 pub fn shell_word_for(a: &str, windows: bool) -> String {
     let safe = |c: char| {
-        c.is_ascii_alphanumeric() || "-_./=:@,+%".contains(c) || (windows && "\\~".contains(c))
+        c.is_ascii_alphanumeric()
+            || "-_./=:@+".contains(c)
+            || (!windows && ",%".contains(c))
+            || (windows && "\\~".contains(c))
     };
-    if !a.is_empty() && a.chars().all(safe) {
+    if !a.is_empty() && a.chars().all(safe) && !(windows && a.starts_with('@')) {
         return a.to_string();
     }
     if windows && !a.contains(['$', '`', '"']) {
@@ -992,6 +997,22 @@ mod tests {
     fn a_windows_temp_path_needs_no_quotes() {
         let p = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpX\secrets.toml";
         assert_eq!(shell_word_for(p, true), p);
+    }
+
+    /// M12: PowerShell splits `dev,prod` into an array; quoted, it stays one argument.
+    #[test]
+    fn a_windows_word_with_a_comma_is_quoted() {
+        assert_eq!(shell_word_for("dev,prod", true), r#""dev,prod""#);
+    }
+
+    #[test]
+    fn a_windows_word_with_a_percent_is_quoted() {
+        assert_eq!(shell_word_for("50%", true), r#""50%""#);
+    }
+
+    #[test]
+    fn a_unix_word_with_a_comma_needs_no_quotes() {
+        assert_eq!(shell_word_for("dev,prod", false), "dev,prod");
     }
 
     #[test]

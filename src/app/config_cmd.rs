@@ -501,8 +501,16 @@ pub fn projects(
 /// `status --all [--json]`: the one-line-per-environment overview for every visible
 /// project. Costs one manifest read per project plus the overview's reads per environment.
 /// A project that cannot be read is one line with its reason; the rest still run. The
-/// result is the first error, else findings.
-pub fn status_all(r: &dyn CommandRunner, json: bool, out: &mut dyn Write) -> Result<(), Error> {
+/// result is the first error, else findings. `product` (`--product` or `OPV_PRODUCT`)
+/// limits it to the projects that declare that product, and counts only its keys (I7).
+/// Each `Next:` names its project (`env OPV_PROJECT=<name> opv ...`), so it runs from any
+/// directory.
+pub fn status_all(
+    r: &dyn CommandRunner,
+    product: Option<&str>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let mut notes = Vec::new();
     let listed = list_all(r, &mut notes)?;
     let mut first: Option<Error> = None;
@@ -513,11 +521,14 @@ pub fn status_all(r: &dyn CommandRunner, json: bool, out: &mut dyn Write) -> Res
             .to_string();
         match store_of(l).load(r) {
             Ok(fleet) => {
-                let o = status::overview_of(&fleet, None, r);
+                if product.is_some_and(|p| fleet.is_simple() || !fleet.products.contains_key(p)) {
+                    continue;
+                }
+                let o = status::overview_of(&fleet, product, r);
                 let lines = o.lines.clone();
                 let envs = serde_json::to_value(&o.envs).unwrap_or_default();
                 if let Err(e) = o.result(&fleet) {
-                    let e = e.map_text(|t| format!("{name}: {t}"));
+                    let e = in_project(e.map_text(|t| format!("{name}: {t}")), &name);
                     first.get_or_insert(e);
                 }
                 docs.push((
@@ -579,6 +590,17 @@ pub fn status_all(r: &dyn CommandRunner, json: bool, out: &mut dyn Write) -> Res
         }
     }
     first.map_or(Ok(()), Err)
+}
+
+/// `e` with its `Next:` run against project `name` from any directory.
+fn in_project(e: Error, name: &str) -> Error {
+    match e.next_step().filter(|n| n.starts_with("opv ")) {
+        Some(next) => {
+            let next = format!("env OPV_PROJECT={} {next}", crate::error::shell_word(name));
+            e.with_next(next)
+        }
+        None => e,
+    }
 }
 
 #[cfg(test)]

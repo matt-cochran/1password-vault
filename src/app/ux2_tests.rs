@@ -213,6 +213,20 @@ fn states_help_defines_every_target_word() {
     }
 }
 
+/// M3: the closed set of SOURCE words, `blocked by source` included.
+#[test]
+fn states_help_defines_every_source_word() {
+    let defined = |w: &str| {
+        super::STATES_HELP.contains(&format!("\n  {w:<11} "))
+            || super::STATES_HELP.contains(&format!("\n  {w}\n"))
+    };
+    let undefined: Vec<&str> = ["saved", "missing", "failed", "skipped", "blocked by source"]
+        .into_iter()
+        .filter(|w| !defined(w))
+        .collect();
+    assert!(undefined.is_empty(), "{undefined:?}");
+}
+
 // ---- H8: CI step summary and `changes` -----------------------------------------------
 
 #[test]

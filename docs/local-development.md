@@ -43,7 +43,7 @@ reports that last check, as a warning, because deployment commands still work th
 
 `check` reads the selected environment's item once and validates only the selected product;
 fields in other products' sections are skipped, so they cannot fail it. It exits 8 when a key
-is missing, of the wrong kind or failing a rule.
+is missing or failing a rule.
 It makes no deployment target call. check --json reports names/states/rules/findings and
 target_checked=false. It can read values internally to validate them, but prints none.
 run remains reference-only: it does not pre-read or transform values. Use check separately.

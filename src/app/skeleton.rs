@@ -110,7 +110,12 @@ pub fn run_as(
         )
         .map_err(write_err)?;
     }
-    writeln!(out, "{} field(s) added", missing.len()).map_err(write_err)
+    writeln!(
+        out,
+        "{} added",
+        super::plural(missing.len(), "field", "fields")
+    )
+    .map_err(write_err)
 }
 
 #[cfg(test)]
@@ -166,7 +171,7 @@ mod tests {
             OPENAI
         );
         assert!(out.contains("allumata/INTEGRATION_ENC_KEY"), "{out}");
-        assert!(out.contains("3 field(s) added"), "{out}");
+        assert!(out.contains("3 fields added"), "{out}");
         assert_no_values(&out);
     }
 

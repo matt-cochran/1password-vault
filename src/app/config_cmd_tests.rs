@@ -324,7 +324,7 @@ fn status_all_reports_an_unreadable_project_and_goes_on() {
     put(&op, "broken", "[profile\n");
     put(&op, "myapp", TOML);
     let mut out = Vec::new();
-    let _ = status_all(&op, false, &mut out);
+    let _ = status_all(&op, None, false, &mut out);
     let t = text(&out);
     assert!(
         t.contains("broken (vault myapp-dev): not read")
@@ -337,7 +337,7 @@ fn status_all_reports_an_unreadable_project_and_goes_on() {
 fn status_all_fails_when_a_project_cannot_be_read() {
     let op = FakeOp::default();
     put(&op, "broken", "[profile\n");
-    assert!(status_all(&op, false, &mut Vec::new()).is_err());
+    assert!(status_all(&op, None, false, &mut Vec::new()).is_err());
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn status_all_json_has_one_entry_per_project() {
     put(&op, "b", TOML);
     let mut out = Vec::new();
     // The environments' items are not in the fake: each project is still one entry.
-    let _ = status_all(&op, true, &mut out);
+    let _ = status_all(&op, None, true, &mut out);
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["projects"].as_array().unwrap().len(), 2);
 }
@@ -402,4 +402,25 @@ fn edit_to_an_env_file_never_shows_a_value() {
     let err = res.err().map(|e| e.to_string()).unwrap_or_default();
     let shown = format!("{err}{}", text(&out));
     assert!(!shown.contains("C1MARKER"), "{shown}");
+}
+
+const FLEET_TOML: &str = "[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\nitem_id = \"app\"\n\n[products.api.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+
+/// I7: `status --all` runs from anywhere, so its step names the project.
+#[test]
+fn status_all_next_names_the_project() {
+    let e = super::in_project(Error::findings(1, "opv check dev".to_string()), "myapp");
+    assert_eq!(e.next_step(), Some("env OPV_PROJECT=myapp opv check dev"));
+}
+
+/// I7: `--product` limits `status --all` to the projects that declare it.
+#[test]
+fn status_all_with_a_product_lists_only_projects_declaring_it() {
+    let op = FakeOp::default();
+    put(&op, "a", FLEET_TOML);
+    put(&op, "b", TOML);
+    let mut out = Vec::new();
+    let _ = status_all(&op, Some("api"), true, &mut out);
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["projects"].as_array().unwrap().len(), 1);
 }

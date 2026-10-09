@@ -61,18 +61,16 @@ pub(crate) fn locate<'a>(
     target: &str,
     env: Option<&'a str>,
 ) -> Result<(String, String, &'a str), Error> {
-    // The same resolution as `explain`; a suggestion names `opv open` instead.
-    let t = resolve(fleet, target).map_err(|e| {
-        let e = runnable_next(fleet, env, e);
-        match e.next_step().and_then(|n| n.strip_prefix("opv explain ")) {
-            Some(rest) => {
-                let next = format!("opv open {rest}");
-                e.with_next(next)
-            }
-            None => e,
+    // The same resolution as `explain`; a suggestion names `opv open` instead (M6).
+    let as_open = |e: Error| match e.next_step().and_then(|n| n.strip_prefix("opv explain ")) {
+        Some(rest) => {
+            let next = format!("opv open {rest}");
+            e.with_next(next)
         }
-    })?;
-    let env_name = environment(fleet, &t, env)?;
+        None => e,
+    };
+    let t = resolve(fleet, target).map_err(|e| as_open(runnable_next(fleet, env, e)))?;
+    let env_name = environment(fleet, &t, env).map_err(as_open)?;
     Ok((t.product.to_string(), t.key.to_string(), env_name))
 }
 

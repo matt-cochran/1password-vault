@@ -58,7 +58,7 @@ pub fn run_scoped(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    check_product(fleet, product)?;
+    check_product(fleet, product, "status", Some(env_name))?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
     // The target's state, read-only and never waiting (NR-23, NR-25).
@@ -195,7 +195,7 @@ pub fn overview(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    check_product(fleet, product)?;
+    check_product(fleet, product, "status", None)?;
     let o = overview_of(fleet, product, r);
     if json {
         let doc = OverviewDoc {

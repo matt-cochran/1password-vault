@@ -7,7 +7,7 @@
     {
       "name": "config",
       "status": "ok",
-      "detail": "valid (1 environment(s), 1 product(s))",
+      "detail": "valid (1 environment, 1 product)",
       "next": null,
       "do": null
     },
@@ -28,7 +28,7 @@
     {
       "name": "item",
       "status": "fail",
-      "detail": "vprd/iprd readable (2 field(s) in section allumata), but 1 key(s) not ready: allumata/OPENAI_API_KEY (missing)",
+      "detail": "vprd/iprd readable (2 fields in section allumata), but 1 key not ready: allumata/OPENAI_API_KEY (missing)",
       "next": "opv check prod --product allumata",
       "do": "fill them in 1Password"
     },

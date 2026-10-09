@@ -287,13 +287,20 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
             })
         })
         .collect();
+    // `init`'s provider options are hidden from --help (one summary line per provider)
+    // but listed here, each with its provider and whether that --target needs it (I6).
     let flags: Vec<Value> = cmd
         .get_arguments()
-        .filter(|a| !a.is_positional() && !a.is_global_set() && !a.is_hide_set())
+        .filter(|a| !a.is_positional() && !a.is_global_set())
+        .filter(|a| !a.is_hide_set() || provider_option(a.get_long().unwrap_or_default()).is_some())
         .filter(|a| !matches!(a.get_id().as_str(), "help" | "version"))
         .map(|a| {
             let mut f = flag(a);
             let long = a.get_long().unwrap_or_default();
+            if let Some((provider, required)) = provider_option(long) {
+                f["provider"] = Value::from(provider);
+                f["required_with_target"] = Value::from(required);
+            }
             f["effect"] = FLAG_EFFECTS
                 .iter()
                 .find(|(c, l, _)| *c == path && *l == long)
@@ -315,6 +322,17 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
         "handles_values": effect.map(|e| e.handles_values),
         "ask_user_first": effect.map(|e| e.ask_user_first),
     }));
+}
+
+/// `(provider section, required)` when `long` is a provider's `init` option
+/// (`azure-key-vault`).
+fn provider_option(long: &str) -> Option<(&'static str, bool)> {
+    crate::adapters::registry::PROVIDERS.iter().find_map(|p| {
+        p.init_fields()
+            .iter()
+            .find(|f| crate::provider::init_flag(*p, f) == long)
+            .map(|f| (p.section(), f.required))
+    })
 }
 
 fn flag(a: &clap::Arg) -> Value {
