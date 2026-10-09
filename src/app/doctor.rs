@@ -89,8 +89,7 @@ fn run_on(
     let mut next: Option<String> = None;
     let mut line = |out: &mut dyn Write, check: &str, res: Result<Check, Error>| {
         let text = match res {
-            Ok(Check::Ok(detail)) => format!("ok    {check}: {detail}"),
-            Ok(Check::Warn(detail)) => format!("warn  {check}: {detail}"),
+            Ok(v) => v.line(check),
             Err(e) => {
                 let t = format!("FAIL  {check}: {e}");
                 next.get_or_insert_with(|| next_step(check, &e));

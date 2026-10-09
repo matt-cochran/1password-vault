@@ -1,9 +1,11 @@
 //! Fly.io adapter wrapping `flyctl` (S4; FR-6, FR-7, FR-8, SR-1, SR-3, SR-4, §6.4).
 //!
-//! Four operations, each exactly one `flyctl` call (none when there is nothing to do):
+//! Five operations, each one `flyctl` call (none when there is nothing to do), except
+//! [`preflight`], which makes two:
 //!
 //! | fn | argv |
 //! |---|---|
+//! | [`preflight`] | `status --app <app> --json`, `releases --app <app> --json` (NR-24) |
 //! | [`list`] | `secrets list --app <app> --json` |
 //! | [`stage`] | `secrets import --app <app> --stage` (values on stdin) |
 //! | [`unset_staged`] | `secrets unset <names...> --app <app> --stage` |
@@ -58,6 +60,7 @@ use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::ports::{StagedRuntime, StagedStore, Store};
+use crate::provider::{Check, Verdict};
 use crate::runner::{
     Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
 };
@@ -73,6 +76,8 @@ pub const FLYCTL: Tool = Tool {
     macos: "install: brew install flyctl",
     windows: "install: iwr https://fly.io/install.ps1 -useb | iex",
     linux: "install: curl -L https://fly.io/install.sh | sh",
+    vendor: "Fly",
+    status_page: "https://status.flyio.net",
 };
 
 /// A Fly token in the environment, in the order they are tried (by name only).
@@ -134,23 +139,8 @@ impl StagedRuntime for Fly<'_> {
 /// `flyctl secrets list --app <app> --json` call.
 pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<StoreEntry>, Error> {
     const WHAT: &str = "fly secrets list";
-    let out = run(
-        r,
-        Effect::Read,
-        WHAT,
-        app,
-        &["secrets", "list", "--app", app, "--json"],
-        None,
-        &["secrets", "list", "--app", app],
-    )?;
-    // serde_json messages can quote input fragments, so report only the position.
-    let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(format!(
-            "{WHAT} returned unexpected JSON (line {}, column {})",
-            e.line(),
-            e.column()
-        ))
-    })?;
+    let entries: Vec<ListEntry> =
+        read_json(r, WHAT, app, &["secrets", "list", "--app", app, "--json"])?;
     Ok(entries
         .into_iter()
         .map(|e| StoreEntry {
@@ -227,6 +217,122 @@ pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
         &["secrets", "deploy", "--app", app],
     )?;
     Ok(())
+}
+
+/// `flyctl status --app <app> --json`: only the app `Status` and each machine's `state`
+/// are read; every other field (organization, hostnames) is skipped unread. flyctl renders
+/// its Go structs as-is, so keys are `Status` / `Machines`; lower case is accepted too.
+#[derive(Deserialize)]
+struct AppStatus {
+    #[serde(rename = "Status", alias = "status", default)]
+    status: Option<String>,
+    #[serde(rename = "Machines", alias = "machines", default)]
+    machines: Option<Vec<MachineState>>,
+}
+
+#[derive(Deserialize)]
+struct MachineState {
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// One `flyctl releases --app <app> --json` entry: version and status only (the `User`
+/// field names an account and is skipped unread, SR-1).
+#[derive(Deserialize)]
+struct Release {
+    #[serde(rename = "Version", alias = "version", default)]
+    version: Option<i64>,
+    #[serde(rename = "Status", alias = "status", default)]
+    status: Option<String>,
+    #[serde(rename = "InProgress", alias = "inProgress", default)]
+    in_progress: Option<bool>,
+}
+
+/// Fly state before the first write (NR-24): two reads, `flyctl status --app <app> --json`
+/// and `flyctl releases --app <app> --json`.
+///
+/// - App `suspended` or `dead`: refused (`Target`) with `flyctl apps resume <app>`.
+/// - No machines, or none started: a warning; secrets still stage, and a deploy updates
+///   stopped machines on their next start (a deploy with no machine at all fails, D0).
+/// - Latest release `pending` / `running` (or `InProgress`): refused, a deploy is running.
+///
+/// A missing or unreachable app fails the read and is diagnosed like any flyctl call
+/// (FR-26); an unanswered read is the outage error (NR-28).
+pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Vec<Check>, Error> {
+    let status: AppStatus = read_json(r, "fly status", app, &["status", "--app", app, "--json"])?;
+    let state = status.status.unwrap_or_default().to_ascii_lowercase();
+    if matches!(state.as_str(), "suspended" | "dead") {
+        return Err(Error::Target(format!(
+            "Fly app {app} is {state}; nothing was changed\n  Next: {PROGRAM} apps resume {app}, \
+             then re-run"
+        )));
+    }
+    let machines = status.machines.unwrap_or_default();
+    let started = machines
+        .iter()
+        .filter(|m| matches!(m.state.as_deref(), Some("started" | "starting")))
+        .count();
+    let mut checks = Vec::new();
+    let warn = |detail: String| Check {
+        name: "fly app",
+        outcome: Ok(Verdict::Warn(detail)),
+    };
+    if machines.is_empty() {
+        checks.push(warn(format!(
+            "{app} has no machines: secrets still stage; a deploy needs a machine \
+             ({PROGRAM} deploy --app {app})"
+        )));
+    } else if started == 0 {
+        checks.push(warn(
+            "machines stopped: secrets still stage; deploy updates them on next start".into(),
+        ));
+    }
+    let releases: Vec<Release> = read_json(
+        r,
+        "fly releases",
+        app,
+        &["releases", "--app", app, "--json"],
+    )?;
+    let latest = releases
+        .iter()
+        .max_by_key(|r| r.version.unwrap_or(i64::MIN));
+    if let Some(rel) = latest.filter(|r| release_running(r)) {
+        let v = rel
+            .version
+            .map(|v| format!(" (release v{v})"))
+            .unwrap_or_default();
+        return Err(Error::Target(format!(
+            "a deploy is already running on Fly app {app}{v}; nothing was changed\n  Next: \
+             wait, then re-run"
+        )));
+    }
+    Ok(checks)
+}
+
+fn release_running(r: &Release) -> bool {
+    r.in_progress == Some(true)
+        || r.status
+            .as_deref()
+            .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "pending" | "running"))
+}
+
+/// One flyctl read whose stdout is JSON of type `T`. serde_json messages can quote input,
+/// so a parse error reports only the position.
+fn read_json<T: serde::de::DeserializeOwned>(
+    r: &dyn CommandRunner,
+    what: &str,
+    app: &str,
+    args: &[&str],
+) -> Result<T, Error> {
+    let hint = args.strip_suffix(&["--json"]).unwrap_or(args);
+    let out = run(r, Effect::Read, what, app, args, None, hint)?;
+    serde_json::from_slice(&out.stdout).map_err(|e| {
+        Error::Target(format!(
+            "{what} returned unexpected JSON (line {}, column {})",
+            e.line(),
+            e.column()
+        ))
+    })
 }
 
 /// Check a batch against every import rule without running anything; S6 may call this
@@ -457,7 +563,8 @@ enum Effect {
 /// Mapping (NR-2): a read still failing after its retries, or a write that exited non-zero,
 /// is diagnosed as before (`auth whoami` is a definite read-back for sign-in); a write
 /// whose diagnosis cannot run, or that timed out, was killed or was lost, is
-/// `Error::Unknown` (exit 9, safe to re-run). A read that never finished is `Target`.
+/// `Error::Unknown` (exit 9, safe to re-run). A read that never finished after its retries
+/// is the outage error naming the step and Fly's status page (NR-28, exit 9).
 fn run(
     r: &dyn CommandRunner,
     effect: Effect,
@@ -507,10 +614,8 @@ fn run_on(
                  the same command",
             unknown_text(PROGRAM, reason)
         ))),
-        Outcome::Unknown { reason, .. } => Err(Error::Target(format!(
-            "{what}: {}",
-            unknown_text(PROGRAM, reason)
-        ))),
+        // A read unanswered after its last attempt: Fly is unreachable (NR-28).
+        Outcome::Unknown { .. } => Err(FLYCTL.outage(what)),
     }
 }
 
@@ -1228,13 +1333,52 @@ mod tests {
         assert_eq!(e.exit_code(), 9, "{e}");
     }
 
-    /// NR-3: a read that timed out on every attempt is a target error, not exit 9: nothing
-    /// was changed.
+    /// NR-28: a read that timed out on every attempt is an outage: exit 9, nothing changed.
     #[test]
-    fn read_timeout_is_target_not_unknown() {
+    fn read_timeout_is_an_outage_exit_9() {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
-        assert_eq!(list(&r, "app").unwrap_err().exit_code(), 5);
+        assert_eq!(list(&r, "app").unwrap_err().exit_code(), 9);
+    }
+
+    /// NR-24: preflight reads the app status, then its releases; nothing else.
+    #[test]
+    fn preflight_reads_status_then_releases() {
+        let r = FakeRunner::new([
+            Output::success(r#"{"Status":"deployed","Machines":[{"state":"started"}]}"#),
+            Output::success(r#"[{"Version":1,"Status":"complete"}]"#),
+        ]);
+        preflight(&r, "app").unwrap();
+        let argv: Vec<String> = r.calls.borrow().iter().map(|c| c.args.join(" ")).collect();
+        assert_eq!(
+            argv,
+            ["status --app app --json", "releases --app app --json"]
+        );
+    }
+
+    /// NR-24: `InProgress` on the latest release (by version) refuses, whatever its status.
+    #[test]
+    fn latest_release_in_progress_refuses() {
+        let r = FakeRunner::new([
+            Output::success(r#"{"status":"deployed","machines":[{"state":"started"}]}"#),
+            Output::success(
+                r#"[{"Version":7,"InProgress":true,"Status":""},{"Version":6,"Status":"complete"}]"#,
+            ),
+        ]);
+        assert!(
+            preflight(&r, "app")
+                .unwrap_err()
+                .to_string()
+                .contains("a deploy is already running on Fly app app (release v7)")
+        );
+    }
+
+    /// NR-6, SR-1: an unexpected status document is a target error that never echoes it.
+    #[test]
+    fn unexpected_status_json_never_echoes_output() {
+        let r = FakeRunner::new([Output::success(r#"{"Machines":"LEAKCANARY"}"#)]);
+        let e = preflight(&r, "app").unwrap_err();
+        assert!(!format!("{e} {e:?}").contains("LEAKCANARY"), "{e}");
     }
 
     /// FR-26: host detection happens only on the failure path.
@@ -1261,18 +1405,14 @@ mod tests {
     }
 
     #[test]
-    fn timeout_is_target_error_naming_the_program() {
+    fn read_outage_names_the_step_and_status_page() {
         let r = FakeRunner::default();
-        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
-        match list(&r, "app") {
-            Err(Error::Target(m)) => {
-                assert!(
-                    m.starts_with("fly secrets list: flyctl did not finish"),
-                    "{m}"
-                )
-            }
-            other => panic!("{other:?}"),
-        }
+        r.push_unknowns("lost", crate::runner::READ_ATTEMPTS);
+        assert_eq!(
+            list(&r, "app").unwrap_err().to_string(),
+            "outcome unknown: Fly did not respond after 3 attempts (fly secrets list); nothing \
+             was changed. Check https://status.flyio.net, then re-run"
+        );
     }
 
     /// FR-22: an import refusal names the rule and its fixed reason, never the value.

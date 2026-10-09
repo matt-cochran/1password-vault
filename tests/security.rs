@@ -71,6 +71,10 @@ case "$1" in
     e="${FAKE_OP_ITEM_EXIT:-$FAKE_OP_EXIT}"
     [ -n "$e" ] && exit "$e"
     cat "$FAKE_FIX/item.json"; exit 0 ;;
+  vault)
+    # NR-26 probe: its output names the vault and must never be echoed.
+    [ -n "$FAKE_OP_VAULT_EXIT" ] && exit "$FAKE_OP_VAULT_EXIT"
+    printf '{"id":"vprd","name":"S7MARKERVALUEvault"}\n'; exit 0 ;;
 esac
 exit 97
 "#;
@@ -97,6 +101,9 @@ case "$1 $2" in
     [ -n "$FAKE_FLY_LIST_FAIL_AT" ] && [ "$l" -ge "$FAKE_FLY_LIST_FAIL_AT" ] && exit 1
     if [ "$l" = 1 ]; then cat "$FAKE_FIX/list_a.json"; else cat "$FAKE_FIX/list_b.json"; fi
     exit 0 ;;
+  # NR-24 preflight (shapes constructed from flyctl's --json rendering of its Go structs).
+  "status --app") printf '{"ID":"app","Status":"deployed","Machines":[{"id":"m1","state":"started"}]}\n'; exit 0 ;;
+  "releases --app") printf '[{"Version":1,"Status":"complete","User":{"Email":"S7MARKERVALUE@example.invalid"}}]\n'; exit 0 ;;
   "secrets import") exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;
   "secrets unset") exit 0 ;;
   "secrets deploy") exit 0 ;;
@@ -447,6 +454,8 @@ fn no_secret_in_any_argv() {
                 vec!["item", "get", "iprd", "--vault", "vprd", "--format", "json"]
             ),
             ("flyctl", vec!["secrets", "list", "--app", APP, "--json"]),
+            ("flyctl", vec!["status", "--app", APP, "--json"]),
+            ("flyctl", vec!["releases", "--app", APP, "--json"]),
             ("flyctl", vec!["secrets", "import", "--app", APP, "--stage"]),
             ("flyctl", vec!["secrets", "list", "--app", APP, "--json"]),
             (
@@ -592,8 +601,8 @@ fn child_stderr_suppressed() {
         );
         for want in [
             "signed in to 1Password as SERVICE_ACCOUNT",
-            "item iprd in vault vprd",
-            "grant this identity access to the vault",
+            "item iprd not found in vault vprd",
+            "op item get iprd --vault vprd",
         ] {
             assert!(r.stderr.contains(want), "{cmd:?}: {want}: {}", r.stderr);
         }

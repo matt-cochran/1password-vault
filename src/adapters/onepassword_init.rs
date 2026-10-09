@@ -434,11 +434,15 @@ mod tests {
 
     #[test]
     fn failed_item_read_is_diagnosed_naming_ids() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::success(
-            br#"{"user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
-        )]));
+        let r = FakeRunner::new(failed_read(1).chain([
+            Output::success(br#"{"user_type":"SERVICE_ACCOUNT"}"#.to_vec()),
+            Output::success(b"{}".to_vec()),
+        ]));
         let e = read_field_shapes(&r, "v1", "i1", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 4);
-        assert!(e.to_string().contains("item i1 in vault v1"), "{e}");
+        assert!(
+            e.to_string().contains("item i1 not found in vault v1"),
+            "{e}"
+        );
     }
 }

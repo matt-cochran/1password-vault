@@ -16,6 +16,7 @@ pub mod explain;
 mod guidance_tests;
 pub mod init;
 pub mod local;
+pub(crate) mod preflight;
 pub mod run;
 pub mod setup;
 mod setup_import;
@@ -464,15 +465,14 @@ pub(crate) fn target<'f>(
     )))
 }
 
-/// Resolve the environment's target, run its preflight checks (NR-23 to NR-26) and open
-/// its ports. Every check happens before the first call that reads or changes anything.
+/// Resolve the environment's target and open its ports, before any call. Mutating
+/// commands run [`preflight`] before their first write.
 pub(crate) fn open_target<'a>(
     fleet: &'a Fleet,
     env_name: &'a str,
     r: &'a dyn CommandRunner,
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
     let (_, t) = target(fleet, env_name)?;
-    t.preflight(r)?;
     Ok((t, t.open(env_name, r)?))
 }
 
@@ -717,6 +717,42 @@ pub(crate) mod testutil {
     }
     pub fn ok() -> Output {
         Output::success(Vec::new())
+    }
+
+    /// `flyctl status --app <app> --json` of a deployed app with one started machine
+    /// (constructed from flyctl's `status --json` rendering: Go field names, NR-24).
+    pub fn fly_app_ok() -> Output {
+        fly_app("deployed", &["started"])
+    }
+    /// `flyctl status --json` with app `Status` and one machine per `state` (constructed).
+    pub fn fly_app(status: &str, machines: &[&str]) -> Output {
+        let m: Vec<Value> = machines
+            .iter()
+            .map(|st| json!({"id": "148e", "name": "m", "state": st, "region": "iad"}))
+            .collect();
+        Output::success(
+            serde_json::to_vec(&json!({
+                "ID": "app", "Name": "app", "Status": status, "Deployed": true,
+                "Hostname": "app.fly.dev", "PlatformVersion": "machines", "Machines": m
+            }))
+            .unwrap(),
+        )
+    }
+    /// `flyctl releases --app <app> --json` whose latest release has `status` (constructed).
+    pub fn fly_releases(status: &str) -> Output {
+        Output::success(
+            serde_json::to_vec(&json!([
+                {"ID": "r2", "Version": 2, "Stable": false, "InProgress": false,
+                 "Status": status, "Reason": "change_secrets"},
+                {"ID": "r1", "Version": 1, "Stable": true, "InProgress": false,
+                 "Status": "complete", "Reason": "change_image"}
+            ]))
+            .unwrap(),
+        )
+    }
+    /// The two Fly preflight reads of a healthy app with no deploy running (NR-24).
+    pub fn fly_preflight_ok() -> [Output; 2] {
+        [fly_app_ok(), fly_releases("complete")]
     }
 
     pub fn op_calls(r: &FakeRunner) -> usize {

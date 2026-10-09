@@ -24,7 +24,7 @@ opv run prod -- ./server            # simple profile: no --product
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
 2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values.
 3. `plan` shows the same rows plus the target side. It changes nothing.
-4. `sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule.
+4. `sync` stages the values on Fly (through `flyctl secrets import --stage`, values on stdin). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a suspended or dead app (`Next: flyctl apps resume <app>`) or a deploy already running (`Next: wait, then re-run`) stops it with nothing written; stopped machines or none are a `warn` line, and staging goes ahead.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
 7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. `--json` prints `schema_version`, `environment`, `target_checked: false`, `rows` (product, key, state, rule, reason) and `findings`.
@@ -104,7 +104,7 @@ failing rule when `state` is `failing_rule`, and `reason` says why (see
 
 ### Change detection
 
-Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. `plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it.
+Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. `plan` therefore shows a desired key that is already on Fly as "potentially changed". An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. Deploying an app that has no machines exits 5.
 
@@ -157,7 +157,7 @@ There is no command that writes a `.env` file or prints `export` lines, on purpo
 | 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule), or `config export` refused |
 | 7 | authentication |
 | 8 | findings: `status`, `plan` or `check` found blocking keys |
-| 9 | outcome unknown: a change to the target (or `op item edit`) may or may not have been applied, for example a `flyctl secrets deploy` that timed out; nothing is known to be broken; re-run the same command |
+| 9 | outcome unknown: a change to the target (or `op item edit`) may or may not have been applied, for example a `flyctl secrets deploy` that timed out; or 1Password or Fly did not respond to a read after 3 attempts (nothing was changed; the message names the step and the status page). Nothing is known to be broken; re-run the same command |
 | 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` |
 | 101 | internal panic (Rust default) |
 

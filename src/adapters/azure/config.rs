@@ -235,8 +235,9 @@ impl TargetConfig for AzureTarget {
         ))
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
-        Ok(())
+    fn preflight(&self, _r: &dyn CommandRunner) -> Result<Vec<Check>, Error> {
+        // Vault and Container App state arrive with the Azure flow (NR-25).
+        Ok(Vec::new())
     }
 
     fn doctor(&self, _r: &dyn CommandRunner, _host: &dyn Fn() -> Host) -> Vec<Check> {

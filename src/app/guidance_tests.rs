@@ -71,7 +71,7 @@ enum S {
     Expired,
     /// whoami fails and `op account list` is empty.
     NoAccount,
-    /// whoami succeeds; the item read failed anyway.
+    /// whoami succeeds; the item read failed anyway and `op vault get` fails too (NR-26).
     NotVisible,
     /// `op` is not on PATH.
     OpMissing,
@@ -85,6 +85,7 @@ fn fake_op(s: S, ci: bool) -> FakeRunner {
         S::NotVisible => {
             q.extend(failed_read(1).map(Ok));
             q.push_back(Ok(Output::success(WHOAMI_USER)));
+            q.push_back(Ok(Output::failure(1)));
         }
         S::Expired | S::NoAccount => {
             q.extend(failed_read(1).map(Ok));
@@ -239,7 +240,7 @@ fn not_visible(p: P) {
     let (e, t, r) = read_fails(p, S::NotVisible);
     assert_eq!(e.exit_code(), 4, "{p:?}: {t}");
     assert!(matches!(e, Error::Source(_)), "{t}");
-    assert!(t.contains("item iprd in vault vprd"), "{t}");
+    assert!(t.contains("cannot access vault vprd"), "{t}");
     assert!(t.contains("signed in to 1Password as USER"), "{t}");
     assert!(t.contains("grant this identity access to the vault"), "{t}");
     assert!(
@@ -407,11 +408,14 @@ fn connect_item_not_found_is_source_exit_4() {
             .var("OP_CONNECT_HOST")
             .var("OP_CONNECT_TOKEN"),
     );
-    let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_USER)]));
+    let r = FakeRunner::new(failed_read(1).chain([
+        Output::success(WHOAMI_USER),
+        Output::success(b"{}".to_vec()),
+    ]));
     let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
     let t = e.to_string();
     assert_eq!(e.exit_code(), 4, "{t}");
-    assert!(t.contains("item iprd in vault vprd"), "{t}");
+    assert!(t.contains("item iprd not found in vault vprd"), "{t}");
     assert!(!t.contains("op signin"), "{t}");
 }
 

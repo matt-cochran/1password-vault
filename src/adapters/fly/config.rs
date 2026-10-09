@@ -199,9 +199,8 @@ impl TargetConfig for FlyTarget {
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
-        // Fly's failures are diagnosed per call (FR-26); nothing to check up front.
-        Ok(())
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<Vec<Check>, Error> {
+        super::preflight(r, &self.app)
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
