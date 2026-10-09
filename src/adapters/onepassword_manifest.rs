@@ -208,15 +208,7 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
         .collect();
     match hits.as_slice() {
         [one] => Ok(one.account_uuid.clone()),
-        [] => Err(Error::Config(
-            format!(
-                "no 1Password account on this machine matches {who:?}; the accounts op knows:\n{}",
-                listing(accounts)
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::AccountRequired)
-        .with_do("add the account in the 1Password app (and turn on Settings > Developer > Integrate with 1Password CLI), then re-run")),
+        [] => Err(not_known(accounts, who)),
         many => Err(Error::Config(
             format!(
                 "{} 1Password accounts match {who:?}; name one by its email or account ID:\n{}",
@@ -227,6 +219,40 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
         )
         .with_code(crate::error::Code::AccountRequired)),
     }
+}
+
+/// `who` is not an account this `op` knows. On Linux and in WSL, `op` keeps its own
+/// accounts (in WSL it does not share the Windows app's: found live), so the step is
+/// `op account add` for that email in this terminal; elsewhere, add it in the 1Password app.
+fn not_known(accounts: &[Account], who: &str) -> Error {
+    use crate::host::Platform;
+    let host = Host::detect();
+    let e = Error::Config(
+        format!(
+            "no 1Password account on this machine matches {who:?}; the accounts op knows:\n{}",
+            listing(accounts)
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::AccountRequired);
+    let own_op = matches!(host.platform, Platform::Linux | Platform::Wsl);
+    if own_op && who.contains('@') && crate::config::is_account(who) {
+        let wsl = if host.platform == Platform::Wsl {
+            " (op in WSL does not see the Windows app's accounts)"
+        } else {
+            ""
+        };
+        return e
+            .with_do(format!(
+                "add the account to op here{wsl}: type its sign-in address, Secret Key and \
+                 password only at op's prompts, then re-run opv login"
+            ))
+            .with_next(format!("op account add --email {who}"));
+    }
+    e.with_do(
+        "add the account in the 1Password app and turn on Settings > Developer > Integrate \
+         with 1Password CLI, then re-run",
+    )
 }
 
 /// One line per account: email, sign-in address and account ID (the person's own accounts,

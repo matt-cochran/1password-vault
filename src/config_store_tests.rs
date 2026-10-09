@@ -806,3 +806,21 @@ fn recording_the_account_keeps_the_pointers_project() {
         (Some("myapp"), Some("ALABS000000000000000000001"))
     );
 }
+
+/// Found live: in WSL, op keeps its own accounts, so the step for an email op does not
+/// know is `op account add` here, not the Windows app.
+#[test]
+fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
+    let wsl = Host::from_env(&crate::host::FakeEnv::new("linux").var("WSL_DISTRO_NAME"));
+    let e = crate::host::with_test_host(wsl, || {
+        pick_account(
+            &accounts_runner(TWO_ACCOUNTS),
+            Some("new@labs.example".into()),
+        )
+        .unwrap_err()
+    });
+    assert_eq!(
+        e.next_step(),
+        Some("op account add --email new@labs.example")
+    );
+}
