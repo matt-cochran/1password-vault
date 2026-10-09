@@ -25,6 +25,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::adapters::registry;
+use crate::error::Error;
+use crate::runner::READ_ATTEMPTS;
 
 /// Where detection reads its facts. [`ProcessEnv`] is the real one; tests use
 /// [`FakeEnv`].
@@ -165,6 +167,22 @@ pub struct Tool {
     pub windows: &'static str,
     /// Linux, WSL and any other platform.
     pub linux: &'static str,
+    /// The service behind the CLI, in messages: "1Password", "Fly".
+    pub vendor: &'static str,
+    /// The service's status page, named when it does not respond (NR-28).
+    pub status_page: &'static str,
+}
+
+impl Tool {
+    /// NR-28: a read of this service still unanswered after its last attempt (timed out,
+    /// killed or lost every time). A read changes nothing, so re-running is safe: exit 9.
+    pub fn outage(&self, step: &str) -> Error {
+        Error::Unknown(format!(
+            "{} did not respond after {READ_ATTEMPTS} attempts ({step}); nothing was changed. \
+             Check {}, then re-run",
+            self.vendor, self.status_page
+        ))
+    }
 }
 
 /// The 1Password CLI.
@@ -175,6 +193,8 @@ pub const OP_CLI: Tool = Tool {
     windows: "install: winget install AgileBits.1Password.CLI",
     linux: "install op from https://developer.1password.com/docs/cli/get-started/ \
             (apt, dnf or the zip for this Linux distribution)",
+    vendor: "1Password",
+    status_page: "https://status.1password.com",
 };
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).

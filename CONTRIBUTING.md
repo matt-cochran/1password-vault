@@ -72,6 +72,16 @@ Write atomic scenarios with declarative names and exactly one behavioural
 assertion per test. Test observable outcomes. Fly behaviour is pinned by golden transcripts in
 `tests/fixtures/characterization/`; a change that alters them must say why.
 
+## Adding a provider
+
+A provider is one module; no core code changes (FR-37, `docs/design/multi-cloud-targets.md` section 11).
+
+1. Run a live spike first and save the real command outputs, with values replaced by markers, under `tests/fixtures/<provider>/`. Adapter tests use those recordings, never invented JSON. Write the findings in `docs/design/spike-<provider>-findings.md`.
+2. Create `src/adapters/<provider>/` and implement the `Provider` and `TargetConfig` traits (config section, name rules, `open`, preflight, `doctor`, `explain`) plus the store and runtime ports. Send every subprocess through `CommandRunner` (`read` for reads, `write` for writes) and put values on stdin only.
+3. Register it: `pub mod <provider>;` in `src/adapters/mod.rs` and one line in `src/adapters/registry.rs`.
+4. Extend the guard test so `app/`, `domain/` and `config.rs` do not name the new module.
+5. Add the marker-value test (no value in argv), a "converges after interruption at every call" test, and the docs: a section in `docs/configuration.md`, the prerequisite in `docs/install.md`, and the changelog.
+
 ## Design decisions
 
 Requirements and design decisions live in `docs/design/`. A change that alters a

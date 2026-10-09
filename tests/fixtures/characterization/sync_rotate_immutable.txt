@@ -1,5 +1,7 @@
 $ op item get iprd --vault vprd --format json
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
+$ flyctl status --app mcproductlabs-portfolio-production --json
+$ flyctl releases --app mcproductlabs-portfolio-production --json
 $ flyctl secrets import --app mcproductlabs-portfolio-production --stage
 <stdin 147 bytes sha256=7e9f5f1b9b76e55cb886a49a06722f4a22ca268b9ad04fee94623adb7191af79>
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json

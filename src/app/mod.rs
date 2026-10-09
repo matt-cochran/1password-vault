@@ -8,6 +8,8 @@
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
 #[cfg(test)]
+mod azure_tests;
+#[cfg(test)]
 mod characterization_tests;
 pub mod config_export;
 pub mod doctor;
@@ -18,6 +20,7 @@ pub mod init;
 pub mod local;
 #[cfg(test)]
 mod pinned_tests;
+pub(crate) mod preflight;
 pub mod run;
 pub mod setup;
 mod setup_import;
@@ -30,7 +33,7 @@ pub mod status;
 pub mod sync;
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Write};
 
 use crate::adapters::{onepassword, registry};
@@ -66,9 +69,18 @@ pub(crate) fn read_and_plan(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
+    let fields = read_fields(fleet, env_name, r)?;
+    plan_item(fleet, env_name, fields, ports, rotate, prune_immutable)
+}
+
+/// The environment's item fields: its one read by IDs (FR-13).
+pub(crate) fn read_fields(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<Vec<plan::ItemField>, Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_item_as(r, env, fleet.profile)?;
-    plan_item(fleet, env_name, item.fields, ports, rotate, prune_immutable)
+    Ok(onepassword::read_item_as(r, env, fleet.profile)?.fields)
 }
 
 /// [`read_and_plan`] for a local check of the products in `fleet` only, with no target: the
@@ -89,7 +101,7 @@ pub(crate) fn read_and_plan_products(
     Ok(plan_item(fleet, env_name, item.fields, None, &none, &none)?.0)
 }
 
-fn plan_item(
+pub(crate) fn plan_item(
     fleet: &Fleet,
     env_name: &str,
     fields: Vec<plan::ItemField>,
@@ -98,19 +110,24 @@ fn plan_item(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
-    let on_target = match store {
+    let mut on_target = match store {
         Some(s) => s.list()?,
         None => Vec::new(),
     };
     let refusal = |n: &str, v: &SecretValue| store.and_then(|s| s.refusal(n, v));
     // The first failed read; the planner itself cannot fail.
     let failed: RefCell<Option<Error>> = RefCell::new(None);
+    // name → the store's current version, from each read (the pinned flow binds it).
+    let versions: RefCell<BTreeMap<String, String>> = RefCell::new(BTreeMap::new());
     let read = |pinned: &dyn PinnedStore, name: &str, desired: &SecretValue| {
         if failed.borrow().is_some() {
             return None;
         }
         match pinned.read(name) {
-            Ok(Some((current, _version))) => Some(compare(&current, desired)),
+            Ok(Some((current, version))) => {
+                versions.borrow_mut().insert(name.to_string(), version);
+                Some(compare(&current, desired))
+            }
             Ok(None) => Some(plan::CurrentState::Absent),
             Err(e) => {
                 failed.replace(Some(e));
@@ -136,14 +153,21 @@ fn plan_item(
             current: current.as_ref().map(|c| c as &plan::CurrentCheck<'_>),
         },
     );
-    match failed.into_inner() {
-        Some(e) => Err(e),
-        None => Ok((p, on_target)),
+    if let Some(e) = failed.into_inner() {
+        return Err(e);
     }
+    // A pinned store's list carries no versions; the reads above found them.
+    let versions = versions.into_inner();
+    for e in &mut on_target {
+        if let Some(v) = versions.get(&e.name) {
+            e.version = Some(v.clone());
+        }
+    }
+    Ok((p, on_target))
 }
 
 /// Exact, constant-time compare of a stored value with the desired one (FR-31, SR-1).
-fn compare(current: &SecretValue, desired: &SecretValue) -> plan::CurrentState {
+pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::CurrentState {
     use subtle::ConstantTimeEq as _;
     if bool::from(
         current
@@ -177,11 +201,15 @@ fn json_product(product: &str) -> Option<String> {
 /// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
 /// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
 /// before this point leave stdout empty, so a caller only gets a document on success.
+///
+/// `pinned` adds the per-row binding fields of a pinned target (R5): `binding`,
+/// `pending_deploy` and `drift`, keyed by env name. They are absent for a staged target.
 pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
     env_name: &str,
     plan: &SyncPlan,
+    pinned: Option<&BTreeMap<String, PinnedRow>>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
@@ -210,7 +238,13 @@ pub(crate) fn write_json(
                 &held_keys,
                 &held_from_prune,
             );
+            let bound = target_name
+                .as_deref()
+                .and_then(|n| pinned.and_then(|m| m.get(n)));
             JsonRow {
+                binding: bound.map(|b| b.binding),
+                pending_deploy: bound.map(|b| b.pending_deploy),
+                drift: bound.map(|b| b.drift),
                 product: json_product(&r.product),
                 key: r.key.clone(),
                 kind: kind_label(r.kind),
@@ -285,6 +319,20 @@ struct JsonRow {
     fly_name: Option<String>,
     target: Option<&'static str>,
     action: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_deploy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drift: Option<bool>,
+}
+
+/// One desired row's binding on a pinned target (R5): `binding` is `current` (bound as
+/// desired), `stale` (bound, but the next `--deploy` changes it) or `unbound`.
+pub(crate) struct PinnedRow {
+    pub binding: &'static str,
+    pub pending_deploy: bool,
+    pub drift: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -508,15 +556,14 @@ pub(crate) fn target<'f>(
     )))
 }
 
-/// Resolve the environment's target, run its preflight checks (NR-23 to NR-26) and open
-/// its ports. Every check happens before the first call that reads or changes anything.
+/// Resolve the environment's target and open its ports, before any call. Mutating
+/// commands run [`preflight`] before their first write.
 pub(crate) fn open_target<'a>(
     fleet: &'a Fleet,
     env_name: &'a str,
     r: &'a dyn CommandRunner,
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
     let (_, t) = target(fleet, env_name)?;
-    t.preflight(r)?;
     let managed = managed_names(fleet, env_name)?.into_iter().collect();
     Ok((t, t.open(env_name, managed, r)?))
 }
@@ -762,6 +809,59 @@ pub(crate) mod testutil {
     }
     pub fn ok() -> Output {
         Output::success(Vec::new())
+    }
+
+    /// Recorded `flyctl status --app <app> --json` of a deployed app with one started
+    /// machine (`tests/fixtures/fly/status-deployed.json`, NR-24).
+    pub fn fly_app_ok() -> Output {
+        fly_status("deployed")
+    }
+    /// Recorded `flyctl status --json` for `kind`: "deployed", "suspended" or "pending"
+    /// (`tests/fixtures/fly/status-<kind>.json`).
+    pub fn fly_status(kind: &str) -> Output {
+        let doc = match kind {
+            "deployed" => include_str!("../../tests/fixtures/fly/status-deployed.json"),
+            "suspended" => include_str!("../../tests/fixtures/fly/status-suspended.json"),
+            "pending" => include_str!("../../tests/fixtures/fly/status-pending.json"),
+            other => panic!("no recorded status fixture for {other}"),
+        };
+        Output::success(doc)
+    }
+    /// The recorded deployed status with every machine set to `state` (derived: the
+    /// recording has only a started machine).
+    pub fn fly_app_machines(state: &str) -> Output {
+        let mut v: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/fly/status-deployed.json"
+        ))
+        .unwrap();
+        for m in v["Machines"].as_array_mut().unwrap() {
+            m["state"] = json!(state);
+        }
+        Output::success(serde_json::to_vec(&v).unwrap())
+    }
+    /// `flyctl status --json` of a deleted app (constructed: no recording, `dead` is
+    /// documented by flyctl but not reproducible without deleting an app).
+    pub fn fly_app_dead() -> Output {
+        Output::success(
+            r#"{"Name":"app","Status":"dead","Machines":[],"PlatformVersion":"machines"}"#,
+        )
+    }
+    /// Recorded `flyctl releases --json` (`tests/fixtures/fly/releases-deployed.json`).
+    /// `"running"` is derived from it by setting `InProgress` on the latest release (no
+    /// recording of a deploy under way).
+    pub fn fly_releases(status: &str) -> Output {
+        let doc = include_str!("../../tests/fixtures/fly/releases-deployed.json");
+        if status == "complete" {
+            return Output::success(doc);
+        }
+        let mut v: Value = serde_json::from_str(doc).unwrap();
+        v[0]["InProgress"] = json!(true);
+        v[0]["Status"] = json!(status);
+        Output::success(serde_json::to_vec(&v).unwrap())
+    }
+    /// The two Fly preflight reads of a healthy app with no deploy running (NR-24).
+    pub fn fly_preflight_ok() -> [Output; 2] {
+        [fly_app_ok(), fly_releases("complete")]
     }
 
     pub fn op_calls(r: &FakeRunner) -> usize {

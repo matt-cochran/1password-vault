@@ -1,7 +1,5 @@
 # Guided local setup
 
-These commands are under development on dev; they are not in the published v0.4.0 binary.
-
 Start in your project:
 ```sh
 opv session

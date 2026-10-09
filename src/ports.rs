@@ -45,6 +45,12 @@ pub trait PinnedStore: Store {
     fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error>;
     /// Refuses an entry without the ownership tag (FR-32).
     fn delete(&self, name: &str) -> Result<(), Error>;
+    /// Removes versions of `name` other than `keep_version` once a healthy revision binds
+    /// `keep_version` (FR-32). Called only after a healthy revision. A store that keeps
+    /// version history inside one entry (Key Vault) implements it as a no-op: old versions
+    /// stay as history and are never disabled or deleted; a store whose versions are
+    /// separate objects (Kubernetes Secrets) deletes the unreferenced ones.
+    fn collect_superseded(&self, name: &str, keep_version: &str) -> Result<(), Error>;
 }
 
 /// What runs the app in the staged flow: the Fly app.
@@ -63,6 +69,13 @@ pub trait PinnedRuntime {
     fn await_healthy(&self, revision: &Revision) -> Result<Health, Error>;
     /// Advisory only (R6): used by doctor, never gates a deploy.
     fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error>;
+    /// True when config is routed like secrets (`config = "store"`): written to the store
+    /// and bound by reference. False: config is a plain env value (FR-14).
+    fn config_in_store(&self) -> bool;
+    /// The runtime in messages, e.g. `container app ca-app`. Names only.
+    fn describe(&self) -> String;
+    /// The command that shows why `revision` is not healthy, for the "next:" line (FR-26).
+    fn inspect_hint(&self, revision: &Revision) -> String;
 }
 
 /// A target's store and runtime adapters, returned by `TargetConfig::open`. The variant is

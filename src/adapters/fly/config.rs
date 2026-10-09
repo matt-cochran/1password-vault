@@ -14,7 +14,9 @@ use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
-use crate::provider::{Check, NameRules, Provider, Section, TargetConfig, Verdict, eq_as};
+use crate::provider::{
+    Check, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig, Verdict, eq_as,
+};
 use crate::runner::CommandRunner;
 
 /// The `flyctl` release opv is tested with (its import parser is ported, see `mod.rs`).
@@ -205,19 +207,23 @@ impl TargetConfig for FlyTarget {
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
-        // Fly's failures are diagnosed per call (FR-26); nothing to check up front.
-        Ok(())
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error> {
+        match mode {
+            // The app's state matters only to writes; a read command's flyctl calls are
+            // diagnosed one by one (FR-26), so it makes no extra call.
+            PreflightMode::Read => Ok(Preflight::default()),
+            PreflightMode::Mutate => super::preflight(r, &self.app),
+        }
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
         vec![
             Check {
-                name: "flyctl",
+                name: "flyctl".into(),
                 outcome: flyctl_version(r, host),
             },
             Check {
-                name: "fly auth",
+                name: "fly auth".into(),
                 outcome: fly_auth(r, host),
             },
         ]

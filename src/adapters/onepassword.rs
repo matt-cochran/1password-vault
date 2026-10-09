@@ -267,12 +267,8 @@ fn failed_op_error_as(
         Err(e) => return e,
     };
     match session {
-        Session::SignedIn(t) => Error::Source(format!(
-            "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not \
-             available to this identity\n  next: {grant} (vault {}), or check vault_id and \
-             item_id in the configuration",
-            env.item_id, env.vault_id, env.vault_id
-        )),
+        Session::SignedIn(t) if !write => item_unavailable(r, env, failed, t, grant),
+        Session::SignedIn(t) => Error::Source(not_available(env, failed, t, grant)),
         Session::Unknown if write => Error::Unknown(format!(
             "{failed}; the item may or may not have been changed{}, then re-run",
             rerun_hint(env)
@@ -280,6 +276,46 @@ fn failed_op_error_as(
         Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env))),
         s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
     }
+}
+
+/// A signed-in item read failed (NR-26): one `op vault get <vault_id>` probe (exit status
+/// only; its output names the vault and is dropped unread, SR-1) tells removed vault access
+/// from an item that was moved, archived or deleted. IDs only, never a title (FR-13).
+fn item_unavailable(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    failed: &str,
+    t: IdentityType,
+    grant: &str,
+) -> Error {
+    let (item, vault) = (&env.item_id, &env.vault_id);
+    let probe = r.probe(
+        &Call::new(OP, &["vault", "get", vault.as_str(), "--format", "json"]),
+        PROBE_TIMEOUT,
+    );
+    Error::Source(match probe {
+        Ok(o) if o.status == 0 => format!(
+            "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
+             (moved, archived or deleted?)\n  next: check item_id in secrets.toml, then \
+             `{OP} item get {item} --vault {vault}`"
+        ),
+        Ok(_) => format!(
+            "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
+             {vault}\n  next: {grant} (vault {vault}), or check vault_id in secrets.toml, \
+             then `{OP} vault get {vault}`"
+        ),
+        Err(_) => not_available(env, failed, t, grant),
+    })
+}
+
+/// A signed-in failure whose cause is not known: access or the IDs.
+fn not_available(env: &Environment, failed: &str, t: IdentityType, grant: &str) -> String {
+    format!(
+        "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not available to \
+         this identity\n  next: {grant} (vault {}), or check vault_id and item_id in the \
+         configuration",
+        env.item_id, env.vault_id, env.vault_id
+    )
 }
 
 /// Read the environment's item once, by vault ID and item ID (FR-13). See the module docs.
@@ -479,7 +515,8 @@ fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
 
 /// One `op` read (NR-3: retried by the runner). The returned output may carry a non-zero
 /// status (still failing after the last attempt): callers diagnose it (FR-26). A read that
-/// never finished is a `Source` error naming the step; nothing was changed.
+/// never finished after its retries is the outage error naming the step and 1Password's
+/// status page (NR-28, exit 9); nothing was changed.
 pub(crate) fn read_op(
     r: &dyn CommandRunner,
     args: &[&str],
@@ -496,11 +533,7 @@ pub(crate) fn read_op(
             Ok(o)
         }
         Outcome::Refused(o) => Ok(o),
-        Outcome::Unknown { reason, .. } => Err(Error::Source(format!(
-            "{}: {}",
-            call.step(),
-            unknown_text(OP, reason)
-        ))),
+        Outcome::Unknown { .. } => Err(OP_CLI.outage(&call.step())),
     }
 }
 
@@ -1112,7 +1145,7 @@ mod tests {
     /// IDs and the identity type, with the grant instruction; never "to see why".
     #[test]
     fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
-        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA)]));
+        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), vault_ok()]));
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         let m = match &e {
             Error::Source(m) => m.clone(),
@@ -1124,8 +1157,7 @@ mod tests {
             "{m}"
         );
         assert!(m.contains("SERVICE_ACCOUNT"), "{m}");
-        assert!(m.contains("item istg in vault vstg"), "{m}");
-        assert!(m.contains("grant this identity access to the vault"), "{m}");
+        assert!(m.contains("item istg not found in vault vstg"), "{m}");
         assert!(!m.contains("to see why"), "{m}");
         assert!(
             !m.contains("example.com") && !m.contains("OPHINTMARKER"),
@@ -1137,9 +1169,48 @@ mod tests {
                 "op item get istg --vault vstg --format json",
                 "op item get istg --vault vstg --format json",
                 "op item get istg --vault vstg --format json",
-                "op whoami --format json"
+                "op whoami --format json",
+                "op vault get vstg --format json"
             ]
         );
+    }
+
+    fn vault_ok() -> Output {
+        Output::success(br#"{"id":"vstg","name":"OPHINTMARKER"}"#.to_vec())
+    }
+
+    /// NR-26: signed in, the item read fails and the vault is readable: the item was moved,
+    /// archived or deleted, named by IDs with the command to check it.
+    #[test]
+    fn item_missing_from_readable_vault_is_named() {
+        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), vault_ok()]));
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("item istg not found in vault vstg (moved, archived or deleted?)"),
+            "{e}"
+        );
+    }
+
+    /// NR-26: signed in, the item read fails and so does `op vault get`: vault access.
+    #[test]
+    fn op_vault_without_access_is_named() {
+        let r =
+            FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), Output::failure(1)]));
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("this identity cannot access vault vstg"),
+            "{e}"
+        );
+    }
+
+    /// NR-26: the vault probe's output names the vault; it is never echoed (SR-1).
+    #[test]
+    fn vault_probe_output_is_never_echoed() {
+        let r = FakeRunner::new(failed_read(1).chain([Output::success(WHOAMI_SA), vault_ok()]));
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(!format!("{e} {e:?}").contains("OPHINTMARKER"), "{e}");
     }
 
     /// FR-26: whoami fails → Auth (exit 7) with the sign-in command, whatever credential
@@ -1199,7 +1270,7 @@ mod tests {
         };
         let sessions = || {
             [
-                vec![Output::success(WHOAMI_SA)],
+                vec![Output::success(WHOAMI_SA), leaky()],
                 vec![leaky(), accounts(1)],
                 vec![leaky(), accounts(0)],
             ]
@@ -1233,12 +1304,14 @@ mod tests {
     }
 
     #[test]
-    fn timeout_is_source_error_naming_op() {
+    fn read_outage_exits_9_naming_the_status_page() {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
-            matches!(&e, Error::Source(m) if m.starts_with("op item get: op did not finish")),
+            matches!(&e, Error::Unknown(m) if m == "1Password did not respond after 3 \
+                attempts (op item get); nothing was changed. Check \
+                https://status.1password.com, then re-run"),
             "{e:?}"
         );
     }

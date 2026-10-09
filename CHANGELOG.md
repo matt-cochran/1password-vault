@@ -5,11 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - Unreleased
+
+Azure and Kubernetes targets, a more resilient CLI, and one install location. Check **Changed**
+before upgrading.
+
+### Added
+
+- Azure target: `[environments.<env>.azure]` syncs secrets to Key Vault and binds them to a Container App ([#39](https://github.com/matt-cochran/1password-vault/issues/39); FR-28 to FR-33). Secrets are written as new versions and the app uses them only after `opv sync <env> --deploy`; `--prune` removes old entries only after a healthy revision. See [usage](docs/usage.md#sync-on-azure-and-kubernetes).
+- Kubernetes target: `[environments.<env>.kubernetes]` stores values as immutable Secrets and updates a Deployment through `kubectl` (FR-38).
+- Plug-in providers: Fly, Azure and Kubernetes implement one contract, so a new provider is one module ([CONTRIBUTING.md](CONTRIBUTING.md#adding-a-provider); FR-37).
+- Resilience (NR-1 to NR-30): reads retry up to 3 times, writes never; progress lines during waits; `--timeout <secs>` (default 900) caps a run; `--verbose` prints one line per external call; every mutating run ends with a summary and every failure with one `Next:` line; Ctrl-C and SIGTERM leave the target safe to re-run (exit 130/143).
+- Exit code 9: outcome unknown, or a provider did not answer. Nothing is known to be broken; re-run the same command.
+- `confirm_env = true` on an environment requires `--confirm <env>` for `sync`.
+- `opv doctor` lists every `opv` on `PATH` and warns about more than one; it checks `az` (2.60 or newer) and `kubectl` for environments that use them. <!-- verify -->
+- `opv session` and `opv setup`: guided sign-in and resumable project onboarding ([guided setup](docs/guided-setup.md); [#63](https://github.com/matt-cochran/1password-vault/pull/63)).
+- `opv sync` checks the Fly app before its first write (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running stops it with nothing written and the next step; suspended, pending or stopped-machine apps print a `warn` line and staging goes ahead, and `--deploy` is skipped with a notice when the app has no machines (NR-23, NR-24).
+- After staging, `sync` re-reads Fly's list for up to 30 seconds until every staged name shows a digest, so a lagging list is never reported as unchanged (NR-30).
 
 ### Changed
 
+- A 1Password or Fly read that gets no answer after 3 attempts exits 9 naming the provider, the step and its status page (status.1password.com, status.flyio.net); nothing was changed. It was exit 4 (1Password) or 5 (Fly) (NR-28).
+- A failed item read while signed in now tells removed vault access from a moved, archived or deleted item (`op vault get <vault_id>`, by ID), with the next command (NR-26).
+- A `sync` refusal ends with the `opv explain` command for the blocking keys (NR-17). A sign-in lost after `sync` wrote something names the writes that completed (NR-10).
+- npm and `install.sh` install to the same place (`~/.local/bin/opv`, or `%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), so either can update the other's copy ([install](docs/install.md#one-install-location)).
+- `status` and `plan` start with a one-line count summary; rows are unchanged. On clouds they gain optional `binding`, `pending_deploy` and `drift` fields in `--json`; `schema_version` stays 1. <!-- verify -->
 - `opv doctor` no longer warns for a later `flyctl` patch release in the tested minor (0.4.113 and up). Another minor, or a patch older than 0.4.112, still warns.
+- Every external call names its scope explicitly (Azure `subscription`, Fly `--app`, Kubernetes `--context` and `--namespace`) and runs with a pinned environment, so your default subscription or CLI settings no longer matter.
+
+### Fixed
+
+- A failed write is read back before opv reports a result, so a dropped connection no longer looks like "nothing happened". <!-- verify -->
 
 ## [0.4.0] - 2026-10-08
 

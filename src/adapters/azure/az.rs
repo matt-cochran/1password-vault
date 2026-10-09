@@ -11,7 +11,6 @@
 //! argv and maps failures. The pinned `az` environment (R7, NR-7) is added by the runner.
 
 use std::io;
-use std::time::Duration;
 
 use crate::error::Error;
 use crate::host::{Host, Tool};
@@ -27,6 +26,8 @@ pub const AZ_CLI: Tool = Tool {
     macos: "install: brew install azure-cli",
     windows: "install: winget install Microsoft.AzureCLI",
     linux: "install: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash",
+    vendor: "Azure",
+    status_page: "https://azure.status.microsoft",
 };
 
 /// Global flag that keeps `az` quiet apart from errors (R7).
@@ -43,31 +44,6 @@ pub fn stdin_supported(action: &str) -> Result<(), Error> {
         )));
     }
     Ok(())
-}
-
-/// Waiting and progress output for polling loops, injectable so tests never sleep (NR-25,
-/// NR-30).
-pub trait Pacer {
-    /// Wait `d`.
-    fn sleep(&self, d: Duration);
-    /// One progress line for the person running opv (stderr, never a value).
-    fn note(&self, line: &str);
-}
-
-/// The real [`Pacer`]: sleeps the thread and prints progress on stderr.
-pub struct SystemPacer;
-
-/// The pacer production code passes to adapters.
-pub static SYSTEM_PACER: SystemPacer = SystemPacer;
-
-impl Pacer for SystemPacer {
-    fn sleep(&self, d: Duration) {
-        std::thread::sleep(d);
-    }
-
-    fn note(&self, line: &str) {
-        eprintln!("{line}");
-    }
 }
 
 /// Whether a call changes the target (NR-2).
@@ -150,13 +126,29 @@ pub(crate) fn write_output(
 /// missing `az` is [`Error::Dependency`]; a probe that errors or times out says nothing
 /// about the sign-in, so it is an [`Error::Target`] that asks for a manual check.
 pub(crate) fn signed_in(r: &dyn CommandRunner) -> Result<bool, Error> {
-    match r.probe(
-        &Call::new(
-            PROGRAM,
-            &["account", "show", "-o", "none", ONLY_SHOW_ERRORS],
-        ),
-        PROBE_TIMEOUT,
-    ) {
+    probe(r, &["account", "show", "-o", "none", ONLY_SHOW_ERRORS])
+}
+
+/// Whether the signed-in account can see `subscription` (NR-7): `az account show
+/// --subscription <id> -o none`, exit status only (its output names the account, SR-1).
+pub(crate) fn sees_subscription(r: &dyn CommandRunner, subscription: &str) -> Result<bool, Error> {
+    probe(
+        r,
+        &[
+            "account",
+            "show",
+            "--subscription",
+            subscription,
+            "-o",
+            "none",
+            ONLY_SHOW_ERRORS,
+        ],
+    )
+}
+
+/// A read-only `az` probe decided by exit status alone: `Ok(true)` for exit 0.
+fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
+    match r.probe(&Call::new(PROGRAM, args), PROBE_TIMEOUT) {
         Ok(o) => Ok(o.status == 0),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
             "{PROGRAM} not found on PATH\n  {}",
@@ -193,38 +185,6 @@ pub(crate) fn not_logged_in(failed: Option<&str>) -> Error {
         "not logged in to Azure ({why})\n  next: run `az login` (in CI: sign in with \
          azure/login first), then run opv again"
     ))
-}
-
-/// A [`Pacer`] for tests that neither waits nor prints.
-#[cfg(test)]
-pub(crate) struct NoWait;
-
-#[cfg(test)]
-impl Pacer for NoWait {
-    fn sleep(&self, _d: Duration) {}
-    fn note(&self, _line: &str) {}
-}
-
-#[cfg(test)]
-pub(crate) static NO_WAIT: NoWait = NoWait;
-
-/// A [`Pacer`] for tests: records every sleep and note, never waits.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct RecordingPacer {
-    pub sleeps: std::cell::RefCell<Vec<Duration>>,
-    pub notes: std::cell::RefCell<Vec<String>>,
-}
-
-#[cfg(test)]
-impl Pacer for RecordingPacer {
-    fn sleep(&self, d: Duration) {
-        self.sleeps.borrow_mut().push(d);
-    }
-
-    fn note(&self, line: &str) {
-        self.notes.borrow_mut().push(line.to_string());
-    }
 }
 
 #[cfg(test)]

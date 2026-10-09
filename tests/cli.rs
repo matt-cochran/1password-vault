@@ -828,3 +828,34 @@ fn guided_commands_refuse_headless_execution_before_vendor_calls() {
         assert!(stderr.contains("interactive terminal"));
     }
 }
+
+/// flyctl deprecated `apps resume` (use `fly scale count`); no message may suggest it.
+#[test]
+fn no_message_or_doc_suggests_the_deprecated_apps_resume() {
+    fn scan(dir: &std::path::Path, needle: &str, hits: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                scan(&p, needle, hits);
+            } else if p
+                .extension()
+                .is_some_and(|x| matches!(x.to_str(), Some("rs" | "md")))
+                && std::fs::read_to_string(&p).is_ok_and(|s| s.contains(needle))
+            {
+                hits.push(p.display().to_string());
+            }
+        }
+    }
+    let needle = ["apps", " resume"].concat();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut hits = Vec::new();
+    for d in ["src", "docs"] {
+        scan(&root.join(d), &needle, &mut hits);
+    }
+    hits.retain(|h| {
+        !h.ends_with("tests/cli.rs")
+            && !h.contains("docs/design/plans/")
+            && !h.ends_with("cli-ux-review.md")
+    });
+    assert_eq!(hits, Vec::<String>::new());
+}

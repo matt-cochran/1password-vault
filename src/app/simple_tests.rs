@@ -73,7 +73,8 @@ fn sync_of(r: &FakeRunner, opts: &sync::SyncOpts) -> (Result<(), Error>, String)
 
 /// item, list A, import, list B, then spare responses so an unexpected call is recorded.
 fn fake_sync(item: Output, a: Output, b: Output) -> FakeRunner {
-    FakeRunner::new([item, a, ok(), b, ok(), ok(), ok()])
+    let [st, rel] = fly_preflight_ok();
+    FakeRunner::new([item, a, st, rel, ok(), b, ok(), ok(), ok()])
 }
 
 fn prune() -> sync::SyncOpts {
@@ -363,7 +364,8 @@ fn sync_refusal_names_the_key_alone() {
     let r = fake_sync(prod_item_without("JWT_KEY"), fly_empty(), fly_empty());
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
-        e.to_string().ends_with("nothing staged: JWT_KEY (missing)"),
+        e.to_string()
+            .contains("nothing staged: JWT_KEY (missing)\n"),
         "{e}"
     );
 }
@@ -453,8 +455,8 @@ fn sync_refusal_names_the_key_alone_with_rule_and_reason() {
     );
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
-        e.to_string().ends_with(
-            "nothing staged: DATABASE_URL (failed prefix (expected prefix postgres://))"
+        e.to_string().contains(
+            "nothing staged: DATABASE_URL (failed prefix (expected prefix postgres://))\n"
         ),
         "{e}"
     );

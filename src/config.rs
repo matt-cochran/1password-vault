@@ -86,6 +86,37 @@ impl<'t> Doc<'t> {
         envs.get_ref().get(env)?.get_ref().get(key)
     }
 
+    /// `msg` located at the declaration of key `key` of `product` (`[products.<p>.keys.<K>]`,
+    /// or `[keys.<K>]` under the simple profile), like [`Doc::at`].
+    fn key_at(&self, product: &str, key: &str, msg: String) -> Error {
+        fn find<'a, 't>(
+            t: &'a DeTable<'t>,
+            name: &str,
+        ) -> Option<(std::ops::Range<usize>, Option<&'a DeTable<'t>>)> {
+            t.iter()
+                .find(|(n, _)| n.get_ref().as_ref() == name)
+                .map(|(n, v)| (n.span(), v.get_ref().as_table()))
+        }
+        let root = self.root.get_ref();
+        let keys = if product == SIMPLE_PRODUCT {
+            find(root, "keys").and_then(|(_, t)| t)
+        } else {
+            find(root, "products")
+                .and_then(|(_, t)| t)
+                .and_then(|t| find(t, product))
+                .and_then(|(_, t)| t)
+                .and_then(|t| find(t, "keys"))
+                .and_then(|(_, t)| t)
+        };
+        match keys.and_then(|t| find(t, key)) {
+            Some((span, _)) => cfg(format!(
+                "invalid secrets.toml: {}",
+                located(self.text, span, &msg)
+            )),
+            None => cfg(msg),
+        }
+    }
+
     /// `msg` located at the key `environments.<env>.<key>` the way the TOML parser reports
     /// its own errors (line, column, the line itself), so every configuration error points
     /// at the file (FR-2). Just `msg` if the key cannot be found.
@@ -296,7 +327,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         products: raw.products,
         profile: Profile::Fleet,
     };
-    check_names(&fleet)?;
+    check_names(&fleet, doc)?;
     Ok(fleet)
 }
 
@@ -335,7 +366,7 @@ fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> 
         products: BTreeMap::from([(SIMPLE_PRODUCT.to_string(), Product { keys: raw.keys })]),
         profile: Profile::Simple,
     };
-    check_names(&fleet)?;
+    check_names(&fleet, doc)?;
     Ok(fleet)
 }
 
@@ -480,7 +511,7 @@ fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<
 /// rendered name, so a key desired here and another key declared only elsewhere that
 /// render the same name would otherwise be both staged and pruned in one run (FR-2, FR-8,
 /// FR-30).
-fn check_names(fleet: &Fleet) -> Result<(), Error> {
+fn check_names(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (env_name, env) in &fleet.environments {
         let Some(t) = env.target() else {
             continue;
@@ -511,6 +542,20 @@ fn check_names(fleet: &Fleet) -> Result<(), Error> {
                                 store.len(),
                                 s.pattern
                             )));
+                        }
+                        // The first and last characters, e.g. a key ending in `_` renders a
+                        // Kubernetes name ending in `-`: refused here, never at sync.
+                        let edges = [store.chars().next(), store.chars().last()];
+                        if !edges.into_iter().flatten().all(s.edge) {
+                            return Err(doc.key_at(
+                                product,
+                                key,
+                                format!(
+                                    "environment {env_name}: {owner} renders {} {store:?}, which \
+                                     must start and end with a letter or digit ({})",
+                                    s.label, s.pattern
+                                ),
+                            ));
                         }
                         if s.case_insensitive {
                             store.to_ascii_lowercase()
@@ -1267,11 +1312,9 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "fly.app = \"mcproductlabs-portfolio-production\"",
             "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
-        assert!(
-            config_err(&bad).ends_with(
-                "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly\n"
-            )
-        );
+        assert!(config_err(&bad).ends_with(
+            "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly, kubernetes\n"
+        ));
     }
 
     /// FR-2: an unknown entry under an environment shows its line, as the parser's own
@@ -1294,7 +1337,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes or a \
-             target section (azure, fly)\n"
+             target section (azure, fly, kubernetes)\n"
         ));
     }
 

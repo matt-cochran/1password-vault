@@ -23,6 +23,10 @@ pub struct RuntimeSnapshot {
     pub bindings: BTreeMap<String, Binding>,
     /// SHA-256 of the canonical JSON of everything outside managed names (FR-31).
     pub unmanaged_fingerprint: String,
+    /// The revision the current spec produced (the newest one, ready or not), when the
+    /// runtime has one. A sync that changes nothing confirms its health before pruning or
+    /// after an interrupted run (NR-1, NR-2).
+    pub revision: Option<Revision>,
     /// The runtime's raw spec, kept for read-modify-write. Holds no secret values
     /// (Key Vault references and config only); `Debug` prints its length only.
     pub spec: RawSpec,

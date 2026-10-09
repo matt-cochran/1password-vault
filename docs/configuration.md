@@ -124,6 +124,75 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--p
 
 It ends with the path, the counts (`N secret, M config, skipped K`) and `Next step: opv plan <env>`.
 
+## Targets
+
+Each environment names at most one target: `fly` (above), `azure` or `kubernetes`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).
+
+How the values travel depends on the field kind:
+
+- A **secret** (concealed field) is stored in the target's secret store and bound to the app as a reference to one exact version.
+- **Config** (text field) is set as a plain environment variable on the app. Set `config = "store"` to keep config in the store too. There is no way to put a secret in a plain variable.
+- On Fly, config is not synced, as before; read it with `config export`.
+
+### Azure: Key Vault + Container Apps
+
+```toml
+[environments.prod.azure]
+subscription   = "00000000-0000-0000-0000-000000000000"   # id or name; required
+key_vault      = "kv-myapp-prod"
+resource_group = "rg-myapp"
+container_app  = "ca-myapp"
+container      = "api"                       # only if the app has more than one container
+identity       = "system"                    # or the resource id of a user-assigned identity
+env_name       = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
+config         = "env"                       # default; "store" keeps config in Key Vault too
+```
+
+| Field | Meaning |
+|---|---|
+| `subscription` | Required. opv passes it on every `az` call and never uses your default subscription. |
+| `key_vault` | The vault that holds the secrets. |
+| `resource_group` | The resource group of the Container App. <!-- verify: also used for the vault? --> |
+| `container_app` | The app that receives the variables. |
+| `container` | Optional. Required only when the app runs more than one container; opv then lists the names. |
+| `identity` | `system`, or the resource id of the user-assigned identity the app uses to read Key Vault. |
+| `env_name` | Template for the variable name; must contain `{PRODUCT}` and `{KEY}`. It defines the managed set. Not allowed under the simple profile, where the field name is the variable name. |
+| `config` | `env` (default) or `store`. |
+
+Names and limits are checked when the file loads, before any call:
+
+- The Key Vault name is the variable name with `_` changed to `-`, and must match `^[0-9A-Za-z-]{1,127}$`. `FLEET__ALLUMATA__OPENAI_API_KEY` is stored as `FLEET--ALLUMATA--OPENAI-API-KEY`.
+- Key Vault names ignore case, so two keys that map to the same name, even in different case, are an error naming both.
+- A Key Vault value may be at most 25 KB. <!-- verify: exact limit and wording of the failure -->
+- Every identifier is checked like `fly.app` (no leading `-`, no shell metacharacters).
+
+opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged secrets. `opv explain <KEY>` shows the Key Vault name and the variable it feeds.
+
+### Kubernetes: Secrets + Deployment
+
+```toml
+[environments.dev.kubernetes]
+context    = "kind-opv"                  # required; passed to every kubectl call
+namespace  = "myapp"                     # required
+deployment = "api"                       # required
+container  = "api"                       # optional when the pod has one container
+env_name   = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
+config     = "env"                       # or "store"
+```
+
+opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<10 hex of the value's hash>`, labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. A changed value is a new Secret; old ones are removed only by `--prune`, after a healthy rollout. The Secret name is the variable name lower-cased with `_` changed to `-`, so it must be a valid DNS-1123 name (at most 253 characters with the suffix), and collisions are an error. A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused when the configuration loads, naming the key and its line. <!-- verify: name length/limit message -->
+
+### Guarding an environment: `confirm_env`
+
+```toml
+[environments.prod]
+vault_id = "vprd1234example"
+item_id  = "iprd1234example"
+confirm_env = true
+```
+
+With `confirm_env = true`, a command that changes the target must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv refuses (exit 6) and prints the exact command to re-run. Reading commands (`status`, `plan`, `check`) are unaffected. <!-- verify: which commands require --confirm: sync only, or item skeleton too? -->
+
 ## Rules reference
 
 Rules go in a key's `rules = { ... }` table. A failure names the key, the rule and a reason, never the value.

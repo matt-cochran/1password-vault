@@ -4,11 +4,14 @@
 //! Layout: `config.rs` holds the section parsing, name rules and the `TargetConfig` impl,
 //! whose `open` returns `Ports::Pinned` over the store adapter `keyvault.rs` and the
 //! runtime adapter `containerapp.rs`. Both run `az` through the shared plumbing in `az.rs`
-//! (spawn, failure diagnosis, `/dev/stdin` check, pacing).
+//! (spawn, failure diagnosis, `/dev/stdin` check, pacing). `preflight.rs` holds the
+//! read-only checks run before a command touches the target, the vault URI read from
+//! Azure, and the `doctor` lines (NR-23, NR-25, FR-26, FR-33).
 
 mod az;
 pub mod config;
 pub mod containerapp;
 pub mod keyvault;
+pub mod preflight;
 
 pub use config::{AzureTarget, ConfigRoute, PROVIDER};

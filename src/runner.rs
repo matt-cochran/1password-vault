@@ -170,10 +170,25 @@ pub trait CommandRunner {
     /// status is returned as is.
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output>;
 
+    /// Wait `d` (never past the run budget) before polling again, printing `note` on
+    /// stderr first (nothing when it is empty): the confirming read after a write (NR-30),
+    /// a target busy with an update (NR-25). The fake advances its clock.
+    fn pause(&self, d: Duration, note: &str);
+
+    /// One line for the person running opv on stderr, never on stdout (so `--json` stays
+    /// parseable): e.g. a read command's preflight note. Names only, never a value.
+    fn note(&self, line: &str);
+
     /// Run `program` with inherited stdin/stdout/stderr and the given extra `env`, wait, and
     /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32>;
+
+    /// Time left in the run budget (`--timeout`, NR-4), for waits that must end inside it
+    /// (a rollout); `None` when this runner has no budget.
+    fn remaining(&self) -> Option<Duration> {
+        None
+    }
 
     /// Check that the native CLI can execute a child for local run (not metadata reads).
     fn local_run_supported(&self) -> io::Result<()> {
@@ -511,6 +526,13 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         ));
         e.sleep(delay);
     }
+}
+
+fn pause_on(e: &dyn Engine, d: Duration, note: &str) {
+    if !note.is_empty() {
+        e.note(note);
+    }
+    e.sleep(d.min(left(e)));
 }
 
 /// The call was never started: the run budget (`--timeout`) is spent.
@@ -914,6 +936,10 @@ fn native_op_on(paths: &std::ffi::OsStr) -> io::Result<()> {
 }
 
 impl CommandRunner for ProcessRunner {
+    fn remaining(&self) -> Option<Duration> {
+        Some(left(self))
+    }
+
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
         read_on(self, call, refused)
     }
@@ -924,6 +950,14 @@ impl CommandRunner for ProcessRunner {
 
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output> {
         probe_on(self, call, limit)
+    }
+
+    fn pause(&self, d: Duration, note: &str) {
+        pause_on(self, d, note)
+    }
+
+    fn note(&self, line: &str) {
+        Engine::note(self, line)
     }
 
     fn local_run_supported(&self) -> io::Result<()> {
@@ -1281,6 +1315,10 @@ pub mod fake {
     }
 
     impl CommandRunner for FakeRunner {
+        fn remaining(&self) -> Option<Duration> {
+            Some(super::left(self))
+        }
+
         fn read(&self, call: &super::Call, refused: &[i32]) -> io::Result<Outcome> {
             super::read_on(self, call, refused)
         }
@@ -1299,6 +1337,14 @@ pub mod fake {
                 super::failure::record(call.program, stderr);
             }
             Ok(out)
+        }
+
+        fn pause(&self, d: Duration, note: &str) {
+            super::pause_on(self, d, note)
+        }
+
+        fn note(&self, line: &str) {
+            super::Engine::note(self, line)
         }
 
         fn local_run_supported(&self) -> io::Result<()> {

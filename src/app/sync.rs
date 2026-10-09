@@ -2,28 +2,42 @@
 //!
 //! Fly digests cannot be computed locally (D0 Q4), so `sync` is stage-and-compare
 //! (ruling P1): read the item once → list A → plan → refuse if anything blocks (nothing
-//! staged) → validate the import batch → stage → list B → report each staged key as
-//! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged; never
+//! staged; `opv explain` named for the first key, NR-17) → validate the import batch →
+//! preflight the target's state (NR-23, NR-24; `super::preflight`) → stage → list B, polled
+//! until every staged name shows a digest (NR-30) → report each staged key as changed or
+//! unchanged by digest → `--prune`: unset the plan's prune list (staged; never
 //! an immutable key unless named with `--prune-immutable`) →
 //! `--deploy`: deploy when a staged digest changed, a prune happened, or a managed name is
 //! still `Staged`/`Partial` on Fly from an earlier run (FR-7). Without `--deploy`
 //! nothing is ever deployed. `plan` reads the item once and lists once; it mutates
 //! nothing (FR-11).
+//!
+//! A pinned target (clouds, FR-29) has no staging area: `sync` writes a new store version
+//! only for a value that differs (FR-31), reads the runtime's bindings, and only under
+//! `--deploy` re-pins them in one revision; it prunes only after that revision is healthy
+//! (FR-32). See `run_pinned`.
 
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::time::Duration;
+
+use std::collections::BTreeMap;
+
+use sha2::{Digest, Sha256};
 
 use super::{
-    is_blocking, managed_names, open_target, print_extras, print_rows, read_and_plan, row_names,
-    unmanaged_on_target, write_err, write_json,
+    compare, is_blocking, managed_names, open_target, plan_item, preflight, print_extras,
+    print_rows, read_and_plan, read_fields, row_names, unmanaged_on_target, write_err, write_json,
 };
+use crate::domain::plan::CurrentState::Same;
 use crate::domain::rules;
 use crate::domain::{
-    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState,
-    key_label,
+    Binding, Fleet, Health, ItemField, KeyState, Kind, Revision, Row, RuntimeChange,
+    RuntimeSnapshot, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState, key_label,
 };
 use crate::error::Error;
-use crate::ports::Ports;
+use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
+use crate::provider::TargetConfig;
 use crate::runner::CommandRunner;
 
 /// Flags of `sync`.
@@ -51,33 +65,67 @@ pub fn run(
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
     let (t, ports) = open_target(fleet, env_name, r)?;
-    let (store, runtime) = match &ports {
-        Ports::Staged { store, runtime } => (store.as_ref(), runtime.as_ref()),
-        // Replaced by the pinned sync flow (FR-29, FR-31).
-        Ports::Pinned { .. } => {
-            return Err(Error::Target(
-                "internal: pinned sync not implemented".into(),
-            ));
-        }
-    };
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
-    let (plan, list_a) =
-        read_and_plan(fleet, env_name, r, Some(&ports), &rotate, &prune_immutable)?;
-
-    let blocking = row_names(&plan.rows, is_blocking);
-    if !blocking.is_empty() {
-        return Err(Error::Policy(format!(
-            "sync refused, nothing staged: {}",
-            blocking.join(", ")
-        )));
+    let c = Ctx {
+        fleet,
+        env_name,
+        t,
+        r,
+        opts,
+        rotate: &rotate,
+        prune_immutable: &prune_immutable,
+    };
+    match &ports {
+        Ports::Staged { store, runtime } => {
+            run_staged(&c, &ports, store.as_ref(), runtime.as_ref(), out)
+        }
+        Ports::Pinned { store, runtime } => {
+            run_pinned(&c, &ports, store.as_ref(), runtime.as_ref(), out)
+        }
     }
+}
+
+/// One `sync` run's inputs, resolved before any call.
+struct Ctx<'a> {
+    fleet: &'a Fleet,
+    env_name: &'a str,
+    t: &'a dyn TargetConfig,
+    r: &'a dyn CommandRunner,
+    opts: &'a SyncOpts,
+    rotate: &'a BTreeSet<(String, String)>,
+    prune_immutable: &'a BTreeSet<(String, String)>,
+}
+
+/// `sync` for a staged target (Fly, §6.4): stage, compare digests, deploy.
+fn run_staged(
+    c: &Ctx<'_>,
+    ports: &Ports<'_>,
+    store: &dyn StagedStore,
+    runtime: &dyn StagedRuntime,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (fleet, env_name, t, opts) = (c.fleet, c.env_name, c.t, c.opts);
+    let (plan, list_a) = read_and_plan(
+        fleet,
+        env_name,
+        c.r,
+        Some(ports),
+        c.rotate,
+        c.prune_immutable,
+    )?;
+    refuse_blocking(&plan, env_name)?;
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
     store.validate(&batch)?;
+    // Last read-only step before the first write (NR-23, NR-24).
+    let skip_deploy = preflight::run(t, c.r, out)?;
     print_extras(out, &plan)?;
     print_counts(out, &plan)?;
 
+    let label = t.provider().label();
+    // Writes this run completed, named when a later step fails (NR-10).
+    let mut done: Vec<String> = Vec::new();
     let mut changed = Vec::new();
     let mut unchanged = Vec::new();
     // Nothing staged by this run: list A is the current state, no second list needed.
@@ -85,7 +133,8 @@ pub fn run(
         list_a.clone()
     } else {
         store.write(&batch)?;
-        store.list()?
+        done.push(format!("staged {} secret(s)", batch.len()));
+        confirm(store, &batch, c.r, label, &done)?
     };
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -103,7 +152,10 @@ pub fn run(
     let pruned = if plan.prune.is_empty() {
         false
     } else if opts.prune {
-        store.remove(&plan.prune)?;
+        store
+            .remove(&plan.prune)
+            .map_err(|e| after_writes(e, &done))?;
+        done.push(format!("pruned {} name(s)", plan.prune.len()));
         p(out, format!("pruned (staged): {}", plan.prune.join(", ")))?;
         true
     } else {
@@ -137,25 +189,698 @@ pub fn run(
         .map(|s| s.name.as_str())
         .collect();
     if !pending.is_empty() {
-        p(
-            out,
-            format!(
-                "pending on {}: {}",
-                t.provider().label(),
-                pending.join(", ")
-            ),
-        )?;
+        p(out, format!("pending on {label}: {}", pending.join(", ")))?;
     }
 
     let needs_deploy = !changed.is_empty() || pruned || !pending.is_empty();
     match (needs_deploy, opts.deploy) {
         (false, true) => p(out, "nothing pending; not deploying".into()),
         (false, false) => p(out, "nothing pending".into()),
+        (true, true) if skip_deploy.is_some() => p(out, skip_deploy.unwrap_or_default()),
         (true, true) => {
-            runtime.deploy()?;
+            runtime.deploy().map_err(|e| after_writes(e, &done))?;
             p(out, "deployed staged secrets".into())
         }
         (true, false) => p(out, "staged changes not deployed (no --deploy)".into()),
+    }
+}
+
+/// `sync` for a pinned target (FR-29, FR-31, FR-32, FR-33; spec §6): compare and write new
+/// store versions, read the runtime's bindings, and only with `--deploy` re-pin them in one
+/// revision; prune only after that revision is healthy.
+///
+/// Every step is convergent (NR-1): a run stopped anywhere leaves at most unbound store
+/// versions (never live) or a revision Azure finishes on its own, and the next run computes
+/// what is left from what it reads. A binding never names a version that does not exist:
+/// versions are written before they are pinned, and a store entry is deleted only once a
+/// healthy revision no longer binds it.
+fn run_pinned(
+    c: &Ctx<'_>,
+    ports: &Ports<'_>,
+    store: &dyn PinnedStore,
+    runtime: &dyn PinnedRuntime,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
+    let fields = read_fields(fleet, env_name, c.r)?;
+    // Blocking rows refuse before any call to the target.
+    let copy = fields.iter().map(copy_field).collect();
+    refuse_blocking(
+        &plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0,
+        env_name,
+    )?;
+    // The target's state, read-only, before its first read (NR-23, NR-25).
+    let skip_deploy = preflight::run(c.t, c.r, out)?;
+    let (plan, listed) = plan_item(
+        fleet,
+        env_name,
+        fields,
+        Some(ports),
+        c.rotate,
+        c.prune_immutable,
+    )?;
+    refuse_blocking(&plan, env_name)?;
+    let want = pinned_want(
+        fleet,
+        env_name,
+        &plan,
+        &listed,
+        store,
+        runtime.config_in_store(),
+    )?;
+    if !want.refused.is_empty() {
+        return Err(Error::Policy(format!(
+            "sync refused, nothing staged: {}",
+            want.refused.join(", ")
+        )));
+    }
+    print_extras(out, &plan)?;
+    let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+
+    // 3. New store versions: not live until a revision binds them (FR-29).
+    let mut written = BTreeMap::new();
+    for (name, w) in &want.store {
+        if let Some(value) = &w.write {
+            let version = store.write_one(name, value).map_err(|e| {
+                let done: Vec<&str> = written.keys().map(String::as_str).collect();
+                with_note(e, &already_written(&done))
+            })?;
+            written.insert(name.clone(), version);
+        }
+    }
+    let unchanged: Vec<&str> = want
+        .store
+        .iter()
+        .filter(|(_, w)| w.write.is_none())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if !written.is_empty() {
+        p(
+            out,
+            format!("written (new versions): {}", join_keys(&written)),
+        )?;
+    }
+    if !unchanged.is_empty() {
+        p(out, format!("unchanged: {}", unchanged.join(", ")))?;
+    }
+
+    // 4–5. What the runtime binds now, and what must change.
+    let snap = runtime.bindings()?;
+    let d = pinned_diff(c.t, &want, &written, &snap, &plan, opts.prune);
+    if !d.drift.is_empty() {
+        p(out, drift_line(env_name, &join(&d.drift)))?;
+    }
+    // Pruned like secrets: opv-managed names no longer desired, including config routed to
+    // the store (the planner names only secrets).
+    let prune_set = prune_names(fleet, env_name, &plan, &listed, &want)?;
+    let stray: BTreeSet<&str> = d
+        .not_desired
+        .iter()
+        .chain(&prune_set)
+        .map(String::as_str)
+        .collect();
+    if !stray.is_empty() && !opts.prune {
+        p(
+            out,
+            format!(
+                "not desired here, kept (pass --prune to remove): {}",
+                join(&stray)
+            ),
+        )?;
+    }
+    if !stray.is_empty() && opts.prune && !opts.deploy {
+        p(
+            out,
+            format!("not pruned without --deploy: {}", join(&stray)),
+        )?;
+    }
+    if !plan.held_from_prune.is_empty() {
+        p(
+            out,
+            format!(
+                "held (immutable), not pruned (pass --prune --prune-immutable {} to remove): {}",
+                key_ref_hint(fleet),
+                held_from_prune(&plan)
+            ),
+        )?;
+    }
+
+    // 6. Deploy only with --deploy (FR-7, FR-9).
+    let change = d.change(c.t, &written);
+    let pending = change_names(&change);
+    let deletes: &[String] = if opts.prune && opts.deploy {
+        &prune_set
+    } else {
+        &[]
+    };
+    let env_routed = |out: &mut dyn Write| {
+        if want.plain.is_empty() {
+            return Ok(());
+        }
+        p(
+            out,
+            format!(
+                "env-routed (visible to readers of {}): {}",
+                runtime.describe(),
+                join_keys(&want.plain)
+            ),
+        )
+    };
+    if !opts.deploy {
+        p(
+            out,
+            if pending.is_empty() {
+                "nothing pending".into()
+            } else {
+                format!("pending deploy (pass --deploy): {}", join(&pending))
+            },
+        )?;
+        return env_routed(out);
+    }
+    if let Some(line) = skip_deploy.filter(|_| !pending.is_empty()) {
+        p(out, line)?;
+        return env_routed(out);
+    }
+    let revision = if !pending.is_empty() {
+        let left = |now: &RuntimeSnapshot| {
+            let d = pinned_diff(c.t, &want, &written, now, &plan, opts.prune);
+            change_names(&d.change(c.t, &written))
+        };
+        apply_reconciled(runtime, &change, &snap, &left, out)?
+    } else if let Some(rev) = &snap.revision {
+        // Nothing to change: confirm the revision of the current bindings is healthy, so a
+        // run stopped before its health check, or a revision that failed, is never
+        // reported as done, and deletes left by an earlier run wait for it (FR-32, NR-1).
+        rev.clone()
+    } else if deletes.is_empty() {
+        p(out, "nothing pending; not deploying".into())?;
+        return env_routed(out);
+    } else {
+        return Err(Error::Target(format!(
+            "{} reports no revision, so nothing was pruned\n  next: run opv status {env_name}",
+            runtime.describe()
+        )));
+    };
+    let health = runtime.await_healthy(&revision)?;
+    if pending.is_empty() && !matches!(health, Health::Healthy) {
+        // Nothing was applied: say so, so a failure is not read as caused by this run.
+        let state = match &health {
+            Health::TimedOut => "not healthy yet".to_string(),
+            Health::Unhealthy(detail) => format!("unhealthy\n  {detail}"),
+            Health::Healthy => unreachable!(),
+        };
+        return Err(Error::Target(format!(
+            "nothing to change; the latest revision {} (with these settings) is {state}; opv \
+             changed nothing\n  Next: `{}` to see its state; if it cannot read its secrets, \
+             run opv doctor --env {env_name}",
+            revision.0,
+            runtime.inspect_hint(&revision)
+        )));
+    }
+    match health {
+        Health::Healthy => {}
+        Health::Unhealthy(detail) => {
+            return Err(Error::Target(format!(
+                "{detail}\n  the previous revision keeps serving; nothing pruned\n  next: run \
+                 opv doctor --env {env_name} to check that {} can read its secrets, then run \
+                 the same command again",
+                runtime.describe()
+            )));
+        }
+        Health::TimedOut => {
+            return Err(Error::Target(format!(
+                "revision {} of {} is not healthy yet; the previous revision keeps serving; \
+                 nothing pruned\n  next: `{}` to see its state, then run the same command again",
+                revision.0,
+                runtime.describe(),
+                runtime.inspect_hint(&revision)
+            )));
+        }
+    }
+    p(
+        out,
+        if pending.is_empty() {
+            "nothing pending; not deploying".into()
+        } else {
+            format!("deployed revision {}: {}", revision.0, join(&pending))
+        },
+    )?;
+    // Superseded versions (FR-32) of every name the healthy revision pins, not only those
+    // re-pinned now, so a run stopped before this step is finished by the next (NR-1). A
+    // no-op where the store keeps history.
+    let mut bound: BTreeMap<&str, &str> = snap
+        .bindings
+        .iter()
+        .filter_map(|(n, b)| match b {
+            Binding::Pinned { version, .. } => Some((n.as_str(), version.as_str())),
+            _ => None,
+        })
+        .collect();
+    bound.extend(
+        change
+            .pin
+            .iter()
+            .map(|(n, (_, v))| (n.as_str(), v.as_str())),
+    );
+    for name in want.store.keys() {
+        if let Some(version) = bound.get(name.as_str()) {
+            store.collect_superseded(name, version)?;
+        }
+    }
+    let mut pruned = Vec::new();
+    for name in deletes {
+        store.delete(name).map_err(|e| {
+            let done: Vec<&str> = pruned.iter().map(String::as_str).collect();
+            with_note(e, &format!("already pruned: {}", none_or(&done)))
+        })?;
+        pruned.push(name.clone());
+    }
+    if !pruned.is_empty() {
+        p(out, format!("pruned: {}", pruned.join(", ")))?;
+    }
+    env_routed(out)
+}
+
+/// The drift line (status and sync): a binding older than the store's current version
+/// is either a hand re-pin or a sync that ran without `--deploy`; opv cannot tell which.
+pub(crate) fn drift_line(env_name: &str, names: &str) -> String {
+    format!(
+        "drift: {names} point to an older Key Vault version than the latest (re-pinned by \
+         hand, or synced without --deploy); opv sync {env_name} --deploy repins them"
+    )
+}
+
+/// Store names to prune: the plan's secrets plus managed config entries (config routed to
+/// the store) whose key is no longer desired here. Only entries the store lists as
+/// opv-managed for this environment; immutable keys are held as for secrets.
+fn prune_names(
+    fleet: &Fleet,
+    env_name: &str,
+    plan: &SyncPlan,
+    listed: &[StoreEntry],
+    want: &PinnedWant,
+) -> Result<Vec<String>, Error> {
+    let env = fleet.environment(env_name)?;
+    let mut names = plan.prune.clone();
+    for (product, p) in &fleet.products {
+        for (key, spec) in &p.keys {
+            let desired = plan
+                .config
+                .get(product)
+                .is_some_and(|k| k.contains_key(key));
+            let Some(name) = env.target_name(product, key) else {
+                continue;
+            };
+            if spec.kind == Kind::Config
+                && !spec.immutable
+                && !desired
+                && !want.store.contains_key(&name)
+                && listed.iter().any(|e| e.name == name)
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Applies `change`. An apply whose outcome is unknown (NR-2) is reconciled by reading the
+/// bindings back: when they show the change, the run goes on with the revision they name;
+/// otherwise the error stays `Unknown` (exit 9) and says what the read showed.
+/// `left` names what a snapshot still lacks of the change.
+fn apply_reconciled(
+    runtime: &dyn PinnedRuntime,
+    change: &RuntimeChange,
+    snap: &RuntimeSnapshot,
+    left: &dyn Fn(&RuntimeSnapshot) -> Vec<String>,
+    out: &mut dyn Write,
+) -> Result<Revision, Error> {
+    let msg = match runtime.apply(change, snap) {
+        Err(Error::Unknown(msg)) => msg,
+        other => return other,
+    };
+    let still_unknown =
+        |why: &str| Error::Unknown(format!("{msg}\n  read back: {why}; nothing pruned"));
+    let Ok(now) = runtime.bindings() else {
+        return Err(still_unknown("could not read the bindings back"));
+    };
+    match (&now.revision, left(&now).is_empty()) {
+        (Some(rev), true) => {
+            writeln!(
+                out,
+                "the update was applied (read back from {})",
+                runtime.describe()
+            )
+            .map_err(write_err)?;
+            Ok(rev.clone())
+        }
+        _ => Err(still_unknown(&format!(
+            "{} does not show the change",
+            runtime.describe()
+        ))),
+    }
+}
+
+/// What a pinned target should hold for the desired rows of a plan (FR-14, FR-29).
+pub(crate) struct PinnedWant {
+    /// Store-routed env name (secrets; config when routed to the store) → its store state.
+    pub store: BTreeMap<String, StoreWant>,
+    /// Env-routed config: env name → value. Config only, never a secret (FR-14).
+    pub plain: BTreeMap<String, String>,
+    /// `product/KEY (failed <rule> (<reason>))` for config values the store refuses.
+    pub refused: Vec<String>,
+}
+
+/// One store-routed name: the store's version before this run, and the value to write when
+/// the store does not hold the desired one.
+pub(crate) struct StoreWant {
+    pub current: Option<String>,
+    pub write: Option<SecretValue>,
+}
+
+/// Bindings to change on a pinned target, and what is reported beside them.
+pub(crate) struct PinnedDiff {
+    /// env name → version to bind (`None`: written by the next sync, not known yet).
+    pub pin: BTreeMap<String, Option<String>>,
+    /// Env-routed config whose plain value differs or is missing: env name → value.
+    pub set: BTreeMap<String, String>,
+    /// Bound managed names no longer desired here (and not held immutable).
+    pub not_desired: Vec<String>,
+    /// Bound to a store version other than the store's current one.
+    pub drift: BTreeSet<String>,
+    unbind: bool,
+}
+
+impl PinnedDiff {
+    /// The runtime change; every pinned version must be known (written or current).
+    fn change(&self, t: &dyn TargetConfig, written: &BTreeMap<String, String>) -> RuntimeChange {
+        RuntimeChange {
+            pin: self
+                .pin
+                .iter()
+                .filter_map(|(n, v)| {
+                    let v = v.as_ref().or_else(|| written.get(n))?;
+                    Some((n.clone(), (t.store_name(n), v.clone())))
+                })
+                .collect(),
+            set: self.set.clone(),
+            unbind: if self.unbind {
+                self.not_desired.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Names whose binding changes on the next `--deploy`.
+    pub fn pending(&self) -> BTreeSet<&str> {
+        self.pin
+            .keys()
+            .chain(self.set.keys())
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// Names a change touches, sorted.
+fn change_names(c: &RuntimeChange) -> Vec<String> {
+    let names: BTreeSet<&String> = c.pin.keys().chain(c.set.keys()).chain(&c.unbind).collect();
+    names.into_iter().cloned().collect()
+}
+
+/// The desired store and env state of `plan` (FR-14, FR-31). Secrets are always
+/// store-routed; config is store-routed when `config_in_store`, and then read and compared
+/// like a secret. `listed` carries the versions the plan's reads found.
+pub(crate) fn pinned_want(
+    fleet: &Fleet,
+    env_name: &str,
+    plan: &SyncPlan,
+    listed: &[StoreEntry],
+    store: &dyn PinnedStore,
+    config_in_store: bool,
+) -> Result<PinnedWant, Error> {
+    let env = fleet.environment(env_name)?;
+    let name_of = |p: &str, k: &str| env.target_name(p, k).unwrap_or_default();
+    let version = |n: &str| {
+        listed
+            .iter()
+            .find(|e| e.name == n)
+            .and_then(|e| e.version.clone())
+    };
+    let staged: BTreeMap<&str, &SecretValue> =
+        plan.stage.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    let mut want = PinnedWant {
+        store: BTreeMap::new(),
+        plain: BTreeMap::new(),
+        refused: Vec::new(),
+    };
+    for row in plan
+        .rows
+        .iter()
+        .filter(|r| r.kind == Kind::Secret && r.state == KeyState::Ready)
+    {
+        let name = name_of(&row.product, &row.key);
+        let write = staged
+            .get(name.as_str())
+            .map(|v| SecretValue::new(v.expose().to_string()));
+        let mut current = version(&name);
+        // Present but never read (cannot happen today): read it once for its version.
+        if write.is_none() && current.is_none() {
+            current = store.read(&name)?.map(|(_, v)| v);
+        }
+        want.store.insert(name, StoreWant { current, write });
+    }
+    for (product, keys) in &plan.config {
+        for (key, value) in keys {
+            let name = name_of(product, key);
+            if !config_in_store {
+                want.plain.insert(name, value.clone());
+                continue;
+            }
+            let desired = SecretValue::new(value.clone());
+            if let Some((rule, why)) = store.refusal(&name, &desired) {
+                want.refused.push(format!(
+                    "{} (failed {rule} ({why}))",
+                    key_label(product, key)
+                ));
+                continue;
+            }
+            let (current, same) = match store.read(&name)? {
+                Some((v, version)) => (Some(version), compare(&v, &desired) == Same),
+                None => (None, false),
+            };
+            let write = (!same).then_some(desired);
+            want.store.insert(name, StoreWant { current, write });
+        }
+    }
+    Ok(want)
+}
+
+/// Compares `want` (with this run's `written` versions) to the runtime's bindings.
+pub(crate) fn pinned_diff(
+    t: &dyn TargetConfig,
+    want: &PinnedWant,
+    written: &BTreeMap<String, String>,
+    snap: &RuntimeSnapshot,
+    plan: &SyncPlan,
+    unbind: bool,
+) -> PinnedDiff {
+    let mut d = PinnedDiff {
+        pin: BTreeMap::new(),
+        set: BTreeMap::new(),
+        not_desired: Vec::new(),
+        drift: BTreeSet::new(),
+        unbind,
+    };
+    for (name, w) in &want.store {
+        // A value still to write (status) has no version to bind yet.
+        let target = if w.write.is_some() {
+            written.get(name)
+        } else {
+            w.current.as_ref()
+        };
+        let bound = snap.bindings.get(name);
+        let current = match (bound, target) {
+            (
+                Some(Binding::Pinned {
+                    store_name,
+                    version,
+                }),
+                Some(v),
+            ) => store_name.eq_ignore_ascii_case(&t.store_name(name)) && version == v,
+            _ => false,
+        };
+        if let (Some(Binding::Pinned { version, .. }), Some(now)) = (bound, &w.current)
+            && version != now
+        {
+            d.drift.insert(name.clone());
+        }
+        if !current {
+            d.pin.insert(name.clone(), target.cloned());
+        }
+    }
+    for (name, value) in &want.plain {
+        let digest = hex::encode(Sha256::digest(value.as_bytes()));
+        if !matches!(snap.bindings.get(name), Some(Binding::Plain { digest: d }) if *d == digest) {
+            d.set.insert(name.clone(), value.clone());
+        }
+    }
+    let held: BTreeSet<&str> = plan
+        .held_from_prune
+        .iter()
+        .map(|(_, _, n)| n.as_str())
+        .collect();
+    d.not_desired = snap
+        .bindings
+        .keys()
+        .filter(|n| {
+            !want.store.contains_key(*n)
+                && !want.plain.contains_key(*n)
+                && !held.contains(n.as_str())
+        })
+        .cloned()
+        .collect();
+    d
+}
+
+/// An item field with its value copied into a new zeroizing wrapper.
+fn copy_field(f: &ItemField) -> ItemField {
+    ItemField {
+        section: f.section.clone(),
+        label: f.label.clone(),
+        kind: f.kind,
+        value: SecretValue::new(f.value.expose().to_string()),
+    }
+}
+
+/// `err` with `note` (names only) on a line of its own, same category.
+fn with_note(err: Error, note: &str) -> Error {
+    let add = |m: String| format!("{m}\n  {note}");
+    match err {
+        Error::Config(m) => Error::Config(add(m)),
+        Error::Dependency(m) => Error::Dependency(add(m)),
+        Error::Auth(m) => Error::Auth(add(m)),
+        Error::Source(m) => Error::Source(add(m)),
+        Error::Target(m) => Error::Target(add(m)),
+        Error::Policy(m) => Error::Policy(add(m)),
+        Error::Unknown(m) => Error::Unknown(add(m)),
+        e @ Error::Findings(_) => e,
+    }
+}
+
+fn already_written(done: &[&str]) -> String {
+    format!(
+        "already written (new versions, not live until a deploy binds them): {}",
+        none_or(done)
+    )
+}
+
+fn none_or(names: &[&str]) -> String {
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn join<S: AsRef<str>>(names: impl IntoIterator<Item = S>) -> String {
+    names
+        .into_iter()
+        .map(|n| n.as_ref().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn join_keys<V>(m: &BTreeMap<String, V>) -> String {
+    join(m.keys())
+}
+
+/// Refuses the whole run, before any write, when a row blocks (FR-15), naming the next
+/// command (NR-17).
+fn refuse_blocking(plan: &SyncPlan, env_name: &str) -> Result<(), Error> {
+    let blocking = row_names(&plan.rows, is_blocking);
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Policy(format!(
+        "sync refused, nothing staged: {}\n  {}",
+        blocking.join(", "),
+        explain_next(&plan.rows, env_name)
+    )))
+}
+
+/// Longest wait for staged names to show a digest (NR-30).
+const CONFIRM_LIMIT: Duration = Duration::from_secs(30);
+
+/// List B (NR-30): the store's list right after staging can lag. Polls, waiting 1 s, 2 s,
+/// 4 s, ... on the runner's clock, until every staged name shows a digest or
+/// [`CONFIRM_LIMIT`] has passed; a name still without one is then counted as changed,
+/// never as unchanged. A read that never answers is reported with what was already done.
+fn confirm(
+    store: &dyn StagedStore,
+    batch: &[(String, &SecretValue)],
+    r: &dyn CommandRunner,
+    label: &str,
+    done: &[String],
+) -> Result<Vec<StoreEntry>, Error> {
+    let mut waited = Duration::ZERO;
+    let mut delay = Duration::from_secs(1);
+    loop {
+        let list = store.list().map_err(|e| match e {
+            Error::Unknown(_) => Error::Unknown(format!(
+                "{label} did not respond while confirming the staged secrets ({}); not \
+                 confirmed\n  next: re-run the same command (safe)",
+                done.join(", ")
+            )),
+            e => after_writes(e, done),
+        })?;
+        let unseen = batch
+            .iter()
+            .filter(|(n, _)| digest(&list, n).is_none())
+            .count();
+        if unseen == 0 || waited >= CONFIRM_LIMIT {
+            return Ok(list);
+        }
+        let d = delay.min(CONFIRM_LIMIT - waited);
+        r.pause(
+            d,
+            &format!(
+                "confirming {unseen} staged secret(s) on {label} ({} s)",
+                waited.as_secs()
+            ),
+        );
+        waited += d;
+        delay *= 2;
+    }
+}
+
+/// NR-10: a sign-in lost after this run's first write names what had completed. Other
+/// errors already say what is known (NR-2).
+fn after_writes(e: Error, done: &[String]) -> Error {
+    match e {
+        Error::Auth(m) if !done.is_empty() => Error::Auth(format!(
+            "{m}\n  {} write(s) had completed: {}; re-running the same command is safe",
+            done.len(),
+            done.join(", ")
+        )),
+        e => e,
+    }
+}
+
+/// The next command for a refusal (NR-17): `opv explain` for the first blocking key, one
+/// line however many keys block.
+fn explain_next(rows: &[Row], env_name: &str) -> String {
+    let keys: Vec<String> = rows
+        .iter()
+        .filter(|r| is_blocking(r))
+        .map(|r| key_label(&r.product, &r.key))
+        .collect();
+    let first = format!("opv explain {} --env {env_name}", keys[0]);
+    if keys.len() == 1 {
+        format!("next: {first}")
+    } else {
+        format!("next: {first} (and likewise for each key above)")
     }
 }
 
@@ -199,10 +924,12 @@ pub fn plan_with(
 ) -> Result<(), Error> {
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
+    // The target's state, read-only and never waiting (NR-23, NR-25).
+    preflight::read(t, r)?;
     let none = BTreeSet::new();
     let (plan, on_target) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     if json {
-        write_json(out, fleet, env_name, &plan)?;
+        write_json(out, fleet, env_name, &plan, None)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
         return if n > 0 {
             Err(Error::Findings(n))
@@ -409,14 +1136,15 @@ mod tests {
     fn fake_with(item: crate::runner::Output, fly_a: crate::runner::Output) -> FakeRunner {
         FakeRunner::new([item, fly_a])
     }
-    /// item, list A, import, list B, then spare responses so an unexpected call (deploy,
+    /// item, list A, the two preflight reads, import, list B, then spare responses so an unexpected call (deploy,
     /// unset) is recorded rather than panicking, and the test can assert it never happened.
     fn fake_sync(
         item: crate::runner::Output,
         a: crate::runner::Output,
         b: crate::runner::Output,
     ) -> FakeRunner {
-        FakeRunner::new([item, a, ok(), b, ok(), ok(), ok()])
+        let [st, rel] = fly_preflight_ok();
+        FakeRunner::new([item, a, st, rel, ok(), b, ok(), ok(), ok()])
     }
     fn fake_complete() -> FakeRunner {
         fake_sync(
@@ -571,6 +1299,8 @@ mod tests {
             vec![
                 "op item get iprd --vault vprd --format json".to_string(),
                 format!("flyctl secrets list --app {app} --json"),
+                format!("flyctl status --app {app} --json"),
+                format!("flyctl releases --app {app} --json"),
                 format!("flyctl secrets import --app {app} --stage"),
                 format!("flyctl secrets list --app {app} --json"),
             ]
@@ -690,7 +1420,8 @@ mod tests {
         ))
         .unwrap();
         let a = || fly_st(&[(ENC_FLY, "d2", "Staged"), (OPENAI_FLY, "d1", "Deployed")]);
-        let r = FakeRunner::new([complete_item(), a(), ok(), ok()]);
+        let [st, rel] = fly_preflight_ok();
+        let r = FakeRunner::new([complete_item(), a(), st, rel, ok(), ok()]);
         let o = SyncOpts {
             deploy: true,
             ..opts()
@@ -703,6 +1434,8 @@ mod tests {
             vec![
                 "op item get iprd --vault vprd --format json".to_string(),
                 format!("flyctl secrets list --app {app} --json"),
+                format!("flyctl status --app {app} --json"),
+                format!("flyctl releases --app {app} --json"),
                 format!("flyctl secrets deploy --app {app}"),
             ],
             "{out}"
@@ -754,11 +1487,13 @@ mod tests {
     /// deploy must not be skipped on missing evidence.
     #[test]
     fn staged_key_without_digest_after_staging_counts_as_changed() {
-        let r = fake_sync(
-            complete_item(),
-            fly(&[(ENC_FLY, "d2")]),
-            fly(&[(ENC_FLY, "d2")]),
-        );
+        let b = || fly(&[(ENC_FLY, "d2")]);
+        let [st, rel] = fly_preflight_ok();
+        // List B is polled until the 30 s limit (NR-30): six lists, then the deploy.
+        let r = FakeRunner::new([complete_item(), b(), st, rel, ok()]);
+        r.responses
+            .borrow_mut()
+            .extend((0..6).map(|_| Ok(b())).chain([Ok(ok())]));
         let o = SyncOpts {
             deploy: true,
             ..opts()
@@ -774,7 +1509,8 @@ mod tests {
     #[test]
     fn immutable_present_on_fly_is_held_not_staged() {
         let a = || fly(&[(ENC_FLY, "d-enc")]);
-        let r = fake_sync(complete_item(), a(), a());
+        let b = fly(&[(ENC_FLY, "d-enc"), (OPENAI_FLY, "d-openai")]);
+        let r = fake_sync(complete_item(), a(), b);
         let (res, out) = sync_out(&f(), &r, &opts());
         res.unwrap();
         let stdin = import_stdin(&r).unwrap();
@@ -786,7 +1522,8 @@ mod tests {
     #[test]
     fn rotate_stages_an_immutable_key() {
         let a = || fly(&[(ENC_FLY, "d-enc")]);
-        let r = fake_sync(complete_item(), a(), fly(&[(ENC_FLY, "d-enc2")]));
+        let b = fly(&[(ENC_FLY, "d-enc2"), (OPENAI_FLY, "d-openai")]);
+        let r = fake_sync(complete_item(), a(), b);
         let o = SyncOpts {
             rotate: vec!["allumata/INTEGRATION_ENC_KEY".into()],
             ..opts()
@@ -846,10 +1583,23 @@ mod tests {
         // prod has payments = "off", so the Stripe key is managed but not desired → prune.
         fly(&[(STRIPE_FLY, "d-s"), ("OTHER_TOOL_TOKEN", "d-o")])
     }
+    /// [`fly_with_prunable`] after this run staged its two keys.
+    fn fly_with_prunable_staged() -> crate::runner::Output {
+        fly(&[
+            (STRIPE_FLY, "d-s"),
+            ("OTHER_TOOL_TOKEN", "d-o"),
+            (OPENAI_FLY, "d-openai"),
+            (ENC_FLY, "d-enc"),
+        ])
+    }
 
     #[test]
     fn sync_never_prunes_without_flag() {
-        let r = fake_sync(complete_item(), fly_with_prunable(), fly_with_prunable());
+        let r = fake_sync(
+            complete_item(),
+            fly_with_prunable(),
+            fly_with_prunable_staged(),
+        );
         sync_out(&f(), &r, &opts()).0.unwrap();
         assert!(
             !called(&r, "flyctl", &["secrets", "unset"]),
@@ -860,7 +1610,11 @@ mod tests {
 
     #[test]
     fn sync_prunes_only_managed_names_with_flag() {
-        let r = fake_sync(complete_item(), fly_with_prunable(), fly_with_prunable());
+        let r = fake_sync(
+            complete_item(),
+            fly_with_prunable(),
+            fly_with_prunable_staged(),
+        );
         let o = SyncOpts {
             prune: true,
             ..opts()
@@ -1104,6 +1858,8 @@ mod tests {
         let r = FakeRunner::new([
             complete_item(),
             fly_empty(),
+            fly_app_ok(),
+            fly_releases("complete"),
             crate::runner::Output::failure(1),
             ok(),
             ok(),
@@ -1117,8 +1873,8 @@ mod tests {
         assert!(matches!(e, Error::Target(_)), "{e}");
         // The failed import is followed only by the login check (FR-26): no list B, no
         // unset, no deploy.
-        assert_eq!(r.calls.borrow().len(), 4);
-        assert_eq!(r.calls.borrow()[3].args, vec!["auth", "whoami"]);
+        assert_eq!(r.calls.borrow().len(), 6);
+        assert_eq!(r.calls.borrow()[5].args, vec!["auth", "whoami"]);
     }
 
     // ---- fly plan -------------------------------------------------------------------
@@ -1190,5 +1946,275 @@ mod tests {
         assert!(out.contains("failed not_prefix ("), "{out}");
         assert_no_values(&out);
         assert_no_values(&e.to_string());
+    }
+
+    // ---- preflight before the first write (NR-10, NR-17, NR-23..NR-28, NR-30) ----------
+
+    const APP: &str = "mcproductlabs-portfolio-production";
+    type Out = crate::runner::Output;
+
+    /// Every write call made (import, unset, deploy).
+    fn writes(r: &FakeRunner) -> Vec<String> {
+        argvs(r)
+            .into_iter()
+            .filter(|a| ["import", "unset", "deploy"].iter().any(|w| a.contains(w)))
+            .collect()
+    }
+    /// Item and list A succeed (a prunable name on Fly), then `rest`; spare responses so
+    /// an unexpected write is recorded, not a panic.
+    fn after_list_a(rest: impl IntoIterator<Item = Out>) -> FakeRunner {
+        let r = FakeRunner::new([complete_item(), fly_with_prunable()]);
+        r.responses.borrow_mut().extend(rest.into_iter().map(Ok));
+        r
+    }
+    fn spare(r: &FakeRunner) {
+        r.responses
+            .borrow_mut()
+            .extend((0..6).map(|_| Ok(fly_with_prunable_staged())));
+    }
+    fn sync_err(r: &FakeRunner) -> Error {
+        spare(r);
+        let bash =
+            crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"));
+        crate::host::with_test_host(bash, || run(&f(), "prod", r, &mut Vec::new(), &all_flags()))
+            .unwrap_err()
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_app_dead() {
+        let r = after_list_a([fly_app_dead()]);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_deploy_running() {
+        let r = after_list_a([fly_app_ok(), fly_releases("running")]);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_fly_does_not_respond() {
+        let r = after_list_a([]);
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_signed_out_of_fly() {
+        let r = FakeRunner::new([complete_item()]);
+        r.responses.borrow_mut().extend(
+            crate::runner::fake::failed_read(1)
+                .chain([Out::failure(1)])
+                .map(Ok),
+        );
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_flyctl_missing() {
+        let r = FakeRunner::new([complete_item()]);
+        r.push_io_error(std::io::ErrorKind::NotFound);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_1password_does_not_respond() {
+        let r = FakeRunner::default();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_vault_access_is_missing() {
+        let r = FakeRunner::new(crate::runner::fake::failed_read(1).chain([
+            Out::success(br#"{"user_type":"USER"}"#.to_vec()),
+            Out::failure(1),
+        ]));
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    fn deploy_opts() -> SyncOpts {
+        SyncOpts {
+            deploy: true,
+            ..SyncOpts::default()
+        }
+    }
+    fn no_machines_warning() -> String {
+        format!(
+            "warn  fly app {APP}: no machines; secrets are staged and apply when machines \
+             start (fly scale count 1 --app {APP})\n"
+        )
+    }
+    fn staged_after(status: Out) -> (FakeRunner, Result<(), Error>, String) {
+        let r = after_list_a([status, fly_releases("complete")]);
+        spare(&r);
+        let (res, out) = sync_out(&f(), &r, &deploy_opts());
+        (r, res, out)
+    }
+
+    #[test]
+    fn suspended_fly_app_stages_with_the_no_machines_warning() {
+        let (r, res, out) = staged_after(fly_status("suspended"));
+        assert!(
+            res.is_ok() && out.contains(&no_machines_warning()) && import_stdin(&r).is_some(),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn suspended_fly_app_with_deploy_skips_the_deploy_and_exits_ok() {
+        let (r, res, out) = staged_after(fly_status("suspended"));
+        assert!(
+            res.is_ok()
+                && !called(&r, "flyctl", &["secrets", "deploy"])
+                && out.contains(&format!(
+                    "deploy skipped: {APP} has no machines; staged secrets apply when machines \
+                     start\n"
+                )),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn pending_fly_app_with_deploy_skips_the_deploy_and_exits_ok() {
+        let (r, res, out) = staged_after(fly_status("pending"));
+        assert!(
+            res.is_ok()
+                && !called(&r, "flyctl", &["secrets", "deploy"])
+                && out.contains(&no_machines_warning())
+                && out.contains("deploy skipped:"),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn stopped_machines_are_reported_not_refused() {
+        let (_r, res, out) = staged_after(fly_app_machines("stopped"));
+        assert!(
+            res.is_ok()
+                && out.contains(&format!(
+                    "warn  fly app {APP}: machines stopped; secrets are staged and apply when \
+                     machines start\n"
+                )),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn dead_fly_app_refuses_with_a_next_step() {
+        let r = after_list_a([fly_app_dead()]);
+        let e = sync_err(&r).to_string();
+        assert!(
+            e.contains(&format!(
+                "Next: recreate it with `flyctl apps create {APP}`"
+            )),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn deploy_in_progress_refuses() {
+        let r = after_list_a([fly_app_ok(), fly_releases("running")]);
+        let e = sync_err(&r);
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "target error: a Fly deploy is already running for {APP}; nothing was \
+                 changed\n  Next: wait for it to finish, then re-run"
+            )
+        );
+    }
+
+    #[test]
+    fn provider_outage_before_writes_exits_9_with_status_page() {
+        let r = after_list_a([]);
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        let e = sync_err(&r);
+        assert_eq!(
+            (e.exit_code(), e.to_string()),
+            (
+                9,
+                "outcome unknown: Fly did not respond after 3 attempts (fly status); nothing \
+                 was changed. Check https://status.flyio.net, then re-run"
+                    .to_string()
+            )
+        );
+    }
+
+    /// NR-30: list B right after staging still lacks the staged names; it is read again
+    /// until they show a digest.
+    #[test]
+    fn stale_list_after_stage_is_polled() {
+        let [st, rel] = fly_preflight_ok();
+        let fresh = fly(&[(OPENAI_FLY, "d-openai"), (ENC_FLY, "d-enc")]);
+        let r = FakeRunner::new([
+            complete_item(),
+            fly_empty(),
+            st,
+            rel,
+            ok(),
+            fly_empty(),
+            fresh,
+        ]);
+        sync_out(&f(), &r, &opts()).0.unwrap();
+        let lists = argvs(&r)
+            .iter()
+            .filter(|a| a.contains("secrets list"))
+            .count();
+        assert_eq!(lists, 3);
+    }
+
+    /// NR-30: the poll gives up after 30 s on the runner's clock.
+    #[test]
+    fn stale_list_poll_is_bounded_at_30_seconds() {
+        let [st, rel] = fly_preflight_ok();
+        let r = FakeRunner::new([complete_item(), fly_empty(), st, rel, ok()]);
+        r.responses
+            .borrow_mut()
+            .extend((0..6).map(|_| Ok(fly_empty())));
+        sync_out(&f(), &r, &opts()).0.unwrap();
+        assert_eq!(r.elapsed.get(), Duration::from_secs(30));
+    }
+
+    /// NR-10: sign-in lost after the stage: the error names the completed write.
+    #[test]
+    fn auth_loss_after_first_write_names_completed_writes() {
+        let r = after_list_a([
+            fly_app_ok(),
+            fly_releases("complete"),
+            ok(),
+            fly_with_prunable_staged(),
+            Out::failure(1), // unset
+            Out::failure(1), // auth whoami: signed out
+        ]);
+        let e = sync_err(&r);
+        assert!(
+            matches!(&e, Error::Auth(m) if m.ends_with(
+                "1 write(s) had completed: staged 2 secret(s); re-running the same command is safe"
+            )),
+            "{e}"
+        );
+    }
+
+    /// NR-17: a refusal names the next command, in one line.
+    #[test]
+    fn refusal_names_explain_as_the_next_command() {
+        let r = fake_with(
+            item_without("allumata", "OPENAI_API_KEY"),
+            fly_with_prunable(),
+        );
+        let e = sync_err(&r);
+        assert!(
+            e.to_string()
+                .ends_with("\n  next: opv explain allumata/OPENAI_API_KEY --env prod"),
+            "{e}"
+        );
     }
 }
