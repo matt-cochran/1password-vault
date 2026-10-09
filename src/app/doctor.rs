@@ -25,7 +25,7 @@
 use std::io::{self, Write};
 
 use super::write_err;
-use crate::adapters::{fly, onepassword};
+use crate::adapters::{fly, kubernetes, onepassword};
 use crate::domain::Fleet;
 use crate::error::Error;
 use crate::host::{Host, Tool};
@@ -242,6 +242,7 @@ fn spawn_tool(
     let program = match tool {
         Tool::Op => OP,
         Tool::Flyctl => fly::PROGRAM,
+        Tool::Kubectl => kubernetes::PROGRAM,
     };
     spawn(r, program, args).map_err(|e| match e {
         Error::Dependency(m) if m.ends_with("not found on PATH") => {

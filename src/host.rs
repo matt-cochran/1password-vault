@@ -155,6 +155,7 @@ pub enum Shell {
 pub enum Tool {
     Op,
     Flyctl,
+    Kubectl,
 }
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).
@@ -333,6 +334,9 @@ impl Host {
                 Tool::Flyctl => "install flyctl in the CI job (GitHub Actions: \
                                  uses: superfly/flyctl-actions/setup-flyctl@master)"
                     .into(),
+                Tool::Kubectl => "install kubectl in the CI job (GitHub Actions: \
+                                  uses: azure/setup-kubectl)"
+                    .into(),
             };
         }
         let cmd = match (tool, self.platform) {
@@ -346,6 +350,13 @@ impl Host {
             (Tool::Flyctl, Platform::MacOs) => "brew install flyctl",
             (Tool::Flyctl, Platform::Windows) => "iwr https://fly.io/install.ps1 -useb | iex",
             (Tool::Flyctl, _) => "curl -L https://fly.io/install.sh | sh",
+            (Tool::Kubectl, Platform::MacOs) => "brew install kubectl",
+            (Tool::Kubectl, Platform::Windows) => "winget install -e --id Kubernetes.kubectl",
+            (Tool::Kubectl, _) => {
+                return "install kubectl from https://kubernetes.io/docs/tasks/tools/ \
+                        (the official instructions for this Linux distribution)"
+                    .into();
+            }
         };
         format!("install: {cmd}")
     }
@@ -591,5 +602,30 @@ mod tests {
         let ci = host(FakeEnv::new("linux").var("CI"));
         assert!(ci.install_hint(Tool::Op).contains("install-cli-action"));
         assert!(ci.install_hint(Tool::Flyctl).contains("setup-flyctl"));
+    }
+
+    #[test]
+    fn kubectl_install_hint_on_macos_uses_brew() {
+        assert_eq!(
+            host(FakeEnv::new("macos")).install_hint(Tool::Kubectl),
+            "install: brew install kubectl"
+        );
+    }
+
+    #[test]
+    fn kubectl_install_hint_on_windows_uses_winget() {
+        assert_eq!(
+            host(FakeEnv::new("windows")).install_hint(Tool::Kubectl),
+            "install: winget install -e --id Kubernetes.kubectl"
+        );
+    }
+
+    #[test]
+    fn kubectl_install_hint_on_linux_points_at_official_instructions() {
+        assert!(
+            host(FakeEnv::new("linux"))
+                .install_hint(Tool::Kubectl)
+                .contains("https://kubernetes.io/docs/tasks/tools/")
+        );
     }
 }
