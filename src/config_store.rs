@@ -99,7 +99,8 @@ pub fn save(
                 store.describe()
             )
             .into(),
-        )),
+        )
+        .with_code(crate::error::Code::ConfigChanged)),
     }
 }
 
@@ -453,6 +454,7 @@ fn by_project(
             format!("no 1Password manifest titled {title:?} (tag {MANIFEST_TAG}) is visible")
                 .into(),
         )
+        .with_code(crate::error::Code::ManifestNotFound)
         .with_next(format!(
             "opv config import --vault <vault> --project {project}"
         ))),
@@ -464,7 +466,8 @@ fn by_project(
                 listing(many)
             )
             .into(),
-        )),
+        )
+        .with_code(crate::error::Code::ManifestAmbiguous)),
     }
 }
 
@@ -536,6 +539,7 @@ fn by_repo(
             )
             .into(),
         )
+        .with_code(crate::error::Code::ManifestAmbiguous)
         .with_next(format!(
             "OPV_PROJECT={} opv <command>",
             project_of(hits[0]).unwrap_or("<project>")
@@ -686,6 +690,7 @@ pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
         )
         .into(),
     )
+    .with_code(crate::error::Code::ConfigNotFound)
     .with_next("opv init <env> --vault <vault title> --item <item title>")
 }
 
@@ -842,6 +847,7 @@ pub fn create_manifest(
             )
             .into(),
         )
+        .with_code(crate::error::Code::ManifestExists)
         .with_next("opv config edit"));
     }
     let item = manifest::template(&title, project, &manifest_tags(repo, paths), text);

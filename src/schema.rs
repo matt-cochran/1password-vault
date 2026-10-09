@@ -15,8 +15,9 @@ use crate::json::SCHEMA_VERSION;
 pub struct Effect {
     /// The command path, as typed after `opv` (`config export`).
     pub command: &'static str,
-    /// `none`, `reads`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`
-    /// or `interactive`.
+    /// `none`, `reads`, `writes_config` (secrets.toml or the project's manifest in
+    /// 1Password), `writes_1password`, `writes_target`, `runs_command`, `opens_browser` or
+    /// `interactive`.
     pub effect: &'static str,
     /// Needs the user's own interactive terminal (an agent hands it to the user).
     pub needs_terminal: bool,
@@ -36,7 +37,7 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: true,
     },
     Effect {
-        command: "session",
+        command: "login",
         effect: "interactive",
         needs_terminal: true,
         handles_values: false,
@@ -58,6 +59,13 @@ pub const EFFECTS: &[Effect] = &[
     },
     Effect {
         command: "status",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "projects",
         effect: "reads",
         needs_terminal: false,
         handles_values: false,
@@ -86,6 +94,27 @@ pub const EFFECTS: &[Effect] = &[
     },
     Effect {
         command: "config export",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "config import",
+        effect: "writes_1password",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "config edit",
+        effect: "interactive",
+        needs_terminal: true,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "config check",
         effect: "reads",
         needs_terminal: false,
         handles_values: false,
@@ -121,7 +150,14 @@ pub const EFFECTS: &[Effect] = &[
     },
     Effect {
         command: "init",
-        effect: "writes_file",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "add",
+        effect: "writes_config",
         needs_terminal: false,
         handles_values: false,
         ask_user_first: true,
@@ -135,6 +171,13 @@ pub const EFFECTS: &[Effect] = &[
     },
     Effect {
         command: "schema",
+        effect: "none",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "guide",
         effect: "none",
         needs_terminal: false,
         handles_values: false,
@@ -154,7 +197,7 @@ pub const FLAG_EFFECTS: [(&str, &str, &str); 6] = [
 ];
 
 /// Commands whose only output is JSON, with or without `--json`.
-const JSON_ONLY: [&str; 2] = ["config export", "schema"];
+const JSON_ONLY: [&str; 1] = ["schema"];
 
 /// The `opv schema` document for the command tree `root` of version `version`.
 pub fn describe(root: &clap::Command, version: &str) -> Value {
@@ -171,7 +214,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "schema_version": SCHEMA_VERSION,
         "opv_version": version,
         "conventions": {
-            "json": "with --json (and always for config export and schema) stdout is one JSON document; human text goes to stderr",
+            "json": "with --json (and always for schema and config export <env>) stdout is one JSON document; human text goes to stderr",
             "ok": "true on success; false on failure, with exit_code and error",
             "next": "a command that runs as typed, or null; on failure always set",
             "do": "an action only a person can take (fill a value in 1Password, sign in), or null; shown before next",
@@ -179,7 +222,9 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
             "values": "no document ever contains a secret value; config export prints config-kind values only",
-            "tidy": "any command that reads the 1Password item, run by a signed-in person, may tidy its layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect and CI never write",
+            "tidy": "any command that reads the 1Password item, run by a signed-in person (opv login), may tidy its layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written",
+            "plan_id": "plan --json prints plan_id when the plan is clean; sync --expect-plan <plan_id> applies exactly that plan or fails with stale_plan (exit 6) and changes nothing",
+            "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
             "schema_version": "stays 1 while fields are only added; changes when a field changes meaning",
         },
         "global_flags": global,
@@ -343,7 +388,8 @@ fn documents() -> Value {
         "tidy": ["action", "name"],
         "status": [
             "environment", "product", "changes", "rows", "extras", "tidy?", "tidy_error?", "stage",
-            "held", "prune", "totals"
+            "held", "prune", "totals",
+            "provenance? ({opv_version, written, plan_id}: the latest stamp on a pinned target)"
         ],
         "status_overview": [
             "product",
@@ -352,7 +398,7 @@ fn documents() -> Value {
         ],
         "plan": [
             "environment", "product", "changes", "rows", "extras", "tidy?", "tidy_error?", "stage",
-            "held", "prune", "totals"
+            "held", "prune", "totals", "plan_id? (a clean plan only)"
         ],
         "check": [
             "environment", "product", "target_checked", "rows", "findings", "totals", "tidy?",
@@ -361,17 +407,33 @@ fn documents() -> Value {
         "sync": [
             "environment", "provider", "product", "written", "unchanged", "held", "deployed",
             "revision", "deploy_reason", "deployed_names", "pruned", "kept", "pending",
-            "skipped", "written_names"
+            "skipped", "written_names", "plan_id"
         ],
-        "doctor": ["checks: [{name, status, detail, next, do}]"],
+        "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
             "environment", "product", "key", "reference", "kind", "field", "target: [{label, value}]",
             "rules", "immutable", "guidance", "required_here", "inspect", "shared_from", "shared_by"
         ],
-        "init": ["path", "environment", "profile", "vault_id", "item_id", "keys: [{product, key, kind}]", "skipped"],
+        "init": [
+            "path", "manifest", "environment", "profile", "target", "vault_id", "item_id",
+            "created", "keys: [{product, key, kind}]", "skipped"
+        ],
+        "init --add-env": [
+            "environment", "target", "saved_in", "vault_id", "item_id", "added", "absent",
+            "undeclared"
+        ],
+        "add": ["product", "key", "kind", "environments", "saved_in", "changed"],
+        "projects": [
+            "projects: [{project, title, vault, vault_id, item_id, account, repos, paths, environments?, error?}]",
+            "notes"
+        ],
+        "status --all": [
+            "projects: [{project, vault, environments: [status_overview environment], error_code, error}]",
+            "notes"
+        ],
         "item skeleton": ["environment", "added: [{product, key, kind}]"],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
-        "config export": "the config-kind values: {KEY: value} (simple profile) or {product: {KEY: value}}; no frame on success",
+        "config export": "with <ENV>: the config-kind values, {KEY: value} (simple profile) or {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
         "schema": "this document",
     })
 }

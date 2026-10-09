@@ -3,16 +3,15 @@
 //! opv reads the item once (FR-43: to tidy it for a person, or to find misplaced fields)
 //! and gives `op run` a child environment of `op://` references
 //! (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`, or `.../<field id>` for a field not yet
-//! where the convention puts it); `op run` resolves them and execs the command. One
-//! exception keeps `run` consistent with `sync`: when a read-only identity (service
-//! account, CI) reads a value a person's tidy would normalize (trailing newline or space,
-//! missing `ensure_prefix`), the normalized value goes in the child environment instead of
-//! the reference, so the child sees what it would see after the tidy. No value ever passes
-//! through argv or files (SR-1, SR-3, SR-4).
+//! where the convention puts it); `op run` resolves them and execs the command, so `op run`
+//! keeps masking the values in the child's output. Every key is a reference, always: when a
+//! read-only identity (service account, CI) reads a value a person's tidy would normalize
+//! (trailing newline or space, missing `ensure_prefix`), the child gets the stored value
+//! through its reference and opv prints one warning per such key naming the fix (`opv
+//! login <env>`, after which a run tidies it). No value passes through opv, argv or files
+//! (SR-1, SR-3, SR-4).
 
 use std::io;
-
-use zeroize::Zeroizing;
 
 use crate::adapters::onepassword;
 use crate::domain::{Fleet, SIMPLE_PRODUCT, rules};
@@ -89,7 +88,7 @@ pub fn run(
         .flatten();
     let by_id = read.as_ref().map(|r| &r.refs);
     let normalized = read.as_ref().map(|r| &r.normalized);
-    let refs: Vec<(&str, Zeroizing<String>)> = prod
+    let refs: Vec<(&str, String)> = prod
         .keys
         .iter()
         .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
@@ -104,15 +103,20 @@ pub fn run(
             };
             // The field's key: the source's for a shared key (FR-45).
             let id = (fp.to_string(), fk.to_string());
-            // Read-only and not yet normalized in 1Password: the value opv uses (FR-43).
-            if let Some(v) = normalized.and_then(|m| m.get(&id)) {
-                return (key.as_str(), Zeroizing::new(v.expose().to_string()));
+            // Read-only and not yet normalized in 1Password (FR-43): still the reference, so
+            // `op run` masks the value; the person who can tidy it is told how.
+            if normalized.is_some_and(|m| m.contains_key(&id)) {
+                runner.note(&format!(
+                    "{} has a fixable formatting problem in 1Password; run as yourself (opv \
+                     login {env_name}) and opv will tidy it",
+                    crate::domain::key_label(fp, fk)
+                ));
             }
             let reference = by_id
                 .and_then(|m| m.get(&id))
                 .cloned()
                 .unwrap_or_else(|| format!("op://{}/{}/{field}", env.vault_id, env.item_id));
-            (key.as_str(), Zeroizing::new(reference))
+            (key.as_str(), reference)
         })
         .collect();
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();

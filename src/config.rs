@@ -29,13 +29,9 @@ mod locate;
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(
-            format!(
-                "cannot read {}: {e}\n  fix: check the path given with --config or OPV_CONFIG",
-                path.display()
-            )
-            .into(),
-        )
+        Error::Config(format!("cannot read {}: {e}", path.display()).into())
+            .with_code(crate::error::Code::ConfigNotFound)
+            .with_do("check the path given with --config or OPV_CONFIG")
     })?;
     parse(&text).map_err(|e| locate::relocate(e, &text, path))
 }

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use super::az::{AZ_CLI, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
 use crate::domain::{Kind, SecretValue};
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
 use crate::runner::{Outcome, signals, unknown_text};
@@ -82,7 +82,7 @@ pub fn start_in(
     runtime: Option<OsString>,
     is_ram: &dyn Fn(&Path) -> io::Result<bool>,
 ) -> Result<AzureLogin, Error> {
-    let refuse = || Error::Policy(NO_RAM_DIR.into());
+    let refuse = || Error::Policy(NO_RAM_DIR.into()).with_code(Code::RamDirUnavailable);
     let runtime = runtime
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -108,6 +108,7 @@ fn start_windows(base: Option<PathBuf>) -> Result<AzureLogin, Error> {
              with az login and remove deploy_credentials"
                     .into(),
             )
+            .with_code(Code::RamDirUnavailable)
         })?;
     sweep(&base);
     let dir = PrivateDir::create(&base).map_err(|e| {
@@ -120,6 +121,7 @@ fn start_windows(base: Option<PathBuf>) -> Result<AzureLogin, Error> {
             )
             .into(),
         )
+        .with_code(Code::RamDirUnavailable)
     })?;
     Ok(AzureLogin { dir })
 }

@@ -360,11 +360,9 @@ fn config_error_next_after_sync_is_plan() {
     .unwrap();
     let p = path.to_str().unwrap();
     let (_, _, err) = opv_with(&[], &["--config", p, "sync", "prod", "--deploy"]);
-    assert_eq!(
-        err.lines().last(),
-        Some(format!("Next: opv --config {p} plan prod").as_str()),
-        "{err}"
-    );
+    // The path is quoted exactly as the product quotes it for this platform's shell.
+    let want = format!("Next: opv --config {} plan prod", opv::error::shell_word(p));
+    assert_eq!(err.lines().last(), Some(want.as_str()), "{err}");
 }
 
 /// P10: --confirm is documented on sync.

@@ -19,8 +19,8 @@ const INVALID: &str = "invalid secrets.toml: ";
 const AT_LINE: &str = "TOML parse error at line ";
 
 /// `e`, when it is a configuration error from parsing `text`, rewritten to name `file`,
-/// the line and the field, with a `fix:` line when the message names what is allowed. Its
-/// next step, if any, is kept. Any other error is returned unchanged.
+/// the line and the field, with the edit that fixes it as the error's `Do:` step when the
+/// message names what is allowed (A3). Its next step, if any, is kept. Any other error is returned unchanged.
 pub(super) fn relocate(e: Error, text: &str, file: &Path) -> Error {
     relocate_at(e, text, super::Source::File(file))
 }
@@ -40,7 +40,10 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
         Some(p) => {
             let field = field_on_line(text, p.line);
             let line = numbered.then_some(p.line);
-            render(&file, line, &field, Some(p.snippet), &p.msg, text)
+            (
+                render(&file, line, &field, Some(p.snippet), &p.msg),
+                fix_for(&p.msg, &field, text),
+            )
         }
         None => {
             let (field, line, snippet) = match owner_path(body) {
@@ -48,10 +51,17 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
                 None => (String::new(), None, None),
             };
             let line = line.filter(|_| numbered);
-            render(&file, line, &field, snippet, body, text)
+            (
+                render(&file, line, &field, snippet, body),
+                fix_for(body, &field, text),
+            )
         }
     };
-    let out = Error::Config(rewritten.into());
+    let (rewritten, fix) = rewritten;
+    let mut out = Error::Config(rewritten.into());
+    if let Some(fix) = fix {
+        out = out.with_do(fix);
+    }
     match next {
         Some(n) => out.with_next(n),
         None => out,
@@ -80,14 +90,13 @@ fn placed(body: &str) -> Option<Placed> {
     })
 }
 
-/// `file:line: field: msg`, the snippet, the rest of the message and the fix.
+/// `file:line: field: msg`, the snippet and the rest of the message.
 fn render(
     file: &str,
     line: Option<usize>,
     field: &str,
     snippet: Option<String>,
     msg: &str,
-    text: &str,
 ) -> String {
     let (first, rest) = msg.split_once('\n').unwrap_or((msg, ""));
     let first = if field.is_empty() {
@@ -111,11 +120,6 @@ fn render(
     if !rest.trim().is_empty() {
         out.push('\n');
         out.push_str(rest.trim_end());
-    }
-    // U4: Do: the fix line becomes the `Do:` step once error.rs has one.
-    if let Some(fix) = fix_for(msg, field, text) {
-        out.push_str("\n  fix: ");
-        out.push_str(&fix);
     }
     out
 }
@@ -414,17 +418,13 @@ mod tests {
             "item_id = \"iprd\"",
             "item_id = \"iprd\"\nconfrm_env = true",
         );
-        assert!(
-            e.text()
-                .ends_with("  fix: rename confrm_env to confirm_env"),
-            "{e}"
-        );
+        assert_eq!(e.action(), Some("rename confrm_env to confirm_env"), "{e}");
     }
 
     #[test]
     fn unknown_variant_fix_names_the_closest_value() {
         let (e, _) = load_err("kind = \"secret\"", "kind = \"secert\"");
-        assert!(e.text().ends_with("  fix: set kind = \"secret\""), "{e}");
+        assert_eq!(e.action(), Some("set kind = \"secret\""), "{e}");
     }
 
     #[test]
@@ -439,18 +439,15 @@ mod tests {
     #[test]
     fn undefined_environment_fix_names_the_closest_environment() {
         let (e, _) = load_err("environments = [\"prod\"]", "environments = [\"prd\"]");
-        assert!(
-            e.text().ends_with("  fix: change \"prd\" to \"prod\""),
-            "{e}"
-        );
+        assert_eq!(e.action(), Some("change \"prd\" to \"prod\""), "{e}");
     }
 
     #[test]
     fn missing_field_fix_names_the_table() {
         let (e, _) = load_err("vault_id = \"vprd\"", "");
-        assert!(
-            e.text()
-                .ends_with("  fix: add vault_id = ... under [environments.prod]"),
+        assert_eq!(
+            e.action(),
+            Some("add vault_id = ... under [environments.prod]"),
             "{e}"
         );
     }
