@@ -254,9 +254,10 @@ impl<'a> Kubectl<'a> {
         };
         if !reachable {
             return Error::Unknown(format!(
-                "provider unavailable: the Kubernetes API server for context \"{ctx}\" is \
-                 unreachable; {what} failed ({why}); {preserved}\n  next: check the cluster \
-                 with `kubectl --context {ctx} cluster-info`, then re-run the same command"
+                "provider unavailable: the Kubernetes API server for context \"{ctx}\" did \
+                 not answer (unreachable, or your credentials for it expired); {what} failed \
+                 ({why}); {preserved}\n  next: `kubectl --context {ctx} cluster-info` shows \
+                 the cause; fix it, then re-run the same command"
             ));
         }
         if effect == Effect::Write && !why.starts_with("exit ") {

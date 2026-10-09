@@ -253,9 +253,11 @@ impl PinnedStore for KubeSecrets<'_> {
         };
         let corrupt = || {
             Error::Target(format!(
-                "secret {secret} does not hold the value its name promises; nothing was \
-                 changed\n  next: {}",
-                self.k.command(&format!("delete secret {secret}"))
+                "secret {secret} does not hold the value its name promises (it was replaced \
+                 outside opv); nothing was changed\n  next: inspect it with `{}`; to repair, \
+                 delete it and re-run at once (pods starting in between cannot read it)",
+                self.k
+                    .command(&format!("get secret {secret} --show-labels"))
             ))
         };
         let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| corrupt())?);
@@ -316,7 +318,9 @@ impl PinnedStore for KubeSecrets<'_> {
                 let echoed = text(&out, &what)?.trim();
                 if echoed != format!("secret/{secret}") {
                     return Err(Error::Target(format!(
-                        "{what} did not confirm the secret it wrote\n  next: {}",
+                        "{what} did not confirm the secret it wrote; it may or may not \
+                         exist and nothing else was changed\n  next: check with `{}`, then \
+                         re-run the same command",
                         self.k.command(&format!("get secret {secret} -o name"))
                     )));
                 }
@@ -340,7 +344,8 @@ impl PinnedStore for KubeSecrets<'_> {
         let store = store_name(name);
         if !valid_label_value(&store) {
             return Err(Error::Config(format!(
-                "{name}: kubernetes-name-invalid: not a valid Kubernetes name"
+                "{name}: kubernetes-name-invalid: not a valid Kubernetes name, so opv never \
+                 wrote it; nothing was deleted\n  next: run opv explain {name}"
             )));
         }
         let selector = format!("{LABEL_MANAGED}={},{LABEL_KEY}={store}", t.env);

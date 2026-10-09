@@ -166,8 +166,10 @@ impl<'a> KubeDeployment<'a> {
     /// it: `Ok(None)` when done, `Ok(Some(state))` while waiting, `Err(state)` when failed.
     fn rollout(&self, doc: &Value, generation: u64) -> Result<Option<String>, String> {
         let num = |p: &str| doc.pointer(p).and_then(Value::as_u64).unwrap_or(0);
-        let wanted = num("/metadata/generation").max(generation);
-        if num("/status/observedGeneration") < wanted {
+        if doc.pointer("/spec/paused").and_then(Value::as_bool) == Some(true) {
+            return Err("it is paused (spec.paused), so no new pods start".into());
+        }
+        if !observed(doc, generation) {
             return Ok(Some("waiting for the new generation to be observed".into()));
         }
         let stalled = doc
@@ -270,7 +272,10 @@ impl<'a> KubeDeployment<'a> {
             {
                 return Ok(Some(format!(
                     "pod {pod} of the new ReplicaSet {newest} is waiting with {reason}; the \
-                     previous ReplicaSet keeps serving"
+                     previous ReplicaSet keeps serving; nothing pruned\n  next: fix the cause \
+                     (`{}`) and re-run, or roll back with `{}`",
+                    self.k.command(&format!("describe pod {pod}")),
+                    self.k.command(&format!("rollout undo deployment/{d}"))
                 )));
             }
         }
@@ -281,11 +286,23 @@ impl<'a> KubeDeployment<'a> {
         let s = std::str::from_utf8(out).unwrap_or("").trim();
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || s.len() > 19 {
             return Err(Error::Target(format!(
-                "{what} returned no Deployment generation"
+                "{what} succeeded but returned no Deployment generation; the change was \
+                 applied and nothing was pruned\n  next: {}",
+                self.k.command(&format!(
+                    "rollout status deployment/{}",
+                    self.t().deployment
+                ))
             )));
         }
         Ok(Revision(s.to_string()))
     }
+}
+
+/// The controller has seen generation `generation` (and any later one) of `doc`. Until it
+/// has, the revision annotation still names the previous ReplicaSet, so pods are not judged.
+fn observed(doc: &Value, generation: u64) -> bool {
+    let num = |p: &str| doc.pointer(p).and_then(Value::as_u64).unwrap_or(0);
+    num("/status/observedGeneration") >= num("/metadata/generation").max(generation)
 }
 
 /// `k=v,…` from the Deployment's `spec.selector.matchLabels`, or `None` when it has none or
@@ -305,6 +322,14 @@ fn selector(doc: &Value) -> Option<String> {
         })
         .collect();
     pairs.filter(|p| !p.is_empty()).map(|p| p.join(","))
+}
+
+/// `kubectl auth can-i` printed "no" (possibly followed by a reason).
+fn answered_no(stdout: &[u8]) -> bool {
+    std::str::from_utf8(stdout)
+        .ok()
+        .and_then(|s| s.split_whitespace().next())
+        == Some("no")
 }
 
 /// How one managed env entry binds its name.
@@ -327,11 +352,21 @@ fn binding_of(entry: &Value, env_name: &str) -> Binding {
     }
 }
 
-/// Replace the entry named `name` in `env`, or append it.
+/// Replace the entry named `name` in `env`, or append it. Later duplicates of the name are
+/// dropped: Kubernetes lets the last one win, which would hide the new binding.
 fn upsert(env: &mut Vec<Value>, entry: Value) {
     let name = entry.get("name").cloned();
-    match env.iter_mut().find(|e| e.get("name") == name.as_ref()) {
-        Some(slot) => *slot = entry,
+    let same = |e: &Value| e.get("name") == name.as_ref();
+    match env.iter().position(same) {
+        Some(i) => {
+            let mut at = 0;
+            env.retain(|e| {
+                let keep = at <= i || !same(e);
+                at += 1;
+                keep
+            });
+            env[i] = entry;
+        }
         None => env.push(entry),
     }
 }
@@ -476,10 +511,18 @@ impl PinnedRuntime for KubeDeployment<'_> {
             let doc = self.k.get_deployment()?;
             let last = match self.rollout(&doc, generation) {
                 Ok(None) => return Ok(Health::Healthy),
-                Err(state) => return Ok(Health::Unhealthy(state)),
+                Err(state) => {
+                    return Ok(Health::Unhealthy(format!(
+                        "deployment {d} did not roll out generation {generation}: {state}; the \
+                         previous ReplicaSet keeps serving; nothing pruned\n  next: {}",
+                        self.k.command(&format!("rollout status deployment/{d}"))
+                    )));
+                }
                 Ok(Some(state)) => state,
             };
-            if let Some(stuck) = self.stuck_pod(&doc)? {
+            if observed(&doc, generation)
+                && let Some(stuck) = self.stuck_pod(&doc)?
+            {
                 return Ok(Health::Unhealthy(stuck));
             }
             if waited >= self.wait_max {
@@ -518,10 +561,14 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 &[1],
             )? {
                 Outcome::Done(_) => {}
-                Outcome::Refused(o) if o.status == 1 => found.push(AccessFinding {
-                    store_name: format!("{verb} {resource}"),
-                    reason,
-                }),
+                // Exit 1 with "no" is a denial (K5); exit 1 without it is a failed call
+                // (an unreachable cluster also exits 1, K6), diagnosed below.
+                Outcome::Refused(o) if o.status == 1 && answered_no(&o.stdout) => {
+                    found.push(AccessFinding {
+                        store_name: format!("{verb} {resource}"),
+                        reason,
+                    })
+                }
                 other => {
                     return Err(self.k.fail(
                         Effect::Read,
@@ -798,11 +845,57 @@ mod tests {
 
     #[test]
     fn await_healthy_waits_for_the_generation_to_be_observed() {
-        let r = FakeRunner::new([ok(DEPLOYMENT), ok(REPLICASETS), pods(""), ok(DEPLOYMENT)]);
         let unseen = deployment_with(|d| d["status"]["observedGeneration"] = json!(4));
-        r.responses.borrow_mut()[0] = Ok(json(&unseen));
+        let r = FakeRunner::new([json(&unseen), ok(DEPLOYMENT)]);
         with_rt(&r, |rt| rt.await_healthy(&Revision("5".into()))).unwrap();
-        assert_eq!(r.calls.borrow().len(), 4);
+        assert_eq!(r.calls.borrow().len(), 2);
+    }
+
+    /// Generation 6 written, not yet observed: the revision annotation still names the
+    /// previous ReplicaSet (`5`, api-69c77668f6 in the fixture).
+    fn unobserved() -> Value {
+        deployment_with(|d| {
+            d["metadata"]["generation"] = json!(6);
+            d["metadata"]["annotations"][REVISION_ANNOTATION] = json!("5");
+            d["status"]["observedGeneration"] = json!(5);
+        })
+    }
+
+    #[test]
+    fn await_healthy_does_not_judge_pods_before_the_new_generation_is_observed() {
+        let observed = deployment_with(|d| {
+            d["metadata"]["generation"] = json!(6);
+            d["status"]["observedGeneration"] = json!(6);
+        });
+        let r = FakeRunner::new([json(&unobserved()), json(&observed)]);
+        assert_eq!(
+            with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap(),
+            Health::Healthy
+        );
+    }
+
+    #[test]
+    fn await_healthy_reports_a_paused_deployment() {
+        let paused = deployment_with(|d| d["spec"]["paused"] = json!(true));
+        let r = FakeRunner::new([json(&paused)]);
+        assert!(matches!(
+            with_rt(&r, |rt| rt.await_healthy(&Revision("5".into()))),
+            Ok(Health::Unhealthy(m)) if m.contains("paused")
+        ));
+    }
+
+    #[test]
+    fn stuck_pod_names_the_rollback_command() {
+        let r = FakeRunner::new([
+            json(&rolling()),
+            ok(REPLICASETS),
+            pods("api-69c77668f6-x1\tapi-69c77668f6\tImagePullBackOff \n"),
+        ]);
+        assert!(matches!(
+            with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))),
+            Ok(Health::Unhealthy(m))
+                if m.contains("next:") && m.contains("rollout undo deployment/api")
+        ));
     }
 
     #[test]
@@ -901,7 +994,10 @@ mod tests {
     #[test]
     fn check_access_reports_each_denied_right() {
         let r = FakeRunner::new([ok("yes"), ok("yes")]);
-        r.responses.borrow_mut().push_back(Ok(Output::failure(1)));
+        r.responses.borrow_mut().push_back(Ok(Output {
+            status: 1,
+            stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
+        }));
         r.responses
             .borrow_mut()
             .extend([Ok(ok("yes")), Ok(ok("yes"))]);
@@ -913,6 +1009,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["delete secrets"]
         );
+    }
+
+    #[test]
+    fn check_access_on_unreachable_cluster_exits_9() {
+        // `auth can-i` exits 1 without printing "no" when the API server is down (K6).
+        let r = FakeRunner::new([
+            Output::failure(1),
+            ok("context/kind-opv"),
+            Output::failure(1),
+        ]);
+        assert_eq!(
+            with_rt(&r, |rt| rt.check_access(&[]))
+                .unwrap_err()
+                .exit_code(),
+            9
+        );
+    }
+
+    #[test]
+    fn apply_drops_later_duplicates_of_a_managed_name() {
+        let doubled = deployment_with(|d| {
+            d["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name": "LOG_LEVEL", "value": "shadow"}));
+        });
+        let r = FakeRunner::new([json(&doubled), ok("6")]);
+        with_rt(&r, |rt| {
+            let snap = rt.bindings().unwrap();
+            rt.apply(&change(), &snap).unwrap();
+        });
+        let env = serde_json::from_slice::<Value>(r.calls.borrow()[1].stdin.as_ref().unwrap())
+            .unwrap()["spec"]["template"]["spec"]["containers"][0]["env"]
+            .clone();
+        let count = env
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["name"] == "LOG_LEVEL")
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]
