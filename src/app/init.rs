@@ -15,7 +15,9 @@
 //!    write it atomically (a temporary file in the same directory, then a rename). The file
 //!    holds IDs, names and kinds only, never a value (SR-4).
 //!
-//! Read-only against 1Password (FR-11, SR-5): the only write in opv stays `item skeleton`.
+//! Read-only against 1Password (FR-11, SR-5) except for a signed-in person (FR-43): a
+//! missing vault or item is created, and the declared item is tidied after the file is
+//! written ([`super::tidy`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -79,8 +81,30 @@ fn run_on(
     let target = dir.join(FILE_NAME);
     refuse_existing(&target, args.force)?;
 
-    let vault = onepassword_init::resolve_vault(r, &args.vault, host)?;
-    let item = onepassword_init::resolve_item(r, &vault.id, &args.item, host)?;
+    // FR-43: a person gets a missing vault or item created; anyone else gets the error.
+    let mut created = Vec::new();
+    let mut person = None;
+    let mut may_create = |r: &dyn CommandRunner| {
+        *person.get_or_insert_with(|| {
+            super::tidy::active() && super::tidy::identity(r) == super::tidy::Identity::Person
+        })
+    };
+    let vault = match onepassword_init::find_vault(r, &args.vault, host)? {
+        onepassword_init::Lookup::Found(v) => v,
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
+        onepassword_init::Lookup::Missing(_) => {
+            created.push(format!("vault {:?}", args.vault));
+            onepassword_init::create_vault(r, &args.vault)?
+        }
+    };
+    let item = match onepassword_init::find_item(r, &vault.id, &args.item, host)? {
+        onepassword_init::Lookup::Found(i) => i,
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
+        onepassword_init::Lookup::Missing(_) => {
+            created.push(format!("item {:?}", args.item));
+            onepassword_init::create_item(r, &vault.id, &args.item)?
+        }
+    };
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
 
     let decl = declare(&fields, args.profile, &args.item)?;
@@ -95,6 +119,18 @@ fn run_on(
     write_atomic(&target, &text, args.force)?;
 
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+    if !created.is_empty() {
+        w(
+            out,
+            format!("created {} in 1Password", created.join(" and ")),
+        )?;
+    }
+    // FR-43: a person's init also tidies the item it just declared (a read; never fails init).
+    if super::tidy::active()
+        && let Ok(fleet) = config::parse(&text)
+    {
+        let _ = super::tidy::read(&fleet, &args.env, r);
+    }
     w(
         out,
         format!(
@@ -261,7 +297,8 @@ fn declare(
             ).into()));
             }
         };
-    check_duplicates(fields, profile, item_title)?;
+    // A label given twice is read tolerantly (FR-43): declared once, never an error.
+    let _ = item_title;
     let mut d = Declared {
         profile,
         keys: BTreeMap::new(),
@@ -345,7 +382,7 @@ fn declare(
 const REJECTED: &str = "status and sync will reject it until it is fixed in 1Password";
 
 /// Why `status` / `sync` (the item reader for `profile`) would reject this field, if
-/// they would; duplicates are checked separately ([`check_duplicates`]). Mirrors
+/// they would; a duplicate label is read tolerantly (FR-43). Mirrors
 /// `onepassword::parse_fields` (fleet) and `parse_unsectioned_fields` (simple).
 fn reader_rejects(f: &FieldShape, profile: Profile) -> Option<String> {
     let bad_type = !matches!(f.ty.as_str(), "CONCEALED" | "STRING");
@@ -376,34 +413,6 @@ fn skip_note(f: &FieldShape, why: Option<&str>, profile: Profile) -> String {
         parts.push(REJECTED.to_string());
     }
     format!("skipped {}: {}", display_name(f), parts.join("; "))
-}
-
-/// A label given twice where the reader for `profile` looks (every sectioned field under
-/// fleet, every unsectioned key-named field under simple), whatever its type: the reader
-/// rejects the item, so init writes nothing (`Source`, names only).
-fn check_duplicates(
-    fields: &[FieldShape],
-    profile: Profile,
-    item_title: &str,
-) -> Result<(), Error> {
-    let mut seen = std::collections::BTreeSet::new();
-    for f in fields {
-        let read = match profile {
-            Profile::Fleet => f.section.is_some() && !f.label.is_empty(),
-            Profile::Simple => f.section.is_none() && config::is_env_name(&f.label),
-        };
-        if read && !seen.insert((f.section.as_deref(), f.label.as_str())) {
-            return Err(Error::Source(
-                format!(
-                    "duplicate field {} in item {item_title:?}; rename one in 1Password \
-                 (nothing written)",
-                    display_name(f)
-                )
-                .into(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// `"section"/"label"` or `"label"`, quoted and escaped. A name, never a value.

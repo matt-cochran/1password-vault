@@ -1,5 +1,6 @@
 //! Pure domain types. Nothing here knows about a vendor CLI or subprocesses (FR-12).
 
+pub mod convention;
 pub mod model;
 pub mod secret;
 

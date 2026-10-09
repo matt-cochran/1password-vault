@@ -13,7 +13,7 @@ opv doctor                          # config, op and sign-in, flyctl and sign-in
 opv doctor --env dev --product allumata   # only what local work in dev needs, plus one read of its item
 opv doctor --json                   # the same checks as one JSON document
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
-opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
+opv item skeleton staging           # add every missing declared field, empty (your own runs do this too)
 opv status                          # one line per environment
 opv status staging                  # one row per product and key; exit 8 if any blocks
 opv status staging --product api    # one product's rows, totals and findings

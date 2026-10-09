@@ -55,7 +55,7 @@ use crate::runner::{
     Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
 };
 
-const OP: &str = "op";
+pub(crate) const OP: &str = "op";
 
 /// The result of one whole-item read.
 ///
@@ -64,6 +64,13 @@ const OP: &str = "op";
 pub struct Item {
     pub fields: Vec<ItemField>,
     raw: Zeroizing<Vec<u8>>,
+}
+
+impl Item {
+    /// The item JSON exactly as `op` returned it (holds values; never print it).
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.raw
+    }
 }
 
 impl fmt::Debug for Item {
@@ -257,7 +264,7 @@ pub(crate) fn failed_op_error(
 
 /// [`failed_op_error`] for a read or (`write`) a write. For a write whose session cannot be
 /// diagnosed, the change may or may not have happened: `Error::Unknown` (exit 9, NR-2).
-fn failed_op_error_as(
+pub(crate) fn failed_op_error_as(
     r: &dyn CommandRunner,
     env: &Environment,
     host: &dyn Fn() -> Host,
@@ -389,6 +396,25 @@ pub fn read_item_in_sections(
     sections: &BTreeSet<String>,
 ) -> Result<Item, Error> {
     read_profile_on(r, env, profile, Some(sections), &Host::detect)
+}
+
+/// The environment's one item read (FR-13) with no field parsing: the tolerant reader
+/// ([`super::onepassword_tidy`], FR-43) parses the raw JSON itself. `fields` is empty.
+pub fn read_whole(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
+    let args = [
+        "item",
+        "get",
+        env.item_id.as_str(),
+        "--vault",
+        env.vault_id.as_str(),
+        "--format",
+        "json",
+    ];
+    let raw = read_diagnosed(r, env, &args, &Host::detect)?;
+    Ok(Item {
+        fields: Vec::new(),
+        raw,
+    })
 }
 
 /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
@@ -613,7 +639,7 @@ pub fn op_missing(host: &Host) -> Error {
 }
 
 /// An `op` spawn error: missing binary (with the install hint) or another start failure.
-fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
+pub(crate) fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
     match e.kind() {
         io::ErrorKind::NotFound => op_missing(&host()),
         io::ErrorKind::TimedOut => Error::Source(format!("op: {e}").into()),

@@ -93,6 +93,8 @@ pub struct SyncPlan {
     pub held_from_prune: Vec<(String, String, String)>,
     /// product -> key -> value, config keys only.
     pub config: BTreeMap<String, BTreeMap<String, String>>,
+    /// What this run tidied in 1Password (FR-43), names only; set by the application layer.
+    pub tidy: Vec<crate::domain::convention::Change>,
 }
 
 impl fmt::Debug for SyncPlan {
@@ -231,6 +233,7 @@ pub fn build_with(
         prune: Vec::new(),
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
+        tidy: Vec::new(),
     };
 
     for (product, p) in &fleet.products {

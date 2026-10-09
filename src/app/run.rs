@@ -1,8 +1,10 @@
 //! `run <env> --product <p> -- <cmd>` use case, delegating to `op run` (FR-4, §10.4).
 //!
-//! opv never resolves values. It hands `op run` a child environment of `op://`
-//! references (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`); `op run` resolves them and
-//! execs the command. No values pass through opv, argv or files (SR-1, SR-3, SR-4).
+//! opv never hands values to the child. It reads the item once (FR-43: to tidy it for a
+//! person, or to find misplaced fields) and gives `op run` a child environment of `op://`
+//! references (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`, or `.../<field id>` for a
+//! field not yet where the convention puts it); `op run` resolves them and execs the
+//! command. No values pass through argv, the child's env or files (SR-1, SR-3, SR-4).
 
 use std::io;
 
@@ -72,6 +74,16 @@ pub fn run(
         ));
     }
 
+    // FR-43: one tolerant item read first, which tidies the item when a person runs opv.
+    // A key whose field is still not where the convention puts it (a read-only run) is
+    // referenced by field id. If the read fails, `op run` reports the problem itself.
+    let by_id = if super::tidy::active() {
+        super::tidy::read(fleet, env_name, runner)
+            .map(|read| read.refs)
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let refs: Vec<(&str, String)> = prod
         .keys
         .iter()
@@ -82,10 +94,11 @@ pub fn run(
             } else {
                 format!("{product}/{key}")
             };
-            (
-                key.as_str(),
-                format!("op://{}/{}/{field}", env.vault_id, env.item_id),
-            )
+            let reference = by_id
+                .get(&(product.to_string(), key.clone()))
+                .cloned()
+                .unwrap_or_else(|| format!("op://{}/{}/{field}", env.vault_id, env.item_id));
+            (key.as_str(), reference)
         })
         .collect();
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();

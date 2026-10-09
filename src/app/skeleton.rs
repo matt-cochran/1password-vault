@@ -1,4 +1,5 @@
-//! `item skeleton <env>` use case (FR-19), the only 1Password write.
+//! `item skeleton <env>` use case (FR-19): the explicit 1Password write, for any identity.
+//! (A signed-in person's runs also tidy the item, FR-43, [`super::tidy`].)
 //!
 //! One read of the item, then at most one edit adding every key declared for `env` (all
 //! products, mode-skipped keys included) that has no field yet, as an empty field of the

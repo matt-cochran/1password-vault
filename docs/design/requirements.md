@@ -339,9 +339,11 @@ Final assignments (a public contract from v0.1.0):
 
 ## FR-11 — Dry-Run Safety
 
-Planning commands shall not mutate 1Password or Fly.
+Planning commands shall not mutate Fly or any other target.
 
-No read-only operation shall write metadata such as "last synchronized at" back to 1Password.
+1Password is read-only for service accounts, Connect and CI. A run by a signed-in person may tidy the item's layout, never its meaning, as FR-43 describes; values are never deleted.
+
+No read-only operation shall write metadata such as "last synchronized at" back to 1Password. (The FR-43 convention marker is a version number written once, with a layout fix, never a timestamp.)
 
 ## FR-12 — Extensible Source/Target Model
 
@@ -367,6 +369,8 @@ Reason: service-account rate limits. On 1Password Families/Teams a token gets 1,
 Measured (D0 spike): a cold whole-item read by vault ID and item ID costs 2 requests; `op` caches by default on UNIX, so a repeat read costs 0. CI should set `OP_CACHE=false` to see the worst case.
 
 Local commands (`run`) may resolve per-reference through `op run`; they use the person's desktop-app session, not a service account.
+
+Since 0.5.0 (FR-43) `run` also makes this one read first, to find fields that are not where the convention puts them. A tidy by a signed-in person adds a check read before its one edit and a verifying read after it; a service account never tidies, so CI keeps one read per environment.
 
 Since v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev time, to write their IDs into `secrets.toml`. The exception is limited to the `init` command: title lookup must be unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export` (and `explain`, which reads only the configuration).
 
@@ -424,7 +428,7 @@ The CLI shall provide:
 opv item skeleton <environment>
 ```
 
-It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5; `fly sync`, `plan`, `status` and `config export` stay read-only.
+It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5. Since 0.5.0 every command run by a signed-in person tidies the layout itself (FR-43), so `item skeleton` is rarely needed; under a service account or in CI, `sync`, `plan`, `status` and `config export` stay read-only.
 
 ## v0.2 ergonomics (FR-20 to FR-25)
 
@@ -544,14 +548,14 @@ opv init <environment> --vault <name> --item <name> --fly-app <app> [--profile s
 
 It is a dev-time helper that writes a starter `secrets.toml`. It resolves the vault and item titles to IDs (exact title match; zero or several matches is an error), reads the item once, and writes the configuration: the environment with `vault_id`, `item_id` and `fly.app`, and one declared key per field, with its kind taken from the field type (concealed = secret, text = config, FR-14). A sectioned item produces a fleet file (section = product, with the default template `FLEET__{PRODUCT}__{KEY}`); an unsectioned item produces a simple file (FR-20), whose fields are unsectioned. `--profile simple|fleet` overrides this detection. Without `--profile`, an item that mixes sectioned and unsectioned fields is an error that names both shapes; `init` never guesses. Rules and guidance are left for the person to add.
 
-`init` is the second 1Password-adjacent command after `item skeleton` (FR-19), and unlike it, it is read-only against 1Password.
+`init` is the second 1Password-adjacent command after `item skeleton` (FR-19). It reads by title only to resolve IDs; since 0.5.0 (FR-43), for a signed-in person it creates a missing vault or item and tidies the item it declared.
 
 Acceptance:
 
 - Titles are resolved to IDs at dev time only. The FR-13 exception is limited to the `init` command: title lookup is unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export`, and from the CI read path, which stay by vault ID and item ID (FR-13).
 - `init` reads the item but writes only names and kinds. Values are never deserialized into opv types (the field struct has no `value` member; the raw `op` output stays in a zeroizing buffer, SR-2, SR-8), and no value reaches disk or output (SR-1, SR-4).
 - If the target file exists, `init` refuses (exit 2) unless `--force` is given. It never merges into an existing file.
-- `init` writes nothing to 1Password (FR-11, SR-5).
+- `init` writes to 1Password only for a signed-in person, as FR-43 describes; under a service account or in CI it writes nothing (FR-11, SR-5).
 - `--fly-app`, the IDs and the field names are validated as for a hand-written file (§10.2), and the generated text is checked with the same loader before it is written. A field whose label is not a valid key name, a section whose label is not a valid product name, and a field of another type are skipped with a note that names them; nothing is ever renamed (ruling, v0.2: skipped with a note rather than failing the whole file, so one stray field does not block init).
 
 Constraints kept: FR-11, FR-13, SR-1, SR-2, SR-3, SR-4, SR-5, SR-7.
@@ -773,6 +777,21 @@ Acceptance:
   binary untouched).
 - `shellcheck` passes, and the script runs under `dash` and `bash`.
 
+## FR-43 — Self-Healing Conventions
+
+Decided 2026-10-08 for 0.5.0. Users never get an error because 1Password is not laid out to opv's convention (§10.1). opv fixes the layout itself, never deletes information, and hides the convention. Design: `docs/design/self-healing-conventions.md`.
+
+- **Tolerant reads, every identity (CI included).** Each declared key's field is found wherever it is: labels match ignoring case, spaces, `-` and `_`; a field in the wrong section, at the top level or in a human-named section is found; of several candidates the choice is deterministic (a filled field in the right section, then any filled field, then an empty one; ties go to the field later in the item). A secret stored as text and config stored as concealed are read, not refused. Fields in product-shaped sections (`^[a-z][a-z0-9_-]*$`) are never claimed for another product. Layout problems never block a read-only command.
+- **Auto-tidy for a signed-in person** (`setup`, `init`, `check`, `run`, `status`, `plan`, `sync`, `doctor --env`, `config export`): when `op whoami` reports `USER` and no `OP_SERVICE_ACCOUNT_TOKEN`, Connect token or CI is set. A service account, Connect or CI only reads tolerantly and prints one note that the next local run will tidy.
+- **The tidy plan (pure, `domain::convention`).** Create missing product sections and missing fields, empty and of the right kind; conceal a secret stored as text (never the reverse); rename labels to the key; move fields home; resolve duplicates. Normalize a value only when its rules make the intended form unambiguous: a trailing newline/CR/space is removed when the value fails its rules and the trimmed one passes; a missing `ensure_prefix` is added. Everything displaced or replaced goes to section `opv · kept`, labelled `<original label> (from <section>, <UTC date>)`; a normalized value's original is kept there as a concealed field, a renamed label as an empty breadcrumb. Nothing is ever deleted. A text field `opv/convention = 1` records the convention version, written only together with another fix.
+- **Missing items or vaults.** For a person running `setup` or `init`, opv creates the item (and the vault, when the account allows it) and writes its IDs into `secrets.toml`. Other commands report it with one `Next:`.
+- **Safe writes.** One read (FR-13), the plan applied to the item JSON in memory, one `op item edit` with the whole item on stdin (SR-3), then a verifying re-read. If the item's version changed between the read and the write, opv re-reads and re-plans once; if it changed again, nothing is written and the run says so. The edit is atomic: an interrupted write leaves the item untouched or fully tidied. A failed tidy never fails the command.
+- **Transparency.** One stderr line per run that tidied, e.g. `tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"`, and a `tidy` array (`{action, name}`) in `--json` when something was tidied. Missing values stay a human action: one line names the keys that still need one.
+
+Acceptance: tests with a stateful fake `op` cover each fix kind; nothing deleted (every original label and value is still in the item after a tidy); a service account never writes; tolerant reads in CI; a concurrent edit detected and not overwritten; idempotency (a second run writes nothing); values never in argv, notes or JSON; an interrupted write leaves the item untouched or fully tidied.
+
+Constraints kept: SR-1, SR-2, SR-3, SR-4, SR-8, FR-9 (no prompts; the tidy is not destructive), FR-13.
+
 ## SR-1 — No Secret Logging
 
 Secret values shall never appear in:
@@ -828,6 +847,8 @@ A CI identity shall require only:
 - on cloud targets, read and write on the opv-tagged store entries and update on the one runtime service. Read is needed for compare-before-write (FR-31); it adds no exposure, because the same values are readable through the CI 1Password token.
 
 The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. This write exception does not apply to synchronization or CI.
+
+A run by a signed-in person (not a service account, Connect or CI) may also tidy the item's layout (FR-43): one whole-item edit, JSON on stdin, nothing deleted, displaced values kept in `opv · kept`. Without write access the tidy is skipped with a note; no command needs write access to 1Password.
 
 ## SR-6 — Explicit Destructive Operations
 
@@ -1217,7 +1238,7 @@ Version 0.2 is acceptable when, in addition to 1–14:
 17. `status --json` and `fly plan --json` carry `schema_version`, contain no value (checked by a test that plants known values and searches the output), and exit with the same codes as the text output.
 18. `opv explain` prints the reference, kind, Fly name, rules and guidance, and an `op item get` command without `--reveal`; it makes no 1Password or Fly call and emits no value or value fragment.
 19. `doctor` ends with a "Next step" line naming a safe command, and never prompts.
-20. `opv init` writes a `secrets.toml` with IDs, names and kinds only, refuses to overwrite without `--force`, writes nothing to 1Password, and no title lookup is reachable from `fly sync`, `fly plan`, `status` or `config export`.
+20. `opv init` writes a `secrets.toml` with IDs, names and kinds only, refuses to overwrite without `--force`, writes to 1Password only as FR-43 allows a signed-in person, and no title lookup is reachable from `fly sync`, `fly plan`, `status` or `config export`.
 21. `ensure_prefix` + `pattern` reproduce `transform = "signoz_ingestion_header"` exactly, and the alias still works with a deprecation warning.
 22. Without `--config`, `secrets.toml` is found in a parent directory and its path is printed on stderr; `--config` overrides; files are never merged.
 23. Items 9 and 10 hold for every new command and flag.
@@ -1296,6 +1317,8 @@ vault <name>-<environment>   item <name>   section <product>   field <KEY>
 ```
 
 One vault per environment is the isolation boundary: service accounts are granted whole vaults, not items. One item per environment keeps a release to one read (FR-13).
+
+Nobody has to lay this out by hand: reads are tolerant and a signed-in person's run tidies the item to this layout (FR-43).
 
 ## 10.2 Configuration
 

@@ -501,7 +501,13 @@ fn no_secret_in_any_argv() {
         h.run(cmd);
         assert_argv_and_env_clean(&h);
     }
-    let run_env = &h.calls()[0].env;
+    // `run` reads the item first (FR-43); the env is on the `op run` call.
+    let calls = h.calls();
+    let run_env = &calls
+        .iter()
+        .find(|c| c.argv.first().is_some_and(|a| a == "run"))
+        .expect("op run")
+        .env;
     assert!(
         run_env.contains("op://vprd/iprd/allumata/OPENAI_API_KEY"),
         "{run_env}"
@@ -790,8 +796,9 @@ fn import_failure_stops_the_run() {
 #[test]
 fn rule_failure_names_key_not_value() {
     let h = Harness::new(&good_item());
+    // A trailing newline alone is normalized, not refused (FR-43): see
+    // `trailing_newline_is_read_in_its_intended_form`.
     for (value, rule) in [
-        ("sk-proj-S7MARKERVALUEnewline0007\n", "single_line"),
         (" sk-proj-S7MARKERVALUEspace0008", "no_surrounding_space"),
         ("pk-S7MARKERVALUEprefix0009", "prefix"),
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
@@ -827,6 +834,16 @@ fn rule_failure_names_key_not_value() {
             assert_clean_output(cmd, &r);
         }
     }
+}
+
+/// FR-43: a value whose only problem is a trailing newline is read in its intended form,
+/// so sync goes ahead, and opv's output still carries no value.
+#[test]
+fn trailing_newline_is_read_in_its_intended_form() {
+    let h = Harness::new(&item(good_fields("sk-proj-S7MARKERVALUEnewline0007\n")));
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    assert_clean_output(&["sync"], &r);
 }
 
 /// Commands that read the item (every `op item get` failure path).

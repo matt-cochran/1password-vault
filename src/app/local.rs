@@ -67,7 +67,7 @@ pub fn check(
         .get_mut(env)
         .expect("selected env")
         .target = None;
-    let mut plan = read_and_plan_products(&selected, env, runner)?;
+    let mut plan = read_and_plan_products(&selected, fleet, env, runner)?;
     plan.extras.clear();
     let findings = plan.blocking();
     if json {
@@ -82,8 +82,11 @@ pub fn check(
                 })
             })
             .collect();
-        let doc = serde_json::json!({"schema_version": 1, "environment": env,
+        let mut doc = serde_json::json!({"schema_version": 1, "environment": env,
             "target_checked": false, "rows": rows, "findings": findings});
+        if !plan.tidy.is_empty() {
+            doc["tidy"] = serde_json::json!(super::json_tidy(&plan.tidy));
+        }
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
         for row in &plan.rows {
@@ -186,13 +189,14 @@ mod tests {
     }
 
     #[test]
-    fn check_kind_failure_reports_names_not_values() {
+    fn check_reads_a_secret_stored_as_text_without_values() {
+        // FR-43: the other kind is read tolerantly, never a finding.
         let r = FakeRunner::new([item(&[text("allumata", "OPENAI_API_KEY", OPENAI)])]);
         let mut out = Vec::new();
         let _ = check(&fleet(), "prod", Some("allumata"), &r, &mut out, true);
         let text = text_of(&out);
         assert_no_values(&text);
-        assert!(text.contains("wrong_kind"));
+        assert!(!text.contains("wrong_kind"), "{text}");
     }
     #[test]
     fn malformed_field_in_another_products_section_does_not_fail_the_check() {

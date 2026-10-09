@@ -87,23 +87,18 @@ mod tests {
         assert_eq!(r.calls.borrow().len(), 1, "{:?}", argvs(&r));
     }
 
+    /// FR-43: config kept concealed is read tolerantly.
     #[test]
-    fn refuses_config_stored_as_secret() {
-        let (res, out, _) = export(complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)));
-        let e = res.unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
-        assert!(e.to_string().contains("allumata/SIGNUP_POLICY"), "{e}");
-        assert!(out.is_empty());
+    fn reads_config_stored_as_secret() {
+        let (res, _, _) = export(complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)));
+        assert!(res.is_ok());
     }
 
+    /// FR-43: a secret stored as text is read tolerantly; its value is never printed.
     #[test]
-    fn refuses_secret_stored_as_text() {
-        let (res, out, _) = export(complete_with(text("allumata", "OPENAI_API_KEY", OPENAI)));
-        let e = res.unwrap_err();
-        assert!(matches!(e, Error::Policy(_)), "{e}");
-        assert!(e.to_string().contains("allumata/OPENAI_API_KEY"), "{e}");
-        assert_no_values(&e.to_string());
-        assert!(out.is_empty(), "printed despite refusal");
+    fn reads_secret_stored_as_text_without_printing_it() {
+        let (_, out, _) = export(complete_with(text("allumata", "OPENAI_API_KEY", OPENAI)));
+        assert_no_values(&text_of(&out));
     }
 
     #[test]

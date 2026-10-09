@@ -4,7 +4,9 @@
 //! - The environment name is resolved with [`Fleet::environment`] before any subprocess
 //!   call, so an unknown name is `Error::Config` and `plan::build` never sees one.
 //! - A command that reads 1Password makes exactly one `op item get` (FR-13); a failed `op`
-//!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26).
+//!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26). The read is
+//!   tolerant, and a signed-in person's run may tidy the item (a check read, one edit, a
+//!   verifying read; FR-43, [`tidy`]); a service account or CI never writes.
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ pub mod skeleton;
 pub mod status;
 pub(crate) mod suggest;
 pub mod sync;
+pub(crate) mod tidy;
 #[cfg(test)]
 mod ux_tests;
 
@@ -39,7 +42,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Write};
 
-use crate::adapters::{onepassword, registry};
+use crate::adapters::registry;
 use crate::domain::plan;
 use crate::domain::{
     Environment, Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan,
@@ -72,36 +75,39 @@ pub(crate) fn read_and_plan(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
-    let fields = read_fields(fleet, env_name, r)?;
-    plan_item(fleet, env_name, fields, ports, rotate, prune_immutable)
+    let read = tidy::read(fleet, env_name, r)?;
+    let (mut plan, listed) =
+        plan_item(fleet, env_name, read.fields, ports, rotate, prune_immutable)?;
+    plan.tidy = read.changes;
+    Ok((plan, listed))
 }
 
-/// The environment's item fields: its one read by IDs (FR-13).
+/// The environment's item fields: its one read by IDs (FR-13), tolerant and tidied when a
+/// person runs opv (FR-43, [`tidy::read`]).
 pub(crate) fn read_fields(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
 ) -> Result<Vec<plan::ItemField>, Error> {
-    let env = fleet.environment(env_name)?;
-    Ok(onepassword::read_item_as(r, env, fleet.profile)?.fields)
+    Ok(tidy::read(fleet, env_name, r)?.fields)
 }
 
-/// [`read_and_plan`] for a local check of the products in `fleet` only, with no target: the
-/// item read skips other products' sections, so their fields can neither block nor fail it.
+/// [`read_and_plan`] for a local check of the products in `fleet` only, with no target.
+/// The item is read (and tidied) against `full`, the whole configuration, so fields of
+/// products outside `fleet` are never mistaken for strays; they cannot block the check,
+/// because the plan covers `fleet` only.
 pub(crate) fn read_and_plan_products(
     fleet: &Fleet,
+    full: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
 ) -> Result<SyncPlan, Error> {
-    let env = fleet.environment(env_name)?;
-    let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
-    let item = if fleet.is_simple() {
-        onepassword::read_item_as(r, env, fleet.profile)?
-    } else {
-        onepassword::read_item_in_sections(r, env, fleet.profile, &sections)?
-    };
+    fleet.environment(env_name)?;
+    let read = tidy::read(full, env_name, r)?;
     let none = BTreeSet::new();
-    Ok(plan_item(fleet, env_name, item.fields, None, &none, &none)?.0)
+    let mut plan = plan_item(fleet, env_name, read.fields, None, &none, &none)?.0;
+    plan.tidy = read.changes;
+    Ok(plan)
 }
 
 pub(crate) fn plan_item(
@@ -281,6 +287,7 @@ pub(crate) fn write_json(
                 key: key.clone(),
             })
             .collect(),
+        tidy: json_tidy(&plan.tidy),
         stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
         held: plan
             .held_immutable
@@ -315,6 +322,9 @@ struct JsonDoc {
     product: Option<String>,
     rows: Vec<JsonRow>,
     extras: Vec<JsonName>,
+    /// What this run tidied in 1Password (FR-43), names only; absent when nothing was.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tidy: Vec<JsonTidy>,
     stage: Vec<String>,
     held: Vec<JsonHeld>,
     prune: Vec<String>,
@@ -354,6 +364,24 @@ pub(crate) struct PinnedRow {
     /// How the bound name reaches the app when it passes through more than one object
     /// (FR-39), e.g. Key Vault → ExternalSecret → env. Names and version ids only.
     pub chain: Option<String>,
+}
+
+/// One tidy change: a stable action word and the field or section it is about.
+#[derive(serde::Serialize)]
+pub(crate) struct JsonTidy {
+    action: &'static str,
+    name: String,
+}
+
+/// The `tidy` array of a JSON document (FR-43).
+pub(crate) fn json_tidy(changes: &[crate::domain::convention::Change]) -> Vec<JsonTidy> {
+    changes
+        .iter()
+        .map(|c| JsonTidy {
+            action: c.action(),
+            name: c.subject().to_string(),
+        })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
