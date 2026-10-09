@@ -104,30 +104,53 @@ pub fn run_or(
     backend.child(command)
 }
 
-/// FR-40: the 1Password account this checkout uses, chosen once. `given` (`--account`: an
-/// email, account ID, user ID or sign-in address) is resolved to an account ID; without it,
-/// and with no account recorded yet (`.opv`, `OP_ACCOUNT`), a person with several accounts
-/// picks one from the list. The choice is recorded in `.opv` (see
-/// [`crate::config_store::record_account`]), so later commands never fall back to op's
-/// default account. `None`: nothing to choose (one account, or already recorded).
+/// FR-40: the 1Password account this checkout uses, chosen once, in one command. `given`
+/// (`--account`: an email, account ID, user ID or sign-in address) is resolved to an
+/// account ID; without it, and with no account recorded yet (`.opv`, `OP_ACCOUNT`), a
+/// person with several accounts picks one from a list. Where `op` keeps its own accounts
+/// (Linux, WSL), an account it does not know yet is added right here, at op's prompts,
+/// and signed in in the same step (found in a fresh-account run-through: leaving opv for
+/// `op account add` was the worst step). The choice is recorded in `.opv`, so later
+/// commands never fall back to op's default account. `None`: nothing to choose.
 pub fn choose_account(
     r: &dyn crate::runner::CommandRunner,
     given: Option<&str>,
     start: &std::path::Path,
+    backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
     use crate::adapters::onepassword_manifest as manifest;
+    use crate::host::{Host, Platform};
+    let own_op = matches!(Host::detect().platform, Platform::Linux | Platform::Wsl);
     let accounts = manifest::accounts(r);
+    const ADD: &str = "Add another 1Password account";
     let uuid = match given {
-        Some(who) => manifest::resolve(&accounts, who)?,
+        Some(who) => match manifest::resolve(&accounts, who) {
+            Ok(u) => u,
+            Err(_) if own_op && who.contains('@') && crate::config::is_account(who) => {
+                let now = add_account(r, backend, ui, Some(who))?;
+                manifest::resolve(&now, who)?
+            }
+            Err(e) => return Err(e),
+        },
         None if crate::config_store::pointer_account(start).is_some()
             || crate::config_store::account_env().is_some()
-            || accounts.len() < 2 =>
+            || accounts.len() == 1 =>
         {
             return Ok(None);
         }
+        None if accounts.is_empty() => {
+            if !own_op {
+                return Ok(None);
+            }
+            let now = add_account(r, backend, ui, None)?;
+            match now.as_slice() {
+                [one] => one.account_uuid.clone(),
+                _ => return Ok(None),
+            }
+        }
         None => {
-            let labels: Vec<String> = accounts
+            let mut labels: Vec<String> = accounts
                 .iter()
                 .map(|a| {
                     format!(
@@ -141,13 +164,28 @@ pub fn choose_account(
                     )
                 })
                 .collect();
+            if own_op {
+                labels.push(ADD.to_string());
+            }
             let picked = ui.choose(
                 "Several 1Password accounts are on this machine. Which one holds this \
                  project's secrets?",
                 &labels,
             )?;
-            let at = labels.iter().position(|l| *l == picked).unwrap_or(0);
-            accounts[at].account_uuid.clone()
+            if picked == ADD {
+                let now = add_account(r, backend, ui, None)?;
+                // The new one: in the list now, not before.
+                match now
+                    .iter()
+                    .find(|a| !accounts.iter().any(|b| b.account_uuid == a.account_uuid))
+                {
+                    Some(a) => a.account_uuid.clone(),
+                    None => return Ok(None),
+                }
+            } else {
+                let at = labels.iter().position(|l| *l == picked).unwrap_or(0);
+                accounts[at].account_uuid.clone()
+            }
         }
     };
     let path = crate::config_store::record_account(start, &uuid)?;
@@ -156,6 +194,22 @@ pub fn choose_account(
         path.display()
     ))?;
     Ok(Some(uuid))
+}
+
+/// Add an account at op's prompts (signed in in the same step); the accounts op knows after.
+fn add_account(
+    r: &dyn crate::runner::CommandRunner,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+    email: Option<&str>,
+) -> Result<Vec<crate::adapters::onepassword_manifest::Account>, Error> {
+    ui.show(&format!(
+        "Adding {} to 1Password on this machine. Type the sign-in address, Secret Key and \
+         password only at 1Password's prompts (your Emergency Kit has them).",
+        email.unwrap_or("your account")
+    ))?;
+    backend.add_account(email)?;
+    Ok(crate::adapters::onepassword_manifest::accounts(r))
 }
 
 #[cfg(test)]

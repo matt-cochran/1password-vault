@@ -13,6 +13,7 @@ struct Fake {
     replies: RefCell<VecDeque<Output>>,
     account: Option<String>,
     sign_ins: Vec<Option<String>>,
+    added: Vec<Option<String>>,
     child_code: i32,
     children: RefCell<Vec<Vec<String>>>,
 }
@@ -29,6 +30,7 @@ impl Fake {
             ),
             account: None,
             sign_ins: Vec::new(),
+            added: Vec::new(),
             child_code,
             children: RefCell::default(),
         }
@@ -66,6 +68,10 @@ impl Backend for Fake {
     }
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
+    }
+    fn add_account(&mut self, email: Option<&str>) -> Result<(), Error> {
+        self.added.push(email.map(str::to_owned));
+        Ok(())
     }
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.children.borrow_mut().push(command.to_vec());
@@ -203,4 +209,80 @@ fn login_to_an_unknown_environment_is_a_configuration_error() {
     )
     .unwrap_err();
     assert_eq!(e.exit_code(), 2);
+}
+
+// --- choosing the project's account in one command (found in a fresh-account run-through)
+
+const ONE: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001"}]"#;
+const BOTH: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001"},{"url":"my.1password.com","email":"me@labs.example","account_uuid":"ALABS000000000000000000001"}]"#;
+
+fn lists(replies: &[&str]) -> crate::runner::fake::FakeRunner {
+    crate::runner::fake::FakeRunner::new(replies.iter().map(|j| Output::success(j.to_string())))
+}
+
+fn wsl() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").var("WSL_DISTRO_NAME"))
+}
+
+/// An email op does not know yet is added at op's prompts, inside opv login.
+#[test]
+fn an_unknown_email_is_added_by_login_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE, BOTH]),
+            Some("me@labs.example"),
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(b.added, [Some("me@labs.example".to_string())]);
+}
+
+#[test]
+fn the_added_account_is_recorded_for_the_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE, BOTH]),
+            Some("me@labs.example"),
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        crate::config_store::pointer_account(dir.path()).as_deref(),
+        Some("ALABS000000000000000000001")
+    );
+}
+
+/// Several accounts and none chosen: a menu, with "add another" where op keeps its own.
+#[test]
+fn several_accounts_offer_a_menu_with_add_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ui = Ui::default();
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[BOTH]),
+            None,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut ui,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        ui.asked[0],
+        [
+            "me@family.example (my.1password.com)",
+            "me@labs.example (my.1password.com)",
+            "Add another 1Password account"
+        ]
+    );
 }

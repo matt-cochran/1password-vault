@@ -16,6 +16,12 @@ pub trait Backend {
     fn native(&self) -> Result<(), Error>;
     fn call(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error>;
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error>;
+    /// Add a 1Password account to this machine's `op` at op's own prompts and sign in to
+    /// it in the same step (`opv login`, found in a fresh-account run-through: the person
+    /// otherwise had to leave opv for `op account add`). `email` pre-fills op's question.
+    fn add_account(&mut self, _email: Option<&str>) -> Result<(), Error> {
+        self.sign_in(None, true)
+    }
     /// Use `account` for every later call (`opv login`, FR-40).
     fn use_account(&mut self, _account: Option<&str>) {}
     /// Run `command` signed in (a signed-in shell when empty); its exit code (`opv login`).

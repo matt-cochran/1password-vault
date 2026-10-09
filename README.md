@@ -30,10 +30,10 @@ opv run dev -- npm run dev       # your app, with dev's settings as environment 
 
 opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk.
 
-Starting from nothing: install the 1Password app, add your account, and turn on **Settings > Developer > Integrate with 1Password CLI** (or [install `op`](docs/install.md)). Then, in your project:
+Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, also turn on **Settings > Developer > Integrate with 1Password CLI** in the 1Password app). Then, in your project:
 
 ```sh
-opv login --account you@example.com            # the project's 1Password account; asked for when you have several
+opv login --account you@example.com            # adds the account to op if needed, signs in, remembers it for the project
 opv init dev --vault myapp-dev --item myapp    # creates the vault and item if missing; saves the configuration in 1Password
 opv add API_KEY --kind secret --env dev
 opv check dev                                  # adds the empty field and links to it: type the value in 1Password

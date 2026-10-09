@@ -127,6 +127,35 @@ pub fn session_vars(
 }
 
 impl Backend for Runtime {
+    fn add_account(&mut self, email: Option<&str>) -> Result<(), Error> {
+        let mut command = Command::new("op");
+        command.args(["account", "add", "--signin"]);
+        if let Some(e) = email {
+            command.args(["--email", e]);
+        }
+        command.env_remove("OP_SESSION").env("OP_DEBUG", "false");
+        command
+            .stdin(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().map_err(dependency)?;
+        let output =
+            crate::runner::read_to_end_zeroizing(child.stdout.take().expect("piped stdout"))
+                .map_err(dependency)?;
+        let status = child.wait().map_err(dependency)?;
+        if !status.success() {
+            return Err(Error::Auth(
+                "1Password did not add the account. Check the sign-in address, Secret Key and \
+                 password at its prompts (your Emergency Kit has them), then run opv login again. \
+                 Session output was not printed."
+                    .into(),
+            ));
+        }
+        if let Some((name, value)) = session_assignment(&output)? {
+            self.session = session_vars(None, name, value);
+        }
+        Ok(())
+    }
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
     }
@@ -289,9 +318,7 @@ impl Interaction for Console {
             .map_err(|_| Error::Dependency("Cannot read the setup answer.".into()))?
             == 0
         {
-            return Err(Error::Policy(
-                "Setup stopped. No further changes made.".into(),
-            ));
+            return Err(Error::Policy("Stopped. No further changes made.".into()));
         }
         Ok(matches!(
             answer.trim().to_ascii_lowercase().as_str(),
@@ -317,9 +344,7 @@ impl Interaction for Console {
                 .read_line(&mut answer)
                 .map_err(|_| Error::Dependency("Cannot read the choice.".into()))?;
             if size == 0 || answer.trim().is_empty() {
-                return Err(Error::Policy(
-                    "Setup stopped. No further changes made.".into(),
-                ));
+                return Err(Error::Policy("Stopped. No further changes made.".into()));
             }
             if let Ok(number) = answer.trim().parse::<usize>()
                 && let Some(choice) = number.checked_sub(1).and_then(|n| choices.get(n))

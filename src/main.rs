@@ -1330,10 +1330,13 @@ fn run(
             Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
             cli.verbose,
         );
+        // One runtime: an account added and signed in here keeps its session for the login.
+        let mut runtime = setup_runtime::Runtime::default();
         login::choose_account(
             &probe,
             account.as_deref(),
             &here,
+            &mut runtime,
             &mut setup_runtime::Console,
         )?;
         let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
@@ -1347,7 +1350,7 @@ fn run(
             fallback.as_deref(),
             env.as_deref(),
             command,
-            &mut setup_runtime::Runtime::default(),
+            &mut runtime,
             &mut setup_runtime::Console,
         );
     }
