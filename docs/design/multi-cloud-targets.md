@@ -366,3 +366,49 @@ configuration error. `TargetConfig::open` takes the managed env names (as on the
 and the rollout wait is the run budget left (`CommandRunner::remaining`), not a fixed 600 s.
 `KUBECONFIG` is inherited; no credential variable is required.
 
+
+## 13. Named stores and cross-provider bindings (FR-39)
+
+Decided 2026-10-08 (owner, into 0.5.0): a runtime can keep its config as env vars while its
+secrets live in a store from another provider — first case: secrets in Azure Key Vault, env in a
+Kubernetes Deployment. The commands do not change.
+
+```toml
+[stores.prod-vault]                        # a named store; reusable across environments
+azure_key_vault = "kv-myapp-prod"          # the store kind is the key; its value is the store
+subscription    = "00000000-0000-0000-0000-000000000000"
+# secret_store  = "prod-vault"             # optional: the in-cluster ClusterSecretStore name
+                                           # (default: the opv store name)
+
+[environments.prod.kubernetes]
+context    = "aks-prod"
+namespace  = "api"
+deployment = "api"
+secrets_in = "prod-vault"                  # optional; default = the runtime's own store
+```
+
+- **One new line for users.** Without `secrets_in` nothing changes. `config = "env"` (default)
+  keeps config in the Deployment env; `config = "store"` routes config to the named store too.
+- **Bindings are pairs.** A binding knows how a runtime pins a version of a store entry. The
+  registry lists supported (store kind, runtime) pairs; an unsupported pair is a config error at
+  load listing the supported ones. 0.5.0 bindings: Key Vault → Container Apps (native), Kubernetes
+  Secrets → Deployment (native), **Key Vault → Deployment via the External Secrets Operator**.
+- **Key Vault → Deployment.** opv writes the Key Vault version (the Key Vault store adapter,
+  unchanged), then applies an `ExternalSecret` named `opv-<store>-<version 10 hex>` with
+  `refreshInterval: 0` (fetched once: pinned, FR-29), `remoteRef: { key: <kv name>, version:
+  <version> }`, `target: { name: <same>, creationPolicy: Owner }`, labels `opv-managed=<env>`,
+  `opv-key=<store>`, pointing at the `ClusterSecretStore` named in the store (default: the opv
+  store name). It waits until the ExternalSecret is `Ready=True` (the Secret exists), then repins
+  the Deployment's `secretKeyRef` and waits for the rollout as for native Kubernetes. Prune deletes
+  ExternalSecrets (and so their Secrets) not referenced by the Deployment or any ReplicaSet, and
+  deletes Key Vault entries only after a healthy rollout (FR-32).
+- **Plug-in contract.** A provider may declare store kinds (`Provider::store_kinds`, e.g. Azure →
+  `azure_key_vault`) and bindings (`Provider::bindings`, e.g. Kubernetes → `(azure_key_vault,
+  external-secrets)`). Core config parses `[stores.*]` generically and dispatches to the provider
+  that declared the kind. Adding a store kind or binding changes no core code.
+- **doctor / preflight.** For an ESO binding: the `externalsecrets.external-secrets.io` CRD exists;
+  the named `ClusterSecretStore` exists and is `Ready`; opv can create ExternalSecrets in the
+  namespace (`auth can-i`); plus the Key Vault checks of the store. A `ClusterSecretStore` that is
+  not Ready is a refusal before any write, naming its condition message.
+- **explain / status.** Show the chain per key: `DB_URL → Key Vault kv-myapp-prod (v4668…) →
+  ExternalSecret opv-… → env`.
