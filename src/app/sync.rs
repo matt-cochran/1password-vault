@@ -827,7 +827,8 @@ fn run_pinned(
         env_routed(out)?;
         return Ok(report);
     }
-    let unbinding: Vec<&String> = change.unbind.iter().chain(deletes).collect();
+    // A pruned key is both unbound and deleted: list it once.
+    let unbinding: BTreeSet<&String> = change.unbind.iter().chain(deletes).collect();
     if !unbinding.is_empty() {
         p(out, format!("will prune: {}", names.join(unbinding)))?;
     }

@@ -197,22 +197,27 @@ pub fn wake(r: &dyn CommandRunner) -> bool {
 }
 
 /// `user_type` from `op whoami --format json`, nothing else. Unknown fields (identity) are
-/// skipped by serde without being kept.
+/// skipped by serde without being kept. With the 1Password app integration, `whoami` has
+/// no `user_type`; a `user_uuid` (checked for presence only, never kept) then means a person,
+/// since a service account always reports `SERVICE_ACCOUNT`.
 fn identity_type(stdout: &[u8]) -> IdentityType {
     #[derive(Deserialize)]
     struct Who {
         #[serde(default)]
         user_type: Option<String>,
+        #[serde(default)]
+        user_uuid: Option<de::IgnoredAny>,
     }
-    let t = serde_json::from_slice::<Who>(stdout)
-        .ok()
-        .and_then(|w| w.user_type)
-        .filter(|t| {
-            !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
-        });
+    let Ok(w) = serde_json::from_slice::<Who>(stdout) else {
+        return IdentityType::Unknown;
+    };
+    let t = w.user_type.filter(|t| {
+        !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+    });
     match t.as_deref() {
         Some("SERVICE_ACCOUNT") => IdentityType::ServiceAccount,
         Some(_) => IdentityType::User,
+        None if w.user_uuid.is_some() => IdentityType::User,
         None => IdentityType::Unknown,
     }
 }
@@ -1946,6 +1951,18 @@ mod tests {
         );
         assert_eq!(identity_type(b"not json"), IdentityType::Unknown);
         assert_eq!(identity_type(b"{}"), IdentityType::Unknown);
+    }
+
+    /// With the 1Password app integration, `op whoami` names the user but has no
+    /// `user_type` (recorded live, op 2.40.0): that is a person.
+    #[test]
+    fn app_integration_whoami_is_a_person() {
+        assert_eq!(
+            identity_type(
+                br#"{"url":"https://x.1password.com/","email":"a@b.c","user_uuid":"UX","account_uuid":"AX"}"#
+            ),
+            IdentityType::User
+        );
     }
 
     #[test]

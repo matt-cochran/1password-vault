@@ -95,6 +95,21 @@ fn import_ends_with_a_next_step_to_delete_the_file() {
     );
 }
 
+/// Found live: without a git remote there may be no repository, so the step is `rm`.
+#[test]
+fn import_without_a_remote_next_step_uses_rm() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
+    let args = ImportArgs {
+        project: Some("myapp".into()),
+        ..import_args(dir.path())
+    };
+    let mut out = Vec::new();
+    import(&args, dir.path(), &FakeOp::default(), &mut out).unwrap();
+    let last = text(&out).lines().last().unwrap().to_string();
+    assert!(last.contains("&& rm "), "{last}");
+}
+
 #[test]
 fn import_refuses_an_invalid_file_before_any_call() {
     let (dir, op) = checkout();

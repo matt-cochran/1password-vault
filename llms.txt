@@ -1,6 +1,6 @@
 # opv
 
-> opv is a Rust CLI that syncs secrets from 1Password into runtime targets (Fly.io supported; Azure Key Vault + Container Apps, Kubernetes, and Key Vault → Kubernetes through the External Secrets Operator in preview; Azure App Service, AWS and GCP planned) and into local processes (`opv run`) without ever printing, logging or writing a secret value. A project manifest in 1Password (Secure Note `opv · <project>`, found by the git remote) or a committed `secrets.toml` with the same TOML declares IDs, key names, kinds and validation rules; values stay in 1Password.
+> opv is a Rust CLI that syncs secrets from 1Password into runtime targets (Fly.io, Azure Key Vault + Container Apps, Kubernetes, and Key Vault → Kubernetes through the External Secrets Operator supported; Azure App Service, AWS and GCP planned) and into local processes (`opv run`) without ever printing, logging or writing a secret value. A project manifest in 1Password (Secure Note `opv · <project>`, found by the git remote) or a committed `secrets.toml` with the same TOML declares IDs, key names, kinds and validation rules; values stay in 1Password.
 
 ## Contract (read this first)
 

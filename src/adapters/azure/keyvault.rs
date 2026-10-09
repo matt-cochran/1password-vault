@@ -572,16 +572,15 @@ fn no_version_error(name: &str) -> Error {
     )
 }
 
-/// The soft-deleted refusal names the exact recover command; opv never recovers itself
-/// (FR-32).
+/// The soft-deleted refusal names the exact recover command, which is also its `Next:`
+/// (re-running sync first would fail again); opv never recovers itself (FR-32).
 fn soft_deleted_error(name: &str, vault: &str) -> Error {
+    let recover = format!("az keyvault secret recover --vault-name {vault} --name {name}");
     Error::Target(
-        format!(
-            "{name} is soft-deleted in Key Vault {vault}; recover it with: \
-         az keyvault secret recover --vault-name {vault} --name {name}"
-        )
-        .into(),
+        format!("{name} is soft-deleted in Key Vault {vault}; recover it, then re-run: {recover}")
+            .into(),
     )
+    .with_next(recover)
 }
 
 #[cfg(test)]
@@ -827,6 +826,21 @@ mod tests {
         assert!(matches!(err, Error::Target(msg) if msg.contains(
             "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET"
         )));
+    }
+
+    /// Found live: the step after a soft-deleted name is the recovery, not a re-run.
+    #[test]
+    fn soft_deleted_name_next_is_the_recover_command() {
+        let r = FakeRunner::new([Output::failure(1), Output::success("")]);
+        let templates = names(&[]);
+        let kv = vault(&r, "prod", &templates);
+        let err = kv
+            .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
+            .unwrap_err();
+        assert_eq!(
+            err.next_step(),
+            Some("az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET")
+        );
     }
 
     #[test]

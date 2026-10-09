@@ -19,6 +19,15 @@ pub fn select(
         )
         .with_next(super::check_command(fleet, Some(env), None)));
     }
+    // One product needs no choosing.
+    let only = (fleet.products.len() == 1)
+        .then(|| fleet.products.keys().next().map(String::as_str))
+        .flatten();
+    let product = if fleet.is_simple() {
+        product
+    } else {
+        product.or(only)
+    };
     if !fleet.is_simple() && required && product.is_none() {
         let first = fleet.products.keys().next().map(String::as_str);
         return Err(Error::Config(format!(

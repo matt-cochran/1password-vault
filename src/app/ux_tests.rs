@@ -244,6 +244,13 @@ fn unknown_product_next_checks_the_closest_product() {
     assert_eq!(e.next_step(), Some("opv check prod --product web"));
 }
 
+/// A fleet configuration with one product needs no `--product` (found live: `check`
+/// asked to choose from one).
+#[test]
+fn a_single_product_is_selected_without_the_flag() {
+    assert!(super::local::select(&fleet(), "prod", None, true).is_ok());
+}
+
 #[test]
 fn missing_product_next_checks_the_first_product() {
     let e = super::local::select(&two_products(), "prod", None, true).unwrap_err();

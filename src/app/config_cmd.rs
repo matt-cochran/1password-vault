@@ -130,11 +130,13 @@ pub fn import(
             args.file.display()
         ),
     )?;
+    // Without a git remote there may be no repository to `git rm` from (found live).
+    let rm = if repo.is_some() { "git rm" } else { "rm" };
     line(
         out,
         format!(
-            "Next: OPV_PROJECT={project} opv config check --file {f} && git rm {f}",
-            f = args.file.display()
+            "Next: OPV_PROJECT={project} opv config check --file {f} && {rm} {f}",
+            f = crate::error::shell_word(&args.file.display().to_string())
         ),
     )
 }

@@ -431,6 +431,10 @@ pub fn unprovable(raw: &[u8]) -> Option<&'static str> {
         "OTP" => "a one-time password field",
         "SSHKEY" => "an SSH key field",
         "PASSKEY" => "a passkey",
+        "DATE" => "a date field",
+        "MONTH_YEAR" => "a month-year field",
+        "ADDRESS" => "an address field",
+        "REFERENCE" => "a reference to another item",
         _ => "a field of a type opv does not rewrite",
     })
 }
@@ -481,6 +485,16 @@ mod tests {
 
     fn layout_of(v: Value) -> Layout {
         parse(&serde_json::to_vec(&v).unwrap()).unwrap().0
+    }
+
+    /// Found live: a date field was named only as "a field of a type opv does not rewrite".
+    #[test]
+    fn unprovable_names_a_date_field() {
+        let raw = json!({"fields": [{"id": "d", "type": "DATE", "label": "renewal"}]});
+        assert_eq!(
+            unprovable(&serde_json::to_vec(&raw).unwrap()),
+            Some("a date field")
+        );
     }
 
     #[test]

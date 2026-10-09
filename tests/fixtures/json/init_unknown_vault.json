@@ -3,7 +3,7 @@
   "ok": false,
   "exit_code": 2,
   "next": "opv init staging --json",
-  "do": "fix the cause above",
+  "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), then re-run",
   "error": {
     "code": "config_invalid",
     "category": "config",
@@ -11,7 +11,7 @@
     "detail": [],
     "retry": "after_fix",
     "human_required": false,
-    "do": "fix the cause above",
+    "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), then re-run",
     "next": "opv init staging --json"
   }
 }

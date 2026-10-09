@@ -793,6 +793,14 @@ fn prune_with_deploy_unbinds_and_deletes_the_entry() {
     assert!(!env.contains_key("OLD_KEY") && !kv.contains_key("old-key"));
 }
 
+/// Found live: a pruned key is both unbound and deleted, and was listed twice.
+#[test]
+fn will_prune_lists_each_key_once() {
+    let sim = converged();
+    let (_, out) = sync_on(&sim, &fleet_b(), &deploy_prune());
+    assert!(out.lines().any(|l| l == "will prune: OLD_KEY"), "{out}");
+}
+
 #[test]
 fn prune_without_deploy_only_reports() {
     let sim = converged();

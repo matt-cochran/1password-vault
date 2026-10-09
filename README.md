@@ -68,14 +68,14 @@ Problems come first, each with its reason and a link to its item in 1Password, t
 | Target | Status |
 |---|---|
 | Fly.io | supported |
-| Azure Key Vault + Container Apps | **preview** |
-| Kubernetes (Secrets + Deployment) | **preview** |
-| Azure Key Vault → Kubernetes (External Secrets Operator) | **preview** |
+| Azure Key Vault + Container Apps | supported |
+| Kubernetes (Secrets + Deployment) | supported |
+| Azure Key Vault → Kubernetes (External Secrets Operator) | supported |
 | Azure App Service | planned ([#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |
 
-Preview targets are complete and tested against recorded CLI output; they leave preview once live smoke tests pass. Each environment names one target, and every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until `sync --deploy`. Local development needs no target at all.
+Each environment names one target, and every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until `sync --deploy`. Local development needs no target at all.
 
 ## Documentation
 

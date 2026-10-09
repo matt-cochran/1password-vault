@@ -203,6 +203,16 @@ struct Prepared {
     created: Vec<String>,
 }
 
+/// A missing vault or item opv may not create (not a person signed in with their own
+/// account, FR-43): the person creates it, then re-runs (found live: the bare error's step
+/// was the same command, which could not succeed).
+fn not_created(e: Error, what: &str, title: &str) -> Error {
+    e.with_do(format!(
+        "create the {what} {title:?} in 1Password (opv creates it only for a person signed in \
+         with their own account), then re-run"
+    ))
+}
+
 /// Resolve (creating a missing vault or item for a signed-in person, FR-43), read field
 /// shapes, declare, render and validate (steps 2 to 5).
 fn prepare(
@@ -221,7 +231,9 @@ fn prepare(
     };
     let vault = match onepassword_init::find_vault(r, &args.vault, host)? {
         onepassword_init::Lookup::Found(v) => v,
-        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => {
+            return Err(not_created(e, "vault", &args.vault));
+        }
         onepassword_init::Lookup::Missing(_) => {
             created.push(format!("vault {:?}", args.vault));
             onepassword_init::create_vault(r, &args.vault)?
@@ -229,7 +241,9 @@ fn prepare(
     };
     let item = match onepassword_init::find_item(r, &vault.id, &args.item, host)? {
         onepassword_init::Lookup::Found(i) => i,
-        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => {
+            return Err(not_created(e, "item", &args.item));
+        }
         onepassword_init::Lookup::Missing(_) => {
             created.push(format!("item {:?}", args.item));
             onepassword_init::create_item(r, &vault.id, &args.item)?

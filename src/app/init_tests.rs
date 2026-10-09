@@ -302,6 +302,23 @@ fn no_matching_vault_lists_candidates_and_reads_nothing_more() {
     assert!(run.file.is_none());
 }
 
+/// Found live: when opv may not create a missing vault, the person is told to create it
+/// (the bare step re-ran a command that could not succeed).
+#[test]
+fn a_vault_opv_may_not_create_asks_the_person_to_create_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(None, false);
+    a.vault = "myapp-prod".into();
+    let run = run_in(dir.path(), &a, vec![vaults()]);
+    assert_eq!(
+        run.err().action(),
+        Some(
+            "create the vault \"myapp-prod\" in 1Password (opv creates it only for a person \
+             signed in with their own account), then re-run"
+        )
+    );
+}
+
 #[test]
 fn several_matching_items_list_them_and_write_nothing() {
     let dir = tempfile::tempdir().unwrap();
