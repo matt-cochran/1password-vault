@@ -352,7 +352,17 @@ pub fn run(
     let raw = if let Some(id) = &item_id {
         successful(
             backend,
-            &["item", "get", id, "--vault", &vault, "--format", "json"],
+            // The item setup may write back whole: never a cached copy (C1).
+            &[
+                "item",
+                "get",
+                id,
+                "--vault",
+                &vault,
+                "--format",
+                "json",
+                crate::adapters::onepassword::NO_CACHE,
+            ],
             None,
         )?
     } else {

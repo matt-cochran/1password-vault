@@ -1,8 +1,14 @@
 //! A stateful fake `op` (and `git remote get-url origin`) for manifest tests: it stores
 //! items with their tags, fields and versions, answers `item list --tags`, `item get`,
 //! `item create -` and `item edit` from that state, and records every call with its stdin.
+//!
+//! It models `op`'s local cache (op 2.x on UNIX): an `item get` without `--cache=false`
+//! answers from the copy cached by the last read or write of that item, so an edit made
+//! elsewhere ([`FakeOp::bump`], [`FakeOp::edit_elsewhere`]) stays invisible to it until a
+//! `--cache=false` read refreshes the cache.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::io;
 use std::time::Duration;
 
@@ -27,6 +33,12 @@ pub struct FakeOp {
     pub toplevel: RefCell<Option<String>>,
     pub signed_in: Cell<bool>,
     pub calls: RefCell<Vec<Recorded>>,
+    /// `op`'s local cache: the item as this machine last read or wrote it, by item ID.
+    pub cache: RefCell<BTreeMap<String, Value>>,
+    /// Someone else's edit, applied right after the n-th `item edit` reaches op (1-based),
+    /// before op answers: an edit landing together with opv's (I5).
+    pub racing_edit: Cell<Option<usize>>,
+    edits: Cell<usize>,
     next_id: Cell<u32>,
 }
 
@@ -42,6 +54,9 @@ impl Default for FakeOp {
             toplevel: RefCell::new(None),
             signed_in: Cell::new(true),
             calls: RefCell::default(),
+            cache: RefCell::default(),
+            racing_edit: Cell::new(None),
+            edits: Cell::new(0),
             next_id: Cell::new(1),
         }
     }
@@ -72,6 +87,21 @@ impl FakeOp {
     pub fn bump(&self, id: &str) {
         for i in self.items.borrow_mut().iter_mut() {
             if i["id"] == id {
+                i["version"] = json!(i["version"].as_u64().unwrap_or(0) + 1);
+            }
+        }
+    }
+
+    /// Someone else edits the item's notes in the 1Password app: its version moves on and
+    /// this machine's cache keeps the old copy.
+    pub fn edit_elsewhere(&self, id: &str, notes: &str) {
+        for i in self.items.borrow_mut().iter_mut() {
+            if i["id"] == id {
+                for f in i["fields"].as_array_mut().into_iter().flatten() {
+                    if f["id"] == "notesPlain" {
+                        f["value"] = json!(notes);
+                    }
+                }
                 i["version"] = json!(i["version"].as_u64().unwrap_or(0) + 1);
             }
         }
@@ -175,16 +205,24 @@ impl FakeOp {
                     .collect();
                 Output::success(serde_json::to_vec(&rows).unwrap())
             }
-            ["item", "get", id, "--vault", vault, ..] => {
-                match self
+            ["item", "get", id, "--vault", vault, rest @ ..] => {
+                let fresh = rest.contains(&crate::adapters::onepassword::NO_CACHE);
+                let current = self
                     .items
                     .borrow()
                     .iter()
                     .find(|i| i["id"] == *id && i["vault"]["id"] == *vault)
-                {
-                    Some(i) => Output::success(serde_json::to_vec(i).unwrap()),
-                    None => Output::failure(1),
-                }
+                    .cloned();
+                let Some(current) = current else {
+                    return Output::failure(1);
+                };
+                let mut cache = self.cache.borrow_mut();
+                let answer = match cache.get(*id) {
+                    Some(cached) if !fresh => cached.clone(),
+                    _ => current,
+                };
+                cache.insert((*id).to_string(), answer.clone());
+                Output::success(serde_json::to_vec(&answer).unwrap())
             }
             ["item", "create", "--vault", vault, ..] => {
                 let Some(mut item) = call
@@ -198,7 +236,9 @@ impl FakeOp {
                 }
                 item["version"] = json!(1);
                 let id = self.insert(vault, item);
-                Output::success(serde_json::to_vec(&self.item(&id)).unwrap())
+                let created = self.item(&id);
+                self.cache.borrow_mut().insert(id, created.clone());
+                Output::success(serde_json::to_vec(&created).unwrap())
             }
             ["item", "edit", id, "--vault", _, ..] => {
                 let Some(new) = call
@@ -207,6 +247,11 @@ impl FakeOp {
                 else {
                     return Output::failure(1);
                 };
+                let n = self.edits.get() + 1;
+                self.edits.set(n);
+                if self.racing_edit.get() == Some(n) {
+                    self.edit_elsewhere(id, "edited = \"elsewhere\"\n");
+                }
                 let mut items = self.items.borrow_mut();
                 let Some(i) = items.iter_mut().find(|i| i["id"] == *id) else {
                     return Output::failure(1);
@@ -216,7 +261,12 @@ impl FakeOp {
                 i["tags"] = new["tags"].clone();
                 i["title"] = new["title"].clone();
                 i["version"] = json!(version);
-                Output::success(serde_json::to_vec(i).unwrap())
+                let written = i.clone();
+                drop(items);
+                self.cache
+                    .borrow_mut()
+                    .insert((*id).to_string(), written.clone());
+                Output::success(serde_json::to_vec(&written).unwrap())
             }
             _ => Output::failure(1),
         }

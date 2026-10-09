@@ -859,7 +859,8 @@ fn add_env_on(
     json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
-    let base = store.read(r)?;
+    // The text the write is built from: for the manifest, a person's fresh read (I3, C1).
+    let base = store.read_for_write(r)?;
     let original = &base.text;
     let place = store.describe();
     let fleet = store.parse(original).map_err(|e| match e {
@@ -904,7 +905,22 @@ fn add_env_on(
     let mut absent: Vec<String> = Vec::new();
     let mut notes = decl.notes.clone();
     let mut declared = std::collections::BTreeSet::new();
+    // Keys added to the new environment, by (product, key) as the fleet names them.
+    let mut added_ids = std::collections::BTreeSet::new();
+    // Shared keys (FR-45), decided once their sources are: (product, key, source).
+    let mut shared: Vec<(Option<String>, String, (String, String))> = Vec::new();
     for (product, key) in doc.keys(fleet_profile) {
+        let spec = fleet
+            .products
+            .get(product.as_deref().unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .and_then(|p| p.keys.get(&key));
+        // M6: a shared key has no field of its own; it joins the environment exactly when
+        // its source does (below), whatever stray field sits under its own label.
+        if let Some((sp, sk)) = spec.and_then(|s| s.source()) {
+            declared.insert((product.clone().unwrap_or_default(), key.clone()));
+            shared.push((product, key, (sp.to_string(), sk.to_string())));
+            continue;
+        }
         let in_item = decl
             .keys
             .get(product.as_deref().unwrap_or(""))
@@ -927,6 +943,26 @@ fn add_env_on(
                 kind_word(spec_kind.unwrap_or(*kind)),
                 kind_word(*kind)
             ));
+        }
+        doc.add_key_env(product.as_deref(), &key, &args.env)?;
+        added_ids.insert((
+            product
+                .clone()
+                .unwrap_or_else(|| crate::domain::SIMPLE_PRODUCT.to_string()),
+            key.clone(),
+        ));
+        if let Some(p) = &product
+            && !products.contains(p)
+        {
+            products.push(p.clone());
+        }
+        added.push(name);
+    }
+    for (product, key, source) in shared {
+        let name = label(&product, &key);
+        if !added_ids.contains(&source) {
+            absent.push(name);
+            continue;
         }
         doc.add_key_env(product.as_deref(), &key, &args.env)?;
         if let Some(p) = &product

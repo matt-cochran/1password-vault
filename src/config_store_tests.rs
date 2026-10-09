@@ -487,3 +487,248 @@ fn default_project_is_the_repo_name() {
         "myapp"
     );
 }
+
+// --- final review (FR-44): fresh reads, version checks, identity gate, accounts ---
+
+/// The manifest `opv · myapp` (no tags) and its store, found by `OPV_PROJECT`.
+fn myapp(op: &FakeOp) -> (String, Found) {
+    let id = put(op, "myapp-dev", "myapp", &manifest_tags(None, &[]));
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = req(dir.path());
+    r.project = Some("myapp".into());
+    (id, locate(&r, op).unwrap())
+}
+
+/// TOML with one more key: an edit someone made in the 1Password app.
+fn edited() -> String {
+    format!("{TOML}\n[keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n")
+}
+
+fn under<T>(env: crate::host::FakeEnv, f: impl FnOnce() -> T) -> T {
+    crate::host::with_test_host(Host::from_env(&env.shell("/bin/bash")), f)
+}
+
+#[test]
+fn the_read_an_edit_starts_from_sees_past_ops_cache() {
+    let op = FakeOp::default();
+    let (id, found) = myapp(&op);
+    found.store().read(&op).unwrap();
+    op.edit_elsewhere(&id, &edited());
+    let base = found.store().read_for_write(&op).unwrap();
+    assert_eq!(base.text, edited());
+}
+
+#[test]
+fn a_base_read_from_ops_cache_never_overwrites_a_newer_edit() {
+    let op = FakeOp::default();
+    let (id, found) = myapp(&op);
+    found.store().read(&op).unwrap();
+    op.edit_elsewhere(&id, &edited());
+    let stale = found.store().read(&op).unwrap();
+    let res = found.store().replace(&op, &stale, TOML).unwrap();
+    assert!(matches!(res, Replaced::Changed(_)));
+}
+
+#[test]
+fn every_read_a_manifest_write_checks_against_bypasses_the_cache() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read_for_write(&op).unwrap();
+    found.store().replace(&op, &base, &edited()).unwrap();
+    let cached = op
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.args.starts_with(&["item".into(), "get".into()]))
+        .skip(1)
+        .any(|c| !c.args.iter().any(|a| a == "--cache=false"));
+    assert!(!cached);
+}
+
+#[test]
+fn an_edit_landing_with_a_manifest_write_is_config_changed() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read_for_write(&op).unwrap();
+    op.racing_edit.set(Some(1));
+    let e = save(found.store(), &op, &base, &edited()).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::ConfigChanged);
+}
+
+#[test]
+fn an_edit_landing_with_a_manifest_write_is_never_retried() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read_for_write(&op).unwrap();
+    op.racing_edit.set(Some(1));
+    let _ = save(found.store(), &op, &base, &edited());
+    assert_eq!(op.count(&["op", "item", "edit"]), 1);
+}
+
+#[test]
+fn a_manifest_write_one_version_later_is_saved() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read_for_write(&op).unwrap();
+    assert!(save(found.store(), &op, &base, &edited()).is_ok());
+}
+
+#[test]
+fn a_manifest_write_under_a_service_account_is_refused() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read(&op).unwrap();
+    let env = crate::host::FakeEnv::new("linux").var_val("OP_SERVICE_ACCOUNT_TOKEN", "dummy");
+    let e = under(env, || found.store().replace(&op, &base, &edited())).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::PolicyRefused);
+}
+
+#[test]
+fn a_manifest_write_in_ci_writes_nothing() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read(&op).unwrap();
+    let env = crate::host::FakeEnv::new("linux").var("CI");
+    let _ = under(env, || found.store().replace(&op, &base, &edited()));
+    assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+#[test]
+fn a_refused_manifest_write_names_opv_login() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let env = crate::host::FakeEnv::new("linux").var("CI");
+    let e = under(env, || found.store().read_for_write(&op)).unwrap_err();
+    assert_eq!(e.next_step(), Some("opv login"));
+}
+
+#[test]
+fn creating_a_manifest_under_a_service_account_creates_nothing() {
+    let op = FakeOp::default();
+    let env = crate::host::FakeEnv::new("linux").var_val("OP_SERVICE_ACCOUNT_TOKEN", "dummy");
+    let _ = under(env, || {
+        create_manifest(&op, "myapp-dev", "myapp", Some(REPO), &[], TOML, None)
+    });
+    assert_eq!(op.count(&["op", "item", "create"]), 0);
+}
+
+/// A fake whose writes come back `Refused` (a definite failure, nothing changed).
+struct RefusedWrites<'a>(&'a FakeOp);
+
+impl CommandRunner for RefusedWrites<'_> {
+    fn read(&self, call: &Call, refused: &[i32]) -> std::io::Result<crate::runner::Outcome> {
+        self.0.read(call, refused)
+    }
+    fn write(&self, _: &Call) -> std::io::Result<crate::runner::Outcome> {
+        Ok(crate::runner::Outcome::Refused(
+            crate::runner::Output::failure(1),
+        ))
+    }
+    fn probe(
+        &self,
+        call: &Call,
+        limit: std::time::Duration,
+    ) -> std::io::Result<crate::runner::Output> {
+        self.0.probe(call, limit)
+    }
+    fn pause(&self, _: std::time::Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> std::io::Result<i32> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+#[test]
+fn a_refused_manifest_write_is_a_definite_failure() {
+    let op = FakeOp::default();
+    let (_, found) = myapp(&op);
+    let base = found.store().read_for_write(&op).unwrap();
+    let e = found
+        .store()
+        .replace(&RefusedWrites(&op), &base, &edited())
+        .unwrap_err();
+    assert_ne!(e.code(), crate::error::Code::OutcomeUnknown, "{e:?}");
+}
+
+#[test]
+fn a_dot_opv_account_that_reads_as_a_flag_is_refused() {
+    let res = parse_dot_opv("project = \"myapp\"\naccount = \"-x\"\n", Path::new(".opv"));
+    assert!(res.is_err());
+}
+
+#[test]
+fn a_dot_opv_sign_in_address_is_accepted() {
+    let res = parse_dot_opv(
+        "project = \"myapp\"\naccount = \"team.1password.com\"\n",
+        Path::new(".opv"),
+    );
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn a_single_path_scoped_manifest_is_not_used_from_a_sibling_directory() {
+    let op = FakeOp::with_remote("git@github.com:acme/myapp.git");
+    let dir = monorepo(&op);
+    put(&op, "myapp-dev", "api", &repo_tags(&["apps/api"]));
+    let start = dir.path().join("apps/web");
+    let e = locate(&req(&start), &op).unwrap_err();
+    assert_eq!(e.next_step(), Some("OPV_PROJECT=api opv <command>"));
+}
+
+#[test]
+fn a_single_path_scoped_manifest_is_used_inside_its_path() {
+    let op = FakeOp::with_remote("git@github.com:acme/myapp.git");
+    let dir = monorepo(&op);
+    put(&op, "myapp-dev", "api", &repo_tags(&["apps/api"]));
+    let start = dir.path().join("apps/api/src");
+    assert_eq!(title_of(locate(&req(&start), &op)), "opv · api");
+}
+
+#[test]
+fn a_single_manifest_without_paths_covers_the_whole_repository() {
+    let op = FakeOp::with_remote("git@github.com:acme/myapp.git");
+    let dir = monorepo(&op);
+    put(&op, "myapp-dev", "whole", &repo_tags(&[]));
+    let start = dir.path().join("apps/web");
+    assert_eq!(title_of(locate(&req(&start), &op)), "opv · whole");
+}
+
+fn in_account(op: &FakeOp, text: &str) -> Fleet {
+    let id = op.insert(
+        "myapp-dev",
+        template(&manifest_title("myapp"), "myapp", &[], text),
+    );
+    let row = Row {
+        id,
+        title: manifest_title("myapp"),
+        tags: Vec::new(),
+        version: 1,
+        vault: crate::adapters::onepassword_manifest::VaultRef {
+            id: "vdev0000000000000000000001".into(),
+            name: "myapp-dev".into(),
+        },
+    };
+    Found::Manifest(ManifestStore::from_row(
+        &row,
+        Some("work".into()),
+        Matched::Given,
+    ))
+    .load(op)
+    .unwrap()
+}
+
+#[test]
+fn a_manifest_in_another_account_passes_it_to_its_environments() {
+    let fleet = in_account(&FakeOp::default(), TOML);
+    assert_eq!(fleet.environments["dev"].account.as_deref(), Some("work"));
+}
+
+#[test]
+fn an_environments_own_account_wins_over_the_manifests() {
+    let text = TOML.replace(
+        "item_id = \"app\"\n",
+        "item_id = \"app\"\naccount = \"home\"\n",
+    );
+    let fleet = in_account(&FakeOp::default(), &text);
+    assert_eq!(fleet.environments["dev"].account.as_deref(), Some("home"));
+}

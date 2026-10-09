@@ -90,7 +90,8 @@ fn run_inner(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let base = store.read(r)?;
+    // The text the write is built from: for the manifest, a person's fresh read (I3, C1).
+    let base = store.read_for_write(r)?;
     let original = &base.text;
     let place = store.describe();
     let fleet = store.parse(original).map_err(|e| match e {

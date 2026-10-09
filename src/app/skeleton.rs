@@ -35,7 +35,20 @@ pub fn run_as(
     // The tolerant reader (FR-43): a field opv would read for a key (another label
     // spelling, a wrong section, another type, a duplicate) counts as present, so no
     // second field is added beside it, and an item the strict reader refuses still works.
-    let item = onepassword::read_whole(r, env)?;
+    // The read the write is built from bypasses op's cache (C1): a cached copy would put
+    // stale values over a newer edit.
+    let item = onepassword::read_whole_fresh(r, env)?;
+    // M2: the project manifest (FR-44) holds the configuration; it never gets key fields.
+    if super::tidy::is_manifest(item.raw()) {
+        return Err(Error::Policy(
+            format!(
+                "environment {env_name} points at the project's manifest item; opv item skeleton \
+                 never adds fields to it; nothing written"
+            )
+            .into(),
+        )
+        .with_next("opv config edit"));
+    }
     let (layout, _) = onepassword_tidy::parse(item.raw())?;
     let found = convention::resolve(&layout, fleet).chosen;
     let missing: Vec<(String, String, Kind)> = fleet
@@ -53,7 +66,18 @@ pub fn run_as(
         .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
         .collect();
     if !missing.is_empty() {
-        onepassword::write_skeleton(r, env, &item, &missing)?;
+        let written = onepassword::write_skeleton(r, env, &item, &missing)?;
+        // I5: one version after the read it was built from, or another edit landed with it.
+        if let (Some(v), Some(w)) = (item.version, written)
+            && w != v + 1
+        {
+            r.note(&format!(
+                "1Password ({env_name}): another edit landed while opv item skeleton wrote the \
+                 item (version {w} instead of {}); opv did not retry. Check the item's history \
+                 in 1Password.",
+                v + 1
+            ));
+        }
     }
     if json {
         let added: Vec<serde_json::Value> = missing
@@ -154,7 +178,7 @@ mod tests {
         assert_eq!(
             a,
             vec![
-                "op item get iprd --vault vprd --format json",
+                "op item get iprd --vault vprd --format json --cache=false",
                 "op item edit iprd --vault vprd --format json",
             ]
         );
@@ -217,7 +241,7 @@ mod tests {
         assert_eq!(
             argvs(&r),
             vec![
-                "op item get idev --vault vdev --format json",
+                "op item get idev --vault vdev --format json --cache=false",
                 "op item edit idev --vault vdev --format json",
             ]
         );

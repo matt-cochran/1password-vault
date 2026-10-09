@@ -1,5 +1,7 @@
 //! Self-healing conventions end to end (FR-43), against a stateful fake `op` that stores
-//! the item, applies `op item edit` stdin to it and bumps its version.
+//! the item, applies `op item edit` stdin to it and bumps its version. It models `op`'s
+//! local cache: an `item get` without `--cache=false` answers with the copy cached by the
+//! last read or write, so someone else's edit is invisible to it until a fresh read.
 
 use std::cell::{Cell, RefCell};
 use std::io;
@@ -23,6 +25,8 @@ enum Edit {
     KilledBefore,
     /// Applied, then the result was lost.
     KilledAfter,
+    /// Applied, but op dropped the item's last field (a field it cannot round-trip).
+    Lossy,
 }
 
 type Editor = fn(&mut Value);
@@ -34,6 +38,13 @@ struct FakeOp {
     /// Someone else editing the item: on the n-th `item get` (1-based), before it answers.
     editors: RefCell<Vec<(usize, Editor)>>,
     gets: Cell<usize>,
+    /// `op`'s local cache of the item (the last read or written copy).
+    cache: RefCell<Option<Value>>,
+    /// Someone else's edit applied right after `op item edit` reaches op, before it applies
+    /// opv's (I5).
+    racing: Cell<Option<Editor>>,
+    /// What `op item edit` echoes: the item as written (op's behaviour) or nothing.
+    echo: Cell<bool>,
     calls: RefCell<Vec<(Vec<String>, Vec<u8>)>>,
     notes: RefCell<Vec<String>>,
     child_env: RefCell<Vec<(String, String)>>,
@@ -47,6 +58,9 @@ impl FakeOp {
             edit: Cell::new(Edit::Apply),
             editors: RefCell::new(Vec::new()),
             gets: Cell::new(0),
+            cache: RefCell::new(None),
+            racing: Cell::new(None),
+            echo: Cell::new(true),
             calls: RefCell::default(),
             notes: RefCell::default(),
             child_env: RefCell::default(),
@@ -108,8 +122,16 @@ impl CommandRunner for FakeOp {
                     bump(&mut item);
                 }
             }
-            let out = serde_json::to_vec(&*self.item.borrow()).unwrap();
-            return Ok(Outcome::Done(Output::success(out)));
+            let fresh = call.args.contains(&crate::adapters::onepassword::NO_CACHE);
+            let mut cache = self.cache.borrow_mut();
+            let answer = match &*cache {
+                Some(cached) if !fresh => cached.clone(),
+                _ => self.item.borrow().clone(),
+            };
+            *cache = Some(answer.clone());
+            return Ok(Outcome::Done(Output::success(
+                serde_json::to_vec(&answer).unwrap(),
+            )));
         }
         if call.args.starts_with(&["vault", "list"]) {
             return Ok(Outcome::Done(Output::success(
@@ -132,14 +154,28 @@ impl CommandRunner for FakeOp {
             return Ok(Outcome::Done(Output::success(b"{}".to_vec())));
         }
         let mode = self.edit.get();
-        if matches!(mode, Edit::Apply | Edit::KilledAfter) {
+        if matches!(mode, Edit::Apply | Edit::KilledAfter | Edit::Lossy) {
+            if let Some(editor) = self.racing.take() {
+                let mut item = self.item.borrow_mut();
+                editor(&mut item);
+                bump(&mut item);
+            }
             let mut new: Value = serde_json::from_slice(call.stdin.unwrap()).unwrap();
             new["version"] = self.item.borrow()["version"].clone();
             bump(&mut new);
-            *self.item.borrow_mut() = new;
+            if mode == Edit::Lossy {
+                new["fields"].as_array_mut().unwrap().pop();
+            }
+            *self.item.borrow_mut() = new.clone();
+            *self.cache.borrow_mut() = Some(new);
         }
+        let echoed = if self.echo.get() {
+            serde_json::to_vec(&*self.item.borrow()).unwrap()
+        } else {
+            b"{}".to_vec()
+        };
         Ok(match mode {
-            Edit::Apply => Outcome::Done(Output::success(b"{}".to_vec())),
+            Edit::Apply | Edit::Lossy => Outcome::Done(Output::success(echoed)),
             Edit::Refuse => Outcome::Unknown {
                 reason: "failed-write",
                 status: Some(1),
@@ -1044,4 +1080,350 @@ fn a_tidy_conflict_is_in_the_check_document() {
     op.editors.borrow_mut().push((3, someone_edits_session));
     let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
     assert_eq!(doc["tidy_error"], "tidy_conflict");
+}
+
+// ---- Final review: fresh reads (C1), version checks (I5), data-preserving tidy (I4),
+// identity-specific notes (M3, M4), shared items (M1), item skeleton (M2) ----------------
+
+/// A person's machine whose `op` cache still holds version 1 of the item while a teammate
+/// rotated `web/SESSION_KEY` in the 1Password app (version 2).
+fn stale_cache() -> FakeOp {
+    let op = FakeOp::person(item(&[
+        ("api", "OPENAI_API_KEY", "STRING", "sk-TIDYMARKER"),
+        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
+    ]));
+    *op.cache.borrow_mut() = Some(op.item.borrow().clone());
+    let mut current = op.item.borrow_mut();
+    someone_edits_session(&mut current);
+    bump(&mut current);
+    drop(current);
+    op
+}
+
+#[test]
+fn a_tidy_never_writes_over_an_edit_ops_cache_hides() {
+    let op = stale_cache();
+    tidied(&op);
+    assert_eq!(
+        op.field(Some("web"), "SESSION_KEY").unwrap()["value"],
+        "edited-by-someone"
+    );
+}
+
+#[test]
+fn a_tidy_still_tidies_past_a_stale_cache() {
+    let op = stale_cache();
+    tidied(&op);
+    assert_eq!(
+        op.field(Some("api"), "OPENAI_API_KEY").unwrap()["type"],
+        "CONCEALED"
+    );
+}
+
+#[test]
+fn every_read_a_tidy_writes_from_bypasses_the_cache() {
+    let op = FakeOp::person(messy_item());
+    tidied(&op);
+    let cached_after_first = op
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(a, _)| a.starts_with(&["item".to_string(), "get".to_string()]))
+        .skip(1)
+        .any(|(a, _)| !a.iter().any(|x| x == "--cache=false"));
+    assert!(!cached_after_first, "{:?}", op.calls.borrow());
+}
+
+#[test]
+fn an_edit_landing_with_the_tidy_reports_tidy_conflict() {
+    let op = FakeOp::person(messy_item());
+    op.racing.set(Some(someone_edits_session));
+    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+}
+
+#[test]
+fn an_edit_landing_with_the_tidy_is_never_retried() {
+    let op = FakeOp::person(messy_item());
+    op.racing.set(Some(someone_edits_session));
+    tidied(&op);
+    assert_eq!(op.edits(), 1);
+}
+
+#[test]
+fn an_edit_landing_with_the_tidy_says_to_check_the_history() {
+    let op = FakeOp::person(messy_item());
+    op.racing.set(Some(someone_edits_session));
+    tidied(&op);
+    assert!(
+        op.notes().contains("Check the item's history"),
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn an_edit_landing_with_the_tidy_is_found_by_a_fresh_re_read_without_an_echo() {
+    let op = FakeOp::person(messy_item());
+    op.echo.set(false);
+    op.racing.set(Some(someone_edits_session));
+    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+}
+
+#[test]
+fn a_tidy_one_version_later_reports_no_error() {
+    let op = FakeOp::person(messy_item());
+    assert_eq!(tidied(&op).tidy_error, None);
+}
+
+#[test]
+fn a_field_the_write_dropped_reports_tidy_unverified() {
+    let op = FakeOp::person(messy_item());
+    op.edit.set(Edit::Lossy);
+    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyUnverified));
+}
+
+#[test]
+fn a_field_the_write_dropped_says_to_restore_it() {
+    let op = FakeOp::person(messy_item());
+    op.edit.set(Edit::Lossy);
+    tidied(&op);
+    assert!(
+        op.notes().contains("restore them from the item's history"),
+        "{}",
+        op.notes()
+    );
+}
+
+fn with_attachment() -> Value {
+    let mut v = messy_item();
+    v["files"] = json!([{"id": "f1", "name": "cert.pem", "size": 10}]);
+    v
+}
+
+fn with_otp() -> Value {
+    let mut v = messy_item();
+    v["fields"].as_array_mut().unwrap().push(
+        json!({"id": "otp", "type": "OTP", "label": "one-time password", "value": "otpauth://x"}),
+    );
+    v
+}
+
+#[test]
+fn an_item_with_an_attachment_is_never_tidied() {
+    let op = FakeOp::person(with_attachment());
+    tidied(&op);
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn an_item_with_an_otp_field_is_never_tidied() {
+    let op = FakeOp::person(with_otp());
+    tidied(&op);
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn an_item_with_an_ssh_key_is_never_tidied() {
+    let mut v = messy_item();
+    v["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "k", "type": "SSHKEY", "label": "private key", "value": "x"}));
+    let op = FakeOp::person(v);
+    tidied(&op);
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn an_item_never_tidied_gets_one_note() {
+    let op = FakeOp::person(with_otp());
+    tidied(&op);
+    assert_eq!(
+        op.notes().matches("opv never tidies such an item").count(),
+        1,
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn an_item_never_tidied_is_still_read_tolerantly() {
+    let op = FakeOp::person(with_attachment());
+    let r = tidied(&op);
+    let f = r.fields.iter().find(|f| f.label == "LOG_LEVEL").unwrap();
+    assert_eq!(f.value.expose(), "debug");
+}
+
+#[test]
+fn an_attachment_added_before_the_write_stops_it() {
+    fn attach(v: &mut Value) {
+        v["files"] = json!([{"id": "f1", "name": "cert.pem"}]);
+    }
+    let op = FakeOp::person(messy_item());
+    op.editors.borrow_mut().push((2, attach));
+    tidied(&op);
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn deploy_credentials_note_names_opv_check() {
+    let op = FakeOp::person(messy_item());
+    let _on = activate();
+    let _ = read(&fleet(), "dev", &UnderDeployCredentials(&op));
+    assert!(
+        op.notes().contains("opv check dev tidies it"),
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn deploy_credentials_note_never_promises_a_signed_in_person() {
+    let op = FakeOp::person(messy_item());
+    let _on = activate();
+    let _ = read(&fleet(), "dev", &UnderDeployCredentials(&op));
+    assert!(!op.notes().contains("signed-in person"), "{}", op.notes());
+}
+
+#[test]
+fn run_after_a_persons_failed_tidy_never_says_run_as_yourself() {
+    let person = FakeOp::person(unnormalized_item());
+    person.edit.set(Edit::Refuse);
+    token_in_child_env(&person);
+    assert!(
+        !person.notes().contains("run as yourself"),
+        "{}",
+        person.notes()
+    );
+}
+
+#[test]
+fn run_after_a_persons_failed_tidy_points_at_the_note() {
+    let person = FakeOp::person(unnormalized_item());
+    person.edit.set(Edit::Refuse);
+    token_in_child_env(&person);
+    assert!(
+        person.notes().contains("opv could not tidy it in this run"),
+        "{}",
+        person.notes()
+    );
+}
+
+fn simple_fleet() -> Fleet {
+    config::parse(
+        r#"
+[profile]
+kind = "simple"
+
+[environments.dev]
+vault_id = "vdev"
+item_id = "idev"
+
+[keys.LOG_LEVEL]
+kind = "config"
+environments = ["dev"]
+"#,
+    )
+    .unwrap()
+}
+
+/// One item shared by a simple and a fleet configuration (M1).
+fn shared_item() -> Value {
+    item(&[
+        ("", "LOG_LEVEL", "STRING", "info"),
+        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
+        ("api", "LOG_LEVEL", "STRING", "debug"),
+        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
+    ])
+}
+
+fn both(op: &FakeOp) {
+    let _on = activate();
+    read(&fleet(), "dev", op).unwrap();
+    read(&simple_fleet(), "dev", op).unwrap();
+}
+
+#[test]
+fn simple_and_fleet_configurations_sharing_an_item_settle() {
+    let op = FakeOp::person(shared_item());
+    both(&op);
+    let settled = op.edits();
+    both(&op);
+    both(&op);
+    assert_eq!(op.edits(), settled);
+}
+
+#[test]
+fn a_fleet_tidy_never_moves_a_simple_configurations_top_level_key() {
+    let op = FakeOp::person(shared_item());
+    tidied(&op);
+    assert_eq!(op.field(None, "LOG_LEVEL").unwrap()["value"], "info");
+}
+
+#[test]
+fn a_simple_tidy_never_moves_a_fleet_configurations_field() {
+    let op = FakeOp::person(item(&[("api", "LOG_LEVEL", "STRING", "debug")]));
+    let _on = activate();
+    read(&simple_fleet(), "dev", &op).unwrap();
+    assert_eq!(
+        op.field(Some("api"), "LOG_LEVEL").unwrap()["value"],
+        "debug"
+    );
+}
+
+#[test]
+fn a_field_left_for_the_other_configuration_is_named_in_one_note() {
+    let op = FakeOp::person(item(&[("api", "LOG_LEVEL", "STRING", "debug")]));
+    let _on = activate();
+    read(&simple_fleet(), "dev", &op).unwrap();
+    assert_eq!(
+        op.notes()
+            .matches("where a fleet-profile configuration keeps it")
+            .count(),
+        1,
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn item_skeleton_refuses_the_manifest_item() {
+    let mut v = item(&[]);
+    v["tags"] = json!([crate::adapters::onepassword_manifest::MANIFEST_TAG]);
+    let op = FakeOp::person(v);
+    let res = crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new());
+    assert!(res.is_err());
+}
+
+#[test]
+fn item_skeleton_never_writes_the_manifest_item() {
+    let mut v = item(&[]);
+    v["tags"] = json!([crate::adapters::onepassword_manifest::MANIFEST_TAG]);
+    let op = FakeOp::person(v);
+    let _ = crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new());
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn item_skeleton_never_writes_over_an_edit_ops_cache_hides() {
+    let op = FakeOp::person(item(&[("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER")]));
+    *op.cache.borrow_mut() = Some(op.item.borrow().clone());
+    {
+        let mut current = op.item.borrow_mut();
+        someone_edits_session(&mut current);
+        bump(&mut current);
+    }
+    crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new()).unwrap();
+    assert_eq!(
+        op.field(Some("web"), "SESSION_KEY").unwrap()["value"],
+        "edited-by-someone"
+    );
+}
+
+#[test]
+fn item_skeleton_reports_an_edit_landing_with_it() {
+    let op = FakeOp::person(item(&[]));
+    op.racing.set(Some(someone_edits_session));
+    crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new()).unwrap();
+    assert!(op.notes().contains("another edit landed"), "{}", op.notes());
 }
