@@ -8,7 +8,7 @@
 //! |---|---|
 //! | `list` | `keyvault secret list --vault-name <vault> -o json` |
 //! | `read` | `keyvault secret show --vault-name <vault> --name <name> -o json` |
-//! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> --query id -o tsv` |
+//! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
 //! | `delete` | `keyvault secret delete --vault-name <vault> --name <name> -o none` |
 //!
 //! Values travel on stdin only (`--file /dev/stdin --encoding utf-8`), never in argv, env
@@ -19,27 +19,37 @@
 //! definite "absent", never retried. `set` and `delete` are writes (never retried
 //! blindly, NR-2). Every non-zero exit is diagnosed through [`az::diagnose`]; a failed
 //! `set` is first checked with a read-only `show-deleted` (stderr is discarded) so a
-//! soft-deleted name gets the recover command (FR-32).
+//! soft-deleted name gets the recover command (FR-32). A `set` that fails for a reason that
+//! is neither a soft-delete nor a sign-out may be a role grant still propagating; it is
+//! retried once, only after `secret list` proves the vault answers (NR-25).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
-use crate::host::{Host, Tool};
 use crate::ports::{PinnedStore, Store};
-use crate::runner::{Call, CommandRunner, Outcome, Output, unknown_text};
+use crate::runner::{CommandRunner, Outcome, unknown_text};
 
-use super::az;
+use super::az::{self, Effect, invoke, read_output, write_output};
 
 /// Largest value Key Vault accepts, in bytes (FR-30).
 pub const VALUE_LIMIT: usize = 25 * 1024;
 
 /// The refusal rule name for a value Key Vault cannot store (FR-22).
 pub const STORE_LIMIT: &str = "store_limit";
+
+/// How long to wait for a role grant to reach the vault before giving up (NR-25).
+const ACCESS_WAIT: Duration = Duration::from_secs(300);
+/// Pause between access polls, and between progress lines (NR-25).
+const ACCESS_POLL: Duration = Duration::from_secs(15);
+/// How long to wait for a written version to show up (NR-30).
+const CONFIRM_WAIT: Duration = Duration::from_secs(30);
+/// Pause between confirmation polls (NR-30).
+const CONFIRM_POLL: Duration = Duration::from_secs(2);
 
 /// Key Vault as both pinned store ports (FR-28): each method is the operation of the same
 /// name.
@@ -48,6 +58,8 @@ pub struct KeyVault<'a> {
     pub vault: &'a str,
     pub env: &'a str,
     pub template_names: &'a BTreeSet<String>,
+    /// Waits and progress lines for the polling loops (NR-25, NR-30).
+    pub pacer: &'a dyn az::Pacer,
 }
 
 /// One `keyvault secret list --json` entry. Unknown fields are ignored (R10).
@@ -102,77 +114,6 @@ pub fn refusal(value: &SecretValue) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Whether a call to the target changes it (NR-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Effect {
-    Read,
-    Write,
-}
-
-/// Run one `az` call through the runner. Only a spawn error or a spent budget is an
-/// `Err`; anything the process returned is an [`Outcome`] for the caller to read.
-fn invoke(
-    r: &dyn CommandRunner,
-    effect: Effect,
-    op: &str,
-    args: &[&str],
-    stdin: Option<&[u8]>,
-    refused: &[i32],
-) -> Result<Outcome, Error> {
-    let call = Call::new(az::PROGRAM, args).with_stdin(stdin);
-    let res = match effect {
-        Effect::Read => r.read(&call, refused),
-        Effect::Write => r.write(&call),
-    };
-    res.map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!(
-            "{} not found on PATH\n  {}",
-            az::PROGRAM,
-            Host::detect().install_hint(Tool::Az)
-        )),
-        io::ErrorKind::TimedOut => Error::Target(format!("az {op}: {e}")),
-        kind => Error::Target(format!("az {op} could not start {} ({kind})", az::PROGRAM)),
-    })
-}
-
-/// A read's output, or the diagnosed error for a non-zero exit / unknown outcome.
-fn read_output(
-    r: &dyn CommandRunner,
-    op: &str,
-    target: &str,
-    outcome: Outcome,
-) -> Result<Output, Error> {
-    match outcome {
-        Outcome::Done(out) => Ok(out),
-        Outcome::Refused(_) => Err(az::diagnose(r, op, target)),
-        Outcome::Unknown { reason, .. } => Err(Error::Target(format!(
-            "az {op}: {}",
-            unknown_text(az::PROGRAM, reason)
-        ))),
-    }
-}
-
-/// A write's output, or the diagnosed error. A write that never finished (timeout, kill,
-/// lost) is [`Error::Unknown`]: it may or may not have been applied (NR-2).
-fn write_output(
-    r: &dyn CommandRunner,
-    op: &str,
-    target: &str,
-    outcome: Outcome,
-) -> Result<Output, Error> {
-    match outcome {
-        Outcome::Done(out) => Ok(out),
-        Outcome::Refused(_)
-        | Outcome::Unknown {
-            status: Some(_), ..
-        } => Err(az::diagnose(r, op, target)),
-        Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
-            "az {op}: {}; the change may or may not have been applied\n  next: re-run the same command",
-            unknown_text(az::PROGRAM, reason)
-        ))),
-    }
-}
-
 impl KeyVault<'_> {
     /// Managed entries: tagged `opv-managed=<env>` and named in the managed template set
     /// (FR-8). Version comes from `show` / the binding, never `list`; nothing is pending.
@@ -204,23 +145,32 @@ impl KeyVault<'_> {
         })?;
         Ok(entries
             .into_iter()
-            .filter(|e| self.is_managed(e))
-            .map(|e| StoreEntry {
-                name: e.name,
-                version: None,
-                pending: false,
+            .filter_map(|e| {
+                self.managed_name(&e).map(|name| StoreEntry {
+                    name: name.to_owned(),
+                    version: None,
+                    pending: false,
+                })
             })
             .collect())
     }
 
-    /// True when opv owns `e`: its name is in the managed set and it carries this
-    /// environment's tag (FR-8, FR-32).
-    fn is_managed(&self, e: &ListEntry) -> bool {
-        self.template_names.contains(&e.name)
-            && e.tags
-                .as_ref()
-                .and_then(|t| t.get("opv-managed"))
-                .is_some_and(|v| v == self.env)
+    /// The template spelling of `e`'s name when opv owns it: the name is in the managed set
+    /// (Key Vault names are case-insensitive, R3) and carries this environment's tag
+    /// (FR-8, FR-32).
+    fn managed_name(&self, e: &ListEntry) -> Option<&str> {
+        let tagged = e
+            .tags
+            .as_ref()
+            .and_then(|t| t.get("opv-managed"))
+            .is_some_and(|v| v == self.env);
+        if !tagged {
+            return None;
+        }
+        self.template_names
+            .iter()
+            .find(|t| t.eq_ignore_ascii_case(&e.name))
+            .map(String::as_str)
     }
 
     /// The current value and version id, or `None` when Key Vault exits 3 (`SecretNotFound`).
@@ -250,13 +200,16 @@ impl KeyVault<'_> {
                 e.column()
             ))
         })?;
-        Ok(Some((
-            SecretValue::new(entry.value),
-            version_from_id(&entry.id),
-        )))
+        let version = version_from_id(&entry.id).ok_or_else(|| no_version_error(name))?;
+        Ok(Some((SecretValue::new(entry.value), version)))
     }
 
-    /// One new version, value on stdin, tagged `opv-managed=<env>`; returns its version id.
+    /// One new version, value on stdin, tagged `opv-managed=<env>`; returns its version id
+    /// once Key Vault shows it (NR-30).
+    ///
+    /// A `set` that exits non-zero while the name is not soft-deleted and `az` is signed in
+    /// may be a role grant still propagating (NR-25). That one failure is retried once,
+    /// but only after a read (`secret list`) proves the vault now answers.
     fn write_secret(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
         const OP: &str = "keyvault secret set";
         az::stdin_supported()?;
@@ -281,40 +234,138 @@ impl KeyVault<'_> {
             "tsv",
             az::ONLY_SHOW_ERRORS,
         ];
-        let outcome = invoke(
-            self.runner,
-            Effect::Write,
-            OP,
-            &args,
-            Some(value.expose().as_bytes()),
-            &[],
-        )?;
+        let set = || {
+            invoke(
+                self.runner,
+                Effect::Write,
+                OP,
+                &args,
+                Some(value.expose().as_bytes()),
+                &[],
+            )
+        };
+        let mut outcome = set()?;
+        if matches!(
+            outcome,
+            Outcome::Unknown {
+                status: Some(_),
+                ..
+            }
+        ) {
+            if self.is_soft_deleted(name)? {
+                return Err(soft_deleted_error(name, self.vault));
+            }
+            if !az::signed_in(self.runner)? {
+                return Err(Error::Auth("not logged in to Azure; run: az login".into()));
+            }
+            self.await_access()?;
+            outcome = set()?;
+        }
         match outcome {
             Outcome::Done(out) => {
-                let id = std::str::from_utf8(&out.stdout).map_err(|_| {
-                    Error::Target(format!("az {OP} returned a non-UTF-8 version id"))
-                })?;
-                Ok(version_from_id(id))
+                let version = std::str::from_utf8(&out.stdout)
+                    .ok()
+                    .and_then(version_from_id)
+                    .ok_or_else(|| no_version_error(name))?;
+                self.confirm_version(name, &version)?;
+                Ok(version)
             }
             Outcome::Unknown {
                 status: Some(_), ..
-            } => {
-                if self.is_soft_deleted(name)? {
-                    Err(soft_deleted_error(name, self.vault))
-                } else {
-                    Err(az::diagnose(self.runner, OP, self.vault))
-                }
             }
+            | Outcome::Refused(_) => Err(az::diagnose(self.runner, OP, self.vault)),
             Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
                 "az {OP}: {}; the change may or may not have been applied\n  next: re-run the same command",
                 unknown_text(az::PROGRAM, reason)
             ))),
-            Outcome::Refused(_) => Err(az::diagnose(self.runner, OP, self.vault)),
+        }
+    }
+
+    /// Poll `secret list` (a read) until the vault answers, for up to [`ACCESS_WAIT`], with a
+    /// progress line every [`ACCESS_POLL`] (NR-25).
+    fn await_access(&self) -> Result<(), Error> {
+        const OP: &str = "keyvault secret list";
+        let args = [
+            "keyvault",
+            "secret",
+            "list",
+            "--vault-name",
+            self.vault,
+            "-o",
+            "none",
+            az::ONLY_SHOW_ERRORS,
+        ];
+        let mut waited = Duration::ZERO;
+        loop {
+            if let Outcome::Done(_) = invoke(self.runner, Effect::Read, OP, &args, None, &[])? {
+                return Ok(());
+            }
+            if waited >= ACCESS_WAIT {
+                return Err(Error::Auth(format!(
+                    "Key Vault {vault} still refuses this account after {secs} s; nothing was \
+                     changed; ask an owner to grant access, then re-run: az role assignment \
+                     create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>",
+                    vault = self.vault,
+                    secs = waited.as_secs()
+                )));
+            }
+            self.pacer.sleep(ACCESS_POLL);
+            waited += ACCESS_POLL;
+            self.pacer.note(&format!(
+                "waiting for Key Vault access on {} ({} s)…",
+                self.vault,
+                waited.as_secs()
+            ));
+        }
+    }
+
+    /// Poll `secret show --query id` (a read) until it returns the version just written,
+    /// every [`CONFIRM_POLL`] for up to [`CONFIRM_WAIT`] (NR-30).
+    fn confirm_version(&self, name: &str, version: &str) -> Result<(), Error> {
+        const OP: &str = "keyvault secret show";
+        let args = [
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            self.vault,
+            "--name",
+            name,
+            "--query",
+            "id",
+            "-o",
+            "tsv",
+            az::ONLY_SHOW_ERRORS,
+        ];
+        let suffix = format!("/{version}");
+        let mut waited = Duration::ZERO;
+        loop {
+            match invoke(self.runner, Effect::Read, OP, &args, None, &[3])? {
+                Outcome::Done(out) => {
+                    let seen = String::from_utf8_lossy(&out.stdout);
+                    if seen.trim().ends_with(&suffix) {
+                        return Ok(());
+                    }
+                }
+                Outcome::Refused(out) if out.status == 3 => {}
+                other => {
+                    read_output(self.runner, OP, self.vault, other)?;
+                }
+            }
+            if waited >= CONFIRM_WAIT {
+                return Err(Error::Unknown(format!(
+                    "Key Vault accepted version {version} of {name} but does not show it yet; \
+                     nothing else was changed; re-run to confirm"
+                )));
+            }
+            self.pacer.sleep(CONFIRM_POLL);
+            waited += CONFIRM_POLL;
         }
     }
 
     /// A follow-up read-only probe: `show-deleted` exits 0 only when `name` is
-    /// soft-deleted but recoverable (stderr is discarded, so this is how opv tells).
+    /// soft-deleted but recoverable; exit 1 or 3 means it is not (stderr is discarded, so
+    /// this is how opv tells). A probe that never finished says nothing either way.
     fn is_soft_deleted(&self, name: &str) -> Result<bool, Error> {
         const OP: &str = "keyvault secret show-deleted";
         let args = [
@@ -329,9 +380,14 @@ impl KeyVault<'_> {
             "none",
             az::ONLY_SHOW_ERRORS,
         ];
-        match invoke(self.runner, Effect::Read, OP, &args, None, &[])? {
+        match invoke(self.runner, Effect::Read, OP, &args, None, &[1, 3])? {
             Outcome::Done(_) => Ok(true),
-            _ => Ok(false),
+            Outcome::Refused(_) => Ok(false),
+            Outcome::Unknown { .. } => Err(Error::Unknown(format!(
+                "could not tell whether {name} is soft-deleted in Key Vault {}; nothing was \
+                 changed; re-run to check again",
+                self.vault
+            ))),
         }
     }
 
@@ -339,7 +395,7 @@ impl KeyVault<'_> {
     fn delete_secret(&self, name: &str) -> Result<(), Error> {
         const OP: &str = "keyvault secret delete";
         let managed = self.list_managed()?;
-        if !managed.iter().any(|e| e.name == name) {
+        if !managed.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
             return Err(Error::Policy(format!(
                 "{name}: not tagged opv-managed={}; refusing to delete",
                 self.env
@@ -367,9 +423,19 @@ impl KeyVault<'_> {
     }
 }
 
-/// The last path segment of a Key Vault id, i.e. its version (FR-29).
-fn version_from_id(id: &str) -> String {
-    id.trim().rsplit('/').next().unwrap_or_default().to_owned()
+/// The version in a Key Vault id: its last path segment, which must be 32 lower-case hex
+/// characters (FR-29); anything else is `None`.
+fn version_from_id(id: &str) -> Option<String> {
+    let v = id.trim().rsplit('/').next()?;
+    let ok = v.len() == 32 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    ok.then(|| v.to_owned())
+}
+
+/// Key Vault answered without a usable version, so nothing can be pinned (NR-6).
+fn no_version_error(name: &str) -> Error {
+    Error::Target(format!(
+        "Key Vault returned no version for {name}; nothing was bound; re-run"
+    ))
 }
 
 /// The soft-deleted refusal names the exact recover command; opv never recovers itself
@@ -385,6 +451,7 @@ fn soft_deleted_error(name: &str, vault: &str) -> Error {
 mod tests {
     use super::*;
     use crate::ports::{PinnedStore, Store};
+    use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
 
     const VAULT: &str = "kv-opv-fixture";
@@ -398,8 +465,26 @@ mod tests {
         set.iter().map(|s| (*s).to_string()).collect()
     }
 
+    struct NoWait;
+
+    impl az::Pacer for NoWait {
+        fn sleep(&self, _d: Duration) {}
+        fn note(&self, _line: &str) {}
+    }
+
+    static NO_WAIT: NoWait = NoWait;
+
     fn vault<'a>(
         r: &'a FakeRunner,
+        env: &'a str,
+        template_names: &'a BTreeSet<String>,
+    ) -> KeyVault<'a> {
+        vault_paced(r, &NO_WAIT, env, template_names)
+    }
+
+    fn vault_paced<'a>(
+        r: &'a FakeRunner,
+        pacer: &'a dyn az::Pacer,
         env: &'a str,
         template_names: &'a BTreeSet<String>,
     ) -> KeyVault<'a> {
@@ -408,6 +493,7 @@ mod tests {
             vault: VAULT,
             env,
             template_names,
+            pacer,
         }
     }
 
@@ -415,25 +501,41 @@ mod tests {
         format!("https://{VAULT}.vault.azure.net/secrets/{NAME}/{version}")
     }
 
+    /// A `set` answer then a `show` that already shows the version.
+    fn written() -> Vec<Output> {
+        vec![Output::success(id(VERSION)), Output::success(id(VERSION))]
+    }
+
+    fn secret() -> SecretValue {
+        SecretValue::new(MARKER.into())
+    }
+
     #[test]
-    fn write_sends_value_on_stdin_only() {
-        let r = FakeRunner::new([Output::success(id(VERSION))]);
+    fn write_sends_value_on_stdin() {
+        let r = FakeRunner::new(written());
         let templates = names(&[]);
-        let kv = vault(&r, "prod", &templates);
-        kv.write_one(NAME, &SecretValue::new(MARKER.into()))
+        vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
             .unwrap();
-        let calls = r.calls.borrow();
-        assert_eq!(calls[0].stdin.as_deref(), Some(MARKER.as_bytes()));
-        assert!(
-            !calls
-                .iter()
-                .any(|c| c.args.iter().any(|a| a.contains(MARKER)))
+        assert_eq!(
+            r.calls.borrow()[0].stdin.as_deref(),
+            Some(MARKER.as_bytes())
         );
     }
 
     #[test]
+    fn write_keeps_value_out_of_argv() {
+        let r = FakeRunner::new(written());
+        let templates = names(&[]);
+        vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        assert!(!r.argv_contains(MARKER));
+    }
+
+    #[test]
     fn write_tags_entry_with_environment() {
-        let r = FakeRunner::new([Output::success(id(VERSION))]);
+        let r = FakeRunner::new(written());
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
         kv.write_one(NAME, &SecretValue::new(MARKER.into()))
@@ -448,7 +550,7 @@ mod tests {
 
     #[test]
     fn write_returns_version_from_id() {
-        let r = FakeRunner::new([Output::success(id(VERSION))]);
+        let r = FakeRunner::new(written());
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
         let version = kv
@@ -462,7 +564,24 @@ mod tests {
         let r = FakeRunner::new([Output::failure(3)]);
         let templates = names(&[]);
         let kv = vault(&r, "prod", &templates);
-        assert!(kv.read(NAME).unwrap().is_none());
+        assert_eq!(kv.read(NAME).unwrap().map(|(_, v)| v), None);
+    }
+
+    #[test]
+    fn read_of_missing_secret_does_not_probe_show_deleted() {
+        let r = FakeRunner::new([Output::failure(3)]);
+        let templates = names(&[]);
+        vault(&r, "prod", &templates).read(NAME).unwrap();
+        assert!(!r.argv_contains("show-deleted"));
+    }
+
+    #[test]
+    fn read_with_garbled_id_is_target_error() {
+        let body = SHOW_FIXTURE.replace(VERSION, "not-a-version");
+        let r = FakeRunner::new([Output::success(body)]);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates).read(NAME).unwrap_err();
+        assert!(matches!(err, Error::Target(m) if m.contains("returned no version")));
     }
 
     #[test]
@@ -540,6 +659,211 @@ mod tests {
         assert!(matches!(err, Error::Target(msg) if msg.contains(
             "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET"
         )));
+    }
+
+    #[test]
+    fn list_matches_template_names_ignoring_case() {
+        let r = FakeRunner::new([Output::success(LIST_FIXTURE)]);
+        let lower = NAME.to_lowercase();
+        let templates = names(&[lower.as_str()]);
+        let kept: Vec<String> = vault(&r, "dev", &templates)
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(kept, vec![lower]);
+    }
+
+    #[test]
+    fn delete_of_tagged_entry_succeeds() {
+        let r = FakeRunner::new([Output::success(LIST_FIXTURE), Output::success("")]);
+        let templates = names(&[NAME]);
+        let result = vault(&r, "dev", &templates).delete(NAME);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn write_with_unknown_outcome_and_no_status_is_unknown_error() {
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Unknown(_)));
+    }
+
+    #[test]
+    fn write_with_empty_id_is_target_error() {
+        let r = FakeRunner::new([Output::success("")]);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Target(m) if m.contains("returned no version for")));
+    }
+
+    #[test]
+    fn write_with_garbled_id_is_target_error() {
+        let r = FakeRunner::new([Output::success(id("XYZ"))]);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Target(m) if m.contains("nothing was bound")));
+    }
+
+    const STALE: &str = "11111111111111111111111111111111";
+
+    #[test]
+    fn write_waits_until_new_version_shows() {
+        let r = FakeRunner::new([
+            Output::success(id(VERSION)),
+            Output::success(id(STALE)),
+            Output::success(id(VERSION)),
+        ]);
+        let templates = names(&[]);
+        let version = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        assert_eq!(version, VERSION);
+    }
+
+    #[test]
+    fn write_polls_for_the_new_version_every_two_seconds() {
+        let r = FakeRunner::new([
+            Output::success(id(VERSION)),
+            Output::success(id(STALE)),
+            Output::success(id(VERSION)),
+        ]);
+        let templates = names(&[]);
+        let pacer = az::RecordingPacer::default();
+        vault_paced(&r, &pacer, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        assert_eq!(*pacer.sleeps.borrow(), vec![Duration::from_secs(2)]);
+    }
+
+    #[test]
+    fn write_whose_version_never_shows_is_unknown_error() {
+        let stale = (0..16).map(|_| Output::success(id(STALE)));
+        let r = FakeRunner::new(std::iter::once(Output::success(id(VERSION))).chain(stale));
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Unknown(m) if m.contains(
+            "accepted version 46687ce78b76487cb0c1da470360b638 of FLEET--API--DB-URL but does not show it yet"
+        )));
+    }
+
+    /// `set` fails, `show-deleted` says no, `az account show` says signed in.
+    fn failed_set() -> Vec<Output> {
+        vec![Output::failure(1), Output::failure(1), Output::success("")]
+    }
+
+    #[test]
+    fn write_retries_set_once_after_vault_starts_answering() {
+        let responses = failed_set()
+            .into_iter()
+            .chain(crate::runner::fake::failed_read(1).chain(crate::runner::fake::failed_read(1)))
+            .chain([Output::success("[]")])
+            .chain(written());
+        let r = FakeRunner::new(responses);
+        let templates = names(&[]);
+        let version = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        assert_eq!(version, VERSION);
+    }
+
+    #[test]
+    fn write_after_grant_sends_set_exactly_twice() {
+        let responses = failed_set()
+            .into_iter()
+            .chain(crate::runner::fake::failed_read(1).chain(crate::runner::fake::failed_read(1)))
+            .chain([Output::success("[]")])
+            .chain(written());
+        let r = FakeRunner::new(responses);
+        let templates = names(&[]);
+        vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        let sets = r
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.args.iter().any(|a| a == "set"))
+            .count();
+        assert_eq!(sets, 2);
+    }
+
+    #[test]
+    fn write_reports_progress_while_waiting_for_access() {
+        let responses = failed_set()
+            .into_iter()
+            .chain(crate::runner::fake::failed_read(1))
+            .chain([Output::success("[]")])
+            .chain(written());
+        let r = FakeRunner::new(responses);
+        let templates = names(&[]);
+        let pacer = az::RecordingPacer::default();
+        vault_paced(&r, &pacer, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        assert_eq!(
+            *pacer.notes.borrow(),
+            vec!["waiting for Key Vault access on kv-opv-fixture (15 s)…".to_string()]
+        );
+    }
+
+    #[test]
+    fn write_without_access_after_five_minutes_is_auth_error_naming_the_role() {
+        let polls = (0..21).flat_map(|_| crate::runner::fake::failed_read(1));
+        let r = FakeRunner::new(failed_set().into_iter().chain(polls));
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Auth(m) if m.contains(
+            "az role assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>"
+        )));
+    }
+
+    #[test]
+    fn failed_set_when_signed_out_is_auth_error_without_waiting() {
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), Output::failure(1)]);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Auth(m) if m.contains("az login")));
+    }
+
+    #[test]
+    fn show_deleted_probe_that_never_finishes_is_unknown_error() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_unknowns("timeout", 3);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap_err();
+        assert!(matches!(err, Error::Unknown(m) if m.contains("soft-deleted")));
+    }
+
+    #[test]
+    fn show_deleted_probe_of_a_new_name_is_not_retried() {
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), Output::failure(1)]);
+        let templates = names(&[]);
+        let _ = vault(&r, "prod", &templates).write_one(NAME, &secret());
+        let probes = r
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.args.iter().any(|a| a == "show-deleted"))
+            .count();
+        assert_eq!(probes, 1);
     }
 
     #[test]
