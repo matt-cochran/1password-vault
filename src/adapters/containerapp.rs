@@ -3,9 +3,9 @@
 //! | fn | argv | stdin |
 //! |---|---|---|
 //! | `bindings` | `containerapp show -g <rg> -n <app> -o json` | — |
-//! | `apply` | `containerapp show …`, then `containerapp update -g <rg> -n <app> --yaml /dev/stdin -o json` | the whole spec as JSON |
+//! | `apply` | `containerapp show …`, `containerapp revision show … --revision <latest ready>`, then `containerapp update -g <rg> -n <app> --yaml /dev/stdin -o json` | the whole spec as JSON |
 //! | `await_healthy` | `containerapp revision show -g <rg> -n <app> --revision <rev> -o json`, then `containerapp show …` | — |
-//! | `check_access` | `containerapp show …`, `identity show --ids <id> --query principalId -o tsv` (user-assigned only), `keyvault show -n <vault> --query … -o json`, `role assignment list --assignee <principal> --scope <vault id> --include-inherited --query [].roleDefinitionName -o json` (RBAC vaults only) | — |
+//! | `check_access` | `containerapp show …`, `identity show --ids <id> -o json` (user-assigned identity whose principal the app does not list), `keyvault show -n <vault> -o json`, `role assignment list --assignee <principal> --scope <vault id> --include-inherited --include-groups -o json` (RBAC vaults only) | — |
 //!
 //! Every call adds `--only-show-errors` (and `--subscription <s>` when configured); the
 //! runner adds the hardened `az` environment (R7). Reads go through `runner.read` (retried),
@@ -31,24 +31,31 @@
 //! spec: each pin becomes a secret named [`secret_name`] (per version, so a repin changes
 //! the env var's `secretRef`, a template change that makes Azure start a new revision) and an
 //! env entry `{name, secretRef}`; each set becomes `{name, value}`; each unbind removes the
-//! env entry. An `opv-` secret referenced by no env var, neither before nor after the edit,
-//! is superseded and removed in the same document (convergent: the secret of the revision
-//! still serving stays until the next apply). Unmanaged plain secrets are sent as `show`
-//! returned them, without a value; Azure keeps their value (Q5).
+//! env entry. An `opv-` secret is superseded, and removed in the same document, only when
+//! neither the edited template nor the template of the app's `latestReadyRevisionName` (the
+//! revision serving now, read with `revision show`) references it. A previous apply whose
+//! revision is not ready yet therefore never costs the serving revision its secret; the
+//! leftover goes on a later apply (convergent, NR-1). Unmanaged plain secrets are sent as
+//! `show` returned them, without a value; Azure keeps their value (Q5).
 //!
 //! # Health (R8) and post-apply verification (R9)
 //!
 //! Healthy = the revision is `Provisioned`, `Running`/`RunningAtMaxScale` with health
 //! `Healthy` (or `ScaledToZero`, Q15), and the app names it `latestReadyRevisionName`.
-//! Failed = `provisioningState Failed` or `healthState Unhealthy`. Polls every
-//! [`POLL_EVERY`] up to [`WAIT_MAX`], within the run budget (NR-4); the sleep is injectable.
+//! Failed = `provisioningState Failed`, `runningState Failed` or `healthState Unhealthy`.
+//! Polls every [`POLL_EVERY`] up to [`WAIT_MAX`], within the run budget (NR-4), printing a
+//! progress line at least every [`PROGRESS_EVERY`]; sleep and progress are injectable.
+//! Unhealthy and timed out are [`Health`] data; the sync flow turns them into errors. Only a
+//! failed `az` call is an error here.
 //! Once healthy, the `show` that confirmed it is fingerprinted again: a change outside the
 //! managed names since the pre-update read is reported (Container Apps has no etag, Q8).
 //!
 //! # Access (R6)
 //!
-//! Advisory (doctor): an RBAC vault needs one of [`READ_ROLES`] for the app identity at the
-//! vault scope or above; an access-policy vault needs a policy for it with secret `get`.
+//! Advisory (doctor): an RBAC vault needs one of [`READ_ROLES`] for the app identity (or a
+//! group it is in) at the vault scope or above; an access-policy vault needs a policy for it
+//! with secret `get`. Full `az` objects are parsed (no `--query` projections), and each
+//! finding names the vault and the command that grants access.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,6 +81,8 @@ pub const PROGRAM: &str = "az";
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Longest wait for a new revision (R8); the run budget may end it sooner (NR-4).
 pub const WAIT_MAX: Duration = Duration::from_secs(300);
+/// Longest gap between two progress lines while waiting (NR-4).
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(15);
 /// Roles that let an identity read Key Vault secret values (R6).
 pub const READ_ROLES: &[&str] = &[
     "Key Vault Secrets User",
@@ -97,10 +106,6 @@ const SECRETS: &str = "/properties/configuration/secrets";
 /// Changed paths named in one error before "and N more".
 const MAX_PATHS: usize = 5;
 
-const NO_ROLE: &str = "the app identity has no Key Vault secrets read role on the vault";
-const NO_POLICY: &str = "the app identity has no Key Vault access policy with secret get";
-const NO_IDENTITY: &str = "the container app has no managed identity to read Key Vault with";
-
 /// Whether a call changes the app (NR-2): reads are retried by the runner, writes never are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effect {
@@ -119,6 +124,7 @@ pub struct ContainerApp<'a> {
     /// `https://<vault>.vault.azure.net`, without a trailing slash.
     pub vault_uri: String,
     sleep: Box<dyn Fn(Duration) + 'a>,
+    progress: Box<dyn Fn(&str) + 'a>,
     poll_every: Duration,
     wait_max: Duration,
     /// The spec `apply` read just before its update, for the R9 check.
@@ -140,6 +146,7 @@ impl<'a> ContainerApp<'a> {
             managed,
             vault_uri,
             sleep: Box::new(std::thread::sleep),
+            progress: Box::new(|line| eprintln!("{line}")),
             poll_every: POLL_EVERY,
             wait_max: WAIT_MAX,
             applied_from: RefCell::new(None),
@@ -156,6 +163,12 @@ impl<'a> ContainerApp<'a> {
         self.sleep = sleep;
         self.poll_every = poll_every;
         self.wait_max = wait_max;
+        self
+    }
+
+    /// Replaces the progress sink (stderr by default; NR-4).
+    pub fn with_progress(mut self, progress: Box<dyn Fn(&str) + 'a>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -212,8 +225,14 @@ impl<'a> ContainerApp<'a> {
                 "{PROGRAM} (the Azure CLI) not found on PATH; nothing was changed\n  install: \
                  https://learn.microsoft.com/cli/azure/install-azure-cli\n  then run opv again"
             )),
-            io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
-            kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
+            // A spent run budget: the call never started.
+            io::ErrorKind::TimedOut => Error::Target(format!(
+                "{what}: {e}; nothing was changed\n  next: re-run with a larger --timeout"
+            )),
+            kind => Error::Target(format!(
+                "{what} could not start {PROGRAM} ({kind}); nothing was changed\n  next: check \
+                 that `{PROGRAM} version` runs, then run opv again"
+            )),
         })?;
         match outcome {
             Outcome::Done(out) => Ok(out),
@@ -240,7 +259,7 @@ impl<'a> ContainerApp<'a> {
     /// The error for a call that exited `status` (FR-26): `az account show`, exit status
     /// only, tells "not signed in" (Auth) from "signed in but refused" (Target; Unknown for
     /// the update, which may have reached Azure).
-    // Minimal local copy; the Key Vault task's shared `az::diagnose` replaces it.
+    // consolidated at integration with az.rs
     fn diagnose(
         &self,
         effect: Effect,
@@ -471,9 +490,9 @@ impl<'a> ContainerApp<'a> {
         Ok(s)
     }
 
-    /// The fresh spec with `change` applied (R2, Q5).
+    /// The fresh spec with `change` applied (R2, Q5). Superseded secrets stay; see
+    /// [`prune_superseded`].
     fn edit(&self, doc: &mut Value, idx: usize, change: &RuntimeChange) {
-        let before = env_refs(doc);
         let env = array_field(&mut doc["properties"]["template"]["containers"][idx], "env");
         for (name, (store, version)) in &change.pin {
             upsert(
@@ -501,12 +520,19 @@ impl<'a> ContainerApp<'a> {
                 }),
             );
         }
-        let after = env_refs(doc);
-        if let Some(secrets) = doc.pointer_mut(SECRETS).and_then(Value::as_array_mut) {
-            secrets.retain(|s| {
-                let name = s["name"].as_str().unwrap_or_default();
-                !is_opv_secret(s) || before.contains(name) || after.contains(name)
-            });
+    }
+
+    /// The `secretRef`s of the revision serving now (`latestReadyRevisionName`), read from
+    /// that revision's own template: the app's template may already belong to a newer
+    /// revision that is not ready yet. Empty when no revision is ready.
+    fn serving_refs(&self, app: &Value) -> Result<BTreeSet<String>, Error> {
+        match app
+            .pointer("/properties/latestReadyRevisionName")
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+        {
+            Some(ready) => Ok(env_refs(&self.revision_show(ready)?)),
+            None => Ok(BTreeSet::new()),
         }
     }
 
@@ -528,47 +554,59 @@ impl<'a> ContainerApp<'a> {
         )))
     }
 
-    fn timed_out(&self, rev: &str, last: &str) -> Error {
-        Error::Target(format!(
-            "revision {rev} of container app {} did not become healthy within {} s (last: \
-             {last}); Azure keeps the previous revision serving until this one is ready\n  \
-             next: check it with `az containerapp revision show -g {} -n {} --revision {rev}`, \
-             then re-run the same command",
-            self.app(),
-            self.wait_max.as_secs(),
-            self.rg(),
-            self.app()
-        ))
-    }
-
-    /// The app identity's principal id, or `None` when the app has none (R6).
-    fn principal(&self, app: &Value) -> Result<Option<String>, Error> {
+    /// The app identity's principal id (R6), or the finding when the app has none that opv
+    /// can use. A user-assigned identity must be attached to the app; its principal comes
+    /// from the app (`identity.userAssignedIdentities`), else from `az identity show`.
+    fn principal(&self, app: &Value) -> Result<Result<String, String>, Error> {
+        let (rg, name, kv) = (self.rg(), self.app(), &self.target.key_vault);
         let id = &self.target.identity;
         if id.eq_ignore_ascii_case("system") {
             return Ok(app
                 .pointer("/identity/principalId")
                 .and_then(Value::as_str)
-                .map(String::from));
+                .filter(|p| !p.is_empty())
+                .map(String::from)
+                .ok_or_else(|| {
+                    format!(
+                        "container app {name} has no system-assigned identity to read Key Vault \
+                         {kv} with; assign one: `az containerapp identity assign -g {rg} -n \
+                         {name} --system-assigned`, then grant it read access to {kv}"
+                    )
+                }));
+        }
+        let attached = app
+            .pointer("/identity/userAssignedIdentities")
+            .and_then(Value::as_object)
+            .and_then(|m| m.iter().find(|(k, _)| k.eq_ignore_ascii_case(id)))
+            .map(|(_, v)| v);
+        let Some(entry) = attached else {
+            return Ok(Err(format!(
+                "container app {name} does not have the user-assigned identity {id} that \
+                 secrets.toml names; attach it: `az containerapp identity assign -g {rg} -n \
+                 {name} --user-assigned {id}`"
+            )));
+        };
+        if let Some(p) = entry["principalId"].as_str().filter(|p| !p.is_empty()) {
+            return Ok(Ok(p.to_string()));
         }
         let out = self.az(
             Effect::Read,
             "az identity show",
             &format!("managed identity {id}"),
             &format!("az identity show --ids {id}"),
-            &[
-                "identity",
-                "show",
-                "--ids",
-                id,
-                "--query",
-                "principalId",
-                "-o",
-                "tsv",
-            ],
+            &["identity", "show", "--ids", id, "-o", "json"],
             None,
         )?;
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok((!p.is_empty()).then_some(p))
+        Ok(parse(&out, "az identity show")?["principalId"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .ok_or_else(|| {
+                format!(
+                    "the user-assigned identity {id} has no principal id; check it with `az \
+                     identity show --ids {id}`"
+                )
+            }))
     }
 }
 
@@ -587,18 +625,19 @@ impl PinnedRuntime for ContainerApp<'_> {
             .find(|n| !self.managed.contains(*n))
         {
             return Err(Error::Config(format!(
-                "{name} is not a managed env name of container app {}; nothing was changed",
+                "{name} is not a managed env name of container app {}; nothing was changed\n  \
+                 next: run opv plan to see the managed names, then run opv again",
                 self.app()
             )));
         }
         let fresh = self.show()?;
-        if fresh
+        if let Some(mode) = fresh
             .pointer("/properties/configuration/activeRevisionsMode")
             .and_then(Value::as_str)
-            .is_some_and(|m| m.eq_ignore_ascii_case("multiple"))
+            .filter(|m| !m.eq_ignore_ascii_case("single"))
         {
             return Err(Error::Config(format!(
-                "container app {app} runs in multiple-revision mode; opv supports single-revision \
+                "container app {app} runs in {mode} revision mode; opv supports single-revision \
                  mode only; nothing was changed\n  next: `az containerapp revision set-mode -g \
                  {rg} -n {app} --mode single`, or keep managing this app's revisions by hand",
                 app = self.app(),
@@ -608,8 +647,9 @@ impl PinnedRuntime for ContainerApp<'_> {
         let fresh = self.snapshot_from(fresh)?;
         if fresh.unmanaged_fingerprint != snapshot.unmanaged_fingerprint {
             return Err(Error::Target(format!(
-                "container app {} changed outside opv since it was read ({}); nothing applied, \
-                 safe to re-run",
+                "container app {} changed outside opv since it was read ({}); nothing was \
+                 changed\n  next: run opv plan to review the app as it is now, then run the \
+                 same command again",
                 self.app(),
                 self.changed_paths(&snapshot.spec.0, &fresh.spec.0)?
             )));
@@ -617,9 +657,11 @@ impl PinnedRuntime for ContainerApp<'_> {
         let mut doc = fresh.spec.0.clone();
         let idx = self.container_index(&doc)?;
         self.edit(&mut doc, idx, change);
+        prune_superseded(&mut doc, &self.serving_refs(&fresh.spec.0)?);
         let body = Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| {
             Error::Target(format!(
-                "could not encode the update for container app {}",
+                "could not encode the update for container app {}; nothing was changed\n  \
+                 next: run opv again",
                 self.app()
             ))
         })?);
@@ -644,14 +686,16 @@ impl PinnedRuntime for ContainerApp<'_> {
             Some(&body),
         )?;
         *self.applied_from.borrow_mut() = Some(fresh.spec.0);
-        parse(&out, WHAT)?
+        let applied = "the update was applied; Azure keeps the previous revision serving until \
+                       the new one is ready";
+        parse_with(&out, WHAT, applied)?
             .pointer("/properties/latestRevisionName")
             .and_then(Value::as_str)
             .map(|r| Revision(r.into()))
             .ok_or_else(|| {
                 Error::Target(format!(
-                    "{WHAT} succeeded but named no revision for container app {}\n  next: \
-                     `{}`, then run opv status",
+                    "{WHAT} named no new revision for container app {}; {applied}\n  next: \
+                     `{}` to see its revisions, then run opv status",
                     self.app(),
                     self.show_hint()
                 ))
@@ -661,6 +705,7 @@ impl PinnedRuntime for ContainerApp<'_> {
     fn await_healthy(&self, revision: &Revision) -> Result<Health, Error> {
         let rev = revision.0.as_str();
         let mut waited = Duration::ZERO;
+        let mut reported: Option<Duration> = None;
         loop {
             let r = self.revision_show(rev)?;
             let state = |k: &str| {
@@ -674,11 +719,16 @@ impl PinnedRuntime for ContainerApp<'_> {
                 state("runningState"),
                 state("healthState"),
             );
-            let mut last =
-                format!("provisioningState {prov}, runningState {run}, healthState {health}");
-            if prov == "Failed" || health == "Unhealthy" {
-                return Ok(Health::Unhealthy(last));
+            if prov == "Failed" || run == "Failed" || health == "Unhealthy" {
+                return Ok(Health::Unhealthy(format!(
+                    "revision {rev}: provisioningState {prov}, runningState {run}, healthState \
+                     {health}; see why with `az containerapp revision show -g {} -n {} \
+                     --revision {rev}`",
+                    self.rg(),
+                    self.app()
+                )));
             }
+            let mut last = format!("{prov}/{run}/{health}");
             let up = prov == "Provisioned"
                 && (run == "ScaledToZero"
                     || (matches!(run.as_str(), "Running" | "RunningAtMaxScale")
@@ -693,12 +743,20 @@ impl PinnedRuntime for ContainerApp<'_> {
                     return Ok(Health::Healthy);
                 }
                 last.push_str(&format!(
-                    "; the latest ready revision is still {}",
-                    ready.unwrap_or("none")
+                    ", still serving {}",
+                    ready.unwrap_or("no revision")
                 ));
             }
             if waited >= self.wait_max {
-                return Err(self.timed_out(rev, &last));
+                return Ok(Health::TimedOut);
+            }
+            if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
+                (self.progress)(&format!(
+                    "waiting for revision {rev} of container app {}: {last}, {} s",
+                    self.app(),
+                    waited.as_secs()
+                ));
+                reported = Some(waited);
             }
             (self.sleep)(self.poll_every);
             waited += self.poll_every;
@@ -706,52 +764,50 @@ impl PinnedRuntime for ContainerApp<'_> {
     }
 
     fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error> {
-        let each = |reason: &'static str| {
+        let each = |reason: String| {
             names
                 .iter()
                 .map(|n| AccessFinding {
                     store_name: n.clone(),
-                    reason,
+                    reason: reason.clone(),
                 })
                 .collect()
         };
         let app = self.show()?;
-        let Some(principal) = self.principal(&app)? else {
-            return Ok(each(NO_IDENTITY));
+        let principal = match self.principal(&app)? {
+            Ok(p) => p,
+            Err(reason) => return Ok(each(reason)),
         };
-        // The id goes into a JMESPath filter: accept a GUID shape only.
-        if !principal.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-            return Ok(each(NO_IDENTITY));
-        }
         let kv = &self.target.key_vault;
         let kv_subject = format!("Key Vault {kv}");
         let kv_hint = format!("az keyvault show -n {kv}");
-        let query = format!(
-            "{{id:id, rbac:properties.enableRbacAuthorization, \
-             secrets:properties.accessPolicies[?objectId=='{principal}'].permissions.secrets[]}}"
-        );
         let out = self.az(
             Effect::Read,
             "az keyvault show",
             &kv_subject,
             &kv_hint,
-            &[
-                "keyvault", "show", "-n", kv, "--query", &query, "-o", "json",
-            ],
+            &["keyvault", "show", "-n", kv, "-o", "json"],
             None,
         )?;
         let vault = parse(&out, "az keyvault show")?;
-        if vault["rbac"].as_bool() != Some(true) {
-            let can_get = vault["secrets"].as_array().is_some_and(|ps| {
-                ps.iter()
-                    .filter_map(Value::as_str)
-                    .any(|p| p.eq_ignore_ascii_case("get") || p.eq_ignore_ascii_case("all"))
+        let rbac = vault
+            .pointer("/properties/enableRbacAuthorization")
+            .and_then(Value::as_bool);
+        if rbac != Some(true) {
+            return Ok(if policy_grants_get(&vault, &principal) {
+                Vec::new()
+            } else {
+                each(format!(
+                    "the app identity (principal {principal}) has no access policy with secret \
+                     get on Key Vault {kv}; grant it: `az keyvault set-policy -n {kv} \
+                     --object-id {principal} --secret-permissions get`"
+                ))
             });
-            return Ok(if can_get { Vec::new() } else { each(NO_POLICY) });
         }
         let scope = vault["id"].as_str().ok_or_else(|| {
             Error::Target(format!(
-                "az keyvault show returned no id for Key Vault {kv}"
+                "az keyvault show returned no id for Key Vault {kv}; nothing was changed\n  \
+                 next: check it with `{kv_hint}`"
             ))
         })?;
         let out = self.az(
@@ -768,8 +824,7 @@ impl PinnedRuntime for ContainerApp<'_> {
                 "--scope",
                 scope,
                 "--include-inherited",
-                "--query",
-                "[].roleDefinitionName",
+                "--include-groups",
                 "-o",
                 "json",
             ],
@@ -778,11 +833,38 @@ impl PinnedRuntime for ContainerApp<'_> {
         let roles = parse(&out, "az role assignment list")?;
         let has_role = roles.as_array().is_some_and(|rs| {
             rs.iter()
-                .filter_map(Value::as_str)
+                .filter_map(|r| r["roleDefinitionName"].as_str())
                 .any(|r| READ_ROLES.contains(&r))
         });
-        Ok(if has_role { Vec::new() } else { each(NO_ROLE) })
+        Ok(if has_role {
+            Vec::new()
+        } else {
+            each(format!(
+                "the app identity (principal {principal}) has no Key Vault secrets read role on \
+                 Key Vault {kv}; grant it: `az role assignment create --assignee-object-id \
+                 {principal} --assignee-principal-type ServicePrincipal --role \"Key Vault \
+                 Secrets User\" --scope {scope}` (a new grant can take a few minutes to apply)"
+            ))
+        })
     }
+}
+
+/// Whether an access-policy vault (full `keyvault show` object) lets `principal` get secrets.
+fn policy_grants_get(vault: &Value, principal: &str) -> bool {
+    vault
+        .pointer("/properties/accessPolicies")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            p["objectId"]
+                .as_str()
+                .is_some_and(|o| o.eq_ignore_ascii_case(principal))
+        })
+        .filter_map(|p| p.pointer("/permissions/secrets").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|p| p.eq_ignore_ascii_case("get") || p.eq_ignore_ascii_case("all"))
 }
 
 /// The Container Apps secret name for one Key Vault version (R2): `opv-` and the first 16
@@ -797,7 +879,7 @@ pub fn secret_name(store_name: &str, version: &str) -> String {
 }
 
 /// Native Windows has no `/dev/stdin`, and the update document must not touch disk (SR-4).
-// Minimal local copy; the Key Vault task's shared `az::stdin_supported` replaces it.
+// consolidated at integration with az.rs
 fn stdin_supported() -> Result<(), Error> {
     if cfg!(windows) {
         return Err(Error::Dependency(
@@ -809,11 +891,18 @@ fn stdin_supported() -> Result<(), Error> {
     Ok(())
 }
 
+/// Parses a read's output; nothing has changed when it fails.
 fn parse(out: &Output, what: &str) -> Result<Value, Error> {
+    parse_with(out, what, "nothing was changed")
+}
+
+/// Parses `out`; `state` says what is true when the JSON is unreadable.
+fn parse_with(out: &Output, what: &str, state: &str) -> Result<Value, Error> {
     // serde_json messages can quote input fragments, so report only the position.
     serde_json::from_slice(&out.stdout).map_err(|e| {
         Error::Target(format!(
-            "{what} returned unexpected JSON (line {}, column {})",
+            "{what} returned JSON opv cannot read (line {}, column {}); {state}\n  next: update \
+             the Azure CLI (`az upgrade`), then run opv again",
             e.line(),
             e.column()
         ))
@@ -823,6 +912,18 @@ fn parse(out: &Output, what: &str) -> Result<Value, Error> {
 /// SHA-256 hex of the canonical JSON: serde_json maps are sorted by key.
 fn fingerprint(v: &Value) -> String {
     hex::encode(Sha256::digest(v.to_string()))
+}
+
+/// Removes each `opv-` secret that neither the edited template nor `serving` (the
+/// references of the revision serving now) uses (R2, NR-1).
+fn prune_superseded(doc: &mut Value, serving: &BTreeSet<String>) {
+    let used = env_refs(doc);
+    if let Some(secrets) = doc.pointer_mut(SECRETS).and_then(Value::as_array_mut) {
+        secrets.retain(|s| {
+            let name = s["name"].as_str().unwrap_or_default();
+            !is_opv_secret(s) || used.contains(name) || serving.contains(name)
+        });
+    }
 }
 
 fn is_opv_secret(s: &Value) -> bool {
@@ -929,6 +1030,22 @@ mod tests {
         fixture("containerapp-update.json")
     }
 
+    /// The recorded revision: its template references `OLD_SECRET`.
+    fn serving_revision() -> Value {
+        fixture("containerapp-revision-show.json")
+    }
+
+    /// What `apply` reads and gets back, in order: the app, the revision serving now (when
+    /// one is ready), the update output.
+    fn apply_responses(fresh: &Value, serving: &Value) -> Vec<Output> {
+        let mut v = vec![out(fresh)];
+        if fresh["properties"]["latestReadyRevisionName"].is_string() {
+            v.push(out(serving));
+        }
+        v.push(out(&update_out()));
+        v
+    }
+
     /// The recorded revision with its states replaced (R10: edited copy of a recon output).
     fn revision(provisioning: &str, running: &str, health: &str) -> Value {
         let mut v = fixture("containerapp-revision-show.json");
@@ -1019,11 +1136,28 @@ mod tests {
         fresh: &Value,
         change: &RuntimeChange,
     ) -> (FakeRunner, Result<Revision, Error>) {
+        apply_serving(before, fresh, &serving_revision(), change)
+    }
+
+    /// `apply_on` with `serving` as the revision `latestReadyRevisionName` names.
+    fn apply_serving(
+        before: &Value,
+        fresh: &Value,
+        serving: &Value,
+        change: &RuntimeChange,
+    ) -> (FakeRunner, Result<Revision, Error>) {
         let snap = snapshot_of(before);
         let (t, m) = (target(), managed());
-        let r = FakeRunner::new([out(fresh), out(&update_out())]);
+        let r = FakeRunner::new(apply_responses(fresh, serving));
         let res = adapter(&r, &t, &m).apply(change, &snap);
         (r, res)
+    }
+
+    /// The stdin document of the one call that carried stdin (the update).
+    fn stdin_doc(r: &FakeRunner) -> Value {
+        let calls = r.calls.borrow();
+        let update = calls.iter().find(|c| c.stdin.is_some()).unwrap();
+        serde_json::from_slice(update.stdin.as_ref().unwrap()).unwrap()
     }
 
     /// The document `apply` sent on stdin.
@@ -1034,8 +1168,7 @@ mod tests {
     fn sent_from(spec: &Value, change: &RuntimeChange) -> Value {
         let (r, res) = apply_on(spec, spec, change);
         res.unwrap();
-        let calls = r.calls.borrow();
-        serde_json::from_slice(calls[1].stdin.as_ref().unwrap()).unwrap()
+        stdin_doc(&r)
     }
 
     fn sent_env(doc: &Value) -> Vec<Value> {
@@ -1235,7 +1368,7 @@ mod tests {
     fn apply_updates_through_dev_stdin() {
         let (r, _) = apply_on(&show(), &show(), &set_config());
         assert_eq!(
-            r.calls.borrow()[1].args,
+            r.calls.borrow().last().unwrap().args,
             [
                 "containerapp",
                 "update",
@@ -1279,10 +1412,9 @@ mod tests {
         t.identity = USER_IDENTITY.into();
         let m = managed();
         let snap = snapshot_of(&show());
-        let r = FakeRunner::new([out(&show()), out(&update_out())]);
+        let r = FakeRunner::new(apply_responses(&show(), &serving_revision()));
         adapter(&r, &t, &m).apply(&repin(), &snap).unwrap();
-        let doc: Value =
-            serde_json::from_slice(r.calls.borrow()[1].stdin.as_ref().unwrap()).unwrap();
+        let doc = stdin_doc(&r);
         assert!(
             sent_secrets(&doc)
                 .iter()
@@ -1311,6 +1443,71 @@ mod tests {
                 .iter()
                 .any(|s| s["name"] == json!("opv-0000000000000000"))
         );
+    }
+
+    /// A previous apply whose revision is not ready yet: the app template binds `PENDING`
+    /// while the serving revision (the recorded one) still binds `OLD_SECRET`.
+    const PENDING: &str = "opv-1111111111111111";
+
+    fn with_pending_revision() -> Value {
+        let mut v = show();
+        v["properties"]["configuration"]["secrets"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"identity": "system", "keyVaultUrl": format!("{VAULT_URI}/secrets/{DB_STORE}/1111"), "name": PENDING}));
+        v["properties"]["template"]["containers"][0]["env"][0]["secretRef"] = json!(PENDING);
+        v["properties"]["latestRevisionName"] = json!("opv-fixture-app--0000003");
+        v
+    }
+
+    #[test]
+    fn apply_keeps_secret_of_serving_revision_while_a_newer_one_is_not_ready() {
+        let v = with_pending_revision();
+        assert!(
+            sent_secrets(&sent_from(&v, &repin()))
+                .iter()
+                .any(|s| s["name"] == json!(OLD_SECRET))
+        );
+    }
+
+    #[test]
+    fn apply_removes_secret_of_unready_revision_once_superseded() {
+        let v = with_pending_revision();
+        assert!(
+            !sent_secrets(&sent_from(&v, &repin()))
+                .iter()
+                .any(|s| s["name"] == json!(PENDING))
+        );
+    }
+
+    #[test]
+    fn apply_reads_the_latest_ready_revision() {
+        let (r, _) = apply_on(&show(), &show(), &repin());
+        assert!(
+            r.calls.borrow()[1]
+                .args
+                .windows(2)
+                .any(|w| w == ["--revision", "opv-fixture-app--jrh59ni"])
+        );
+    }
+
+    #[test]
+    fn apply_without_ready_revision_removes_unreferenced_opv_secret() {
+        let mut v = show();
+        v["properties"]["latestReadyRevisionName"] = Value::Null;
+        assert!(
+            !sent_secrets(&sent_from(&v, &repin()))
+                .iter()
+                .any(|s| s["name"] == json!(OLD_SECRET))
+        );
+    }
+
+    #[test]
+    fn apply_refuses_labels_revision_mode() {
+        let mut v = show();
+        v["properties"]["configuration"]["activeRevisionsMode"] = json!("Labels");
+        let (_, res) = apply_on(&v, &v, &repin());
+        assert!(matches!(res, Err(Error::Config(_))));
     }
 
     #[test]
@@ -1384,7 +1581,12 @@ mod tests {
     fn failed_update_when_signed_out_is_auth_error() {
         let snap = snapshot_of(&show());
         let (t, m) = (target(), managed());
-        let r = FakeRunner::new([out(&show()), Output::failure(1), Output::failure(1)]);
+        let r = FakeRunner::new([
+            out(&show()),
+            out(&serving_revision()),
+            Output::failure(1),
+            Output::failure(1),
+        ]);
         assert!(matches!(
             adapter(&r, &t, &m).apply(&repin(), &snap),
             Err(Error::Auth(_))
@@ -1395,7 +1597,12 @@ mod tests {
     fn failed_update_when_signed_in_is_unknown_outcome() {
         let snap = snapshot_of(&show());
         let (t, m) = (target(), managed());
-        let r = FakeRunner::new([out(&show()), Output::failure(1), Output::success("")]);
+        let r = FakeRunner::new([
+            out(&show()),
+            out(&serving_revision()),
+            Output::failure(1),
+            Output::success(""),
+        ]);
         assert!(matches!(
             adapter(&r, &t, &m).apply(&repin(), &snap),
             Err(Error::Unknown(_))
@@ -1524,14 +1731,64 @@ mod tests {
     }
 
     #[test]
-    fn await_healthy_times_out_naming_revision_and_last_states() {
+    fn await_healthy_times_out() {
         let starting = revision("Provisioned", "Running", "None");
-        let text = err_text(await_with(vec![
-            starting.clone(),
-            starting.clone(),
-            starting,
-        ]));
-        assert!(text.contains(REV) && text.contains("healthState None"));
+        assert_eq!(
+            await_with(vec![starting.clone(), starting.clone(), starting]).unwrap(),
+            Health::TimedOut
+        );
+    }
+
+    #[test]
+    fn await_healthy_reports_failed_running_state() {
+        assert!(matches!(
+            await_with(vec![revision("Provisioned", "Failed", "None")]),
+            Ok(Health::Unhealthy(_))
+        ));
+    }
+
+    #[test]
+    fn unhealthy_report_names_the_revision() {
+        let Ok(Health::Unhealthy(why)) =
+            await_with(vec![revision("Provisioned", "Running", "Unhealthy")])
+        else {
+            panic!("expected Unhealthy");
+        };
+        assert!(why.contains(REV));
+    }
+
+    /// Progress lines printed while waiting `polls` reads that never get ready.
+    fn progress_over(polls: usize) -> Vec<String> {
+        let lines = RefCell::new(Vec::new());
+        let (t, m) = (target(), managed());
+        let starting = revision("Provisioning", "Activating", "None");
+        let r = FakeRunner::new((0..polls).map(|_| out(&starting)));
+        ContainerApp::new(&r, &t, None, &m, VAULT_URI.into())
+            .with_clock(
+                Box::new(|_| {}),
+                Duration::from_secs(5),
+                Duration::from_secs(5 * (polls as u64 - 1)),
+            )
+            .with_progress(Box::new(|l| lines.borrow_mut().push(l.to_string())))
+            .await_healthy(&Revision(REV.into()))
+            .unwrap();
+        lines.into_inner()
+    }
+
+    #[test]
+    fn waiting_prints_progress_every_fifteen_seconds() {
+        assert_eq!(progress_over(8).len(), 3);
+    }
+
+    #[test]
+    fn progress_line_names_revision_states_and_elapsed_time() {
+        assert_eq!(
+            progress_over(5)[1],
+            format!(
+                "waiting for revision {REV} of container app opv-fixture-app: \
+                 Provisioning/Activating/None, 15 s"
+            )
+        );
     }
 
     #[test]
@@ -1542,6 +1799,7 @@ mod tests {
         after["properties"]["configuration"]["ingress"]["targetPort"] = json!(8080);
         let r = FakeRunner::new([
             out(&show()),
+            out(&serving_revision()),
             out(&update_out()),
             out(&healthy_revision()),
             out(&after),
@@ -1552,6 +1810,13 @@ mod tests {
     }
 
     // ---- check_access ----
+
+    /// The principal of the user-assigned identity in `identity-show.json` (constructed).
+    const USER_PRINCIPAL: &str = "33333333-3333-3333-3333-333333333333";
+
+    fn constructed(name: &str) -> Value {
+        fixture(&format!("constructed/{name}"))
+    }
 
     fn access_with(identity: &str, responses: Vec<Output>) -> (FakeRunner, Vec<AccessFinding>) {
         let mut t = target();
@@ -1564,33 +1829,43 @@ mod tests {
         (r, found)
     }
 
-    fn rbac_vault() -> Output {
-        out(
-            &json!({"id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/opv-fixture-rg/providers/Microsoft.KeyVault/vaults/kv-opv-fixture", "rbac": true, "secrets": []}),
+    /// The system identity against the recorded RBAC vault and `roles` (a recorded list).
+    fn rbac_access(roles: &str) -> (FakeRunner, Vec<AccessFinding>) {
+        access_with(
+            "system",
+            vec![
+                out(&show()),
+                out(&fixture("keyvault-show.json")),
+                out(&fixture(roles)),
+            ],
         )
+    }
+
+    /// The app with `USER_IDENTITY` attached; `principal` as the app lists it.
+    fn show_with_user_identity(principal: Option<&str>) -> Value {
+        let mut v = show();
+        let mut entry = json!({"clientId": "55555555-5555-5555-5555-555555555555"});
+        if let Some(p) = principal {
+            entry["principalId"] = json!(p);
+        }
+        // ARM may change the id's case: the lookup ignores it.
+        v["identity"] = json!({
+            "type": "UserAssigned",
+            "userAssignedIdentities": {USER_IDENTITY.replace("resourceGroups", "resourcegroups"): entry}
+        });
+        v
     }
 
     #[test]
     fn check_access_passes_with_secrets_user_role() {
-        let (_, found) = access_with(
-            "system",
-            vec![
-                out(&show()),
-                rbac_vault(),
-                out(&json!(["Key Vault Secrets User"])),
-            ],
-        );
-        assert!(found.is_empty());
+        assert!(rbac_access("role-assignment-list.json").1.is_empty());
     }
 
     #[test]
     fn check_access_reports_each_name_without_role() {
-        let (_, found) = access_with(
-            "system",
-            vec![out(&show()), rbac_vault(), out(&json!(["Reader"]))],
-        );
         assert_eq!(
-            found
+            rbac_access("role-assignment-list-empty.json")
+                .1
                 .iter()
                 .map(|f| f.store_name.as_str())
                 .collect::<Vec<_>>(),
@@ -1599,29 +1874,99 @@ mod tests {
     }
 
     #[test]
+    fn missing_role_finding_names_the_vault_and_the_grant_command() {
+        let reason = rbac_access("role-assignment-list-empty.json").1[0]
+            .reason
+            .clone();
+        assert!(reason.contains(
+            "on Key Vault kv-opv-fixture; grant it: `az role assignment create \
+             --assignee-object-id 22222222-2222-2222-2222-222222222222"
+        ));
+    }
+
+    #[test]
+    fn check_access_lists_roles_at_the_vault_scope_including_groups() {
+        let (r, _) = rbac_access("role-assignment-list.json");
+        assert_eq!(
+            r.calls.borrow()[2].args[3..],
+            [
+                "--assignee",
+                "22222222-2222-2222-2222-222222222222",
+                "--scope",
+                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/opv-fixture-rg/providers/Microsoft.KeyVault/vaults/kv-opv-fixture",
+                "--include-inherited",
+                "--include-groups",
+                "-o",
+                "json",
+                "--only-show-errors"
+            ]
+        );
+    }
+
+    #[test]
     fn check_access_passes_with_access_policy_get() {
-        let vault = json!({"id": "/subscriptions/x/vaults/kv-opv-fixture", "rbac": false, "secrets": ["Get", "List"]});
-        let (_, found) = access_with("system", vec![out(&show()), out(&vault)]);
+        let (_, found) = access_with(
+            "system",
+            vec![
+                out(&show()),
+                out(&constructed("keyvault-show-access-policy.json")),
+            ],
+        );
         assert!(found.is_empty());
     }
 
     #[test]
-    fn check_access_reads_user_assigned_principal() {
-        let (r, _) = access_with(
-            USER_IDENTITY,
+    fn access_policy_for_another_principal_is_a_finding() {
+        let mut v = show();
+        v["identity"]["principalId"] = json!("66666666-6666-6666-6666-666666666666");
+        let (_, found) = access_with(
+            "system",
             vec![
-                out(&show()),
-                Output::success("33333333-3333-3333-3333-333333333333\n"),
-                rbac_vault(),
-                out(&json!(["Key Vault Secrets User"])),
+                out(&v),
+                out(&constructed("keyvault-show-access-policy.json")),
             ],
         );
         assert!(
-            r.calls.borrow()[3]
-                .args
-                .iter()
-                .any(|a| a == "33333333-3333-3333-3333-333333333333")
+            found[0]
+                .reason
+                .contains("az keyvault set-policy -n kv-opv-fixture")
         );
+    }
+
+    #[test]
+    fn check_access_reads_user_assigned_principal_from_the_app() {
+        let (r, _) = access_with(
+            USER_IDENTITY,
+            vec![
+                out(&show_with_user_identity(Some(USER_PRINCIPAL))),
+                out(&fixture("keyvault-show.json")),
+                out(&fixture("role-assignment-list.json")),
+            ],
+        );
+        assert!(r.calls.borrow()[2].args.iter().any(|a| a == USER_PRINCIPAL));
+    }
+
+    #[test]
+    fn check_access_reads_user_assigned_principal_from_identity_show() {
+        let (r, _) = access_with(
+            USER_IDENTITY,
+            vec![
+                out(&show_with_user_identity(None)),
+                out(&constructed("identity-show.json")),
+                out(&fixture("keyvault-show.json")),
+                out(&fixture("role-assignment-list.json")),
+            ],
+        );
+        assert!(r.calls.borrow()[3].args.iter().any(|a| a == USER_PRINCIPAL));
+    }
+
+    #[test]
+    fn unattached_user_identity_finding_names_the_assign_command() {
+        let (_, found) = access_with(USER_IDENTITY, vec![out(&show())]);
+        assert!(found[0].reason.contains(&format!(
+            "az containerapp identity assign -g opv-fixture-rg -n opv-fixture-app \
+             --user-assigned {USER_IDENTITY}"
+        )));
     }
 
     #[test]

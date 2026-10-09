@@ -75,7 +75,8 @@ pub enum Health {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessFinding {
     pub store_name: String,
-    pub reason: &'static str,
+    /// Names the store and the command that grants access. Names and ids only, never values.
+    pub reason: String,
 }
 
 #[cfg(test)]

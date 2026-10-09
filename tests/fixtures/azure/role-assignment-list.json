@@ -1,0 +1,18 @@
+[
+  {
+    "createdBy": "33333333-3333-3333-3333-333333333333",
+    "createdOn": "2026-10-08T22:06:39.328113+00:00",
+    "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/opv-fixture-rg/providers/Microsoft.KeyVault/vaults/kv-opv-fixture/providers/Microsoft.Authorization/roleAssignments/d172ca93-d800-4244-9c16-3599649fd600",
+    "name": "d172ca93-d800-4244-9c16-3599649fd600",
+    "principalId": "22222222-2222-2222-2222-222222222222",
+    "principalName": "fa8fd796-29ae-4032-a4df-247510d2f141",
+    "principalType": "ServicePrincipal",
+    "resourceGroup": "opv-fixture-rg",
+    "roleDefinitionId": "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6",
+    "roleDefinitionName": "Key Vault Secrets User",
+    "scope": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/opv-fixture-rg/providers/Microsoft.KeyVault/vaults/kv-opv-fixture",
+    "type": "Microsoft.Authorization/roleAssignments",
+    "updatedBy": "33333333-3333-3333-3333-333333333333",
+    "updatedOn": "2026-10-08T22:06:39.328113+00:00"
+  }
+]
