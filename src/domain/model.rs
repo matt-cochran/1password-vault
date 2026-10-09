@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
@@ -16,7 +16,7 @@ pub enum Kind {
 
 /// Declarative validation rules for one key (FR-15). Every rule is optional.
 /// Evaluated by the rules engine (`domain::rules`); this type only carries them.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Rules {
     pub prefix: Option<String>,
@@ -38,7 +38,7 @@ pub struct Rules {
 }
 
 /// A string or a list of strings in TOML (`x = "a"` or `x = ["a", "b"]`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum OneOrMany {
     One(String),
@@ -67,7 +67,7 @@ impl OneOrMany {
 
 /// Required prefix chosen by an environment mode, e.g. `payments = "test"` → `sk_test_`.
 /// Modes listed in `skip` mean the key is not required in that environment.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrefixByMode {
     pub mode: String,
@@ -271,12 +271,10 @@ impl Fleet {
         match &e.target {
             Some(t) => Ok((e, t)),
             None if self.is_simple() => Err(Error::Config(format!(
-                "environment {env:?} has no fly section (add fly.app to use status and the \
-                 fly commands)"
+                "environment {env:?} has no deployment target. For local settings use opv check {env} and opv run {env} -- <command>. To deploy, configure fly.app first."
             ))),
             None => Err(Error::Config(format!(
-                "environment {env:?} has no fly section (add fly.app and fly.secret_name to \
-                 use status and the fly commands)"
+                "environment {env:?} has no deployment target. For local settings use opv check {env} --product <name> and opv run {env} --product <name> -- <command>. To deploy, configure fly.app and fly.secret_name first."
             ))),
         }
     }

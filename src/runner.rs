@@ -460,6 +460,18 @@ fn read_capped(
     res.map(|complete| complete.then_some(out))
 }
 
+/// Read an interactive child's stdout (the owner-run `op signin` in `setup`/`session`) into
+/// a zeroized buffer, capped at [`OUTPUT_CAP`] like every captured call (NR-5).
+pub(crate) fn read_to_end_zeroizing(r: impl Read) -> io::Result<Zeroizing<Vec<u8>>> {
+    let over = AtomicBool::new(false);
+    read_capped(r, OUTPUT_CAP, &over)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("output exceeded {} bytes", OUTPUT_CAP),
+        )
+    })
+}
+
 /// Runs real processes with `std::process::Command`. Child stderr is discarded because it
 /// may echo values (SR-1); callers map outcomes to typed errors.
 ///

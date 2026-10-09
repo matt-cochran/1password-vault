@@ -445,7 +445,7 @@ fn render(args: &InitArgs, vault_id: &str, item_id: &str, d: &Declared) -> Strin
 /// Write `text` to `target` through a temporary file in the same directory and a rename,
 /// so the target is never partly written. Without `force`, an existing target is refused
 /// again just before the rename (it may have appeared during the 1Password calls).
-fn write_atomic(target: &Path, text: &str, force: bool) -> Result<(), Error> {
+pub(crate) fn write_atomic(target: &Path, text: &str, force: bool) -> Result<(), Error> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     let tmp: PathBuf = dir.join(format!(".{FILE_NAME}.opv-init.{}.tmp", std::process::id()));
     let fail = |what: &str, p: &Path, e: io::Error| {

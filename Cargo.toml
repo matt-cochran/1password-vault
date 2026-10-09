@@ -30,6 +30,7 @@ hex = "0.4"
 regex = "1"
 sha2 = "0.10"
 subtle = "2"
+rpassword = "7.5"
 
 [target.'cfg(unix)'.dependencies]
 # SIGINT/SIGTERM forwarding to the running CLI (NR-12); libc is already in the tree.

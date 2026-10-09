@@ -41,6 +41,10 @@ allumata  STRIPE_SECRET_KEY    secret  skipped  absent
 
 For local development, `opv run dev -- <command>` starts any command with the environment's keys set as variables, through `op run`, with no `.env` file ([patterns](docs/usage.md#local-development)).
 
+## Guided local setup (in development)
+
+The next release adds `opv session` and `opv setup` for sign-in and resumable project onboarding, with plain instructions and private input. See [guided setup](docs/guided-setup.md) and the [CLI interaction review](docs/cli-ux-review.md). These commands are not in v0.4.0.
+
 ## Quickstart
 
 Install on Linux or macOS ([docs/install.md](docs/install.md) covers npm, Windows, source builds and checksum verification):

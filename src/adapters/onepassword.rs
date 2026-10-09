@@ -671,7 +671,7 @@ fn is_unsectioned(f: &Value) -> bool {
 }
 
 /// A JSON tree whose strings are zeroized when it is dropped.
-struct WipeOnDrop(Value);
+pub(crate) struct WipeOnDrop(pub(crate) Value);
 
 impl Drop for WipeOnDrop {
     fn drop(&mut self) {
@@ -798,7 +798,7 @@ fn unique(base: String, taken: impl Fn(&str) -> bool) -> String {
 
 /// Serialize into a `Zeroizing` buffer allocated at the exact final size, so the buffer is
 /// never reallocated (a realloc would leave an unzeroized copy of the values behind).
-fn serialize_exact(v: &Value) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub(crate) fn serialize_exact(v: &Value) -> Result<Zeroizing<Vec<u8>>, Error> {
     struct Count(usize);
     impl Write for Count {
         fn write(&mut self, b: &[u8]) -> io::Result<usize> {
