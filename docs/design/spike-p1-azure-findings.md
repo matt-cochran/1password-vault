@@ -27,4 +27,9 @@ Recorded outputs, with subscription, tenant, principal ids, IPs and host names r
 
 ## Appendix: Q15 scale to zero
 
-(filled in from the background observation)
+`az containerapp update --min-replicas 0` created revision `--0000003`. Observed once a minute
+for 16 minutes: minutes 1–4 `Provisioned / Running / Healthy`, replicas 1; from minute 5 on
+`Provisioned / ScaledToZero / Healthy`, replicas 0; the revision stayed `latestReadyRevisionName`.
+
+Consequence (R8): `ScaledToZero` counts as running for a revision that is already the latest
+ready one; `healthState` stays `Healthy` at zero replicas.
