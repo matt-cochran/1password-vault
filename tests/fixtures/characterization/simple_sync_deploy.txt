@@ -7,9 +7,9 @@ $ flyctl secrets import --app myapp-production --stage
 $ flyctl secrets list --app myapp-production --json
 $ flyctl secrets deploy --app myapp-production
 --- stdout
-1 to stage, 1 held (immutable), 0 to prune
-staged: 1 changed, 0 unchanged
-  changed: DATABASE_URL
-deployed staged secrets
+written: DATABASE_URL
+held (immutable), not rewritten (pass --rotate KEY to replace): JWT_KEY
+deployed: DATABASE_URL
+summary: written 1 · deployed yes · pruned 0 · pending 0 · unchanged 0 · skipped 1
 --- result
 Ok(())
