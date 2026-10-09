@@ -97,6 +97,7 @@ one is a configuration error. Existing `fly` sections are unchanged.
 
 ```toml
 [environments.prod.azure]
+subscription   = "00000000-0000-0000-0000-000000000000"  # required; --subscription on every call (NR-7)
 key_vault      = "kv-myapp-prod"
 resource_group = "rg-myapp"
 container_app  = "ca-myapp"            # exactly one of container_app | app_service

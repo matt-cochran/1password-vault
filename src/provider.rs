@@ -107,6 +107,11 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)>;
+    /// `explain` lines for a config key, when this target routes config itself (Azure:
+    /// a plain env value or a Key Vault reference). `None`: config is not deployed here.
+    fn explain_config(&self, _product: &str, _key: &str) -> Option<Vec<(&'static str, String)>> {
+        None
+    }
     /// Equal configuration (every field), for comparing whole configurations.
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;
     /// For [`TargetConfig::same_target`] and [`TargetConfig::eq_dyn`] implementations.

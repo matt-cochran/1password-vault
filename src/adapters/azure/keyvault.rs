@@ -11,6 +11,8 @@
 //! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
 //! | `delete` | `keyvault secret delete --vault-name <vault> --name <name> -o none` |
 //!
+//! Every call also carries `--subscription <azure.subscription>` (NR-7).
+//!
 //! Values travel on stdin only (`--file /dev/stdin --encoding utf-8`), never in argv, env
 //! or a temp file (SR-1..SR-4). The write asks for `--query id -o tsv` because
 //! `keyvault secret set` echoes the value on stdout (R11), so the value never comes back.
@@ -57,6 +59,8 @@ const CONFIRM_POLL: Duration = Duration::from_secs(2);
 pub struct KeyVault<'a> {
     pub runner: &'a dyn CommandRunner,
     pub vault: &'a str,
+    /// `azure.subscription`, passed as `--subscription` on every call (NR-7).
+    pub subscription: &'a str,
     pub env: &'a str,
     /// The managed env names (from the template, FR-8). The ports speak env names; each
     /// is stored under its Key Vault spelling ([`AzureTarget::key_vault_name`]).
@@ -118,6 +122,13 @@ pub fn refusal(value: &SecretValue) -> Option<(&'static str, &'static str)> {
 }
 
 impl KeyVault<'_> {
+    /// `args` plus `--subscription <id>` (NR-7).
+    fn scoped<'s>(&'s self, args: &[&'s str]) -> Vec<&'s str> {
+        let mut v = args.to_vec();
+        v.extend(["--subscription", self.subscription]);
+        v
+    }
+
     /// Managed entries: tagged `opv-managed=<env>` and named in the managed template set
     /// (FR-8). Version comes from `show` / the binding, never `list`; nothing is pending.
     fn list_managed(&self) -> Result<Vec<StoreEntry>, Error> {
@@ -136,7 +147,14 @@ impl KeyVault<'_> {
             self.runner,
             OP,
             self.vault,
-            invoke(self.runner, Effect::Read, OP, &args, None, &[])?,
+            invoke(
+                self.runner,
+                Effect::Read,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[],
+            )?,
         )?;
         // serde_json messages can quote input fragments, so report only the position.
         let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
@@ -192,7 +210,14 @@ impl KeyVault<'_> {
             "json",
             az::ONLY_SHOW_ERRORS,
         ];
-        let outcome = invoke(self.runner, Effect::Read, OP, &args, None, &[3])?;
+        let outcome = invoke(
+            self.runner,
+            Effect::Read,
+            OP,
+            &self.scoped(&args),
+            None,
+            &[3],
+        )?;
         let out = match outcome {
             Outcome::Refused(out) if out.status == 3 => return Ok(None),
             other => read_output(self.runner, OP, self.vault, other)?,
@@ -244,7 +269,7 @@ impl KeyVault<'_> {
                 self.runner,
                 Effect::Write,
                 OP,
-                &args,
+                &self.scoped(&args),
                 Some(value.expose().as_bytes()),
                 &[],
             )
@@ -302,7 +327,14 @@ impl KeyVault<'_> {
         ];
         let mut waited = Duration::ZERO;
         loop {
-            if let Outcome::Done(_) = invoke(self.runner, Effect::Read, OP, &args, None, &[])? {
+            if let Outcome::Done(_) = invoke(
+                self.runner,
+                Effect::Read,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[],
+            )? {
                 return Ok(());
             }
             if waited >= ACCESS_WAIT {
@@ -345,7 +377,14 @@ impl KeyVault<'_> {
         let suffix = format!("/{version}");
         let mut waited = Duration::ZERO;
         loop {
-            match invoke(self.runner, Effect::Read, OP, &args, None, &[3])? {
+            match invoke(
+                self.runner,
+                Effect::Read,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[3],
+            )? {
                 Outcome::Done(out) => {
                     let seen = String::from_utf8_lossy(&out.stdout);
                     if seen.trim().ends_with(&suffix) {
@@ -385,7 +424,14 @@ impl KeyVault<'_> {
             "none",
             az::ONLY_SHOW_ERRORS,
         ];
-        match invoke(self.runner, Effect::Read, OP, &args, None, &[1, 3])? {
+        match invoke(
+            self.runner,
+            Effect::Read,
+            OP,
+            &self.scoped(&args),
+            None,
+            &[1, 3],
+        )? {
             Outcome::Done(_) => Ok(true),
             Outcome::Refused(_) => Ok(false),
             Outcome::Unknown { .. } => Err(Error::Unknown(format!(
@@ -423,7 +469,14 @@ impl KeyVault<'_> {
             self.runner,
             OP,
             self.vault,
-            invoke(self.runner, Effect::Write, OP, &args, None, &[])?,
+            invoke(
+                self.runner,
+                Effect::Write,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[],
+            )?,
         )?;
         Ok(())
     }
@@ -461,6 +514,7 @@ mod tests {
     use crate::runner::fake::FakeRunner;
 
     const VAULT: &str = "kv-opv-fixture";
+    const SUBSCRIPTION: &str = "00000000-0000-0000-0000-000000000000";
     const MARKER: &str = "opv-marker-kv";
     const NAME: &str = "FLEET--API--DB-URL";
     const VERSION: &str = "46687ce78b76487cb0c1da470360b638";
@@ -490,6 +544,7 @@ mod tests {
         KeyVault {
             runner: r,
             vault: VAULT,
+            subscription: SUBSCRIPTION,
             env,
             managed: template_names.clone(),
             pacer,
@@ -520,6 +575,20 @@ mod tests {
             r.calls.borrow()[0].stdin.as_deref(),
             Some(MARKER.as_bytes())
         );
+    }
+
+    /// NR-7: the store is scoped to the configured subscription, writes included.
+    #[test]
+    fn every_key_vault_call_carries_the_subscription() {
+        let r = FakeRunner::new(written());
+        let templates = names(&[]);
+        vault(&r, "prod", &templates)
+            .write_one(NAME, &secret())
+            .unwrap();
+        assert!(r.calls.borrow().iter().all(|c| {
+            c.args
+                .ends_with(&["--subscription".into(), SUBSCRIPTION.into()])
+        }));
     }
 
     #[test]

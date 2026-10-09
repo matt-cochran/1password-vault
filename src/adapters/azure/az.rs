@@ -150,13 +150,29 @@ pub(crate) fn write_output(
 /// missing `az` is [`Error::Dependency`]; a probe that errors or times out says nothing
 /// about the sign-in, so it is an [`Error::Target`] that asks for a manual check.
 pub(crate) fn signed_in(r: &dyn CommandRunner) -> Result<bool, Error> {
-    match r.probe(
-        &Call::new(
-            PROGRAM,
-            &["account", "show", "-o", "none", ONLY_SHOW_ERRORS],
-        ),
-        PROBE_TIMEOUT,
-    ) {
+    probe(r, &["account", "show", "-o", "none", ONLY_SHOW_ERRORS])
+}
+
+/// Whether the signed-in account can see `subscription` (NR-7): `az account show
+/// --subscription <id> -o none`, exit status only (its output names the account, SR-1).
+pub(crate) fn sees_subscription(r: &dyn CommandRunner, subscription: &str) -> Result<bool, Error> {
+    probe(
+        r,
+        &[
+            "account",
+            "show",
+            "--subscription",
+            subscription,
+            "-o",
+            "none",
+            ONLY_SHOW_ERRORS,
+        ],
+    )
+}
+
+/// A read-only `az` probe decided by exit status alone: `Ok(true)` for exit 0.
+fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
+    match r.probe(&Call::new(PROGRAM, args), PROBE_TIMEOUT) {
         Ok(o) => Ok(o.status == 0),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
             "{PROGRAM} not found on PATH\n  {}",

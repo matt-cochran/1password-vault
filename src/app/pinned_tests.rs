@@ -18,6 +18,7 @@ kind = "simple"
 vault_id = "vprd"
 item_id = "iprd"
 [environments.prod.azure]
+subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "kv-app"
 resource_group = "rg-app"
 container_app = "ca-app"
@@ -36,6 +37,27 @@ const VERSION: &str = "46687ce78b76487cb0c1da470360b638";
 
 fn azure() -> Fleet {
     config::parse(AZURE).unwrap()
+}
+
+/// The recorded `az` output `name` (R10).
+fn recorded(name: &str) -> Value {
+    let path = format!("{}/tests/fixtures/azure/{name}", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The preflight's answers (NR-23, NR-25): subscription visible, the recorded vault (renamed
+/// to kv-app), its data plane answering, the recorded app.
+fn preflight() -> Vec<Output> {
+    let mut vault = recorded("keyvault-show.json");
+    vault["name"] = json!("kv-app");
+    vault["properties"]["vaultUri"] = json!("https://kv-app.vault.azure.net/");
+    let json = |v: &Value| Output::success(serde_json::to_vec(v).unwrap());
+    vec![
+        Output::success(""),
+        json(&vault),
+        Output::success(""),
+        json(&recorded("containerapp-show.json")),
+    ]
 }
 
 fn azure_item() -> Output {
@@ -59,7 +81,7 @@ fn kv_show(name: &str, value: &str) -> Output {
 
 /// `status prod --json` on `responses`: the TARGET of each row by key, and the runner.
 fn azure_status(responses: Vec<Output>) -> (Vec<(String, String)>, FakeRunner) {
-    let r = FakeRunner::new(responses);
+    let r = FakeRunner::new(preflight().into_iter().chain(responses));
     let mut out = Vec::new();
     super::status::run_with(&azure(), "prod", &r, &mut out, true).unwrap();
     let doc: Value = serde_json::from_slice(&out).unwrap();
@@ -137,14 +159,29 @@ fn azure_status_reports_absent_when_the_listed_entry_is_gone() {
     assert_eq!(target_of(&targets, "API_KEY"), "absent");
 }
 
+/// NR-23: the target is checked, read-only, before 1Password is read.
+#[test]
+fn azure_status_checks_the_subscription_before_reading_1password() {
+    let (_, r) = azure_status(vec![
+        azure_item(),
+        kv_list(&["API-KEY", "DB-URL"]),
+        kv_show("API-KEY", API_KEY),
+        kv_show("DB-URL", DB_URL),
+    ]);
+    assert_eq!(
+        r.calls.borrow()[0].args[..3],
+        ["account", "show", "--subscription"]
+    );
+}
+
 #[test]
 fn azure_status_prints_no_store_value() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", "api-FIXTUREVALUE-old"),
         kv_show("DB-URL", DB_URL),
-    ]);
+    ]));
     let mut out = Vec::new();
     let _ = super::status::run(&azure(), "prod", &r, &mut out);
     assert!(!text_of(&out).contains(MARKER));
@@ -152,12 +189,12 @@ fn azure_status_prints_no_store_value() {
 
 #[test]
 fn azure_plan_reads_each_secret_once() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", API_KEY),
         kv_show("DB-URL", "changed-FIXTUREVALUE"),
-    ]);
+    ]));
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, false).unwrap();
     assert_eq!(kv_reads(&r), 2);
@@ -165,12 +202,12 @@ fn azure_plan_reads_each_secret_once() {
 
 #[test]
 fn azure_plan_stages_only_the_changed_secret() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", API_KEY),
         kv_show("DB-URL", "changed-FIXTUREVALUE"),
-    ]);
+    ]));
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, true).unwrap();
     let doc: Value = serde_json::from_slice(&out).unwrap();
@@ -179,12 +216,12 @@ fn azure_plan_stages_only_the_changed_secret() {
 
 #[test]
 fn azure_plan_shows_an_unchanged_secret_as_unchanged() {
-    let r = FakeRunner::new(vec![
+    let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", API_KEY),
         kv_show("DB-URL", "changed-FIXTUREVALUE"),
-    ]);
+    ]));
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, false).unwrap();
     assert!(
@@ -208,10 +245,10 @@ fn fly_plan_makes_no_read_calls() {
 }
 
 /// `sync` against a pinned target is still the internal refusal until the pinned flow
-/// lands (Task 7); it reads nothing first.
+/// lands (Task 7); only the read-only preflight runs first.
 #[test]
-fn azure_sync_is_refused_before_any_call() {
-    let r = FakeRunner::new(vec![]);
+fn azure_sync_is_refused_after_the_preflight() {
+    let r = FakeRunner::new(preflight());
     let mut out = Vec::new();
     let res = super::sync::run(&azure(), "prod", &r, &mut out, &Default::default());
     assert!(matches!(res, Err(Error::Target(m)) if m.contains("pinned sync not implemented")));
