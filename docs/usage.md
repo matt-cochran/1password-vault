@@ -151,7 +151,7 @@ It reads only the configuration: no 1Password or Fly call, and no value or value
 ### Open a key in 1Password
 
 ```sh
-opv open <[product/]KEY> [--env <environment>] [--print]
+opv open <[product/]KEY> [--env <environment>] [--print] [--json]
 ```
 
 Every missing or failing row in `status`, `plan` and `check` carries the link to its item, with the field to fix:
@@ -164,7 +164,7 @@ allumata  OPENAI_API_KEY  secret  missing  new
 
 The link is 1Password's private item link, the form "Copy Private Link" produces: account, vault and item IDs and the sign-in host, never a value. 1Password links to items, not single fields, so the section and field are named next to it. opv takes the account from one free `op whoami` call, made only when there is something to fix; when that call fails the link has the vault and item only.
 
-`opv open` resolves the key as `explain` does (a bare `KEY` under one product, `--env` optional with one environment), prints its section and field and the link, and opens the link with the desktop's opener: `xdg-open` (Linux with a display), `wslview` (WSL), `open` (macOS) or `rundll32 url.dll,FileProtocolHandler` (Windows). The opener gets the link as its only argument; no shell is involved. Over SSH, under CI, on a machine without a display, or with `--print` it only prints the link, which is what an assistant should show its user. It never reads the item.
+`opv open` resolves the key as `explain` does (a bare `KEY` under one product, `--env` optional with one environment), prints its section and field and the link, and opens the link with the desktop's opener: `xdg-open` (Linux with a display), `wslview` (WSL), `open` (macOS) or `rundll32 url.dll,FileProtocolHandler` (Windows). The opener gets the link as its only argument; no shell is involved. Over SSH, under CI, on a machine without a display, or with `--print` it only prints the link, which is what an assistant should show its user. It never reads the item. A shared key (`from = ...`) opens its source's field. `--json` prints `{environment, product, key, section, field, open_url}` and opens nothing.
 
 ### Machine-readable status and plan
 
@@ -225,6 +225,13 @@ target (a new or changed key, a prune, a pending binding), `unknown` when only k
 values the target hides (Fly) would be staged, and `none` otherwise; a nightly drift job
 can alert on `some`. A missing or failing row also carries `open_url`, the 1Password item
 link to fix it in (IDs only); `check --json` rows carry it too.
+
+A shared key's row carries `shared_from` (`api/DATABASE_URL`) and, while its source has a
+finding, the state `source_blocked`. When a person's run tidied the item (FR-43),
+`status`, `plan` and `check` documents carry `tidy`, a list of `{action, name}` (names
+only; omitted when nothing was tidied). A tidy that was tried and did not complete puts
+its error code in `tidy_error` (`tidy_conflict` when the item changed twice meanwhile);
+the command itself still succeeds or fails on its own result.
 
 ### One product: `--product`
 
@@ -489,8 +496,9 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer; nothing was changed |
 | `interrupted` | 130/143 | safe | no | interrupted by SIGINT or SIGTERM |
+| `tidy_conflict` | 4 | safe | no | never a failure: in `tidy_error` when the item changed twice while opv was tidying it; nothing was written |
 
-`opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
+`opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
 
 ```sh
 opv schema | jq '.commands[] | select(.ask_user_first) | .name'

@@ -87,6 +87,7 @@ pub(crate) fn read_and_plan(
     let (mut plan, listed) =
         plan_item(fleet, env_name, read.fields, ports, rotate, prune_immutable)?;
     plan.tidy = read.changes;
+    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok((plan, listed))
 }
 
@@ -115,6 +116,7 @@ pub(crate) fn read_and_plan_products(
     let none = BTreeSet::new();
     let mut plan = plan_item(fleet, env_name, read.fields, None, &none, &none)?.0;
     plan.tidy = read.changes;
+    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok(plan)
 }
 
@@ -298,6 +300,7 @@ pub(crate) fn write_json(
             })
             .collect(),
         tidy: json_tidy(&plan.tidy),
+        tidy_error: plan.tidy_error,
         stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
         held: plan
             .held_immutable
@@ -363,6 +366,9 @@ struct JsonDoc {
     /// What this run tidied in 1Password (FR-43), names only; absent when nothing was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tidy: Vec<JsonTidy>,
+    /// The error code of a tidy that did not complete (FR-43); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tidy_error: Option<&'static str>,
     stage: Vec<String>,
     held: Vec<JsonHeld>,
     prune: Vec<String>,
@@ -777,6 +783,12 @@ pub(crate) fn item_url(
         &env.vault_id,
         &env.item_id,
     ))
+}
+
+/// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
+/// and `Next:` opens the first blocking key in 1Password (H1).
+pub(crate) fn findings_error(n: usize, rows: &[Row], env_name: &str) -> Error {
+    Error::findings(n, open_next(rows, env_name)).with_do("fix the keys above in 1Password")
 }
 
 /// The next step for findings (H1): open the first blocking key's field in 1Password.

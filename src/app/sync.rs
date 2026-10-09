@@ -26,9 +26,9 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use super::{
-    KeyNames, check_product, ci_summary, compare, is_blocking, item_url, managed_names, open_next,
-    open_target, plan_item, plural, preflight, print_extras, print_legend, print_rows,
-    product_names, read_and_plan, read_fields, row_names, scope_plan, target_word,
+    KeyNames, check_product, ci_summary, compare, findings_error, is_blocking, item_url,
+    managed_names, open_target, plan_item, plural, preflight, print_extras, print_legend,
+    print_rows, product_names, read_and_plan, read_fields, row_names, scope_plan, target_word,
     unmanaged_on_target, write_err, write_json,
 };
 use crate::domain::plan::CurrentState::Same;
@@ -1301,7 +1301,7 @@ pub fn plan_scoped(
     } else {
         None
     };
-    let findings = || Error::findings(n, open_next(&plan.rows, env_name));
+    let findings = || findings_error(n, &plan.rows, env_name);
     let held: BTreeSet<(&str, &str)> = plan
         .held_immutable
         .iter()

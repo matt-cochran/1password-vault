@@ -179,6 +179,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
             "values": "no document ever contains a secret value; config export prints config-kind values only",
+            "tidy": "any command that reads the 1Password item, run by a signed-in person, may tidy its layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect and CI never write",
             "schema_version": "stays 1 while fields are only added; changes when a field changes meaning",
         },
         "global_flags": global,
@@ -200,6 +201,10 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "doctor_status": ["ok", "warn", "fail", "skip"],
             "overview_state": ["checked", "run_only", "not_checked"],
             "changes": ["none", "some", "unknown"],
+            "tidy_action": [
+                "created_section", "renamed_section", "created_field", "made_concealed",
+                "renamed_field", "moved_field", "kept_duplicate", "normalized_value"
+            ],
             "text_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
         },
         "documents": documents(),
@@ -335,14 +340,24 @@ fn documents() -> Value {
         "row": row,
         "key_ref": key_ref,
         "error": ["code", "category", "message", "detail", "retry", "human_required", "do", "next"],
-        "status": ["environment", "product", "changes", "rows", "extras", "stage", "held", "prune", "totals"],
+        "tidy": ["action", "name"],
+        "status": [
+            "environment", "product", "changes", "rows", "extras", "tidy?", "tidy_error?", "stage",
+            "held", "prune", "totals"
+        ],
         "status_overview": [
             "product",
             "environments: [{name, target, state, keys, saved, skipped, findings, error_code, error}]",
             "totals"
         ],
-        "plan": ["environment", "product", "changes", "rows", "extras", "stage", "held", "prune", "totals"],
-        "check": ["environment", "product?", "target_checked", "rows", "findings", "totals"],
+        "plan": [
+            "environment", "product", "changes", "rows", "extras", "tidy?", "tidy_error?", "stage",
+            "held", "prune", "totals"
+        ],
+        "check": [
+            "environment", "product", "target_checked", "rows", "findings", "totals", "tidy?",
+            "tidy_error?"
+        ],
         "sync": [
             "environment", "provider", "product", "written", "unchanged", "held", "deployed",
             "revision", "deploy_reason", "deployed_names", "pruned", "kept", "pending",

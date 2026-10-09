@@ -165,7 +165,14 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
     let decls: Vec<(&str, &str)> = fleet
         .products
         .iter()
-        .flat_map(|(p, prod)| prod.keys.keys().map(move |k| (p.as_str(), k.as_str())))
+        .flat_map(|(p, prod)| {
+            prod.keys
+                .iter()
+                // A shared key (FR-45) has no field of its own: it reads its source's, so it
+                // never claims one (a stray field under its label stays an extra).
+                .filter(|(_, spec)| spec.from.is_none())
+                .map(move |(k, _)| (p.as_str(), k.as_str()))
+        })
         .collect();
     let mut claims: BTreeMap<KeyId, Vec<usize>> = BTreeMap::new();
     for (i, f) in layout.fields.iter().enumerate() {
@@ -581,7 +588,8 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
 
     for (product, prod) in &fleet.products {
         let home = (product != SIMPLE_PRODUCT).then(|| product.clone());
-        for (key, spec) in &prod.keys {
+        // A shared key (FR-45) never gets a field: its source's field holds the value.
+        for (key, spec) in prod.keys.iter().filter(|(_, s)| s.from.is_none()) {
             let name = key_label(product, key);
             let id = (product.clone(), key.clone());
             let here = spec.environments.iter().any(|e| e == env_name);

@@ -23,10 +23,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::adapters::onepassword::{self, IdentityType, Item, Session};
 use crate::adapters::onepassword_tidy::{self, Stamp};
 use crate::config;
+use crate::domain::SecretValue;
 use crate::domain::convention::{self, Change, KeyId, Layout, TidyPlan};
 use crate::domain::plan::ItemField;
 use crate::domain::{Environment, Fleet, key_label, rules};
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
@@ -122,6 +123,15 @@ pub(crate) struct Read {
     /// `op://<vault>/<item>/<field id>` for keys whose field is not where the convention
     /// puts it (a read-only run): `run` references those by id.
     pub refs: BTreeMap<KeyId, String>,
+    /// The keys whose stored value differs from the value opv uses (a trailing newline or
+    /// space removed, a missing `ensure_prefix` added; [`convention::normalized`]), with
+    /// that value. Empty once a person's tidy wrote it; a read-only run (service account,
+    /// CI) keeps the item as it is, so `run` passes these values instead of references and
+    /// every command sees the same value either way.
+    pub normalized: BTreeMap<KeyId, SecretValue>,
+    /// The error code of a tidy that was attempted and did not complete (`tidy_conflict`
+    /// when the item changed twice meanwhile); the command still went on (FR-43).
+    pub tidy_error: Option<Code>,
 }
 
 /// The environment's item, read tolerantly and tidied when a person runs opv (see the
@@ -133,7 +143,7 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
     let date = today();
     let plan = convention::plan(&layout, fleet, env_name, &date);
     if plan.is_empty() || !active() {
-        return Ok(finish(layout, fleet, env_name, env, Vec::new()));
+        return Ok(finish(layout, fleet, env_name, env, Vec::new(), None));
     }
     match identity(r) {
         Identity::Person => {}
@@ -142,12 +152,12 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
                 "1Password ({env_name}) is not laid out the way opv expects; read it as it is \
                  (read-only here). The next opv run by a signed-in person tidies it."
             ));
-            return Ok(finish(layout, fleet, env_name, env, Vec::new()));
+            return Ok(finish(layout, fleet, env_name, env, Vec::new(), None));
         }
-        Identity::Unknown => return Ok(finish(layout, fleet, env_name, env, Vec::new())),
+        Identity::Unknown => return Ok(finish(layout, fleet, env_name, env, Vec::new(), None)),
     }
     match tidy(r, fleet, env_name, env, &date, &item, stamp, plan) {
-        Ok(Some((after, changes))) => {
+        Ok(Some((after, changes, conflict))) => {
             if !changes.is_empty() {
                 r.note(&format!(
                     "tidied 1Password ({env_name}): {}",
@@ -155,22 +165,28 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
                 ));
                 missing_values(r, &after, fleet, env_name, env);
             }
-            Ok(finish(after, fleet, env_name, env, changes))
+            Ok(finish(after, fleet, env_name, env, changes, conflict))
         }
-        Ok(None) => Ok(finish(layout, fleet, env_name, env, Vec::new())),
+        Ok(None) => Ok(finish(layout, fleet, env_name, env, Vec::new(), None)),
         Err(e) => {
             let text = e.to_string();
             r.note(&format!(
                 "could not tidy 1Password ({env_name}); read it as it is: {}",
                 text.lines().next().unwrap_or("")
             ));
-            Ok(finish(layout, fleet, env_name, env, Vec::new()))
+            let code = e.code();
+            Ok(finish(layout, fleet, env_name, env, Vec::new(), Some(code)))
         }
     }
 }
 
-/// Check, write, verify (module docs). `Some((layout, changes))`: the item as it now is and
-/// what was written (empty when nothing was). `None`: keep the first read.
+/// The item after a tidy attempt: its layout, what was written, and `tidy_conflict` when
+/// nothing could be.
+type Tidied = (Layout, Vec<Change>, Option<Code>);
+
+/// Check, write, verify (module docs). `Some((layout, changes, conflict))`: the item as it
+/// now is, what was written (empty when nothing was) and `tidy_conflict` when the item
+/// changed twice meanwhile. `None`: keep the first read.
 #[allow(clippy::too_many_arguments)]
 fn tidy(
     r: &dyn CommandRunner,
@@ -181,7 +197,7 @@ fn tidy(
     first: &Item,
     mut stamp: Stamp,
     mut plan: TidyPlan,
-) -> Result<Option<(Layout, Vec<Change>)>, Error> {
+) -> Result<Option<Tidied>, Error> {
     let mut newer: Option<Item> = None;
     for attempt in 0..2 {
         let check = onepassword::read_whole(r, env)?;
@@ -192,12 +208,12 @@ fn tidy(
                     "1Password ({env_name}) changed twice while opv was tidying it; nothing \
                      written. Re-run when nobody is editing the item."
                 ));
-                return Ok(Some((seen, Vec::new())));
+                return Ok(Some((seen, Vec::new(), Some(Code::TidyConflict))));
             }
             stamp = seen_stamp;
             plan = convention::plan(&seen, fleet, env_name, date);
             if plan.is_empty() {
-                return Ok(Some((seen, Vec::new())));
+                return Ok(Some((seen, Vec::new(), None)));
             }
             newer = Some(check);
             continue;
@@ -214,7 +230,7 @@ fn tidy(
                  finishes it"
             ));
         }
-        return Ok(Some((layout, plan.changes)));
+        return Ok(Some((layout, plan.changes, None)));
     }
     Ok(None)
 }
@@ -232,6 +248,8 @@ fn missing_values(
         .products
         .iter()
         .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
+        // A shared key (FR-45) has no field: its source is named instead.
+        .filter(|(_, _, s)| s.from.is_none())
         .filter(|(p, _, s)| rules::applies(s, env_name, env, p))
         .filter(|(p, k, _)| {
             res.chosen
@@ -241,8 +259,14 @@ fn missing_values(
         .map(|(p, k, _)| key_label(p, k))
         .collect();
     if !empty.is_empty() {
+        // H1: the item link (IDs only) to type the values in.
+        let link = onepassword::item_link(
+            onepassword::account(r).as_ref(),
+            &env.vault_id,
+            &env.item_id,
+        );
         r.note(&format!(
-            "still needs a value in 1Password ({env_name}): {}",
+            "still needs a value in 1Password ({env_name}): {} · open: {link}",
             empty.join(", ")
         ));
     }
@@ -254,11 +278,18 @@ fn finish(
     env_name: &str,
     env: &Environment,
     changes: Vec<Change>,
+    tidy_error: Option<Code>,
 ) -> Read {
     let res = convention::resolve(&layout, fleet);
     let mut refs = BTreeMap::new();
+    let mut normalized = BTreeMap::new();
     for (id, &i) in &res.chosen {
         let f = &layout.fields[i];
+        let spec = &fleet.products[&id.0].keys[&id.1];
+        if let Some((v, _)) = convention::normalized(fleet, env_name, &id.0, &id.1, spec, &f.value)
+        {
+            normalized.insert(id.clone(), v);
+        }
         let section = (!fleet.is_simple()).then_some(id.0.as_str());
         let same_place = |g: &convention::Found| g.section_label() == section && g.label == id.1;
         let conventional = same_place(f)
@@ -275,6 +306,8 @@ fn finish(
         fields: convention::read_fields(&layout, fleet, env_name),
         changes,
         refs,
+        normalized,
+        tidy_error,
     }
 }
 

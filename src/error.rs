@@ -478,6 +478,7 @@ codes! {
     OutcomeUnknown => "outcome_unknown", 9, Safe, false, "a change may or may not have been applied; re-running is safe";
     ProviderUnavailable => "provider_unavailable", 9, Safe, false, "a provider did not answer after its retries; nothing was changed";
     Interrupted => "interrupted", 130, Safe, false, "interrupted by SIGINT (130) or SIGTERM (143); re-running is safe";
+    TidyConflict => "tidy_conflict", 4, Safe, false, "the 1Password item changed twice while opv was tidying it, so nothing was written; never a failure: reported in a document's tidy_error while the command reads the item as it is";
 }
 
 /// The end of a failure (A3): an optional human-only action (`Do:`) and one command that

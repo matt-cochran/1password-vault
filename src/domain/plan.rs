@@ -102,6 +102,9 @@ pub struct SyncPlan {
     pub config: BTreeMap<String, BTreeMap<String, String>>,
     /// What this run tidied in 1Password (FR-43), names only; set by the application layer.
     pub tidy: Vec<crate::domain::convention::Change>,
+    /// The error code of a tidy that did not complete (`tidy_conflict`, ...), set by the
+    /// application layer; the read went on as it is (FR-43).
+    pub tidy_error: Option<&'static str>,
 }
 
 impl fmt::Debug for SyncPlan {
@@ -241,6 +244,7 @@ pub fn build_with(
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
         tidy: Vec::new(),
+        tidy_error: None,
     };
 
     // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and

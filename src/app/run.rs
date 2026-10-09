@@ -1,12 +1,18 @@
 //! `run <env> --product <p> -- <cmd>` use case, delegating to `op run` (FR-4, §10.4).
 //!
-//! opv never hands values to the child. It reads the item once (FR-43: to tidy it for a
-//! person, or to find misplaced fields) and gives `op run` a child environment of `op://`
-//! references (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`, or `.../<field id>` for a
-//! field not yet where the convention puts it); `op run` resolves them and execs the
-//! command. No values pass through argv, the child's env or files (SR-1, SR-3, SR-4).
+//! opv reads the item once (FR-43: to tidy it for a person, or to find misplaced fields)
+//! and gives `op run` a child environment of `op://` references
+//! (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`, or `.../<field id>` for a field not yet
+//! where the convention puts it); `op run` resolves them and execs the command. One
+//! exception keeps `run` consistent with `sync`: when a read-only identity (service
+//! account, CI) reads a value a person's tidy would normalize (trailing newline or space,
+//! missing `ensure_prefix`), the normalized value goes in the child environment instead of
+//! the reference, so the child sees what it would see after the tidy. No value ever passes
+//! through argv or files (SR-1, SR-3, SR-4).
 
 use std::io;
+
+use zeroize::Zeroizing;
 
 use crate::adapters::onepassword;
 use crate::domain::{Fleet, SIMPLE_PRODUCT, rules};
@@ -77,14 +83,12 @@ pub fn run(
     // FR-43: one tolerant item read first, which tidies the item when a person runs opv.
     // A key whose field is still not where the convention puts it (a read-only run) is
     // referenced by field id. If the read fails, `op run` reports the problem itself.
-    let by_id = if super::tidy::active() {
-        super::tidy::read(fleet, env_name, runner)
-            .map(|read| read.refs)
-            .unwrap_or_default()
-    } else {
-        std::collections::BTreeMap::new()
-    };
-    let refs: Vec<(&str, String)> = prod
+    let read = super::tidy::active()
+        .then(|| super::tidy::read(fleet, env_name, runner).ok())
+        .flatten();
+    let by_id = read.as_ref().map(|r| &r.refs);
+    let normalized = read.as_ref().map(|r| &r.normalized);
+    let refs: Vec<(&str, Zeroizing<String>)> = prod
         .keys
         .iter()
         .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
@@ -97,11 +101,17 @@ pub fn run(
             } else {
                 format!("{fp}/{fk}")
             };
+            // The field's key: the source's for a shared key (FR-45).
+            let id = (fp.to_string(), fk.to_string());
+            // Read-only and not yet normalized in 1Password: the value opv uses (FR-43).
+            if let Some(v) = normalized.and_then(|m| m.get(&id)) {
+                return (key.as_str(), Zeroizing::new(v.expose().to_string()));
+            }
             let reference = by_id
-                .get(&(product.to_string(), key.clone()))
+                .and_then(|m| m.get(&id))
                 .cloned()
                 .unwrap_or_else(|| format!("op://{}/{}/{field}", env.vault_id, env.item_id));
-            (key.as_str(), reference)
+            (key.as_str(), Zeroizing::new(reference))
         })
         .collect();
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();

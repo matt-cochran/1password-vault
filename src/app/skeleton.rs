@@ -8,8 +8,8 @@
 use std::io::Write;
 
 use super::{kind_label, write_err};
-use crate::adapters::onepassword;
-use crate::domain::{Fleet, Kind, key_label};
+use crate::adapters::{onepassword, onepassword_tidy};
+use crate::domain::{Fleet, Kind, convention, key_label};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -32,7 +32,12 @@ pub fn run_as(
     json: bool,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_item_as(r, env, fleet.profile)?;
+    // The tolerant reader (FR-43): a field opv would read for a key (another label
+    // spelling, a wrong section, another type, a duplicate) counts as present, so no
+    // second field is added beside it, and an item the strict reader refuses still works.
+    let item = onepassword::read_whole(r, env)?;
+    let (layout, _) = onepassword_tidy::parse(item.raw())?;
+    let found = convention::resolve(&layout, fleet).chosen;
     let missing: Vec<(String, String, Kind)> = fleet
         .products
         .iter()
@@ -45,12 +50,7 @@ pub fn run_as(
                 .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
-        .filter(|(product, key, _)| {
-            !item
-                .fields
-                .iter()
-                .any(|f| f.section == *product && f.label == *key)
-        })
+        .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
         .collect();
     if !missing.is_empty() {
         onepassword::write_skeleton(r, env, &item, &missing)?;

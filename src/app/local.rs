@@ -113,6 +113,9 @@ pub fn check(
         if !plan.tidy.is_empty() {
             doc["tidy"] = serde_json::json!(super::json_tidy(&plan.tidy));
         }
+        if let Some(code) = plan.tidy_error {
+            doc["tidy_error"] = code.into();
+        }
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
         for row in super::problems_first(&plan.rows) {
@@ -138,7 +141,7 @@ pub fn check(
         writeln!(out, "{findings} finding(s); no deployment target checked").map_err(write_err)?;
     }
     if findings > 0 {
-        Err(Error::findings(findings, super::open_next(&plan.rows, env)))
+        Err(super::findings_error(findings, &plan.rows, env))
     } else {
         Ok(())
     }

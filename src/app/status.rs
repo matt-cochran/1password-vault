@@ -14,8 +14,8 @@ use std::io::Write;
 
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
-    KeyNames, PinnedRow, check_product, ci_summary, count_line, is_blocking, item_url, open_next,
-    open_target, plan_item, plural, preflight, print_extras, print_legend, print_rows,
+    KeyNames, PinnedRow, check_product, ci_summary, count_line, findings_error, is_blocking,
+    item_url, open_target, plan_item, plural, preflight, print_extras, print_legend, print_rows,
     product_names, read_and_plan, read_fields, scope_plan, target_word, write_err, write_json,
 };
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
@@ -85,7 +85,7 @@ pub fn run_scoped(
     } else {
         None
     };
-    let findings = || Error::findings(n, open_next(&plan.rows, env_name));
+    let findings = || findings_error(n, &plan.rows, env_name);
     let env = fleet.environment(env_name)?;
     let held: BTreeSet<(&str, &str)> = plan
         .held_immutable

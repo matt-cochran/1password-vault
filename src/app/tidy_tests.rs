@@ -738,3 +738,227 @@ fn init_never_creates_an_item_for_a_service_account() {
     let _ = crate::app::init::run(&args, dir.path(), &op, &mut out);
     assert_eq!(op.count(&["item", "create"]), 0);
 }
+
+// ---- Integration seams: shared keys (FR-45), links (H1), read-only consistency ----------
+
+fn shared_fleet() -> Fleet {
+    config::parse(
+        r#"
+[profile]
+kind = "fleet"
+
+[environments.dev]
+vault_id = "vdev"
+item_id = "idev"
+
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["dev"]
+
+[products.worker.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["dev"]
+from = "api/OPENAI_API_KEY"
+"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn tidy_never_creates_a_field_for_a_shared_key() {
+    let op = FakeOp::person(item(&[]));
+    let _on = activate();
+    read(&shared_fleet(), "dev", &op).unwrap();
+    assert!(op.field(Some("worker"), "OPENAI_API_KEY").is_none());
+}
+
+#[test]
+fn still_needs_a_value_names_the_source_not_the_shared_key() {
+    let op = FakeOp::person(item(&[]));
+    let _on = activate();
+    read(&shared_fleet(), "dev", &op).unwrap();
+    assert!(
+        !op.notes().contains("worker/OPENAI_API_KEY"),
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn still_needs_a_value_carries_the_item_link() {
+    let op = FakeOp::person(item(&[]));
+    tidied(&op);
+    let line = op
+        .notes()
+        .lines()
+        .find(|l| l.starts_with("still needs a value"))
+        .unwrap()
+        .to_string();
+    assert!(line.contains(" · open: https://"), "{line}");
+}
+
+#[test]
+fn an_item_edited_twice_reports_tidy_conflict() {
+    let op = FakeOp::person(messy_item());
+    op.editors.borrow_mut().push((2, someone_edits_session));
+    op.editors.borrow_mut().push((3, someone_edits_session));
+    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+}
+
+fn prefixed_fleet() -> Fleet {
+    config::parse(
+        r#"
+[profile]
+kind = "simple"
+
+[environments.dev]
+vault_id = "vdev"
+item_id = "idev"
+
+[keys.API_TOKEN]
+kind = "secret"
+environments = ["dev"]
+rules = { ensure_prefix = "tok_", pattern = "[A-Z]+" }
+"#,
+    )
+    .unwrap()
+}
+
+/// A stored value a person's tidy rewrites: trailing newline, missing `ensure_prefix`.
+fn unnormalized_item() -> Value {
+    item(&[("", "API_TOKEN", "CONCEALED", "TIDYMARKER\n")])
+}
+
+fn token_value(op: &FakeOp) -> String {
+    let _on = activate();
+    let read = read(&prefixed_fleet(), "dev", op).unwrap();
+    let f = read.fields.iter().find(|f| f.label == "API_TOKEN").unwrap();
+    f.value.expose().to_string()
+}
+
+#[test]
+fn a_read_only_identity_uses_the_value_a_persons_tidy_writes() {
+    let person = FakeOp::person(unnormalized_item());
+    let service = FakeOp::new(unnormalized_item(), "SERVICE_ACCOUNT");
+    assert_eq!(token_value(&service), token_value(&person));
+}
+
+#[test]
+fn a_persons_tidy_writes_the_normalized_value() {
+    let person = FakeOp::person(unnormalized_item());
+    token_value(&person);
+    assert_eq!(
+        person.field(None, "API_TOKEN").unwrap()["value"],
+        "tok_TIDYMARKER"
+    );
+}
+
+fn token_in_child_env(op: &FakeOp) -> String {
+    let _on = activate();
+    crate::app::run::run(
+        &prefixed_fleet(),
+        "dev",
+        crate::domain::SIMPLE_PRODUCT,
+        &["true".into()],
+        op,
+    )
+    .unwrap();
+    op.child_env
+        .borrow()
+        .iter()
+        .find(|(k, _)| k == "API_TOKEN")
+        .map(|(_, v)| v.clone())
+        .unwrap()
+}
+
+#[test]
+fn run_as_a_read_only_identity_gives_the_child_the_normalized_value() {
+    let service = FakeOp::new(unnormalized_item(), "SERVICE_ACCOUNT");
+    assert_eq!(token_in_child_env(&service), "tok_TIDYMARKER");
+}
+
+#[test]
+fn run_after_a_persons_tidy_gives_the_child_a_reference() {
+    let person = FakeOp::person(unnormalized_item());
+    assert_eq!(token_in_child_env(&person), "op://vdev/idev/API_TOKEN");
+}
+
+#[test]
+fn run_never_puts_a_normalized_value_in_argv() {
+    let service = FakeOp::new(unnormalized_item(), "SERVICE_ACCOUNT");
+    token_in_child_env(&service);
+    assert!(
+        service
+            .calls
+            .borrow()
+            .iter()
+            .all(|(args, _)| args.iter().all(|a| !a.contains(MARKER)))
+    );
+}
+
+#[test]
+fn item_skeleton_counts_a_misplaced_field_as_present() {
+    let op = FakeOp::person(item(&[
+        ("Misc", "log-level", "STRING", "debug"),
+        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
+        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
+    ]));
+    let mut out = Vec::new();
+    crate::app::skeleton::run(&fleet(), "dev", &op, &mut out).unwrap();
+    assert_eq!(op.edits(), 0, "{}", String::from_utf8_lossy(&out));
+}
+
+#[test]
+fn item_skeleton_reads_an_item_the_strict_reader_refuses() {
+    // Two fields with the same section and label: the strict reader's duplicate error.
+    let op = FakeOp::person(item(&[
+        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
+        ("api", "OPENAI_API_KEY", "CONCEALED", ""),
+    ]));
+    let mut out = Vec::new();
+    let res = crate::app::skeleton::run(&fleet(), "dev", &op, &mut out);
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn a_shared_key_reads_its_misplaced_source_tolerantly() {
+    let op = FakeOp::person(item(&[(
+        "Misc",
+        "openai-api-key",
+        "STRING",
+        "sk-TIDYMARKER",
+    )]));
+    let out = with_host(FakeEnv::new("linux").var("CI"), || {
+        let _on = activate();
+        let mut out = Vec::new();
+        let _ =
+            crate::app::local::check(&shared_fleet(), "dev", Some("worker"), &op, &mut out, true);
+        String::from_utf8(out).unwrap()
+    });
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["findings"], 0, "{doc}");
+}
+
+#[test]
+fn the_schema_lists_the_tidy_fields_of_a_check_document() {
+    let op = FakeOp::person(item(&[(
+        "api",
+        "OPENAI_API_KEY",
+        "STRING",
+        "sk-TIDYMARKER",
+    )]));
+    let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
+    assert!(
+        crate::app::json_tests::undocumented(&doc, "check").is_empty(),
+        "{doc}"
+    );
+}
+
+#[test]
+fn a_tidy_conflict_is_in_the_check_document() {
+    let op = FakeOp::person(messy_item());
+    op.editors.borrow_mut().push((2, someone_edits_session));
+    op.editors.borrow_mut().push((3, someone_edits_session));
+    let doc: Value = serde_json::from_str(&check_json(&op)).unwrap();
+    assert_eq!(doc["tidy_error"], "tidy_conflict");
+}

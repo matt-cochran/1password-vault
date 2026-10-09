@@ -206,3 +206,80 @@ fn skeleton_unknown_environment() {
         &framed(&out, &res, "opv item skeleton qa --json"),
     );
 }
+
+// ---- The schema covers every field (A4): links (H1), changes (H8), shared keys (FR-45),
+// tidy (FR-43) ----------------------------------------------------------------------------
+
+/// The fields `opv schema` lists for document `doc`, without `?` (optional) or a
+/// `: [...]` shape suffix, in order.
+pub(crate) fn documented(doc: &str) -> Vec<String> {
+    let schema = crate::schema::describe(&clap::Command::new("opv"), "0");
+    schema["documents"][doc]
+        .as_array()
+        .unwrap_or_else(|| panic!("no document {doc:?} in the schema"))
+        .iter()
+        .map(|f| {
+            let f = f.as_str().unwrap();
+            let f = f.split(':').next().unwrap();
+            let f = f.split(" (").next().unwrap();
+            f.trim_end_matches('?').trim().to_string()
+        })
+        .collect()
+}
+
+/// The top-level fields of `doc` outside the frame (A1) that the schema does not list.
+pub(crate) fn undocumented(doc: &serde_json::Value, name: &str) -> Vec<String> {
+    let listed = documented(name);
+    let frame = ["schema_version", "ok", "exit_code", "next", "do", "error"];
+    doc.as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| !frame.contains(&k.as_str()) && !listed.contains(k))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_schema_lists_every_row_field_in_order() {
+    let row = crate::domain::Row {
+        product: "allumata".into(),
+        key: "OPENAI_API_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state: crate::domain::KeyState::Ready,
+        target: crate::domain::TargetState::Present,
+        guidance: String::new(),
+        source: Some(("api".into(), "OPENAI_API_KEY".into())),
+        shared_by: Vec::new(),
+    };
+    let full = super::JsonRow {
+        binding: Some("current"),
+        pending_deploy: Some(false),
+        drift: Some(false),
+        chain: Some("a → b".into()),
+        open_url: Some("https://start.1password.com/open/i".into()),
+        ..super::JsonRow::new(&row, Some("NAME".into()), Some("present"), None)
+    };
+    let v = serde_json::to_value(&full).unwrap();
+    let keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys, documented("row"));
+}
+
+#[test]
+fn the_schema_lists_every_field_of_every_golden_document() {
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir("tests/fixtures/json").unwrap() {
+        let path = entry.unwrap().path();
+        let file = path.file_stem().unwrap().to_str().unwrap().to_string();
+        let name = match file.split('_').next().unwrap() {
+            "status" if file == "status_overview" => "status_overview",
+            "skeleton" => "item skeleton",
+            other => other,
+        };
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for f in undocumented(&doc, name) {
+            missing.push(format!("{file}: {f}"));
+        }
+    }
+    assert!(missing.is_empty(), "{missing:?}");
+}
