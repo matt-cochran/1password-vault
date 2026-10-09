@@ -28,7 +28,7 @@ use crate::adapters::probe::{parse_version, spawn_tool, version_in};
 use crate::adapters::{onepassword, registry};
 use crate::domain::Fleet;
 use crate::error::Error;
-use crate::host::{Host, Tool};
+use crate::host::{Host, OP_CLI};
 use crate::provider::{TargetConfig, Verdict as Check};
 use crate::runner::CommandRunner;
 
@@ -135,10 +135,7 @@ fn run_on(
             if !without.is_empty() {
                 // One provider in use: its section name; several: "target".
                 let section = match used.as_slice() {
-                    [only] => registry::PROVIDERS
-                        .iter()
-                        .find(|p| p.label() == only.provider())
-                        .map_or("target", |p| p.section()),
+                    [only] => only.provider().section(),
                     _ => "target",
                 };
                 writeln!(
@@ -188,14 +185,17 @@ fn run_on(
 fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     let mut used: Vec<&dyn TargetConfig> = Vec::new();
     for t in f.environments.values().filter_map(|e| e.target()) {
-        if !used.iter().any(|u| u.provider() == t.provider()) {
+        if !used
+            .iter()
+            .any(|u| u.provider().section() == t.provider().section())
+        {
             used.push(t);
         }
     }
     used.sort_by_key(|t| {
         registry::PROVIDERS
             .iter()
-            .position(|p| p.label() == t.provider())
+            .position(|p| p.section() == t.provider().section())
     });
     used
 }
@@ -241,7 +241,7 @@ fn next_step(check: &str, e: &Error) -> String {
 }
 
 fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
-    let o = spawn_tool(r, Tool::Op, host, &["--version"])?;
+    let o = spawn_tool(r, OP_CLI, host, &["--version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
             "op --version failed (exit {})",
@@ -255,11 +255,11 @@ fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, E
         }
         Some(v) => Check::Warn(format!(
             "version {v}; opv is tested with op {a}.{b}.{c} or newer\n  {}",
-            host().install_hint(Tool::Op)
+            host().install_hint(OP_CLI)
         )),
         None => Check::Warn(format!(
             "present, version not recognised; opv is tested with op {a}.{b}.{c} or newer\n  {}",
-            host().install_hint(Tool::Op)
+            host().install_hint(OP_CLI)
         )),
     })
 }

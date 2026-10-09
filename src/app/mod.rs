@@ -472,9 +472,7 @@ pub(crate) fn open_target<'a>(
     r: &'a dyn CommandRunner,
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
     let (_, t) = target(fleet, env_name)?;
-    for check in t.preflight(r)? {
-        check.outcome?;
-    }
+    t.preflight(r)?;
     Ok((t, t.open(env_name, r)?))
 }
 

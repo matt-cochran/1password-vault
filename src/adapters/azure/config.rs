@@ -8,9 +8,9 @@ use serde::Deserialize;
 use crate::config::{check_ident, is_id};
 use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
-use crate::host::{Host, Tool};
+use crate::host::Host;
 use crate::ports::Ports;
-use crate::provider::{Check, NameRules, Provider, StoreNameRules, TargetConfig, eq_as};
+use crate::provider::{Check, NameRules, Provider, Section, StoreNameRules, TargetConfig, eq_as};
 use crate::runner::CommandRunner;
 
 /// The registered Azure provider.
@@ -74,15 +74,11 @@ impl Provider for AzureProvider {
 
     fn parse(
         &self,
-        env: &str,
-        section: &toml::Value,
+        section: &Section<'_>,
         profile: Profile,
     ) -> Result<Box<dyn TargetConfig>, Error> {
-        let a: RawAzure = section.clone().try_into().map_err(|e| {
-            cfg(format!(
-                "invalid secrets.toml: environment {env}: azure: {e}"
-            ))
-        })?;
+        let env = section.env();
+        let a: RawAzure = section.deserialize()?;
         let template = match (profile, a.env_name.clone()) {
             (Profile::Fleet, Some(t)) if t.contains("{PRODUCT}") && t.contains("{KEY}") => t,
             (Profile::Fleet, Some(t)) => {
@@ -190,8 +186,8 @@ impl AzureTarget {
 }
 
 impl TargetConfig for AzureTarget {
-    fn provider(&self) -> &'static str {
-        "Azure"
+    fn provider(&self) -> &'static dyn Provider {
+        &PROVIDER
     }
 
     fn env_name(&self, product: &str, key: &str) -> String {
@@ -232,10 +228,6 @@ impl TargetConfig for AzureTarget {
         )
     }
 
-    fn tools(&self) -> &'static [Tool] {
-        &[]
-    }
-
     fn open<'a>(&'a self, _env: &'a str, _r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error> {
         // Placeholder until keyvault.rs and containerapp.rs are wired in (FR-28).
         Err(Error::Config(
@@ -243,8 +235,8 @@ impl TargetConfig for AzureTarget {
         ))
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<Vec<Check>, Error> {
-        Ok(Vec::new())
+    fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
+        Ok(())
     }
 
     fn doctor(&self, _r: &dyn CommandRunner, _host: &dyn Fn() -> Host) -> Vec<Check> {
@@ -311,6 +303,18 @@ environments = ["prod"]
         azure_doc(&AZURE_ENV.replace(from, to), KEYS)
     }
 
+    /// FR-2, FR-37: a mistyped field in the provider section shows the file's line and
+    /// column, the line itself and the field, like any other TOML error.
+    #[test]
+    fn azure_section_type_error_points_at_the_field() {
+        let bad = azure_env_with("identity = \"system\"", "identity = 5");
+        assert_eq!(
+            parse(&bad).unwrap_err().to_string(),
+            "configuration error: invalid secrets.toml: TOML parse error at line 11, column 12\n   \
+             |\n11 | identity = 5\n   |            ^\ninvalid type: integer `5`, expected a string\n"
+        );
+    }
+
     fn azure_err(text: &str) -> String {
         parse(text).unwrap_err().to_string()
     }
@@ -318,7 +322,10 @@ environments = ["prod"]
     #[test]
     fn loads_azure_target() {
         let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
-        assert_eq!(f.environments["prod"].target().unwrap().provider(), "Azure");
+        assert_eq!(
+            f.environments["prod"].target().unwrap().provider().label(),
+            "Azure"
+        );
     }
 
     #[test]

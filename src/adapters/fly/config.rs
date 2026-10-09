@@ -6,14 +6,14 @@ use std::io;
 
 use serde::Deserialize;
 
-use super::{Fly, PROGRAM, auth_whoami, not_logged_in};
+use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami, not_logged_in};
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
 use crate::config::{check_ident, is_id};
 use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
-use crate::host::{Host, Tool};
+use crate::host::Host;
 use crate::ports::Ports;
-use crate::provider::{Check, NameRules, Provider, TargetConfig, Verdict, eq_as};
+use crate::provider::{Check, NameRules, Provider, Section, TargetConfig, Verdict, eq_as};
 use crate::runner::CommandRunner;
 
 /// The `flyctl` release opv is tested with (its import parser is ported, see `mod.rs`).
@@ -68,10 +68,6 @@ struct RawSimpleFly {
     secret_name: Option<toml::Value>,
 }
 
-fn section_err(env: &str, e: toml::de::Error) -> Error {
-    Error::Config(format!("invalid secrets.toml: environment {env}: fly: {e}"))
-}
-
 impl Provider for FlyProvider {
     fn section(&self) -> &'static str {
         "fly"
@@ -83,16 +79,13 @@ impl Provider for FlyProvider {
 
     fn parse(
         &self,
-        env: &str,
-        section: &toml::Value,
+        section: &Section<'_>,
         profile: Profile,
     ) -> Result<Box<dyn TargetConfig>, Error> {
+        let env = section.env();
         let target = match profile {
             Profile::Fleet => {
-                let f: RawFly = section
-                    .clone()
-                    .try_into()
-                    .map_err(|e| section_err(env, e))?;
+                let f: RawFly = section.deserialize()?;
                 check_app(env, &f.app)?;
                 let t = &f.secret_name;
                 if !t.contains("{PRODUCT}") || !t.contains("{KEY}") {
@@ -107,10 +100,7 @@ impl Provider for FlyProvider {
                 }
             }
             Profile::Simple => {
-                let f: RawSimpleFly = section
-                    .clone()
-                    .try_into()
-                    .map_err(|e| section_err(env, e))?;
+                let f: RawSimpleFly = section.deserialize()?;
                 check_app(env, &f.app)?;
                 if f.secret_name.is_some() {
                     return Err(Error::Config(format!(
@@ -130,6 +120,10 @@ impl Provider for FlyProvider {
 
     fn doctor_checks(&self) -> &'static [&'static str] {
         &["flyctl", "fly auth"]
+    }
+
+    fn credential_vars(&self) -> &'static [&'static str] {
+        CREDENTIAL_VARS
     }
 
     fn setup_hint(&self, profile: Profile) -> String {
@@ -155,8 +149,8 @@ fn check_app(env: &str, app: &str) -> Result<(), Error> {
 }
 
 impl TargetConfig for FlyTarget {
-    fn provider(&self) -> &'static str {
-        "Fly"
+    fn provider(&self) -> &'static dyn Provider {
+        &PROVIDER
     }
 
     fn env_name(&self, product: &str, key: &str) -> String {
@@ -194,10 +188,6 @@ impl TargetConfig for FlyTarget {
         }
     }
 
-    fn tools(&self) -> &'static [Tool] {
-        &[Tool::Flyctl]
-    }
-
     fn open<'a>(&'a self, _env: &'a str, r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error> {
         let fly = || Fly {
             runner: r,
@@ -209,9 +199,9 @@ impl TargetConfig for FlyTarget {
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<Vec<Check>, Error> {
+    fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
         // Fly's failures are diagnosed per call (FR-26); nothing to check up front.
-        Ok(Vec::new())
+        Ok(())
     }
 
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
@@ -251,7 +241,7 @@ fn flyctl_tested(v: (u64, u64, u64)) -> bool {
 }
 
 fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
-    let o = spawn_tool(r, Tool::Flyctl, host, &["version"])?;
+    let o = spawn_tool(r, FLYCTL, host, &["version"])?;
     if o.status != 0 {
         return Err(Error::Dependency(format!(
             "{PROGRAM} version failed (exit {})",
@@ -265,11 +255,11 @@ fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verd
         }
         Some(v) => Verdict::Warn(format!(
             "version {v}; opv is tested with flyctl {a}.{b}.{c} or a later {a}.{b}.x patch (its secrets import format may differ)\n  {}",
-            host().install_hint(Tool::Flyctl)
+            host().install_hint(FLYCTL)
         )),
         None => Verdict::Warn(format!(
             "present, version not recognised; opv is tested with flyctl {a}.{b}.{c} or a later {a}.{b}.x patch\n  {}",
-            host().install_hint(Tool::Flyctl)
+            host().install_hint(FLYCTL)
         )),
     })
 }
@@ -281,7 +271,7 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
         Ok(true) => Ok(Verdict::Ok("signed in".into())),
         // FR-26: app-scoped deploy tokens cannot run `auth whoami`, so with a Fly token in
         // the environment a failure here is not proof of being logged out.
-        Ok(false) => match host().fly_token {
+        Ok(false) => match host().token(CREDENTIAL_VARS) {
             Some(var) => Ok(Verdict::Warn(format!(
                 "{PROGRAM} auth whoami failed with {var} set (an app-scoped deploy token cannot \
                  run it); fly commands will show whether the token can access the app"
@@ -290,7 +280,7 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
             "{PROGRAM} not found on PATH\n  {}",
-            host().install_hint(Tool::Flyctl)
+            host().install_hint(FLYCTL)
         ))),
         Err(e) => Err(Error::Dependency(format!(
             "failed to run {PROGRAM} ({})",

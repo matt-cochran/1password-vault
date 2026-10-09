@@ -132,7 +132,7 @@ fn explain_in(
     // Without a target, the lines name the default provider (FR-37).
     let label_of = env
         .target()
-        .map_or(registry::DEFAULT.label(), |t| t.provider());
+        .map_or(registry::DEFAULT.label(), |t| t.provider().label());
     let name_label = format!("{} name", label_of.to_lowercase());
     let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
         (Kind::Config, _) => vec![(name_label, format!("- (config: not a {label_of} secret)"))],
@@ -166,7 +166,7 @@ fn explain_in(
         format!("  kind:       {} ({field})", kind_label(spec.kind)),
     ];
     for (l, v) in target_lines {
-        lines.push(format!("  {:<12}{v}", format!("{l}:")));
+        lines.push(format!("  {:<11} {v}", format!("{l}:")));
     }
     lines.extend([
         format!(
@@ -320,6 +320,26 @@ mod tests {
     #[test]
     fn prints_the_field_kind() {
         assert!(openai_prod().contains("kind:       secret (concealed field)"));
+    }
+
+    /// FR-37: a provider's own explain lines stay readable when a label is wider than the
+    /// column.
+    #[test]
+    fn prints_the_key_vault_name_of_an_azure_target() {
+        let fleet = crate::config::parse(
+            "[profile]\nkind = \"fleet\"\n\
+             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
+             [environments.prod.azure]\nkey_vault = \"kv\"\nresource_group = \"rg\"\n\
+             container_app = \"ca\"\nidentity = \"system\"\n\
+             env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+             [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let out = explain(&fleet, "api/TOKEN", Some("prod")).unwrap();
+        assert!(
+            out.contains("  key vault name: FLEET--API--TOKEN\n"),
+            "{out}"
+        );
     }
 
     #[test]

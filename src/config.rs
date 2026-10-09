@@ -11,12 +11,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use toml::Spanned;
+use toml::de::{DeTable, DeValue};
 
 use crate::adapters::registry;
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{Environment, Fleet, KeySpec, Product, Profile, SIMPLE_PRODUCT, key_label};
 use crate::error::Error;
-use crate::provider::TargetConfig;
+use crate::provider::{Section, TargetConfig};
 
 /// Read and validate the configuration at `path`.
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
@@ -48,14 +50,81 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
 /// file that does not parse, takes the fleet path exactly as in v0.1, which reports any
 /// other kind as a configuration error.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
+    let invalid = |e| Error::Config(format!("invalid secrets.toml: {e}"));
     if peek_kind(text).as_deref() == Some("simple") {
-        let raw: RawSimpleConfig = toml::from_str(text)
-            .map_err(|e| Error::Config(format!("invalid secrets.toml: {e}")))?;
-        return validate_simple(raw);
+        let raw: RawSimpleConfig = toml::from_str(text).map_err(invalid)?;
+        let doc = Doc::parse(text).map_err(invalid)?;
+        return validate_simple(raw, &doc);
     }
-    let raw: RawConfig =
-        toml::from_str(text).map_err(|e| Error::Config(format!("invalid secrets.toml: {e}")))?;
-    validate(raw)
+    let raw: RawConfig = toml::from_str(text).map_err(invalid)?;
+    let doc = Doc::parse(text).map_err(invalid)?;
+    validate(raw, &doc)
+}
+
+/// The file as parsed TOML with source positions, so a provider section is read with its
+/// place in the file and its errors point at the offending line (FR-2, FR-37).
+struct Doc<'t> {
+    text: &'t str,
+    root: Spanned<DeTable<'t>>,
+}
+
+impl<'t> Doc<'t> {
+    fn parse(text: &'t str) -> Result<Self, toml::de::Error> {
+        Ok(Self {
+            text,
+            root: DeTable::parse(text)?,
+        })
+    }
+
+    /// `environments.<env>.<key>`: present for every entry the typed parse saw.
+    fn entry(&self, env: &str, key: &str) -> Option<&Spanned<DeValue<'t>>> {
+        let (_, envs) = self
+            .root
+            .get_ref()
+            .iter()
+            .find(|(n, _)| n.get_ref().as_ref() == "environments")?;
+        envs.get_ref().get(env)?.get_ref().get(key)
+    }
+
+    /// `msg` located at the key `environments.<env>.<key>` the way the TOML parser reports
+    /// its own errors (line, column, the line itself), so every configuration error points
+    /// at the file (FR-2). Just `msg` if the key cannot be found.
+    fn at(&self, env: &str, key: &str, msg: String) -> Error {
+        let span = self
+            .root
+            .get_ref()
+            .iter()
+            .find(|(n, _)| n.get_ref().as_ref() == "environments")
+            .and_then(|(_, envs)| envs.get_ref().as_table())
+            .and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == env))
+            .and_then(|(_, e)| e.get_ref().as_table())
+            .and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == key))
+            .map(|(n, _)| n.span());
+        match span {
+            Some(span) => cfg(format!(
+                "invalid secrets.toml: {}",
+                located(self.text, span, &msg)
+            )),
+            None => cfg(msg),
+        }
+    }
+}
+
+/// `msg` under the source line holding `span`, in the TOML parser's error layout.
+fn located(text: &str, span: std::ops::Range<usize>, msg: &str) -> String {
+    let before = &text[..span.start];
+    let line = before.matches('\n').count();
+    let column = before.len() - before.rfind('\n').map_or(0, |i| i + 1);
+    let content = text.split('\n').nth(line).unwrap_or("");
+    let num = (line + 1).to_string();
+    let pad = " ".repeat(num.len() + 1);
+    let width = span.len().min(content.len().saturating_sub(column)).max(1);
+    format!(
+        "TOML parse error at line {num}, column {}\n{pad}|\n{num} | {content}\n{pad}|{}{}\n{msg}\n",
+        column + 1,
+        " ".repeat(column + 1),
+        "^".repeat(width)
+    )
 }
 
 /// `profile.kind` when the text parses as TOML and holds it as a string.
@@ -127,25 +196,48 @@ fn target_of(
     name: &str,
     sections: &BTreeMap<String, toml::Value>,
     profile: Profile,
+    doc: &Doc<'_>,
 ) -> Result<Option<Box<dyn TargetConfig>>, Error> {
-    if let Some(unknown) = sections.keys().find(|s| registry::find(s).is_none()) {
-        return Err(cfg(format!(
-            "environment {name}: unknown target section {unknown:?}; known: {}",
-            registry::sections().join(", ")
-        )));
+    if let Some((unknown, v)) = sections.iter().find(|(s, _)| registry::find(s).is_none()) {
+        let known = registry::sections().join(", ");
+        return Err(doc.at(
+            name,
+            unknown,
+            if v.is_table() {
+                format!("environment {name}: unknown target section {unknown:?}; known: {known}")
+            } else {
+                format!(
+                    "environment {name}: unknown field {unknown:?}; expected vault_id, item_id, \
+                 modes or a target section ({known})"
+                )
+            },
+        ));
     }
     let present: Vec<_> = registry::PROVIDERS
         .iter()
-        .filter_map(|p| sections.get(p.section()).map(|v| (p, v)))
+        .filter(|p| sections.contains_key(p.section()))
         .collect();
     match present.as_slice() {
         [] => Ok(None),
-        [(p, v)] => p.parse(name, v, profile).map(Some),
-        [(a, _), (b, _), ..] => Err(cfg(format!(
-            "environment {name}: declares both {} and {}; use one target",
-            a.section(),
-            b.section()
-        ))),
+        [p] => {
+            let value = doc.entry(name, p.section()).ok_or_else(|| {
+                cfg(format!(
+                    "environment {name}: {} section not found",
+                    p.section()
+                ))
+            })?;
+            p.parse(&Section::new(name, value, doc.text), profile)
+                .map(Some)
+        }
+        [a, b, ..] => Err(doc.at(
+            name,
+            b.section(),
+            format!(
+                "environment {name}: declares both {} and {}; use one target",
+                a.section(),
+                b.section()
+            ),
+        )),
     }
 }
 
@@ -154,9 +246,10 @@ fn environment<M>(
     name: &str,
     e: RawEnvironment<M>,
     profile: Profile,
+    doc: &Doc<'_>,
 ) -> Result<(Environment, M), Error> {
     check_ids(name, &e.vault_id, &e.item_id)?;
-    let target = target_of(name, &e.sections, profile)?;
+    let target = target_of(name, &e.sections, profile, doc)?;
     Ok((
         Environment {
             vault_id: e.vault_id,
@@ -168,7 +261,7 @@ fn environment<M>(
     ))
 }
 
-fn validate(raw: RawConfig) -> Result<Fleet, Error> {
+fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     if raw.profile.kind != "fleet" {
         return Err(cfg(format!(
             "profile.kind must be \"fleet\" or \"simple\", got {:?}",
@@ -181,7 +274,7 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
 
     let mut environments = BTreeMap::new();
     for (name, e) in raw.environments {
-        let (mut env, modes) = environment(&name, e, Profile::Fleet)?;
+        let (mut env, modes) = environment(&name, e, Profile::Fleet, doc)?;
         env.modes = modes;
         environments.insert(name, env);
     }
@@ -211,7 +304,7 @@ fn validate(raw: RawConfig) -> Result<Fleet, Error> {
 /// named [`SIMPLE_PRODUCT`], each target's simple-profile name template, and modes under
 /// the implicit product. The managed set is therefore exactly the declared keys (FR-8,
 /// SR-6).
-fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
+fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     if raw.products.is_some() {
         return Err(cfg(
             "simple profile: [products] is not allowed; declare keys under [keys] (or use \
@@ -225,7 +318,7 @@ fn validate_simple(raw: RawSimpleConfig) -> Result<Fleet, Error> {
 
     let mut environments = BTreeMap::new();
     for (name, e) in raw.environments {
-        let (mut env, modes) = environment(&name, e, Profile::Simple)?;
+        let (mut env, modes) = environment(&name, e, Profile::Simple, doc)?;
         if !modes.is_empty() {
             env.modes = BTreeMap::from([(SIMPLE_PRODUCT.to_string(), modes)]);
         }
@@ -1174,9 +1267,48 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "fly.app = \"mcproductlabs-portfolio-production\"",
             "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
+        assert!(
+            config_err(&bad).ends_with(
+                "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly\n"
+            )
+        );
+    }
+
+    /// FR-2: an unknown entry under an environment shows its line, as the parser's own
+    /// errors do.
+    #[test]
+    fn unknown_target_section_shows_its_line() {
+        let bad = mutate(
+            "fly.app = \"mcproductlabs-portfolio-production\"",
+            "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
+        );
+        assert!(config_err(&bad).contains(" | flyy.app = \"x\"\n"));
+    }
+
+    /// A plain value is a mistyped field, not a target section.
+    #[test]
+    fn unknown_environment_field_names_the_expected_fields() {
+        let bad = mutate(
+            "fly.app = \"mcproductlabs-portfolio-production\"",
+            "vault = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
+        );
+        assert!(config_err(&bad).ends_with(
+            "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes or a \
+             target section (azure, fly)\n"
+        ));
+    }
+
+    /// FR-2, FR-37: an unknown field in the Fly section reports line, column, the line and
+    /// the field exactly as 0.4 did, before the section moved behind the provider contract.
+    #[test]
+    fn fly_section_unknown_field_points_at_the_field() {
+        let bad = "[profile]\nkind = \"fleet\"\n[environments.prod]\nvault_id = \"v\"\n\
+                   item_id = \"i\"\nfly.app = \"a\"\nfly.secret_name = \"F__{PRODUCT}__{KEY}\"\n\
+                   fly.region = \"ams\"\n";
         assert_eq!(
-            config_err(&bad),
-            "environment prod: unknown target section \"flyy\"; known: azure, fly"
+            config_err(bad),
+            "invalid secrets.toml: TOML parse error at line 8, column 5\n  |\n8 | fly.region = \
+             \"ams\"\n  |     ^^^^^^\nunknown field `region`, expected `app` or `secret_name`\n"
         );
     }
 
@@ -1187,9 +1319,9 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "fly.app = \"mcproductlabs-portfolio-production\"",
             "azure.key_vault = \"kv\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
-        assert_eq!(
-            config_err(&two),
-            "environment prod: declares both fly and azure; use one target"
+        assert!(
+            config_err(&two)
+                .ends_with("\nenvironment prod: declares both fly and azure; use one target\n")
         );
     }
 

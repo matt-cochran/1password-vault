@@ -8,9 +8,13 @@
 use std::any::Any;
 use std::fmt;
 
+use serde::de::DeserializeOwned;
+use toml::Spanned;
+use toml::de::{DeValue, ValueDeserializer};
+
 use crate::domain::Profile;
 use crate::error::Error;
-use crate::host::{Host, Tool};
+use crate::host::Host;
 use crate::ports::Ports;
 use crate::runner::CommandRunner;
 
@@ -20,13 +24,18 @@ pub trait Provider: Sync {
     fn section(&self) -> &'static str;
     /// User-facing name: "Fly", "Azure", "Kubernetes".
     fn label(&self) -> &'static str;
-    /// Parses and validates that section (identifiers, templates, required fields).
+    /// Parses and validates that section (identifiers, templates, required fields). Read
+    /// the section with [`Section::deserialize`], so a shape error points at its line.
     fn parse(
         &self,
-        env: &str,
-        section: &toml::Value,
+        section: &Section<'_>,
         profile: Profile,
     ) -> Result<Box<dyn TargetConfig>, Error>;
+    /// Environment variables holding this provider's non-interactive credential, by name
+    /// (values are never read). [`crate::host::Host::token`] reports which one is set.
+    fn credential_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// Names of the checks [`TargetConfig::doctor`] prints, so `doctor` can list them as
     /// skipped when no environment uses this provider.
     fn doctor_checks(&self) -> &'static [&'static str];
@@ -38,10 +47,39 @@ pub trait Provider: Sync {
     fn init_section(&self, name: &str, profile: Profile) -> Option<String>;
 }
 
+/// One provider section of `secrets.toml` (`[environments.<env>.<section>]`), with its
+/// place in the file so errors point at the offending line.
+pub struct Section<'a> {
+    env: &'a str,
+    value: &'a Spanned<DeValue<'a>>,
+    text: &'a str,
+}
+
+impl<'a> Section<'a> {
+    /// `value` is the section as parsed from `text`, the whole file.
+    pub(crate) fn new(env: &'a str, value: &'a Spanned<DeValue<'a>>, text: &'a str) -> Self {
+        Self { env, value, text }
+    }
+
+    /// The environment this section belongs to.
+    pub fn env(&self) -> &str {
+        self.env
+    }
+
+    /// The section as `T`. A missing, unknown or mistyped field is reported like any other
+    /// TOML error in the file: line, column, the line itself and the field (FR-2).
+    pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, Error> {
+        T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|mut e| {
+            e.set_input(Some(self.text));
+            Error::Config(format!("invalid secrets.toml: {e}"))
+        })
+    }
+}
+
 /// A validated, provider-specific target. Core code sees only this trait.
 pub trait TargetConfig: fmt::Debug + Send + Sync {
-    /// User-facing provider name: "Fly", "Azure", "Kubernetes".
-    fn provider(&self) -> &'static str;
+    /// The provider this target belongs to (its label names it in messages: "on Fly").
+    fn provider(&self) -> &'static dyn Provider;
     /// Runtime env var name of `product`/`key`.
     fn env_name(&self, product: &str, key: &str) -> String;
     /// Name in the store for a runtime env var name.
@@ -53,12 +91,11 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn same_target(&self, other: &dyn TargetConfig) -> bool;
     /// The configuration error for environments `first` and `second` sharing this target.
     fn shared_target_error(&self, first: &str, second: &str) -> String;
-    /// CLIs this provider needs (NR-27).
-    fn tools(&self) -> &'static [Tool];
     /// The store and runtime adapters of this target (FR-28).
     fn open<'a>(&'a self, env: &'a str, r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error>;
-    /// Checks run before a command touches the target (NR-23 to NR-26).
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<Vec<Check>, Error>;
+    /// Read-only checks run before a command touches the target (NR-23 to NR-26): the
+    /// first failure stops the command before anything is read or written.
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<(), Error>;
     /// `doctor` lines: tool versions and sign-in, never identities or values (FR-3).
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
@@ -114,7 +151,7 @@ pub struct StoreNameRules {
     pub case_insensitive: bool,
 }
 
-/// One named check line (doctor, preflight).
+/// One named `doctor` check line.
 #[derive(Debug)]
 pub struct Check {
     pub name: &'static str,

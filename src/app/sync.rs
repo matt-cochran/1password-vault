@@ -145,7 +145,11 @@ pub fn run(
     if !pending.is_empty() {
         p(
             out,
-            format!("pending on {}: {}", t.provider(), pending.join(", ")),
+            format!(
+                "pending on {}: {}",
+                t.provider().label(),
+                pending.join(", ")
+            ),
         )?;
     }
 
@@ -241,7 +245,7 @@ pub fn plan_with(
         out,
         "{} unmanaged on {} (never touched)",
         unmanaged.len(),
-        t.provider()
+        t.provider().label()
     )
     .map_err(write_err)?;
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();

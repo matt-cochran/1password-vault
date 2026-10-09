@@ -24,7 +24,7 @@ pub(crate) fn spawn_tool(
     host: &dyn Fn() -> Host,
     args: &[&str],
 ) -> Result<Output, Error> {
-    spawn(r, tool.program(), args).map_err(|e| match e {
+    spawn(r, tool.program, args).map_err(|e| match e {
         Error::Dependency(m) if m.ends_with("not found on PATH") => {
             Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)))
         }

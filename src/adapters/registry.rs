@@ -15,6 +15,15 @@ pub fn find(section: &str) -> Option<&'static dyn Provider> {
     PROVIDERS.iter().copied().find(|p| p.section() == section)
 }
 
+/// Every provider's credential variable names, in registry order (see `Host::token`).
+pub fn credential_vars() -> Vec<&'static str> {
+    PROVIDERS
+        .iter()
+        .flat_map(|p| p.credential_vars())
+        .copied()
+        .collect()
+}
+
 /// Every registered section name, sorted, for "known: ..." messages.
 pub fn sections() -> Vec<&'static str> {
     let mut s: Vec<&str> = PROVIDERS.iter().map(|p| p.section()).collect();
@@ -29,5 +38,11 @@ mod tests {
     #[test]
     fn registry_has_fly_and_azure() {
         assert_eq!(sections(), ["azure", "fly"]);
+    }
+
+    /// `Host` keeps one bit per credential variable.
+    #[test]
+    fn credential_vars_fit_the_host_bitset() {
+        assert!(credential_vars().len() <= 64);
     }
 }

@@ -58,7 +58,7 @@ pub fn run_with(
         .map_err(write_err)?;
         return Err(Error::Findings(n));
     }
-    writeln!(out, "{}", summary(&plan.rows, t.provider())).map_err(write_err)?;
+    writeln!(out, "{}", summary(&plan.rows, t.provider().label())).map_err(write_err)?;
     Ok(())
 }
 

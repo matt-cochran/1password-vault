@@ -46,7 +46,7 @@ use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT, key_label
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
-use crate::host::{Host, OpCredential, Platform, Tool};
+use crate::host::{Host, OP_CLI, OpCredential, Platform};
 use crate::runner::{
     Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
 };
@@ -462,7 +462,7 @@ fn rerun_hint(env: &Environment) -> String {
 pub fn op_missing(host: &Host) -> Error {
     Error::Dependency(format!(
         "op CLI not found on PATH\n  {}",
-        host.install_hint(Tool::Op)
+        host.install_hint(OP_CLI)
     ))
 }
 
