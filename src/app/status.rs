@@ -4,16 +4,22 @@
 //! missing row, extras as warnings. Names only. Exits `Findings(n)` for the n rows that are
 //! missing, of the wrong kind or failing a rule; extras alone exit 0. A clean run ends with
 //! a summary line on stdout (FR-26). Read-only: one `op item get` and one store list
-//! (plus the free `op whoami` diagnosis when the read fails).
+//! (plus the free `op whoami` diagnosis when the read fails). A pinned target is also read
+//! value by value (FR-31) and its bindings once, for the pending-deploy, drift and
+//! env-routed lines (FR-29).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+use super::sync::{DRIFT, pinned_diff, pinned_want};
 use super::{
-    is_blocking, open_target, print_extras, print_rows, read_and_plan, write_err, write_json,
+    PinnedRow, is_blocking, open_target, print_extras, print_rows, read_and_plan, write_err,
+    write_json,
 };
-use crate::domain::{Fleet, KeyState, Kind, Row, TargetState};
+use crate::domain::{Fleet, KeyState, Kind, Row, StoreEntry, SyncPlan, TargetState};
 use crate::error::Error;
+use crate::ports::{PinnedRuntime, PinnedStore, Ports};
+use crate::provider::TargetConfig;
 use crate::runner::CommandRunner;
 
 pub fn run(
@@ -37,9 +43,27 @@ pub fn run_with(
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
     let none = BTreeSet::new();
-    let (plan, _) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
+    let (plan, listed) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
+    let pinned = match &ports {
+        Ports::Pinned { store, runtime } => Some(pinned_status(
+            fleet,
+            env_name,
+            t,
+            &plan,
+            &listed,
+            store.as_ref(),
+            runtime.as_ref(),
+        )?),
+        Ports::Staged { .. } => None,
+    };
     if json {
-        write_json(out, fleet, env_name, &plan)?;
+        write_json(
+            out,
+            fleet,
+            env_name,
+            &plan,
+            pinned.as_ref().map(|p| &p.rows),
+        )?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
         return if n > 0 {
             Err(Error::Findings(n))
@@ -49,6 +73,9 @@ pub fn run_with(
     }
     print_rows(out, fleet, &plan.rows, target)?;
     print_extras(out, &plan)?;
+    if let Some(p) = &pinned {
+        p.print(out, env_name)?;
+    }
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     if n > 0 {
         writeln!(
@@ -60,6 +87,85 @@ pub fn run_with(
     }
     writeln!(out, "{}", summary(&plan.rows, t.provider().label())).map_err(write_err)?;
     Ok(())
+}
+
+/// Bindings of a pinned target (FR-29): per desired name whether its binding is current,
+/// whether the next `--deploy` changes it, and drift; plus the env-routed config names.
+struct PinnedStatus {
+    rows: BTreeMap<String, PinnedRow>,
+    pending: Vec<String>,
+    drift: Vec<String>,
+    env_routed: Vec<String>,
+    runtime: String,
+}
+
+impl PinnedStatus {
+    fn print(&self, out: &mut dyn Write, env_name: &str) -> Result<(), Error> {
+        let mut line = |label: String, names: &[String]| {
+            if names.is_empty() {
+                return Ok(());
+            }
+            writeln!(out, "{label}: {}", names.join(", ")).map_err(write_err)
+        };
+        line(
+            format!("pending deploy (opv sync {env_name} --deploy)"),
+            &self.pending,
+        )?;
+        line(DRIFT.to_string(), &self.drift)?;
+        line(
+            format!("env-routed (visible to readers of {})", self.runtime),
+            &self.env_routed,
+        )
+    }
+}
+
+/// Reads the runtime's bindings once and compares them with the plan (no write).
+fn pinned_status(
+    fleet: &Fleet,
+    env_name: &str,
+    t: &dyn TargetConfig,
+    plan: &SyncPlan,
+    listed: &[StoreEntry],
+    store: &dyn PinnedStore,
+    runtime: &dyn PinnedRuntime,
+) -> Result<PinnedStatus, Error> {
+    let want = pinned_want(
+        fleet,
+        env_name,
+        plan,
+        listed,
+        store,
+        runtime.config_in_store(),
+    )?;
+    let snap = runtime.bindings()?;
+    let d = pinned_diff(t, &want, &BTreeMap::new(), &snap, plan, false);
+    let pending = d.pending();
+    let rows = want
+        .store
+        .keys()
+        .chain(want.plain.keys())
+        .map(|n| {
+            let is_pending = pending.contains(n.as_str());
+            let binding = match (snap.bindings.contains_key(n), is_pending) {
+                (_, false) => "current",
+                (true, true) => "stale",
+                (false, true) => "unbound",
+            };
+            let row = PinnedRow {
+                binding,
+                pending_deploy: is_pending,
+                drift: d.drift.contains(n),
+            };
+            (n.clone(), row)
+        })
+        .collect();
+    Ok(PinnedStatus {
+        rows,
+        pending: pending.iter().map(|n| n.to_string()).collect(),
+        drift: d.drift.iter().cloned().collect(),
+        env_routed: want.plain.keys().cloned().collect(),
+        runtime: runtime.describe(),
+    })
 }
 
 /// The clean-run summary line (FR-26): `N saved, M not yet on <target> (staged by the next

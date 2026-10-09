@@ -9,21 +9,32 @@
 //! still `Staged`/`Partial` on Fly from an earlier run (FR-7). Without `--deploy`
 //! nothing is ever deployed. `plan` reads the item once and lists once; it mutates
 //! nothing (FR-11).
+//!
+//! A pinned target (clouds, FR-29) has no staging area: `sync` writes a new store version
+//! only for a value that differs (FR-31), reads the runtime's bindings, and only under
+//! `--deploy` re-pins them in one revision; it prunes only after that revision is healthy
+//! (FR-32). See `run_pinned`.
 
 use std::collections::BTreeSet;
 use std::io::Write;
 
+use std::collections::BTreeMap;
+
+use sha2::{Digest, Sha256};
+
 use super::{
-    is_blocking, managed_names, open_target, print_extras, print_rows, read_and_plan, row_names,
-    unmanaged_on_target, write_err, write_json,
+    compare, is_blocking, managed_names, open_target, plan_item, print_extras, print_rows,
+    read_and_plan, read_fields, row_names, unmanaged_on_target, write_err, write_json,
 };
+use crate::domain::plan::CurrentState::Same;
 use crate::domain::rules;
 use crate::domain::{
-    Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState,
-    key_label,
+    Binding, Fleet, Health, ItemField, KeyState, Kind, Revision, Row, RuntimeChange,
+    RuntimeSnapshot, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan, TargetState, key_label,
 };
 use crate::error::Error;
-use crate::ports::Ports;
+use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
+use crate::provider::TargetConfig;
 use crate::runner::CommandRunner;
 
 /// Flags of `sync`.
@@ -51,27 +62,56 @@ pub fn run(
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
     let (t, ports) = open_target(fleet, env_name, r)?;
-    let (store, runtime) = match &ports {
-        Ports::Staged { store, runtime } => (store.as_ref(), runtime.as_ref()),
-        // Replaced by the pinned sync flow (FR-29, FR-31).
-        Ports::Pinned { .. } => {
-            return Err(Error::Target(
-                "internal: pinned sync not implemented".into(),
-            ));
-        }
-    };
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
-    let (plan, list_a) =
-        read_and_plan(fleet, env_name, r, Some(&ports), &rotate, &prune_immutable)?;
-
-    let blocking = row_names(&plan.rows, is_blocking);
-    if !blocking.is_empty() {
-        return Err(Error::Policy(format!(
-            "sync refused, nothing staged: {}",
-            blocking.join(", ")
-        )));
+    let c = Ctx {
+        fleet,
+        env_name,
+        t,
+        r,
+        opts,
+        rotate: &rotate,
+        prune_immutable: &prune_immutable,
+    };
+    match &ports {
+        Ports::Staged { store, runtime } => {
+            run_staged(&c, &ports, store.as_ref(), runtime.as_ref(), out)
+        }
+        Ports::Pinned { store, runtime } => {
+            run_pinned(&c, &ports, store.as_ref(), runtime.as_ref(), out)
+        }
     }
+}
+
+/// One `sync` run's inputs, resolved before any call.
+struct Ctx<'a> {
+    fleet: &'a Fleet,
+    env_name: &'a str,
+    t: &'a dyn TargetConfig,
+    r: &'a dyn CommandRunner,
+    opts: &'a SyncOpts,
+    rotate: &'a BTreeSet<(String, String)>,
+    prune_immutable: &'a BTreeSet<(String, String)>,
+}
+
+/// `sync` for a staged target (Fly, §6.4): stage, compare digests, deploy.
+fn run_staged(
+    c: &Ctx<'_>,
+    ports: &Ports<'_>,
+    store: &dyn StagedStore,
+    runtime: &dyn StagedRuntime,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (fleet, env_name, t, opts) = (c.fleet, c.env_name, c.t, c.opts);
+    let (plan, list_a) = read_and_plan(
+        fleet,
+        env_name,
+        c.r,
+        Some(ports),
+        c.rotate,
+        c.prune_immutable,
+    )?;
+    refuse_blocking(&plan)?;
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
     store.validate(&batch)?;
@@ -159,6 +199,522 @@ pub fn run(
     }
 }
 
+/// `sync` for a pinned target (FR-29, FR-31, FR-32, FR-33; spec §6): compare and write new
+/// store versions, read the runtime's bindings, and only with `--deploy` re-pin them in one
+/// revision; prune only after that revision is healthy.
+///
+/// Every step is convergent (NR-1): a run stopped anywhere leaves at most unbound store
+/// versions (never live) or a revision Azure finishes on its own, and the next run computes
+/// what is left from what it reads. A binding never names a version that does not exist:
+/// versions are written before they are pinned, and a store entry is deleted only once a
+/// healthy revision no longer binds it.
+fn run_pinned(
+    c: &Ctx<'_>,
+    ports: &Ports<'_>,
+    store: &dyn PinnedStore,
+    runtime: &dyn PinnedRuntime,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
+    let fields = read_fields(fleet, env_name, c.r)?;
+    // Blocking rows refuse before any call to the target.
+    let copy = fields.iter().map(copy_field).collect();
+    refuse_blocking(&plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0)?;
+    let (plan, listed) = plan_item(
+        fleet,
+        env_name,
+        fields,
+        Some(ports),
+        c.rotate,
+        c.prune_immutable,
+    )?;
+    refuse_blocking(&plan)?;
+    let want = pinned_want(
+        fleet,
+        env_name,
+        &plan,
+        &listed,
+        store,
+        runtime.config_in_store(),
+    )?;
+    if !want.refused.is_empty() {
+        return Err(Error::Policy(format!(
+            "sync refused, nothing staged: {}",
+            want.refused.join(", ")
+        )));
+    }
+    print_extras(out, &plan)?;
+    let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+
+    // 3. New store versions: not live until a revision binds them (FR-29).
+    let mut written = BTreeMap::new();
+    for (name, w) in &want.store {
+        if let Some(value) = &w.write {
+            let version = store.write_one(name, value).map_err(|e| {
+                let done: Vec<&str> = written.keys().map(String::as_str).collect();
+                with_note(e, &already_written(&done))
+            })?;
+            written.insert(name.clone(), version);
+        }
+    }
+    let unchanged: Vec<&str> = want
+        .store
+        .iter()
+        .filter(|(_, w)| w.write.is_none())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if !written.is_empty() {
+        p(
+            out,
+            format!("written (new versions): {}", join_keys(&written)),
+        )?;
+    }
+    if !unchanged.is_empty() {
+        p(out, format!("unchanged: {}", unchanged.join(", ")))?;
+    }
+
+    // 4–5. What the runtime binds now, and what must change.
+    let snap = runtime.bindings()?;
+    let d = pinned_diff(c.t, &want, &written, &snap, &plan, opts.prune);
+    if !d.drift.is_empty() {
+        p(out, format!("{DRIFT}: {}", join(&d.drift)))?;
+    }
+    let stray: BTreeSet<&str> = d
+        .not_desired
+        .iter()
+        .chain(&plan.prune)
+        .map(String::as_str)
+        .collect();
+    if !stray.is_empty() && !opts.prune {
+        p(
+            out,
+            format!(
+                "not desired here, kept (pass --prune to remove): {}",
+                join(&stray)
+            ),
+        )?;
+    }
+    if !stray.is_empty() && opts.prune && !opts.deploy {
+        p(
+            out,
+            format!("not pruned without --deploy: {}", join(&stray)),
+        )?;
+    }
+    if !plan.held_from_prune.is_empty() {
+        p(
+            out,
+            format!(
+                "held (immutable), not pruned (pass --prune --prune-immutable {} to remove): {}",
+                key_ref_hint(fleet),
+                held_from_prune(&plan)
+            ),
+        )?;
+    }
+
+    // 6. Deploy only with --deploy (FR-7, FR-9).
+    let change = d.change(c.t, &written);
+    let pending = change_names(&change);
+    let deletes: &[String] = if opts.prune && opts.deploy {
+        &plan.prune
+    } else {
+        &[]
+    };
+    let env_routed = |out: &mut dyn Write| {
+        if want.plain.is_empty() {
+            return Ok(());
+        }
+        p(
+            out,
+            format!(
+                "env-routed (visible to readers of {}): {}",
+                runtime.describe(),
+                join_keys(&want.plain)
+            ),
+        )
+    };
+    if !opts.deploy {
+        p(
+            out,
+            if pending.is_empty() {
+                "nothing pending".into()
+            } else {
+                format!("pending deploy (pass --deploy): {}", join(&pending))
+            },
+        )?;
+        return env_routed(out);
+    }
+    let revision = if !pending.is_empty() {
+        let left = |now: &RuntimeSnapshot| {
+            let d = pinned_diff(c.t, &want, &written, now, &plan, opts.prune);
+            change_names(&d.change(c.t, &written))
+        };
+        apply_reconciled(runtime, &change, &snap, &left, out)?
+    } else if let Some(rev) = &snap.revision {
+        // Nothing to change: confirm the revision of the current bindings is healthy, so a
+        // run stopped before its health check, or a revision that failed, is never
+        // reported as done, and deletes left by an earlier run wait for it (FR-32, NR-1).
+        rev.clone()
+    } else if deletes.is_empty() {
+        p(out, "nothing pending; not deploying".into())?;
+        return env_routed(out);
+    } else {
+        return Err(Error::Target(format!(
+            "{} reports no revision, so nothing was pruned\n  next: run opv status {env_name}",
+            runtime.describe()
+        )));
+    };
+    match runtime.await_healthy(&revision)? {
+        Health::Healthy => {}
+        Health::Unhealthy(detail) => {
+            return Err(Error::Target(format!(
+                "{detail}\n  the previous revision keeps serving; nothing pruned\n  next: run \
+                 opv doctor --env {env_name} to check that {} can read its secrets, then run \
+                 the same command again",
+                runtime.describe()
+            )));
+        }
+        Health::TimedOut => {
+            return Err(Error::Target(format!(
+                "revision {} of {} is not healthy yet; the previous revision keeps serving; \
+                 nothing pruned\n  next: `{}` to see its state, then run the same command again",
+                revision.0,
+                runtime.describe(),
+                runtime.inspect_hint(&revision)
+            )));
+        }
+    }
+    p(
+        out,
+        if pending.is_empty() {
+            "nothing pending; not deploying".into()
+        } else {
+            format!("deployed revision {}: {}", revision.0, join(&pending))
+        },
+    )?;
+    // Superseded versions of re-pinned names (FR-32): a no-op where the store keeps history.
+    for (name, (_, version)) in &change.pin {
+        store.collect_superseded(name, version)?;
+    }
+    let mut pruned = Vec::new();
+    for name in deletes {
+        store.delete(name).map_err(|e| {
+            let done: Vec<&str> = pruned.iter().map(String::as_str).collect();
+            with_note(e, &format!("already pruned: {}", none_or(&done)))
+        })?;
+        pruned.push(name.clone());
+    }
+    if !pruned.is_empty() {
+        p(out, format!("pruned: {}", pruned.join(", ")))?;
+    }
+    env_routed(out)
+}
+
+/// The drift line's label (status and sync).
+pub(crate) const DRIFT: &str = "drift (bound to a version other than the store's current one)";
+
+/// Applies `change`. An apply whose outcome is unknown (NR-2) is reconciled by reading the
+/// bindings back: when they show the change, the run goes on with the revision they name;
+/// otherwise the error stays `Unknown` (exit 9) and says what the read showed.
+/// `left` names what a snapshot still lacks of the change.
+fn apply_reconciled(
+    runtime: &dyn PinnedRuntime,
+    change: &RuntimeChange,
+    snap: &RuntimeSnapshot,
+    left: &dyn Fn(&RuntimeSnapshot) -> Vec<String>,
+    out: &mut dyn Write,
+) -> Result<Revision, Error> {
+    let msg = match runtime.apply(change, snap) {
+        Err(Error::Unknown(msg)) => msg,
+        other => return other,
+    };
+    let still_unknown =
+        |why: &str| Error::Unknown(format!("{msg}\n  read back: {why}; nothing pruned"));
+    let Ok(now) = runtime.bindings() else {
+        return Err(still_unknown("could not read the bindings back"));
+    };
+    match (&now.revision, left(&now).is_empty()) {
+        (Some(rev), true) => {
+            writeln!(
+                out,
+                "the update was applied (read back from {})",
+                runtime.describe()
+            )
+            .map_err(write_err)?;
+            Ok(rev.clone())
+        }
+        _ => Err(still_unknown(&format!(
+            "{} does not show the change",
+            runtime.describe()
+        ))),
+    }
+}
+
+/// What a pinned target should hold for the desired rows of a plan (FR-14, FR-29).
+pub(crate) struct PinnedWant {
+    /// Store-routed env name (secrets; config when routed to the store) → its store state.
+    pub store: BTreeMap<String, StoreWant>,
+    /// Env-routed config: env name → value. Config only, never a secret (FR-14).
+    pub plain: BTreeMap<String, String>,
+    /// `product/KEY (failed <rule> (<reason>))` for config values the store refuses.
+    pub refused: Vec<String>,
+}
+
+/// One store-routed name: the store's version before this run, and the value to write when
+/// the store does not hold the desired one.
+pub(crate) struct StoreWant {
+    pub current: Option<String>,
+    pub write: Option<SecretValue>,
+}
+
+/// Bindings to change on a pinned target, and what is reported beside them.
+pub(crate) struct PinnedDiff {
+    /// env name → version to bind (`None`: written by the next sync, not known yet).
+    pub pin: BTreeMap<String, Option<String>>,
+    /// Env-routed config whose plain value differs or is missing: env name → value.
+    pub set: BTreeMap<String, String>,
+    /// Bound managed names no longer desired here (and not held immutable).
+    pub not_desired: Vec<String>,
+    /// Bound to a store version other than the store's current one.
+    pub drift: BTreeSet<String>,
+    unbind: bool,
+}
+
+impl PinnedDiff {
+    /// The runtime change; every pinned version must be known (written or current).
+    fn change(&self, t: &dyn TargetConfig, written: &BTreeMap<String, String>) -> RuntimeChange {
+        RuntimeChange {
+            pin: self
+                .pin
+                .iter()
+                .filter_map(|(n, v)| {
+                    let v = v.as_ref().or_else(|| written.get(n))?;
+                    Some((n.clone(), (t.store_name(n), v.clone())))
+                })
+                .collect(),
+            set: self.set.clone(),
+            unbind: if self.unbind {
+                self.not_desired.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Names whose binding changes on the next `--deploy`.
+    pub fn pending(&self) -> BTreeSet<&str> {
+        self.pin
+            .keys()
+            .chain(self.set.keys())
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// Names a change touches, sorted.
+fn change_names(c: &RuntimeChange) -> Vec<String> {
+    let names: BTreeSet<&String> = c.pin.keys().chain(c.set.keys()).chain(&c.unbind).collect();
+    names.into_iter().cloned().collect()
+}
+
+/// The desired store and env state of `plan` (FR-14, FR-31). Secrets are always
+/// store-routed; config is store-routed when `config_in_store`, and then read and compared
+/// like a secret. `listed` carries the versions the plan's reads found.
+pub(crate) fn pinned_want(
+    fleet: &Fleet,
+    env_name: &str,
+    plan: &SyncPlan,
+    listed: &[StoreEntry],
+    store: &dyn PinnedStore,
+    config_in_store: bool,
+) -> Result<PinnedWant, Error> {
+    let env = fleet.environment(env_name)?;
+    let name_of = |p: &str, k: &str| env.target_name(p, k).unwrap_or_default();
+    let version = |n: &str| {
+        listed
+            .iter()
+            .find(|e| e.name == n)
+            .and_then(|e| e.version.clone())
+    };
+    let staged: BTreeMap<&str, &SecretValue> =
+        plan.stage.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    let mut want = PinnedWant {
+        store: BTreeMap::new(),
+        plain: BTreeMap::new(),
+        refused: Vec::new(),
+    };
+    for row in plan
+        .rows
+        .iter()
+        .filter(|r| r.kind == Kind::Secret && r.state == KeyState::Ready)
+    {
+        let name = name_of(&row.product, &row.key);
+        let write = staged
+            .get(name.as_str())
+            .map(|v| SecretValue::new(v.expose().to_string()));
+        let mut current = version(&name);
+        // Present but never read (cannot happen today): read it once for its version.
+        if write.is_none() && current.is_none() {
+            current = store.read(&name)?.map(|(_, v)| v);
+        }
+        want.store.insert(name, StoreWant { current, write });
+    }
+    for (product, keys) in &plan.config {
+        for (key, value) in keys {
+            let name = name_of(product, key);
+            if !config_in_store {
+                want.plain.insert(name, value.clone());
+                continue;
+            }
+            let desired = SecretValue::new(value.clone());
+            if let Some((rule, why)) = store.refusal(&name, &desired) {
+                want.refused.push(format!(
+                    "{} (failed {rule} ({why}))",
+                    key_label(product, key)
+                ));
+                continue;
+            }
+            let (current, same) = match store.read(&name)? {
+                Some((v, version)) => (Some(version), compare(&v, &desired) == Same),
+                None => (None, false),
+            };
+            let write = (!same).then_some(desired);
+            want.store.insert(name, StoreWant { current, write });
+        }
+    }
+    Ok(want)
+}
+
+/// Compares `want` (with this run's `written` versions) to the runtime's bindings.
+pub(crate) fn pinned_diff(
+    t: &dyn TargetConfig,
+    want: &PinnedWant,
+    written: &BTreeMap<String, String>,
+    snap: &RuntimeSnapshot,
+    plan: &SyncPlan,
+    unbind: bool,
+) -> PinnedDiff {
+    let mut d = PinnedDiff {
+        pin: BTreeMap::new(),
+        set: BTreeMap::new(),
+        not_desired: Vec::new(),
+        drift: BTreeSet::new(),
+        unbind,
+    };
+    for (name, w) in &want.store {
+        // A value still to write (status) has no version to bind yet.
+        let target = if w.write.is_some() {
+            written.get(name)
+        } else {
+            w.current.as_ref()
+        };
+        let bound = snap.bindings.get(name);
+        let current = match (bound, target) {
+            (
+                Some(Binding::Pinned {
+                    store_name,
+                    version,
+                }),
+                Some(v),
+            ) => store_name.eq_ignore_ascii_case(&t.store_name(name)) && version == v,
+            _ => false,
+        };
+        if let (Some(Binding::Pinned { version, .. }), Some(now)) = (bound, &w.current)
+            && version != now
+        {
+            d.drift.insert(name.clone());
+        }
+        if !current {
+            d.pin.insert(name.clone(), target.cloned());
+        }
+    }
+    for (name, value) in &want.plain {
+        let digest = hex::encode(Sha256::digest(value.as_bytes()));
+        if !matches!(snap.bindings.get(name), Some(Binding::Plain { digest: d }) if *d == digest) {
+            d.set.insert(name.clone(), value.clone());
+        }
+    }
+    let held: BTreeSet<&str> = plan
+        .held_from_prune
+        .iter()
+        .map(|(_, _, n)| n.as_str())
+        .collect();
+    d.not_desired = snap
+        .bindings
+        .keys()
+        .filter(|n| {
+            !want.store.contains_key(*n)
+                && !want.plain.contains_key(*n)
+                && !held.contains(n.as_str())
+        })
+        .cloned()
+        .collect();
+    d
+}
+
+/// An item field with its value copied into a new zeroizing wrapper.
+fn copy_field(f: &ItemField) -> ItemField {
+    ItemField {
+        section: f.section.clone(),
+        label: f.label.clone(),
+        kind: f.kind,
+        value: SecretValue::new(f.value.expose().to_string()),
+    }
+}
+
+/// `err` with `note` (names only) on a line of its own, same category.
+fn with_note(err: Error, note: &str) -> Error {
+    let add = |m: String| format!("{m}\n  {note}");
+    match err {
+        Error::Config(m) => Error::Config(add(m)),
+        Error::Dependency(m) => Error::Dependency(add(m)),
+        Error::Auth(m) => Error::Auth(add(m)),
+        Error::Source(m) => Error::Source(add(m)),
+        Error::Target(m) => Error::Target(add(m)),
+        Error::Policy(m) => Error::Policy(add(m)),
+        Error::Unknown(m) => Error::Unknown(add(m)),
+        e @ Error::Findings(_) => e,
+    }
+}
+
+fn already_written(done: &[&str]) -> String {
+    format!(
+        "already written (new versions, not live until a deploy binds them): {}",
+        none_or(done)
+    )
+}
+
+fn none_or(names: &[&str]) -> String {
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn join<S: AsRef<str>>(names: impl IntoIterator<Item = S>) -> String {
+    names
+        .into_iter()
+        .map(|n| n.as_ref().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn join_keys<V>(m: &BTreeMap<String, V>) -> String {
+    join(m.keys())
+}
+
+/// Refuses the whole run, before any write, when a row blocks (FR-15).
+fn refuse_blocking(plan: &SyncPlan) -> Result<(), Error> {
+    let blocking = row_names(&plan.rows, is_blocking);
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Policy(format!(
+        "sync refused, nothing staged: {}",
+        blocking.join(", ")
+    )))
+}
+
 /// The result line, then the per-key change lists (names only).
 fn print_changes(out: &mut dyn Write, changed: &[&str], unchanged: &[&str]) -> Result<(), Error> {
     writeln!(
@@ -202,7 +758,7 @@ pub fn plan_with(
     let none = BTreeSet::new();
     let (plan, on_target) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     if json {
-        write_json(out, fleet, env_name, &plan)?;
+        write_json(out, fleet, env_name, &plan, None)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
         return if n > 0 {
             Err(Error::Findings(n))

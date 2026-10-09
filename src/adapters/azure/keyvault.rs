@@ -102,6 +102,12 @@ impl PinnedStore for KeyVault<'_> {
     fn delete(&self, name: &str) -> Result<(), Error> {
         self.delete_secret(name)
     }
+
+    /// Key Vault keeps every version inside one entry as history; superseded versions are
+    /// left as they are, never disabled or deleted (FR-32).
+    fn collect_superseded(&self, _name: &str, _keep_version: &str) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// The first rule Key Vault would refuse `value` for, with its fixed reason (FR-22, FR-30),

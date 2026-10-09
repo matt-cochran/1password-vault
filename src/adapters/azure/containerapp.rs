@@ -66,8 +66,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::AzureTarget;
 use super::az::{self, Effect, Pacer};
+use super::{AzureTarget, ConfigRoute};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
@@ -414,9 +414,15 @@ impl<'a> ContainerApp<'a> {
             bindings.insert(e["name"].as_str().unwrap_or_default().to_string(), binding);
         }
         let unmanaged_fingerprint = fingerprint(&self.strip(&spec, idx));
+        let revision = spec
+            .pointer("/properties/latestRevisionName")
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+            .map(|r| Revision(r.into()));
         Ok(RuntimeSnapshot {
             bindings,
             unmanaged_fingerprint,
+            revision,
             spec: RawSpec(spec),
         })
     }
@@ -710,6 +716,23 @@ impl PinnedRuntime for ContainerApp<'_> {
             self.pacer.sleep(self.poll_every);
             waited += self.poll_every;
         }
+    }
+
+    fn config_in_store(&self) -> bool {
+        self.target.config == ConfigRoute::Store
+    }
+
+    fn describe(&self) -> String {
+        format!("container app {}", self.app())
+    }
+
+    fn inspect_hint(&self, revision: &Revision) -> String {
+        format!(
+            "az containerapp revision show -g {} -n {} --revision {}",
+            self.rg(),
+            self.app(),
+            revision.0
+        )
     }
 
     fn check_access(&self, names: &[String]) -> Result<Vec<AccessFinding>, Error> {

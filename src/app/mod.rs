@@ -8,6 +8,8 @@
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
 #[cfg(test)]
+mod azure_tests;
+#[cfg(test)]
 mod characterization_tests;
 pub mod config_export;
 pub mod doctor;
@@ -30,7 +32,7 @@ pub mod status;
 pub mod sync;
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Write};
 
 use crate::adapters::{onepassword, registry};
@@ -66,9 +68,18 @@ pub(crate) fn read_and_plan(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
+    let fields = read_fields(fleet, env_name, r)?;
+    plan_item(fleet, env_name, fields, ports, rotate, prune_immutable)
+}
+
+/// The environment's item fields: its one read by IDs (FR-13).
+pub(crate) fn read_fields(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<Vec<plan::ItemField>, Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_item_as(r, env, fleet.profile)?;
-    plan_item(fleet, env_name, item.fields, ports, rotate, prune_immutable)
+    Ok(onepassword::read_item_as(r, env, fleet.profile)?.fields)
 }
 
 /// [`read_and_plan`] for a local check of the products in `fleet` only, with no target: the
@@ -89,7 +100,7 @@ pub(crate) fn read_and_plan_products(
     Ok(plan_item(fleet, env_name, item.fields, None, &none, &none)?.0)
 }
 
-fn plan_item(
+pub(crate) fn plan_item(
     fleet: &Fleet,
     env_name: &str,
     fields: Vec<plan::ItemField>,
@@ -98,19 +109,24 @@ fn plan_item(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
-    let on_target = match store {
+    let mut on_target = match store {
         Some(s) => s.list()?,
         None => Vec::new(),
     };
     let refusal = |n: &str, v: &SecretValue| store.and_then(|s| s.refusal(n, v));
     // The first failed read; the planner itself cannot fail.
     let failed: RefCell<Option<Error>> = RefCell::new(None);
+    // name → the store's current version, from each read (the pinned flow binds it).
+    let versions: RefCell<BTreeMap<String, String>> = RefCell::new(BTreeMap::new());
     let read = |pinned: &dyn PinnedStore, name: &str, desired: &SecretValue| {
         if failed.borrow().is_some() {
             return None;
         }
         match pinned.read(name) {
-            Ok(Some((current, _version))) => Some(compare(&current, desired)),
+            Ok(Some((current, version))) => {
+                versions.borrow_mut().insert(name.to_string(), version);
+                Some(compare(&current, desired))
+            }
             Ok(None) => Some(plan::CurrentState::Absent),
             Err(e) => {
                 failed.replace(Some(e));
@@ -136,14 +152,21 @@ fn plan_item(
             current: current.as_ref().map(|c| c as &plan::CurrentCheck<'_>),
         },
     );
-    match failed.into_inner() {
-        Some(e) => Err(e),
-        None => Ok((p, on_target)),
+    if let Some(e) = failed.into_inner() {
+        return Err(e);
     }
+    // A pinned store's list carries no versions; the reads above found them.
+    let versions = versions.into_inner();
+    for e in &mut on_target {
+        if let Some(v) = versions.get(&e.name) {
+            e.version = Some(v.clone());
+        }
+    }
+    Ok((p, on_target))
 }
 
 /// Exact, constant-time compare of a stored value with the desired one (FR-31, SR-1).
-fn compare(current: &SecretValue, desired: &SecretValue) -> plan::CurrentState {
+pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::CurrentState {
     use subtle::ConstantTimeEq as _;
     if bool::from(
         current
@@ -177,11 +200,15 @@ fn json_product(product: &str) -> Option<String> {
 /// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
 /// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
 /// before this point leave stdout empty, so a caller only gets a document on success.
+///
+/// `pinned` adds the per-row binding fields of a pinned target (R5): `binding`,
+/// `pending_deploy` and `drift`, keyed by env name. They are absent for a staged target.
 pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
     env_name: &str,
     plan: &SyncPlan,
+    pinned: Option<&BTreeMap<String, PinnedRow>>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
@@ -210,7 +237,13 @@ pub(crate) fn write_json(
                 &held_keys,
                 &held_from_prune,
             );
+            let bound = target_name
+                .as_deref()
+                .and_then(|n| pinned.and_then(|m| m.get(n)));
             JsonRow {
+                binding: bound.map(|b| b.binding),
+                pending_deploy: bound.map(|b| b.pending_deploy),
+                drift: bound.map(|b| b.drift),
                 product: json_product(&r.product),
                 key: r.key.clone(),
                 kind: kind_label(r.kind),
@@ -285,6 +318,20 @@ struct JsonRow {
     fly_name: Option<String>,
     target: Option<&'static str>,
     action: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_deploy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drift: Option<bool>,
+}
+
+/// One desired row's binding on a pinned target (R5): `binding` is `current` (bound as
+/// desired), `stale` (bound, but the next `--deploy` changes it) or `unbound`.
+pub(crate) struct PinnedRow {
+    pub binding: &'static str,
+    pub pending_deploy: bool,
+    pub drift: bool,
 }
 
 #[derive(serde::Serialize)]

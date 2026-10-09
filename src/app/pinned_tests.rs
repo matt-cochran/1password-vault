@@ -1,13 +1,12 @@
 //! `status` and `plan` against a pinned target (Azure Key Vault): exact compare of the
 //! store's current value with the desired one (FR-31), and the staged flow (Fly) left
-//! unchanged.
+//! unchanged. The `sync` flow is covered in `azure_tests.rs`.
 
 use serde_json::{Value, json};
 
 use super::testutil::*;
 use crate::config;
 use crate::domain::Fleet;
-use crate::error::Error;
 use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
 
@@ -57,8 +56,19 @@ fn kv_show(name: &str, value: &str) -> Output {
     Output::success(serde_json::to_vec(&json!({"id": id, "value": value})).unwrap())
 }
 
-/// `status prod --json` on `responses`: the TARGET of each row by key, and the runner.
-fn azure_status(responses: Vec<Output>) -> (Vec<(String, String)>, FakeRunner) {
+/// `az containerapp show -o json` (the recorded fixture): `status` reads the bindings.
+fn ca_show() -> Output {
+    let path = format!(
+        "{}/tests/fixtures/azure/containerapp-show.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    Output::success(std::fs::read(path).unwrap())
+}
+
+/// `status prod --json` on `responses` (then the app's bindings): the TARGET of each row
+/// by key, and the runner.
+fn azure_status(mut responses: Vec<Output>) -> (Vec<(String, String)>, FakeRunner) {
+    responses.push(ca_show());
     let r = FakeRunner::new(responses);
     let mut out = Vec::new();
     super::status::run_with(&azure(), "prod", &r, &mut out, true).unwrap();
@@ -144,6 +154,7 @@ fn azure_status_prints_no_store_value() {
         kv_list(&["API-KEY", "DB-URL"]),
         kv_show("API-KEY", "api-FIXTUREVALUE-old"),
         kv_show("DB-URL", DB_URL),
+        ca_show(),
     ]);
     let mut out = Vec::new();
     let _ = super::status::run(&azure(), "prod", &r, &mut out);
@@ -205,14 +216,4 @@ fn fly_plan_makes_no_read_calls() {
     let mut out = Vec::new();
     let _ = super::sync::plan_with(&fleet(), "prod", &r, &mut out, false);
     assert_eq!(r.calls.borrow().len(), 2);
-}
-
-/// `sync` against a pinned target is still the internal refusal until the pinned flow
-/// lands (Task 7); it reads nothing first.
-#[test]
-fn azure_sync_is_refused_before_any_call() {
-    let r = FakeRunner::new(vec![]);
-    let mut out = Vec::new();
-    let res = super::sync::run(&azure(), "prod", &r, &mut out, &Default::default());
-    assert!(matches!(res, Err(Error::Target(m)) if m.contains("pinned sync not implemented")));
 }
