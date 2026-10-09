@@ -1,5 +1,7 @@
 # P1 spike: Azure Key Vault + Container Apps (live recon)
 
+Status: done; the findings are built into 0.5.0 and the recorded outputs are test fixtures.
+
 Date: 2026-10-08. Owner-approved throwaway resources in the owner's sandbox subscription, resource
 group `opv-spike-rg` (Key Vault in eastus; Container Apps environment in eastus2 after eastus
 returned `AKSCapacityHeavyUsage`). Marker values only (`opv-spike-marker-*`); no real secret was

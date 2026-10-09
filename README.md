@@ -11,117 +11,86 @@
 
 Sync secrets from 1Password into the places your apps run, without ever printing, logging or writing a value.
 
-1Password owns the values. Your runtime consumes them. `opv` connects the two and nothing else: no server, no state, no encryption of its own, and no command that prints a secret. What to sync lives in a committed `secrets.toml` that holds IDs and validation rules, never values.
+1Password owns the values. Your runtime consumes them. `opv` connects the two and nothing else: no server, no state, no encryption of its own, and no command that prints a secret. What to sync is a small configuration of IDs, key names and validation rules, never values, kept in 1Password next to the secrets or in a committed `secrets.toml`.
+
+## Quick start
+
+Install on Linux or macOS ([other ways](docs/install.md)):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
+```
+
+In a checkout of a project whose configuration lives in 1Password, no file is needed:
+
+```sh
+opv login dev                    # sign in to dev's 1Password account (your own terminal)
+opv run dev -- npm run dev       # your app, with dev's settings as environment variables
+```
+
+opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk. Starting a project instead: `opv init dev --vault <vault> --item <item>` writes the configuration from an existing 1Password item ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
+
+Then, for a deployed environment:
+
+```sh
+opv status prod                  # one row per key, problems first
+opv plan prod                    # what a sync would write, hold and prune, and its plan id
+opv sync prod --deploy --expect-plan 412a5b23   # exactly that plan, then deploy
+```
 
 ```console
 $ opv status prod
-prod: 4 keys · 2 saved · 1 skipped · 1 finding · 1 not yet on Fly
-PRODUCT   KEY                  KIND    STATE    TARGET
-allumata  OPENAI_API_KEY       secret  missing  new
+prod: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
+PRODUCT  KEY             KIND    STATE                                             TARGET
+api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
+    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field LOG_LEVEL)
+api      OPENAI_API_KEY  secret  missing                                           unknown
     guidance: OpenAI platform / API keys
-    open: https://start.1password.com/open/i?a=<account>&v=vprd&i=iprd&h=my.1password.com (section allumata, field OPENAI_API_KEY)
-allumata  INTEGRATION_ENC_KEY  secret  saved    new
-allumata  SIGNUP_POLICY        config  saved    n/a
-allumata  STRIPE_SECRET_KEY    secret  skipped  n/a
-opv: 1 finding
-Next: opv open allumata/OPENAI_API_KEY --env prod
+    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field OPENAI_API_KEY)
+unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
+opv: 2 findings
+Do: fix the keys above in 1Password
+Next: opv open api/LOG_LEVEL --env prod
 ```
 
-Problems come first, each with its fix and a link to the item in 1Password, the only place a value is typed. `opv help states` explains every word.
+Problems come first, each with its reason and a link to its item in 1Password, the only place a value is typed. Every failure ends with one runnable `Next:` command.
 
 ## Why
 
-- **Values stay out of your tooling.** They travel only on stdin to the official `op` and target CLIs: never in argv, files, logs, errors or CI output.
+- **Values stay out of your tooling.** They travel only on stdin to the official `op` and target CLIs, or in your app's environment: never in argv, files, logs, errors or CI output.
 - **Typed and checked before they ship.** Each key declares its kind (secret or config) and rules (`prefix`, `base64_bytes`, `enum`, `https_url`, ...). A bad value fails `status` with the key, the rule and a reason, never the value.
-- **Explicit, never surprising.** No prompts. Nothing is deployed without `--deploy`, nothing is deleted without `--prune`, and prune only touches names opv declares.
-- **Cheap in CI.** Each environment is read from 1Password once, by ID, so a sync costs a few requests with a read-only service account.
+- **Explicit, never surprising.** No prompts in automation. Nothing is deployed without `--deploy`, nothing is deleted without `--prune`, and prune only touches names opv manages.
+- **Safe to re-run.** Reads are retried, writes are checked, and an interrupted run converges when you run it again ([how opv handles failures](docs/how-opv-handles-failures.md)).
+- **Built for scripts and assistants.** `--json` on every reporting command, stable error codes, and `opv schema` describing the installed binary.
 
 ## Targets
 
 | Target | Status |
 |---|---|
 | Fly.io | supported |
-| Azure (Key Vault + Container Apps) | supported |
-| Kubernetes (Secrets + Deployment) | supported |
+| Azure Key Vault + Container Apps | **preview** |
+| Kubernetes (Secrets + Deployment) | **preview** |
+| Azure Key Vault → Kubernetes (External Secrets Operator) | **preview** |
 | Azure App Service | planned ([#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |
 
-Each environment names one target in `secrets.toml`; every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until you run `sync --deploy`.
-
-For local development, `opv run dev -- <command>` starts any command with the environment's keys set as variables, through `op run`, with no `.env` file ([patterns](docs/usage.md#local-development)).
-
-## Guided local setup
-
-`opv login <env>` and `opv setup` handle sign-in and resumable project onboarding, with plain instructions and private input. See [guided setup](docs/guided-setup.md) and the [CLI interaction review](docs/cli-ux-review.md).
-
-## Quickstart
-
-Install on Linux or macOS ([docs/install.md](docs/install.md) covers npm, Windows, source builds and checksum verification):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
-```
-
-Then, with `op` and your target CLI (`flyctl`, `az` or `kubectl`) signed in:
-
-```sh
-opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # configuration from an existing item (a 1Password manifest; --file for secrets.toml)
-opv doctor                     # config, op, flyctl and sign-in; ends with the next step
-opv status                     # one line per environment, run-only ones included
-opv status staging             # one row per key, problems first: saved, missing or failed
-opv open api/KEY --env staging # open a key's item in 1Password to fill it in
-opv plan staging               # what a sync would stage, hold and prune; changes nothing on the target
-opv sync staging --deploy      # stage on the target, deploy only if something changed
-opv check staging              # every key saved? names only, no deployment target touched
-opv run staging -- ./server    # run a process with the secrets in its environment
-```
-
-No file in the repository is needed: in a new project `opv init` saves the configuration as a manifest in 1Password (a Secure Note titled `opv · <project>`, tagged with the git remote), so any checkout of the repository finds it:
-
-```sh
-opv init dev --vault myapp-dev --item myapp    # once, by the project owner
-opv login dev                                  # in any checkout, no files: sign in once
-opv run dev -- npm run dev
-```
-
-An existing `secrets.toml` keeps working and wins over a manifest; `opv config import --vault <vault>` moves it into 1Password ([configuration](docs/configuration.md#configuration-in-1password)). `opv projects` lists every project you can see and `opv status --all` checks them all.
-
-A minimal `secrets.toml` for one app per environment:
-
-```toml
-[profile]
-kind = "simple"
-
-[environments.staging]
-vault_id = "vstg1234example"     # IDs, not names
-item_id  = "istg1234example"
-fly.app  = "myapp-staging"
-
-[keys.DATABASE_URL]
-kind = "secret"
-environments = ["staging"]
-
-[keys.JWT_KEY]
-kind = "secret"
-environments = ["staging"]
-immutable = true                 # never overwritten unless you pass --rotate
-rules = { base64_bytes = 32 }
-```
+Preview targets are complete and tested against recorded CLI output; they leave preview once live smoke tests pass. Each environment names one target, and every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until `sync --deploy`. Local development needs no target at all.
 
 ## Documentation
 
-- [Installing](docs/install.md): install script, release binaries, npm, from source, verifying downloads, prerequisites.
-- [Configuration](docs/configuration.md): store layout, `secrets.toml`, the fleet and simple profiles, `opv init`, rules and failure reasons.
-- [Local development](docs/local-development.md): local-only environments, `opv check`, switching products, WSL.
-- [Usage](docs/usage.md): every command, how sync works on Fly, Azure and Kubernetes, JSON output, pruning, retries, exit codes, security model, GitHub Actions.
-- [Setting up with an AI assistant](docs/agent-setup.md): a step-by-step procedure and safety rules for Claude Code, Codex, Cursor and similar; [llms.txt](llms.txt) indexes the docs for them.
-- [Design](docs/design/): requirements, design decisions and plans, for contributors.
-- [Changelog](CHANGELOG.md).
+- [Installing](docs/install.md): install script, binaries, npm, source, verifying downloads, prerequisites.
+- [Configuration](docs/configuration.md): where the configuration lives, the schema, store layout, every target, shared keys, `init` and `add`, rules.
+- [Local development](docs/local-development.md): `opv run`, `opv check`, several products, WSL.
+- [Guided setup](docs/guided-setup.md): `opv login` and `opv setup` for people.
+- [Usage](docs/usage.md): every command and flag, the JSON contract, exit codes, GitHub Actions, security model.
+- [How opv handles failures](docs/how-opv-handles-failures.md): retries, time limits, exit 9, `Next:`, interruptions.
+- [Setting up with an AI assistant](docs/agent-setup.md) (also `opv guide agent`) and [llms.txt](llms.txt).
+- [Design](docs/design/) for contributors, and the [changelog](CHANGELOG.md).
 
 ## Security
 
-Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. When `op`, `flyctl`, `az` or `kubectl` fails, its last few stderr lines are shown (`az said: ...`) after every value opv read or staged and every token, key or password pattern is masked as `__SECRET__`; masking can only catch values it knows or recognises, and stdout of those tools is never shown. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [docs/usage.md](docs/usage.md#security-model-and-limits).
+Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. When a CLI fails, its last few stderr lines are shown with every known value and secret-shaped token masked as `__SECRET__`. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [usage](docs/usage.md#security-model-and-limits).
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
 

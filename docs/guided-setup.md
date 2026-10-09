@@ -1,6 +1,6 @@
 # Guided local setup
 
-Start in your project:
+For a project that ships an `opv.setup.toml` recipe, `opv setup` walks a person through every setting: where it comes from, private input, progress saved in 1Password. Start in your project:
 ```sh
 opv login dev
 opv setup
@@ -12,7 +12,7 @@ When the project's configuration lives in 1Password (a manifest, see [configurat
 
 `opv login dev` signs in to the 1Password account the `dev` environment uses (its `account` setting) at 1Password's own prompts, and opens a terminal with the session available. Type `exit` to leave it. No export commands or token copying are needed, and no token is printed. Desktop integration can provide authentication without a session token. `opv login` without an environment signs in to the one account all environments use, or asks which environment when they use different accounts; before `secrets.toml` exists it uses your default account. `opv login dev -- <command>` runs one command signed in and returns its exit code.
 
-Signing in to environments in different accounts from the same terminal keeps both sessions, and `check`, `run`, `plan` and `sync` each use the account of the environment they act on. Every sign-in hint opv prints (from `doctor` and from errors) is `opv login <env>`.
+Sessions for environments in different accounts coexist in one terminal, and every command uses the account of the environment it acts on ([usage](usage.md#sign-in-opv-login)).
 
 `setup` finds `opv.setup.toml` in your current directory or its parents. It explains each setting, where to find it, and how to finish later. Several products produce a numbered choice; `--product NAME` selects directly. Filled values are kept. Enter skips a missing value. One final confirmation saves progress in 1Password; rerun the same command to resume. If someone changed the item in 1Password while setup was open, setup does not overwrite it: it reads the item again, keeps what is there, fills only the settings still empty with what you already entered (without asking for it again), tells you, and asks once more before saving.
 
@@ -45,7 +45,7 @@ opv item skeleton dev
 opv check dev --product api
 ```
 
-`opv add` keeps the file's comments and order, validates the result like a hand-written file and writes nothing to 1Password. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv init <env> --vault … --item … --add-env` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-add).
+`opv add` edits the configuration where it lives (a `secrets.toml`, or the manifest in 1Password), keeps comments and order, validates the result like a hand-written file and never reads the item. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv init <env> --vault … --item … --add-env` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-add).
 
 ## Existing local settings
 

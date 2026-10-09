@@ -1,116 +1,64 @@
 # Local development
 
-## Local-only setup
+`opv run` starts your app with its settings from 1Password as environment variables, with no `.env` file. This page covers getting there and the everyday patterns.
 
-Use one development vault, an item with one section per product, concealed secret fields
-and text configuration fields. Keep operator credentials in a separate profile.
+## First run
 
-Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`, or the desktop app
-integration). On WSL, `op` must be the Linux CLI installed inside WSL (see [WSL](#wsl)).
-
-**New configuration.** If there is no `secrets.toml` yet, let `init` write one from the item.
-Omitting `--fly-app` creates a run-only environment; no placeholder app is needed:
+When the project's configuration already lives in 1Password (a [manifest](configuration.md#configuration-in-1password)), a checkout needs no file:
 
 ```sh
-opv init dev --vault fleet-dev --item fleet
-opv doctor --env dev --product zonetico
-opv check dev --product zonetico
-opv run dev --product zonetico -- cargo run
+opv login dev                                # sign in to dev's 1Password account
+opv check dev --product api                  # every key saved and valid? names only
+opv run dev --product api -- npm run dev
 ```
 
-init writes IDs and declarations, never values; review keys, rules and modes.
+Under the simple profile there is no `--product`: `opv check dev`, then `opv run dev -- npm run dev`.
 
-**Existing configuration.** `init` refuses when `secrets.toml` already exists (exit 2) and never
-merges. To add a local environment next to deployed ones, add its block by hand. It needs only
-the vault and item IDs (from `op vault list --format json` and `op item list --vault <vault>
---format json`, which list IDs and titles, not values), and then each key that should load
-locally lists `dev` in its `environments`:
+Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`, or the 1Password desktop app integration). No deployment CLI is needed. `opv doctor --env dev` checks exactly what local work needs (configuration, `op`, its sign-in, whether `op` can start a local command) and reads the item once, as `check` does.
 
-```toml
-[environments.dev]
-vault_id = "vdev1234example"
-item_id  = "idev1234example"
+## No configuration yet
 
-[products.zonetico.keys.DATABASE_URL]
-kind = "secret"
-environments = ["dev", "staging", "prod"]
-```
-
-`doctor --env dev` then checks only what local work needs (configuration, `op`, its sign-in and
-whether `op` can start a local command) and skips the deployment CLIs. Unscoped `doctor` also
-reports that last check, as a warning, because deployment commands still work through
-`op.exe`.
-
-`check` reads the selected environment's item once and validates only the selected product;
-fields in other products' sections are skipped, so they cannot fail it. It exits 8 when a key
-is missing or failing a rule.
-It makes no deployment target call. check --json reports names/states/rules/findings and
-target_checked=false. It can read values internally to validate them, but prints none.
-run remains reference-only: it does not pre-read or transform values. Use check separately.
-
-## Launch from each repository or worktree
-
-Use an explicit config path to avoid selecting an unintended ancestor configuration.
+If the 1Password item exists, let `init` write the configuration from it. Without a target option it declares a run-only environment, which needs no deployment target:
 
 ```sh
-opv --config /path/to/fleet/secrets.toml run dev --product zonetico -- cargo test
-opv --config /path/to/fleet/secrets.toml run dev --product journeeze -- npm run dev
-opv --config /path/to/fleet/secrets.toml run dev --product allumata -- docker compose up
+opv init dev --vault myapp-dev --item app    # new project: a manifest in 1Password (--file for secrets.toml)
+opv check dev --product api
 ```
 
-Do not infer product identity from a worktree directory name or reuse staging credentials
-automatically. Compose should consume process environment entries, not a plaintext env_file.
+If the project already has a configuration for its deployed environments, add the local one with `--add-env`; it includes `dev` in every declared key the item has and names the rest:
 
-## Switching products: v0.4 migration
+```sh
+opv init dev --vault myapp-dev --item app --add-env
+```
 
-run removes every key name declared in the loaded configuration from the inherited
-environment, then adds only the selected applicable references. This clears other products'
-managed keys and mode-skipped keys. Selected keys are resolved from 1Password.
+A key the item does not have yet: `opv add api/STRIPE_KEY --kind secret --env dev`, then `opv item skeleton dev` adds its empty field, and you type the value in 1Password. A project that ships `opv.setup.toml` has a guided path instead: [guided setup](guided-setup.md).
 
-PATH, shell/tool context, 1Password authentication and undeclared variables remain inherited.
-This is managed-key isolation, not a sandbox. Keep operator commands in a separate terminal.
-If an app relied on an inherited managed key, declare its proper development field instead.
+## How `run` works
 
-Library users: `InitArgs::fly_app` is an `Option<String>`; a custom `CommandRunner` must
-implement `run_inherited_clean` for managed local runs (the default fails closed with exit 3
-when there are names to remove), and may override `local_run_supported`.
+`run` hands `op run` one `op://` reference per key; `op run` resolves them and starts your command. opv never sees the values, `op run` masks them in your command's output, nothing is written to disk, and the values are gone when the process exits. Only keys whose `environments` include the environment are set, under their plain names (`DATABASE_URL`, not `FLEET__API__DATABASE_URL`). `run` exits with your command's own exit code.
+
+Before adding the selected keys, `run` removes every key name declared in the configuration from the inherited environment, so switching products in one shell never leaks the previous product's keys, and a key a mode skips is not inherited either. Everything else (PATH, tool settings, the 1Password sign-in, undeclared variables) is inherited: this is not a sandbox. Keys named `PATH`, `HOME`, `XDG_CONFIG_HOME` or `OP_*` are a configuration error for that reason.
+
+When a stored value has a formatting problem opv can fix (a trailing newline or space, a missing `ensure_prefix`) and you run under a service account or CI, the command gets the value as stored and opv prints one warning per key: `api/KEY has a fixable formatting problem in 1Password; run as yourself (opv login dev) and opv will tidy it`.
+
+| You want | Run |
+|---|---|
+| An app or test suite | `opv run dev -- npm test` |
+| A shell with every variable set (gone on `exit`) | `opv run dev -- $SHELL` |
+| Docker Compose (`${VAR}` in `compose.yaml`, and `environment:` entries without a value) | `opv run dev -- docker compose up` |
+| An editor or debugger whose run configurations inherit the variables | `opv run dev -- code .` |
+| Config values (not secrets) as JSON for another tool | `opv config export dev --json` |
+
+There is no command that writes a `.env` file or prints `export` lines, on purpose (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead; Compose's `env_file:` can be replaced by `environment:` entries without values.
+
+## Several products or checkouts
+
+- `OPV_PRODUCT=api` sets the default `--product` for `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env` (never `sync`); stderr says `product api (from OPV_PRODUCT)`. A single-product repository in a fleet can export it once, for example in `.envrc`.
+- Worktrees and clones of one repository find the same manifest by its git remote. In a monorepo, a manifest tagged with paths covers its directories ([monorepo paths](configuration.md#how-opv-finds-the-configuration)).
+- To use a configuration from elsewhere, name it: `OPV_PROJECT=<name>` for a manifest, `--config <path>` (or `OPV_CONFIG`) for a file. Never infer a product from a directory name.
 
 ## WSL
 
-Windows op.exe may use Windows desktop authentication for metadata reads, but cannot execute
-a Linux child for opv run. An `op` on PATH that is a Windows binary is rejected by `run` (exit 3);
-`doctor` reports it on its `op local run` line, as a failure under `--env` for a local-only
-environment and as a warning otherwise. Shell aliases are not consulted by subprocess lookup.
-Do not use a wrapper that silently substitutes op.exe.
+Use the Linux `op` installed inside WSL, signed in with its own session (`opv login dev` adds the account at `op`'s prompts if none is set up yet). A Windows `op.exe` first on `PATH` can read metadata through the Windows desktop app but cannot start a Linux command: `run` refuses it (exit 3), and `doctor` reports it on its `op local run` line (a failure under `--env` for a run-only environment, a warning otherwise). Shell aliases do not count, because subprocess lookup ignores them. On native Windows, use the Windows `opv` and `op` in PowerShell.
 
-Use Linux op with its own owner-authenticated session:
-
-```sh
-opv login dev        # adds the account at op's prompts if none is set up, then signs in
-opv doctor --env dev --product zonetico
-```
-
-Follow CLI prompts yourself; never give credentials or session tokens to an agent.
-Do not save them in shell profiles. See [manual sign-in](https://www.1password.dev/cli/sign-in-manually).
-Windows-native commands may use Windows opv/op directly in PowerShell.
-Automatic Windows desktop-to-Linux execution is not provided.
-
-## Remote development
-
-Local injection does not automatically forward credentials over SSH. A remote wrapper must
-define allowed keys, authenticated transport, masking, cancellation and process lifetime.
-Do not rsync secret files or use wildcard forwarding.
-
-Track [Zonetico #565](https://github.com/matt-cochran-products/zonetico-saas/issues/565)
-and [infra #524](https://github.com/matt-cochran-products/infra/issues/524) for ecosystem integration.
-Hetzner remains local development only, outside CI/CD.
-
-## Dogfooding receipt
-
-Automated checks use synthetic credentials and fake vendor CLIs; they do not prove live
-account provisioning. The owner configures a disposable development item, runs doctor,
-check and a real product smoke test, then records product/tool versions, success/failure
-and missing names only. Verify local execution before remote propagation.
-
-Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op`; native Linux, macOS and Windows
-(PowerShell). Automated tests use fake CLIs; live receipts are recorded on issues #52–#54.
+Follow sign-in prompts yourself; never give credentials or session tokens to an assistant, and do not save them in shell profiles.

@@ -1,5 +1,7 @@
 # Configuration in 1Password (FR-44)
 
+Status: as built for 0.5.0.
+
 Owner decision 2026-10-08, for 0.5.0: keep the complete configuration in 1Password and make
 `secrets.toml` optional. The goal is a checkout that needs no file:
 

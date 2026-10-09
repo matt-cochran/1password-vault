@@ -1,6 +1,6 @@
 # Self-healing 1Password conventions (FR-43)
 
-Decided 2026-10-08 for 0.5.0. Requirement: [FR-43](requirements.md#fr-43--self-healing-conventions).
+Status: as built for 0.5.0. Decided 2026-10-08. Requirement: [FR-43](requirements.md#fr-43--self-healing-conventions).
 
 ## Problem
 

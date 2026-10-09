@@ -1,6 +1,6 @@
 # opv
 
-> opv is a Rust CLI that syncs secrets from 1Password into runtime targets (Fly.io, Azure Key Vault + Container Apps and Kubernetes today; Azure App Service, AWS and GCP planned) without ever printing, logging or writing a secret value. A committed `secrets.toml`, or the same TOML kept in 1Password as a project manifest (Secure Note `opv · <project>`, found by the git remote), declares IDs, key names, kinds and validation rules; values stay in 1Password.
+> opv is a Rust CLI that syncs secrets from 1Password into runtime targets (Fly.io supported; Azure Key Vault + Container Apps, Kubernetes, and Key Vault → Kubernetes through the External Secrets Operator in preview; Azure App Service, AWS and GCP planned) and into local processes (`opv run`) without ever printing, logging or writing a secret value. A project manifest in 1Password (Secure Note `opv · <project>`, found by the git remote) or a committed `secrets.toml` with the same TOML declares IDs, key names, kinds and validation rules; values stay in 1Password.
 
 ## Contract (read this first)
 
@@ -21,9 +21,11 @@ Assistants setting opv up for a user: read the agent setup guide first and follo
 - [Agent setup guide](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/agent-setup.md): step-by-step setup for AI assistants, with safety rules and exit codes
 - [README](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/README.md): what opv is, quickstart, minimal configuration
 - [Installing](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/install.md): install script, binaries, npm, source, checksum verification, prerequisites
-- [Configuration](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/configuration.md): store layout, `secrets.toml`, simple and fleet profiles, Fly, Azure and Kubernetes targets, named stores (`[stores.<name>]` + `secrets_in`: Key Vault → Kubernetes via the External Secrets Operator), `opv init`, configuration in 1Password (manifest discovery, `config import/export/edit/check`, monorepo paths), rules and failure reasons
-- [Local development](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/local-development.md): local-only environments, `opv check`, switching products, WSL
-- [Usage](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/usage.md): commands, sync on Fly, Azure and Kubernetes, JSON output, pruning, retries, exit codes, security model, GitHub Actions
+- [Configuration](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/configuration.md): where the configuration lives (manifest discovery, monorepo paths, `config import/export/edit/check`), the schema, simple and fleet profiles, store layout, Fly, Azure and Kubernetes targets, named stores (`[stores.<name>]` + `secrets_in`: Key Vault → Kubernetes via the External Secrets Operator), shared keys, `opv init` and `opv add`, rules and failure reasons
+- [Local development](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/local-development.md): `opv run`, `opv check`, run-only environments, several products, WSL
+- [Guided setup](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/guided-setup.md): `opv login` and `opv setup` (the user's own terminal)
+- [Usage](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/usage.md): every command and flag, sync on Fly, Azure and Kubernetes, the JSON contract and error codes, exit codes, security model, GitHub Actions
+- [How opv handles failures](https://raw.githubusercontent.com/matt-cochran/1password-vault/main/docs/how-opv-handles-failures.md): `Next:`/`Do:`, retries, time limits, exit 9, interruptions, scrubbed CLI output
 
 ## Optional
 
