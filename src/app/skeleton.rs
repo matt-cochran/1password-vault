@@ -38,6 +38,9 @@ pub fn run_as(
         .flat_map(|(product, p)| {
             p.keys
                 .iter()
+                // A shared key (FR-45) reads its source's field and never gets one of its
+                // own. Task X (self-healing): keep this filter wherever fields are created.
+                .filter(|(_, spec)| spec.from.is_none())
                 .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })

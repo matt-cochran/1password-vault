@@ -43,8 +43,9 @@ const DOCTOR: [(&str, &str); 4] = [
 ];
 
 /// Row states, as printed by `state_label` (a failing rule starts with `failed`).
-const STATES: [(&str, &str); 5] = [
+const STATES: [(&str, &str); 6] = [
     ("saved", GREEN),
+    ("blocked", YELLOW),
     ("missing", RED),
     ("wrong kind", RED),
     ("failed", RED),

@@ -705,6 +705,18 @@ opv check <environment> [--product <product>] [--json]
 - On Linux and macOS, `doctor` reports `op local run`: the first `op` on PATH must be a native binary, because a Windows `op.exe` reached from WSL cannot start a Linux child. It fails a scope of environments without a target and warns otherwise, always with the remaining checks and a `Next step` line. `run` refuses such an `op` before starting anything (exit 3).
 - Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op` and its own sign-in; native Linux, macOS and Windows. Automatic Windows desktop-to-Linux execution is not provided.
 
+## v0.5 shared keys (FR-45)
+
+## FR-45 — Shared Keys
+
+- A key may declare `from = "<product>/<KEY>"` (`"<KEY>"` under the simple profile) instead of having a field of its own. Its value is read from the source's field in the same environment's item, within the one item read (FR-13). References to another item or environment are refused at load with a configuration error.
+- Validated at load, with the line and column of `from` (FR-2): the source is declared; it is not itself a `from` (no chains, no cycles); it has the same `kind`; it is declared for every environment the referencing key uses; the referencing key sets neither `immutable` (it follows the source) nor a `refuse_in` environment where the source is declared.
+- The source's rules apply first; the referencing key's own rules are then checked against the value the source would stage. Failures name the key and rule only (FR-15, FR-22).
+- `run` exports the value under the referencing key's own name, as an `op://` reference to the source's field (FR-4, SR-3). `sync` writes it under the referencing key's own target name; each name is its own store entry or binding, so the managed set and prune are unchanged (FR-8). Changing the source changes every referencing target in the same sync; `--rotate` of an immutable source rotates its referencing keys too (FR-16).
+- `status`, `plan` and `check` show a referencing row as `shared from <product>/<KEY>` (JSON `shared_from`). A missing, wrong-kind or failing source is one finding, on the source's row, listing the referencing keys as affected; the referencing rows are `blocked by source` (JSON `source_blocked`) and are not counted again. A product-scoped `check`, `status`, `plan` or `sync` keeps the rows of its keys' sources, so a source's finding still blocks it.
+- `explain` shows the chain: the source's `op://` reference and `shared from` on a referencing key, `shared by` on a source.
+- `item skeleton`, and any later field creation, never creates a field for a referencing key. A field left under a referencing key is reported as an extra field.
+
 # 4. Security Requirements
 
 ## FR-26 — Diagnose and Guide

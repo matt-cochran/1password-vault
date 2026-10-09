@@ -192,7 +192,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "meaning": c.meaning(),
         })).collect::<Vec<_>>(),
         "states": {
-            "row_state": ["saved", "missing", "wrong_kind", "failing_rule", "skipped"],
+            "row_state": ["saved", "missing", "wrong_kind", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
             "row_target": ["present", "absent", "would_change", null],
             "row_action": ["would_stage", "would_prune", "held", null],
@@ -323,7 +323,8 @@ fn documents() -> Value {
         "pending_deploy?",
         "drift?",
         "chain?",
-        "open_url?"
+        "open_url?",
+        "shared_from?"
     ]);
     let key_ref = json!(["product", "key", "target_name"]);
     json!({
@@ -350,7 +351,7 @@ fn documents() -> Value {
         "doctor": ["checks: [{name, status, detail, next, do}]"],
         "explain": [
             "environment", "product", "key", "reference", "kind", "field", "target: [{label, value}]",
-            "rules", "immutable", "guidance", "required_here", "inspect"
+            "rules", "immutable", "guidance", "required_here", "inspect", "shared_from", "shared_by"
         ],
         "init": ["path", "environment", "profile", "vault_id", "item_id", "keys: [{product, key, kind}]", "skipped"],
         "item skeleton": ["environment", "added: [{product, key, kind}]"],

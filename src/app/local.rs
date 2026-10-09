@@ -1,6 +1,6 @@
 //! Local-only validation. One item read, no deployment store, names-only output.
 use super::{read_and_plan_products, write_err};
-use crate::domain::{Fleet, KeyState};
+use crate::domain::Fleet;
 use crate::error::Error;
 use crate::runner::CommandRunner;
 use std::io::Write;
@@ -48,7 +48,16 @@ pub fn select(
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
     if let Some(p) = product {
-        selected.products.retain(|name, _| name == p);
+        // The sources of the product's shared keys (FR-45) stay, alone: the read then
+        // covers their sections too, and their findings are reported once, on them.
+        let sources = fleet.sources_of(p);
+        selected
+            .products
+            .retain(|name, _| name == p || sources.iter().any(|(s, _)| s == name));
+        for (name, prod) in selected.products.iter_mut().filter(|(n, _)| *n != p) {
+            prod.keys
+                .retain(|k, _| sources.contains(&(name.clone(), k.clone())));
+        }
     }
     Ok(selected)
 }
@@ -104,8 +113,14 @@ pub fn check(
     } else {
         for row in super::problems_first(&plan.rows) {
             let label = crate::domain::key_label(&row.product, &row.key);
-            writeln!(out, "{label}: {}", super::row_state_label(row)).map_err(write_err)?;
-            if !matches!(row.state, KeyState::Ready | KeyState::Skipped) {
+            writeln!(
+                out,
+                "{label}: {}{}",
+                super::row_state_label(row),
+                super::shared_note(row)
+            )
+            .map_err(write_err)?;
+            if super::is_blocking(row) {
                 let guidance = &selected.products[&row.product].keys[&row.key].guidance;
                 if !guidance.is_empty() {
                     writeln!(out, "  guidance: {guidance}").map_err(write_err)?;

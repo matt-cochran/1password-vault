@@ -463,9 +463,11 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         }
     }
 
+    let mut products = raw.products;
+    check_shared(&mut products, Profile::Fleet, doc)?;
     let fleet = Fleet {
         environments,
-        products: raw.products,
+        products,
         profile: Profile::Fleet,
     };
     check_names(&fleet, doc)?;
@@ -503,9 +505,11 @@ fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> 
         validate_key(key, key, spec, &environments)?;
     }
 
+    let mut products = BTreeMap::from([(SIMPLE_PRODUCT.to_string(), Product { keys: raw.keys })]);
+    check_shared(&mut products, Profile::Simple, doc)?;
     let fleet = Fleet {
         environments,
-        products: BTreeMap::from([(SIMPLE_PRODUCT.to_string(), Product { keys: raw.keys })]),
+        products,
         profile: Profile::Simple,
     };
     check_names(&fleet, doc)?;
@@ -630,6 +634,150 @@ fn validate_key(
         )));
     }
     Ok(())
+}
+
+/// Shared keys (FR-45): every `from` names a declared key with its own field, in the same
+/// environment's item, of the same kind, declared for every environment the referencing
+/// key uses. No chains, no cycles, no cross-item or cross-environment reference. The
+/// referencing key may not set `immutable`: it follows the source, and is copied from it
+/// here so every later check (rotate, prune, hold) treats both alike. Errors point at the
+/// `from` line.
+fn check_shared(
+    products: &mut BTreeMap<String, Product>,
+    profile: Profile,
+    doc: &Doc<'_>,
+) -> Result<(), Error> {
+    let simple = profile == Profile::Simple;
+    let path = |product: &str, key: &str, field: &str| -> Vec<String> {
+        if simple {
+            vec!["keys".into(), key.into(), field.into()]
+        } else {
+            vec![
+                "products".into(),
+                product.into(),
+                "keys".into(),
+                key.into(),
+                field.into(),
+            ]
+        }
+    };
+    let at = |product: &str, key: &str, field: &str, msg: String| {
+        let p = path(product, key, field);
+        doc.at_path(&p.iter().map(String::as_str).collect::<Vec<_>>(), msg)
+    };
+    let shape = if simple {
+        "\"<KEY>\""
+    } else {
+        "\"<product>/<KEY>\""
+    };
+    let mut follow: Vec<(String, String, bool)> = Vec::new();
+    for (product, p) in products.iter() {
+        for (key, spec) in &p.keys {
+            let Some(from) = spec.from.as_deref() else {
+                continue;
+            };
+            let owner = key_label(product, key);
+            let err = |msg: String| {
+                at(
+                    product,
+                    key,
+                    "from",
+                    format!("{owner}: from = {from:?}: {msg}"),
+                )
+            };
+            let slashes = from.matches('/').count();
+            if from.contains("://") || slashes > usize::from(!simple) {
+                return Err(err(format!(
+                    "a shared key reads another key of the same environment's item; write \
+                     from = {shape} (cross-item and cross-environment references are not supported)"
+                )));
+            }
+            let (sp, sk) = spec.source().expect("from is set");
+            let well_formed = is_env_name(sk) && (simple || (slashes == 1 && is_product_name(sp)));
+            if !well_formed {
+                return Err(err(format!("must be {shape}")));
+            }
+            if (sp, sk) == (product.as_str(), key.as_str()) {
+                return Err(err("a key cannot share its own value (cycle)".into()));
+            }
+            let Some(src) = products.get(sp).and_then(|q| q.keys.get(sk)) else {
+                return Err(err("names no declared key; declare the source first".into()));
+            };
+            let source = key_label(sp, sk);
+            if let Some((tp, tk)) = src.source() {
+                return Err(err(if (tp, tk) == (product.as_str(), key.as_str()) {
+                    format!(
+                        "{source} is shared from {owner} (cycle); keep the field on one of them"
+                    )
+                } else {
+                    format!(
+                        "{source} is itself shared from {} (no chains); write from = {:?}",
+                        key_label(tp, tk),
+                        src.from.as_deref().unwrap_or_default()
+                    )
+                }));
+            }
+            if src.kind != spec.kind {
+                return Err(err(format!(
+                    "{source} is a {} key, {owner} a {} key; a shared key has its source's kind",
+                    kind_name(src.kind),
+                    kind_name(spec.kind)
+                )));
+            }
+            if let Some(env) = spec
+                .environments
+                .iter()
+                .find(|e| !src.environments.contains(e))
+            {
+                return Err(err(format!(
+                    "{source} is not declared for environment {env:?}, which {owner} uses; add \
+                     {env:?} to its environments (the value is read from the same environment's item)"
+                )));
+            }
+            if let Some(env) = spec
+                .rules
+                .refuse_in
+                .iter()
+                .find(|e| src.environments.contains(e))
+            {
+                return Err(err(format!(
+                    "refuse_in {env:?} would refuse the value {source} provides there"
+                )));
+            }
+            let set = if simple {
+                doc.value(&["keys", key, "immutable"])
+            } else {
+                doc.value(&["products", product, "keys", key, "immutable"])
+            };
+            if set.is_some() {
+                return Err(at(
+                    product,
+                    key,
+                    "immutable",
+                    format!(
+                        "{owner}: immutable follows the source of a shared key ({source}); remove it here"
+                    ),
+                ));
+            }
+            follow.push((product.clone(), key.clone(), src.immutable));
+        }
+    }
+    for (product, key, immutable) in follow {
+        if let Some(spec) = products
+            .get_mut(&product)
+            .and_then(|p| p.keys.get_mut(&key))
+        {
+            spec.immutable = immutable;
+        }
+    }
+    Ok(())
+}
+
+fn kind_name(k: crate::domain::Kind) -> &'static str {
+    match k {
+        crate::domain::Kind::Secret => "secret",
+        crate::domain::Kind::Config => "config",
+    }
 }
 
 /// Two environments on the same target would manage the same names, and each would prune
@@ -1619,6 +1767,151 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
                 "environment prod: allumata/INTEGRATION_ENC_KEY renders Fly name \"fleet__ALLUMATA__INTEGRATION_ENC_KEY\", which must match ^[A-Z][A-Z0-9_]*$",
                 "environment prod: my-app/K and my_app/K both render Fly name FLEET__MY_APP__K",
             ]
+        );
+    }
+
+    // ---- shared keys (FR-45) ----------------------------------------------------------
+
+    /// The fixture plus `api/DATABASE_URL` (secret, staging and prod) and a worker key
+    /// whose table body is `worker`.
+    fn shared(worker: &str) -> String {
+        format!(
+            "{}\n[products.api.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"staging\", \"prod\"]\n\n[products.worker.keys.DATABASE_URL]\n{worker}\n",
+            ok()
+        )
+    }
+
+    #[test]
+    fn shared_key_loads_with_its_source() {
+        let f = parse(&shared(
+            "kind = \"secret\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"prod\"]",
+        ))
+        .unwrap();
+        assert_eq!(
+            f.products["worker"].keys["DATABASE_URL"].source(),
+            Some(("api", "DATABASE_URL"))
+        );
+    }
+
+    #[test]
+    fn shared_key_refuses_an_undeclared_source() {
+        let e = config_err(&shared(
+            "kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]",
+        ));
+        assert!(
+            e.contains("worker/DATABASE_URL: from = \"api/DB_URL\": names no declared key"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn shared_key_error_points_at_the_from_line() {
+        let e = config_err(&shared(
+            "kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]",
+        ));
+        assert!(e.contains("| from = \"api/DB_URL\""), "{e}");
+    }
+
+    #[test]
+    fn shared_key_refuses_a_source_of_another_kind() {
+        let e = config_err(&shared(
+            "kind = \"config\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"prod\"]",
+        ));
+        assert!(
+            e.contains("api/DATABASE_URL is a secret key, worker/DATABASE_URL a config key"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn shared_key_refuses_a_chain() {
+        let text = format!(
+            "{}\n[products.jobs.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"worker/DATABASE_URL\"\nenvironments = [\"prod\"]\n",
+            shared("kind = \"secret\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"prod\"]")
+        );
+        let e = config_err(&text);
+        assert!(e.contains("worker/DATABASE_URL is itself shared from api/DATABASE_URL (no chains); write from = \"api/DATABASE_URL\""), "{e}");
+    }
+
+    #[test]
+    fn shared_key_refuses_a_cycle() {
+        let text = format!(
+            "{}\n[products.a.keys.K]\nkind = \"secret\"\nfrom = \"b/K\"\nenvironments = [\"prod\"]\n\n[products.b.keys.K]\nkind = \"secret\"\nfrom = \"a/K\"\nenvironments = [\"prod\"]\n",
+            ok()
+        );
+        let e = config_err(&text);
+        assert!(e.contains("(cycle)"), "{e}");
+    }
+
+    #[test]
+    fn shared_key_refuses_its_own_name() {
+        let e = config_err(&shared(
+            "kind = \"secret\"\nfrom = \"worker/DATABASE_URL\"\nenvironments = [\"prod\"]",
+        ));
+        assert!(e.contains("cannot share its own value (cycle)"), "{e}");
+    }
+
+    #[test]
+    fn shared_key_refuses_an_environment_its_source_lacks() {
+        let text = format!(
+            "{}\n[products.api.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n[products.worker.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"staging\", \"prod\"]\n",
+            ok()
+        );
+        let e = config_err(&text);
+        assert!(e.contains("api/DATABASE_URL is not declared for environment \"staging\", which worker/DATABASE_URL uses"), "{e}");
+    }
+
+    #[test]
+    fn shared_key_refuses_a_cross_item_reference() {
+        let e = config_err(&shared(
+            "kind = \"secret\"\nfrom = \"op://vprd/other/api/DATABASE_URL\"\nenvironments = [\"prod\"]",
+        ));
+        assert!(
+            e.contains("cross-item and cross-environment references are not supported"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn shared_key_refuses_a_cross_environment_reference() {
+        let e = config_err(&shared(
+            "kind = \"secret\"\nfrom = \"staging/api/DATABASE_URL\"\nenvironments = [\"prod\"]",
+        ));
+        assert!(
+            e.contains("cross-item and cross-environment references are not supported"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn shared_key_refuses_its_own_immutable() {
+        let e = config_err(&shared(
+            "kind = \"secret\"\nfrom = \"api/DATABASE_URL\"\nimmutable = true\nenvironments = [\"prod\"]",
+        ));
+        assert!(
+            e.contains("immutable follows the source of a shared key (api/DATABASE_URL)"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn shared_key_immutable_follows_its_source() {
+        let text = format!(
+            "{}\n[products.worker.keys.INTEGRATION_ENC_KEY]\nkind = \"secret\"\nfrom = \"allumata/INTEGRATION_ENC_KEY\"\nenvironments = [\"prod\"]\n",
+            ok()
+        );
+        assert!(parse(&text).unwrap().products["worker"].keys["INTEGRATION_ENC_KEY"].immutable);
+    }
+
+    #[test]
+    fn simple_shared_key_names_a_bare_key() {
+        let text = format!(
+            "{}\n[keys.PRISMA_URL]\nkind = \"secret\"\nfrom = \"DATABASE_URL\"\nenvironments = [\"prod\"]\n",
+            simple()
+        );
+        assert_eq!(
+            parse(&text).unwrap().products[SIMPLE_PRODUCT].keys["PRISMA_URL"].source(),
+            Some((SIMPLE_PRODUCT, "DATABASE_URL"))
         );
     }
 }

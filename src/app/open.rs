@@ -88,6 +88,11 @@ pub fn run_as(
     json: bool,
 ) -> Result<(), Error> {
     let (product, key, env_name) = explain::locate(fleet, target, env)?;
+    // A shared key (FR-45) has no field of its own: open its source's field.
+    let (product, key) = match fleet.products[&product].keys[&key].source() {
+        Some((p, k)) => (p.to_string(), k.to_string()),
+        None => (product, key),
+    };
     let url = item_url(fleet, env_name, r)?;
     if json {
         let doc = serde_json::json!({

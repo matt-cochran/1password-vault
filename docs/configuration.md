@@ -62,6 +62,31 @@ rules = { enum = ["open", "invite_only"] }
 
 Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A product name is upper-cased into the template (`allumata` becomes `ALLUMATA`), so `OPENAI_API_KEY` is staged on Fly as `FLEET__ALLUMATA__OPENAI_API_KEY`. The template must contain `{PRODUCT}` and `{KEY}`.
 
+### Shared keys: `from`
+
+When two products need the same value (both `api` and `worker` read `DATABASE_URL`), keep one field in 1Password and point the second key at it with `from`:
+
+```toml
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging", "prod"]
+guidance = "Neon / connection string"
+
+[products.worker.keys.DATABASE_URL]
+kind = "secret"
+from = "api/DATABASE_URL"            # read api's field; worker has no field of its own
+environments = ["prod"]
+rules = { prefix = "postgres://" }   # optional: checked as well as api's own rules
+```
+
+- The value comes from the source's field in the **same environment's item**. References to another item or environment (`op://...`, `staging/api/KEY`) are refused at load.
+- Each key keeps its own target name: `sync` writes `FLEET__API__DATABASE_URL` and `FLEET__WORKER__DATABASE_URL` from the one field, and `run --product worker` exports `DATABASE_URL` from `op://<vault>/<item>/api/DATABASE_URL`. Change the source and every key sharing it changes in the same sync.
+- Checked at load, with the line of the `from`: the source is declared, has its own field (no chains or cycles), has the same `kind`, and is declared for every environment the sharing key uses.
+- The source's rules apply first, then the sharing key's own `rules` on the same value. `immutable` follows the source and may not be set on the sharing key; `--rotate api/DATABASE_URL` rotates both.
+- `item skeleton` never adds a field for a sharing key. A leftover field from before the switch (`worker/DATABASE_URL`) is reported as an extra field; delete it in 1Password.
+
+Under the simple profile, `from` names a bare key: `from = "DATABASE_URL"`.
+
 ### Simple profile (one app per environment)
 
 For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item (a field outside any section) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.

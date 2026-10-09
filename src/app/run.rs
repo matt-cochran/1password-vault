@@ -76,11 +76,14 @@ pub fn run(
         .keys
         .iter()
         .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
-        .map(|(key, _)| {
-            let field = if product == SIMPLE_PRODUCT {
-                key.clone()
+        .map(|(key, spec)| {
+            // A shared key (FR-45) is exported under its own name, referencing its source's
+            // field in the same item.
+            let (fp, fk) = spec.source().unwrap_or((product, key));
+            let field = if fp == SIMPLE_PRODUCT {
+                fk.to_string()
             } else {
-                format!("{product}/{key}")
+                format!("{fp}/{fk}")
             };
             (
                 key.as_str(),

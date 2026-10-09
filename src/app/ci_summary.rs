@@ -75,6 +75,7 @@ fn state_word(r: &Row) -> String {
         KeyState::RuleFailed(rule, _) => format!("failed {rule}"),
         KeyState::Ready => "saved".into(),
         KeyState::Skipped => "skipped".into(),
+        KeyState::SourceBlocked => "blocked by source".into(),
     }
 }
 
@@ -99,6 +100,8 @@ mod tests {
             state,
             target: TargetState::Absent,
             guidance: "Stripe dashboard".into(),
+            source: None,
+            shared_by: Vec::new(),
         }
     }
 

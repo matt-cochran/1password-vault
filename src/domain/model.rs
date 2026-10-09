@@ -90,6 +90,21 @@ pub struct KeySpec {
     pub immutable: bool,
     #[serde(default)]
     pub guidance: String,
+    /// Shared key (FR-45): `"<product>/<KEY>"` (`"<KEY>"` under the simple profile) names
+    /// the key whose field holds the value, in the same environment's item. The key then has
+    /// no field of its own. Validated at load: see [`KeySpec::source`].
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+impl KeySpec {
+    /// The source `(product, key)` of a shared key (FR-45), or `None` for a key with its
+    /// own field. `"<KEY>"` (no `/`) is the simple profile's implicit product. Only
+    /// meaningful after `config` validated the reference.
+    pub fn source(&self) -> Option<(&str, &str)> {
+        let from = self.from.as_deref()?;
+        Some(from.split_once('/').unwrap_or((SIMPLE_PRODUCT, from)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -186,6 +201,32 @@ impl Fleet {
             )
             .with_code(crate::error::Code::UnknownEnv)
         })
+    }
+
+    /// The declared keys of `product` that are sources of shared keys (FR-45): each
+    /// `(source product, source key)` a key of `product` reads its value from. Empty for an
+    /// undeclared product.
+    pub fn sources_of(&self, product: &str) -> std::collections::BTreeSet<(String, String)> {
+        self.products
+            .get(product)
+            .into_iter()
+            .flat_map(|p| p.keys.values())
+            .filter_map(KeySpec::source)
+            .map(|(p, k)| (p.to_string(), k.to_string()))
+            .collect()
+    }
+
+    /// The keys declared for `env_name` that share the value of `product`/`key` (FR-45), as
+    /// `(product, key)`.
+    pub fn shared_by(&self, env_name: &str, product: &str, key: &str) -> Vec<(String, String)> {
+        self.products
+            .iter()
+            .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
+            .filter(|(_, _, s)| {
+                s.source() == Some((product, key)) && s.environments.iter().any(|e| e == env_name)
+            })
+            .map(|(p, k, _)| (p.clone(), k.clone()))
+            .collect()
     }
 
     /// Target name (runtime env var name) for `product`/`key` in `env`.

@@ -437,6 +437,7 @@ mod tests {
             rules,
             immutable: false,
             guidance: String::new(),
+            from: None,
         };
         let env = &f.environments["prod"];
         check(
@@ -675,6 +676,7 @@ mod tests {
             },
             immutable: false,
             guidance: String::new(),
+            from: None,
         };
         let env = &f.environments["staging"];
         assert!(!applies(&spec, "staging", env, "allumata"));

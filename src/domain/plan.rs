@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::domain::model::{Fleet, Kind};
+use crate::domain::model::{Fleet, KeySpec, Kind};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
 
@@ -50,6 +50,9 @@ pub enum KeyState {
     RuleFailed(&'static str, Reason),
     Ready,
     Skipped,
+    /// A shared key (FR-45) whose source has a finding: the finding is reported once, on
+    /// the source's row, which also blocks the sync. Not counted as a finding of its own.
+    SourceBlocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +75,10 @@ pub struct Row {
     /// always `Unknown` (they are not store secrets).
     pub target: TargetState,
     pub guidance: String,
+    /// A shared key's source `(product, key)` (FR-45): `shared from <product>/<KEY>`.
+    pub source: Option<(String, String)>,
+    /// The keys declared here that share this key's value (FR-45), as `(product, key)`.
+    pub shared_by: Vec<(String, String)>,
 }
 
 pub struct SyncPlan {
@@ -233,6 +240,40 @@ pub fn build_with(
         config: BTreeMap::new(),
     };
 
+    // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
+    // whatever the field's kind: a non-empty field in a refused environment blocks even
+    // though the key is not otherwise desired there (FR-15). `rules::applies` is evaluated
+    // exactly once per key otherwise.
+    let evaluate = |product: &str,
+                    key: &str,
+                    spec: &KeySpec,
+                    field: Option<(Kind, &SecretValue)>|
+     -> Result<Option<SecretValue>, KeyState> {
+        let refused =
+            rules::refused_in(spec, env_name) && field.is_some_and(|(_, v)| !v.expose().is_empty());
+        match field {
+            _ if refused => Err(KeyState::RuleFailed(
+                "refuse_in",
+                Reason::Fixed(rules::REASON_REFUSED),
+            )),
+            Some((kind, value)) if kind == spec.kind => {
+                rules::check(product, key, spec, env_name, env, value)
+                    .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
+            }
+            other => {
+                if rules::applies(spec, env_name, env, product) {
+                    Err(if other.is_some() {
+                        KeyState::WrongKind
+                    } else {
+                        KeyState::Missing
+                    })
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    };
+
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
             let target_name = env.target_name(product, key);
@@ -242,30 +283,23 @@ pub fn build_with(
             let field = by_name.get(&(product.as_str(), key.as_str()));
             let declared_here = spec.environments.iter().any(|e| e == env_name);
 
-            // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
-            // whatever the field's kind: a non-empty field in a refused environment blocks
-            // even though the key is not otherwise desired there (FR-15). `rules::applies`
-            // is evaluated exactly once per key otherwise.
-            let refused = rules::refused_in(spec, env_name)
-                && field.is_some_and(|f| !f.value.expose().is_empty());
-            let outcome: Result<Option<SecretValue>, KeyState> = match field {
-                _ if refused => Err(KeyState::RuleFailed(
-                    "refuse_in",
-                    Reason::Fixed(rules::REASON_REFUSED),
-                )),
-                Some(f) if f.kind == spec.kind => {
-                    rules::check(product, key, spec, env_name, env, &f.value)
-                        .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
-                }
-                other => {
-                    if rules::applies(spec, env_name, env, product) {
-                        Err(if other.is_some() {
-                            KeyState::WrongKind
-                        } else {
-                            KeyState::Missing
-                        })
-                    } else {
-                        Ok(None)
+            // A shared key (FR-45) reads its source's field: the source's rules first (its
+            // transformed value is the one shared), then the key's own rules on that value.
+            // When the source has a finding, the finding is reported once, on the source
+            // row; this row only says it waits on it.
+            let source = spec.source();
+            let outcome = match source {
+                None => evaluate(product, key, spec, field.map(|f| (f.kind, &f.value))),
+                Some((sp, sk)) => {
+                    let src_spec = &fleet.products[sp].keys[sk];
+                    let src_field = by_name.get(&(sp, sk)).map(|f| (f.kind, &f.value));
+                    match evaluate(sp, sk, src_spec, src_field) {
+                        Ok(Some(v)) => evaluate(product, key, spec, Some((spec.kind, &v))),
+                        Ok(None) => evaluate(product, key, spec, src_field),
+                        Err(_) if rules::applies(spec, env_name, env, product) => {
+                            Err(KeyState::SourceBlocked)
+                        }
+                        Err(_) => Ok(None),
                     }
                 }
             };
@@ -289,6 +323,8 @@ pub fn build_with(
                     _ => TargetState::Unknown,
                 },
                 guidance: spec.guidance.clone(),
+                source: source.map(|(p, k)| (p.to_string(), k.to_string())),
+                shared_by: fleet.shared_by(env_name, product, key),
             };
 
             match outcome {
@@ -340,7 +376,11 @@ pub fn build_with(
                                     };
                                 }
                             }
-                            let rotated = opts.rotate.contains(&(product.clone(), key.clone()));
+                            // Rotating a source rotates every key sharing it (FR-45).
+                            let rotated = opts.rotate.contains(&(product.clone(), key.clone()))
+                                || source.is_some_and(|(p, k)| {
+                                    opts.rotate.contains(&(p.to_string(), k.to_string()))
+                                });
                             let on_target = row.target != TargetState::Absent;
                             if spec.immutable && on_target && !rotated {
                                 plan.held_immutable.push((product.clone(), key.clone()));
@@ -365,10 +405,12 @@ pub fn build_with(
         .retain(|(_, _, n)| !staged.contains(n.as_str()));
 
     for field in &item {
+        // A shared key (FR-45) has no field of its own: a leftover copy is an extra.
         let declared = fleet
             .products
             .get(&field.section)
-            .is_some_and(|p| p.keys.contains_key(&field.label));
+            .and_then(|p| p.keys.get(&field.label))
+            .is_some_and(|spec| spec.from.is_none());
         let pair = (field.section.clone(), field.label.clone());
         if !declared && !plan.extras.contains(&pair) {
             plan.extras.push(pair);

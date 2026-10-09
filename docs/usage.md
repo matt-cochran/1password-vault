@@ -86,6 +86,21 @@ With `--env`, doctor also reads that environment's item once, by IDs, and checks
 
 With no `secrets.toml` at all, the step is `Do: fill in and run: opv init <env> --vault <vault title> --item <item title>` for an existing item; the config line also lists `opv setup` for a project that ships `opv.setup.toml` and `--config <path>`. An invalid configuration always gets `Do: fix secrets.toml (see the config line above)`; another failure with no command of its own gets `Do: fix the <check> failure above`; both end with `Next: opv doctor`. When every check passes, the last line is `all clear: nothing pending`. The lines are text, never a prompt.
 
+### Shared keys
+
+A key declared with `from = "<product>/<KEY>"` ([configuration](configuration.md#shared-keys-from)) has a row of its own in `status`, `plan` and `check`, with the source under it:
+
+```text
+PRODUCT  KEY           KIND    STATE              TARGET
+api      DATABASE_URL  secret  missing            absent
+    affects worker/DATABASE_URL
+    guidance: Neon / connection string
+worker   DATABASE_URL  secret  blocked by source  absent
+    shared from api/DATABASE_URL
+```
+
+A missing or failing source is one finding, reported on the source with the keys it affects; the sharing keys read `blocked by source` and are not counted again. `check --product worker` and `status --product worker` include the source's row, because worker's key depends on it. JSON rows carry `"shared_from": "api/DATABASE_URL"` and the state `source_blocked`. `explain worker/DATABASE_URL` shows the source's `op://` reference and `shared from:`; `explain api/DATABASE_URL` lists `shared by:`.
+
 ### Explain a key
 
 ```sh

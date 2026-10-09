@@ -292,13 +292,23 @@ fn explain_in(
     // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
     let required_here = rules::applies(spec, env_name, env, product);
+    // A shared key (FR-45) has no field: its reference is its source's field.
+    let source = spec
+        .source()
+        .map(|(p, k)| (p, k, &fleet.products[p].keys[k]));
+    let field_label = source.map_or_else(|| label.clone(), |(p, k, _)| key_label(p, k));
+    let shared_by: Vec<String> = fleet
+        .shared_by(env_name, product, key)
+        .iter()
+        .map(|(p, k)| key_label(p, k))
+        .collect();
     if json {
         let doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
             "product": super::json_product(product),
             "key": key,
-            "reference": format!("op://{}/{}/{label}", env.vault_id, env.item_id),
+            "reference": format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
             "kind": kind_label(spec.kind),
             "field": field,
             "target": target_lines
@@ -310,19 +320,35 @@ fn explain_in(
             "guidance": (!spec.guidance.is_empty()).then_some(spec.guidance.as_str()),
             "required_here": required_here,
             "inspect": inspect_command(&env.item_id, &env.vault_id),
+            // FR-45: the key whose field holds this one's value, and the keys reading this one.
+            "shared_from": source.map(|_| field_label.clone()),
+            "shared_by": shared_by,
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }
     let mut rows: Vec<(String, String)> = vec![
         (
             "reference".into(),
-            format!("op://{}/{}/{label}", env.vault_id, env.item_id),
+            format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
         ),
         (
             "kind".into(),
             format!("{} ({field})", kind_label(spec.kind)),
         ),
     ];
+    if let Some((_, _, src)) = source {
+        rows.push((
+            "shared from".into(),
+            format!("{field_label} (its field holds the value; {label} has none)"),
+        ));
+        let src_rules = describe_rules(&src.rules);
+        if !src_rules.is_empty() {
+            rows.push(("source rules".into(), src_rules.join(", ")));
+        }
+    }
+    if !shared_by.is_empty() {
+        rows.push(("shared by".into(), shared_by.join(", ")));
+    }
     rows.extend(target_lines);
     rows.extend([
         (
@@ -335,7 +361,12 @@ fn explain_in(
         ),
         (
             "immutable".into(),
-            if spec.immutable { "yes" } else { "no" }.into(),
+            match (spec.immutable, source) {
+                (true, Some(_)) => format!("yes (follows {field_label})"),
+                (false, Some(_)) => format!("no (follows {field_label})"),
+                (true, None) => "yes".into(),
+                (false, None) => "no".into(),
+            },
         ),
         ("guidance".into(), guidance.to_string()),
     ]);
