@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
-use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
+use opv::app::{add, config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
 use opv::config;
 use opv::runner::{Budget, ProcessRunner};
 
@@ -86,7 +86,20 @@ const INIT_EXAMPLES: &str = "\
 Examples:
   opv init dev --vault myapp-dev --item app            # run-only environment
   opv init prod --vault myapp-prod --item app --fly-app myapp
+  opv init prod --vault V --item I --target azure --azure-subscription <guid> \\
+      --azure-key-vault kv-myapp --azure-resource-group rg --azure-container-app myapp
+  opv init prod --vault V --item I --target kubernetes --kubernetes-context ctx \\
+      --kubernetes-namespace myapp --kubernetes-deployment web
+  opv init staging --vault myapp-staging --item app --add-env   # add to secrets.toml
   opv init prod --vault fleet-prod --item fleet --profile fleet --force";
+
+const ADD_EXAMPLES: &str = "\
+Examples:
+  opv add api/STRIPE_KEY --kind secret --env dev,prod --rule prefix=sk_
+  opv add LOG_LEVEL --kind config --rule enum=debug,info,warn   # simple profile
+  opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable \\
+      --guidance \"32 random bytes, base64\"
+  opv add api/STRIPE_KEY --env staging          # include a declared key in staging";
 
 const EXPLAIN_EXAMPLES: &str = "\
 Examples:
@@ -318,7 +331,7 @@ enum Cmd {
     ///
     /// Looks the vault and item up by title once, reads the item's field names and types
     /// (never its values) and writes IDs, key names and kinds. Writes nothing to 1Password.
-    /// Does not use --config or OPV_CONFIG.
+    /// Does not use --config or OPV_CONFIG, except with --add-env, which edits that file.
     #[command(after_help = INIT_EXAMPLES)]
     Init {
         /// Environment name to declare (for example staging or prod).
@@ -329,16 +342,50 @@ enum Cmd {
         /// Item title in that vault, matched exactly.
         #[arg(long)]
         item: String,
-        /// Fly app of the environment (not looked up; flyctl is not called). Omit it for a
-        /// run-only environment used for local development.
-        #[arg(long, value_name = "APP")]
-        fly_app: Option<String>,
+        /// Deployment target of the environment; its options follow (--<target>-<field>).
+        /// Inferred from those options when omitted; omit both for a run-only environment
+        /// used for local development. Nothing is looked up.
+        #[arg(long, value_name = "PROVIDER")]
+        target: Option<String>,
+        /// Add this environment to the existing secrets.toml (found like other commands:
+        /// --config, OPV_CONFIG or the nearest one) instead of writing a new file; comments
+        /// are kept, and every declared key the item has includes the environment.
+        #[arg(long, conflicts_with_all = ["force", "profile"])]
+        add_env: bool,
         /// Profile to write; without it, it follows the item's shape.
         #[arg(long, value_parser = ["simple", "fleet"])]
         profile: Option<String>,
         /// Overwrite an existing secrets.toml.
         #[arg(long)]
         force: bool,
+    },
+    /// Declare a key in secrets.toml, or add environments to a declared key.
+    ///
+    /// Edits the file in place (comments and order kept) and validates it like a
+    /// hand-written one before writing: a name that collides on a target, an unknown rule
+    /// or a bad rule value is refused. Makes no 1Password or target call.
+    #[command(after_help = ADD_EXAMPLES)]
+    Add {
+        /// The key: PRODUCT/KEY (fleet profile) or KEY (simple profile).
+        #[arg(value_name = "[PRODUCT/]KEY")]
+        name: String,
+        /// secret (a concealed field) or config (a text field); required for a new key.
+        #[arg(long, value_parser = ["secret", "config"])]
+        kind: Option<String>,
+        /// Environments that need the key (repeat or comma-separate); default: every
+        /// declared environment.
+        #[arg(long, value_delimiter = ',')]
+        env: Vec<String>,
+        /// A rule as name=value (prefix=sk_, base64_bytes=32, enum=debug,info) or a flag
+        /// rule by name (https_url); repeatable.
+        #[arg(long, value_name = "NAME[=VALUE]")]
+        rule: Vec<String>,
+        /// Where the value comes from, shown by explain and setup.
+        #[arg(long)]
+        guidance: Option<String>,
+        /// Staged only when absent on the target unless rotated.
+        #[arg(long)]
+        immutable: bool,
     },
     /// Print a shell completion script for commands and options.
     #[command(after_help = completions::INSTALL)]
@@ -465,6 +512,59 @@ impl<W: Write> Write for PipeSafe<W> {
     }
 }
 
+/// The command line: the derived [`Cli`] plus each provider's `init` options
+/// (`--<provider>-<field>`), taken from the plug-in contract so a new provider adds its
+/// options without a change here (H3).
+fn command_line() -> clap::Command {
+    use opv::adapters::registry;
+    use opv::provider::init_flag;
+    Cli::command().mut_subcommand("init", |mut c| {
+        c = c.mut_arg("target", |a| {
+            a.value_parser(clap::builder::PossibleValuesParser::new(
+                registry::PROVIDERS
+                    .iter()
+                    .filter(|p| !p.init_fields().is_empty())
+                    .map(|p| p.section()),
+            ))
+        });
+        for p in registry::PROVIDERS {
+            for f in p.init_fields() {
+                let flag = init_flag(*p, f);
+                let help = if f.required {
+                    format!("{} (required with --target {})", f.help, p.section())
+                } else {
+                    f.help.to_string()
+                };
+                c = c.arg(
+                    clap::Arg::new(flag.clone())
+                        .long(flag)
+                        .value_name(f.field.to_ascii_uppercase())
+                        .help(help)
+                        .help_heading(format!("{} target options", p.label())),
+                );
+            }
+        }
+        c
+    })
+}
+
+/// The provider options given to `init`, by option name.
+fn init_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
+    use opv::adapters::registry;
+    use opv::provider::init_flag;
+    let Some(m) = matches.subcommand_matches("init") else {
+        return Default::default();
+    };
+    registry::PROVIDERS
+        .iter()
+        .flat_map(|p| p.init_fields().iter().map(move |f| init_flag(*p, f)))
+        .filter_map(|flag| {
+            m.get_one::<String>(&flag)
+                .map(|v| (flag.clone(), v.clone()))
+        })
+        .collect()
+}
+
 /// Where the configuration path came from, for the `using` line and `init`'s refusal.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConfigSource {
@@ -476,7 +576,7 @@ enum ConfigSource {
 fn main() -> ExitCode {
     // clap prints usage errors itself (exit 2, shared with configuration errors); opv adds
     // the `Next:` line (NR-19).
-    let matches = match Cli::command().try_get_matches() {
+    let matches = match command_line().try_get_matches() {
         Ok(m) => m,
         Err(e) => return usage_error(e),
     };
@@ -489,6 +589,7 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage_error(e),
     };
+    let init_options = init_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
     opv::runner::signals::set_rerun(&rerun);
     let mut stdout = PipeSafe {
@@ -502,11 +603,11 @@ fn main() -> ExitCode {
     ) && cli.cmd.has_state_words();
     let res = if paint {
         let mut painter = colour::Painter::new(&mut stdout);
-        let res = run(cli, config_source, &mut painter);
+        let res = run(cli, config_source, &init_options, &mut painter);
         let _ = painter.flush();
         res
     } else {
-        run(cli, config_source, &mut stdout)
+        run(cli, config_source, &init_options, &mut stdout)
     };
     let _ = stdout.flush();
     match res {
@@ -538,7 +639,7 @@ fn usage_error(e: clap::Error) -> ExitCode {
         e.exit();
     }
     let _ = e.print();
-    let cmd = Cli::command();
+    let cmd = command_line();
     let sub = std::env::args()
         .skip(1)
         .find(|a| cmd.get_subcommands().any(|s| s.get_name() == a));
@@ -644,9 +745,14 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
     }
 }
 
-fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32, Error> {
+fn run(
+    cli: Cli,
+    config_source: ConfigSource,
+    init_options: &std::collections::BTreeMap<String, String>,
+    out: &mut dyn Write,
+) -> Result<i32, Error> {
     if let Cmd::Completions { shell } = &cli.cmd {
-        completions::write(*shell, &mut Cli::command(), out);
+        completions::write(*shell, &mut command_line(), out);
         return Ok(0);
     }
     if let Cmd::Session { account, command } = &cli.cmd {
@@ -696,31 +802,16 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
             Error::Dependency(format!("cannot install signal handlers: {e}").into())
         })?;
     }
-    if let Cmd::Init { .. } = &cli.cmd {
-        return run_init(cli, config_source, &r, out).map(|()| 0);
+    if let Cmd::Init { add_env: false, .. } = &cli.cmd {
+        return run_init(cli, config_source, init_options, &r, out).map(|()| 0);
     }
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
-    let loaded = match &cli.config {
-        Some(path) => {
-            if config_source == ConfigSource::Env {
-                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
-            }
-            config::load(path)
-        }
-        None => match std::env::current_dir() {
-            Err(e) => Err(Error::Config(
-                format!("cannot read the current directory: {e}").into(),
-            )),
-            Ok(start) => match config::discover(&start) {
-                Some(found) => {
-                    let _ = writeln!(io::stderr(), "using {}", found.display());
-                    config::load(&found)
-                }
-                None => Err(config::not_found(&start)),
-            },
-        },
-    };
+    let path = config_path(cli.config.as_deref(), config_source);
+    if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } = &cli.cmd {
+        return run_edit(cli.cmd, &path?, init_options, &r, out).map(|()| 0);
+    }
+    let loaded = path.and_then(|p| config::load(&p));
     let mut cmd = cli.cmd;
     apply_product_env(&mut cmd, &loaded);
     if let Cmd::Run {
@@ -745,6 +836,7 @@ fn run_other(
         Cmd::Session { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
+        Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Completions { .. } => unreachable!("handled by run"),
         Cmd::Doctor { env, product, json } => {
             doctor::run_scoped_as(loaded, env.as_deref(), product.as_deref(), json, r, out)
@@ -775,24 +867,36 @@ fn run_other(
     }
 }
 
+/// The configuration file to use: `--config` / `OPV_CONFIG`, else the nearest
+/// `secrets.toml` from the current directory up. Prints `using <path>` on stderr unless
+/// the path came from `--config`.
+fn config_path(flag: Option<&std::path::Path>, source: ConfigSource) -> Result<PathBuf, Error> {
+    match flag {
+        Some(path) => {
+            if source == ConfigSource::Env {
+                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
+            }
+            Ok(path.to_path_buf())
+        }
+        None => {
+            let start = std::env::current_dir().map_err(|e| {
+                Error::Config(format!("cannot read the current directory: {e}").into())
+            })?;
+            let found = config::discover(&start).ok_or_else(|| config::not_found(&start))?;
+            let _ = writeln!(io::stderr(), "using {}", found.display());
+            Ok(found)
+        }
+    }
+}
+
 /// `init` writes `./secrets.toml`; it reads no configuration, so it runs before discovery.
 fn run_init(
     cli: Cli,
     config_source: ConfigSource,
+    init_options: &std::collections::BTreeMap<String, String>,
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let Cmd::Init {
-        env,
-        vault,
-        item,
-        fly_app,
-        profile,
-        force,
-    } = cli.cmd
-    else {
-        unreachable!("called for init only")
-    };
     if cli.config.is_some() {
         let how = if config_source == ConfigSource::Env {
             "OPV_CONFIG is set; unset it for init"
@@ -800,20 +904,76 @@ fn run_init(
             "--config is not used"
         };
         return Err(Error::Config(
-            format!("init writes secrets.toml in the current directory; {how}").into(),
+            format!(
+                "init writes secrets.toml in the current directory; {how} (to add an \
+                 environment to that file, pass --add-env)"
+            )
+            .into(),
         ));
     }
     let dir = std::env::current_dir()
         .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
-    let args = init::InitArgs {
+    init::run(&init_args(cli.cmd, init_options)?, &dir, r, out)
+}
+
+/// `add` and `init --add-env`: edit the configuration file at `path` in place.
+fn run_edit(
+    cmd: Cmd,
+    path: &std::path::Path,
+    init_options: &std::collections::BTreeMap<String, String>,
+    r: &ProcessRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    match cmd {
+        Cmd::Add {
+            name,
+            kind,
+            env,
+            rule,
+            guidance,
+            immutable,
+        } => add::run(
+            &add::AddArgs {
+                name,
+                kind,
+                envs: env,
+                rules: rule,
+                guidance,
+                immutable,
+            },
+            path,
+            out,
+        ),
+        cmd @ Cmd::Init { .. } => init::add_env(&init_args(cmd, init_options)?, path, r, out),
+        _ => unreachable!("called for add and init --add-env only"),
+    }
+}
+
+fn init_args(
+    cmd: Cmd,
+    init_options: &std::collections::BTreeMap<String, String>,
+) -> Result<init::InitArgs, Error> {
+    let Cmd::Init {
         env,
         vault,
         item,
-        fly_app,
+        target,
+        add_env: _,
+        profile,
+        force,
+    } = cmd
+    else {
+        unreachable!("called for init only")
+    };
+    Ok(init::InitArgs {
+        env,
+        vault,
+        item,
+        target,
+        fields: init_options.clone(),
         profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
-    };
-    init::run(&args, &dir, r, out)
+    })
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

@@ -38,10 +38,16 @@ fn args(profile: Option<Profile>, force: bool) -> InitArgs {
         env: "staging".into(),
         vault: "myapp-staging".into(),
         item: "myapp".into(),
-        fly_app: Some("myapp-staging".into()),
+        target: None,
+        fields: fly("myapp-staging"),
         profile,
         force,
     }
+}
+
+/// The Fly provider's `--fly-app` option.
+fn fly(app: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([("fly-app".to_string(), app.to_string())])
 }
 
 fn v(s: &str) -> String {
@@ -167,7 +173,7 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
     let path = dir.path().join(FILE_NAME);
     assert!(
         out.contains(&format!(
-            "wrote {} (simple profile): 2 secret, 1 config, skipped 0",
+            "wrote {} (simple profile, fly target): 2 secret, 1 config, skipped 0",
             path.display()
         )),
         "{out}"
@@ -208,7 +214,7 @@ fn sectioned_item_writes_a_fleet_file_that_the_loader_accepts() {
     );
     assert!(
         run.out
-            .contains("(fleet profile): 2 secret, 1 config, skipped 0"),
+            .contains("(fleet profile, fly target): 2 secret, 1 config, skipped 0"),
         "{}",
         run.out
     );
@@ -441,7 +447,7 @@ fn bad_fly_app_or_env_name_fails_before_any_call() {
     ] {
         let mut a = args(None, false);
         a.env = env.into();
-        a.fly_app = Some(app.into());
+        a.fields = fly(app);
         let run = run_in(dir.path(), &a, vec![]);
         assert_eq!(run.err().exit_code(), 2, "{env} {app}");
         assert!(run.r.calls.borrow().is_empty());
@@ -453,12 +459,12 @@ fn bad_fly_app_or_env_name_fails_before_any_call() {
 fn bad_fly_app_error_quotes_the_app_name() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = args(None, false);
-    a.fly_app = Some("my app".into());
+    a.fields = fly("my app");
     let run = run_in(dir.path(), &a, vec![]);
     assert!(
         run.err()
             .to_string()
-            .contains("--fly-app \"my app\" must match"),
+            .contains("fly.app \"my app\" must match"),
         "{}",
         run.err()
     );
@@ -810,7 +816,7 @@ fn no_ancestor_note_without_an_ancestor_file() {
 #[test]
 fn targetless_init_writes_no_fly_section() {
     let mut a = args(None, false);
-    a.fly_app = None;
+    a.fields.clear();
     let (_dir, run) = init_with(&simple_fields(), &a);
     assert!(!run.file().contains("fly."));
 }
@@ -818,7 +824,7 @@ fn targetless_init_writes_no_fly_section() {
 #[test]
 fn targetless_fleet_init_points_to_product_check() {
     let mut a = args(None, false);
-    a.fly_app = None;
+    a.fields.clear();
     let (_dir, run) = init_with(&fleet_fields(), &a);
     assert!(run.out.contains("opv check staging --product <product>"));
 }
@@ -827,7 +833,7 @@ fn targetless_fleet_init_points_to_product_check() {
 #[test]
 fn targetless_single_product_init_names_the_product() {
     let mut a = args(None, false);
-    a.fly_app = None;
+    a.fields.clear();
     let one: Vec<Field> = fleet_fields()
         .into_iter()
         .filter(|f| f.0 == "api")
@@ -846,6 +852,303 @@ fn init_points_to_the_rules_reference_url() {
     let (_dir, run) = init_with(&fleet_fields(), &args(None, false));
     assert!(
         run.out.contains("configuration.md#rules-reference"),
+        "{}",
+        run.out
+    );
+}
+
+// H3: `init --target <provider>` with the provider's own options, through the plug-in
+// contract.
+
+const GUID: &str = "00000000-0000-0000-0000-0000000000ab";
+
+fn with_target(target: Option<&str>, opts: &[(&str, &str)]) -> InitArgs {
+    let mut a = args(None, false);
+    a.target = target.map(String::from);
+    a.fields = opts
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    a
+}
+
+fn azure_opts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("azure-subscription", GUID),
+        ("azure-key-vault", "kv-myapp"),
+        ("azure-resource-group", "rg-myapp"),
+        ("azure-container-app", "myapp"),
+    ]
+}
+
+fn kubernetes_opts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("kubernetes-context", "kind-dev"),
+        ("kubernetes-namespace", "myapp"),
+        ("kubernetes-deployment", "web"),
+    ]
+}
+
+/// The provider section of the written file's environment, as loaded.
+fn loaded_target(dir: &Path) -> &'static str {
+    let fleet = config::load(dir.join(FILE_NAME)).unwrap();
+    fleet.environments["staging"]
+        .target
+        .as_ref()
+        .map_or("none", |t| t.provider().section())
+}
+
+#[test]
+fn fly_target_by_option_writes_a_file_that_loads() {
+    let (dir, _run) = init_with(
+        &fleet_fields(),
+        &with_target(Some("fly"), &[("fly-app", "a")]),
+    );
+    assert_eq!(loaded_target(dir.path()), "fly");
+}
+
+#[test]
+fn azure_target_writes_a_fleet_file_that_loads() {
+    let (dir, _run) = init_with(&fleet_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert_eq!(loaded_target(dir.path()), "azure");
+}
+
+#[test]
+fn azure_target_writes_a_simple_file_that_loads() {
+    let (dir, _run) = init_with(&simple_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert_eq!(loaded_target(dir.path()), "azure");
+}
+
+#[test]
+fn kubernetes_target_writes_a_fleet_file_that_loads() {
+    let (dir, _run) = init_with(
+        &fleet_fields(),
+        &with_target(Some("kubernetes"), &kubernetes_opts()),
+    );
+    assert_eq!(loaded_target(dir.path()), "kubernetes");
+}
+
+#[test]
+fn kubernetes_target_writes_a_simple_file_that_loads() {
+    let (dir, _run) = init_with(
+        &simple_fields(),
+        &with_target(Some("kubernetes"), &kubernetes_opts()),
+    );
+    assert_eq!(loaded_target(dir.path()), "kubernetes");
+}
+
+#[test]
+fn the_target_is_inferred_from_its_options() {
+    let (dir, _run) = init_with(&fleet_fields(), &with_target(None, &kubernetes_opts()));
+    assert_eq!(loaded_target(dir.path()), "kubernetes");
+}
+
+#[test]
+fn azure_identity_defaults_to_system() {
+    let (_dir, run) = init_with(&fleet_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert!(
+        run.file().contains("azure.identity = \"system\"\n"),
+        "{}",
+        run.file()
+    );
+}
+
+#[test]
+fn optional_options_are_written() {
+    let mut opts = kubernetes_opts();
+    opts.push(("kubernetes-container", "app"));
+    let (_dir, run) = init_with(&fleet_fields(), &with_target(Some("kubernetes"), &opts));
+    assert!(
+        run.file().contains("kubernetes.container = \"app\"\n"),
+        "{}",
+        run.file()
+    );
+}
+
+#[test]
+fn a_missing_required_option_is_refused_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(
+        dir.path(),
+        &with_target(Some("azure"), &azure_opts()[..3]),
+        vec![],
+    );
+    assert!(
+        run.err().to_string().contains("--azure-container-app"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn options_of_two_providers_without_target_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = kubernetes_opts();
+    opts.push(("fly-app", "a"));
+    let run = run_in(dir.path(), &with_target(None, &opts), vec![]);
+    assert!(
+        run.err().to_string().contains("pass --target"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn an_option_of_another_provider_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = kubernetes_opts();
+    opts.push(("fly-app", "a"));
+    let run = run_in(dir.path(), &with_target(Some("kubernetes"), &opts), vec![]);
+    assert!(
+        run.err()
+            .to_string()
+            .contains("--fly-app is an option of --target fly"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn an_invalid_option_value_is_refused_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = azure_opts();
+    opts[0] = ("azure-subscription", "not-a-guid");
+    let run = run_in(dir.path(), &with_target(Some("azure"), &opts), vec![]);
+    assert!(run.r.calls.borrow().is_empty());
+}
+
+#[test]
+fn an_unknown_target_is_refused_listing_the_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(dir.path(), &with_target(Some("heroku"), &[]), vec![]);
+    assert!(run.err().to_string().contains("known: "), "{}", run.err());
+}
+
+#[test]
+fn a_target_refusal_points_at_the_init_help() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(dir.path(), &with_target(Some("azure"), &[]), vec![]);
+    assert_eq!(run.err().next_step(), Some("opv init --help"));
+}
+
+// H2: `init <env> --add-env` adds one environment to an existing file.
+
+const EXISTING: &str = "# Fleet config; values live in 1Password.\n[profile]\nkind = \"fleet\"\n\n\
+[environments.prod]   # live\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\n\
+# api\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.api.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]  # going away\n";
+
+struct AddEnv {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+    res: Result<(), Error>,
+    out: String,
+    r: FakeRunner,
+}
+
+impl AddEnv {
+    fn text(&self) -> String {
+        fs::read_to_string(&self.path).unwrap()
+    }
+    fn fleet(&self) -> crate::domain::Fleet {
+        config::parse(&self.text()).unwrap()
+    }
+}
+
+fn add_env_with(file: &str, a: &InitArgs, fields: &[Field]) -> AddEnv {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    fs::write(&path, file).unwrap();
+    let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
+    let mut out = Vec::new();
+    let res = add_env(a, &path, &r, &mut out);
+    let run = AddEnv {
+        _dir: dir,
+        path,
+        res,
+        out: text_of(&out),
+        r,
+    };
+    assert_no_values(&run.text());
+    assert_no_values(&run.out);
+    assert_no_values_in_argv(&run.r);
+    run
+}
+
+fn staging() -> InitArgs {
+    let mut a = args(None, false);
+    a.fields.clear();
+    a
+}
+
+#[test]
+fn add_env_keeps_every_comment() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let text = run.text();
+    let comments: Vec<&str> = EXISTING.lines().filter(|l| l.contains('#')).collect();
+    assert!(comments.iter().all(|c| text.contains(c)), "{text}");
+}
+
+#[test]
+fn add_env_writes_the_environment_with_its_ids() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let env = &run.fleet().environments["staging"];
+    assert_eq!(
+        (env.vault_id.as_str(), env.item_id.as_str()),
+        (VAULT_ID, ITEM_ID)
+    );
+}
+
+#[test]
+fn add_env_includes_the_keys_the_item_has() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
+        vec!["prod", "staging"]
+    );
+}
+
+#[test]
+fn add_env_leaves_out_the_keys_the_item_lacks() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["api"].keys["LEGACY_TOKEN"].environments,
+        vec!["prod"]
+    );
+}
+
+#[test]
+fn add_env_names_the_item_fields_not_declared() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert!(
+        run.out
+            .contains("in the item but not declared: api/SIGNUP_POLICY, web-app/SESSION_KEY"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn add_env_writes_the_target_options() {
+    let mut a = staging();
+    a.fields = fly("myapp-staging");
+    let run = add_env_with(EXISTING, &a, &fleet_fields());
+    assert!(run.fleet().environments["staging"].target.is_some());
+}
+
+#[test]
+fn add_env_refuses_an_existing_environment_before_any_call() {
+    let mut a = staging();
+    a.env = "prod".into();
+    let run = add_env_with(EXISTING, &a, &fleet_fields());
+    assert!(run.r.calls.borrow().is_empty() && run.res.is_err());
+}
+
+#[test]
+fn add_env_without_a_target_points_at_check() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert!(
+        run.out.ends_with("Next: opv check staging --product api\n"),
         "{}",
         run.out
     );

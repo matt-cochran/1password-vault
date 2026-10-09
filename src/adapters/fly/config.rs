@@ -2,7 +2,7 @@
 //! the port wiring (FR-37, §10.3). Every user-visible Fly message is unchanged from 0.4.
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use serde::Deserialize;
@@ -15,7 +15,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig, Verdict, eq_as,
+    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, TargetConfig,
+    Verdict, eq_as, init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -139,15 +140,34 @@ impl Provider for FlyProvider {
         }
     }
 
-    fn init_section(&self, app: &str, profile: Profile) -> Option<String> {
-        let quoted = |s: &str| toml::Value::String(s.to_string()).to_string();
-        let mut s = format!("fly.app = {}\n", quoted(app));
-        if profile == Profile::Fleet {
-            s.push_str(&format!("fly.secret_name = {}\n", quoted(FLEET_TEMPLATE)));
+    fn init_fields(&self) -> &'static [InitField] {
+        &INIT_FIELDS
+    }
+
+    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
+        let mut lines: Vec<(&str, &str)> = vec![("app", values.get("app")?.as_str())];
+        match (values.get("secret_name"), profile) {
+            (Some(t), _) => lines.push(("secret_name", t)),
+            (None, Profile::Fleet) => lines.push(("secret_name", FLEET_TEMPLATE)),
+            (None, Profile::Simple) => {}
         }
-        Some(s)
+        Some(init_lines("fly", lines))
     }
 }
+
+/// `opv init --target fly` options (H3): `--fly-app` and `--fly-secret-name`.
+static INIT_FIELDS: [InitField; 2] = [
+    InitField {
+        field: "app",
+        help: "Fly app of the environment (not looked up; flyctl is not called)",
+        required: true,
+    },
+    InitField {
+        field: "secret_name",
+        help: "Fly secret name template (fleet profile; default FLEET__{PRODUCT}__{KEY})",
+        required: false,
+    },
+];
 
 /// The app name goes into argv: non-empty, unpadded, never read as a flag.
 fn check_app(env: &str, app: &str) -> Result<(), Error> {
@@ -349,7 +369,12 @@ mod tests {
     #[test]
     fn init_section_writes_the_fleet_template() {
         assert_eq!(
-            PROVIDER.init_section("my-app", Profile::Fleet).as_deref(),
+            PROVIDER
+                .init_section(
+                    &BTreeMap::from([("app", "my-app".to_string())]),
+                    Profile::Fleet
+                )
+                .as_deref(),
             Some("fly.app = \"my-app\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n")
         );
     }

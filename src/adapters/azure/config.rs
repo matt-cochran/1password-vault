@@ -2,7 +2,7 @@
 //! `TargetConfig` (FR-28, FR-30, FR-37).
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -16,8 +16,8 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
 use crate::provider::{
-    Check, NameRules, Preflight, PreflightMode, Provider, Section, StoreConfig, StoreNameRules,
-    TargetConfig, eq_as,
+    Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreConfig,
+    StoreNameRules, TargetConfig, eq_as, init_lines,
 };
 use crate::runner::CommandRunner;
 
@@ -128,6 +128,53 @@ struct RawAzure {
     config: Option<String>,
 }
 
+/// The env-name template `opv init` writes under the fleet profile.
+const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
+
+/// `opv init --target azure` options (H3), in the order they are written.
+static INIT_FIELDS: [InitField; 8] = [
+    InitField {
+        field: "subscription",
+        help: "Azure subscription id (a GUID; az account list -o table)",
+        required: true,
+    },
+    InitField {
+        field: "key_vault",
+        help: "Key Vault name the secrets are written to",
+        required: true,
+    },
+    InitField {
+        field: "resource_group",
+        help: "Resource group of the Container App",
+        required: true,
+    },
+    InitField {
+        field: "container_app",
+        help: "Container App that reads the secrets",
+        required: true,
+    },
+    InitField {
+        field: "container",
+        help: "Container in the app (only when it has more than one)",
+        required: false,
+    },
+    InitField {
+        field: "identity",
+        help: "system (default) or the resource id of a user-assigned identity",
+        required: false,
+    },
+    InitField {
+        field: "env_name",
+        help: "Env-name template (fleet profile; default FLEET__{PRODUCT}__{KEY})",
+        required: false,
+    },
+    InitField {
+        field: "config",
+        help: "Where config keys go: env (default) or store",
+        required: false,
+    },
+];
+
 fn cfg(msg: String) -> Error {
     Error::Config(msg.into())
 }
@@ -181,8 +228,22 @@ impl Provider for AzureProvider {
             .into()
     }
 
-    fn init_section(&self, _name: &str, _profile: Profile) -> Option<String> {
-        None
+    fn init_fields(&self) -> &'static [InitField] {
+        &INIT_FIELDS
+    }
+
+    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
+        let mut lines: Vec<(&str, &str)> = Vec::new();
+        for f in &INIT_FIELDS {
+            let v = match (values.get(f.field), f.field, profile) {
+                (Some(v), _, _) => v.as_str(),
+                (None, "identity", _) => "system",
+                (None, "env_name", Profile::Fleet) => INIT_FLEET_TEMPLATE,
+                (None, _, _) => continue,
+            };
+            lines.push((f.field, v));
+        }
+        Some(init_lines("azure", lines))
     }
 
     fn store_kinds(&self) -> &'static [&'static str] {

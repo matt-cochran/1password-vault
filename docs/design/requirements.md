@@ -539,8 +539,12 @@ Acceptance:
 The CLI shall provide:
 
 ```bash
-opv init <environment> --vault <name> --item <name> --fly-app <app> [--profile simple|fleet] [--force]
+opv init <environment> --vault <name> --item <name> [--target <provider> --<provider>-<field> <value> …] [--profile simple|fleet] [--force]
+opv init <environment> --vault <name> --item <name> --add-env [--target …]
+opv add <[product/]KEY> --kind secret|config [--env <env> …] [--rule <name>[=<value>] …] [--guidance <text>] [--immutable]
 ```
+
+Since 0.5.0 (H2, H3): the target section is written for every provider from its own `init` fields (`Provider::init_fields` and `Provider::init_section`), so a new provider adds its options without core or CLI changes; `--target` may be omitted when the options name one provider, and `--fly-app` is the Fly provider's `app` option. Nothing is looked up. `--add-env` adds one environment to an existing file (found like every other command's), and adds it to every declared key whose field the item has; an existing environment is refused. `add` declares a key (or adds environments to a declared one) without a 1Password call. Both edit the file in place, keeping comments and order, validate the edited text with the same loader before writing (a name colliding on any target is refused), and write atomically (temporary file in the same directory, then a rename).
 
 It is a dev-time helper that writes a starter `secrets.toml`. It resolves the vault and item titles to IDs (exact title match; zero or several matches is an error), reads the item once, and writes the configuration: the environment with `vault_id`, `item_id` and `fly.app`, and one declared key per field, with its kind taken from the field type (concealed = secret, text = config, FR-14). A sectioned item produces a fleet file (section = product, with the default template `FLEET__{PRODUCT}__{KEY}`); an unsectioned item produces a simple file (FR-20), whose fields are unsectioned. `--profile simple|fleet` overrides this detection. Without `--profile`, an item that mixes sectioned and unsectioned fields is an error that names both shapes; `init` never guesses. Rules and guidance are left for the person to add.
 
@@ -552,7 +556,7 @@ Acceptance:
 - `init` reads the item but writes only names and kinds. Values are never deserialized into opv types (the field struct has no `value` member; the raw `op` output stays in a zeroizing buffer, SR-2, SR-8), and no value reaches disk or output (SR-1, SR-4).
 - If the target file exists, `init` refuses (exit 2) unless `--force` is given. It never merges into an existing file.
 - `init` writes nothing to 1Password (FR-11, SR-5).
-- `--fly-app`, the IDs and the field names are validated as for a hand-written file (§10.2), and the generated text is checked with the same loader before it is written. A field whose label is not a valid key name, a section whose label is not a valid product name, and a field of another type are skipped with a note that names them; nothing is ever renamed (ruling, v0.2: skipped with a note rather than failing the whole file, so one stray field does not block init).
+- The target options, the IDs and the field names are validated as for a hand-written file (§10.2), and the generated text is checked with the same loader before it is written. A field whose label is not a valid key name, a section whose label is not a valid product name, and a field of another type are skipped with a note that names them; nothing is ever renamed (ruling, v0.2: skipped with a note rather than failing the whole file, so one stray field does not block init).
 
 Constraints kept: FR-11, FR-13, SR-1, SR-2, SR-3, SR-4, SR-5, SR-7.
 

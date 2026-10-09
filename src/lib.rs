@@ -5,6 +5,7 @@
 pub mod adapters;
 pub mod app;
 pub mod config;
+pub mod config_edit;
 pub mod domain;
 pub mod error;
 pub mod host;

@@ -748,6 +748,60 @@ fn init_accepts_a_run_only_environment() {
     assert_eq!(code, 3, "{err}");
 }
 
+/// H3: every provider's `init` options reach the command line from the plug-in contract.
+#[test]
+fn init_help_lists_each_providers_options() {
+    let (_, out, _) = opv(&["init", "--help"]);
+    let flags = ["--fly-app", "--azure-key-vault", "--kubernetes-namespace"];
+    assert!(flags.iter().all(|f| out.contains(f)), "{out}");
+}
+
+/// H3: a provider option is parsed and checked before any call (no op on PATH needed).
+#[test]
+fn init_with_a_missing_required_option_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, _, err) = opv_in(
+        dir.path(),
+        &[
+            "init",
+            "prod",
+            "--vault",
+            "v",
+            "--item",
+            "i",
+            "--azure-key-vault",
+            "kv",
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+}
+
+/// H2: `opv add` edits the discovered file end to end.
+#[test]
+fn add_declares_a_key_in_the_discovered_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::copy("tests/fixtures/simple.toml", &path).unwrap();
+    let (code, _, err) = opv_in(dir.path(), &["add", "SENTRY_DSN", "--kind", "secret"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// H2: `init --add-env` refuses an environment the file already has, before any call.
+#[test]
+fn init_add_env_refuses_an_existing_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple.toml",
+        dir.path().join("secrets.toml"),
+    )
+    .unwrap();
+    let (code, _, err) = opv_in(
+        dir.path(),
+        &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
+    );
+    assert!(code == 2 && err.contains("already exists"), "{code} {err}");
+}
+
 /// A fake `op` that runs `script`, in a fresh PATH dir; returns the dir.
 #[cfg(unix)]
 fn fake_op(script: &str) -> tempfile::TempDir {

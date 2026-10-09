@@ -36,6 +36,9 @@ before upgrading.
 - `opv explain KEY` resolves the product when only one declares the key, lists the candidates when several do, and suggests close names for an unknown key or product; a single close name becomes the `Next:` command.
 - When an external call fails, its last stderr lines (at most 5, every secret masked as `__SECRET__`) follow opv's error line as `  <program> said: …`, before the `Next:` line (NR-31).
 - After staging, `sync` re-reads Fly's list for up to 30 seconds until every staged name shows a digest, so a lagging list is never reported as unchanged (NR-30).
+- `opv add <[product/]KEY> --kind secret|config [--env e …] [--rule name=value …] [--guidance …] [--immutable]` declares a key in `secrets.toml`, or adds environments to a declared key, without hand-editing. The file is edited in place (comments and order kept), validated like a hand-written file before writing (a name colliding on any target, an unknown rule or a bad value is refused and nothing is written) and written atomically. No 1Password or target call; `Next: opv item skeleton <env>` ([configuration](docs/configuration.md#declare-a-key-opv-add); H2).
+- `opv init <env> --vault … --item … --add-env` adds one environment to the existing `secrets.toml` and includes it in every declared key the item has; it refuses an environment that already exists (H2).
+- `opv init --target fly|azure|kubernetes` with each provider's options (`--azure-key-vault`, `--kubernetes-namespace`, …) writes the target section for every provider; the options come from the provider contract (`Provider::init_fields`), so a new provider brings its own. `--fly-app` keeps working ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init); H3).
 
 ### Changed
 

@@ -2,7 +2,7 @@
 
 ## Workflow
 
-Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the flag wins). Without either, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config` or `OPV_CONFIG`, the path is used exactly as given and no search is done; a path from `OPV_CONFIG` is announced as `using <path> (from OPV_CONFIG)` on stderr. `init` refuses both, because it always writes `./secrets.toml`. `<ENV>` is an environment name from the file.
+Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the flag wins). Without either, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config` or `OPV_CONFIG`, the path is used exactly as given and no search is done; a path from `OPV_CONFIG` is announced as `using <path> (from OPV_CONFIG)` on stderr. `init` refuses both, because it always writes `./secrets.toml`; `init --add-env` and `add` edit the file found this way. `<ENV>` is an environment name from the file.
 
 `OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env`, `explain` (where a bare `KEY` means `$OPV_PRODUCT/KEY`), `status <ENV>` and `plan`. It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
 
@@ -13,6 +13,9 @@ opv doctor                          # config, op and sign-in, flyctl and sign-in
 opv doctor --env dev --product allumata   # only what local work in dev needs, plus one read of its item
 opv doctor --json                   # the same checks as one JSON document
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
+opv init prod --vault myapp-prod --item myapp --add-env --target kubernetes \
+  --kubernetes-context prod --kubernetes-namespace myapp --kubernetes-deployment web   # one more environment
+opv add api/STRIPE_KEY --kind secret --env staging,prod --rule prefix=sk_   # declare a key; comments kept
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
 opv status                          # one line per environment
 opv status staging                  # one row per product and key; exit 8 if any blocks
@@ -28,7 +31,7 @@ opv run dev --product allumata -- cargo run
 opv run prod -- ./server            # simple profile: no --product
 ```
 
-1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
+1. `init` writes `secrets.toml` from an existing item, `init --add-env` adds an environment to it and `add` declares a key in it, all without hand-editing (see [configuration](configuration.md#declare-a-key-opv-add)). `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
 2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values. Its first line counts the rows: `staging: 12 keys · 10 saved · 1 skipped · 1 finding · 2 not yet on Fly`.
 3. `plan` shows the same rows plus the target side, then names what a sync would do and ends with the command that does it (see [Plan](#plan)). It changes nothing.
 4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app stops it with nothing written. A Fly deploy already running is waited for: opv reads the releases again every 5 s, prints `waiting for the running Fly deploy of <app> (release vN) to finish, 15 s` on stderr at least every 15 s, and goes on once it has finished; if it is still running when the `--timeout` budget is nearly spent (or after 10 minutes), opv stops with nothing written and a `Next:` line. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.

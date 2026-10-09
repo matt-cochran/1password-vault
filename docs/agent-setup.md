@@ -43,7 +43,21 @@ If the 1Password item already exists, let opv write the file. It looks the vault
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging
 ```
 
-Repeat per environment by adding the next `[environments.<env>]` block by hand (vault ID and item ID, plus `fly.app` only for an environment that deploys to Fly; a local-only `dev` environment has none), copying the IDs from `opv init` output or from `op vault list --format json` and `op item list --vault <vault> --format json` (these list IDs and titles, not values). Then add rules where the user knows the format of a value, for example `rules = { prefix = "sk-" }` or `rules = { base64_bytes = 32 }`; see [configuration.md](configuration.md#rules-reference). Mark keys that must never change once set (encryption keys) with `immutable = true`.
+Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same file (comments kept) and includes it in every declared key the item has; give a target only for an environment that deploys (a local-only `dev` environment has none):
+
+```sh
+opv init dev --vault myapp-dev --item myapp --add-env
+opv init prod --vault myapp-prod --item myapp --add-env --fly-app myapp-production
+```
+
+Declare a key the item does not have yet with `opv add` instead of editing TOML, adding rules where the user knows the format of a value (see [configuration.md](configuration.md#rules-reference)) and `--immutable` for keys that must never change once set (encryption keys):
+
+```sh
+opv add api/OPENAI_API_KEY --kind secret --env dev,prod --rule prefix=sk-
+opv add api/ENC_KEY --kind secret --rule base64_bytes=32 --immutable
+```
+
+Both validate the file before writing and refuse a name that would collide on a target.
 
 If there is no item yet, write `secrets.toml` from the example in [configuration.md](configuration.md), then (with the user's yes) run `opv item skeleton <env>` to create the empty fields.
 
@@ -57,7 +71,7 @@ It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether 
 
 ### Azure or Kubernetes instead of Fly
 
-Replace `fly.app` with the target section from [configuration.md](configuration.md#targets): `[environments.<env>.azure]` (`subscription`, `key_vault`, `resource_group`, `container_app`, `identity`) or `[environments.<env>.kubernetes]` (`context`, `namespace`, `deployment`). Ask the user for those names; they are not secrets. `opv init` writes the Fly section only, so add the block by hand. <!-- verify: init for azure/kubernetes -->
+Give `opv init` (or `opv init --add-env`) the target instead of `--fly-app`: `--target azure --azure-subscription <guid> --azure-key-vault <vault> --azure-resource-group <rg> --azure-container-app <app>` (`--azure-identity` defaults to `system`), or `--target kubernetes --kubernetes-context <ctx> --kubernetes-namespace <ns> --kubernetes-deployment <deployment>`. `opv init --help` lists every option; [configuration.md](configuration.md#targets) explains each field. Ask the user for those names; they are not secrets. Nothing is looked up, and a bad value is refused before any 1Password call.
 
 - **Azure.** The user runs `az login`. The app's identity must be able to read the vault. If `opv doctor` warns about it, show the user the grant command it prints, which looks like `az role assignment create --assignee <principal> --role "Key Vault Secrets User" --scope <vault id>`. Run it only with their yes. The person running opv needs rights to write secrets to the vault and to update the Container App.
 - **Kubernetes.** The user's kubeconfig must contain the named `context`. `opv doctor` checks with `kubectl auth can-i` that they may manage Secrets and update the Deployment; if not, tell the user which right is missing.
