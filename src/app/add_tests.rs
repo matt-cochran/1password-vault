@@ -211,6 +211,21 @@ fn a_new_key_without_kind_is_refused() {
     assert!(a.err().contains("--kind"), "{}", a.err());
 }
 
+/// M6: an undeclared environment is added with init --add-env first.
+#[test]
+fn an_unknown_environment_says_to_add_it_with_add_env() {
+    let mut args = new_key("api/STRIPE_KEY");
+    args.envs = vec!["qa".into()];
+    let a = add_to(COMMENTED, args);
+    let action = a.res.unwrap_err().action().map(str::to_string);
+    assert!(
+        action
+            .as_deref()
+            .is_some_and(|d| d.contains("opv init qa") && d.contains("--add-env")),
+        "{action:?}"
+    );
+}
+
 #[test]
 fn an_unknown_environment_is_refused() {
     let mut args = new_key("api/STRIPE_KEY");

@@ -516,31 +516,22 @@ fn plan_names_what_it_would_prune() {
 }
 
 #[test]
-fn plan_ends_with_the_sync_command() {
-    let (_, out) = plan_out(
-        &fleet(),
-        &FakeRunner::new([complete_item(), fly_empty()]),
-        None,
-    );
-    assert_eq!(last_line(&out), "Next: opv sync prod --deploy", "{out}");
-}
-
-#[test]
 fn plan_with_prune_names_suggests_the_prune_flag() {
     let (_, out) = plan_out(
         &fleet(),
         &FakeRunner::new([complete_item(), prunable()]),
         None,
     );
-    assert_eq!(
-        last_line(&out),
-        "Next: opv sync prod --deploy --prune",
+    assert!(
+        last_line(&out).starts_with("Next: opv sync prod --deploy --prune --expect-plan "),
         "{out}"
     );
 }
 
+/// `--expect-plan` stands for a guarded environment's `--confirm` (A7).
 #[test]
-fn plan_for_a_guarded_environment_suggests_confirm() {
+fn plan_for_a_guarded_environment_needs_no_confirm_with_its_plan_id() {
+    let id = fly_plan_id(&guarded());
     let (_, out) = plan_out(
         &guarded(),
         &FakeRunner::new([complete_item(), fly_empty()]),
@@ -548,7 +539,7 @@ fn plan_for_a_guarded_environment_suggests_confirm() {
     );
     assert_eq!(
         last_line(&out),
-        "Next: opv sync prod --deploy --confirm prod",
+        format!("Next: opv sync prod --deploy --expect-plan {id}"),
         "{out}"
     );
 }
@@ -814,6 +805,19 @@ fn plan_names_its_plan_id_and_the_flag_that_applies_it() {
     );
 }
 
+/// M13: a clean plan ends with the command that applies exactly that plan.
+#[test]
+fn plan_next_applies_its_plan_id() {
+    let id = fly_plan_id(&fleet());
+    let r = FakeRunner::new([complete_item(), fly_empty()]);
+    let (_, out) = plan_out(&fleet(), &r, None);
+    assert_eq!(
+        out.lines().last(),
+        Some(format!("Next: opv sync prod --deploy --expect-plan {id}").as_str()),
+        "{out}"
+    );
+}
+
 #[test]
 fn fly_plan_id_is_stable_across_runs() {
     assert_eq!(fly_plan_id(&fleet()), fly_plan_id(&fleet()));
@@ -839,6 +843,43 @@ fn stale_plan_refusal_next_step_is_the_review() {
     assert_eq!(res.unwrap_err().next_step(), Some("opv plan prod"));
 }
 
+/// The item and the Fly listing after a run staged both secrets but never deployed them.
+fn staged_not_deployed() -> FakeRunner {
+    let staged = || fly_st(&[(OPENAI_FLY, "d1", "Staged"), (ENC_FLY, "d2", "Staged")]);
+    let [st, rel] = fly_preflight_ok();
+    FakeRunner::new([
+        complete_item(),
+        staged(),
+        st,
+        rel,
+        ok(),
+        staged(),
+        ok(),
+        ok(),
+        ok(),
+    ])
+}
+
+/// I2: exit 9 is safe to re-run as is. The first run staged the values and its deploy was
+/// interrupted; the same `--expect-plan` id still matches and the re-run deploys.
+#[test]
+fn expect_plan_rerun_after_an_interrupted_deploy_succeeds() {
+    let id = fly_plan_id(&fleet());
+    let first = new_secrets();
+    first.responses.borrow_mut().truncate(6);
+    first.push_unknown("timeout");
+    let o = SyncOpts {
+        deploy: true,
+        ..expect(&id)
+    };
+    let interrupted = sync_out(&fleet(), &first, &o).0.unwrap_err().exit_code();
+    let (res, out) = sync_out(&fleet(), &staged_not_deployed(), &o);
+    assert!(
+        interrupted == 9 && res.is_ok(),
+        "{interrupted} {res:?}\n{out}"
+    );
+}
+
 #[test]
 fn expect_plan_satisfies_confirm_env() {
     let (res, _) = sync_out(
@@ -858,4 +899,39 @@ fn expect_plan_with_rotate_is_refused_before_any_call() {
     };
     let (res, _) = sync_out(&fleet(), &r, &o);
     assert!(matches!(res, Err(Error::Config(_))) && r.calls.borrow().is_empty());
+}
+
+// ---- I4: an undeclared --product keeps the command and the environment ---------------
+
+#[test]
+fn status_with_an_undeclared_product_suggests_status_of_the_same_env() {
+    let r = FakeRunner::new([]);
+    let e = status::run_scoped(
+        &fleet(),
+        "prod",
+        Some("allumatta"),
+        &r,
+        &mut Vec::new(),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(e.next_step(), Some("opv status prod --product allumata"));
+}
+
+#[test]
+fn sync_with_an_undeclared_product_suggests_its_plan() {
+    let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("allumatta"));
+    assert_eq!(
+        res.unwrap_err().next_step(),
+        Some("opv plan prod --product allumata")
+    );
+}
+
+/// M4: `check` counts its findings once, on the error line (`opv: 1 finding`).
+#[test]
+fn check_with_findings_does_not_count_them_on_stdout() {
+    let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
+    let mut out = Vec::new();
+    let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
+    assert!(!text_of(&out).contains("finding"), "{}", text_of(&out));
 }

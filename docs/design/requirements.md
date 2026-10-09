@@ -378,7 +378,9 @@ Since v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev ti
 
 ## FR-14 — Field Kinds
 
-Each declared key has a kind, `secret` or `config`. In 1Password the field type records it: concealed = secret, text = config. A key stored with the wrong type is an error reported by `status` and refused by `fly sync` and `config export`.
+Each declared key has a kind, `secret` or `config`. In 1Password the field type normally records it: concealed = secret, text = config. The declared kind decides how a key is delivered; the field type does not block.
+
+Decided in v0.5 (owner, final review I1): a config key stored in a concealed field is accepted and delivered as a plain value; opv never prints its value (`config export`, `status`, `plan` and every other output), and `status` warns about it once. A secret stored in a text field is accepted and delivered as a secret. There is no `wrong kind` finding: neither case is refused by `sync` or `config export`.
 
 ## FR-15 — Declarative Validation Rules
 
@@ -693,6 +695,7 @@ design. Owner decision 2026-10-08.
 - The id is SHA-256 over names and integers only: the environment, the `--product` scope, the item's `version` integer, every row's product, key, kind, state and target state, the planned names (stage, prune, held, extras) and the store listing (names, pending flags, and a pinned store's version ids). No value, value length or value digest goes in: Fly digests are left out because they are digests of values. The id can neither reveal nor confirm a value (SR-1).
 - `sync <env> --expect-plan <id>` re-derives the id from what it reads and, if it differs, refuses before any write (exit 6) with the new id, the exact `sync … --expect-plan <new id>` command, and `Next: opv plan <env>`. Any edit to the item, a store version written or re-pinned by someone else, or a change to the configuration (`secrets.toml` or the manifest, FR-44) that changes the plan changes the id.
 - `--expect-plan` satisfies `confirm_env`, because the id is bound to its environment. It cannot be combined with `--rotate` or `--prune-immutable` (exit 2): `plan` never shows a rotation.
+- Decided in v0.5 (final review I2, manager ruling): a run's own partial apply is not a plan change, so exit 9 stays safe to re-run as is. A name the plan writes (it is staged, or it already holds the desired value and is pending a deploy, or carries an FR-42 stamp of the expected id) is hashed as `apply`: its listing entry, pending flag and version are left out. Only that boolean per name goes in, never a value. `sync --expect-plan <id>` re-run after an interrupted deploy therefore matches and finishes it. `plan`'s `Next:` is `opv sync <env> --deploy --expect-plan <id>`.
 - Stateless: the id is recomputed, never stored; no plan file (§7, §9). Owner decision 2026-10-08 (pass-2 A7).
 
 ## FR-42 — Provenance Stamps
@@ -725,7 +728,7 @@ The requirements below make opv usable for local development without a deploymen
 opv check <environment> [--product <product>] [--json]
 ```
 
-- Reads the environment's item once, by IDs (FR-13), and reports each selected key as saved, missing, wrong kind, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
+- Reads the environment's item once, by IDs (FR-13), and reports each selected key as saved, missing, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
 - Never lists, stages or deploys on a target, even when the environment has one; `--json` carries `target_checked: false`.
 - With `--product`, fields in other products' sections are skipped before they are validated, so they can neither block nor fail the check.
 - `--product` is required under the fleet profile and refused under the simple profile.
@@ -1301,7 +1304,7 @@ Version 0.1 is acceptable when:
 9. Secret values do not appear in logs, debug output, CLI arguments, or temporary files.
 10. Core planning and security behavior has automated test coverage.
 11. A full fleet `fly sync` (§10) costs at most 4 1Password requests per environment.
-12. `status` reports missing, extra, wrong-kind and rule-failing keys for every product without printing values.
+12. `status` reports missing, extra and rule-failing keys for every product without printing values (a field of the other type is accepted, FR-14).
 13. An immutable key that differs from the target is reported and not staged unless `--rotate` names it.
 14. `config export` never emits a secret-kind field.
 

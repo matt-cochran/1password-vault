@@ -69,7 +69,7 @@
     "held": 0,
     "to_prune": 0
   },
-  "plan_id": "674d43e2",
-  "next": "opv sync prod --deploy",
+  "plan_id": "4fe9a87d",
+  "next": "opv sync prod --deploy --expect-plan 4fe9a87d",
   "do": null
 }

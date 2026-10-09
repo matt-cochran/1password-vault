@@ -138,14 +138,19 @@ pub(crate) fn read_item_fields(
 /// The plan id (FR-41) of `plan`, built against `listed` on the target behind `ports`
 /// from item version `item_version`. A staged store's versions are value digests (Fly), so
 /// only a pinned store's version ids go in (SR-1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_id_of(
+    fleet: &Fleet,
     env_name: &str,
     product: Option<&str>,
     item_version: Option<u64>,
     plan: &SyncPlan,
     listed: &[StoreEntry],
     ports: &Ports<'_>,
+    own_plan: Option<&str>,
 ) -> String {
+    let env = fleet.environments.get(env_name);
+    let name_of = |p: &str, k: &str| env.and_then(|e| e.target_name(p, k));
     crate::domain::provenance::plan_id(
         &crate::domain::provenance::PlanIdInput {
             env: env_name,
@@ -153,6 +158,8 @@ pub(crate) fn plan_id_of(
             item_version,
             listed,
             version_ids: matches!(ports, Ports::Pinned { .. }),
+            name_of: &name_of,
+            own_plan,
         },
         plan,
     )
@@ -711,11 +718,15 @@ pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &
 /// H5). The JSON `state` and `target` fields keep their own stable spellings.
 pub const STATES_HELP: &str = "\
 SOURCE: the key in 1Password
-  saved       stored in the right kind of field and passes every rule
+  saved       stored and passes every rule. Either field type is accepted: a config key
+              stored concealed is delivered as a plain value, opv never prints its value,
+              and status warns about it once
   missing     no field with this name in the item's section
-  wrong kind  a text field where a secret needs a concealed one, or the reverse
   failed      fails a rule; the rule and the reason follow, e.g. failed prefix (expected sk-)
   skipped     not required in this environment (its rules leave it out)
+  blocked by source
+              shares another key's value (shared from <product>/<KEY>) and that key has a
+              finding; fixed with it, not counted again
 
 TARGET: the key on the deployment target
   new         not on the target yet; the next sync writes it
@@ -729,7 +740,7 @@ TARGET: the key on the deployment target
   drift       the running app is bound to something other than what opv last wrote
   n/a         not a target secret (config keys, and skipped keys not on the target)
 
-Missing, wrong kind and failed are findings: status, plan and check exit 8 and print an
+Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
 
 /// `product/KEY` (`KEY` under the simple profile) of every row in `rows` matching `pred`,
@@ -930,17 +941,41 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
 
 /// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused under the simple
 /// profile, which has no products (FR-20), and for an undeclared product. Before any call.
-pub(crate) fn check_product(fleet: &Fleet, product: Option<&str>) -> Result<(), Error> {
+/// `--product` (or `OPV_PRODUCT`) of `opv <verb> [<env>]`: an undeclared one ends with the
+/// same read-only command on the closest declared product (I4).
+pub(crate) fn check_product(
+    fleet: &Fleet,
+    product: Option<&str>,
+    verb: &str,
+    env: Option<&str>,
+) -> Result<(), Error> {
     let Some(p) = product else { return Ok(()) };
+    let command = |product: Option<&str>| {
+        let mut c = format!("opv {verb}");
+        if let Some(e) = env {
+            c.push(' ');
+            c.push_str(&crate::error::shell_word(e));
+        }
+        if let Some(p) = product {
+            c.push_str(" --product ");
+            c.push_str(&crate::error::shell_word(p));
+        }
+        c
+    };
     if fleet.is_simple() {
         return Err(Error::Config(
             "--product is not used under the simple profile; run the command without it".into(),
         )
         .with_code(crate::error::Code::UnknownProduct)
-        .with_next("opv status"));
+        .with_next(command(None)));
     }
     if !fleet.products.contains_key(p) {
-        return Err(undefined_product(fleet, p, None));
+        let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
+        let pick = suggest::close(p, all.iter().copied())
+            .first()
+            .copied()
+            .or(all.first().copied());
+        return Err(undefined_product(fleet, p, env).with_next(command(pick)));
     }
     Ok(())
 }

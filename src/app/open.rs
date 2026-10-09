@@ -87,7 +87,23 @@ pub fn run_as(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    let (product, key, env_name) = explain::locate(fleet, target, env)?;
+    // A suggested `opv open` keeps this run's own output flag (M6).
+    let flag = if json {
+        " --json"
+    } else if opener.is_none() {
+        " --print"
+    } else {
+        ""
+    };
+    let (product, key, env_name) = explain::locate(fleet, target, env).map_err(|e| {
+        match e.next_step().filter(|n| n.starts_with("opv open ")) {
+            Some(n) => {
+                let next = format!("{n}{flag}");
+                e.with_next(next)
+            }
+            None => e,
+        }
+    })?;
     // A shared key (FR-45) has no field of its own: open its source's field.
     let (product, key) = match fleet.products[&product].keys[&key].source() {
         Some((p, k)) => (p.to_string(), k.to_string()),
@@ -254,6 +270,28 @@ mod tests {
         assert_eq!(
             (o.program, o.args),
             ("rundll32", &["url.dll,FileProtocolHandler"][..])
+        );
+    }
+
+    /// M6: with several environments, the step is the same `open --print` with `--env`.
+    #[test]
+    fn open_print_without_env_suggests_open_print_with_env() {
+        let r = FakeRunner::new([]);
+        let e = run(
+            &fleet(),
+            "allumata/OPENAI_API_KEY",
+            None,
+            None,
+            &r,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            e.next_step()
+                .is_some_and(|n| n.starts_with("opv open allumata/OPENAI_API_KEY --env ")
+                    && n.ends_with(" --print")),
+            "{:?}",
+            e.next_step()
         );
     }
 }

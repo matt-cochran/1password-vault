@@ -204,25 +204,16 @@ impl Backend for Runtime {
 
 pub struct Console;
 impl Console {
-    /// `command` (`setup` or `login`) needs the owner's own terminal; the refusal names
-    /// that command (review #8).
-    pub fn require_terminal(command: &str) -> Result<(), Error> {
-        let what = if command == "login" {
-            "opv login signs in at 1Password's own prompts, so it"
-        } else {
-            "Guided setup (opv setup)"
-        };
+    /// `command` (`setup`, `login` or `config edit`) needs the owner's own terminal; the
+    /// refusal names that command, and `next` is the command line as typed, with the
+    /// user's own arguments (review #8, I3).
+    pub fn require_terminal(command: &str, next: &str) -> Result<(), Error> {
         if !io::stdin().is_terminal()
             || !io::stdout().is_terminal()
             || std::env::var_os("CI").is_some_and(|v| !v.is_empty() && v != "false" && v != "0")
             || std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true")
         {
-            return Err(Error::Policy(format!(
-                "{what} needs your own interactive terminal. Automation signs in with OP_SERVICE_ACCOUNT_TOKEN and uses init, doctor, check, item skeleton, run and sync with declared configuration."
-            ).into())
-            .with_code(crate::error::Code::TerminalRequired)
-            .with_do("ask the user to run this in their own terminal")
-            .with_next(format!("opv {command}")));
+            return Err(terminal_refusal(command, next));
         }
         for key in [
             "OP_SERVICE_ACCOUNT_TOKEN",
@@ -235,12 +226,52 @@ impl Console {
                 ).into())
                 .with_code(crate::error::Code::TerminalRequired)
                 .with_do(format!("ask the user to run this in their own terminal, without {key} set"))
-                .with_next(format!("opv {command}")));
+                .with_next(next.to_string()));
             }
         }
         Ok(())
     }
 }
+
+/// The refusal of `opv <command>` without an interactive terminal: it names that command,
+/// and `next` is the command line the user typed.
+pub(crate) fn terminal_refusal(command: &str, next: &str) -> Error {
+    let what = match command {
+        "login" => "opv login signs in at 1Password's own prompts, so it".to_string(),
+        "setup" => "Guided setup (opv setup)".to_string(),
+        "config edit" => {
+            "opv config edit opens your editor and asks before saving, so it".to_string()
+        }
+        other => format!("opv {other}"),
+    };
+    Error::Policy(format!(
+        "{what} needs your own interactive terminal. Automation signs in with OP_SERVICE_ACCOUNT_TOKEN and uses init, doctor, check, item skeleton, run and sync with declared configuration."
+    ).into())
+    .with_code(crate::error::Code::TerminalRequired)
+    .with_do("ask the user to run this in their own terminal")
+    .with_next(next.to_string())
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::terminal_refusal;
+
+    #[test]
+    fn config_edit_refusal_names_config_edit() {
+        let e = terminal_refusal("config edit", "opv config edit");
+        assert!(
+            e.to_string().contains("opv config edit opens your editor"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn login_refusal_next_keeps_the_environment() {
+        let e = terminal_refusal("login", "opv login prod");
+        assert_eq!(e.next_step(), Some("opv login prod"));
+    }
+}
+
 impl Interaction for Console {
     fn show(&mut self, message: &str) -> Result<(), Error> {
         println!("{message}");

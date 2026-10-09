@@ -41,7 +41,7 @@ Problems come first, each with its fix and a link to the item in 1Password, the 
 | Target | Status |
 |---|---|
 | Fly.io | supported |
-| Azure (Key Vault + Container Apps) | supported <!-- verify: preview until the live receipt in #39? --> |
+| Azure (Key Vault + Container Apps) | supported |
 | Kubernetes (Secrets + Deployment) | supported |
 | Azure App Service | planned ([#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
@@ -66,12 +66,12 @@ curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/i
 Then, with `op` and your target CLI (`flyctl`, `az` or `kubectl`) signed in:
 
 ```sh
-opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml from an existing item
+opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # configuration from an existing item (a 1Password manifest; --file for secrets.toml)
 opv doctor                     # config, op, flyctl and sign-in; ends with the next step
 opv status                     # one line per environment, run-only ones included
-opv status staging             # one row per key, problems first: saved, missing, wrong kind or failed
+opv status staging             # one row per key, problems first: saved, missing or failed
 opv open api/KEY --env staging # open a key's item in 1Password to fill it in
-opv plan staging               # what a sync would stage, hold and prune; changes nothing
+opv plan staging               # what a sync would stage, hold and prune; changes nothing on the target
 opv sync staging --deploy      # stage on the target, deploy only if something changed
 opv check staging              # every key saved? names only, no deployment target touched
 opv run staging -- ./server    # run a process with the secrets in its environment
@@ -121,7 +121,7 @@ rules = { base64_bytes = 32 }
 
 ## Security
 
-Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. The stderr of `op`, `flyctl`, `az` and `kubectl` is suppressed because it could echo a value. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [docs/usage.md](docs/usage.md#security-model-and-limits).
+Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. When `op`, `flyctl`, `az` or `kubectl` fails, its last few stderr lines are shown (`az said: ...`) after every value opv read or staged and every token, key or password pattern is masked as `__SECRET__`; masking can only catch values it knows or recognises, and stdout of those tools is never shown. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [docs/usage.md](docs/usage.md#security-model-and-limits).
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
 

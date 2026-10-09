@@ -112,7 +112,9 @@ fn run_on(
     let choice = choose_target(args).map_err(init_help)?;
     probe_target(args, choice.as_ref(), args.profile).map_err(init_help)?;
     let target = dir.join(FILE_NAME);
-    refuse_existing(&target, args.force)?;
+    if !args.force && fs::symlink_metadata(&target).is_ok() {
+        return Err(existing_refusal(args, &target));
+    }
     let p = prepare(args, choice, r, host)?;
     write_atomic(&target, &p.text, args.force)?;
     tidy_declared(args, &p, r);
@@ -571,6 +573,61 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
     Ok(())
 }
 
+/// `opv init` run where a `secrets.toml` already is (I5). A new environment is added with
+/// `--add-env` (the exact command is the step); an environment the file already declares is
+/// changed with `opv config edit`. Never a step that repeats the failing command.
+fn existing_refusal(args: &InitArgs, target: &Path) -> Error {
+    let declared = fs::read_to_string(target)
+        .ok()
+        .and_then(|t| crate::config::parse(&t).ok())
+        .is_some_and(|f| f.environments.contains_key(&args.env));
+    if declared {
+        return Error::Config(
+            format!(
+                "{} already declares environment {}; init never merges",
+                target.display(),
+                args.env
+            )
+            .into(),
+        )
+        .with_do(format!(
+            "change environment {} with opv config edit",
+            args.env
+        ))
+        .with_next("opv config edit");
+    }
+    Error::Config(
+        format!(
+            "{} already exists; init never merges: add environment {} to it with --add-env \
+             (or pass --force to replace the whole file)",
+            target.display(),
+            args.env
+        )
+        .into(),
+    )
+    .with_next(add_env_command(args))
+}
+
+/// `opv init <env> --vault <v> --item <i> [--target t] [--<option> <value>...] --add-env`:
+/// this run's own arguments, as `--add-env`.
+pub(crate) fn add_env_command(args: &InitArgs) -> String {
+    use crate::error::shell_word;
+    let mut c = format!(
+        "opv init {} --vault {} --item {}",
+        shell_word(&args.env),
+        shell_word(&args.vault),
+        shell_word(&args.item)
+    );
+    if let Some(t) = &args.target {
+        c.push_str(&format!(" --target {}", shell_word(t)));
+    }
+    for (name, value) in &args.fields {
+        c.push_str(&format!(" --{name} {}", shell_word(value)));
+    }
+    c.push_str(" --add-env");
+    c
+}
+
 /// The target exists (a file, directory or symlink) and `--force` was not given: exit 2,
 /// naming the path. `init` never merges.
 fn refuse_existing(target: &Path, force: bool) -> Result<(), Error> {
@@ -619,21 +676,22 @@ fn declare(
 ) -> Result<Declared, Error> {
     let (sectioned, unsectioned): (Vec<&FieldShape>, Vec<&FieldShape>) =
         fields.iter().partition(|f| f.section.is_some());
-    let profile =
-        match (explicit, sectioned.is_empty(), unsectioned.is_empty()) {
-            (Some(p), _, _) => p,
-            (None, true, _) => Profile::Simple,
-            (None, false, true) => Profile::Fleet,
-            (None, false, false) => {
-                return Err(Error::Config(format!(
-                "item {item_title:?} mixes {} unsectioned field(s) (the simple profile shape) \
-                 and {} sectioned field(s) (the fleet profile shape); init never guesses: pass \
-                 --profile simple or --profile fleet",
-                unsectioned.len(),
-                sectioned.len()
-            ).into()));
-            }
-        };
+    let profile = match (explicit, sectioned.is_empty(), unsectioned.is_empty()) {
+        (Some(p), _, _) => p,
+        (None, true, _) => Profile::Simple,
+        (None, false, true) => Profile::Fleet,
+        (None, false, false) => {
+            return Err(Error::Config(
+                format!(
+                    "item {item_title:?} mixes {} (the simple profile shape) and {} (the fleet \
+                 profile shape); init never guesses: pass --profile simple or --profile fleet",
+                    super::plural(unsectioned.len(), "unsectioned field", "unsectioned fields"),
+                    super::plural(sectioned.len(), "sectioned field", "sectioned fields")
+                )
+                .into(),
+            ));
+        }
+    };
     // A label given twice is read tolerantly (FR-43): declared once, never an error.
     let _ = item_title;
     let mut d = Declared {
@@ -658,8 +716,12 @@ fn declare(
             Profile::Fleet => "unsectioned",
         };
         d.notes.push(format!(
-            "ignored {} {shape} field(s) under --profile {flag}: {}",
-            names.len(),
+            "ignored {} under --profile {flag}: {}",
+            super::plural(
+                names.len(),
+                &format!("{shape} field"),
+                &format!("{shape} fields")
+            ),
             names.join(", ")
         ));
     }
@@ -708,8 +770,9 @@ fn declare(
     }
     for (product, n) in bad_products {
         d.notes.push(format!(
-            "skipped section {product:?} ({n} field(s)): not a valid product name \
-             (^[a-z][a-z0-9_-]*$); rename the section in 1Password to manage it"
+            "skipped section {product:?} ({}): not a valid product name \
+             (^[a-z][a-z0-9_-]*$); rename the section in 1Password to manage it",
+            super::plural(n, "field", "fields")
         ));
     }
     Ok(d)
@@ -871,12 +934,16 @@ fn add_env_on(
     if fleet.environments.contains_key(&args.env) {
         return Err(Error::Config(
             format!(
-                "environment {} already exists in {place}; --add-env never overwrites: edit \
-                 it by hand (opv config edit)",
+                "environment {} already exists in {place}; --add-env never overwrites it",
                 args.env,
             )
             .into(),
-        ));
+        )
+        .with_do(format!(
+            "change environment {} with opv config edit",
+            args.env
+        ))
+        .with_next("opv config edit"));
     }
     let profile = fleet.profile;
     let choice = choose_target(args).map_err(init_help)?;

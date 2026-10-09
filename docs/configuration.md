@@ -141,7 +141,7 @@ Changed in v0.2 for fleet files: `run` without `--product` is now an opv configu
 
 ### Start from an existing item: `opv init`
 
-If the 1Password item already exists, `init` writes a starter `secrets.toml` from it instead of writing one by hand:
+If the 1Password item already exists, `init` writes the configuration from it instead of writing one by hand. In a new project it saves it as a manifest in 1Password ([configuration in 1Password](#configuration-in-1password)); `--file` writes `./secrets.toml` instead:
 
 ```sh
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--profile simple|fleet] [--force]

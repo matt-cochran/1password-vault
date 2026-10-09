@@ -334,7 +334,7 @@ const SIMPLE: &str = "tests/fixtures/simple.toml";
 fn doctor_reports_a_simple_profile_file_as_valid() {
     let (_, out, err) = opv(&["--config", SIMPLE, "doctor"]);
     assert!(
-        out.contains("ok    config: valid (2 environment(s), 5 key(s))"),
+        out.contains("ok    config: valid (2 environments, 5 keys)"),
         "{out}{err}"
     );
 }
@@ -643,6 +643,35 @@ fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
     assert!(err.contains("secrets.toml already exists"), "{err}");
     assert!(err.contains("--force"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+}
+
+/// I5: a new environment in an existing project is added with --add-env, never a loop.
+#[test]
+fn init_in_an_existing_project_suggests_add_env() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("secrets.toml"), "# mine\n").unwrap();
+    let (_, _, err) = opv_in(dir.path(), &INIT);
+    assert_eq!(
+        err.lines().last(),
+        Some("Next: opv init staging --vault v --item i --fly-app app --add-env"),
+        "{err}"
+    );
+}
+
+/// I5: an environment the file already declares is changed with opv config edit.
+#[test]
+fn init_of_a_declared_environment_suggests_config_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple.toml",
+        dir.path().join("secrets.toml"),
+    )
+    .unwrap();
+    let (_, _, err) = opv_in(
+        dir.path(),
+        &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
+    );
+    assert_eq!(err.lines().last(), Some("Next: opv config edit"), "{err}");
 }
 
 /// init reads no configuration: an ancestor secrets.toml is neither announced nor loaded,

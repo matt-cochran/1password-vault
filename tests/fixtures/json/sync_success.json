@@ -47,7 +47,7 @@
     "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
     "FLEET__ALLUMATA__OPENAI_API_KEY"
   ],
-  "plan_id": "eff45945",
+  "plan_id": "4fe9a87d",
   "next": "opv sync prod --deploy",
   "do": null
 }

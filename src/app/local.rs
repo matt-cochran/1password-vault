@@ -130,7 +130,13 @@ pub fn check(
                 }
             }
         }
-        writeln!(out, "{findings} finding(s); no deployment target checked").map_err(write_err)?;
+        // With findings, the error line counts them (`opv: 1 finding`); not twice (M4).
+        let line = if findings == 0 {
+            "no findings; no deployment target checked"
+        } else {
+            "no deployment target checked"
+        };
+        writeln!(out, "{line}").map_err(write_err)?;
     }
     if findings > 0 {
         Err(super::findings_error(findings, &plan.rows, env))

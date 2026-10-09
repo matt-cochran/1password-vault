@@ -355,3 +355,51 @@ fn github_actions_example_pins_this_version() {
     let want = format!("OPV_VERSION: v{}", env!("CARGO_PKG_VERSION"));
     assert!(usage.contains(&want), "docs/usage.md must pin {want}");
 }
+
+const CODES_BEGIN: &str = "<!-- error-codes:begin";
+const CODES_END: &str = "<!-- error-codes:end -->";
+
+/// The usage.md error-code table, rendered from `Code::ALL` (I8).
+fn codes_table() -> String {
+    let mut t =
+        String::from("| `code` | Exit | `retry` | Human | Meaning |\n|---|---|---|---|---|\n");
+    for c in opv::error::Code::ALL {
+        let exit = match c.exit_code() {
+            130 => "130/143".to_string(),
+            n => n.to_string(),
+        };
+        t.push_str(&format!(
+            "| `{}` | {exit} | {} | {} | {} |\n",
+            c.as_str(),
+            c.retry().as_str(),
+            if c.human_required() { "yes" } else { "no" },
+            c.meaning().replace('|', "\\|")
+        ));
+    }
+    t
+}
+
+/// I8: the closed list of error codes in usage.md is generated from the code. Regenerate it
+/// with `UPDATE_DOCS=1 cargo test --features fake --test docs_commands`.
+#[test]
+fn usage_error_code_table_matches_the_code() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/usage.md");
+    let doc = std::fs::read_to_string(&path).unwrap();
+    let begin = doc
+        .find(CODES_BEGIN)
+        .expect("usage.md has the error-codes:begin marker");
+    let body = begin + doc[begin..].find("-->").unwrap() + "-->\n".len();
+    let end = doc
+        .find(CODES_END)
+        .expect("usage.md has the error-codes:end marker");
+    let want = codes_table();
+    if std::env::var_os("UPDATE_DOCS").is_some() {
+        std::fs::write(&path, format!("{}{want}{}", &doc[..body], &doc[end..])).unwrap();
+        return;
+    }
+    assert_eq!(
+        &doc[body..end],
+        want,
+        "run UPDATE_DOCS=1 cargo test --features fake --test docs_commands"
+    );
+}

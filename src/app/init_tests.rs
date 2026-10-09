@@ -229,11 +229,11 @@ fn mixed_item_fails_naming_both_shapes_and_writes_nothing() {
     assert_eq!(e.exit_code(), 2, "{e}");
     let m = e.to_string();
     assert!(
-        m.contains("3 unsectioned field(s) (the simple profile shape)"),
+        m.contains("3 unsectioned fields (the simple profile shape)"),
         "{m}"
     );
     assert!(
-        m.contains("3 sectioned field(s) (the fleet profile shape)"),
+        m.contains("3 sectioned fields (the fleet profile shape)"),
         "{m}"
     );
     assert!(m.contains("--profile simple or --profile fleet"), "{m}");
@@ -256,7 +256,7 @@ fn mixed_item_with_profile_simple_keeps_unsectioned_and_notes_the_rest() {
     let out = &run.out;
     assert!(
         out.contains(
-            "note: ignored 3 sectioned field(s) under --profile simple: \"api\"/\"OPENAI_API_KEY\""
+            "note: ignored 3 sectioned fields under --profile simple: \"api\"/\"OPENAI_API_KEY\""
         ),
         "{out}"
     );
@@ -277,9 +277,7 @@ fn mixed_item_with_profile_fleet_keeps_sections_and_notes_the_rest() {
     );
     let out = &run.out;
     assert!(
-        out.contains(
-            "note: ignored 3 unsectioned field(s) under --profile fleet: \"DATABASE_URL\""
-        ),
+        out.contains("note: ignored 3 unsectioned fields under --profile fleet: \"DATABASE_URL\""),
         "{out}"
     );
     assert!(out.contains("2 secret, 1 config, skipped 3"), "{out}");
@@ -416,7 +414,7 @@ fn invalid_section_names_are_skipped_by_name() {
     assert!(!run.file().contains("TOKEN") && !run.file().contains("[products.my"));
     assert!(
         run.out
-            .contains("note: skipped section \"My App\" (1 field(s)): not a valid product name"),
+            .contains("note: skipped section \"My App\" (1 field): not a valid product name"),
         "{}",
         run.out
     );
@@ -694,7 +692,7 @@ fn wrong_type_in_a_skipped_section_is_noted_as_rejected() {
     // The valid field in the skipped section has no per-field note, only the section one.
     assert!(!out.contains("\"My App\"/\"KEY\""), "{out}");
     assert!(
-        out.contains("skipped section \"My App\" (2 field(s))"),
+        out.contains("skipped section \"My App\" (2 fields)"),
         "{out}"
     );
 }
@@ -1260,7 +1258,7 @@ fn add_env_on_a_manifest_refuses_an_existing_environment_naming_config_edit() {
     let mut a = staging();
     a.env = "prod".into();
     let (res, _, _) = add_env_to_manifest(EXISTING, &a);
-    assert!(res.unwrap_err().to_string().contains("opv config edit"));
+    assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
 }
 
 // ---- A5: `init --json` ----
