@@ -6,6 +6,7 @@
 //! `config.rs`) sees only these traits, so adding a provider changes no core code.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::de::DeserializeOwned;
@@ -91,8 +92,14 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn same_target(&self, other: &dyn TargetConfig) -> bool;
     /// The configuration error for environments `first` and `second` sharing this target.
     fn shared_target_error(&self, first: &str, second: &str) -> String;
-    /// The store and runtime adapters of this target (FR-28).
-    fn open<'a>(&'a self, env: &'a str, r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error>;
+    /// The store and runtime adapters of this target (FR-28). `managed` is every env name
+    /// the template renders for a declared key (FR-8); the ports speak those names.
+    fn open<'a>(
+        &'a self,
+        env: &'a str,
+        managed: BTreeSet<String>,
+        r: &'a dyn CommandRunner,
+    ) -> Result<Ports<'a>, Error>;
     /// Read-only checks run before a command touches the target (NR-23 to NR-26): the
     /// first failure stops the command before anything is read or written.
     fn preflight(&self, r: &dyn CommandRunner) -> Result<(), Error>;

@@ -1,6 +1,6 @@
 //! Vendor adapters behind the `CommandRunner` seam (FR-12). Each wraps an official CLI.
 //!
-//! Deployment providers live in one module each (`fly/`, `azure/`) and are reached only
+//! Deployment providers live in one module each (`fly/`, `azure/`, `kubernetes/`) and are reached only
 //! through the plug-in contract in `crate::provider`, via [`registry`] (FR-37).
 
 pub mod azure;

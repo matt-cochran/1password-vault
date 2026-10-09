@@ -333,4 +333,20 @@ config     = "env"                         # or "store" (a ConfigMap-free design
   Old versions are reclaimed as Kubernetes trims the history.
 - **Access** (FR-33 as amended by R6): the Deployment's ServiceAccount needs no secret access
   (kubelet mounts the env); `doctor` checks the operator's own rights with
-  `kubectl auth can-i` for get/create/delete secrets and get/update deployments.
+  `kubectl auth can-i` for get/create/delete/list secrets, get/update deployments and list
+  replicasets and pods; a missing right is a warning naming the `create role` /
+  `create rolebinding` commands that grant exactly it.
+
+As implemented (provider plug-in): `src/adapters/kubernetes/config.rs` holds the section, its
+`TargetConfig` and the doctor checks (`kubectl`, `kubernetes context`, `kubernetes cluster`,
+`kubernetes access`). Each identifier is validated while the section is deserialized, so a bad
+`context`, `namespace`, `deployment`, `container`, `env_name` or `config` shows its line and
+column. `namespace`/`deployment`/`container` are DNS-1123 labels; `context` allows
+`[A-Za-z0-9_.:/@+-]` and no leading `-` (cloud context names hold `:`, `/` and `@`). The store
+name is also the `opv-key` label value, so it is held to a label (≤ 63), which keeps the Secret
+name ≤ 253. `env_name` is required under the fleet profile and refused under the simple one.
+Two environments on the same context, namespace and Deployment with the same template are a
+configuration error. `TargetConfig::open` takes the managed env names (as on the Azure branch)
+and the rollout wait is the run budget left (`CommandRunner::remaining`), not a fixed 600 s.
+`KUBECONFIG` is inherited; no credential variable is required.
+

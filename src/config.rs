@@ -1267,11 +1267,9 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "fly.app = \"mcproductlabs-portfolio-production\"",
             "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
-        assert!(
-            config_err(&bad).ends_with(
-                "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly\n"
-            )
-        );
+        assert!(config_err(&bad).ends_with(
+            "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly, kubernetes\n"
+        ));
     }
 
     /// FR-2: an unknown entry under an environment shows its line, as the parser's own
@@ -1294,7 +1292,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes or a \
-             target section (azure, fly)\n"
+             target section (azure, fly, kubernetes)\n"
         ));
     }
 

@@ -301,7 +301,7 @@ impl CommandRunner for Cluster {
 fn sync(c: &Cluster) -> Result<(), Error> {
     let (t, m) = (target(), managed());
     let store = KubeSecrets::new(c, &t);
-    let rt = KubeDeployment::new(c, &t, &m)
+    let rt = KubeDeployment::new(c, &t, m)
         .with_wait(Duration::from_secs(5), Duration::from_secs(30), |_| {})
         .with_progress(|_| {});
     let mut pins = BTreeMap::new();

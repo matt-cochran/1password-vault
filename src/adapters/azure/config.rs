@@ -2,6 +2,7 @@
 //! `TargetConfig` (FR-28, FR-30, FR-37).
 
 use std::any::Any;
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
@@ -228,7 +229,12 @@ impl TargetConfig for AzureTarget {
         )
     }
 
-    fn open<'a>(&'a self, _env: &'a str, _r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error> {
+    fn open<'a>(
+        &'a self,
+        _env: &'a str,
+        _managed: BTreeSet<String>,
+        _r: &'a dyn CommandRunner,
+    ) -> Result<Ports<'a>, Error> {
         // Placeholder until keyvault.rs and containerapp.rs are wired in (FR-28).
         Err(Error::Config(
             "the Azure target is not supported yet".into(),

@@ -5,7 +5,7 @@
 //! | `bindings` | `get deployment <d> -o json` | read |
 //! | `apply` | `replace -f - -o jsonpath={.metadata.generation}` (whole Deployment on stdin, with its `resourceVersion`) | write |
 //! | `await_healthy` | per poll: `get deployment`; while not rolled out, `get replicasets -o json` and `get pods -l <selector> -o jsonpath=<name, owner, waiting reasons>` | reads |
-//! | `check_access` | `auth can-i <verb> <resource>` for get/create/delete secrets, get/update deployments | reads |
+//! | `check_access` | `auth can-i <verb> <resource>` for get/create/delete/list secrets, get/update deployments, list replicasets and pods | reads |
 //!
 //! `apply` edits only managed env entries of the managed container: `valueFrom.secretKeyRef
 //! {name: opv-<store>-<version>, key: value}` for secrets, `value` for config. Kubernetes
@@ -54,7 +54,7 @@ const PODS_PATH: &str = r#"jsonpath={range .items[*]}{.metadata.name}{"\t"}{.met
 const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 
 /// The operator rights opv needs, each with its fixed reason (advisory, R6).
-const ACCESS: [(&str, &str, &str); 5] = [
+const ACCESS: [(&str, &str, &str); 8] = [
     (
         "get",
         "secrets",
@@ -80,13 +80,28 @@ const ACCESS: [(&str, &str, &str); 5] = [
         "deployments",
         "your kubectl identity cannot update Deployments, so --deploy cannot repin",
     ),
+    (
+        "list",
+        "secrets",
+        "your kubectl identity cannot list Secrets, so opv cannot find the versions it wrote",
+    ),
+    (
+        "list",
+        "replicasets",
+        "your kubectl identity cannot list ReplicaSets, so --prune cannot tell which versions a rollback needs",
+    ),
+    (
+        "list",
+        "pods",
+        "your kubectl identity cannot list Pods, so --deploy cannot see a stuck rollout early",
+    ),
 ];
 
 /// The Deployment of one Kubernetes target.
 pub struct KubeDeployment<'a> {
     k: Kubectl<'a>,
     /// Managed env names (from the template, FR-8).
-    managed: &'a BTreeSet<String>,
+    managed: BTreeSet<String>,
     sleep: Box<dyn Fn(Duration) + 'a>,
     note: Box<dyn Fn(&str) + 'a>,
     poll_every: Duration,
@@ -97,7 +112,7 @@ impl<'a> KubeDeployment<'a> {
     pub fn new(
         runner: &'a dyn CommandRunner,
         target: &'a KubeTarget,
-        managed: &'a BTreeSet<String>,
+        managed: BTreeSet<String>,
     ) -> Self {
         Self {
             k: Kubectl::new(runner, target),
@@ -595,7 +610,7 @@ mod tests {
 
     fn with_rt<T>(r: &FakeRunner, f: impl FnOnce(&KubeDeployment) -> T) -> T {
         let (t, m) = (target(), managed());
-        let rt = KubeDeployment::new(r, &t, &m)
+        let rt = KubeDeployment::new(r, &t, m)
             .with_wait(POLL_EVERY, Duration::from_secs(20), |_| {})
             .with_progress(|_| {});
         f(&rt)
@@ -950,7 +965,7 @@ mod tests {
         let slept = RefCell::new(Vec::new());
         let (t, m) = (target(), managed());
         let r = FakeRunner::new([json(&rolling()), ok(REPLICASETS), pods(""), ok(DEPLOYMENT)]);
-        KubeDeployment::new(&r, &t, &m)
+        KubeDeployment::new(&r, &t, m)
             .with_wait(POLL_EVERY, WAIT_MAX, |d| slept.borrow_mut().push(d))
             .with_progress(|_| {})
             .await_healthy(&Revision("5".into()))
@@ -984,7 +999,7 @@ mod tests {
                 Ok(pods("")),
             ]);
         }
-        let _ = KubeDeployment::new(&r, &t, &m)
+        let _ = KubeDeployment::new(&r, &t, m)
             .with_wait(POLL_EVERY, Duration::from_secs(20), |_| {})
             .with_progress(|l| lines.borrow_mut().push(l.to_string()))
             .await_healthy(&Revision("6".into()));
@@ -1000,7 +1015,7 @@ mod tests {
         }));
         r.responses
             .borrow_mut()
-            .extend([Ok(ok("yes")), Ok(ok("yes"))]);
+            .extend((0..5).map(|_| Ok(ok("yes"))));
         let found = with_rt(&r, |rt| rt.check_access(&[])).unwrap();
         assert_eq!(
             found
@@ -1054,7 +1069,7 @@ mod tests {
 
     #[test]
     fn check_access_asks_kubectl_auth_can_i() {
-        let r = FakeRunner::new((0..5).map(|_| ok("yes")));
+        let r = FakeRunner::new((0..8).map(|_| ok("yes")));
         with_rt(&r, |rt| rt.check_access(&[])).unwrap();
         assert_eq!(args(&r, 0)[5..], ["auth", "can-i", "get", "secrets"]);
     }

@@ -2,6 +2,7 @@
 //! the port wiring (FR-37, §10.3). Every user-visible Fly message is unchanged from 0.4.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::io;
 
 use serde::Deserialize;
@@ -188,7 +189,12 @@ impl TargetConfig for FlyTarget {
         }
     }
 
-    fn open<'a>(&'a self, _env: &'a str, r: &'a dyn CommandRunner) -> Result<Ports<'a>, Error> {
+    fn open<'a>(
+        &'a self,
+        _env: &'a str,
+        _managed: BTreeSet<String>,
+        r: &'a dyn CommandRunner,
+    ) -> Result<Ports<'a>, Error> {
         let fly = || Fly {
             runner: r,
             app: &self.app,
@@ -324,7 +330,10 @@ mod tests {
     fn fly_target_opens_staged_ports() {
         let t = fleet_target("FLEET__{PRODUCT}__{KEY}");
         let r = FakeRunner::new([]);
-        assert!(matches!(t.open("prod", &r), Ok(Ports::Staged { .. })));
+        assert!(matches!(
+            t.open("prod", BTreeSet::new(), &r),
+            Ok(Ports::Staged { .. })
+        ));
     }
 
     #[test]

@@ -20,6 +20,7 @@
 //! version --request-timeout=5s` (fails ⇒ the cluster is unreachable, [`Error::Unknown`],
 //! exit 9, NR-28); otherwise the step itself was refused ([`Error::Target`]).
 
+pub mod config;
 pub mod runtime;
 pub mod store;
 
@@ -39,6 +40,7 @@ use crate::runner::{
     unknown_text,
 };
 
+pub use config::{ConfigRoute, KubernetesTarget, PROVIDER};
 pub use runtime::KubeDeployment;
 pub use store::KubeSecrets;
 
