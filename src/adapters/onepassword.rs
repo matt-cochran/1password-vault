@@ -196,43 +196,44 @@ pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Opt
     let ci_token = "set OP_SERVICE_ACCOUNT_TOKEN to a service account token that can read \
                     the vault (as a CI secret, never in the repository)";
     let network = "if you are signed in, check network access to 1Password";
-    let m = match session {
-        Session::SignedIn(_) | Session::Unknown => return None,
-        Session::CredentialFailed(c) => {
-            return Some(Error::Source(format!(
+    let m =
+        match session {
+            Session::SignedIn(_) | Session::Unknown => return None,
+            Session::CredentialFailed(c) => {
+                return Some(Error::Source(format!(
                 "{ctx}\n  1Password rejected the {} token or could not be reached: check the \
                  token in {} and network access",
                 c.label(),
                 c.var()
-            )));
-        }
-        Session::NotSignedIn => match host.signin_line("sign in") {
-            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-            Some(step) => format!(
-                "not signed in to 1Password ({ctx})\n  {step}\n  (a session from op signin \
+            ).into()));
+            }
+            Session::NotSignedIn => match host.signin_line("sign in") {
+                None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+                Some(step) => format!(
+                    "not signed in to 1Password ({ctx})\n  {step}\n  (a session from op signin \
                  expires after 30 minutes idle; with the desktop app integration, unlock the \
                  1Password app instead)\n  {network}"
-            ),
-        },
-        Session::NoAccount => match host.signin_line("then sign in") {
-            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-            Some(step) => {
-                let wsl = if host.platform == Platform::Wsl {
-                    " (op in WSL does not share the Windows app's accounts)"
-                } else {
-                    ""
-                };
-                format!(
-                    "no 1Password account is set up for op on this machine{wsl} ({ctx} \
+                ),
+            },
+            Session::NoAccount => match host.signin_line("then sign in") {
+                None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+                Some(step) => {
+                    let wsl = if host.platform == Platform::Wsl {
+                        " (op in WSL does not share the Windows app's accounts)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "no 1Password account is set up for op on this machine{wsl} ({ctx} \
                      and op account list is empty)\n  add one: op account \
                      add --address <sign-in address> --email <email>\n  {step}\n  \
                      type the Secret Key and password only at op's prompts, never into chat, \
                      tickets or files"
-                )
-            }
-        },
-    };
-    Some(Error::Auth(format!("{m}\n  then run opv again")))
+                    )
+                }
+            },
+        };
+    Some(Error::Auth(format!("{m}\n  then run opv again").into()))
 }
 
 /// After a failed `op` call: diagnose the session and return the error to report. Not
@@ -266,12 +267,15 @@ fn failed_op_error_as(
     };
     match session {
         Session::SignedIn(t) if !write => item_unavailable(r, env, failed, t, grant),
-        Session::SignedIn(t) => Error::Source(not_available(env, failed, t, grant)),
-        Session::Unknown if write => Error::Unknown(format!(
-            "{failed}; the item may or may not have been changed{}, then re-run",
-            rerun_hint(env)
-        )),
-        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env))),
+        Session::SignedIn(t) => Error::Source(not_available(env, failed, t, grant).into()),
+        Session::Unknown if write => Error::Unknown(
+            format!(
+                "{failed}; the item may or may not have been changed{}, then re-run",
+                rerun_hint(env)
+            )
+            .into(),
+        ),
+        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env)).into()),
         s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
     }
 }
@@ -291,19 +295,22 @@ fn item_unavailable(
         &Call::new(OP, &["vault", "get", vault.as_str(), "--format", "json"]),
         PROBE_TIMEOUT,
     );
-    Error::Source(match probe {
-        Ok(o) if o.status == 0 => format!(
-            "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
+    Error::Source(
+        match probe {
+            Ok(o) if o.status == 0 => format!(
+                "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
              (moved, archived or deleted?)\n  next: check item_id in secrets.toml, then \
              `{OP} item get {item} --vault {vault}`"
-        ),
-        Ok(_) => format!(
-            "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
+            ),
+            Ok(_) => format!(
+                "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
              {vault}\n  next: {grant} (vault {vault}), or check vault_id in secrets.toml, \
              then `{OP} vault get {vault}`"
-        ),
-        Err(_) => not_available(env, failed, t, grant),
-    })
+            ),
+            Err(_) => not_available(env, failed, t, grant),
+        }
+        .into(),
+    )
 }
 
 /// A signed-in failure whose cause is not known: access or the IDs.
@@ -462,12 +469,15 @@ fn write_skeleton_on(
             status: Some(s), ..
         } => s,
         Outcome::Unknown { reason, .. } => {
-            return Err(Error::Unknown(format!(
-                "{}: {}; the item may or may not have been changed\n  next: re-run the \
+            return Err(Error::Unknown(
+                format!(
+                    "{}: {}; the item may or may not have been changed\n  next: re-run the \
                  same command (it adds only the fields still missing)",
-                call.step(),
-                unknown_text(OP, reason)
-            )));
+                    call.step(),
+                    unknown_text(OP, reason)
+                )
+                .into(),
+            ));
         }
     };
     if status != 0 {
@@ -496,18 +506,15 @@ fn rerun_hint(env: &Environment) -> String {
 
 /// `op` is not on PATH: a dependency error with the install hint for this platform.
 pub fn op_missing(host: &Host) -> Error {
-    Error::Dependency(format!(
-        "op CLI not found on PATH\n  {}",
-        host.install_hint(OP_CLI)
-    ))
+    Error::Dependency(format!("op CLI not found on PATH\n  {}", host.install_hint(OP_CLI)).into())
 }
 
 /// An `op` spawn error: missing binary (with the install hint) or another start failure.
 fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
     match e.kind() {
         io::ErrorKind::NotFound => op_missing(&host()),
-        io::ErrorKind::TimedOut => Error::Source(format!("op: {e}")),
-        kind => Error::Dependency(format!("failed to run op: {kind}")),
+        io::ErrorKind::TimedOut => Error::Source(format!("op: {e}").into()),
+        kind => Error::Dependency(format!("failed to run op: {kind}").into()),
     }
 }
 
@@ -529,12 +536,15 @@ pub(crate) fn read_op(
 
 /// serde_json's Display can quote input (values), so report only position and category.
 pub(crate) fn json_error(e: &serde_json::Error) -> Error {
-    Error::Source(format!(
-        "op returned malformed item JSON ({:?} error at line {}, column {})",
-        e.classify(),
-        e.line(),
-        e.column()
-    ))
+    Error::Source(
+        format!(
+            "op returned malformed item JSON ({:?} error at line {}, column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        )
+        .into(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -602,32 +612,29 @@ fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<Item
         let section = match section.label {
             Some(l) if !l.is_empty() => l,
             _ => {
-                return Err(Error::Source(format!(
-                    "field {} is in a section without a label",
-                    f.label
-                )));
+                return Err(Error::Source(
+                    format!("field {} is in a section without a label", f.label).into(),
+                ));
             }
         };
         if f.label.is_empty() {
-            return Err(Error::Source(format!(
-                "field without a label in section {section}"
-            )));
+            return Err(Error::Source(
+                format!("field without a label in section {section}").into(),
+            ));
         }
         let kind = match f.ty.as_str() {
             "CONCEALED" => Kind::Secret,
             "STRING" => Kind::Config,
             _ => {
-                return Err(Error::Source(format!(
-                    "unsupported field type on {section}/{}",
-                    f.label
-                )));
+                return Err(Error::Source(
+                    format!("unsupported field type on {section}/{}", f.label).into(),
+                ));
             }
         };
         if !seen.insert((section.clone(), f.label.clone())) {
-            return Err(Error::Source(format!(
-                "duplicate field {section}/{} in item",
-                f.label
-            )));
+            return Err(Error::Source(
+                format!("duplicate field {section}/{} in item", f.label).into(),
+            ));
         }
         out.push(ItemField {
             section,
@@ -665,17 +672,15 @@ fn parse_unsectioned_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
             "CONCEALED" => Kind::Secret,
             "STRING" => Kind::Config,
             _ => {
-                return Err(Error::Source(format!(
-                    "unsupported field type on {}",
-                    f.label
-                )));
+                return Err(Error::Source(
+                    format!("unsupported field type on {}", f.label).into(),
+                ));
             }
         };
         if !seen.insert(f.label.clone()) {
-            return Err(Error::Source(format!(
-                "duplicate field {} in item",
-                f.label
-            )));
+            return Err(Error::Source(
+                format!("duplicate field {} in item", f.label).into(),
+            ));
         }
         out.push(ItemField {
             section: SIMPLE_PRODUCT.to_string(),
@@ -758,16 +763,18 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
     let mut listed = BTreeSet::new();
     for (s, l, _) in missing {
         if existing.contains(&(s.clone(), l.clone())) {
-            return Err(Error::Source(format!(
-                "skeleton: {} already exists in the item; not modified",
-                key_label(s, l)
-            )));
+            return Err(Error::Source(
+                format!(
+                    "skeleton: {} already exists in the item; not modified",
+                    key_label(s, l)
+                )
+                .into(),
+            ));
         }
         if !listed.insert((s.clone(), l.clone())) {
-            return Err(Error::Source(format!(
-                "skeleton: {} listed twice",
-                key_label(s, l)
-            )));
+            return Err(Error::Source(
+                format!("skeleton: {} listed twice", key_label(s, l)).into(),
+            ));
         }
     }
 
@@ -812,7 +819,9 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             .entry(key)
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| Error::Source(format!("op item JSON: `{key}` is not an array")))?;
+            .ok_or_else(|| {
+                Error::Source(format!("op item JSON: `{key}` is not an array").into())
+            })?;
         arr.extend(add);
     }
     Ok(())
@@ -895,6 +904,7 @@ mod tests {
                 profile: crate::domain::Profile::Fleet,
             })),
             modes: BTreeMap::new(),
+            confirm_env: false,
         }
     }
 
@@ -1607,7 +1617,7 @@ mod tests {
         let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m.starts_with("op item edit failed (exit 2): signed in")
-                && m.contains("grant this identity write access to the vault")
+                && m.mentions("grant this identity write access to the vault")
                 && !m.contains("to see why")),
             "{e:?}"
         );

@@ -162,11 +162,14 @@ impl KeyVault<'_> {
         )?;
         // serde_json messages can quote input fragments, so report only the position.
         let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
-            Error::Target(format!(
-                "az {OP} returned unexpected JSON (line {}, column {})",
-                e.line(),
-                e.column()
-            ))
+            Error::Target(
+                format!(
+                    "az {OP} returned unexpected JSON (line {}, column {})",
+                    e.line(),
+                    e.column()
+                )
+                .into(),
+            )
         })?;
         Ok(entries
             .into_iter()
@@ -227,11 +230,14 @@ impl KeyVault<'_> {
             other => read_output(self.runner, OP, self.vault, other)?,
         };
         let entry: ShowEntry = serde_json::from_slice(&out.stdout).map_err(|e| {
-            Error::Target(format!(
-                "az {OP} returned unexpected JSON (line {}, column {})",
-                e.line(),
-                e.column()
-            ))
+            Error::Target(
+                format!(
+                    "az {OP} returned unexpected JSON (line {}, column {})",
+                    e.line(),
+                    e.column()
+                )
+                .into(),
+            )
         })?;
         let version = version_from_id(&entry.id).ok_or_else(|| no_version_error(name))?;
         Ok(Some((SecretValue::new(entry.value), version)))
@@ -311,7 +317,7 @@ impl KeyVault<'_> {
             Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
                 "az {OP}: {}; the change may or may not have been applied\n  next: re-run the same command",
                 unknown_text(az::PROGRAM, reason)
-            ))),
+            ).into())),
         }
     }
 
@@ -348,7 +354,7 @@ impl KeyVault<'_> {
                      create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>",
                     vault = self.vault,
                     secs = waited.as_secs()
-                )));
+                ).into()));
             }
             waited += ACCESS_POLL;
             self.runner.pause(
@@ -403,10 +409,13 @@ impl KeyVault<'_> {
                 }
             }
             if waited >= CONFIRM_WAIT {
-                return Err(Error::Unknown(format!(
-                    "Key Vault accepted version {version} of {name} but does not show it yet; \
+                return Err(Error::Unknown(
+                    format!(
+                        "Key Vault accepted version {version} of {name} but does not show it yet; \
                      nothing else was changed; re-run to confirm"
-                )));
+                    )
+                    .into(),
+                ));
             }
             self.runner.pause(CONFIRM_POLL, "");
             waited += CONFIRM_POLL;
@@ -440,11 +449,14 @@ impl KeyVault<'_> {
         )? {
             Outcome::Done(_) => Ok(true),
             Outcome::Refused(_) => Ok(false),
-            Outcome::Unknown { .. } => Err(Error::Unknown(format!(
-                "could not tell whether {name} is soft-deleted in Key Vault {}; nothing was \
+            Outcome::Unknown { .. } => Err(Error::Unknown(
+                format!(
+                    "could not tell whether {name} is soft-deleted in Key Vault {}; nothing was \
                  changed; re-run to check again",
-                self.vault
-            ))),
+                    self.vault
+                )
+                .into(),
+            )),
         }
     }
 
@@ -453,10 +465,13 @@ impl KeyVault<'_> {
         const OP: &str = "keyvault secret delete";
         let managed = self.list_managed()?;
         if !managed.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
-            return Err(Error::Policy(format!(
-                "{name}: not tagged opv-managed={}; refusing to delete",
-                self.env
-            )));
+            return Err(Error::Policy(
+                format!(
+                    "{name}: not tagged opv-managed={}; refusing to delete",
+                    self.env
+                )
+                .into(),
+            ));
         }
         let name = &AzureTarget::key_vault_name(name);
         let args = [
@@ -498,18 +513,21 @@ fn version_from_id(id: &str) -> Option<String> {
 
 /// Key Vault answered without a usable version, so nothing can be pinned (NR-6).
 fn no_version_error(name: &str) -> Error {
-    Error::Target(format!(
-        "Key Vault returned no version for {name}; nothing was bound; re-run"
-    ))
+    Error::Target(
+        format!("Key Vault returned no version for {name}; nothing was bound; re-run").into(),
+    )
 }
 
 /// The soft-deleted refusal names the exact recover command; opv never recovers itself
 /// (FR-32).
 fn soft_deleted_error(name: &str, vault: &str) -> Error {
-    Error::Target(format!(
-        "{name} is soft-deleted in Key Vault {vault}; recover it with: \
+    Error::Target(
+        format!(
+            "{name} is soft-deleted in Key Vault {vault}; recover it with: \
          az keyvault secret recover --vault-name {vault} --name {name}"
-    ))
+        )
+        .into(),
+    )
 }
 
 #[cfg(test)]
@@ -927,7 +945,7 @@ mod tests {
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret())
             .unwrap_err();
-        assert!(matches!(err, Error::Auth(m) if m.contains("az login")));
+        assert!(matches!(err, Error::Auth(m) if m.mentions("az login")));
     }
 
     #[test]
@@ -959,7 +977,7 @@ mod tests {
     fn failed_call_when_signed_out_is_auth_error() {
         let r = FakeRunner::new([Output::failure(1)]);
         let err = az::diagnose(&r, "keyvault secret show", VAULT);
-        assert!(matches!(err, Error::Auth(msg) if msg.contains("az login")));
+        assert!(matches!(err, Error::Auth(msg) if msg.mentions("az login")));
     }
 
     #[test]

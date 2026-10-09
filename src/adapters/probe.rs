@@ -12,8 +12,8 @@ use crate::runner::{Call, CommandRunner, Output, PROBE_TIMEOUT};
 pub(crate) fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, Error> {
     let call = Call::new(program, args);
     r.probe(&call, PROBE_TIMEOUT).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH")),
-        kind => Error::Dependency(format!("failed to run {program} ({kind})")),
+        io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH").into()),
+        kind => Error::Dependency(format!("failed to run {program} ({kind})").into()),
     })
 }
 
@@ -26,7 +26,7 @@ pub(crate) fn spawn_tool(
 ) -> Result<Output, Error> {
     spawn(r, tool.program, args).map_err(|e| match e {
         Error::Dependency(m) if m.ends_with("not found on PATH") => {
-            Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)))
+            Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)).into())
         }
         e => e,
     })

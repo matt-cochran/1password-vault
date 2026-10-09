@@ -72,7 +72,7 @@ impl<'a> Section<'a> {
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, Error> {
         T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|mut e| {
             e.set_input(Some(self.text));
-            Error::Config(format!("invalid secrets.toml: {e}"))
+            Error::Config(format!("invalid secrets.toml: {e}").into())
         })
     }
 }

@@ -192,22 +192,23 @@ impl Provider for KubernetesProvider {
         profile: Profile,
     ) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
-        let target = match profile {
-            Profile::Fleet => {
-                let mut raw: Raw<Template> = section.deserialize()?;
-                let Some(Template(t)) = raw.env_name.take() else {
-                    return Err(Error::Config(format!(
+        let target =
+            match profile {
+                Profile::Fleet => {
+                    let mut raw: Raw<Template> = section.deserialize()?;
+                    let Some(Template(t)) = raw.env_name.take() else {
+                        return Err(Error::Config(format!(
                         "environment {env}: kubernetes.env_name is required under the fleet \
                          profile (for example \"FLEET__{{PRODUCT}}__{{KEY}}\")"
-                    )));
-                };
-                raw.target(env, t)
-            }
-            Profile::Simple => {
-                let raw: Raw<Refused> = section.deserialize()?;
-                raw.target(env, SIMPLE_TEMPLATE.into())
-            }
-        };
+                    ).into()));
+                    };
+                    raw.target(env, t)
+                }
+                Profile::Simple => {
+                    let raw: Raw<Refused> = section.deserialize()?;
+                    raw.target(env, SIMPLE_TEMPLATE.into())
+                }
+            };
         Ok(Box::new(target))
     }
 
@@ -431,10 +432,9 @@ impl TargetConfig for KubernetesTarget {
 fn kubectl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, KUBECTL, host, &["version", "--client"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(format!(
-            "{PROGRAM} version --client failed (exit {})",
-            o.status
-        )));
+        return Err(Error::Dependency(
+            format!("{PROGRAM} version --client failed (exit {})", o.status).into(),
+        ));
     }
     Ok(match version_in(&o.stdout) {
         Some(v) => Verdict::Ok(format!("version {v}")),
@@ -459,11 +459,14 @@ impl KubernetesTarget {
         if o.status == 0 {
             Ok(Verdict::Ok(format!("context {ctx} is in your kubeconfig")))
         } else {
-            Err(Error::Config(format!(
-                "context \"{ctx}\" is not in your kubeconfig (KUBECONFIG or ~/.kube/config); \
+            Err(Error::Config(
+                format!(
+                    "context \"{ctx}\" is not in your kubeconfig (KUBECONFIG or ~/.kube/config); \
                  nothing was changed\n  next: kubectl config get-contexts -o name lists the \
                  contexts; set kubernetes.context in secrets.toml to one of them"
-            )))
+                )
+                .into(),
+            ))
         }
     }
 
@@ -483,12 +486,15 @@ impl KubernetesTarget {
         if o.status == 0 {
             Ok(Verdict::Ok(format!("API server for context {ctx} answers")))
         } else {
-            Err(Error::Unknown(format!(
-                "provider unavailable: the Kubernetes API server for context \"{ctx}\" did not \
+            Err(Error::Unknown(
+                format!(
+                    "provider unavailable: the Kubernetes API server for context \"{ctx}\" did not \
                  answer (unreachable, or your credentials for it expired); nothing was \
                  changed\n  next: `kubectl --context {ctx} cluster-info` shows the cause; fix \
                  it, then re-run `opv doctor`"
-            )))
+                )
+                .into(),
+            ))
         }
     }
 
@@ -898,7 +904,10 @@ environments = ["dev"]
             .map(|c| match c.outcome {
                 Ok(Verdict::Ok(d)) => format!("{}: ok {d}", c.name),
                 Ok(Verdict::Warn(d)) => format!("{}: warn {d}", c.name),
-                Err(e) => format!("{}: FAIL {e}", c.name),
+                Err(e) => match e.next_step() {
+                    Some(n) => format!("{}: FAIL {e}\n  fix: {n}", c.name),
+                    None => format!("{}: FAIL {e}", c.name),
+                },
             })
             .collect()
     }
@@ -949,7 +958,7 @@ environments = ["dev"]
         let mut g = healthy();
         g[1] = Output::failure(1);
         let r = FakeRunner::new(g);
-        assert!(doctor_lines(&r)[1].contains("next: kubectl config get-contexts -o name"));
+        assert!(doctor_lines(&r)[1].contains("fix: kubectl config get-contexts -o name"));
     }
 
     #[test]

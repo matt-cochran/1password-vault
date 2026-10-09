@@ -795,6 +795,13 @@ pub mod signals {
     static CHILD: Mutex<Option<u32>> = Mutex::new(None);
     /// The step of the most recent captured call.
     static STEP: Mutex<String> = Mutex::new(String::new());
+    /// The command line to run again after an interruption (NR-19).
+    static RERUN: Mutex<String> = Mutex::new(String::new());
+
+    /// The command the interruption message names as the next step.
+    pub fn set_rerun(command: &str) {
+        *lock(&RERUN) = command.to_string();
+    }
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -857,7 +864,12 @@ pub mod signals {
                 STOPPING.store(true, Ordering::SeqCst);
                 forward(sig);
                 let step = lock(&STEP).clone();
-                eprintln!("opv: {}", interrupted_message(&step));
+                let rerun = lock(&RERUN).clone();
+                eprint!(
+                    "opv: {}\n{}",
+                    interrupted_message(&step),
+                    crate::error::next_line(&format!("{rerun} (safe to re-run)"))
+                );
                 std::process::exit(128 + sig);
             }
         });

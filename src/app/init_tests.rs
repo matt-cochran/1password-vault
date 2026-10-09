@@ -172,7 +172,7 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
         )),
         "{out}"
     );
-    assert!(out.ends_with("Next step: opv plan staging\n"), "{out}");
+    assert!(out.ends_with("Next: opv plan staging\n"), "{out}");
     assert!(out.contains(VAULT_ID) && out.contains(ITEM_ID), "{out}");
 }
 

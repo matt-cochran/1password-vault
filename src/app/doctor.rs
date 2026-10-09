@@ -17,9 +17,9 @@
 //! A failing check prints the next command for the detected platform and shell (FR-26):
 //! the sign-in command, `op account add`, or the install command.
 //!
-//! The output ends with one `Next step` line (FR-22): the first failing check and the safe
-//! command that addresses it (the first remediation line of that check), or `nothing
-//! pending`. Text only, never a prompt (FR-9).
+//! A failure ends the run with the first failing check as the error, whose `Next:` line
+//! (NR-19) is the safe command that addresses it (the first remediation line of that check);
+//! a clean run ends with `Next: nothing pending`. Text only, never a prompt (FR-9).
 
 use std::io::{self, Write};
 
@@ -85,15 +85,18 @@ fn run_on(
     local_only: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let mut first: Option<Error> = None;
-    let mut next: Option<String> = None;
+    let mut first: Option<(String, Error)> = None;
     let mut line = |out: &mut dyn Write, check: &str, res: Result<Check, Error>| {
         let text = match res {
             Ok(v) => v.line(check),
             Err(e) => {
-                let t = format!("FAIL  {check}: {e}");
-                next.get_or_insert_with(|| next_step(check, &e));
-                first.get_or_insert(e);
+                let t = match e.next_step() {
+                    Some(n) => format!("FAIL  {check}: {e}\n  fix: {n}"),
+                    None => format!("FAIL  {check}: {e}"),
+                };
+                if first.is_none() {
+                    first = Some((check.to_string(), e));
+                }
                 t
             }
         };
@@ -173,11 +176,19 @@ fn run_on(
         .map_err(write_err)?;
     }
     line(out, "opv", opv_on_path(r))?;
-    let next = next.unwrap_or_else(|| "Next step: nothing pending".into());
-    writeln!(out, "{next}").map_err(write_err)?;
+    // The first failure is the result: its FAIL line above has the detail, so the error
+    // names the check only, and its next step is that check's remediation (NR-19).
     match first {
-        Some(e) => Err(e),
-        None => Ok(()),
+        Some((check, e)) => {
+            let next = next_step(&check, &e);
+            Err(e
+                .map_text(|_| format!("{check} check failed (see the FAIL line above)"))
+                .with_next(next))
+        }
+        None => {
+            writeln!(out, "Next: nothing pending").map_err(write_err)?;
+            Ok(())
+        }
     }
 }
 
@@ -215,38 +226,39 @@ fn config_summary(f: &Fleet) -> String {
     }
 }
 
-/// The `Next step` line for the first failing check (FR-22).
+/// The next step for the first failing check (FR-22, NR-19).
 ///
 /// A configuration failure gets a fixed step: its message is parser output (a TOML error
 /// carries a `  |` source gutter), not a layout opv controls. For doctor's own tool and auth
-/// checks, whose messages opv writes, the step is that check's first remediation line (the
-/// install, sign-in, `op account add` or log-in command the failure already prints, FR-26),
-/// or the fix-and-re-run hint when it has none. Never tool output or a value (SR-1).
+/// checks, whose messages opv writes, the step is the failure's own next step, or its first
+/// remediation line (the install, sign-in, `op account add` or log-in command the failure
+/// already prints, FR-26), or the fix-and-re-run hint when it has none. Never tool output or
+/// a value (SR-1).
 fn next_step(check: &str, e: &Error) -> String {
     if check == CONFIG_CHECK {
-        return format!(
-            "Next step ({check}): fix secrets.toml (see the config line above) and re-run `opv doctor`"
-        );
+        return "fix secrets.toml (see the config line above), then run opv doctor".into();
     }
-    let text = e.to_string();
-    let hint = text
+    if let Some(n) = e.next_step() {
+        return n.to_string();
+    }
+    let hint = e
+        .text()
         .lines()
         .skip(1)
         .find_map(|l| l.strip_prefix("  "))
-        .map(|l| l.strip_prefix("next: ").unwrap_or(l).trim());
+        .map(str::trim);
     match hint {
-        Some(h) if !h.is_empty() => format!("Next step ({check}): {h}"),
-        _ => format!("Next step ({check}): fix the failure reported above and re-run `opv doctor`"),
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => format!("fix the {check} failure above, then run opv doctor"),
     }
 }
 
 fn op_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Check, Error> {
     let o = spawn_tool(r, OP_CLI, host, &["--version"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(format!(
-            "op --version failed (exit {})",
-            o.status
-        )));
+        return Err(Error::Dependency(
+            format!("op --version failed (exit {})", o.status).into(),
+        ));
     }
     let (a, b, c) = OP_TESTED_MIN;
     Ok(match version_in(&o.stdout) {
@@ -295,10 +307,9 @@ fn local_run(r: &dyn CommandRunner, local_only: bool) -> Result<Check, Error> {
             Err(Error::Dependency(WINDOWS_OP.into()))
         }
         Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(Check::Warn(WINDOWS_OP.into())),
-        Err(e) if local_only => Err(Error::Dependency(format!(
-            "cannot inspect op on PATH ({})",
-            e.kind()
-        ))),
+        Err(e) if local_only => Err(Error::Dependency(
+            format!("cannot inspect op on PATH ({})", e.kind()).into(),
+        )),
         Err(e) => Ok(Check::Warn(format!(
             "cannot inspect op on PATH ({})",
             e.kind()
@@ -427,7 +438,17 @@ mod tests {
     fn doctor_local_only(r: &FakeRunner) -> (Result<(), Error>, String) {
         let mut out = Vec::new();
         let res = run_on(Ok(fleet()), r, &|| linux(), true, &mut out);
-        (res, text_of(&out))
+        let t = terminal(&res, &out);
+        (res, t)
+    }
+
+    /// What the terminal shows: stdout, then on failure the stderr report (NR-19).
+    fn terminal(res: &Result<(), Error>, out: &[u8]) -> String {
+        let mut t = text_of(out);
+        if let Err(e) = res {
+            t.push_str(&crate::error::report(e, "-"));
+        }
+        t
     }
 
     #[cfg(not(windows))]
@@ -439,14 +460,15 @@ mod tests {
     fn doctor(config: Result<Fleet, Error>, r: &FakeRunner) -> (Result<(), Error>, String) {
         let mut out = Vec::new();
         let res = run_with(config, r, &linux(), &mut out);
-        (res, text_of(&out))
+        let t = terminal(&res, &out);
+        (res, t)
     }
 
     /// The check lines only (remediation lines under a check are indented; the closing
-    /// `Next step` line is not a check).
+    /// `Next:` line and the error report are not checks).
     fn checks(out: &str) -> Vec<&str> {
         out.lines()
-            .filter(|l| !l.starts_with("  ") && !l.starts_with("Next step"))
+            .filter(|l| !l.starts_with("  ") && !l.starts_with("Next: ") && !l.starts_with("opv: "))
             .collect()
     }
 
@@ -790,7 +812,7 @@ mod tests {
     fn next_step_is_the_last_line_when_all_checks_pass() {
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(next_line(&out), "Next step: nothing pending", "{out}");
+        assert_eq!(next_line(&out), "Next: nothing pending", "{out}");
     }
 
     #[test]
@@ -801,7 +823,7 @@ mod tests {
         }
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
-            out.lines().filter(|l| l.starts_with("Next step")).count(),
+            out.lines().filter(|l| l.starts_with("Next")).count(),
             1,
             "{out}"
         );
@@ -817,7 +839,7 @@ mod tests {
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
             next_line(&out),
-            "Next step (op): install op from https://developer.1password.com/docs/cli/get-started/ \
+            "Next: install op from https://developer.1password.com/docs/cli/get-started/ \
              (apt, dnf or the zip for this Linux distribution)",
             "{out}"
         );
@@ -830,11 +852,7 @@ mod tests {
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(
-            next_line(&out),
-            "Next step (op auth): sign in: eval $(op signin)",
-            "{out}"
-        );
+        assert_eq!(next_line(&out), "Next: sign in: eval $(op signin)", "{out}");
     }
 
     #[test]
@@ -845,7 +863,7 @@ mod tests {
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
         assert!(
-            next_line(&out).starts_with("Next step (op auth): add one: op account add"),
+            next_line(&out).starts_with("Next: add one: op account add"),
             "{out}"
         );
     }
@@ -856,11 +874,7 @@ mod tests {
         g[3] = Output::failure(1);
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(
-            next_line(&out),
-            "Next step (fly auth): log in: flyctl auth login",
-            "{out}"
-        );
+        assert_eq!(next_line(&out), "Next: log in: flyctl auth login", "{out}");
     }
 
     #[test]
@@ -871,11 +885,11 @@ mod tests {
         g[4] = Output::failure(1); // fly auth fails too
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert!(next_line(&out).starts_with("Next step (op auth):"), "{out}");
+        assert!(next_line(&out).starts_with("Next: sign in"), "{out}");
     }
 
     const CONFIG_STEP: &str =
-        "Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor`";
+        "Next: fix secrets.toml (see the config line above), then run opv doctor";
 
     #[test]
     fn next_step_for_invalid_config_is_fix_and_rerun() {
@@ -916,7 +930,7 @@ mod tests {
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
             next_line(&out),
-            "Next step (op): fix the failure reported above and re-run `opv doctor`",
+            "Next: fix the op failure above, then run opv doctor",
             "{out}"
         );
     }
@@ -946,10 +960,10 @@ mod tests {
                 .var("CI"),
         );
         let mut out = Vec::new();
-        let _ = run_with(Ok(fleet()), &r, &h, &mut out);
-        let out = text_of(&out);
+        let res = run_with(Ok(fleet()), &r, &h, &mut out);
+        let out = terminal(&res, &out);
         assert!(
-            next_line(&out).starts_with("Next step (op auth): set OP_SERVICE_ACCOUNT_TOKEN"),
+            next_line(&out).starts_with("Next: set OP_SERVICE_ACCOUNT_TOKEN"),
             "{out}"
         );
     }
@@ -1006,7 +1020,7 @@ mod tests {
         let (_, out) = doctor_local_only(windows_op(&r));
         assert!(
             out.ends_with(
-                "Next step (op local run): install the Linux 1Password CLI in WSL and sign in: see docs/local-development.md (WSL)\n"
+                "Next: install the Linux 1Password CLI in WSL and sign in: see docs/local-development.md (WSL)\n"
             ),
             "{out}"
         );

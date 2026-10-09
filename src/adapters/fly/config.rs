@@ -94,7 +94,7 @@ impl Provider for FlyProvider {
                 if !t.contains("{PRODUCT}") || !t.contains("{KEY}") {
                     return Err(Error::Config(format!(
                         "environment {env}: fly.secret_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
-                    )));
+                    ).into()));
                 }
                 FlyTarget {
                     app: f.app,
@@ -106,10 +106,13 @@ impl Provider for FlyProvider {
                 let f: RawSimpleFly = section.deserialize()?;
                 check_app(env, &f.app)?;
                 if f.secret_name.is_some() {
-                    return Err(Error::Config(format!(
-                        "environment {env}: fly.secret_name is not allowed under the simple \
+                    return Err(Error::Config(
+                        format!(
+                            "environment {env}: fly.secret_name is not allowed under the simple \
                          profile (the Fly name is the key name)"
-                    )));
+                        )
+                        .into(),
+                    ));
                 }
                 FlyTarget {
                     app: f.app,
@@ -255,10 +258,9 @@ fn flyctl_tested(v: (u64, u64, u64)) -> bool {
 fn flyctl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, FLYCTL, host, &["version"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(format!(
-            "{PROGRAM} version failed (exit {})",
-            o.status
-        )));
+        return Err(Error::Dependency(
+            format!("{PROGRAM} version failed (exit {})", o.status).into(),
+        ));
     }
     let (a, b, c) = FLYCTL_TESTED;
     Ok(match version_in(&o.stdout) {
@@ -290,14 +292,16 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
             ))),
             None => Err(not_logged_in(&host(), None)),
         },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(format!(
-            "{PROGRAM} not found on PATH\n  {}",
-            host().install_hint(FLYCTL)
-        ))),
-        Err(e) => Err(Error::Dependency(format!(
-            "failed to run {PROGRAM} ({})",
-            e.kind()
-        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
+            format!(
+                "{PROGRAM} not found on PATH\n  {}",
+                host().install_hint(FLYCTL)
+            )
+            .into(),
+        )),
+        Err(e) => Err(Error::Dependency(
+            format!("failed to run {PROGRAM} ({})", e.kind()).into(),
+        )),
     }
 }
 

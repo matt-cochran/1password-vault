@@ -52,9 +52,9 @@ pub fn parse_profile(s: &str) -> Result<Profile, Error> {
     match s {
         "simple" => Ok(Profile::Simple),
         "fleet" => Ok(Profile::Fleet),
-        other => Err(Error::Config(format!(
-            "--profile must be simple or fleet, got {other:?}"
-        ))),
+        other => Err(Error::Config(
+            format!("--profile must be simple or fleet, got {other:?}").into(),
+        )),
     }
 }
 
@@ -87,9 +87,9 @@ fn run_on(
     let text = render(args, &vault.id, &item.id, &decl);
     // Validated exactly like a hand-written file (§10.2): IDs, app, key and product names.
     config::parse(&text).map_err(|e| match e {
-        Error::Config(m) => Error::Config(format!(
-            "{m} (in the file init would write; nothing written)"
-        )),
+        e @ Error::Config(_) => {
+            e.map_text(|m| format!("{m} (in the file init would write; nothing written)"))
+        }
         other => other,
     })?;
     write_atomic(&target, &text, args.force)?;
@@ -132,7 +132,7 @@ fn run_on(
     } else {
         ""
     };
-    w(out, format!("Next step: opv {next} {}{product}", args.env))
+    w(out, format!("Next: opv {next} {}{product}", args.env))
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
@@ -161,22 +161,28 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !env_ok {
-        return Err(Error::Config(format!(
-            "environment name {:?} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$",
-            args.env
-        )));
+        return Err(Error::Config(
+            format!(
+                "environment name {:?} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                args.env
+            )
+            .into(),
+        ));
     }
     if let Some(app) = &args.fly_app
         && !config::is_id(app)
     {
-        return Err(Error::Config(format!(
-            "--fly-app {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
-            app
-        )));
+        return Err(Error::Config(
+            format!(
+                "--fly-app {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                app
+            )
+            .into(),
+        ));
     }
     for (flag, v) in [("--vault", &args.vault), ("--item", &args.item)] {
         if v.is_empty() {
-            return Err(Error::Config(format!("{flag} is empty")));
+            return Err(Error::Config(format!("{flag} is empty").into()));
         }
     }
     Ok(())
@@ -186,10 +192,13 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
 /// naming the path. `init` never merges.
 fn refuse_existing(target: &Path, force: bool) -> Result<(), Error> {
     if !force && fs::symlink_metadata(target).is_ok() {
-        return Err(Error::Config(format!(
-            "{} already exists; init never merges: pass --force to overwrite it",
-            target.display()
-        )));
+        return Err(Error::Config(
+            format!(
+                "{} already exists; init never merges: pass --force to overwrite it",
+                target.display()
+            )
+            .into(),
+        ));
     }
     Ok(())
 }
@@ -227,20 +236,21 @@ fn declare(
 ) -> Result<Declared, Error> {
     let (sectioned, unsectioned): (Vec<&FieldShape>, Vec<&FieldShape>) =
         fields.iter().partition(|f| f.section.is_some());
-    let profile = match (explicit, sectioned.is_empty(), unsectioned.is_empty()) {
-        (Some(p), _, _) => p,
-        (None, true, _) => Profile::Simple,
-        (None, false, true) => Profile::Fleet,
-        (None, false, false) => {
-            return Err(Error::Config(format!(
+    let profile =
+        match (explicit, sectioned.is_empty(), unsectioned.is_empty()) {
+            (Some(p), _, _) => p,
+            (None, true, _) => Profile::Simple,
+            (None, false, true) => Profile::Fleet,
+            (None, false, false) => {
+                return Err(Error::Config(format!(
                 "item {item_title:?} mixes {} unsectioned field(s) (the simple profile shape) \
                  and {} sectioned field(s) (the fleet profile shape); init never guesses: pass \
                  --profile simple or --profile fleet",
                 unsectioned.len(),
                 sectioned.len()
-            )));
-        }
-    };
+            ).into()));
+            }
+        };
     check_duplicates(fields, profile, item_title)?;
     let mut d = Declared {
         profile,
@@ -373,11 +383,14 @@ fn check_duplicates(
             Profile::Simple => f.section.is_none() && config::is_env_name(&f.label),
         };
         if read && !seen.insert((f.section.as_deref(), f.label.as_str())) {
-            return Err(Error::Source(format!(
-                "duplicate field {} in item {item_title:?}; rename one in 1Password \
+            return Err(Error::Source(
+                format!(
+                    "duplicate field {} in item {item_title:?}; rename one in 1Password \
                  (nothing written)",
-                display_name(f)
-            )));
+                    display_name(f)
+                )
+                .into(),
+            ));
         }
     }
     Ok(())
@@ -450,7 +463,7 @@ pub(crate) fn write_atomic(target: &Path, text: &str, force: bool) -> Result<(),
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     let tmp: PathBuf = dir.join(format!(".{FILE_NAME}.opv-init.{}.tmp", std::process::id()));
     let fail = |what: &str, p: &Path, e: io::Error| {
-        Error::Config(format!("cannot {what} {}: {e}", p.display()))
+        Error::Config(format!("cannot {what} {}: {e}", p.display()).into())
     };
     let res = (|| {
         let mut f = fs::OpenOptions::new()

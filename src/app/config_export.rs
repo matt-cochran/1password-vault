@@ -24,10 +24,9 @@ pub fn run(
     let (plan, _) = read_and_plan(fleet, env_name, r, None, &none, &none)?;
     let refused = row_names(&plan.rows, refuses);
     if !refused.is_empty() {
-        return Err(Error::Policy(format!(
-            "config export refused: {}",
-            refused.join(", ")
-        )));
+        return Err(Error::Policy(
+            format!("config export refused: {}", refused.join(", ")).into(),
+        ));
     }
     // Config values are not secret (FR-18); `plan.config` never holds a secret-kind value.
     // Under the simple profile (FR-20) the export is a flat `KEY -> value` object, with no

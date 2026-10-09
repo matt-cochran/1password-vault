@@ -30,10 +30,10 @@ pub trait Interaction {
 }
 
 fn settings_error(message: &str) -> Error {
-    Error::Config(format!("[SETUP-SETTINGS] {message}"))
+    Error::Config(format!("[SETUP-SETTINGS] {message}").into())
 }
 fn source_error(message: &str) -> Error {
-    Error::Source(format!("[SETUP-ACCESS] {message}"))
+    Error::Source(format!("[SETUP-ACCESS] {message}").into())
 }
 
 #[derive(Deserialize)]

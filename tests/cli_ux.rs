@@ -288,3 +288,56 @@ fn color_always_never_colours_explain() {
     );
     assert!(!has_escape(&out), "{out:?}");
 }
+
+/// P12: OPV_PRODUCT is the default for --product on status (checked before any call).
+#[test]
+fn opv_product_applies_to_status() {
+    let (_, _, err) = opv_with(
+        &[("OPV_PRODUCT", "nope")],
+        &["--config", CFG, "status", "prod"],
+    );
+    assert!(
+        err.starts_with("product nope (from OPV_PRODUCT)\n"),
+        "{err}"
+    );
+}
+
+#[test]
+fn opv_product_applies_to_plan() {
+    let (code, _, _) = opv_with(
+        &[("OPV_PRODUCT", "nope")],
+        &["--config", CFG, "plan", "prod"],
+    );
+    assert_eq!(code, 2);
+}
+
+/// P20: sync never takes its product from the environment.
+#[test]
+fn opv_product_is_never_used_by_sync() {
+    let (_, _, err) = opv_with(
+        &[("OPV_PRODUCT", "nope")],
+        &["--config", CFG, "sync", "prod"],
+    );
+    assert!(!err.contains("OPV_PRODUCT"), "{err}");
+}
+
+/// NR-19: a usage error ends with the help command for the subcommand.
+#[test]
+fn usage_error_ends_with_the_help_command() {
+    let (_, _, err) = opv_with(&[], &["sync"]);
+    assert_eq!(err.lines().last(), Some("Next: opv sync --help"), "{err}");
+}
+
+/// P10: --confirm is documented on sync.
+#[test]
+fn sync_help_documents_confirm() {
+    let (_, out, _) = opv_with(&[], &["sync", "--help"]);
+    assert!(out.contains("--confirm <ENV>"), "{out}");
+}
+
+/// NR-19: `opv` with no command shows the help, exits 2 and ends with a `Next:` line.
+#[test]
+fn missing_command_ends_with_the_help_command() {
+    let (_, _, err) = opv_with(&[], &[]);
+    assert_eq!(err.lines().last(), Some("Next: opv --help"), "{err}");
+}

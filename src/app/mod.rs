@@ -31,6 +31,8 @@ mod simple_tests;
 pub mod skeleton;
 pub mod status;
 pub mod sync;
+#[cfg(test)]
+mod ux_tests;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -184,7 +186,7 @@ pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::Cur
 /// A failed write to the output stream. A closed pipe never gets here: `main` swallows
 /// `BrokenPipe` so the command still returns its own result (e.g. `status | head`).
 pub(crate) fn write_err(e: io::Error) -> Error {
-    Error::Dependency(format!("cannot write output ({})", e.kind()))
+    Error::Dependency(format!("cannot write output ({})", e.kind()).into())
 }
 
 /// The `product` of a JSON row: `None` (JSON `null`) for the simple profile's implicit
@@ -204,12 +206,17 @@ fn json_product(product: &str) -> Option<String> {
 ///
 /// `pinned` adds the per-row binding fields of a pinned target (R5): `binding`,
 /// `pending_deploy` and `drift`, keyed by env name. They are absent for a staged target.
+///
+/// `target_name` is the row's name on the target for every provider; `fly_name` holds the
+/// same value and is kept for scripts written before 0.5.0 (deprecated, P4). `product` is
+/// set when `--product` scoped the document (NR-16).
 pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
     env_name: &str,
     plan: &SyncPlan,
     pinned: Option<&BTreeMap<String, PinnedRow>>,
+    product: Option<&str>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
@@ -251,7 +258,8 @@ pub(crate) fn write_json(
                 state: json_state(&r.state),
                 rule: json_rule(&r.state),
                 reason: json_reason(&r.state),
-                fly_name: target_name,
+                fly_name: target_name.clone(),
+                target_name,
                 target: json_target(r.kind, r.target),
                 action,
             }
@@ -261,6 +269,7 @@ pub(crate) fn write_json(
     let doc = JsonDoc {
         schema_version: 1,
         environment: env_name.to_string(),
+        product: product.map(str::to_string),
         rows,
         extras: plan
             .extras
@@ -278,6 +287,7 @@ pub(crate) fn write_json(
                 product: json_product(product),
                 key: key.clone(),
                 fly_name: env.target_name(product, key),
+                target_name: env.target_name(product, key),
             })
             .collect(),
         prune: plan.prune.clone(),
@@ -291,7 +301,7 @@ pub(crate) fn write_json(
         },
     };
     let text = serde_json::to_string(&doc)
-        .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})")))?;
+        .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
     writeln!(out, "{text}").map_err(write_err)
 }
 
@@ -299,6 +309,8 @@ pub(crate) fn write_json(
 struct JsonDoc {
     schema_version: u32,
     environment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    product: Option<String>,
     rows: Vec<JsonRow>,
     extras: Vec<JsonName>,
     stage: Vec<String>,
@@ -316,7 +328,9 @@ struct JsonRow {
     rule: Option<&'static str>,
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
     reason: Option<String>,
+    /// Deprecated alias of `target_name` (P4).
     fly_name: Option<String>,
+    target_name: Option<String>,
     target: Option<&'static str>,
     action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -345,7 +359,9 @@ struct JsonName {
 struct JsonHeld {
     product: Option<String>,
     key: String,
+    /// Deprecated alias of `target_name` (P4).
     fly_name: Option<String>,
+    target_name: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -534,6 +550,119 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
     Ok(())
 }
 
+/// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused under the simple
+/// profile, which has no products (FR-20), and for an undeclared product. Before any call.
+pub(crate) fn check_product(fleet: &Fleet, product: Option<&str>) -> Result<(), Error> {
+    let Some(p) = product else { return Ok(()) };
+    if fleet.is_simple() {
+        return Err(Error::Config(
+            "--product is not used under the simple profile".into(),
+        ));
+    }
+    if !fleet.products.contains_key(p) {
+        let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
+        return Err(Error::Config(
+            format!("undefined product {p:?}; choose one of: {}", all.join(", ")).into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The target names `product`'s declared keys render in `env_name` (its share of the managed
+/// set, FR-8).
+pub(crate) fn product_names(
+    fleet: &Fleet,
+    env_name: &str,
+    product: &str,
+) -> Result<HashSet<String>, Error> {
+    let (_, t) = target(fleet, env_name)?;
+    Ok(fleet
+        .products
+        .get(product)
+        .map(|p| p.keys.keys().map(|k| t.env_name(product, k)).collect())
+        .unwrap_or_default())
+}
+
+/// `plan` limited to one product: its rows, extras, writes, prunes and held keys only, so
+/// other products can neither block nor be touched (NR-16, P12, P20). `names` is the
+/// product's share of the managed set ([`product_names`]).
+pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<String>) {
+    plan.rows.retain(|r| r.product == product);
+    plan.extras.retain(|(section, _)| section == product);
+    plan.stage.retain(|(n, _)| names.contains(n));
+    plan.held_immutable.retain(|(p, _)| p == product);
+    plan.prune.retain(|n| names.contains(n));
+    plan.held_from_prune.retain(|(p, _, _)| p == product);
+    plan.config.retain(|p, _| p == product);
+}
+
+/// Target name → `product/KEY` of every declared key, so output names a key the way the
+/// configuration does, with the target's name second: `product/KEY (TARGET_NAME)` (P19).
+pub(crate) struct KeyNames(BTreeMap<String, String>);
+
+impl KeyNames {
+    pub(crate) fn new(fleet: &Fleet, env_name: &str) -> Result<KeyNames, Error> {
+        let (_, t) = target(fleet, env_name)?;
+        Ok(KeyNames(
+            fleet
+                .products
+                .iter()
+                .flat_map(|(p, prod)| {
+                    prod.keys
+                        .keys()
+                        .map(move |k| (t.env_name(p, k), key_label(p, k)))
+                })
+                .collect(),
+        ))
+    }
+
+    /// `product/KEY (NAME)`; the bare name when it is no declared key's, or when the label
+    /// is the name itself (simple profile).
+    pub(crate) fn label(&self, name: &str) -> String {
+        match self.0.get(name) {
+            Some(key) if key != name => format!("{key} ({name})"),
+            _ => name.to_string(),
+        }
+    }
+
+    /// [`KeyNames::label`] of each name, comma-separated.
+    pub(crate) fn join<S: AsRef<str>>(&self, names: impl IntoIterator<Item = S>) -> String {
+        names
+            .into_iter()
+            .map(|n| self.label(n.as_ref()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// `N key` / `N keys`.
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// The one-line count summary `status` prints first, and `status` without an environment
+/// prints per environment (NR-16, P22): `prod: 4 keys · 3 saved · 1 skipped · 0 findings ·
+/// 1 not yet on Fly`. Names and counts only.
+pub(crate) fn count_line(env_name: &str, rows: &[Row], target_label: &str) -> String {
+    let saved = rows.iter().filter(|r| r.state == KeyState::Ready);
+    let absent = saved
+        .clone()
+        .filter(|r| r.kind == Kind::Secret && r.target == TargetState::Absent)
+        .count();
+    let skipped = rows.iter().filter(|r| r.state == KeyState::Skipped).count();
+    let findings = rows.iter().filter(|r| is_blocking(r)).count();
+    format!(
+        "{env_name}: {} · {} saved · {skipped} skipped · {} · {absent} not yet on {target_label}",
+        plural(rows.len(), "key", "keys"),
+        saved.count(),
+        plural(findings, "finding", "findings"),
+    )
+}
+
 /// The environment and its target; `Error::Config` naming the environment when it is
 /// undefined or has no target section (status, plan and sync need one). The hint names
 /// what the default provider needs (FR-37).
@@ -545,16 +674,25 @@ pub(crate) fn target<'f>(
     if let Some(t) = e.target() {
         return Ok((e, t));
     }
-    let hint = registry::DEFAULT.setup_hint(fleet.profile);
     let local = if fleet.is_simple() {
         format!("opv check {env} and opv run {env} -- <command>")
     } else {
         format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>")
     };
-    Err(Error::Config(format!(
-        "environment {env:?} has no deployment target. For local settings use {local}. To deploy, {hint} first."
-    )))
+    let sections: Vec<&str> = registry::PROVIDERS.iter().map(|p| p.section()).collect();
+    Err(Error::Config(
+        format!(
+            "environment {env:?} has no deployment target. For local settings use {local}. To \
+             deploy, add one target section ({}) to environment {env} in secrets.toml first.",
+            sections.join(", ")
+        )
+        .into(),
+    )
+    .with_next(format!("{DOCS}/configuration.md")))
 }
+
+/// Where the user documentation lives (for next steps that are a page to read).
+pub(crate) const DOCS: &str = "https://github.com/matt-cochran/1password-vault/blob/main/docs";
 
 /// Resolve the environment's target and open its ports, before any call. Mutating
 /// commands run [`preflight`] before their first write.

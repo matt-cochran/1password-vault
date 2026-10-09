@@ -268,15 +268,16 @@ impl PinnedStore for KubeSecrets<'_> {
         let Some((_, b64)) = text(&out, &what)?.split_once('\t') else {
             return Ok(None);
         };
-        let corrupt = || {
-            Error::Target(format!(
+        let corrupt =
+            || {
+                Error::Target(format!(
                 "secret {secret} does not hold the value its name promises (it was replaced \
                  outside opv); nothing was changed\n  next: inspect it with `{}`; to repair, \
                  delete it and re-run at once (pods starting in between cannot read it)",
                 self.k
                     .command(&format!("get secret {secret} --show-labels"))
-            ))
-        };
+            ).into())
+            };
         let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| corrupt())?);
         let value = std::str::from_utf8(&bytes).map_err(|_| corrupt())?;
         let value = SecretValue::new(value.to_string());
@@ -291,7 +292,7 @@ impl PinnedStore for KubeSecrets<'_> {
     /// environment (or none) is refused (FR-32).
     fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
         if let Some((rule, reason)) = refusal(name, value) {
-            return Err(Error::Policy(format!("{name}: {rule}: {reason}")));
+            return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
         }
         let t = self.t();
         let store = store_name(name);
@@ -305,14 +306,17 @@ impl PinnedStore for KubeSecrets<'_> {
                 } else {
                     format!("opv environment \"{env}\"")
                 };
-                return Err(Error::Target(format!(
-                    "secret {secret} in namespace {} belongs to {owner}, not \"{}\"; nothing \
+                return Err(Error::Target(
+                    format!(
+                        "secret {secret} in namespace {} belongs to {owner}, not \"{}\"; nothing \
                      was written\n  next: give each environment its own namespace, or {}",
-                    t.namespace,
-                    t.env,
-                    self.k
-                        .command(&format!("label secret {secret} {LABEL_MANAGED}={}", t.env))
-                )));
+                        t.namespace,
+                        t.env,
+                        self.k
+                            .command(&format!("label secret {secret} {LABEL_MANAGED}={}", t.env))
+                    )
+                    .into(),
+                ));
             }
             None => {}
         }
@@ -334,12 +338,15 @@ impl PinnedStore for KubeSecrets<'_> {
             Outcome::Done(out) => {
                 let echoed = text(&out, &what)?.trim();
                 if echoed != format!("secret/{secret}") {
-                    return Err(Error::Target(format!(
-                        "{what} did not confirm the secret it wrote; it may or may not \
+                    return Err(Error::Target(
+                        format!(
+                            "{what} did not confirm the secret it wrote; it may or may not \
                          exist and nothing else was changed\n  next: check with `{}`, then \
                          re-run the same command",
-                        self.k.command(&format!("get secret {secret} -o name"))
-                    )));
+                            self.k.command(&format!("get secret {secret} -o name"))
+                        )
+                        .into(),
+                    ));
                 }
                 Ok(version)
             }
@@ -376,10 +383,13 @@ impl KubeSecrets<'_> {
         let t = self.t();
         let store = store_name(name);
         if !valid_label_value(&store) {
-            return Err(Error::Config(format!(
-                "{name}: kubernetes-name-invalid: not a valid Kubernetes name, so opv never \
+            return Err(Error::Config(
+                format!(
+                    "{name}: kubernetes-name-invalid: not a valid Kubernetes name, so opv never \
                  wrote it; nothing was deleted\n  next: run opv explain {name}"
-            )));
+                )
+                .into(),
+            ));
         }
         let kept = keep.map(|v| secret_name(&store, v));
         let selector = format!("{LABEL_MANAGED}={},{LABEL_KEY}={store}", t.env);

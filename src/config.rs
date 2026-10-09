@@ -24,7 +24,7 @@ use crate::provider::{Section, TargetConfig};
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
+        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
     parse(&text)
 }
 
@@ -50,7 +50,7 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
 /// file that does not parse, takes the fleet path exactly as in v0.1, which reports any
 /// other kind as a configuration error.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
-    let invalid = |e| Error::Config(format!("invalid secrets.toml: {e}"));
+    let invalid = |e| Error::Config(format!("invalid secrets.toml: {e}").into());
     if peek_kind(text).as_deref() == Some("simple") {
         let raw: RawSimpleConfig = toml::from_str(text).map_err(invalid)?;
         let doc = Doc::parse(text).map_err(invalid)?;
@@ -211,6 +211,9 @@ struct RawEnvironment<M> {
     item_id: String,
     #[serde(default)]
     modes: M,
+    /// `sync` needs `--confirm <env>` (NR-20).
+    #[serde(default)]
+    confirm_env: bool,
     /// Optional: environments used only for `run`, `config export` and `item skeleton`
     /// need no target. At most one entry (FR-28).
     #[serde(flatten)]
@@ -218,7 +221,7 @@ struct RawEnvironment<M> {
 }
 
 fn cfg(msg: String) -> Error {
-    Error::Config(msg)
+    Error::Config(msg.into())
 }
 
 /// The environment's target section, parsed by its provider (FR-28, FR-37): an unknown
@@ -239,7 +242,7 @@ fn target_of(
             } else {
                 format!(
                     "environment {name}: unknown field {unknown:?}; expected vault_id, item_id, \
-                 modes or a target section ({known})"
+                 modes, confirm_env or a target section ({known})"
                 )
             },
         ));
@@ -287,6 +290,7 @@ fn environment<M>(
             item_id: e.item_id,
             target,
             modes: BTreeMap::new(),
+            confirm_env: e.confirm_env,
         },
         e.modes,
     ))
@@ -657,7 +661,7 @@ mod tests {
 
     fn config_err(text: &str) -> String {
         match parse(text) {
-            Err(Error::Config(m)) => m,
+            Err(Error::Config(m)) => m.to_string(),
             other => panic!("expected Config error, got {other:?}"),
         }
     }
@@ -1296,7 +1300,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         .unwrap();
         assert!(matches!(
             crate::app::target(&f, "dev"),
-            Err(Error::Config(m)) if m.contains("configure fly.app") && !m.contains("secret_name")
+            Err(Error::Config(m)) if m.contains("add one target section (fly, azure, kubernetes)")
         ));
     }
 
@@ -1336,8 +1340,8 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "vault = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
         assert!(config_err(&bad).ends_with(
-            "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes or a \
-             target section (azure, fly, kubernetes)\n"
+            "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
+             confirm_env or a target section (azure, fly, kubernetes)\n"
         ));
     }
 

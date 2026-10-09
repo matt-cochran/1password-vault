@@ -129,7 +129,7 @@ struct RawAzure {
 }
 
 fn cfg(msg: String) -> Error {
-    Error::Config(msg)
+    Error::Config(msg.into())
 }
 
 impl Provider for AzureProvider {

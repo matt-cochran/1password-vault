@@ -109,7 +109,8 @@ fn read_fails(p: P, s: S) -> (Error, String, FakeRunner) {
     let h = host(p);
     let r = fake_op(s, h.ci);
     let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
-    let t = e.to_string();
+    // What the user sees: the message, then its `Next:` line (NR-19).
+    let t = crate::error::report(&e, "-");
     (e, t, r)
 }
 
@@ -413,7 +414,8 @@ fn connect_item_not_found_is_source_exit_4() {
         Output::success(b"{}".to_vec()),
     ]));
     let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
-    let t = e.to_string();
+    // What the user sees: the message, then its `Next:` line (NR-19).
+    let t = crate::error::report(&e, "-");
     assert_eq!(e.exit_code(), 4, "{t}");
     assert!(t.contains("item iprd not found in vault vprd"), "{t}");
     assert!(!t.contains("op signin"), "{t}");

@@ -15,7 +15,6 @@
 use std::io::Write;
 
 use super::{kind_label, write_err};
-use crate::adapters::registry;
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
 use crate::domain::{Fleet, rules};
 use crate::error::Error;
@@ -47,13 +46,13 @@ pub fn run(
 fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
     if fleet.is_simple() {
         if target.contains('/') {
-            return Err(Error::Config(format!(
-                "explain expects <KEY> under the simple profile, got {target:?}"
-            )));
+            return Err(Error::Config(
+                format!("explain expects <KEY> under the simple profile, got {target:?}").into(),
+            ));
         }
         let keys = fleet.products.get(SIMPLE_PRODUCT).map(|p| &p.keys);
         let Some((key, spec)) = keys.and_then(|k| k.get_key_value(target)) else {
-            return Err(Error::Config(format!("undeclared key {target:?}")));
+            return Err(Error::Config(format!("undeclared key {target:?}").into()));
         };
         return Ok(Target {
             product: SIMPLE_PRODUCT,
@@ -62,21 +61,24 @@ fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
         });
     }
     let Some((product, key)) = target.split_once('/') else {
-        return Err(Error::Config(format!(
-            "explain expects <product>/<key>, got {target:?}"
-        )));
+        return Err(Error::Config(
+            format!("explain expects <product>/<key>, got {target:?}").into(),
+        ));
     };
     let Some((product, p)) = fleet.products.get_key_value(product) else {
         let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        return Err(Error::Config(format!(
-            "undeclared product {product:?} (declared: {})",
-            known.join(", ")
-        )));
+        return Err(Error::Config(
+            format!(
+                "undeclared product {product:?} (declared: {})",
+                known.join(", ")
+            )
+            .into(),
+        ));
     };
     let Some((key, spec)) = p.keys.get_key_value(key) else {
-        return Err(Error::Config(format!(
-            "undeclared key {key:?} in product {product}"
-        )));
+        return Err(Error::Config(
+            format!("undeclared key {key:?} in product {product}").into(),
+        ));
     };
     Ok(Target { product, key, spec })
 }
@@ -99,20 +101,26 @@ fn environment<'a>(
                 (Some(only), None) => only.as_str(),
                 _ => {
                     let known: Vec<&str> = fleet.environments.keys().map(String::as_str).collect();
-                    return Err(Error::Config(format!(
-                        "several environments are declared ({}): pass --env <environment>",
-                        known.join(", ")
-                    )));
+                    return Err(Error::Config(
+                        format!(
+                            "several environments are declared ({}): pass --env <environment>",
+                            known.join(", ")
+                        )
+                        .into(),
+                    ));
                 }
             }
         }
     };
     if !t.spec.environments.iter().any(|e| e == name) {
-        return Err(Error::Config(format!(
-            "{} is not declared for environment {name:?} (declared for: {})",
-            key_label(t.product, t.key),
-            t.spec.environments.join(", ")
-        )));
+        return Err(Error::Config(
+            format!(
+                "{} is not declared for environment {name:?} (declared for: {})",
+                key_label(t.product, t.key),
+                t.spec.environments.join(", ")
+            )
+            .into(),
+        ));
     }
     Ok(name)
 }
@@ -129,31 +137,27 @@ fn explain_in(
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
-    // Without a target, the lines name the default provider (FR-37).
-    let label_of = env
-        .target()
-        .map_or(registry::DEFAULT.label(), |t| t.provider().label());
-    let name_label = format!("{} name", label_of.to_lowercase());
     let config_lines = env.target().and_then(|t| t.explain_config(product, key));
     let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
-        (Kind::Config, _) if config_lines.is_some() => config_lines
+        // A run-only environment names no provider (P4).
+        (_, None) => vec![("target".into(), "none (run-only)".into())],
+        (Kind::Config, Some(_)) if config_lines.is_some() => config_lines
             .into_iter()
             .flatten()
             .map(|(l, v)| (l.to_string(), v))
             .collect(),
-        (Kind::Config, _) => vec![(name_label, format!("- (config: not a {label_of} secret)"))],
+        (Kind::Config, Some(t)) => {
+            let label = t.provider().label();
+            vec![(
+                format!("{} name", label.to_lowercase()),
+                format!("- (config: not a {label} secret)"),
+            )]
+        }
         (Kind::Secret, Some(t)) => t
             .explain(product, key)
             .into_iter()
             .map(|(l, v)| (l.to_string(), v))
             .collect(),
-        (Kind::Secret, None) => vec![(
-            name_label,
-            format!(
-                "- (environment has no {} section)",
-                registry::DEFAULT.section()
-            ),
-        )],
     };
     let rules = describe_rules(&spec.rules);
     let guidance = if spec.guidance.is_empty() {
@@ -163,39 +167,54 @@ fn explain_in(
     };
     // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
-    let mut lines = vec![
-        format!("{label} in {env_name}"),
-        format!(
-            "  reference:  op://{}/{}/{label}",
-            env.vault_id, env.item_id
+    let mut rows: Vec<(String, String)> = vec![
+        (
+            "reference".into(),
+            format!("op://{}/{}/{label}", env.vault_id, env.item_id),
         ),
-        format!("  kind:       {} ({field})", kind_label(spec.kind)),
+        (
+            "kind".into(),
+            format!("{} ({field})", kind_label(spec.kind)),
+        ),
     ];
-    for (l, v) in target_lines {
-        lines.push(format!("  {:<11} {v}", format!("{l}:")));
-    }
-    lines.extend([
-        format!(
-            "  rules:      {}",
+    rows.extend(target_lines);
+    rows.extend([
+        (
+            "rules".into(),
             if rules.is_empty() {
                 "-".to_string()
             } else {
                 rules.join(", ")
-            }
+            },
         ),
-        format!(
-            "  immutable:  {}",
-            if spec.immutable { "yes" } else { "no" }
+        (
+            "immutable".into(),
+            if spec.immutable { "yes" } else { "no" }.into(),
         ),
-        format!("  guidance:   {guidance}"),
+        ("guidance".into(), guidance.to_string()),
     ]);
     if !rules::applies(spec, env_name, env, product) {
-        lines.push("  note:       not required here (its prefix_by_mode mode is skipped)".into());
+        rows.push((
+            "note".into(),
+            "not required here (its prefix_by_mode mode is skipped)".into(),
+        ));
     }
-    lines.push(format!(
-        "  inspect:    {}",
-        inspect_command(&env.item_id, &env.vault_id)
+    rows.push((
+        "inspect".into(),
+        inspect_command(&env.item_id, &env.vault_id),
     ));
+    // One value column, however long a provider's label is (P4).
+    let width = rows
+        .iter()
+        .map(|(l, _)| l.len() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(11);
+    let mut lines = vec![format!("{label} in {env_name}")];
+    lines.extend(
+        rows.iter()
+            .map(|(l, v)| format!("  {:<width$} {v}", format!("{l}:"))),
+    );
     for l in lines {
         writeln!(out, "{l}").map_err(write_err)?;
     }
@@ -347,6 +366,37 @@ mod tests {
             out.contains("  key vault name: FLEET--API--TOKEN\n"),
             "{out}"
         );
+    }
+
+    fn azure_fleet() -> Fleet {
+        crate::config::parse(
+            "[profile]\nkind = \"fleet\"\n\
+             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
+             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+             key_vault = \"kv\"\nresource_group = \"rg\"\n\
+             container_app = \"ca\"\nidentity = \"system\"\n\
+             env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+             [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap()
+    }
+
+    /// P4: every value starts in one column, however wide a provider's label is.
+    #[test]
+    fn values_share_one_column_beside_a_wide_provider_label() {
+        let out = explain(&azure_fleet(), "api/TOKEN", Some("prod")).unwrap();
+        assert!(out.contains("\n  reference:      op://"), "{out}");
+    }
+
+    /// P4: a run-only environment names no provider.
+    #[test]
+    fn run_only_environment_says_run_only() {
+        let f = fleet_with(
+            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+             [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+        );
+        let out = explain(&f, "allumata/DEV_KEY", Some("dev")).unwrap();
+        assert!(out.contains("\n  target:     none (run-only)\n"), "{out}");
     }
 
     /// FR-37: a config key on a target that routes config shows that target's lines.

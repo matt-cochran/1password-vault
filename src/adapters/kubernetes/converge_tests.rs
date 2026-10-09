@@ -438,3 +438,24 @@ fn sync_binds_every_desired_key_by_reference() {
     };
     assert!(DESIRED.iter().all(|(n, _)| bound(n)), "{env:?}");
 }
+
+/// UX1 (P2, NR-18): the pinned flow on Kubernetes ends with the same summary line as Fly and
+/// Azure.
+#[test]
+fn kubernetes_sync_ends_with_the_shared_summary_line() {
+    let c = Cluster::new();
+    let opts = SyncOpts {
+        deploy: true,
+        prune: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    sync::run(&fleet(), "dev", &c, &mut out, &opts).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let last = text.lines().last().unwrap_or_default();
+    let re = regex::Regex::new(
+        r"^summary: written \d+ · deployed \S+ · pruned \d+ · pending \d+ · unchanged \d+ · skipped \d+$",
+    )
+    .unwrap();
+    assert!(re.is_match(last), "{text}");
+}

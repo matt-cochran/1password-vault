@@ -95,13 +95,14 @@ pub fn vault_uri_of(t: &AzureTarget, r: &dyn CommandRunner) -> Result<String, Er
 /// labels, nothing after the host but one optional `/`. Returned without the trailing `/`.
 /// The value is never echoed: a hostile one names only what is wrong with it.
 pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
-    let bad = |why: &str| {
-        Error::Target(format!(
+    let bad =
+        |why: &str| {
+            Error::Target(format!(
             "az keyvault show returned a vaultUri for Key Vault {vault} that opv cannot use \
              ({why}); nothing was changed\n  next: check it with `az keyvault show -n {vault} \
              --query properties.vaultUri`, then run opv again"
-        ))
-    };
+        ).into())
+        };
     let raw = show
         .pointer("/properties/vaultUri")
         .and_then(Value::as_str)
@@ -146,21 +147,27 @@ fn read(
 
 /// A read that never finished: nothing was changed.
 fn unfinished(op: &str, reason: &str) -> Error {
-    Error::Target(format!(
-        "az {op}: {}; nothing was changed\n  next: re-run the same command",
-        unknown_text(az::PROGRAM, reason)
-    ))
+    Error::Target(
+        format!(
+            "az {op}: {}; nothing was changed\n  next: re-run the same command",
+            unknown_text(az::PROGRAM, reason)
+        )
+        .into(),
+    )
 }
 
 fn parse(out: &Output, op: &str) -> Result<Value, Error> {
     // serde_json messages can quote input fragments, so report only the position.
     serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(format!(
-            "az {op} returned JSON opv cannot read (line {}, column {}); nothing was \
+        Error::Target(
+            format!(
+                "az {op} returned JSON opv cannot read (line {}, column {}); nothing was \
              changed\n  next: update the Azure CLI (`az upgrade`), then run opv again",
-            e.line(),
-            e.column()
-        ))
+                e.line(),
+                e.column()
+            )
+            .into(),
+        )
     })
 }
 
@@ -179,7 +186,7 @@ fn subscription(t: &AzureTarget, r: &dyn CommandRunner) -> Result<(), Error> {
          can see; sign in with an account that can see {s} (`az login`), or correct \
          azure.subscription",
         s = t.subscription
-    )))
+    ).into()))
 }
 
 /// `keyvault show`: the vault exists in the subscription (NR-25). On failure a read-only
@@ -201,17 +208,23 @@ fn vault(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
             const DELETED: &str = "keyvault show-deleted";
             let probe = ["keyvault", "show-deleted", "-n", kv, "-o", "none"];
             match read(t, r, DELETED, &probe, &[1, 3])? {
-                Outcome::Done(_) => Err(Error::Target(format!(
-                    "Key Vault {kv} is deleted but still recoverable (soft-deleted); nothing \
+                Outcome::Done(_) => Err(Error::Target(
+                    format!(
+                        "Key Vault {kv} is deleted but still recoverable (soft-deleted); nothing \
                      was changed\n  next: recover it with `az keyvault recover -n {kv} \
                      --subscription {s}`, then run opv again"
-                ))),
+                    )
+                    .into(),
+                )),
                 Outcome::Unknown { reason, .. } => Err(unfinished(DELETED, reason)),
-                Outcome::Refused(_) => Err(Error::Target(format!(
-                    "Key Vault {kv} was not found in subscription {s}, or this account cannot \
+                Outcome::Refused(_) => Err(Error::Target(
+                    format!(
+                        "Key Vault {kv} was not found in subscription {s}, or this account cannot \
                      read it; nothing was changed\n  next: check azure.key_vault and \
                      azure.subscription with `az keyvault show -n {kv} --subscription {s}`"
-                ))),
+                    )
+                    .into(),
+                )),
             }
         }
     }
@@ -234,20 +247,26 @@ fn vault_answers(t: &AzureTarget, r: &dyn CommandRunner, vault: &Value) -> Resul
     match read(t, r, OP, &base, &[])? {
         Outcome::Done(_) => Ok(()),
         Outcome::Unknown { reason, .. } => Err(unfinished(OP, reason)),
-        Outcome::Refused(_) if network_restricted(vault) => Err(Error::Target(format!(
-            "Key Vault {kv} refused this request: it accepts connections only from allowed \
+        Outcome::Refused(_) if network_restricted(vault) => Err(Error::Target(
+            format!(
+                "Key Vault {kv} refused this request: it accepts connections only from allowed \
              networks (firewall or private endpoint), and this machine is not on one; nothing \
              was changed\n  next: run opv from a network the vault allows, or ask an owner to \
              allow this address: `az keyvault network-rule add -n {kv} --ip-address <your \
              address> --subscription {s}`"
-        ))),
-        Outcome::Refused(_) => Err(Error::Auth(format!(
-            "Key Vault {kv} refused to list its secrets to this account (Azure RBAC or access \
+            )
+            .into(),
+        )),
+        Outcome::Refused(_) => Err(Error::Auth(
+            format!(
+                "Key Vault {kv} refused to list its secrets to this account (Azure RBAC or access \
              policy); nothing was changed\n  next: ask an owner to grant it: `az role \
              assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope \
              {id}`; a new grant can take a few minutes to apply, then run opv again",
-            id = vault["id"].as_str().unwrap_or("<vault id>")
-        ))),
+                id = vault["id"].as_str().unwrap_or("<vault id>")
+            )
+            .into(),
+        )),
     }
 }
 
@@ -272,18 +291,19 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         t.subscription.as_str(),
     );
     let base = ["containerapp", "show", "-g", rg, "-n", a, "-o", "json"];
-    let app = match read(t, r, OP, &base, &[3])? {
-        Outcome::Done(out) => parse(&out, OP)?,
-        Outcome::Unknown { reason, .. } => return Err(unfinished(OP, reason)),
-        Outcome::Refused(_) => {
-            return Err(Error::Target(format!(
+    let app =
+        match read(t, r, OP, &base, &[3])? {
+            Outcome::Done(out) => parse(&out, OP)?,
+            Outcome::Unknown { reason, .. } => return Err(unfinished(OP, reason)),
+            Outcome::Refused(_) => {
+                return Err(Error::Target(format!(
                 "container app {a} was not found in resource group {rg} (subscription {s}), \
                  or this account cannot read it; nothing was changed\n  next: check \
                  azure.container_app and azure.resource_group with `az containerapp show -g \
                  {rg} -n {a} --subscription {s}`"
-            )));
-        }
-    };
+            ).into()));
+            }
+        };
     containerapp::single_revision_mode(t, &app)?;
     Ok(app)
 }
@@ -306,16 +326,19 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
             return Ok(app);
         }
         if waited >= WAIT_MAX {
-            return Err(Error::Target(format!(
-                "container app {a} is still being updated by someone else (provisioningState \
+            return Err(Error::Target(
+                format!(
+                    "container app {a} is still being updated by someone else (provisioningState \
                  InProgress) after {secs} s; nothing was changed\n  next: wait for that update \
                  to finish (`az containerapp show -g {rg} -n {a} --subscription {s} --query \
                  properties.provisioningState`), then run opv again",
-                a = t.container_app,
-                rg = t.resource_group,
-                s = t.subscription,
-                secs = waited.as_secs()
-            )));
+                    a = t.container_app,
+                    rg = t.resource_group,
+                    s = t.subscription,
+                    secs = waited.as_secs()
+                )
+                .into(),
+            ));
         }
         let note = if reported.is_none_or(|at| waited - at >= PROGRESS_EVERY) {
             reported = Some(waited);
@@ -432,11 +455,9 @@ fn not_checked(name: &'static str, why: &str) -> Check {
 fn az_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, AZ_CLI, host, &["version", "-o", "json"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(format!(
-            "{} version failed (exit {})",
-            az::PROGRAM,
-            o.status
-        )));
+        return Err(Error::Dependency(
+            format!("{} version failed (exit {})", az::PROGRAM, o.status).into(),
+        ));
     }
     let (a, b, c) = AZ_TESTED_MIN;
     let version = serde_json::from_slice::<Value>(&o.stdout)
@@ -559,8 +580,9 @@ mod tests {
         (r, res)
     }
 
+    /// The error as reported: its message and its `Next:` line.
     fn err_text(res: Result<Preflight, Error>) -> String {
-        res.unwrap_err().to_string()
+        crate::error::report(&res.unwrap_err(), "-")
     }
 
     #[test]
@@ -635,7 +657,7 @@ mod tests {
     #[test]
     fn preflight_signed_out_names_az_login() {
         let (_, res) = preflight_on(vec![Output::failure(1), Output::failure(1)]);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.contains("az login")));
+        assert!(matches!(res, Err(Error::Auth(m)) if m.mentions("az login")));
     }
 
     #[test]
@@ -643,7 +665,7 @@ mod tests {
         let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
         assert!(matches!(res, Err(Error::Auth(m)) if m.contains(
             "cannot see subscription 00000000-0000-0000-0000-000000000000 (azure.subscription)"
-        ) && m.contains("az account list -o table")));
+        ) && m.mentions("az account list -o table")));
     }
 
     #[test]
@@ -682,7 +704,7 @@ mod tests {
         let mut responses = vec![ok(), out(&vault_show())];
         responses.extend(crate::runner::fake::failed_read(1));
         let (_, res) = preflight_on(responses);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.contains(
+        assert!(matches!(res, Err(Error::Auth(m)) if m.mentions(
             "az role assignment create --role \"Key Vault Secrets Officer\""
         )));
     }
@@ -700,7 +722,7 @@ mod tests {
         let mut app = app_show();
         app["properties"]["configuration"]["activeRevisionsMode"] = json!("Multiple");
         let (_, res) = preflight_on(healthy_with(&app));
-        assert!(matches!(res, Err(Error::Config(m)) if m.contains("revision set-mode")));
+        assert!(matches!(res, Err(Error::Config(m)) if m.mentions("revision set-mode")));
     }
 
     #[test]
@@ -862,7 +884,12 @@ mod tests {
         let host = Host::detect();
         doctor(&target(), &r, &|| host)
             .into_iter()
-            .map(|c| (c.name.to_string(), c.outcome.map_err(|e| e.to_string())))
+            .map(|c| {
+                (
+                    c.name.to_string(),
+                    c.outcome.map_err(|e| crate::error::report(&e, "-")),
+                )
+            })
             .collect()
     }
 

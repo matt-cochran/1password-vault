@@ -34,7 +34,7 @@ pub fn run_for(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))),
+        ).into())),
         (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
         (true, Some(_)) => Err(Error::Config(
             "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
@@ -58,10 +58,13 @@ pub fn run(
     let env = fleet.environment(env_name)?;
     let prod = fleet.products.get(product).ok_or_else(|| {
         let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        Error::Config(format!(
-            "undefined product {product:?} (defined: {})",
-            known.join(", ")
-        ))
+        Error::Config(
+            format!(
+                "undefined product {product:?} (defined: {})",
+                known.join(", ")
+            )
+            .into(),
+        )
     })?;
     if command.is_empty() {
         return Err(Error::Config(
@@ -104,7 +107,7 @@ pub fn run(
         .run_inherited_clean(OP, &args, &env_pairs, &remove)
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
-            k => Error::Dependency(format!("cannot run {OP} ({k})")),
+            k => Error::Dependency(format!("cannot run {OP} ({k})").into()),
         })
 }
 
@@ -113,7 +116,7 @@ pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
     runner.local_run_supported().map_err(|e| {
         if e.kind() == io::ErrorKind::Unsupported {
             Error::Dependency("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See docs/local-development.md (WSL).".into())
-        } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind())) }
+        } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind()).into()) }
     })
 }
 

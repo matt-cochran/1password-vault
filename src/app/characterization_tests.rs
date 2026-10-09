@@ -1,7 +1,8 @@
 //! Characterization tests (P0, §8 item 27): every Fly scenario's flyctl argv, stdin
 //! digest, stdout and result, compared with a golden file. `UPDATE_GOLDEN=1` rewrites them;
 //! after Task 1 they change only where an NR task changes Fly behaviour on purpose
-//! (R2: the two preflight reads before the first write, NR-24).
+//! (R2: the two preflight reads before the first write, NR-24; UX1: the output contract,
+//! the run summary, `Next:` steps and `product/KEY (NAME)` names).
 
 use sha2::{Digest, Sha256};
 

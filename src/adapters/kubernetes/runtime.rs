@@ -310,14 +310,17 @@ impl<'a> KubeDeployment<'a> {
     fn generation(&self, out: &[u8], what: &str) -> Result<Revision, Error> {
         let s = std::str::from_utf8(out).unwrap_or("").trim();
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || s.len() > 19 {
-            return Err(Error::Target(format!(
-                "{what} succeeded but returned no Deployment generation; the change was \
+            return Err(Error::Target(
+                format!(
+                    "{what} succeeded but returned no Deployment generation; the change was \
                  applied and nothing was pruned\n  next: {}",
-                self.k.command(&format!(
-                    "rollout status deployment/{}",
-                    self.t().deployment
-                ))
-            )));
+                    self.k.command(&format!(
+                        "rollout status deployment/{}",
+                        self.t().deployment
+                    ))
+                )
+                .into(),
+            ));
         }
         Ok(Revision(s.to_string()))
     }
@@ -433,22 +436,25 @@ impl PinnedRuntime for KubeDeployment<'_> {
             .chain(change.set.keys())
             .chain(change.unbind.iter());
         if let Some(bad) = names.clone().find(|n| !self.managed.contains(*n)) {
-            return Err(Error::Target(format!(
-                "refusing to change env name {bad} on deployment {d}: opv manages only the \
+            return Err(Error::Target(
+                format!(
+                    "refusing to change env name {bad} on deployment {d}: opv manages only the \
                  names its template renders; nothing applied\n  next: run opv explain {bad}"
-            )));
+                )
+                .into(),
+            ));
         }
         let mut doc = snapshot.spec.0.clone();
-        let rv = doc
-            .pointer("/metadata/resourceVersion")
-            .and_then(Value::as_str)
-            .map(String::from)
-            .ok_or_else(|| {
-                Error::Target(format!(
+        let rv =
+            doc.pointer("/metadata/resourceVersion")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .ok_or_else(|| {
+                    Error::Target(format!(
                     "deployment {d} has no resourceVersion; nothing applied\n  next: re-run \
                      the same command"
-                ))
-            })?;
+                ).into())
+                })?;
         let i = container_index(&doc, t)?;
         let mut env = container_env(&doc, i);
         env.retain(|e| {
@@ -460,10 +466,13 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 || super::split_secret_name(&secret_name(store, version))
                     != Some((store.as_str(), version.as_str()))
             {
-                return Err(Error::Target(format!(
-                    "refusing to pin {name} to an invalid Secret version; nothing applied\n  \
+                return Err(Error::Target(
+                    format!(
+                        "refusing to pin {name} to an invalid Secret version; nothing applied\n  \
                      next: re-run the same command"
-                )));
+                    )
+                    .into(),
+                ));
             }
             upsert(
                 &mut env,
@@ -477,7 +486,7 @@ impl PinnedRuntime for KubeDeployment<'_> {
         let container = doc
             .pointer_mut(&format!("/spec/template/spec/containers/{i}"))
             .and_then(Value::as_object_mut)
-            .ok_or_else(|| Error::Target(format!("deployment {d} has no containers")))?;
+            .ok_or_else(|| Error::Target(format!("deployment {d} has no containers").into()))?;
         container.insert("env".into(), Value::Array(env));
         if let Some(o) = doc.as_object_mut() {
             o.remove("status");
@@ -520,10 +529,13 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 .unwrap_or_default();
             return self.generation(generation.as_bytes(), &what);
         }
-        Err(Error::Target(format!(
-            "deployment {d} changed while opv applied; nothing applied; safe to re-run\n  \
+        Err(Error::Target(
+            format!(
+                "deployment {d} changed while opv applied; nothing applied; safe to re-run\n  \
              next: re-run the same command"
-        )))
+            )
+            .into(),
+        ))
     }
 
     /// Polls the rollout of `revision` (a generation): healthy when rolled out as `kubectl
@@ -532,10 +544,13 @@ impl PinnedRuntime for KubeDeployment<'_> {
     fn await_healthy(&self, revision: &Revision) -> Result<Health, Error> {
         let d = self.t().deployment.as_str();
         let generation: u64 = revision.0.parse().map_err(|_| {
-            Error::Target(format!(
-                "deployment {d}: revision {} is not a generation",
-                revision.0
-            ))
+            Error::Target(
+                format!(
+                    "deployment {d}: revision {} is not a generation",
+                    revision.0
+                )
+                .into(),
+            )
         })?;
         let mut waited = Duration::ZERO;
         let mut next_note = PROGRESS_EVERY;
@@ -558,13 +573,16 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 return Ok(Health::Unhealthy(stuck));
             }
             if waited >= self.wait_max {
-                return Err(Error::Target(format!(
-                    "deployment {d} did not finish rolling out generation {generation} within \
+                return Err(Error::Target(
+                    format!(
+                        "deployment {d} did not finish rolling out generation {generation} within \
                      {} s ({last}); the previous ReplicaSet keeps serving; nothing pruned\n  \
                      next: {}",
-                    self.wait_max.as_secs(),
-                    self.k.command(&format!("rollout status deployment/{d}"))
-                )));
+                        self.wait_max.as_secs(),
+                        self.k.command(&format!("rollout status deployment/{d}"))
+                    )
+                    .into(),
+                ));
             }
             if waited >= next_note {
                 (self.note)(&format!(
@@ -1017,7 +1035,7 @@ mod tests {
             ]);
         }
         let e = with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap_err();
-        assert!(matches!(e, Error::Target(m) if m.contains("rollout status deployment/api")));
+        assert!(matches!(e, Error::Target(m) if m.mentions("rollout status deployment/api")));
     }
 
     #[test]

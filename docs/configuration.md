@@ -122,7 +122,7 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--p
 - It writes `./secrets.toml` in the current directory (`--config` and `OPV_CONFIG` are not accepted). If the file exists, it refuses (exit 2) unless `--force` is given; it never merges. If a parent directory already holds a `secrets.toml`, a note names it: the new file takes precedence for commands run from here down. The file is validated like a hand-written one and written atomically (a temporary file in the same directory, then a rename).
 - It writes nothing to 1Password. It costs three 1Password requests (`op vault list`, `op item list`, `op item get`), at dev time only.
 
-It ends with the path, the counts (`N secret, M config, skipped K`) and `Next step: opv plan <env>`.
+It ends with the path, the counts (`N secret, M config, skipped K`) and `Next: opv plan <env>`.
 
 ## Targets
 
@@ -191,7 +191,7 @@ item_id  = "iprd1234example"
 confirm_env = true
 ```
 
-With `confirm_env = true`, a command that changes the target must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv refuses (exit 6) and prints the exact command to re-run. Reading commands (`status`, `plan`, `check`) are unaffected. <!-- verify: which commands require --confirm: sync only, or item skeleton too? -->
+With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv refuses before any call (exit 6) and its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `check`, `run`) and `item skeleton` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
 
 ## Rules reference
 

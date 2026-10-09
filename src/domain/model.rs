@@ -108,6 +108,8 @@ pub struct Environment {
     pub target: Option<Box<dyn TargetConfig>>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
+    /// `confirm_env = true`: `sync` refuses without `--confirm <env>` (NR-20).
+    pub confirm_env: bool,
 }
 
 impl Environment {
@@ -175,10 +177,13 @@ impl Fleet {
     pub fn environment(&self, env: &str) -> Result<&Environment, Error> {
         self.environments.get(env).ok_or_else(|| {
             let known: Vec<&str> = self.environments.keys().map(String::as_str).collect();
-            Error::Config(format!(
-                "undefined environment {env:?} (defined: {})",
-                known.join(", ")
-            ))
+            Error::Config(
+                format!(
+                    "undefined environment {env:?} (defined: {})",
+                    known.join(", ")
+                )
+                .into(),
+            )
         })
     }
 

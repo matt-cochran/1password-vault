@@ -4,7 +4,7 @@
 
 Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the flag wins). Without either, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config` or `OPV_CONFIG`, the path is used exactly as given and no search is done; a path from `OPV_CONFIG` is announced as `using <path> (from OPV_CONFIG)` on stderr. `init` refuses both, because it always writes `./secrets.toml`. `<ENV>` is an environment name from the file.
 
-`OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env` and `explain` (where a bare `KEY` means `$OPV_PRODUCT/KEY`). It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
+`OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env`, `explain` (where a bare `KEY` means `$OPV_PRODUCT/KEY`), `status <ENV>` and `plan`. It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
 
 Every command's `--help` lists its own options first, then the global options (`--config`, `--timeout`, `--verbose`, `--color`) under `Global options:`, then a few examples.
 
@@ -13,11 +13,13 @@ opv doctor                          # config, op and sign-in, flyctl and sign-in
 opv doctor --env dev --product allumata   # only what local work in dev needs; no deployment CLIs
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml
 opv item skeleton staging           # add every missing declared field, empty; the only 1Password write
+opv status                          # one line per environment
 opv status staging                  # one row per product and key; exit 8 if any blocks
+opv status staging --product api    # one product's rows, totals and findings
 opv status staging --json           # the same state as one machine-readable JSON document
-opv plan staging                    # what a sync would stage, hold and prune; exit 8 if any blocks
+opv plan staging                    # what a sync would stage, hold and prune, and the command to run
 opv plan staging --json             # the same plan as one machine-readable JSON document
-opv sync staging [--deploy] [--prune] [--confirm staging] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
+opv sync staging [--deploy] [--prune] [--product P] [--confirm staging] [--json] [--rotate PRODUCT/KEY] [--prune-immutable PRODUCT/KEY]
 opv config export staging --json    # config-kind values as JSON
 opv explain allumata/OPENAI_API_KEY --env prod   # what opv knows about one key, from the config alone
 opv check dev --product allumata    # each key saved, missing, wrong kind or failing a rule; exit 8 if any
@@ -26,23 +28,40 @@ opv run prod -- ./server            # simple profile: no --product
 ```
 
 1. `item skeleton` creates the empty fields in the 1Password item. Fill them in 1Password.
-2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values.
-3. `plan` shows the same rows plus the target side. It changes nothing.
-4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running (`Next: wait for it to finish, then re-run`) stops it with nothing written. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
+2. `status` shows what is missing, of the wrong kind, or failing a rule. It prints names and the declared `guidance`, never values. Its first line counts the rows: `staging: 12 keys · 10 saved · 1 skipped · 1 finding · 2 not yet on Fly`.
+3. `plan` shows the same rows plus the target side, then names what a sync would do and ends with the command that does it (see [Plan](#plan)). It changes nothing.
+4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app stops it with nothing written. A Fly deploy already running is waited for: opv reads the releases again every 5 s, prints `waiting for the running Fly deploy of <app> (release vN) to finish, 15 s` on stderr at least every 15 s, and goes on once it has finished; if it is still running when the `--timeout` budget is nearly spent (or after 10 minutes), opv stops with nothing written and a `Next:` line. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
 6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
-7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. `--json` prints `schema_version`, `environment`, `target_checked: false`, `rows` (product, key, state, rule, reason) and `findings`.
+7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. A failing key's declared guidance is printed under it as `  guidance: <text>`. `--json` prints `schema_version`, `environment`, `target_checked: false`, `rows` (product, key, state, rule, reason) and `findings`.
 8. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. It writes no `.env` file. See [Local development](#local-development).
 
 ### Next step
 
-`doctor` ends with one `Next step` line. When a check fails it names the first failing check and the safe command that addresses it, the same command the failure prints under it:
+Every command that fails (any exit code other than 0, except `run`, which passes the command's own code through) ends with exactly one `Next:` line, the last line on stderr. It holds the command to run, or the fix and then the command:
 
 ```text
-Next step (op auth): sign in: eval $(op signin)
+opv: policy denied: sync refused, nothing staged: api/OPENAI_API_KEY (missing)
+Next: opv explain api/OPENAI_API_KEY --env prod
 ```
 
-An invalid configuration always gets ``Next step (config): fix secrets.toml (see the config line above) and re-run `opv doctor` ``; another failure with no command of its own gets ``fix the failure reported above and re-run `opv doctor` ``. When every check passes the line is `Next step: nothing pending`. The line is text, never a prompt.
+```text
+opv: 1 finding
+Next: fix the keys above in 1Password, then run opv check dev --product api
+```
+
+A usage error ends with `Next: opv <command> --help`; an outcome that is unknown (exit 9) or an interruption (130/143) ends with the same command line and `(safe to re-run)`. Scripts and AI assistants can rely on the pattern `^Next: `. Guidance from the configuration is labelled `guidance:` and is never a `Next:` line.
+
+`doctor` prints one line per check; a failing check has its fix on the line under it (`  fix: ...`). When a check fails, `doctor` exits with the first failing check as the error, and its `Next:` line is that check's fix:
+
+```text
+FAIL  op auth: authentication error: not signed in to 1Password
+...
+opv: authentication error: op auth check failed (see the FAIL line above)
+Next: sign in: eval $(op signin)
+```
+
+An invalid configuration always gets `Next: fix secrets.toml (see the config line above), then run opv doctor`. When every check passes, the last line is `Next: nothing pending`. The line is text, never a prompt.
 
 ### Explain a key
 
@@ -50,7 +69,7 @@ An invalid configuration always gets ``Next step (config): fix secrets.toml (see
 opv explain <product>/<key> [--env <environment>]
 ```
 
-`explain` prints what the configuration declares for one key in one environment: the `op://` reference, the field kind, the Fly name, the declared rules, `immutable` and `guidance`, plus an `op item get <item_id> --vault <vault_id>` command you can run in your own terminal to look at the item. That command never contains `--reveal`.
+`explain` prints what the configuration declares for one key in one environment: the `op://` reference, the field kind, the target name, the declared rules, `immutable` and `guidance`, plus an `op item get <item_id> --vault <vault_id>` command you can run in your own terminal to look at the item. That command never contains `--reveal`.
 
 ```text
 allumata/OPENAI_API_KEY in prod
@@ -63,7 +82,7 @@ allumata/OPENAI_API_KEY in prod
   inspect:    op item get iprd --vault vprd
 ```
 
-Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
+Under the simple profile the form is `opv explain <KEY> [--env <environment>]`: the reference is the unsectioned field `op://<vault_id>/<item_id>/<KEY>` and the Fly name is the key. Other providers show their own rows (`env name:`, `key vault name:`, ...), and every value starts in one column. An environment without a target section shows `target:     none (run-only)`. The fleet form `<product>/<key>` is a configuration error under the simple profile, and a bare `<KEY>` is one under the fleet profile.
 
 It reads only the configuration: no 1Password or Fly call, and no value or value fragment (it is not a `secret get`). `--env` may be omitted when the configuration declares exactly one environment. An undeclared product, key or environment, or an environment the key is not declared for, is a configuration error (exit 2).
 
@@ -88,6 +107,7 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
       "rule": null,
       "reason": null,
       "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target": "absent",
       "action": "would_stage"
     }
@@ -102,9 +122,47 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
 
 `state` is `saved`, `missing`, `wrong_kind`, `failing_rule` or `skipped`; `rule` names the
 failing rule when `state` is `failing_rule`, and `reason` says why (see
-[Failure reasons](configuration.md#failure-reasons)); `target` is `present`, `absent` or
-`would_change` for a secret and `null` for a config key; `action` is `would_stage`,
-`would_prune`, `held` or `null`. The document is meant for the scheduled drift check.
+[Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
+target for every provider (`fly_name` holds the same value and is kept for older scripts; it
+is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
+a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. With `--product`,
+the document carries `"product": "<p>"` and only that product's rows and totals. The
+document is meant for the scheduled drift check.
+
+### One product: `--product`
+
+`status`, `plan` and `sync` take `--product <p>` under the fleet profile:
+
+- `status` and `plan` show only that product's rows; the count line, the totals and the exit-8 findings count that product only, so another team's missing key does not turn your status red. `OPV_PRODUCT` is the default for both.
+- `sync --product <p>` writes, prunes and deploys only that product's managed names; `--prune` never removes another product's name, and another product's missing key does not block it. A Fly deploy still restarts the whole app with every staged change: when another product has staged changes waiting, sync prints `pending for other products: web/TOKEN (FLEET__WEB__TOKEN); a deploy restarts the app with them too`. `OPV_PRODUCT` is never used by `sync`.
+
+### Every environment: `opv status`
+
+Without an environment, `status` prints one line per environment, in name order:
+
+```text
+dev: run-only (no target)
+prod: 14 keys · 13 saved · 1 skipped · 0 findings · 0 not yet on Fly
+staging: 14 keys · 11 saved · 1 skipped · 2 findings · 1 not yet on Fly
+```
+
+It reads each environment's item once. An environment it cannot read is one line `prod: not checked (<error>)` and the others are still shown; the exit code is that error's, else 8 when any environment has findings (with `Next: opv status <env>` for the first), else 0.
+
+### Plan
+
+`plan` starts with one count line, then the rows, then what a sync would do, by name, and ends with the sync command:
+
+```text
+prod: 4 keys · 0 findings · 1 to stage · 1 held (immutable) · 1 to prune · 1 unmanaged on Fly (never touched)
+PRODUCT   KEY                  KIND    STATE    TARGET
+...
+would stage: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+would prune (needs --prune): allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
+held (immutable): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY) (pass --rotate PRODUCT/KEY to replace)
+Next: opv sync prod --deploy --prune
+```
+
+On Azure and Kubernetes the line says `would write`. The `Next:` command adds `--prune` only when something would be pruned, `--product` when you scoped the plan, and `--confirm <env>` for a [guarded environment](#guarded-environments). When a key blocks the sync, `plan` exits 8 and the `Next:` line says to fix it and run `plan` again.
 
 ### Change detection on Fly
 
@@ -128,7 +186,7 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 
 - **Pending deploy.** `status` and `plan` show a key as pending when the store holds a newer version than the app uses. Config values are only ever set by `--deploy`, so they are pending until then.
 - **Nothing changed.** If every store value matches 1Password and the app already uses the current versions, opv writes and deploys nothing, and creates no new version.
-- **Healthy means ready.** After a deploy opv waits for the new revision to be ready and healthy (Container Apps: the latest ready revision reports `Healthy`; Kubernetes: `kubectl rollout status` succeeds and no new pod is stuck). If it is not healthy, the old revision keeps serving, nothing is pruned, and opv exits 5 with the reason and a `Next:` line. <!-- verify: exit code and wording for an unhealthy revision -->
+- **Healthy means ready.** After a deploy opv waits for the new revision to be ready and healthy (Container Apps: the latest ready revision reports `Healthy`; Kubernetes: `kubectl rollout status` succeeds and no new pod is stuck). If it is not healthy, the old revision keeps serving, nothing is pruned, and opv exits 5 with the reason and a `Next:` line.
 - **Prune order.** `--prune` without `--deploy` only lists what it would remove. With `--deploy`, opv removes a name from the app first, waits for the healthy revision, and only then deletes it from the store. It deletes only entries it tagged `opv-managed=<env>`, and only names the configuration declares; other names are counted as unmanaged and left alone.
 - **Drift.** If someone re-pins a variable by hand to another version, `status` reports drift for that key. opv overwrites it only under `--deploy`.
 - **An update already in progress.** If the Container App is being updated when opv starts (`provisioningState` `InProgress`), `sync` waits for it to finish, with a progress line, within `--timeout`. `status` and `plan` never wait: they print one `warn` line on stderr and show the current state.
@@ -143,15 +201,40 @@ Values reach `az` and `kubectl` only on stdin. On native Windows the Azure write
 
 Long steps print a progress line on stderr at least every 15 seconds (`waiting for revision ca-myapp--0000002: Provisioning, 45 s`).
 
-Every run that changes something ends with one summary block, then one `Next:` line:
+`sync` names each key as `product/KEY (TARGET_NAME)` (`KEY` alone under the simple profile) and ends with one summary line, the same on Fly, Azure and Kubernetes:
 
 ```text
-summary: written 2, deployed yes, pruned 0, pending 0, unchanged 5, skipped 1
-Next: opv status prod
+written: api/OPENAI_API_KEY (FLEET__API__OPENAI_API_KEY)
+unchanged: api/DATABASE_URL (FLEET__API__DATABASE_URL)
+pending deploy (pass --deploy): api/OPENAI_API_KEY (FLEET__API__OPENAI_API_KEY)
+summary: written 1 · deployed no · pruned 0 · pending 1 · unchanged 1 · skipped 0
+Next: opv sync prod --deploy
 ```
 
-<!-- verify: exact summary and Next: text -->
-Every failure also ends with exactly one `Next:` line holding a command you can run. `--json` carries the same summary object. <!-- verify: --json summary field name -->
+`written` counts new values (staged on Fly, new versions on Azure and Kubernetes); `deployed` is the revision name (`yes` on Fly, which names none) or `no`; `pending` counts names still waiting for a deploy after this run; `skipped` counts declared keys not desired in this environment. The `Next:` line follows only when something is left to do: a deploy for pending names, or `--prune` for names kept because `--prune` was not given. `--prune` prints `will prune: <names>` before it removes anything.
+
+`sync --json` prints the same report as one JSON document on stdout (names only, never values; detail lines are not printed, and preflight warnings go to stderr):
+
+```json
+{
+  "schema_version": 1,
+  "environment": "prod",
+  "provider": "fly",
+  "product": null,
+  "written": ["FLEET__API__OPENAI_API_KEY"],
+  "deployed": false,
+  "revision": null,
+  "pruned": [],
+  "pending": ["FLEET__API__OPENAI_API_KEY"],
+  "unchanged": ["FLEET__API__DATABASE_URL"],
+  "skipped": [],
+  "held": [],
+  "kept": [],
+  "next": "opv sync prod --deploy"
+}
+```
+
+Names are target names. `held` lists immutable keys left alone, `kept` names not desired here that stayed because `--prune` was not given, and `next` is the `Next:` command or `null`. Every failure ends with exactly one `Next:` line ([Next step](#next-step)); with `--json`, stdout is empty on failure.
 
 ### Retries, timeouts and interruptions
 
@@ -164,7 +247,14 @@ Every failure also ends with exactly one `Next:` line holding a command you can 
 
 ### Guarded environments
 
-If an environment sets `confirm_env = true` ([configuration](configuration.md#guarding-an-environment-confirm_env)), `sync` refuses (exit 6) unless you repeat the name: `opv sync prod --deploy --confirm prod`. The refusal prints that exact command. `--prune` always lists the names it will remove before it acts.
+If an environment sets `confirm_env = true` ([configuration](configuration.md#guarding-an-environment-confirm_env)), `sync` refuses (exit 6) before any call unless you repeat the name: `opv sync prod --deploy --confirm prod`. The refusal ends with that exact command, with every flag you gave:
+
+```text
+opv: policy denied: environment prod is guarded (confirm_env = true): sync needs --confirm prod; nothing was changed
+Next: opv sync prod --deploy --confirm prod
+```
+
+A `--confirm` that names another environment is refused everywhere, guarded or not. `plan` and the `Next:` line after a guarded sync include `--confirm <env>`. `--prune` always lists the names it will remove before it acts.
 
 ### Pruning on Fly
 
@@ -230,11 +320,11 @@ On a terminal, opv colours state words only: `ok`, `warn`, `FAIL` and `skip` in 
 | 3 | dependency: `op`, `flyctl`, `az` or `kubectl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
 | 4 | 1Password source error (including an `op` timeout) |
 | 5 | target error: Fly, Azure or Kubernetes (including an unhealthy revision or rollout, a change made under opv while it applied, a `flyctl secrets list` timeout, and deploy on an app with no machines) |
-| 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule, or `--confirm` missing), or `config export` refused |
+| 6 | policy refusal: `sync` refused (missing, wrong kind, failing rule, or `--confirm <env>` missing or naming another environment), or `config export` refused |
 | 7 | authentication |
 | 8 | findings: `status`, `plan` or `check` found blocking keys |
 | 9 | outcome unknown, or a provider did not answer: a change may or may not have been applied (a `flyctl secrets deploy` that timed out, an `az` call that lost its connection), or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command |
-| 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` |
+| 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` and `Next: <the same command> (safe to re-run)` |
 | 101 | internal panic (Rust default) |
 
 CI may retry a job that exited 9; codes 2 to 8 need a fix first.
@@ -253,7 +343,7 @@ Diagnose and guide: after any failed `op` call (`op item get`, `op item edit`) o
 
 `doctor` uses the same checks, and a missing `op` or `flyctl` names the install command for your OS. Child stderr is suppressed on purpose, because it could echo a value; a re-run hint ("... to see why") remains only when `op whoami` or `flyctl auth whoami` cannot run or times out. An `op` timeout and `opv run` (which passes the child's exit code through) are not diagnosed.
 
-A clean `status` ends with a summary line, for example `49 saved, 13 not yet on Fly (staged by the next sync), 0 findings`.
+`status` starts with a count line, for example `prod: 62 keys · 49 saved · 0 skipped · 0 findings · 13 not yet on Fly`.
 
 ## GitHub Actions example
 
