@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "path": "<dir>/secrets.toml",
+  "environment": "staging",
+  "profile": "fleet",
+  "vault_id": "vaultid01",
+  "item_id": "itemid01",
+  "keys": [
+    {
+      "product": "api",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret"
+    },
+    {
+      "product": "api",
+      "key": "SIGNUP_POLICY",
+      "kind": "config"
+    },
+    {
+      "product": "web-app",
+      "key": "SESSION_KEY",
+      "kind": "secret"
+    }
+  ],
+  "skipped": 0,
+  "next": "opv plan staging",
+  "do": null
+}

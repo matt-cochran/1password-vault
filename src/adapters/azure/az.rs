@@ -256,10 +256,10 @@ mod tests {
         let e = write_output(&r, "keyvault secret set", "kv-prod", outcome.unwrap()).unwrap_err();
         let excerpt = crate::runner::take_failure_excerpt();
         assert_eq!(
-            crate::error::report(&e, &e.default_next("opv sync prod"), excerpt.as_ref()),
+            crate::error::report(&e, "opv sync prod", excerpt.as_ref()),
             "opv: target error: az keyvault secret set failed for kv-prod\n  \
              az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n\
-             Next: opv doctor\n"
+             Next: opv sync prod\n"
         );
     }
 

@@ -87,6 +87,7 @@ pub fn run_scoped(
             &plan,
             pinned.as_ref().map(|p| &p.rows),
             product,
+            None,
         )?;
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
@@ -127,19 +128,48 @@ pub(crate) fn fix_then(command: &str) -> String {
 /// rest are still shown; the first such error is the result, else `Findings` when any
 /// environment has findings.
 pub fn overview(fleet: &Fleet, r: &dyn CommandRunner, out: &mut dyn Write) -> Result<(), Error> {
+    overview_as(fleet, r, out, false)
+}
+
+/// [`overview`], printing one JSON document instead of lines when `json` (A5):
+/// `{environments: [{name, target, state, keys, findings, error_code}], totals}`, where
+/// `state` is `checked`, `run_only` or `not_checked`. Exit codes are the same.
+pub fn overview_as(
+    fleet: &Fleet,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     let mut first_err: Option<(String, Error)> = None;
     let mut findings = 0;
     let mut first_finding: Option<&str> = None;
+    let mut entries = Vec::new();
+    let line = |out: &mut dyn Write, text: String| {
+        if json {
+            Ok(())
+        } else {
+            writeln!(out, "{text}").map_err(write_err)
+        }
+    };
     for (name, env) in &fleet.environments {
         let Some(t) = env.target() else {
-            writeln!(out, "{name}: run-only (no target)").map_err(write_err)?;
+            line(out, format!("{name}: run-only (no target)"))?;
+            entries.push(overview_entry(name, None, "run_only", None, None, None));
             continue;
         };
+        let provider = Some(t.provider().section());
         match env_rows(fleet, name, t, r) {
             Ok(rows) => {
-                writeln!(out, "{}", count_line(name, &rows, t.provider().label()))
-                    .map_err(write_err)?;
+                line(out, count_line(name, &rows, t.provider().label()))?;
                 let n = rows.iter().filter(|r| is_blocking(r)).count();
+                entries.push(overview_entry(
+                    name,
+                    provider,
+                    "checked",
+                    Some(rows.len()),
+                    Some(n),
+                    None,
+                ));
                 if n > 0 {
                     findings += n;
                     first_finding.get_or_insert(name);
@@ -147,18 +177,54 @@ pub fn overview(fleet: &Fleet, r: &dyn CommandRunner, out: &mut dyn Write) -> Re
             }
             Err(e) => {
                 let first = e.to_string().lines().next().unwrap_or_default().to_string();
-                writeln!(out, "{name}: not checked ({first})").map_err(write_err)?;
+                line(out, format!("{name}: not checked ({first})"))?;
+                entries.push(overview_entry(
+                    name,
+                    provider,
+                    "not_checked",
+                    None,
+                    None,
+                    Some(e.code().as_str()),
+                ));
                 first_err.get_or_insert((name.clone(), e));
             }
         }
+    }
+    if json {
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environments": entries,
+            "totals": {"environments": fleet.environments.len(), "findings": findings},
+        });
+        writeln!(out, "{doc}").map_err(write_err)?;
     }
     if let Some((name, e)) = first_err {
         return Err(e.or_next(|| format!("opv status {name}")));
     }
     match first_finding {
-        Some(name) => Err(Error::findings(findings, format!("opv status {name}"))),
+        Some(name) => Err(Error::findings(findings, format!("opv status {name}"))
+            .with_do("fix the keys in 1Password")),
         None => Ok(()),
     }
+}
+
+/// One environment of the `status --json` overview.
+fn overview_entry(
+    name: &str,
+    target: Option<&str>,
+    state: &str,
+    keys: Option<usize>,
+    findings: Option<usize>,
+    error_code: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "target": target,
+        "state": state,
+        "keys": keys,
+        "findings": findings,
+        "error_code": error_code,
+    })
 }
 
 /// One environment's rows, for [`overview`].

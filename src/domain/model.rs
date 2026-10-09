@@ -184,6 +184,7 @@ impl Fleet {
                 )
                 .into(),
             )
+            .with_code(crate::error::Code::UnknownEnv)
         })
     }
 

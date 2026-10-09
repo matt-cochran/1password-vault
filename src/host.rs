@@ -205,6 +205,7 @@ impl Tool {
             )
             .into(),
         )
+        .with_code(crate::error::Code::ProviderUnavailable)
     }
 }
 

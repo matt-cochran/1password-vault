@@ -17,6 +17,8 @@ pub mod explain;
 #[cfg(test)]
 mod guidance_tests;
 pub mod init;
+#[cfg(test)]
+pub(crate) mod json_tests;
 pub mod local;
 #[cfg(test)]
 mod pinned_tests;
@@ -192,7 +194,7 @@ pub(crate) fn write_err(e: io::Error) -> Error {
 
 /// The `product` of a JSON row: `None` (JSON `null`) for the simple profile's implicit
 /// product, which is never shown (FR-20).
-fn json_product(product: &str) -> Option<String> {
+pub(crate) fn json_product(product: &str) -> Option<String> {
     (product != SIMPLE_PRODUCT).then(|| product.to_string())
 }
 
@@ -218,6 +220,7 @@ pub(crate) fn write_json(
     plan: &SyncPlan,
     pinned: Option<&BTreeMap<String, PinnedRow>>,
     product: Option<&str>,
+    next: Option<&str>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
@@ -254,22 +257,13 @@ pub(crate) fn write_json(
                 pending_deploy: bound.map(|b| b.pending_deploy),
                 drift: bound.map(|b| b.drift),
                 chain: bound.and_then(|b| b.chain.clone()),
-                product: json_product(&r.product),
-                key: r.key.clone(),
-                kind: kind_label(r.kind),
-                state: json_state(&r.state),
-                rule: json_rule(&r.state),
-                reason: json_reason(&r.state),
-                fly_name: target_name.clone(),
-                target_name,
-                target: json_target(r.kind, r.target),
-                action,
+                ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
         .collect();
 
     let doc = JsonDoc {
-        schema_version: 1,
+        schema_version: crate::json::SCHEMA_VERSION,
         environment: env_name.to_string(),
         product: product.map(str::to_string),
         rows,
@@ -288,8 +282,8 @@ pub(crate) fn write_json(
             .map(|(product, key)| JsonHeld {
                 product: json_product(product),
                 key: key.clone(),
-                fly_name: env.target_name(product, key),
                 target_name: env.target_name(product, key),
+                fly_name: env.target_name(product, key),
             })
             .collect(),
         prune: plan.prune.clone(),
@@ -301,6 +295,7 @@ pub(crate) fn write_json(
             held: plan.held_immutable.len(),
             to_prune: plan.prune.len(),
         },
+        next: next.map(str::to_string),
     };
     let text = serde_json::to_string(&doc)
         .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
@@ -311,7 +306,7 @@ pub(crate) fn write_json(
 struct JsonDoc {
     schema_version: u32,
     environment: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `--product`, or null for the whole environment.
     product: Option<String>,
     rows: Vec<JsonRow>,
     extras: Vec<JsonName>,
@@ -319,10 +314,13 @@ struct JsonDoc {
     held: Vec<JsonHeld>,
     prune: Vec<String>,
     totals: JsonTotals,
+    /// The command to run next on success (`plan`: the sync); `null` otherwise.
+    next: Option<String>,
 }
 
+/// The one row shape of every names-only document: `status`, `plan` and `check` (A6).
 #[derive(serde::Serialize)]
-struct JsonRow {
+pub(crate) struct JsonRow {
     product: Option<String>,
     key: String,
     kind: &'static str,
@@ -330,9 +328,9 @@ struct JsonRow {
     rule: Option<&'static str>,
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
     reason: Option<String>,
+    target_name: Option<String>,
     /// Deprecated alias of `target_name` (P4).
     fly_name: Option<String>,
-    target_name: Option<String>,
     target: Option<&'static str>,
     action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -343,6 +341,33 @@ struct JsonRow {
     drift: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chain: Option<String>,
+}
+
+impl JsonRow {
+    /// `r` with its name on the target, its target presence and the plan's action.
+    pub(crate) fn new(
+        r: &Row,
+        target_name: Option<String>,
+        target: Option<&'static str>,
+        action: Option<&'static str>,
+    ) -> JsonRow {
+        JsonRow {
+            product: json_product(&r.product),
+            key: r.key.clone(),
+            kind: kind_label(r.kind),
+            state: json_state(&r.state),
+            rule: json_rule(&r.state),
+            reason: json_reason(&r.state),
+            fly_name: target_name.clone(),
+            target_name,
+            target,
+            action,
+            binding: None,
+            pending_deploy: None,
+            drift: None,
+            chain: None,
+        }
+    }
 }
 
 /// One desired row's binding on a pinned target (R5): `binding` is `current` (bound as
@@ -366,9 +391,9 @@ struct JsonName {
 struct JsonHeld {
     product: Option<String>,
     key: String,
+    target_name: Option<String>,
     /// Deprecated alias of `target_name` (P4).
     fly_name: Option<String>,
-    target_name: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -562,15 +587,17 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
 pub(crate) fn check_product(fleet: &Fleet, product: Option<&str>) -> Result<(), Error> {
     let Some(p) = product else { return Ok(()) };
     if fleet.is_simple() {
-        return Err(Error::Config(
-            "--product is not used under the simple profile".into(),
-        ));
+        return Err(
+            Error::Config("--product is not used under the simple profile".into())
+                .with_code(crate::error::Code::UnknownProduct),
+        );
     }
     if !fleet.products.contains_key(p) {
         let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
         return Err(Error::Config(
             format!("undefined product {p:?}; choose one of: {}", all.join(", ")).into(),
-        ));
+        )
+        .with_code(crate::error::Code::UnknownProduct));
     }
     Ok(())
 }
@@ -630,6 +657,28 @@ impl KeyNames {
             Some(key) if key != name => format!("{key} ({name})"),
             _ => name.to_string(),
         }
+    }
+
+    /// `{product, key, target_name}` for a target name (A6); `product` is null under the
+    /// simple profile, `product` and `key` for a name no declared key renders.
+    pub(crate) fn json_ref(&self, name: &str) -> serde_json::Value {
+        let (product, key) = match self.0.get(name).map(|l| (l, l.split_once('/'))) {
+            Some((_, Some((p, k)))) => (Some(p), Some(k)),
+            Some((l, None)) => (None, Some(l.as_str())),
+            None => (None, None),
+        };
+        serde_json::json!({"product": product, "key": key, "target_name": name})
+    }
+
+    /// [`KeyNames::json_ref`] of each name.
+    pub(crate) fn json_refs<S: AsRef<str>>(
+        &self,
+        names: impl IntoIterator<Item = S>,
+    ) -> Vec<serde_json::Value> {
+        names
+            .into_iter()
+            .map(|n| self.json_ref(n.as_ref()))
+            .collect()
     }
 
     /// [`KeyNames::label`] of each name, comma-separated.
@@ -695,7 +744,16 @@ pub(crate) fn target<'f>(
         )
         .into(),
     )
-    .with_next(format!("{DOCS}/configuration.md")))
+    .with_code(crate::error::Code::NoTarget)
+    .with_do(format!(
+        "to deploy, add a {} section to environment {env} in secrets.toml ({DOCS}/configuration.md)",
+        sections.join(", ")
+    ))
+    .with_next(if fleet.is_simple() {
+        format!("opv check {env}")
+    } else {
+        format!("opv doctor --env {env}")
+    }))
 }
 
 /// Where the user documentation lives (for next steps that are a page to read).

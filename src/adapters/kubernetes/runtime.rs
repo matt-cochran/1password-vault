@@ -499,7 +499,11 @@ fn selector(doc: &Value) -> Option<String> {
             (safe(k) && safe(v)).then(|| format!("{k}={v}"))
         })
         .collect();
-    pairs.filter(|p| !p.is_empty()).map(|p| p.join(","))
+    // In name order, whatever order the document lists them in.
+    pairs.filter(|p| !p.is_empty()).map(|mut p| {
+        p.sort();
+        p.join(",")
+    })
 }
 
 /// `kubectl auth can-i` printed "no" (possibly followed by a reason).

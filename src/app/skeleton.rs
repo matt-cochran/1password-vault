@@ -18,6 +18,18 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_as(fleet, env_name, r, out, false)
+}
+
+/// [`run`], printing `{schema_version, environment, added: [{product, key, kind}]}` instead
+/// of lines when `json` (A5). Names and kinds only.
+pub fn run_as(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let item = onepassword::read_item_as(r, env, fleet.profile)?;
     let missing: Vec<(String, String, Kind)> = fleet
@@ -36,11 +48,31 @@ pub fn run(
                 .any(|f| f.section == *product && f.label == *key)
         })
         .collect();
+    if !missing.is_empty() {
+        onepassword::write_skeleton(r, env, &item, &missing)?;
+    }
+    if json {
+        let added: Vec<serde_json::Value> = missing
+            .iter()
+            .map(|(product, key, kind)| {
+                serde_json::json!({
+                    "product": super::json_product(product),
+                    "key": key,
+                    "kind": kind_label(*kind),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env_name,
+            "added": added,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
     if missing.is_empty() {
         writeln!(out, "nothing to add: every declared field exists").map_err(write_err)?;
         return Ok(());
     }
-    onepassword::write_skeleton(r, env, &item, &missing)?;
     for (product, key, kind) in &missing {
         writeln!(
             out,

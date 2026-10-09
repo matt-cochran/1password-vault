@@ -826,8 +826,7 @@ fn sigterm_forwards_and_exits_143() {
             Some(143),
             "forwarded",
             "opv: interrupted during op item get; safe to re-run\n\
-             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata \
-             (safe to re-run)"
+             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata"
         )
     );
 }
@@ -895,4 +894,131 @@ fn no_message_or_doc_suggests_the_deprecated_apps_resume() {
             && !h.ends_with("cli-ux-review.md")
     });
     assert_eq!(hits, Vec::<String>::new());
+}
+
+// --- A1, A4, A5: the JSON contract at the process boundary ---
+
+fn json_of(stdout: &str) -> serde_json::Value {
+    serde_json::from_str(stdout).expect("stdout is one JSON document")
+}
+
+#[test]
+fn json_failure_before_any_call_prints_the_envelope_on_stdout() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "qa", "--json"]);
+    assert_eq!(json_of(&out)["error"]["code"], "unknown_env", "{out}");
+}
+
+#[test]
+fn json_failure_keeps_the_human_text_on_stderr() {
+    let (_, _, err) = opv(&["--config", CFG, "status", "qa", "--json"]);
+    assert!(
+        err.starts_with("opv: configuration error: undefined environment"),
+        "{err}"
+    );
+}
+
+#[test]
+fn json_failure_keeps_the_exit_code() {
+    let (code, out, _) = opv(&["--config", CFG, "plan", "qa", "--json"]);
+    assert_eq!(
+        (code, json_of(&out)["exit_code"].clone()),
+        (2, serde_json::json!(2))
+    );
+}
+
+#[test]
+fn json_usage_error_prints_the_envelope() {
+    let (_, out, _) = opv(&["--config", CFG, "sync", "prod", "--frobnicate", "--json"]);
+    assert_eq!(json_of(&out)["error"]["code"], "usage", "{out}");
+}
+
+#[test]
+fn json_dependency_failure_names_a_runnable_next() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "prod", "--json"]);
+    assert_eq!(
+        json_of(&out)["next"],
+        "opv --config tests/fixtures/secrets.toml status prod --json",
+        "{out}"
+    );
+}
+
+#[test]
+fn config_export_failure_is_the_envelope() {
+    let (_, out, _) = opv(&["--config", CFG, "config", "export", "qa"]);
+    assert_eq!(json_of(&out)["ok"], false, "{out}");
+}
+
+#[test]
+fn status_json_without_an_environment_lists_every_environment() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "--json"]);
+    let names: Vec<String> = json_of(&out)["environments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["prod", "staging"], "{out}");
+}
+
+#[test]
+fn schema_is_one_json_document_listing_sync() {
+    let (code, out, _) = opv(&["schema"]);
+    let doc = json_of(&out);
+    let sync = doc["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "sync" && c["effect"] == "writes_target");
+    assert!(code == 0 && sync, "{out}");
+}
+
+#[test]
+fn schema_lists_every_error_code_with_its_retry() {
+    let (_, out, _) = opv(&["schema"]);
+    let codes = json_of(&out)["error_codes"].as_array().unwrap().clone();
+    assert!(
+        codes
+            .iter()
+            .any(|c| c["code"] == "outcome_unknown" && c["retry"] == "safe"),
+        "{out}"
+    );
+}
+
+#[test]
+fn explain_json_names_the_reference() {
+    let (_, out, _) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+        "--json",
+    ]);
+    assert_eq!(
+        json_of(&out)["reference"],
+        "op://vprd/iprd/allumata/OPENAI_API_KEY",
+        "{out}"
+    );
+}
+
+#[test]
+fn every_text_failure_ends_with_a_runnable_next() {
+    // A3: `Next:` is followed by a command, never prose or a placeholder.
+    let mut bad = Vec::new();
+    for args in [
+        &["--config", CFG, "status", "qa"][..],
+        &["--config", CFG, "status", "prod"],
+        &["--config", CFG, "sync", "prod", "--rotate", "allumata/NOPE"],
+        &["--config", CFG, "explain", "OPENAI_API_KEY"],
+        &["--config", CFG, "status", "prod", "--product", "nope"],
+        &["--config", "does-not-exist.toml", "status", "prod"],
+    ] {
+        let (_, _, err) = opv(args);
+        let next = err.lines().last().unwrap_or_default();
+        if !opv::error::is_runnable(next.strip_prefix("Next: ").unwrap_or("not a next line")) {
+            bad.push(format!("{args:?}: {next}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
 }

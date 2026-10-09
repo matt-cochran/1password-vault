@@ -12,7 +12,7 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
    - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
    - `--deploy` (restarts or redeploys the app, or starts a new revision or rollout), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed).
    `doctor`, `status`, `plan`, `explain` and `config export` change nothing.
-5. **Use exit codes, not guesses.** Every opv failure prints a typed error and a `Next:` line with the exact next command. Run that command or show it to the user; do not invent workarounds.
+5. **Use the machine contract, not guesses.** Run `opv schema` once: it describes the installed opv (commands, flags, which commands change something and which to ask about first, exit codes, error codes and JSON shapes). Prefer `--json`: stdout is then one document on success and on failure. On failure read `error.code`, not the message text. Re-run the same command only when `error.retry` is `safe` (now) or `after_fix` (once `do` is done); never when it is `never`, then run `next` instead. When `error.human_required` is `true`, or a text failure has a `Do:` line, hand that step to the user (it is something only they can do: sign in, fill a value in 1Password, approve a guarded environment, type in their own terminal) and wait; do not try to do it yourself. `next` and the `Next:` line are always one command that runs as typed; run it (if rule 4 allows) or show it to the user. Do not invent workarounds.
 
 ## 1. Check the tools
 
@@ -53,7 +53,7 @@ Then:
 opv doctor
 ```
 
-It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`), and ends with a `Next:` line (on stderr when a check fails). Do what that line says before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks and the next step as JSON.
+It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`). When a check fails it ends with a `Do:` line (the user's part, such as signing in) and a `Next:` command on stderr; when all pass, the last line is `all clear: nothing pending`. Do what those lines say before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks, `do` and `next` as JSON.
 
 ### Azure or Kubernetes instead of Fly
 
@@ -99,7 +99,7 @@ Each row is `saved`, `missing`, `wrong kind`, `failing rule` or `skipped` (not w
 
 Never ask for the value to check it yourself. A failing rule prints the rule and a reason (for example `expected prefix sk-`), which is enough to tell the user what is wrong.
 
-For scripts, `opv status staging --json` returns names and states only (`schema_version` 1); see [usage.md](usage.md#machine-readable-status-and-plan).
+For scripts, `opv status staging --json` returns names and states only (`schema_version` 1); see [usage.md](usage.md#machine-readable-status-and-plan). Exit 8 still prints the rows, plus `error` with `code: "findings"` and `human_required: true`: the user fills the values.
 
 ## 5. Plan, then sync
 
@@ -114,7 +114,9 @@ opv sync staging          # stage only; the running app is unchanged
 opv sync staging --deploy # stage and deploy, only if something changed (needs a separate yes)
 ```
 
-`sync` refuses (exit 6) and stages nothing while any key is missing, of the wrong kind or failing a rule. Go back to step 4.
+`sync` refuses (exit 6, `error.code` `keys_blocking`) and stages nothing while any key is missing, of the wrong kind or failing a rule. Go back to step 4. A guarded environment (`confirm_env = true`) refuses with `confirm_required`: ask the user, and only with their yes run the `next` command, which adds `--confirm <env>`.
+
+`opv setup` and `opv session` need the user's own terminal. Without one they refuse with `terminal_required`, `Do: ask the user to run this in their own terminal` and the command on `Next:`; pass both to the user.
 
 ## 6. Local development
 
@@ -144,6 +146,8 @@ More patterns: [usage.md](usage.md#local-development).
 
 ## Exit codes
 
+Every failure also has a stable `error.code` with `--json`; the full list, with `retry` and `human_required` for each, is in [usage.md](usage.md#json-contract) and in `opv schema`.
+
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | ok | continue |
@@ -151,7 +155,7 @@ More patterns: [usage.md](usage.md#local-development).
 | 3 | `op`, `flyctl`, `az` or `kubectl` missing | install it (`opv doctor` prints how) |
 | 4 | 1Password error | the message names the vault and item; the identity may need access |
 | 5 | target error (Fly, Azure or Kubernetes) | the message names the app and, for a deploy, the unhealthy revision or rollout; the old one keeps serving; follow the `Next:` line |
-| 6 | refused | a key is missing, of the wrong kind or failing a rule; run `opv status` |
+| 6 | refused | `keys_blocking`: a key is missing, of the wrong kind or failing a rule (run `opv status`); `confirm_required`: ask the user, then run `next`; `terminal_required`: hand `next` to the user; `policy_refused`: follow `do` |
 | 7 | not signed in | run the sign-in command opv prints |
 | 8 | findings | `status`, `plan` or `check` found keys to fix; see step 4 |
 | 9 | outcome unknown, or a provider did not answer | a change may or may not have been applied, or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command (a CI job may retry it) |
