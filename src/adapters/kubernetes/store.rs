@@ -343,8 +343,9 @@ impl PinnedStore for KubeSecrets<'_> {
                 }
                 Ok(version)
             }
-            // Reconcile by reading back (NR-2): the Secret may have been written.
-            other => match self.owner(&secret) {
+            // Reconcile by reading back (NR-2): the Secret may have been written. The
+            // read-back explains the failure, so the apply's excerpt stays (NR-31).
+            other => match crate::runner::diagnosing(|| self.owner(&secret)) {
                 Ok(Some(env)) if env == t.env => Ok(version),
                 _ => Err(self
                     .k
@@ -406,7 +407,7 @@ impl KubeSecrets<'_> {
         args.push("--ignore-not-found");
         match self.k.call(Effect::Write, &what, &args, None, &[])? {
             Outcome::Done(_) => Ok(()),
-            other => match self.names(&selector) {
+            other => match crate::runner::diagnosing(|| self.names(&selector)) {
                 Ok(left) if !left.iter().any(|(n, _)| doomed.contains(&n.as_str())) => Ok(()),
                 _ => Err(self
                     .k
@@ -488,6 +489,41 @@ mod tests {
         let r = FakeRunner::new([ok(""), ok("secret/x")]);
         let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
         assert!(!r.argv_contains(MARK) && stdin_text(&r, 1).contains(&STANDARD.encode(MARK)));
+    }
+
+    /// A failed apply whose stderr echoes the Secret manifest shows the value masked.
+    #[test]
+    fn failed_apply_excerpt_masks_the_manifest_value() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(ok(""), "");
+        let manifest = format!(r#"{{"data":{{"value":"{}"}}}}"#, STANDARD.encode(MARK));
+        r.push_with_stderr(
+            Output::failure(1),
+            &format!("error: invalid object {manifest}\n"),
+        );
+        r.push_with_stderr(ok(""), "");
+        r.push_with_stderr(ok("context/kind-opv\n"), "");
+        r.push_with_stderr(ok("v1.36"), "");
+        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        assert_eq!(
+            crate::runner::take_failure_excerpt().map(|x| x.lines),
+            Some(vec![
+                r#"error: invalid object {"data":{"value":"__SECRET__"}}"#.to_string()
+            ])
+        );
+    }
+
+    /// `--verbose` shows the apply's argv and result shape, never the manifest on stdin.
+    #[test]
+    fn verbose_write_never_shows_the_manifest() {
+        let r = FakeRunner::new([ok(""), ok("secret/x")]);
+        r.verbose.set(true);
+        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK)));
+        let notes = r.notes.take().join("\n");
+        assert!(
+            !notes.contains(&STANDARD.encode(MARK)) && !notes.contains("\"data\""),
+            "{notes}"
+        );
     }
 
     #[test]

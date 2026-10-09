@@ -74,7 +74,11 @@ impl Registry {
             return;
         }
         if value.len() < MIN_SUBSTRING {
-            push_unique(&mut self.short, Zeroizing::new(value.to_owned()));
+            // A short value and its encodings (its base64 is what a Kubernetes Secret
+            // manifest carries) are masked as whole tokens only.
+            for needle in encodings(value) {
+                push_unique(&mut self.short, needle);
+            }
             return;
         }
         for needle in encodings(value) {
@@ -143,6 +147,9 @@ fn encodings(value: &str) -> Vec<Zeroizing<String>> {
         out.push(Zeroizing::new(json[1..json.len() - 1].to_owned()));
     }
     out.push(json_ascii(value));
+    out.push(escaped(value, Quoting::GoJson));
+    out.push(escaped(value, Quoting::GoQuote));
+    out.push(escaped(value, Quoting::PythonRepr));
     for engine in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
         out.push(Zeroizing::new(engine.encode(b)));
     }
@@ -168,6 +175,49 @@ fn json_ascii(value: &str) -> Zeroizing<String> {
                 }
             }
             c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The escaping of a quoted string by the CLIs opv runs, beyond plain JSON.
+#[derive(Clone, Copy)]
+enum Quoting {
+    /// Go `encoding/json` (kubectl, the Kubernetes API, flyctl): JSON, plus `<`, `>`, `&`,
+    /// U+2028 and U+2029 as `\uXXXX`.
+    GoJson,
+    /// Go `%q` / `strconv.Quote` (kubectl and flyctl error text): `\a \b \f \v` and
+    /// `\xNN` for other control bytes.
+    GoQuote,
+    /// Python `repr` in single quotes (az): `\'`, and `\xNN` for control bytes.
+    PythonRepr,
+}
+
+/// The body of `value` quoted the way `q` writes it (non-ASCII printable text kept as is).
+fn escaped(value: &str, q: Quoting) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(value.len() + 8));
+    for c in value.chars() {
+        match (c, q) {
+            ('\\', _) => out.push_str("\\\\"),
+            ('\n', _) => out.push_str("\\n"),
+            ('\r', _) => out.push_str("\\r"),
+            ('\t', _) => out.push_str("\\t"),
+            ('"', Quoting::GoJson | Quoting::GoQuote) => out.push_str("\\\""),
+            ('\'', Quoting::PythonRepr) => out.push_str("\\'"),
+            ('<' | '>' | '&' | '\u{2028}' | '\u{2029}', Quoting::GoJson) => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
+            (c, Quoting::GoJson) if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
+            ('\u{07}', Quoting::GoQuote) => out.push_str("\\a"),
+            ('\u{08}', Quoting::GoQuote) => out.push_str("\\b"),
+            ('\u{0c}', Quoting::GoQuote) => out.push_str("\\f"),
+            ('\u{0b}', Quoting::GoQuote) => out.push_str("\\v"),
+            (c, Quoting::GoQuote | Quoting::PythonRepr) if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            (c, _) => out.push(c),
         }
     }
     out
@@ -455,6 +505,56 @@ mod tests {
         assert_eq!(
             reg().scrub(&format!("q={}&", enc.as_str())),
             "q=__SECRET__&"
+        );
+    }
+
+    #[test]
+    fn go_json_escaped_value_is_replaced() {
+        let mut r = Registry::new();
+        r.register("p<w>&d");
+        assert_eq!(
+            r.scrub(r#"{"value":"p\u003cw\u003e\u0026d"}"#),
+            r#"{"value":"__SECRET__"}"#
+        );
+    }
+
+    #[test]
+    fn go_quoted_control_byte_value_is_replaced() {
+        let mut r = Registry::new();
+        r.register("bell\u{07}ring");
+        assert_eq!(
+            r.scrub(r#"Invalid value: "bell\aring""#),
+            r#"Invalid value: "__SECRET__""#
+        );
+    }
+
+    #[test]
+    fn python_repr_value_is_replaced() {
+        let mut r = Registry::new();
+        r.register("it's \"x\"");
+        assert_eq!(r.scrub(r#"value 'it\'s "x"'"#), "value '__SECRET__'");
+    }
+
+    /// A Kubernetes Secret manifest carries a short value as its base64.
+    #[test]
+    fn short_value_base64_is_replaced_as_a_token() {
+        let mut r = Registry::new();
+        r.register("ab");
+        assert_eq!(
+            r.scrub(r#""data":{"value":"YWI="}"#),
+            r#""data":{"value":"__SECRET__"}"#
+        );
+    }
+
+    /// az errors name Key Vault secret ids; they stay readable while the value is masked.
+    #[test]
+    fn key_vault_id_is_kept_while_the_value_is_masked() {
+        let line = format!(
+            "ERROR: (Conflict) https://kv-prod.vault.azure.net/secrets/fleet--api--db-url/0f3c9a2b7d4e4f0a: {MARK}"
+        );
+        assert_eq!(
+            reg().scrub(&line),
+            "ERROR: (Conflict) https://kv-prod.vault.azure.net/secrets/fleet--api--db-url/0f3c9a2b7d4e4f0a: __SECRET__"
         );
     }
 

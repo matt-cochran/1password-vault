@@ -262,6 +262,18 @@ fn failed_op_error_as(
     grant: &str,
     write: bool,
 ) -> Error {
+    // The probes explain the failed call; its excerpt stays with the error (NR-31).
+    crate::runner::diagnosing(|| failed_op_session_error(r, env, host, failed, grant, write))
+}
+
+fn failed_op_session_error(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+    grant: &str,
+    write: bool,
+) -> Error {
     let session = match diagnose(r, host) {
         Ok(s) => s,
         Err(e) => return e,

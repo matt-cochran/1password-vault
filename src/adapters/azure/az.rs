@@ -167,7 +167,8 @@ fn probe(r: &dyn CommandRunner, args: &[&str]) -> Result<bool, Error> {
 /// [`Error::Dependency`] with the platform install hint (FR-10); a probe that could not
 /// run says so instead of claiming a sign-out.
 pub fn diagnose(r: &dyn CommandRunner, op: &str, target: &str) -> Error {
-    match signed_in(r) {
+    // The probe explains the failed call; its excerpt stays with the error (NR-31).
+    match crate::runner::diagnosing(|| signed_in(r)) {
         Ok(true) => Error::Target(format!("az {op} failed for {target}")),
         Ok(false) => not_logged_in(None),
         Err(e) => e,
@@ -191,6 +192,30 @@ pub(crate) fn not_logged_in(failed: Option<&str>) -> Error {
 mod tests {
     use super::*;
     use crate::runner::fake::FakeRunner;
+
+    /// NR-31: a refused `az` call keeps its own stderr through the sign-in diagnosis.
+    #[test]
+    fn failed_call_leaves_an_az_said_excerpt() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n",
+        );
+        r.push_with_stderr(Output::success(""), "");
+        let outcome = invoke(
+            &r,
+            Effect::Write,
+            "keyvault secret set",
+            &["keyvault"],
+            None,
+            &[],
+        );
+        let _ = write_output(&r, "keyvault secret set", "kv-prod", outcome.unwrap());
+        assert_eq!(
+            crate::runner::take_failure_excerpt().map(|x| x.render()),
+            Some("  az said: ERROR: (Forbidden) The user does not have secrets set permission on kv-prod\n".into())
+        );
+    }
 
     #[test]
     fn probe_that_cannot_run_does_not_claim_signed_out() {

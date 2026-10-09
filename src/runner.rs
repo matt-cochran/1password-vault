@@ -444,35 +444,94 @@ impl Stderr {
 /// The child's stderr of the last failed captured call on this thread, waiting for opv's
 /// error line (NR-31). Raw bytes in zeroizing memory; scrubbed only when shown, so values
 /// registered later in the run are scrubbed too.
+///
+/// Every call (each read attempt, write and probe) takes the next call id and clears the
+/// slot when it starts; a failure is stored stamped with its own id, and is handed out only
+/// while no later call has started. So an excerpt can only follow the error made from that
+/// same failed call. The one exception is [`diagnosing`]: the read-only probes an adapter
+/// runs to explain a failure (`op whoami`, `az account show`, …) belong to that failure and
+/// neither clear nor replace it.
 mod failure {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use super::Stderr;
 
+    struct Failed {
+        call: u64,
+        program: String,
+        stderr: Stderr,
+    }
+
     thread_local! {
-        static LAST: RefCell<Option<(String, Stderr)>> = const { RefCell::new(None) };
+        static CALL: Cell<u64> = const { Cell::new(0) };
+        static DIAGNOSING: Cell<u32> = const { Cell::new(0) };
+        static LAST: RefCell<Option<Failed>> = const { RefCell::new(None) };
     }
 
-    pub(super) fn clear() {
+    /// A call starts: its id, after clearing the slot. `None` inside [`diagnosing`]: the
+    /// probe is part of the failure being explained and leaves the slot alone.
+    pub(super) fn begin() -> Option<u64> {
+        if DIAGNOSING.with(Cell::get) > 0 {
+            return None;
+        }
         LAST.with(|l| l.borrow_mut().take());
+        Some(CALL.with(|c| {
+            c.set(c.get() + 1);
+            c.get()
+        }))
     }
 
-    pub(super) fn record(program: &str, stderr: Stderr) {
-        LAST.with(|l| *l.borrow_mut() = Some((program.to_string(), stderr)));
+    /// Call `call` failed with `stderr`; kept only while it is still the latest call.
+    pub(super) fn record(call: Option<u64>, program: &str, stderr: Stderr) {
+        let Some(call) = call.filter(|id| *id == CALL.with(Cell::get)) else {
+            return;
+        };
+        LAST.with(|l| {
+            *l.borrow_mut() = Some(Failed {
+                call,
+                program: program.to_string(),
+                stderr,
+            })
+        });
     }
 
     pub(super) fn take() -> Option<crate::scrub::Excerpt> {
-        let (program, stderr) = LAST.with(|l| l.borrow_mut().take())?;
-        crate::scrub::Excerpt::from_stderr(&program, &stderr.bytes, stderr.truncated)
+        let f = LAST.with(|l| l.borrow_mut().take())?;
+        if f.call != CALL.with(Cell::get) {
+            return None;
+        }
+        crate::scrub::Excerpt::from_stderr(&f.program, &f.stderr.bytes, f.stderr.truncated)
+    }
+
+    pub(super) struct Diagnosis;
+
+    impl Diagnosis {
+        pub(super) fn enter() -> Self {
+            DIAGNOSING.with(|d| d.set(d.get() + 1));
+            Diagnosis
+        }
+    }
+
+    impl Drop for Diagnosis {
+        fn drop(&mut self) {
+            DIAGNOSING.with(|d| d.set(d.get().saturating_sub(1)));
+        }
     }
 }
 
-/// The scrubbed stderr excerpt of the last captured call that failed (a read refused, a
-/// write or probe that exited non-zero), if it wrote any; taken once. A later read or
-/// write clears it, so it belongs to the call the error is about (NR-31). Probes (the
-/// diagnosis of a failure) never clear it.
+/// The scrubbed stderr excerpt of the failed call the error at hand came from (a read
+/// refused, a write or probe that exited non-zero), if it wrote any; taken once. Any call
+/// started after the failure (other than a [`diagnosing`] probe) drops it, so an excerpt
+/// never attaches to an error it did not cause (NR-31).
 pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
     failure::take()
+}
+
+/// Run `f`, the read-only diagnosis of the call that just failed (FR-26): its probes keep
+/// that call's excerpt instead of starting a new one (NR-31). Used only on failure paths.
+pub fn diagnosing<T>(f: impl FnOnce() -> T) -> T {
+    let _scope = failure::Diagnosis::enter();
+    f()
 }
 
 fn left(e: &dyn Engine) -> Duration {
@@ -487,8 +546,8 @@ fn backoff(n: u32, jitter: f64) -> Duration {
 fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
     let mut n = 1;
     loop {
-        // The excerpt belongs to the last attempt only.
-        failure::clear();
+        // Each attempt is its own call: the excerpt belongs to the last one only.
+        let id = failure::begin();
         let limit = READ_TIMEOUT.min(left(e));
         if limit.is_zero() {
             return Err(budget_spent(call));
@@ -497,11 +556,11 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         let failed = match attempt {
             Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
             Attempt::Exited(o) if refused.contains(&o.status) => {
-                failure::record(call.program, stderr);
+                failure::record(id, call.program, stderr);
                 return Ok(Outcome::Refused(o));
             }
             Attempt::Exited(o) => {
-                failure::record(call.program, stderr);
+                failure::record(id, call.program, stderr);
                 Outcome::Refused(o)
             }
             Attempt::OverCap => return Ok(Outcome::Refused(Output::failure(OVER_CAP))),
@@ -544,7 +603,7 @@ fn budget_spent(call: &Call) -> io::Error {
 }
 
 fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
-    failure::clear();
+    let id = failure::begin();
     let limit = WRITE_TIMEOUT.min(left(e));
     if limit.is_zero() {
         return Err(budget_spent(call));
@@ -553,7 +612,7 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
     Ok(match attempt {
         Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
         Attempt::Exited(o) => {
-            failure::record(call.program, stderr);
+            failure::record(id, call.program, stderr);
             Outcome::Unknown {
                 reason: "failed-write",
                 status: Some(o.status),
@@ -567,6 +626,7 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
 }
 
 fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> {
+    let id = failure::begin();
     let limit = limit.min(left(e));
     let timed_out = || {
         io::Error::new(
@@ -585,7 +645,7 @@ fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> 
     match attempt {
         Attempt::Exited(o) => {
             if o.status != 0 {
-                failure::record(call.program, stderr);
+                failure::record(id, call.program, stderr);
             }
             Ok(o)
         }
@@ -1330,11 +1390,12 @@ pub mod fake {
         /// A queued `TimedOut` comes back as that error, like a real probe timeout. A
         /// non-zero exit keeps its stderr for the failure excerpt, like the real probe.
         fn probe(&self, call: &super::Call, _limit: Duration) -> io::Result<Output> {
+            let id = super::failure::begin();
             let index = self.calls.borrow().len();
             let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
             let stderr = self.stderr_of(index);
             if out.status != 0 {
-                super::failure::record(call.program, stderr);
+                super::failure::record(id, call.program, stderr);
             }
             Ok(out)
         }
@@ -1991,13 +2052,70 @@ mod tests {
         assert_eq!(excerpt_lines(), ["[ERROR] not signed in"]);
     }
 
-    /// The diagnosis after a failed read (a succeeding probe) keeps the read's excerpt.
+    /// A diagnosis probe explains the failed read, so the read's excerpt stays.
     #[test]
-    fn succeeding_probe_keeps_the_earlier_excerpt() {
+    fn diagnosis_probe_keeps_the_failed_calls_excerpt() {
         let r = failing_read_with_stderr("denied\n");
         r.push_with_stderr(Output::success("{}"), "");
-        let _ = r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT);
+        diagnosing(|| r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT)).unwrap();
         assert_eq!(excerpt_lines(), ["denied"]);
+    }
+
+    #[test]
+    fn failed_diagnosis_probe_does_not_replace_the_failed_calls_excerpt() {
+        let r = failing_read_with_stderr("denied\n");
+        r.push_with_stderr(Output::failure(1), "not signed in\n");
+        diagnosing(|| r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT)).unwrap();
+        assert_eq!(excerpt_lines(), ["denied"]);
+    }
+
+    #[test]
+    fn probe_outside_a_diagnosis_drops_an_earlier_excerpt() {
+        let r = failing_read_with_stderr("denied\n");
+        r.push_with_stderr(Output::success("{}"), "");
+        r.probe(&Call::new("az", &["version"]), PROBE_TIMEOUT)
+            .unwrap();
+        assert_eq!(take_failure_excerpt(), None);
+    }
+
+    fn failed_probe_then_successful_read() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(1), "[ERROR] probe went wrong\n");
+        r.push_with_stderr(Output::success("ok"), "");
+        let _ = r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT);
+        let _ = read_fake(&r);
+    }
+
+    #[test]
+    fn failed_probe_then_success_then_config_error_attaches_nothing() {
+        failed_probe_then_successful_read();
+        let e = crate::error::Error::Config("bad secrets.toml".into());
+        assert_eq!(
+            crate::error::report(&e, take_failure_excerpt().as_ref()),
+            "opv: configuration error: bad secrets.toml\n"
+        );
+    }
+
+    #[test]
+    fn failed_probe_then_success_then_target_error_attaches_nothing() {
+        failed_probe_then_successful_read();
+        let e = crate::error::Error::Target("app is dead".into());
+        assert_eq!(
+            crate::error::report(&e, take_failure_excerpt().as_ref()),
+            "opv: target error: app is dead\n"
+        );
+    }
+
+    #[test]
+    fn failed_write_excerpt_attaches_to_its_own_error() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(Output::failure(2), "Error: app not found\n");
+        let _ = r.write(&Call::new("flyctl", &["secrets", "import"]));
+        let e = crate::error::Error::Unknown("flyctl secrets import failed (exit 2)".into());
+        assert_eq!(
+            crate::error::report(&e, take_failure_excerpt().as_ref()),
+            "opv: outcome unknown: flyctl secrets import failed (exit 2)\n  flyctl said: Error: app not found\n"
+        );
     }
 
     #[test]
