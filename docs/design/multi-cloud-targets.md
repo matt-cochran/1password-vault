@@ -1,7 +1,10 @@
 # Multi-cloud targets: Azure, AWS and GCP
 
-Status: approved by the owner on 2026-10-08. Requirements FR-28 to FR-33 and §8 items 27 to 36 in
-`docs/design/requirements.md` are normative; this document is their argument and the delivery plan.
+Status: approved by the owner on 2026-10-08; as built for 0.5.0. Azure Key Vault + Container Apps,
+Kubernetes and Key Vault → Kubernetes (External Secrets) ship as **preview** until the live smoke
+tests pass; App Service, AWS and GCP are planned (P2 to P4). Requirements FR-28 to FR-33 and
+FR-37 to FR-39 and §8 in `docs/design/requirements.md` are normative; this document is their
+argument and the delivery plan. §11 to §13 describe what was built.
 
 ## 1. Intent
 
@@ -97,6 +100,7 @@ one is a configuration error. Existing `fly` sections are unchanged.
 
 ```toml
 [environments.prod.azure]
+subscription   = "00000000-0000-0000-0000-000000000000"  # required; --subscription on every call (NR-7)
 key_vault      = "kv-myapp-prod"
 resource_group = "rg-myapp"
 container_app  = "ca-myapp"            # exactly one of container_app | app_service
@@ -207,13 +211,13 @@ report: written, pending deploy, deployed, pruned, unchanged, unmanaged count
 
 Each phase is one feature branch → `dev` PR → release through staging → main.
 
-| Phase | Owner | Junior tasks |
-|---|---|---|
-| P0 ports + Fly | manager (judgment: interfaces, refactor) | characterization tests; renames once the ports exist |
-| P1 Key Vault + Container Apps | manager wires the engine | `recon` on `az` stdin, versioned refs and YAML update; Key Vault adapter; Container Apps adapter |
-| P2 App Service | Junior | adapter + contract tests |
-| P3 Secrets Manager + ECS | manager reviews | `recon`; two adapters |
-| P4 Secret Manager + Cloud Run | manager reviews | `recon`; two adapters; confirm Cloud Run functions coverage |
+| Phase | Owner | Junior tasks | Status |
+|---|---|---|---|
+| P0 ports + Fly | manager (judgment: interfaces, refactor) | characterization tests; renames once the ports exist | done (0.3.0) |
+| P1 Key Vault + Container Apps | manager wires the engine | `recon` on `az` stdin, versioned refs and YAML update; Key Vault adapter; Container Apps adapter | done (0.5.0, preview), with Kubernetes (§12) and Key Vault → Kubernetes (§13) |
+| P2 App Service | Junior | adapter + contract tests | planned (#40) |
+| P3 Secrets Manager + ECS | manager reviews | `recon`; two adapters | planned (#41) |
+| P4 Secret Manager + Cloud Run | manager reviews | `recon`; two adapters; confirm Cloud Run functions coverage | planned (#42) |
 
 The P1 `recon` result can change §6 details (exact commands, health signals). Any change goes back
 into this document and `docs/design/requirements.md` before the adapter is built.
@@ -225,3 +229,226 @@ Low-probability risk is a secret stored as a text field becoming plain env (R12)
 because a heuristic would be speculative. The mitigations that must not be dropped are pinned
 references (FR-29), read-modify-write with the unmanaged fingerprint (FR-31), prune order and the
 ownership tag (FR-32), and P0 characterization tests.
+
+## 11. Provider plug-in contract (FR-37)
+
+Decided 2026-10-08 (owner): every provider is pluggable behind one contract, so adding a provider
+changes no core code. Fly, Azure and Kubernetes all implement it.
+
+As built for 0.5.0 (`src/provider.rs`; signatures abbreviated):
+
+```rust
+/// One deployment provider. Registered once in `adapters::registry::PROVIDERS`.
+pub trait Provider: Sync {
+    fn section(&self) -> &'static str;                        // "fly", "azure", "kubernetes"
+    fn label(&self) -> &'static str;                          // "Fly", "Azure", "Kubernetes"
+    fn tools(&self) -> &'static [&'static Tool];              // its CLIs: install lines, status page,
+                                                              // pinned env, not-found phrases
+    fn parse(&self, section: &Section<'_>, profile: Profile) -> Result<Box<dyn TargetConfig>, Error>;
+    fn credential_vars(&self) -> &'static [&'static str];     // e.g. FLY_API_TOKEN, by name
+    fn doctor_checks(&self) -> &'static [&'static str];       // names, for doctor's "skip" lines
+    fn setup_hint(&self, profile: Profile) -> String;         // "configure fly.app ..." (no target)
+    fn init_fields(&self) -> &'static [InitField];            // `opv init --<section>-<field>` (H3)
+    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String>;
+    fn deploy_credential_fields(&self) -> Result<&'static [CredentialField], String>; // FR-40
+    fn deploy_login(&self) -> Result<Box<dyn DeployLogin>, Error>;                    // FR-40
+    fn store_kinds(&self) -> &'static [&'static str];         // `[stores.<name>]` kinds (FR-39)
+    fn parse_store(/* section, kind */) -> Result<Box<dyn StoreConfig>, Error>;
+    fn bindings(&self) -> &'static [StoreBinding];            // other providers' stores it binds
+    fn bind(/* target, store */) -> Result<Box<dyn TargetConfig>, Error>;
+}
+
+/// A validated, provider-specific target. Core code sees only this trait.
+pub trait TargetConfig: fmt::Debug + Send + Sync {
+    fn provider(&self) -> &'static dyn Provider;
+    fn env_name(&self, product: &str, key: &str) -> String;   // runtime env var name
+    fn store_name(&self, env_name: &str) -> String;           // name in the store
+    fn name_rules(&self) -> NameRules;                        // patterns, case, limits (FR-30)
+    fn secrets_in(&self) -> Option<&dyn StoreConfig>;         // a named store (FR-39)
+    fn same_target(&self, other: &dyn TargetConfig) -> bool;  // two environments sharing one target
+    fn shared_target_error(&self, first: &str, second: &str) -> String;
+    fn open<'a>(&'a self, env: &'a str, managed: BTreeSet<String>, r: &'a dyn CommandRunner)
+        -> Result<Ports<'a>, Error>;                          // managed: template env names (FR-8)
+    fn preflight(&self, r: &dyn CommandRunner, mode: PreflightMode) -> Result<Preflight, Error>;
+    fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
+    fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)>;
+    fn explain_config(&self, product: &str, key: &str) -> Option<Vec<(&'static str, String)>>;
+    fn eq_dyn(&self, other: &dyn TargetConfig) -> bool;
+    fn as_any(&self) -> &dyn Any;
+    fn clone_box(&self) -> Box<dyn TargetConfig>;
+}
+```
+
+`preflight` runs in two modes (NR-25): `Mutate` (sync) may wait, with progress, for an update in progress; `Read` (status, plan, doctor) never waits and returns a warning instead. Warnings are returned as checks and printed one line each.
+
+As implemented (Task P): `open` returns `Result` (a provider whose adapters are not wired in
+yet refuses with `Error::Config`); `doctor` takes the host so install hints and token checks
+stay testable; `label`, `doctor_checks`, `setup_hint`, `shared_target_error` keep every Fly
+message byte-identical without core naming Fly; `eq_dyn`, `as_any`, `clone_box` let the
+configuration model keep `Clone`/`Eq`. `adapters::registry::DEFAULT` names the provider opv
+suggests when an environment has no target (and the one `init` writes): Fly in 0.5.0.
+
+Review fixes (Task P): a provider section is read through `Section::deserialize`, which keeps
+the TOML source positions, so a missing, unknown or mistyped field shows the line, column and
+field exactly as 0.4 did; unknown entries under an environment and the two-provider error point
+at their line too. A provider's CLI is a `host::Tool` value (program, install line per platform, status page,
+pinned environment, not-found phrases) declared in its own module and returned by
+`Provider::tools`, and its credential variables come from `Provider::credential_vars`, so
+`host.rs` names no provider.
+
+Integration (Key Vault + Container Apps): `open` also takes the managed env names (FR-8), which
+the pinned adapters need to recognise what they own. Every store port speaks runtime env names;
+Key Vault maps them to its spelling (`_` → `-`) inside the adapter. The Azure adapters live in
+`src/adapters/azure/` (`keyvault.rs`, `containerapp.rs`, and `az.rs`, their shared spawn,
+diagnosis, `/dev/stdin` and pacing plumbing), and `AzureTarget::open` returns `Ports::Pinned`.
+
+- `config.rs` keeps the generic environment fields and dispatches each remaining table to the
+  provider registered under that section name; an unknown section is a config error listing the
+  registered names; two provider sections in one environment is the FR-28 error.
+- `Target` (the enum) is replaced by `Box<dyn TargetConfig>`. `app/`, `domain/` and `config.rs`
+  never name a provider; the existing guard test is extended to every provider module name.
+- `init` stays provider-aware by design (it writes a provider section) through
+  `Provider::init_fields` (its `--<section>-<field>` options, added to the CLI from the
+  registry) and `Provider::init_section`; Fly, Azure and Kubernetes support it (H3).
+- Adding a provider = one module under `src/adapters/<provider>/` (declared with `pub mod` in
+  `src/adapters/mod.rs`) + one line in the registry + docs. Nothing else.
+
+## 12. Kubernetes target (FR-38)
+
+Store: Kubernetes Secrets. Runtime: a Deployment (StatefulSet later if asked). CLI: `kubectl`.
+
+```toml
+[environments.dev.kubernetes]
+context    = "kind-opv"                    # required; passed as --context on every call (NR-7)
+namespace  = "myapp"                       # required; --namespace on every call
+deployment = "api"
+container  = "api"                         # optional when the pod has one container
+env_name   = "FLEET__{PRODUCT}__{KEY}"     # fleet profile only
+config     = "env"                         # or "store" (a ConfigMap-free design: config in Secrets)
+```
+
+- **Pinned flow.** Kubernetes Secrets have no versions, so opv creates an immutable Secret per
+  value version: name `opv-<store name>-<id>`, `immutable: true`, labels `opv-managed=<env>`,
+  `opv-key=<store name>`. The id is the version (FR-29): 10 lower-case base32 characters (50
+  bits) from the OS RNG. It is never derived from the value: a content-hash name would let anyone
+  allowed to list Secrets confirm a guess of a short or low-entropy value, so no name, label or
+  annotation carries anything value-derived (SR-1, SR-2; owner decision 2026-10-08). A pod
+  sees a new value only when the Deployment is repinned. Store names follow DNS-1123
+  (`_` → `-`, lower case, ≤ 253 with the suffix) and are collision-checked at load.
+- **Writes** go through `kubectl apply -f - --server-side --field-manager=opv` with the manifest on
+  stdin (SR-3); values are base64 in `data`, never in argv.
+- **Compare before write** lists `kubectl get secret -l opv-key=<name>,opv-managed=<env>` with a
+  jsonpath of names and labels only (`-o json` returns `data`, recon K2); the current version is
+  the one the Deployment binds. opv reads that Secret's `data.value` (jsonpath, zeroized) and
+  compares it with the desired value in constant time; it writes a new version only when they
+  differ or nothing is bound, so a matching value never gets a second version.
+- **Convergence (NR-1).** A write whose outcome is lost is reconciled by reading the new Secret
+  back. If that fails too, the re-run writes another id; the unreferenced version left behind is
+  labelled `opv-managed=<env>` and deleted by `collect_superseded` after the next healthy
+  rollout, so the end state is one bound version.
+- **Runtime apply** reads the Deployment (`kubectl get deployment -o json`), edits only managed
+  env entries (`valueFrom.secretKeyRef` for secrets, `value` for config), and writes it back with
+  `kubectl replace -f -` carrying `metadata.resourceVersion`: Kubernetes rejects the write if anyone
+  changed the Deployment in between (true optimistic concurrency, stronger than R9).
+- **Health:** opv polls the Deployment and judges it as `kubectl rollout status` does
+  (observedGeneration ≥ generation, then updated = replicas, no old replicas, available =
+  updated; a Deployment scaled to 0 is healthy once observed) within the remaining run budget.
+  It fails fast, without waiting for the progress deadline, on `ProgressDeadlineExceeded`, a
+  paused Deployment, or a pod of the *new* ReplicaSet waiting with `CreateContainerConfigError`,
+  `ImagePullBackOff`, `ErrImagePull` or `CrashLoopBackOff` (recon K4). Pods are judged only once
+  the new generation is observed, so an old ReplicaSet's pods are never misread as the new one's.
+- **Prune** deletes old `opv-managed=<env>` Secrets only after a successful rollout, and never one
+  named anywhere in the Deployment or in any ReplicaSet of the namespace. Decision (rollback):
+  Kubernetes keeps `revisionHistoryLimit` old ReplicaSets for `kubectl rollout undo`; a Secret
+  one of them references is kept, so a rollback never starts pods that bind a missing Secret.
+  Old versions are reclaimed as Kubernetes trims the history.
+- **Access** (FR-33 as amended by R6): the Deployment's ServiceAccount needs no secret access
+  (kubelet mounts the env); `doctor` checks the operator's own rights with
+  `kubectl auth can-i` for get/create/delete/list secrets, get/update deployments and list
+  replicasets and pods. As built, every right a sync needs is required: `doctor` fails a
+  missing one naming the `create role` / `create rolebinding` commands that grant exactly it,
+  and `sync` refuses before its first write without the rights only a deploy uses (delete
+  Secrets or ExternalSecrets, list ReplicaSets and Pods). Removing superseded versions after a
+  healthy deploy is a warning when it fails, never the run's result.
+
+As implemented (provider plug-in): `src/adapters/kubernetes/config.rs` holds the section, its
+`TargetConfig` and the doctor checks (`kubectl`, `kubernetes context`, `kubernetes cluster`,
+`kubernetes access`). Each identifier is validated while the section is deserialized, so a bad
+`context`, `namespace`, `deployment`, `container`, `env_name` or `config` shows its line and
+column. `namespace`/`deployment`/`container` are DNS-1123 labels; `context` allows
+`[A-Za-z0-9_.:/@+-]` and no leading `-` (cloud context names hold `:`, `/` and `@`). The store
+name is also the `opv-key` label value, so it is held to a label (≤ 63), which keeps the Secret
+name ≤ 253. `env_name` is required under the fleet profile and refused under the simple one.
+Two environments on the same context, namespace and Deployment with the same template are a
+configuration error. `TargetConfig::open` takes the managed env names (as on the Azure branch)
+and the rollout wait is the run budget left (`CommandRunner::remaining`), not a fixed 600 s.
+`KUBECONFIG` is inherited; no credential variable is required.
+
+
+## 13. Named stores and cross-provider bindings (FR-39)
+
+Decided 2026-10-08 (owner, into 0.5.0): a runtime can keep its config as env vars while its
+secrets live in a store from another provider — first case: secrets in Azure Key Vault, env in a
+Kubernetes Deployment. The commands do not change.
+
+```toml
+[stores.prod-vault]                        # a named store; reusable across environments
+azure_key_vault = "kv-myapp-prod"          # the store kind is the key; its value is the store
+subscription    = "00000000-0000-0000-0000-000000000000"
+# secret_store  = "prod-vault"             # optional: the in-cluster ClusterSecretStore name
+                                           # (default: the opv store name)
+
+[environments.prod.kubernetes]
+context    = "aks-prod"
+namespace  = "api"
+deployment = "api"
+secrets_in = "prod-vault"                  # optional; default = the runtime's own store
+```
+
+- **One new line for users.** Without `secrets_in` nothing changes. `config = "env"` (default)
+  keeps config in the Deployment env; `config = "store"` routes config to the named store too.
+- **Bindings are pairs.** A binding knows how a runtime pins a version of a store entry. The
+  registry lists supported (store kind, runtime) pairs; an unsupported pair is a config error at
+  load listing the supported ones. 0.5.0 bindings: Key Vault → Container Apps (native), Kubernetes
+  Secrets → Deployment (native), **Key Vault → Deployment via the External Secrets Operator**.
+- **Key Vault → Deployment.** opv writes the Key Vault version (the Key Vault store adapter,
+  unchanged), then applies an `ExternalSecret` named `opv-<store>-<version 10 hex>` with
+  `refreshInterval: 0` (fetched once: pinned, FR-29), `remoteRef: { key: <kv name>, version:
+  <version> }`, `target: { name: <same>, creationPolicy: Owner }`, labels `opv-managed=<env>`,
+  `opv-key=<store>`, pointing at the `ClusterSecretStore` named in the store (default: the opv
+  store name). It waits until the ExternalSecret is `Ready=True` (the Secret exists), then repins
+  the Deployment's `secretKeyRef` and waits for the rollout as for native Kubernetes. Prune deletes
+  ExternalSecrets (and so their Secrets) not referenced by the Deployment or any ReplicaSet, and
+  deletes Key Vault entries only after a healthy rollout (FR-32).
+- **Plug-in contract.** A provider may declare store kinds (`Provider::store_kinds`, e.g. Azure →
+  `azure_key_vault`) and bindings (`Provider::bindings`, e.g. Kubernetes → `(azure_key_vault,
+  external-secrets)`). Core config parses `[stores.*]` generically and dispatches to the provider
+  that declared the kind. Adding a store kind or binding changes no core code.
+- **doctor / preflight.** For an ESO binding: the `externalsecrets.external-secrets.io` CRD exists;
+  the named `ClusterSecretStore` exists and is `Ready`; opv can create ExternalSecrets in the
+  namespace (`auth can-i`); plus the Key Vault checks of the store. A `ClusterSecretStore` that is
+  not Ready is a refusal before any write, naming its condition message.
+- **explain / status.** Show the chain per key: `DB_URL → Key Vault kv-myapp-prod (v4668…) →
+  ExternalSecret opv-… → env`.
+
+As implemented (Task C): `Provider` gained `store_kinds`, `parse_store`, `bindings` (a list of
+`StoreBinding { store_kind, via }`) and `bind`; a store is a `StoreConfig` (kind, name,
+`describe`, `locator`, `bridge_name` = the ClusterSecretStore, `store_name`, `name_rules`,
+`open` → a `PinnedStore`, `preflight`, `doctor`, `explain`, `same_store`); `TargetConfig`
+gained `secrets_in`. `config.rs` parses `[stores.*]` (the name is a DNS label; the kind is the
+one key some provider declares), strips `secrets_in` from a runtime section before the
+provider reads it, checks the pair against `registry::binds` and calls `Provider::bind`;
+errors point at the line. Name checks run the runtime's rules (a Kubernetes name of ≤ 63,
+case-insensitive) and the store's (Key Vault), and a store name shared by two environments
+of one store is refused. Ports grew two defaulted methods: `PinnedStore::has_version` (Key
+Vault: `secret show --version`, diagnosis only) and `PinnedRuntime::chain` (status' `chain:`
+lines). In `src/adapters/kubernetes/external.rs`, `ExternalStore` wraps the store port:
+`collect_superseded` and `delete` remove unreferenced ExternalSecrets (Deployment and every
+ReplicaSet are checked) before the Key Vault delete, plus a once-per-run sweep of
+ExternalSecrets whose key Key Vault no longer holds; `KubeDeployment::with_external` applies
+and awaits the ExternalSecrets before the `replace`, and reads bound versions back from the
+ExternalSecrets' `remoteRef.version`. Preflight: the store's checks, discovery of
+`/apis/external-secrets.io/v1` (Dependency when absent), the ClusterSecretStore (missing
+refuses; not Ready refuses under Mutate, warns under Read; Ready but naming no vault warns)
+and `auth can-i create` (Auth under Mutate). Tests: `eso_tests.rs` (stateful op + az +
+kubectl + operator, interruption matrices) and the diagnosis unit tests in `external.rs`.

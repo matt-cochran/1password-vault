@@ -4,8 +4,11 @@ use std::process::Command;
 
 fn opv(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         // An empty PATH guarantees no real `op` or `flyctl` can run from these tests.
         .env("PATH", "")
         .output()
@@ -49,9 +52,12 @@ fn missing_config_file_exits_2() {
 /// Run opv with `dir` as the working directory and no `op` or `flyctl` on PATH.
 fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .current_dir(dir)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         .env("PATH", "")
         .output()
         .unwrap();
@@ -139,6 +145,25 @@ fn missing_discovered_config_names_starting_directory() {
     assert!(same_file(named, &nested), "{err}");
 }
 
+/// P3: the first-run router offers both starting paths.
+#[test]
+fn missing_discovered_config_offers_init_and_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, err) = opv_in(dir.path(), &["status", "prod"]);
+    assert!(
+        err.contains("opv init <env> --vault <vault title> --item <item title>")
+            && err.contains("opv setup"),
+        "{err}"
+    );
+}
+
+/// Review #8: `opv login` without a terminal names itself, not guided setup.
+#[test]
+fn login_without_a_terminal_names_login() {
+    let (_, _, err) = opv(&["login"]);
+    assert!(err.contains("opv login"), "{err}");
+}
+
 #[test]
 fn missing_discovered_config_suggests_config_flag() {
     let dir = tempfile::tempdir().unwrap();
@@ -162,11 +187,7 @@ fn top_level_help_describes_config_discovery() {
 
 #[test]
 fn usage_errors_exit_2() {
-    for args in [
-        vec!["--config", CFG, "config", "export", "prod"], // --json is required
-        vec!["--config", CFG, "sync"],
-        vec!["nonsense"],
-    ] {
+    for args in [vec!["--config", CFG, "sync"], vec!["nonsense"]] {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{args:?}: {err}");
     }
@@ -313,7 +334,7 @@ const SIMPLE: &str = "tests/fixtures/simple.toml";
 fn doctor_reports_a_simple_profile_file_as_valid() {
     let (_, out, err) = opv(&["--config", SIMPLE, "doctor"]);
     assert!(
-        out.contains("ok    config: valid (2 environment(s), 5 key(s))"),
+        out.contains("ok    config: valid (2 environments, 5 keys)"),
         "{out}{err}"
     );
 }
@@ -372,7 +393,10 @@ mod run_with_fake_op {
             let op = dir.join("op");
             std::fs::write(
                 &op,
-                "#!/bin/sh\necho called >> \"$FAKE_OP_LOG\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+                // `run` first reads the item once (FR-43): an empty item, read by a service
+                // account (read-only, like CI). Missing fields alone are no layout problem,
+                // so nothing is tidied and nothing is printed.
+                "#!/bin/sh\necho \"$1\" >> \"$FAKE_OP_LOG\"\ncase \"$1\" in\n  item) echo '{\"fields\":[]}'; exit 0 ;;\n  whoami) echo '{\"user_type\":\"SERVICE_ACCOUNT\"}'; exit 0 ;;\n  account) echo '[]'; exit 0 ;;\nesac\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
             )
             .unwrap();
             std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -393,9 +417,15 @@ mod run_with_fake_op {
 
     fn run(path: &std::path::Path, args: &[&str]) -> (i32, String, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env_remove("OPV_CONFIG")
+            .env_remove("OPV_PRODUCT")
+            // The fake's `whoami` decides the identity, on CI runners too.
+            .env_remove("CI")
+            .env_remove("GITHUB_ACTIONS")
             .env("FAKE_OP_LOG", path.join("calls.log"))
             .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
             .output()
@@ -437,7 +467,8 @@ mod run_with_fake_op {
         );
         assert_eq!(code, 7, "{err}");
         assert!(err.is_empty(), "no opv message for a child exit: {err}");
-        assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 1);
+        let log = std::fs::read_to_string(log).unwrap();
+        assert_eq!(log.lines().filter(|l| *l == "run").count(), 1, "{log}");
     }
 
     #[test]
@@ -465,9 +496,12 @@ mod run_with_fake_op {
     fn simple_child_sees_unsectioned_op_references() {
         let (dir, _) = fake_op_dir("simple-env");
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args(["--config", super::SIMPLE, "run", "prod", "--"])
             .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env_remove("OPV_CONFIG")
+            .env_remove("OPV_PRODUCT")
             .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
             .output()
             .unwrap();
@@ -481,6 +515,7 @@ mod run_with_fake_op {
     #[test]
     fn missing_op_exits_3() {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args([
                 "--config",
                 CFG,
@@ -567,9 +602,9 @@ fn explain_product_form_under_simple_exits_2() {
     assert_eq!(code, 2, "{err}");
 }
 
-/// FR-22, FR-20: a bare key under the fleet profile is a configuration error.
+/// P8: a bare key declared by one product resolves to it under the fleet profile.
 #[test]
-fn explain_bare_key_under_fleet_exits_2() {
+fn explain_bare_key_unique_under_fleet_exits_0() {
     let (code, _, err) = opv(&[
         "--config",
         CFG,
@@ -578,6 +613,13 @@ fn explain_bare_key_under_fleet_exits_2() {
         "--env",
         "prod",
     ]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// FR-22: an undeclared bare key under the fleet profile is a configuration error.
+#[test]
+fn explain_undeclared_bare_key_under_fleet_exits_2() {
+    let (code, _, err) = opv(&["--config", CFG, "explain", "NOPE", "--env", "prod"]);
     assert_eq!(code, 2, "{err}");
 }
 
@@ -605,6 +647,35 @@ fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
     assert!(err.contains("secrets.toml already exists"), "{err}");
     assert!(err.contains("--force"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+}
+
+/// I5: a new environment in an existing project is added with --add-env, never a loop.
+#[test]
+fn init_in_an_existing_project_suggests_add_env() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("secrets.toml"), "# mine\n").unwrap();
+    let (_, _, err) = opv_in(dir.path(), &INIT);
+    assert_eq!(
+        err.lines().last(),
+        Some("Next: opv init staging --vault v --item i --fly-app app --add-env"),
+        "{err}"
+    );
+}
+
+/// I5: an environment the file already declares is changed with opv config edit.
+#[test]
+fn init_of_a_declared_environment_suggests_config_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple.toml",
+        dir.path().join("secrets.toml"),
+    )
+    .unwrap();
+    let (_, _, err) = opv_in(
+        dir.path(),
+        &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
+    );
+    assert_eq!(err.lines().last(), Some("Next: opv config edit"), "{err}");
 }
 
 /// init reads no configuration: an ancestor secrets.toml is neither announced nor loaded,
@@ -658,11 +729,16 @@ fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
     std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
     Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         .env_remove("OP_CONNECT_TOKEN")
         .env("PATH", dir.path())
         .env("OP_ITEM", "tests/fixtures/op_item.json")
+        // Test builds only: retries (NR-3) without waiting out the backoff.
+        .env("OPV_TEST_BACKOFF_SCALE", "0")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap()
@@ -714,13 +790,478 @@ fn init_accepts_a_run_only_environment() {
     assert_eq!(code, 3, "{err}");
 }
 
+/// H3: every provider's `init` options reach the command line from the plug-in contract.
+#[test]
+fn init_help_lists_each_providers_options() {
+    let (_, out, _) = opv(&["init", "--help"]);
+    let flags = ["--fly-app", "--azure-key-vault", "--kubernetes-namespace"];
+    assert!(flags.iter().all(|f| out.contains(f)), "{out}");
+}
+
+/// H3: a provider option is parsed and checked before any call (no op on PATH needed).
+#[test]
+fn init_with_a_missing_required_option_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, _, err) = opv_in(
+        dir.path(),
+        &[
+            "init",
+            "prod",
+            "--vault",
+            "v",
+            "--item",
+            "i",
+            "--azure-key-vault",
+            "kv",
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+}
+
+/// H2: `opv add` edits the discovered file end to end.
+#[test]
+fn add_declares_a_key_in_the_discovered_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::copy("tests/fixtures/simple.toml", &path).unwrap();
+    let (code, _, err) = opv_in(dir.path(), &["add", "SENTRY_DSN", "--kind", "secret"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// H2: `init --add-env` refuses an environment the file already has, before any call.
+#[test]
+fn init_add_env_refuses_an_existing_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        "tests/fixtures/simple.toml",
+        dir.path().join("secrets.toml"),
+    )
+    .unwrap();
+    let (code, _, err) = opv_in(
+        dir.path(),
+        &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
+    );
+    assert!(code == 2 && err.contains("already exists"), "{code} {err}");
+}
+
+/// A fake `op` that runs `script`, in a fresh PATH dir; returns the dir.
+#[cfg(unix)]
+fn fake_op(script: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let op = dir.path().join("op");
+    std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+/// NR-29: proxy and CA variables reach the CLI untouched.
+#[cfg(unix)]
+#[test]
+fn proxy_env_is_inherited() {
+    let dir = fake_op("printf '%s' \"$HTTPS_PROXY\" > \"$OPV_LOG\"; /bin/cat \"$OP_ITEM\"");
+    let log = dir.path().join("log");
+    Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
+        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("HTTPS_PROXY", "http://proxy.example:3128")
+        .env("OPV_LOG", &log)
+        .env("OP_ITEM", "tests/fixtures/op_item.json")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "http://proxy.example:3128"
+    );
+}
+
+/// NR-12: SIGTERM reaches the running CLI, and opv exits 143 naming the step.
+#[cfg(unix)]
+#[test]
+fn sigterm_forwards_and_exits_143() {
+    let dir = fake_op(
+        "trap 'echo forwarded > \"$OPV_LOG\"; kill $! 2>/dev/null; exit 0' TERM\n\
+         echo started > \"$OPV_LOG.start\"\n\
+         /bin/sleep 30 &\n\
+         wait",
+    );
+    let log = dir.path().join("log");
+    let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
+        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("OPV_LOG", &log)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = dir.path().join("log.start");
+    let t = std::time::Instant::now();
+    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Command::new("/bin/kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let forwarded = std::fs::read_to_string(&log).unwrap_or_default();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        (out.status.code(), forwarded.trim(), err.trim()),
+        (
+            Some(143),
+            "forwarded",
+            "opv: interrupted during op item get; safe to re-run\n\
+             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata"
+        )
+    );
+}
+
+/// NR-4: `--timeout` and `--verbose` are global flags.
+#[test]
+fn timeout_and_verbose_are_accepted_globally() {
+    let (code, _, err) = opv(&[
+        "--timeout",
+        "5",
+        "--verbose",
+        "explain",
+        "--config",
+        CFG,
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+    ]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// `--timeout` takes 1 to 86400 seconds; anything else is a usage error (exit 2).
+#[test]
+fn timeout_out_of_range_exits_2() {
+    let (code, _, _) = opv(&["--timeout", "0", "explain", "--config", CFG, "x"]);
+    assert_eq!(code, 2);
+}
+
 #[test]
 fn guided_commands_refuse_headless_execution_before_vendor_calls() {
-    for command in ["setup", "session"] {
+    for command in ["setup", "login"] {
         let (code, stdout, stderr) = opv(&[command]);
         assert_eq!(code, 6);
         assert!(stdout.is_empty());
-        assert!(stderr.contains("SETUP-TERMINAL"));
         assert!(stderr.contains("interactive terminal"));
     }
+}
+
+/// flyctl deprecated `apps resume` (use `fly scale count`); no message may suggest it.
+#[test]
+fn no_message_or_doc_suggests_the_deprecated_apps_resume() {
+    fn scan(dir: &std::path::Path, needle: &str, hits: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                scan(&p, needle, hits);
+            } else if p
+                .extension()
+                .is_some_and(|x| matches!(x.to_str(), Some("rs" | "md")))
+                && std::fs::read_to_string(&p).is_ok_and(|s| s.contains(needle))
+            {
+                hits.push(p.display().to_string());
+            }
+        }
+    }
+    let needle = ["apps", " resume"].concat();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut hits = Vec::new();
+    for d in ["src", "docs"] {
+        scan(&root.join(d), &needle, &mut hits);
+    }
+    hits.retain(|h| {
+        !h.ends_with("tests/cli.rs")
+            && !h.contains("docs/design/plans/")
+            && !h.ends_with("cli-ux-review.md")
+    });
+    assert_eq!(hits, Vec::<String>::new());
+}
+
+/// FR-44: `config export` without an environment prints the configuration as stored.
+#[test]
+fn config_export_without_env_prints_the_configuration_verbatim() {
+    let (code, out, err) = opv(&["--config", CFG, "config", "export"]);
+    assert!(
+        code == 0 && out == std::fs::read_to_string(CFG).unwrap(),
+        "{err}"
+    );
+}
+
+// --- A1, A4, A5: the JSON contract at the process boundary ---
+
+fn json_of(stdout: &str) -> serde_json::Value {
+    serde_json::from_str(stdout).expect("stdout is one JSON document")
+}
+
+#[test]
+fn json_failure_before_any_call_prints_the_envelope_on_stdout() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "qa", "--json"]);
+    assert_eq!(json_of(&out)["error"]["code"], "unknown_env", "{out}");
+}
+
+#[test]
+fn json_failure_keeps_the_human_text_on_stderr() {
+    let (_, _, err) = opv(&["--config", CFG, "status", "qa", "--json"]);
+    assert!(
+        err.starts_with("opv: configuration error: undefined environment"),
+        "{err}"
+    );
+}
+
+#[test]
+fn json_failure_keeps_the_exit_code() {
+    let (code, out, _) = opv(&["--config", CFG, "plan", "qa", "--json"]);
+    assert_eq!(
+        (code, json_of(&out)["exit_code"].clone()),
+        (2, serde_json::json!(2))
+    );
+}
+
+#[test]
+fn json_usage_error_prints_the_envelope() {
+    let (_, out, _) = opv(&["--config", CFG, "sync", "prod", "--frobnicate", "--json"]);
+    assert_eq!(json_of(&out)["error"]["code"], "usage", "{out}");
+}
+
+#[test]
+fn json_dependency_failure_names_a_runnable_next() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "prod", "--json"]);
+    assert_eq!(
+        json_of(&out)["next"],
+        "opv --config tests/fixtures/secrets.toml status prod --json",
+        "{out}"
+    );
+}
+
+#[test]
+fn config_export_failure_is_the_envelope() {
+    let (_, out, _) = opv(&["--config", CFG, "config", "export", "qa"]);
+    assert_eq!(json_of(&out)["ok"], false, "{out}");
+}
+
+#[test]
+fn status_json_without_an_environment_lists_every_environment() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "--json"]);
+    let names: Vec<String> = json_of(&out)["environments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["prod", "staging"], "{out}");
+}
+
+#[test]
+fn schema_is_one_json_document_listing_sync() {
+    let (code, out, _) = opv(&["schema"]);
+    let doc = json_of(&out);
+    let sync = doc["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "sync" && c["effect"] == "writes_target");
+    assert!(code == 0 && sync, "{out}");
+}
+
+#[test]
+fn schema_lists_every_error_code_with_its_retry() {
+    let (_, out, _) = opv(&["schema"]);
+    let codes = json_of(&out)["error_codes"].as_array().unwrap().clone();
+    assert!(
+        codes
+            .iter()
+            .any(|c| c["code"] == "outcome_unknown" && c["retry"] == "safe"),
+        "{out}"
+    );
+}
+
+#[test]
+fn explain_json_names_the_reference() {
+    let (_, out, _) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+        "--json",
+    ]);
+    assert_eq!(
+        json_of(&out)["reference"],
+        "op://vprd/iprd/allumata/OPENAI_API_KEY",
+        "{out}"
+    );
+}
+
+#[test]
+fn every_text_failure_ends_with_a_runnable_next() {
+    // A3: `Next:` is followed by a command, never prose or a placeholder.
+    let mut bad = Vec::new();
+    for args in [
+        &["--config", CFG, "status", "qa"][..],
+        &["--config", CFG, "status", "prod"],
+        &["--config", CFG, "sync", "prod", "--rotate", "allumata/NOPE"],
+        &["--config", CFG, "explain", "OPENAI_API_KEY"],
+        &["--config", CFG, "status", "prod", "--product", "nope"],
+        &["--config", "does-not-exist.toml", "status", "prod"],
+    ] {
+        let (_, _, err) = opv(args);
+        let next = err.lines().last().unwrap_or_default();
+        if !opv::error::is_runnable(next.strip_prefix("Next: ").unwrap_or("not a next line")) {
+            bad.push(format!("{args:?}: {next}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
+/// I2: SIGHUP (a closed terminal, a dropped SSH session) is handled like SIGTERM: opv
+/// exits 128 + 1 naming the step.
+#[cfg(unix)]
+#[test]
+fn sighup_is_handled_and_exits_129() {
+    let dir = fake_op(
+        "trap 'kill $! 2>/dev/null; exit 0' HUP TERM\n\
+         echo started > \"$OPV_LOG.start\"\n\
+         /bin/sleep 30 &\n\
+         wait",
+    );
+    let log = dir.path().join("log");
+    let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
+        .args(["--config", CFG, "check", "prod", "--product", "allumata"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("OPV_LOG", &log)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(&dir.path().join("log.start"));
+    signal(child.id(), "HUP");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(129));
+}
+
+#[cfg(unix)]
+fn wait_for(path: &std::path::Path) {
+    let t = std::time::Instant::now();
+    while !path.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn signal(pid: u32, sig: &str) {
+    Command::new("/bin/kill")
+        .args([&format!("-{sig}"), &pid.to_string()])
+        .status()
+        .unwrap();
+}
+
+/// I2 (SR-4): an Azure deploy sign-in interrupted by `sig` leaves no private az directory
+/// behind. Fake `op` serves the deploy-credential item; fake `az login` hangs until the
+/// signal; the runtime directory is a RAM (tmpfs) directory of the test's own.
+#[cfg(target_os = "linux")]
+fn az_dir_left_after(sig: &str) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str| {
+        let p = bin.path().join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write(
+        "op",
+        r#"/bin/cat <<'JSON'
+{"id":"azure","fields":[
+ {"id":"t","type":"STRING","label":"AZURE_TENANT_ID","value":"11111111-1111-1111-1111-111111111111"},
+ {"id":"c","type":"STRING","label":"AZURE_CLIENT_ID","value":"55555555-5555-5555-5555-555555555555"},
+ {"id":"s","type":"CONCEALED","label":"AZURE_CLIENT_SECRET","value":"i2-marker-secret"}]}
+JSON"#,
+    );
+    write(
+        "az",
+        "if [ \"$1\" = login ]; then\n\
+           echo '{}' > \"$AZURE_CONFIG_DIR/service_principal_entries.json\"\n\
+           echo started > \"$OPV_LOG.start\"\n\
+           trap 'kill $! 2>/dev/null; exit 1' HUP TERM INT\n\
+           /bin/sleep 30 &\n\
+           wait\n\
+         fi\n\
+         echo '{}'",
+    );
+    let runtime = tempfile::Builder::new().tempdir_in("/dev/shm").unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cfg = bin.path().join("secrets.toml");
+    std::fs::write(
+        &cfg,
+        "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"vprd\"\n\
+         item_id = \"iprd\"\ndeploy_credentials = \"op://deploy/azure\"\n\
+         [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+         key_vault = \"kv-myapp-prod\"\nresource_group = \"rg-myapp\"\n\
+         container_app = \"ca-myapp\"\nidentity = \"system\"\n\
+         [keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+    )
+    .unwrap();
+    let log = bin.path().join("log");
+    let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["--config", cfg.to_str().unwrap(), "status", "prod"])
+        .env_clear()
+        .env("PATH", bin.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("OP_SERVICE_ACCOUNT_TOKEN", "dummy-not-a-token")
+        .env("OPV_LOG", &log)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(&bin.path().join("log.start"));
+    // The sign-in is under way: its private directory exists before the signal.
+    let before = std::fs::read_dir(runtime.path()).unwrap().count();
+    assert_eq!(before, 1, "no private az directory to clean up");
+    signal(child.id(), sig);
+    let _ = child.wait_with_output().unwrap();
+    std::fs::read_dir(runtime.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sighup_removes_the_private_az_dir() {
+    assert_eq!(az_dir_left_after("HUP"), Vec::<String>::new());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigquit_removes_the_private_az_dir() {
+    assert_eq!(az_dir_left_after("QUIT"), Vec::<String>::new());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigint_removes_the_private_az_dir() {
+    assert_eq!(az_dir_left_after("INT"), Vec::<String>::new());
 }

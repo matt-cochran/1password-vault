@@ -1,6 +1,8 @@
 //! Characterization tests (P0, §8 item 27): every Fly scenario's flyctl argv, stdin
 //! digest, stdout and result, compared with a golden file. `UPDATE_GOLDEN=1` rewrites them;
-//! after Task 1 they must never change during P0.
+//! after Task 1 they change only where an NR task changes Fly behaviour on purpose
+//! (R2: the two preflight reads before the first write, NR-24; UX1: the output contract,
+//! the run summary, `Next:` steps and `product/KEY (NAME)` names).
 
 use sha2::{Digest, Sha256};
 
@@ -46,6 +48,8 @@ fn sync_new_secrets_without_deploy() {
     let r = FakeRunner::new([
         complete_item(),
         fly_empty(),
+        fly_app_ok(),
+        fly_releases("complete"),
         ok(),
         fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
     ]);
@@ -60,7 +64,15 @@ fn sync_new_secrets_without_deploy() {
 #[test]
 fn sync_unchanged_with_deploy() {
     let a = || fly(&[(OPENAI_FLY, "dA"), (ENC_FLY, "dB")]);
-    let r = FakeRunner::new([complete_item(), a(), ok(), a(), ok()]);
+    let r = FakeRunner::new([
+        complete_item(),
+        a(),
+        fly_app_ok(),
+        fly_releases("complete"),
+        ok(),
+        a(),
+        ok(),
+    ]);
     let opts = SyncOpts {
         deploy: true,
         ..SyncOpts::default()
@@ -75,6 +87,8 @@ fn sync_changed_with_deploy() {
     let r = FakeRunner::new([
         complete_item(),
         fly(&[(OPENAI_FLY, "dA"), (ENC_FLY, "dB")]),
+        fly_app_ok(),
+        fly_releases("complete"),
         ok(),
         fly(&[(OPENAI_FLY, "dA2"), (ENC_FLY, "dB")]),
         ok(),
@@ -91,7 +105,15 @@ fn sync_changed_with_deploy() {
 #[test]
 fn sync_pending_from_earlier_run() {
     let a = || fly_st(&[(OPENAI_FLY, "d1", "Staged"), (ENC_FLY, "d2", "Deployed")]);
-    let r = FakeRunner::new([complete_item(), a(), ok(), a(), ok()]);
+    let r = FakeRunner::new([
+        complete_item(),
+        a(),
+        fly_app_ok(),
+        fly_releases("complete"),
+        ok(),
+        a(),
+        ok(),
+    ]);
     let opts = SyncOpts {
         deploy: true,
         ..SyncOpts::default()
@@ -104,7 +126,16 @@ fn sync_pending_from_earlier_run() {
 #[test]
 fn sync_prune_with_deploy() {
     let a = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (STRIPE_FLY, "d3")]);
-    let r = FakeRunner::new([complete_item(), a(), ok(), a(), ok(), ok()]);
+    let r = FakeRunner::new([
+        complete_item(),
+        a(),
+        fly_app_ok(),
+        fly_releases("complete"),
+        ok(),
+        a(),
+        ok(),
+        ok(),
+    ]);
     let opts = SyncOpts {
         deploy: true,
         prune: true,
@@ -118,7 +149,14 @@ fn sync_prune_with_deploy() {
 #[test]
 fn sync_prune_without_flag() {
     let a = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (STRIPE_FLY, "d3")]);
-    let r = FakeRunner::new([complete_item(), a(), ok(), a()]);
+    let r = FakeRunner::new([
+        complete_item(),
+        a(),
+        fly_app_ok(),
+        fly_releases("complete"),
+        ok(),
+        a(),
+    ]);
     let mut out = Vec::new();
     let res = sync::run(&fleet(), "prod", &r, &mut out, &SyncOpts::default());
     golden("sync_prune_without_flag", &transcript(&r, &out, &res));
@@ -129,8 +167,11 @@ fn sync_rotate_immutable() {
     let r = FakeRunner::new([
         complete_item(),
         fly(&[(ENC_FLY, "d-enc")]),
+        fly_app_ok(),
+        fly_releases("complete"),
         ok(),
-        fly(&[(ENC_FLY, "d-enc2")]),
+        // List B shows every staged name (NR-30 polls until it does).
+        fly(&[(ENC_FLY, "d-enc2"), (OPENAI_FLY, "d-openai")]),
     ]);
     let opts = SyncOpts {
         rotate: vec!["allumata/INTEGRATION_ENC_KEY".into()],
@@ -149,7 +190,15 @@ fn sync_prune_immutable() {
          environments = [\"staging\"]\nimmutable = true\n",
     );
     let a = || fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2"), (OLD_FLY, "d3")]);
-    let r = FakeRunner::new([complete_item(), a(), ok(), a(), ok()]);
+    let r = FakeRunner::new([
+        complete_item(),
+        a(),
+        fly_app_ok(),
+        fly_releases("complete"),
+        ok(),
+        a(),
+        ok(),
+    ]);
     let opts = SyncOpts {
         prune: true,
         prune_immutable: vec!["allumata/OLD_ENC".into()],
@@ -218,6 +267,8 @@ fn simple_sync_deploy() {
     let r = FakeRunner::new([
         simple_item(),
         fly(&[("DATABASE_URL", "d1"), ("JWT_KEY", "d2")]),
+        fly_app_ok(),
+        fly_releases("complete"),
         ok(),
         fly(&[("DATABASE_URL", "d1b"), ("JWT_KEY", "d2")]),
         ok(),

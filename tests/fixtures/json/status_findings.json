@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 8,
+  "environment": "prod",
+  "product": null,
+  "changes": "some",
+  "rows": [
+    {
+      "product": "allumata",
+      "key": "INTEGRATION_ENC_KEY",
+      "kind": "secret",
+      "state": "saved",
+      "rule": null,
+      "reason": null,
+      "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
+      "fly_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
+      "target": "absent",
+      "action": "would_stage"
+    },
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret",
+      "state": "missing",
+      "rule": null,
+      "reason": null,
+      "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "target": "present",
+      "action": null,
+      "open_url": "https://start.1password.com/open/i?v=vprd&i=iprd"
+    },
+    {
+      "product": "allumata",
+      "key": "SIGNUP_POLICY",
+      "kind": "config",
+      "state": "saved",
+      "rule": null,
+      "reason": null,
+      "target_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
+      "fly_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
+      "target": null,
+      "action": null
+    },
+    {
+      "product": "allumata",
+      "key": "STRIPE_SECRET_KEY",
+      "kind": "secret",
+      "state": "skipped",
+      "rule": null,
+      "reason": null,
+      "target_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
+      "fly_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
+      "target": "absent",
+      "action": null
+    }
+  ],
+  "extras": [],
+  "stage": [
+    "FLEET__ALLUMATA__INTEGRATION_ENC_KEY"
+  ],
+  "held": [],
+  "prune": [],
+  "totals": {
+    "rows": 4,
+    "findings": 1,
+    "extras": 0,
+    "to_stage": 1,
+    "held": 0,
+    "to_prune": 0
+  },
+  "next": "opv open allumata/OPENAI_API_KEY --env prod",
+  "do": "fix the keys above in 1Password",
+  "error": {
+    "code": "findings",
+    "category": "findings",
+    "message": "1 finding",
+    "detail": [],
+    "retry": "after_fix",
+    "human_required": true,
+    "do": "fix the keys above in 1Password",
+    "next": "opv open allumata/OPENAI_API_KEY --env prod"
+  }
+}

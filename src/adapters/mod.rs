@@ -1,30 +1,20 @@
 //! Vendor adapters behind the `CommandRunner` seam (FR-12). Each wraps an official CLI.
+//!
+//! Deployment providers live in one module each (`fly/`, `azure/`, `kubernetes/`) and are reached only
+//! through the plug-in contract in `crate::provider`, via [`registry`] (FR-37).
 
+pub mod azure;
+/// Stateful fake `op` for manifest tests.
+#[cfg(any(test, feature = "fake"))]
+pub mod fake_op;
 pub mod fly;
+pub mod kubernetes;
 pub mod onepassword;
 /// Dev-time title lookup and value-free item read, for `opv init` only (FR-23).
 pub(crate) mod onepassword_init;
-
-use crate::domain::Target;
-use crate::ports::{Runtime, SecretStore};
-use crate::runner::CommandRunner;
-
-/// The store and runtime adapters for `target` (FR-28). The only place that maps a
-/// configured target to its vendor adapter.
-pub fn open<'a>(
-    target: &'a Target,
-    r: &'a dyn CommandRunner,
-) -> (Box<dyn SecretStore + 'a>, Box<dyn Runtime + 'a>) {
-    match target {
-        Target::Fly(t) => (
-            Box::new(fly::Fly {
-                runner: r,
-                app: &t.app,
-            }),
-            Box::new(fly::Fly {
-                runner: r,
-                app: &t.app,
-            }),
-        ),
-    }
-}
+/// The project manifest (configuration in 1Password, FR-44).
+pub mod onepassword_manifest;
+/// Tolerant item parse and the tidy write (FR-43).
+pub mod onepassword_tidy;
+pub(crate) mod probe;
+pub mod registry;

@@ -1,0 +1,8 @@
+{
+  "azure-cli": "2.90.0",
+  "azure-cli-core": "2.90.0",
+  "azure-cli-telemetry": "1.1.0",
+  "extensions": {
+    "quota": "1.0.0"
+  }
+}

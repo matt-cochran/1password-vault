@@ -1,4 +1,5 @@
-//! `init <env> --vault <name> --item <name> --fly-app <app>` use case (FR-23).
+//! `init <env> --vault <name> --item <name> [--target <provider> …]` use case (FR-23, H3)
+//! and `init <env> … --add-env` (H2).
 //!
 //! A dev-time helper that writes a starter `secrets.toml` in the given directory:
 //!
@@ -15,27 +16,39 @@
 //!    write it atomically (a temporary file in the same directory, then a rename). The file
 //!    holds IDs, names and kinds only, never a value (SR-4).
 //!
-//! Read-only against 1Password (FR-11, SR-5): the only write in opv stays `item skeleton`.
+//! The target section comes from the provider through the plug-in contract
+//! ([`Provider::init_fields`], [`Provider::init_section`]): `--target <section>` and the
+//! options `--<section>-<field>`. Nothing is looked up; the section is validated by the
+//! loader before any 1Password call. `--fly-app` is the Fly provider's `app` option.
+//!
+//! `--add-env` adds one `[environments.<env>]` to an existing file instead (edited in
+//! place, comments kept, [`crate::config_edit`]), and adds the environment to every
+//! declared key whose field the item has. It refuses an environment that already exists.
+//!
+//! Read-only against 1Password (FR-11, SR-5) except for a signed-in person (FR-43): a
+//! missing vault or item is created, and the declared item is tidied after the file is
+//! written ([`super::tidy`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
 
 use super::write_err;
 use crate::adapters::onepassword_init::{self, FieldShape};
+use crate::adapters::registry;
 use crate::config;
+use crate::config_edit::{self, ConfigDoc};
+use crate::config_store::ConfigStore;
 use crate::domain::{Kind, Profile};
 use crate::error::Error;
 use crate::host::Host;
+use crate::provider::{InitField, Provider, init_flag};
 use crate::runner::CommandRunner;
 
 /// The file `init` writes, in the directory it is given (the current directory).
 pub const FILE_NAME: &str = "secrets.toml";
-
-/// The fleet Fly name template written for a fleet file (§10.2, the fixture's template).
-pub const FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
 /// `opv init` arguments.
 #[derive(Debug, Clone)]
@@ -43,7 +56,11 @@ pub struct InitArgs {
     pub env: String,
     pub vault: String,
     pub item: String,
-    pub fly_app: Option<String>,
+    /// `--target`: the provider section. Without it, the provider whose options were given
+    /// (none: a run-only environment).
+    pub target: Option<String>,
+    /// Provider options given, by option name without dashes (`fly-app` → value).
+    pub fields: BTreeMap<String, String>,
     /// `--profile`: overrides detection.
     pub profile: Option<Profile>,
     pub force: bool,
@@ -54,9 +71,9 @@ pub fn parse_profile(s: &str) -> Result<Profile, Error> {
     match s {
         "simple" => Ok(Profile::Simple),
         "fleet" => Ok(Profile::Fleet),
-        other => Err(Error::Config(format!(
-            "--profile must be simple or fleet, got {other:?}"
-        ))),
+        other => Err(Error::Config(
+            format!("--profile must be simple or fleet, got {other:?}").into(),
+        )),
     }
 }
 
@@ -67,7 +84,20 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(args, dir, r, out, &Host::detect)
+    run_on(args, dir, r, out, &Host::detect, false)
+}
+
+/// [`run`], printing what was written as one JSON document when `json` (A5): `{path,
+/// manifest, environment, profile, target, vault_id, item_id, created, keys: [{product,
+/// key, kind}], skipped, next}`. Names, IDs and kinds only.
+pub fn run_as(
+    args: &InitArgs,
+    dir: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    run_on(args, dir, r, out, &Host::detect, json)
 }
 
 fn run_on(
@@ -76,27 +106,182 @@ fn run_on(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     host: &dyn Fn() -> Host,
+    json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
+    let choice = choose_target(args).map_err(init_help)?;
+    probe_target(args, choice.as_ref(), args.profile).map_err(init_help)?;
     let target = dir.join(FILE_NAME);
-    refuse_existing(&target, args.force)?;
+    if !args.force && fs::symlink_metadata(&target).is_ok() {
+        return Err(existing_refusal(args, &target));
+    }
+    let p = prepare(args, choice, r, host)?;
+    write_atomic(&target, &p.text, args.force)?;
+    tidy_declared(args, &p, r);
+    let place = Place::File(target.display().to_string());
+    if json {
+        return write_json(out, args, &p, &place);
+    }
+    let ancestor = ancestor_note(dir);
+    report(args, &p, &place, ancestor, out)
+}
 
-    let vault = onepassword_init::resolve_vault(r, &args.vault, host)?;
-    let item = onepassword_init::resolve_item(r, &vault.id, &args.item, host)?;
+/// `init` for a new project with no `secrets.toml` (FR-44): the same declaration, saved as
+/// a project manifest in the item's vault, tagged with the git remote. `--force` does not
+/// overwrite a manifest; `opv config edit` changes one.
+pub fn run_manifest(
+    args: &InitArgs,
+    project: Option<&str>,
+    dir: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    check_args(args)?;
+    let choice = choose_target(args).map_err(init_help)?;
+    probe_target(args, choice.as_ref(), args.profile).map_err(init_help)?;
+    let p = prepare(args, choice, r, &Host::detect)?;
+    let repo = crate::config_store::git_repo(r);
+    let project = crate::config_store::default_project(project, repo.as_deref(), dir)?;
+    let m = crate::config_store::create_manifest(
+        r,
+        &p.vault.id,
+        &project,
+        repo.as_deref(),
+        &[],
+        &p.text,
+        None,
+    )?;
+    tidy_declared(args, &p, r);
+    use crate::config_store::ConfigStore as _;
+    let place = Place::Manifest(m.describe());
+    if json {
+        return write_json(out, args, &p, &place);
+    }
+    let note = match &repo {
+        Some(repo) => format!("note: tagged for {repo}; any checkout of it finds this manifest"),
+        None => format!(
+            "note: no git remote origin; point a checkout at it with OPV_PROJECT={project} or \
+             a .opv file holding project = \"{project}\""
+        ),
+    };
+    report(args, &p, &place, Some(note), out)
+}
+
+/// FR-43: a person's init also tidies the item it just declared (a read; never fails init).
+fn tidy_declared(args: &InitArgs, p: &Prepared, r: &dyn CommandRunner) {
+    if super::tidy::active()
+        && let Ok(fleet) = config::parse(&p.text)
+    {
+        let _ = super::tidy::read(&fleet, &args.env, r);
+    }
+}
+
+/// Where `init` saved the configuration.
+enum Place {
+    File(String),
+    Manifest(String),
+}
+
+impl Place {
+    fn describe(&self) -> &str {
+        match self {
+            Place::File(s) | Place::Manifest(s) => s,
+        }
+    }
+}
+
+/// What `init` declares, before it is written anywhere.
+struct Prepared {
+    vault: onepassword_init::Named,
+    item: onepassword_init::Named,
+    decl: Declared,
+    text: String,
+    /// The target section written, if any.
+    choice: Option<TargetChoice>,
+    /// What was created in 1Password for a signed-in person (FR-43), e.g. `vault "x"`.
+    created: Vec<String>,
+}
+
+/// A missing vault or item opv may not create (not a person signed in with their own
+/// account, FR-43): the person creates it, then re-runs (found live: the bare error's step
+/// was the same command, which could not succeed).
+fn not_created(e: Error, what: &str, title: &str) -> Error {
+    e.with_do(format!(
+        "create the {what} {title:?} in 1Password (opv creates it only for a person signed in \
+         with their own account), then re-run"
+    ))
+}
+
+/// Resolve (creating a missing vault or item for a signed-in person, FR-43), read field
+/// shapes, declare, render and validate (steps 2 to 5).
+fn prepare(
+    args: &InitArgs,
+    choice: Option<TargetChoice>,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+) -> Result<Prepared, Error> {
+    // FR-43: a person gets a missing vault or item created; anyone else gets the error.
+    let mut created = Vec::new();
+    let mut person = None;
+    let mut may_create = |r: &dyn CommandRunner| {
+        *person.get_or_insert_with(|| {
+            super::tidy::active() && super::tidy::identity(r) == super::tidy::Identity::Person
+        })
+    };
+    let vault = match onepassword_init::find_vault(r, &args.vault, host)? {
+        onepassword_init::Lookup::Found(v) => v,
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => {
+            return Err(not_created(e, "vault", &args.vault));
+        }
+        onepassword_init::Lookup::Missing(_) => {
+            created.push(format!("vault {:?}", args.vault));
+            onepassword_init::create_vault(r, &args.vault)?
+        }
+    };
+    let item = match onepassword_init::find_item(r, &vault.id, &args.item, host)? {
+        onepassword_init::Lookup::Found(i) => i,
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => {
+            return Err(not_created(e, "item", &args.item));
+        }
+        onepassword_init::Lookup::Missing(_) => {
+            created.push(format!("item {:?}", args.item));
+            onepassword_init::create_item(r, &vault.id, &args.item)?
+        }
+    };
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
 
     let decl = declare(&fields, args.profile, &args.item)?;
-    let text = render(args, &vault.id, &item.id, &decl);
-    // Validated exactly like a hand-written file (§10.2): IDs, app, key and product names.
-    config::parse(&text).map_err(|e| match e {
-        Error::Config(m) => Error::Config(format!(
-            "{m} (in the file init would write; nothing written)"
-        )),
-        other => other,
-    })?;
-    write_atomic(&target, &text, args.force)?;
+    let text = render(args, &vault.id, &item.id, choice.as_ref(), &decl);
+    // Validated exactly like a hand-written file (§10.2): IDs, target, key and product names.
+    config::parse(&text).map_err(|e| would_write(e, "init"))?;
+    Ok(Prepared {
+        vault,
+        item,
+        decl,
+        text,
+        choice,
+        created,
+    })
+}
 
+/// The lines after a successful `init`: IDs, notes, counts, where it was written, then
+/// the next step.
+fn report(
+    args: &InitArgs,
+    p: &Prepared,
+    place: &Place,
+    extra: Option<String>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (vault, item, decl, choice) = (&p.vault, &p.item, &p.decl, &p.choice);
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+    if !p.created.is_empty() {
+        w(
+            out,
+            format!("created {} in 1Password", p.created.join(" and ")),
+        )?;
+    }
     w(
         out,
         format!(
@@ -111,30 +296,253 @@ fn run_on(
     w(
         out,
         format!(
-            "wrote {} ({} profile): {secrets} secret, {configs} config, skipped {}",
-            target.display(),
+            "wrote {} ({} profile{}): {secrets} secret, {configs} config, skipped {}",
+            place.describe(),
             profile_word(decl.profile),
+            target_word(choice.as_ref()),
             decl.skipped
         ),
     )?;
-    if let Some(note) = ancestor_note(dir) {
+    if let Some(note) = extra {
         w(out, note)?;
     }
+    // A URL: the rules reference moved to docs/configuration.md (review #16, #17).
     w(
         out,
-        "add rules and guidance by hand; see the README (Rules reference)".into(),
+        format!(
+            "add keys with opv add, rules and guidance by hand; see \
+             {}/configuration.md#rules-reference",
+            crate::DOCS_URL
+        ),
     )?;
-    let next = if args.fly_app.is_some() {
-        "plan"
-    } else {
-        "check"
+    w(out, format!("Next: {}", next_command(args, p)))
+}
+
+/// The command to run after `init`: `plan` for a target, else `check` (with the product
+/// when there is one); with several products, `doctor --env`, which checks them all.
+fn next_command(args: &InitArgs, p: &Prepared) -> String {
+    let env = &args.env;
+    if p.choice.is_some() {
+        return format!("opv plan {env}");
+    }
+    match (p.decl.profile, p.decl.keys.len()) {
+        (Profile::Fleet, 1) => format!(
+            "opv check {env} --product {}",
+            p.decl.keys.keys().next().expect("one product")
+        ),
+        (Profile::Fleet, _) => format!("opv doctor --env {env}"),
+        (Profile::Simple, _) => format!("opv check {env}"),
+    }
+}
+
+/// `init --json` (A5).
+fn write_json(
+    out: &mut dyn Write,
+    args: &InitArgs,
+    p: &Prepared,
+    place: &Place,
+) -> Result<(), Error> {
+    let decl = &p.decl;
+    let keys: Vec<serde_json::Value> = decl
+        .keys
+        .iter()
+        .flat_map(|(product, keys)| {
+            keys.iter().map(move |(key, kind)| {
+                serde_json::json!({
+                    "product": (decl.profile == Profile::Fleet).then_some(product),
+                    "key": key,
+                    "kind": super::kind_label(*kind),
+                })
+            })
+        })
+        .collect();
+    let (path, manifest) = match place {
+        Place::File(f) => (Some(f.as_str()), None),
+        Place::Manifest(m) => (None, Some(m.as_str())),
     };
-    let product = if args.fly_app.is_none() && decl.profile == Profile::Fleet {
-        " --product <product>"
-    } else {
-        ""
+    let doc = serde_json::json!({
+        "schema_version": crate::json::SCHEMA_VERSION,
+        "path": path,
+        "manifest": manifest,
+        "environment": args.env,
+        "profile": profile_word(decl.profile),
+        "target": p.choice.as_ref().map(|c| c.provider.section()),
+        "vault_id": p.vault.id,
+        "item_id": p.item.id,
+        "created": p.created,
+        "keys": keys,
+        "skipped": decl.skipped,
+        "next": next_command(args, p),
+    });
+    writeln!(out, "{doc}").map_err(write_err)
+}
+
+/// A configuration error in text opv generated: say so, and that nothing was written.
+fn would_write(e: Error, command: &str) -> Error {
+    match e {
+        e @ Error::Config(_) => e.map_text(|m| {
+            format!("{m} (in the configuration {command} would write; nothing written)")
+        }),
+        other => other,
+    }
+}
+
+/// A refusal of the target options names `opv init --help` unless it names its own step.
+fn init_help(e: Error) -> Error {
+    e.or_next(|| "opv init --help".into())
+}
+
+/// The provider and option values `init` writes, chosen from `--target` and the options.
+struct TargetChoice {
+    provider: &'static dyn Provider,
+    values: BTreeMap<&'static str, String>,
+}
+
+fn target_word(choice: Option<&TargetChoice>) -> String {
+    choice.map_or_else(String::new, |c| {
+        format!(", {} target", c.provider.section())
+    })
+}
+
+/// The provider option `flag` (without dashes) names, if any.
+fn find_field(flag: &str) -> Option<(&'static dyn Provider, &'static InitField)> {
+    registry::PROVIDERS.iter().copied().find_map(|p| {
+        p.init_fields()
+            .iter()
+            .find(|f| init_flag(p, f) == flag)
+            .map(|f| (p, f))
+    })
+}
+
+/// `--target` and the provider options to one provider and its values (H3), before any
+/// call: an unknown target, options of two providers, an option of another provider than
+/// `--target` and a missing required option are each refused naming the options.
+fn choose_target(args: &InitArgs) -> Result<Option<TargetChoice>, Error> {
+    let mut given = Vec::new();
+    for (flag, value) in &args.fields {
+        let (p, f) = find_field(flag)
+            .ok_or_else(|| Error::Config(format!("unknown init option --{flag}").into()))?;
+        given.push((p, f, flag.as_str(), value));
+    }
+    let section = match &args.target {
+        Some(t) => t.clone(),
+        None => {
+            let mut sections: Vec<&str> = given.iter().map(|(p, ..)| p.section()).collect();
+            sections.dedup();
+            match sections.as_slice() {
+                [] => return Ok(None),
+                [one] => (*one).to_string(),
+                many => {
+                    return Err(Error::Config(
+                        format!(
+                            "init options for {} given; one environment has one target: pass \
+                             --target with one of them",
+                            many.join(" and ")
+                        )
+                        .into(),
+                    ));
+                }
+            }
+        }
     };
-    w(out, format!("Next step: opv {next} {}{product}", args.env))
+    let provider = registry::find(&section).ok_or_else(|| {
+        Error::Config(
+            format!(
+                "--target {section:?} is not a provider; known: {}",
+                registry::sections().join(", ")
+            )
+            .into(),
+        )
+    })?;
+    if provider.init_fields().is_empty() {
+        return Err(Error::Config(
+            format!(
+                "init cannot write a {} target yet; add [environments.{}.{section}] by hand \
+                 (see {}/configuration.md)",
+                provider.label(),
+                args.env,
+                crate::DOCS_URL
+            )
+            .into(),
+        ));
+    }
+    let mut values = BTreeMap::new();
+    for (p, f, flag, value) in given {
+        if p.section() != section {
+            return Err(Error::Config(
+                format!(
+                    "--{flag} is an option of --target {}, not {section}",
+                    p.section()
+                )
+                .into(),
+            ));
+        }
+        values.insert(f.field, value.clone());
+    }
+    let missing: Vec<String> = provider
+        .init_fields()
+        .iter()
+        .filter(|f| f.required && !values.contains_key(f.field))
+        .map(|f| format!("--{}", init_flag(provider, f)))
+        .collect();
+    if !missing.is_empty() {
+        return Err(Error::Config(
+            format!(
+                "--target {section} needs {} (opv init --help lists every option)",
+                missing.join(", ")
+            )
+            .into(),
+        ));
+    }
+    Ok(Some(TargetChoice { provider, values }))
+}
+
+/// The provider section for `profile`.
+fn target_section(choice: &TargetChoice, profile: Profile) -> String {
+    choice
+        .provider
+        .init_section(&choice.values, profile)
+        .unwrap_or_default()
+}
+
+/// Validate the target section before any 1Password call, with the loader: a file holding
+/// only this environment, under `profile` or, when the profile is not known yet, under
+/// either (the first error is reported when both fail).
+fn probe_target(
+    args: &InitArgs,
+    choice: Option<&TargetChoice>,
+    profile: Option<Profile>,
+) -> Result<(), Error> {
+    let Some(choice) = choice else {
+        return Ok(());
+    };
+    let profiles = match profile {
+        Some(p) => vec![p],
+        None => vec![Profile::Simple, Profile::Fleet],
+    };
+    let mut first = None;
+    for p in profiles {
+        let text = format!(
+            "[profile]\nkind = \"{}\"\n\n{}",
+            profile_word(p),
+            env_table(&args.env, "vault", "item", Some(&target_section(choice, p)))
+        );
+        match config::parse(&text) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                first.get_or_insert(e);
+            }
+        }
+    }
+    Err(first.map_or_else(
+        || Error::Config("invalid target".into()),
+        |e| match e {
+            e @ Error::Config(_) => {
+                e.map_text(|m| format!("{m} (from the --target options; nothing written)"))
+            }
+            other => other,
+        },
+    ))
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
@@ -150,8 +558,8 @@ pub fn ancestor_note(dir: &Path) -> Option<String> {
     ))
 }
 
-/// Arguments that need no 1Password call: the environment name (a bare TOML key) and the
-/// Fly app (the same rule as a hand-written `fly.app`, §10.2).
+/// Arguments that need no 1Password call: the environment name (a bare TOML key), vault
+/// and item. The target options are checked by [`probe_target`].
 fn check_args(args: &InitArgs) -> Result<(), Error> {
     let env_ok = args
         .env
@@ -163,35 +571,88 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !env_ok {
-        return Err(Error::Config(format!(
-            "environment name {:?} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$",
-            args.env
-        )));
-    }
-    if let Some(app) = &args.fly_app
-        && !config::is_id(app)
-    {
-        return Err(Error::Config(format!(
-            "--fly-app {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
-            app
-        )));
+        return Err(Error::Config(
+            format!(
+                "environment name {:?} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                args.env
+            )
+            .into(),
+        ));
     }
     for (flag, v) in [("--vault", &args.vault), ("--item", &args.item)] {
         if v.is_empty() {
-            return Err(Error::Config(format!("{flag} is empty")));
+            return Err(Error::Config(format!("{flag} is empty").into()));
         }
     }
     Ok(())
+}
+
+/// `opv init` run where a `secrets.toml` already is (I5). A new environment is added with
+/// `--add-env` (the exact command is the step); an environment the file already declares is
+/// changed with `opv config edit`. Never a step that repeats the failing command.
+fn existing_refusal(args: &InitArgs, target: &Path) -> Error {
+    let declared = fs::read_to_string(target)
+        .ok()
+        .and_then(|t| crate::config::parse(&t).ok())
+        .is_some_and(|f| f.environments.contains_key(&args.env));
+    if declared {
+        return Error::Config(
+            format!(
+                "{} already declares environment {}; init never merges",
+                target.display(),
+                args.env
+            )
+            .into(),
+        )
+        .with_do(format!(
+            "change environment {} with opv config edit",
+            args.env
+        ))
+        .with_next("opv config edit");
+    }
+    Error::Config(
+        format!(
+            "{} already exists; init never merges: add environment {} to it with --add-env \
+             (or pass --force to replace the whole file)",
+            target.display(),
+            args.env
+        )
+        .into(),
+    )
+    .with_next(add_env_command(args))
+}
+
+/// `opv init <env> --vault <v> --item <i> [--target t] [--<option> <value>...] --add-env`:
+/// this run's own arguments, as `--add-env`.
+pub(crate) fn add_env_command(args: &InitArgs) -> String {
+    use crate::error::shell_word;
+    let mut c = format!(
+        "opv init {} --vault {} --item {}",
+        shell_word(&args.env),
+        shell_word(&args.vault),
+        shell_word(&args.item)
+    );
+    if let Some(t) = &args.target {
+        c.push_str(&format!(" --target {}", shell_word(t)));
+    }
+    for (name, value) in &args.fields {
+        c.push_str(&format!(" --{name} {}", shell_word(value)));
+    }
+    c.push_str(" --add-env");
+    c
 }
 
 /// The target exists (a file, directory or symlink) and `--force` was not given: exit 2,
 /// naming the path. `init` never merges.
 fn refuse_existing(target: &Path, force: bool) -> Result<(), Error> {
     if !force && fs::symlink_metadata(target).is_ok() {
-        return Err(Error::Config(format!(
-            "{} already exists; init never merges: pass --force to overwrite it",
-            target.display()
-        )));
+        return Err(Error::Config(
+            format!(
+                "{} already exists; init never merges: pass --force to overwrite it",
+                target.display()
+            )
+            .into(),
+        ));
     }
     Ok(())
 }
@@ -234,16 +695,19 @@ fn declare(
         (None, true, _) => Profile::Simple,
         (None, false, true) => Profile::Fleet,
         (None, false, false) => {
-            return Err(Error::Config(format!(
-                "item {item_title:?} mixes {} unsectioned field(s) (the simple profile shape) \
-                 and {} sectioned field(s) (the fleet profile shape); init never guesses: pass \
-                 --profile simple or --profile fleet",
-                unsectioned.len(),
-                sectioned.len()
-            )));
+            return Err(Error::Config(
+                format!(
+                    "item {item_title:?} mixes {} (the simple profile shape) and {} (the fleet \
+                 profile shape); init never guesses: pass --profile simple or --profile fleet",
+                    super::plural(unsectioned.len(), "unsectioned field", "unsectioned fields"),
+                    super::plural(sectioned.len(), "sectioned field", "sectioned fields")
+                )
+                .into(),
+            ));
         }
     };
-    check_duplicates(fields, profile, item_title)?;
+    // A label given twice is read tolerantly (FR-43): declared once, never an error.
+    let _ = item_title;
     let mut d = Declared {
         profile,
         keys: BTreeMap::new(),
@@ -266,8 +730,12 @@ fn declare(
             Profile::Fleet => "unsectioned",
         };
         d.notes.push(format!(
-            "ignored {} {shape} field(s) under --profile {flag}: {}",
-            names.len(),
+            "ignored {} under --profile {flag}: {}",
+            super::plural(
+                names.len(),
+                &format!("{shape} field"),
+                &format!("{shape} fields")
+            ),
             names.join(", ")
         ));
     }
@@ -316,8 +784,9 @@ fn declare(
     }
     for (product, n) in bad_products {
         d.notes.push(format!(
-            "skipped section {product:?} ({n} field(s)): not a valid product name \
-             (^[a-z][a-z0-9_-]*$); rename the section in 1Password to manage it"
+            "skipped section {product:?} ({}): not a valid product name \
+             (^[a-z][a-z0-9_-]*$); rename the section in 1Password to manage it",
+            super::plural(n, "field", "fields")
         ));
     }
     Ok(d)
@@ -327,7 +796,7 @@ fn declare(
 const REJECTED: &str = "status and sync will reject it until it is fixed in 1Password";
 
 /// Why `status` / `sync` (the item reader for `profile`) would reject this field, if
-/// they would; duplicates are checked separately ([`check_duplicates`]). Mirrors
+/// they would; a duplicate label is read tolerantly (FR-43). Mirrors
 /// `onepassword::parse_fields` (fleet) and `parse_unsectioned_fields` (simple).
 fn reader_rejects(f: &FieldShape, profile: Profile) -> Option<String> {
     let bad_type = !matches!(f.ty.as_str(), "CONCEALED" | "STRING");
@@ -360,31 +829,6 @@ fn skip_note(f: &FieldShape, why: Option<&str>, profile: Profile) -> String {
     format!("skipped {}: {}", display_name(f), parts.join("; "))
 }
 
-/// A label given twice where the reader for `profile` looks (every sectioned field under
-/// fleet, every unsectioned key-named field under simple), whatever its type: the reader
-/// rejects the item, so init writes nothing (`Source`, names only).
-fn check_duplicates(
-    fields: &[FieldShape],
-    profile: Profile,
-    item_title: &str,
-) -> Result<(), Error> {
-    let mut seen = std::collections::BTreeSet::new();
-    for f in fields {
-        let read = match profile {
-            Profile::Fleet => f.section.is_some() && !f.label.is_empty(),
-            Profile::Simple => f.section.is_none() && config::is_env_name(&f.label),
-        };
-        if read && !seen.insert((f.section.as_deref(), f.label.as_str())) {
-            return Err(Error::Source(format!(
-                "duplicate field {} in item {item_title:?}; rename one in 1Password \
-                 (nothing written)",
-                display_name(f)
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// `"section"/"label"` or `"label"`, quoted and escaped. A name, never a value.
 fn display_name(f: &FieldShape) -> String {
     match &f.section {
@@ -405,26 +849,39 @@ fn quoted(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
 }
 
-/// The file text: profile, one environment with IDs and the Fly app, one table per key with
+/// `[environments.<env>]` with its IDs and the target section, if any.
+fn env_table(env: &str, vault_id: &str, item_id: &str, section: Option<&str>) -> String {
+    let mut s = format!(
+        "[environments.{env}]\nvault_id = {}\nitem_id = {}\n",
+        quoted(vault_id),
+        quoted(item_id)
+    );
+    if let Some(section) = section {
+        s.push_str(section);
+    }
+    s
+}
+
+/// The file text: profile, one environment with IDs and the target, one table per key with
 /// its kind and `environments = [<env>]`. Mirrors `tests/fixtures/secrets.toml` and
 /// `tests/fixtures/simple.toml`. Keys and products are validated names (bare TOML keys).
-fn render(args: &InitArgs, vault_id: &str, item_id: &str, d: &Declared) -> String {
+fn render(
+    args: &InitArgs,
+    vault_id: &str,
+    item_id: &str,
+    choice: Option<&TargetChoice>,
+    d: &Declared,
+) -> String {
     let env = &args.env;
     let mut s = String::new();
     s.push_str(
         "# Written by opv init: IDs, key names and kinds only; values stay in 1Password.\n\
-         # Add rules, guidance and more environments by hand.\n\n",
+         # Add keys with opv add, environments with opv init <env> --add-env; rules and \
+         guidance by hand.\n\n",
     );
     let _ = writeln!(s, "[profile]\nkind = \"{}\"\n", profile_word(d.profile));
-    let _ = writeln!(s, "[environments.{env}]");
-    let _ = writeln!(s, "vault_id = {}", quoted(vault_id));
-    let _ = writeln!(s, "item_id = {}", quoted(item_id));
-    if let Some(app) = &args.fly_app {
-        let _ = writeln!(s, "fly.app = {}", quoted(app));
-        if d.profile == Profile::Fleet {
-            let _ = writeln!(s, "fly.secret_name = {}", quoted(FLEET_TEMPLATE));
-        }
-    }
+    let section = choice.map(|c| target_section(c, d.profile));
+    s.push_str(&env_table(env, vault_id, item_id, section.as_deref()));
     for (product, keys) in &d.keys {
         for (key, kind) in keys {
             let table = match d.profile {
@@ -442,32 +899,272 @@ fn render(args: &InitArgs, vault_id: &str, item_id: &str, d: &Declared) -> Strin
     s
 }
 
-/// Write `text` to `target` through a temporary file in the same directory and a rename,
-/// so the target is never partly written. Without `force`, an existing target is refused
+/// Write `text` to `target` atomically; without `force`, an existing target is refused
 /// again just before the rename (it may have appeared during the 1Password calls).
 pub(crate) fn write_atomic(target: &Path, text: &str, force: bool) -> Result<(), Error> {
-    let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    let tmp: PathBuf = dir.join(format!(".{FILE_NAME}.opv-init.{}.tmp", std::process::id()));
-    let fail = |what: &str, p: &Path, e: io::Error| {
-        Error::Config(format!("cannot {what} {}: {e}", p.display()))
-    };
-    let res = (|| {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| fail("create", &tmp, e))?;
-        f.write_all(text.as_bytes())
-            .and_then(|()| f.sync_all())
-            .map_err(|e| fail("write", &tmp, e))?;
-        drop(f);
-        refuse_existing(target, force)?;
-        fs::rename(&tmp, target).map_err(|e| fail("write", target, e))
-    })();
-    if res.is_err() {
-        let _ = fs::remove_file(&tmp);
+    config_edit::write_atomic(target, text, || refuse_existing(target, force))
+}
+
+/// Run `init <env> --add-env`: add the environment to the existing file at `path`.
+pub fn add_env(
+    args: &InitArgs,
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    add_env_on(args, store, r, out, &Host::detect, false)
+}
+
+/// [`add_env`], printing `{environment, target, saved_in, vault_id, item_id, added,
+/// absent, undeclared, next}` as one JSON document when `json` (A5). Names only.
+pub fn add_env_as(
+    args: &InitArgs,
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    add_env_on(args, store, r, out, &Host::detect, json)
+}
+
+fn add_env_on(
+    args: &InitArgs,
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    host: &dyn Fn() -> Host,
+    json: bool,
+) -> Result<(), Error> {
+    check_args(args)?;
+    // The text the write is built from: for the manifest, a person's fresh read (I3, C1).
+    let base = store.read_for_write(r)?;
+    let original = &base.text;
+    let place = store.describe();
+    let fleet = store.parse(original).map_err(|e| match e {
+        e @ Error::Config(_) => e
+            .map_text(|m| super::on_first_line(&m, " (fix it first; nothing written)"))
+            .or_next(|| "opv config edit".into()),
+        other => other,
+    })?;
+    if fleet.environments.contains_key(&args.env) {
+        return Err(Error::Config(
+            format!(
+                "environment {} already exists in {place}; --add-env never overwrites it",
+                args.env,
+            )
+            .into(),
+        )
+        .with_do(format!(
+            "change environment {} with opv config edit",
+            args.env
+        ))
+        .with_next("opv config edit"));
     }
-    res
+    let profile = fleet.profile;
+    let choice = choose_target(args).map_err(init_help)?;
+    probe_target(args, choice.as_ref(), Some(profile)).map_err(init_help)?;
+
+    // The item must exist: its fields are what --add-env declares (nothing is created).
+    let vault = onepassword_init::find_vault(r, &args.vault, host)?.found()?;
+    let item = onepassword_init::find_item(r, &vault.id, &args.item, host)?.found()?;
+    let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
+    let decl = declare(&fields, Some(profile), &args.item)?;
+
+    let mut doc = ConfigDoc::parse(original)?;
+    let section = choice.as_ref().map(|c| target_section(c, profile));
+    doc.add_environment(
+        &args.env,
+        &env_table(&args.env, &vault.id, &item.id, section.as_deref()),
+    )?;
+    let fleet_profile = profile == Profile::Fleet;
+    let label = |p: &Option<String>, k: &str| match p {
+        Some(p) => format!("{p}/{k}"),
+        None => k.to_string(),
+    };
+    let mut added: Vec<String> = Vec::new();
+    let mut products: Vec<String> = Vec::new();
+    let mut absent: Vec<String> = Vec::new();
+    let mut notes = decl.notes.clone();
+    let mut declared = std::collections::BTreeSet::new();
+    // Keys added to the new environment, by (product, key) as the fleet names them.
+    let mut added_ids = std::collections::BTreeSet::new();
+    // Shared keys (FR-45), decided once their sources are: (product, key, source).
+    let mut shared: Vec<(Option<String>, String, (String, String))> = Vec::new();
+    for (product, key) in doc.keys(fleet_profile) {
+        let spec = fleet
+            .products
+            .get(product.as_deref().unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .and_then(|p| p.keys.get(&key));
+        // M6: a shared key has no field of its own; it joins the environment exactly when
+        // its source does (below), whatever stray field sits under its own label.
+        if let Some((sp, sk)) = spec.and_then(|s| s.source()) {
+            declared.insert((product.clone().unwrap_or_default(), key.clone()));
+            shared.push((product, key, (sp.to_string(), sk.to_string())));
+            continue;
+        }
+        let in_item = decl
+            .keys
+            .get(product.as_deref().unwrap_or(""))
+            .and_then(|keys| keys.get(&key));
+        declared.insert((product.clone().unwrap_or_default(), key.clone()));
+        let name = label(&product, &key);
+        let Some(kind) = in_item else {
+            absent.push(name);
+            continue;
+        };
+        let spec_kind = fleet
+            .products
+            .get(product.as_deref().unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .and_then(|p| p.keys.get(&key))
+            .map(|k| k.kind);
+        if spec_kind.is_some_and(|k| k != *kind) {
+            notes.push(format!(
+                "{name} is declared {} but its field in the item is {}; status will report \
+                 the wrong kind until one of them changes",
+                kind_word(spec_kind.unwrap_or(*kind)),
+                kind_word(*kind)
+            ));
+        }
+        doc.add_key_env(product.as_deref(), &key, &args.env)?;
+        added_ids.insert((
+            product
+                .clone()
+                .unwrap_or_else(|| crate::domain::SIMPLE_PRODUCT.to_string()),
+            key.clone(),
+        ));
+        if let Some(p) = &product
+            && !products.contains(p)
+        {
+            products.push(p.clone());
+        }
+        added.push(name);
+    }
+    for (product, key, source) in shared {
+        let name = label(&product, &key);
+        if !added_ids.contains(&source) {
+            absent.push(name);
+            continue;
+        }
+        doc.add_key_env(product.as_deref(), &key, &args.env)?;
+        if let Some(p) = &product
+            && !products.contains(p)
+        {
+            products.push(p.clone());
+        }
+        added.push(name);
+    }
+    let undeclared: Vec<(String, Kind)> = decl
+        .keys
+        .iter()
+        .flat_map(|(p, keys)| keys.iter().map(move |(k, kind)| (p, k, *kind)))
+        .filter(|(p, k, _)| !declared.contains(&((*p).clone(), (*k).clone())))
+        .map(|(p, k, kind)| {
+            let name = if fleet_profile {
+                format!("{p}/{k}")
+            } else {
+                k.clone()
+            };
+            (name, kind)
+        })
+        .collect();
+
+    let text = doc.to_string();
+    store
+        .parse(&text)
+        .map_err(|e| would_write(e, "init --add-env"))?;
+    crate::config_store::save(store, r, &base, &text)?;
+
+    let next = match (added.is_empty(), undeclared.first()) {
+        (true, Some((name, kind))) => format!(
+            "opv add {name} --kind {} --env {}",
+            kind_word(*kind),
+            args.env
+        ),
+        (true, None) => format!("opv add <key> --kind secret --env {}", args.env),
+        (false, _) if choice.is_some() => format!("opv plan {}", args.env),
+        (false, _) => match (profile, products.as_slice()) {
+            (Profile::Fleet, [one]) => format!("opv check {} --product {one}", args.env),
+            (Profile::Fleet, _) => format!("opv doctor --env {}", args.env),
+            (Profile::Simple, _) => format!("opv check {}", args.env),
+        },
+    };
+    if json {
+        let names: Vec<&str> = undeclared.iter().map(|(n, _)| n.as_str()).collect();
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": args.env,
+            "target": choice.as_ref().map(|c| c.provider.section()),
+            "saved_in": place,
+            "vault_id": vault.id,
+            "item_id": item.id,
+            "added": added,
+            "absent": absent,
+            "undeclared": names,
+            "next": next,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+    w(
+        out,
+        format!(
+            "vault {:?} is {}, item {:?} is {}",
+            vault.name, vault.id, item.name, item.id
+        ),
+    )?;
+    for note in &notes {
+        w(out, format!("note: {note}"))?;
+    }
+    w(
+        out,
+        format!(
+            "added environment {}{} to {}: {} now {} it{}",
+            args.env,
+            choice
+                .as_ref()
+                .map(|c| format!(" ({} target)", c.provider.section()))
+                .unwrap_or_default(),
+            place,
+            super::plural(added.len(), "key", "keys"),
+            if added.len() == 1 {
+                "includes"
+            } else {
+                "include"
+            },
+            if added.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", added.join(", "))
+            }
+        ),
+    )?;
+    if !absent.is_empty() {
+        w(
+            out,
+            format!(
+                "not in the item, so left out of {}: {} (opv add {} --env {} includes one)",
+                args.env,
+                absent.join(", "),
+                absent[0],
+                args.env
+            ),
+        )?;
+    }
+    if !undeclared.is_empty() {
+        let names: Vec<&str> = undeclared.iter().map(|(n, _)| n.as_str()).collect();
+        let (first, kind) = &undeclared[0];
+        w(
+            out,
+            format!(
+                "in the item but not declared: {} (opv add {first} --kind {} --env {} declares \
+                 one)",
+                names.join(", "),
+                kind_word(*kind),
+                args.env
+            ),
+        )?;
+    }
+    w(out, format!("Next: {next}"))
 }
 
 #[cfg(test)]

@@ -148,9 +148,11 @@ Only explicitly managed secrets may be deleted.
 
 # 3. Functional Requirements
 
+Requirements are numbered in the order they were adopted: FR-1 to FR-19 in v0.1, FR-20 to FR-27 in v0.2 (single-app adopters, diagnostics, install script), FR-28 to FR-33 in v0.3 (multi-cloud targets, adopted after an FMECA review; deferred items in §8), FR-34 to FR-36 in v0.4 (local development, issues #52 to #54), and FR-37 to FR-45 in v0.5 (plug-in providers, Kubernetes, named stores, sign-in and deploy credentials, plan ids, provenance, self-healing conventions, configuration in 1Password, shared keys). Each later group keeps every FR and SR before it.
+
 ## FR-1 — Configuration
 
-The CLI shall load a repository-local configuration file named `secrets.toml` by default.
+The CLI shall load its configuration from a repository-local file named `secrets.toml` or, since 0.5.0, from a project manifest in 1Password holding the same TOML (FR-44). The schema is the same in both homes.
 
 The configuration shall support:
 
@@ -162,7 +164,7 @@ The configuration shall support:
 - a flat key map with no products (simple profile, v0.2, FR-20);
 - future extension to additional secret sources and targets.
 
-Since v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25).
+Since v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25). Since 0.5.0 the file is optional: discovery also finds the project's manifest in 1Password (FR-25, FR-44).
 
 Configuration shall never contain secret values.
 
@@ -180,6 +182,8 @@ Validation shall include:
 
 Validation failures shall occur before any target mutation.
 
+A configuration error names the file (or manifest), line, column, field and problem, never the offending line or any other text of the file (SR-1): a values file given as the configuration by mistake (a `.env` through `--config`, `OPV_CONFIG`, `config import --file` or `config check --file`) must not print a value, in text or in `error.detail` of `--json`. Quoted values in parser messages (`invalid type: string "…"`) are dropped too.
+
 ## FR-3 — Diagnostics
 
 The CLI shall provide:
@@ -193,13 +197,14 @@ The command shall verify:
 - configuration validity;
 - presence of the `op` CLI;
 - 1Password authentication;
-- presence of `flyctl` when Fly functionality is requested;
-- Fly authentication;
+- presence of each target CLI the environments use (`flyctl`, `az`, `kubectl`) and its sign-in;
 - minimum supported dependency versions where relevant.
 
 The command shall not resolve or print secret values unless necessary to verify access.
 
 Decided in v0.4: `doctor --env <environment> [--product <product>]` checks only what that scope needs; an environment without a target needs no deployment CLI. Every `doctor` run on Linux and macOS also reports whether `op` can start a local child (FR-36).
+
+Decided in v0.5 (UX review P6, P18): `doctor --env` makes the environment's one item read by IDs (FR-13) and evaluates the selected keys as `check` does, reporting names, counts and states only, so it is never all clear when `check` would fail. Unscoped `doctor` reads no item. `doctor --json` prints `{schema_version: 1, ok, config_source, checks: [{name, status, detail, next, do}], next, do}`.
 
 ## FR-4 — Local Process Execution
 
@@ -244,6 +249,10 @@ The plan should classify keys as:
 Where Fly exposes sufficient metadata or digests, the CLI should use that metadata to improve change detection.
 
 Decided in v0.1.0: Fly digests cannot be computed locally, so a desired key that is already on Fly is shown as "potentially changed"; real change detection happens in `fly sync` (§6.4). A key removed from the configuration is no longer declared, so it is neither reported nor pruned; unset it manually. Unmanaged names on Fly are only counted.
+
+Decided in v0.5 (FR-31): a pinned store that can read its values back (Azure Key Vault) is read once per ready secret it lists, and the value compared exactly in constant time, so `plan` shows "unchanged" or "changed" and `status` "present" or "would change" for it. Fly is unchanged.
+
+Decided in v0.5 (CLI UX pass 2, H4/H5): `status` and `plan` share one TARGET vocabulary on every provider: `new`, `same`, `changed`, `unknown` (Fly: the value cannot be compared; this replaces "potentially changed"), `pending`, `held`, `extra` (on the target, not desired here), `drift` and `n/a` (config, or skipped and absent). Problem rows (missing, wrong kind, failed) are listed first, each with its full reason and a link to its 1Password item (H1). `opv help states` defines each word. The FR-21 JSON `state` and `target` values are unchanged; the document gains `changes` (`none`/`some`/`unknown`) and `open_url` on blocking rows.
 
 ## FR-6 — Fly Synchronization
 
@@ -302,7 +311,7 @@ Prune scope: only template names of declared keys that are not desired in this e
 
 Commands used by CI shall not prompt for input.
 
-Automation commands require explicit flags for confirmation and never fall back to prompts. The owner-only `setup` and `session` commands are explicit interactive entry points: they require a terminal, refuse CI and service-account/Connect authentication, and do not deploy or prune.
+Automation commands require explicit flags for confirmation and never fall back to prompts. The owner-only `setup` and `login` commands (FR-40) are explicit interactive entry points: they require a terminal, refuse CI and service-account/Connect authentication, and do not deploy or prune.
 
 CI behavior must be predictable from arguments and configuration alone.
 
@@ -324,20 +333,26 @@ Final assignments (a public contract from v0.1.0):
 |---|---|
 | 0 | success |
 | 2 | configuration error, and command-line usage error |
-| 3 | dependency (`op` or `flyctl` missing or unusable, including a Windows `op.exe` used for `run` under WSL) |
+| 3 | dependency (`op` or the target CLI missing or unusable, including a Windows `op.exe` used for `run` under WSL) |
 | 4 | source (1Password) |
-| 5 | target (Fly) |
-| 6 | policy: refused (blocking keys, a refused value, a denied destructive operation) |
-| 7 | authentication (1Password or Fly) |
+| 5 | target (Fly, Azure, Kubernetes) |
+| 6 | policy: refused (blocking keys, a refused value, a denied destructive operation, a missing `--confirm`, a stale `--expect-plan`, a command that needs the user's terminal) |
+| 7 | authentication (1Password or the target, deploy credentials included) |
 | 8 | findings (`status`, `plan` or `check` found blocking keys) |
+| 9 | outcome unknown, or a provider did not answer (NR-2, NR-28); safe to re-run (since 0.5.0) |
+| 130 / 143 | interrupted by SIGINT / SIGTERM (NR-12); safe to re-run (since 0.5.0) |
+
+Since 0.5.0 a stable `error.code` names the cause within each category in `--json` (FR-22, `opv schema`).
 
 `run` exits with the child's own exit code. A closed stdout (`status | head`) does not change the result.
 
 ## FR-11 — Dry-Run Safety
 
-Planning commands shall not mutate 1Password or Fly.
+Planning commands shall not mutate Fly or any other target.
 
-No read-only operation shall write metadata such as "last synchronized at" back to 1Password.
+1Password is read-only for service accounts, Connect and CI. A run by a signed-in person may tidy the item's layout, never its meaning, as FR-43 describes; values are never deleted.
+
+No read-only operation shall write metadata such as "last synchronized at" back to 1Password. (The FR-43 convention marker is a version number written once, with a layout fix, never a timestamp.)
 
 ## FR-12 — Extensible Source/Target Model
 
@@ -364,11 +379,15 @@ Measured (D0 spike): a cold whole-item read by vault ID and item ID costs 2 requ
 
 Local commands (`run`) may resolve per-reference through `op run`; they use the person's desktop-app session, not a service account.
 
+Since 0.5.0 (FR-43) `run` also makes this one read first, to find fields that are not where the convention puts them. A tidy by a signed-in person adds a check read before its one edit and a verifying read after it; a service account never tidies, so CI keeps one read per environment.
+
 Since v0.2: `init` (FR-23) looks a vault and an item up by title once, at dev time, to write their IDs into `secrets.toml`. The exception is limited to the `init` command: title lookup must be unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export` (and `explain`, which reads only the configuration).
 
 ## FR-14 — Field Kinds
 
-Each declared key has a kind, `secret` or `config`. In 1Password the field type records it: concealed = secret, text = config. A key stored with the wrong type is an error reported by `status` and refused by `fly sync` and `config export`.
+Each declared key has a kind, `secret` or `config`. In 1Password the field type normally records it: concealed = secret, text = config. The declared kind decides how a key is delivered; the field type does not block.
+
+Decided in v0.5 (owner, final review I1): a config key stored in a concealed field is accepted and delivered as a plain value; opv never prints its value (`config export` shows `<concealed in 1Password>`; `status`, `plan` and every other output name the key only), and `status` warns about it once. A secret stored in a text field is accepted and delivered as a secret. There is no `wrong kind` finding: neither case is refused by `sync` or `config export`.
 
 ## FR-15 — Declarative Validation Rules
 
@@ -400,7 +419,9 @@ The CLI shall provide:
 opv status <environment>
 ```
 
-One row per product × key: declared, saved, missing, extra (in the item but not declared), wrong kind, failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
+One row per product × key: declared, saved, missing, extra (in the item but not declared), failing rule, and target state (present, absent; "would change" is not produced, because digests cannot be compared locally, see §6.4). Names only. Non-zero exit when anything is missing or failing, so it can run as a scheduled drift check. For missing keys it prints the declared guidance text.
+
+Decided in v0.5 (H1, H11): target words follow the shared vocabulary under FR-5's plan decisions; each missing or failing row also prints `open:` with 1Password's private item link (account UUID and sign-in host from `op whoami`, vault and item IDs; never a value) and the section and field to fix, and `opv open <[product/]KEY>` opens it. `opv status` without an environment reads every environment, run-only ones included (one item read each, FR-13), and takes `--product`, `OPV_PRODUCT` and `--json`. With `$GITHUB_STEP_SUMMARY` set, `status`, `plan` and `sync` append a names-and-states Markdown summary (H8; no value, reason or link).
 
 ## FR-18 — Config Export
 
@@ -420,11 +441,7 @@ The CLI shall provide:
 opv item skeleton <environment>
 ```
 
-It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5; `fly sync`, `plan`, `status` and `config export` stay read-only.
-
-## v0.2 ergonomics (FR-20 to FR-25)
-
-The requirements below shipped in v0.2.0. They make opv usable by a single-app adopter and easier to start with, without weakening any FR or SR above. The owner adopted them on 2026-10-07. Rejected and deferred proposals are listed in §8 under "v0.2 scope".
+It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5. Since 0.5.0 every command run by a signed-in person tidies the layout itself (FR-43), so `item skeleton` is rarely needed; under a service account or in CI, `sync`, `plan`, `status` and `config export` stay read-only.
 
 ## FR-20 — Simple Profile
 
@@ -481,7 +498,7 @@ stdout carries one JSON document with a top-level integer `schema_version` (1 in
 
 Acceptance:
 
-- The document contains names, states and counts only (value lengths are metadata about values, and guidance belongs in `explain`, FR-22): environment, product and key names, kind, row state (saved, missing, extra, wrong kind, failing rule, held, present, absent, would stage, would prune), the name of a failing rule, Fly names, and totals. It contains no value, no value fragment, no value length and no guidance text.
+- The document contains names, states and counts only (value lengths are metadata about values, and guidance belongs in `explain`, FR-22): environment, product and key names, kind, row state (saved, missing, extra, failing rule, held, present, absent, would stage, would prune), the name of a failing rule, Fly names, and totals. It contains no value, no value fragment, no value length and no guidance text.
 - Exit codes are unchanged (FR-10): with blocking findings the command still exits 8, and an error still exits with its category. An error before the document is produced is reported on stderr as text; stdout then carries no partial document.
 - Without `--json` the human output is unchanged.
 
@@ -535,20 +552,24 @@ Acceptance:
 The CLI shall provide:
 
 ```bash
-opv init <environment> --vault <name> --item <name> --fly-app <app> [--profile simple|fleet] [--force]
+opv init <environment> --vault <name> --item <name> [--target <provider> --<provider>-<field> <value> …] [--profile simple|fleet] [--force]
+opv init <environment> --vault <name> --item <name> --add-env [--target …]
+opv add <[product/]KEY> --kind secret|config [--env <env> …] [--rule <name>[=<value>] …] [--guidance <text>] [--immutable]
 ```
+
+Since 0.5.0 (H2, H3): the target section is written for every provider from its own `init` fields (`Provider::init_fields` and `Provider::init_section`), so a new provider adds its options without core or CLI changes; `--target` may be omitted when the options name one provider, and `--fly-app` is the Fly provider's `app` option. Nothing is looked up. `--add-env` adds one environment to an existing file (found like every other command's), and adds it to every declared key whose field the item has; an existing environment is refused. `add` declares a key (or adds environments to a declared one) without a 1Password call. Both edit the file in place, keeping comments and order, validate the edited text with the same loader before writing (a name colliding on any target is refused), and write atomically (temporary file in the same directory, then a rename).
 
 It is a dev-time helper that writes a starter `secrets.toml`. It resolves the vault and item titles to IDs (exact title match; zero or several matches is an error), reads the item once, and writes the configuration: the environment with `vault_id`, `item_id` and `fly.app`, and one declared key per field, with its kind taken from the field type (concealed = secret, text = config, FR-14). A sectioned item produces a fleet file (section = product, with the default template `FLEET__{PRODUCT}__{KEY}`); an unsectioned item produces a simple file (FR-20), whose fields are unsectioned. `--profile simple|fleet` overrides this detection. Without `--profile`, an item that mixes sectioned and unsectioned fields is an error that names both shapes; `init` never guesses. Rules and guidance are left for the person to add.
 
-`init` is the second 1Password-adjacent command after `item skeleton` (FR-19), and unlike it, it is read-only against 1Password.
+`init` is the second 1Password-adjacent command after `item skeleton` (FR-19). It reads by title only to resolve IDs; since 0.5.0 (FR-43), for a signed-in person it creates a missing vault or item and tidies the item it declared.
 
 Acceptance:
 
 - Titles are resolved to IDs at dev time only. The FR-13 exception is limited to the `init` command: title lookup is unreachable from `fly sync`, `status`, `fly plan`, `run` and `config export`, and from the CI read path, which stay by vault ID and item ID (FR-13).
 - `init` reads the item but writes only names and kinds. Values are never deserialized into opv types (the field struct has no `value` member; the raw `op` output stays in a zeroizing buffer, SR-2, SR-8), and no value reaches disk or output (SR-1, SR-4).
 - If the target file exists, `init` refuses (exit 2) unless `--force` is given. It never merges into an existing file.
-- `init` writes nothing to 1Password (FR-11, SR-5).
-- `--fly-app`, the IDs and the field names are validated as for a hand-written file (§10.2), and the generated text is checked with the same loader before it is written. A field whose label is not a valid key name, a section whose label is not a valid product name, and a field of another type are skipped with a note that names them; nothing is ever renamed (ruling, v0.2: skipped with a note rather than failing the whole file, so one stray field does not block init).
+- `init` writes to 1Password only for a signed-in person, as FR-43 describes; under a service account or in CI it writes nothing (FR-11, SR-5).
+- The target options, the IDs and the field names are validated as for a hand-written file (§10.2), and the generated text is checked with the same loader before it is written. A field whose label is not a valid key name, a section whose label is not a valid product name, and a field of another type are skipped with a note that names them; nothing is ever renamed (ruling, v0.2: skipped with a note rather than failing the whole file, so one stray field does not block init).
 
 Constraints kept: FR-11, FR-13, SR-1, SR-2, SR-3, SR-4, SR-5, SR-7.
 
@@ -573,100 +594,16 @@ Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, 
 
 When `--config` is not given, the CLI shall look for `secrets.toml` in the current directory and then in each parent directory, and use the first one found.
 
+Since 0.5.0 (FR-44) the full order is, first match wins: `--config <file>` (or `OPV_CONFIG`); `OPV_PROJECT=<name>` (the manifest titled `opv · <name>`); a `secrets.toml` found by the walk-up (so an existing file keeps working unchanged); a one-line `.opv` file (`project = "<name>"`, optionally `account = "…"`) found by the same walk-up; the manifest whose repo tag matches the normalized `git remote get-url origin` (in a monorepo, the one whose path tag is the longest prefix of the current directory). No match is a configuration error whose `Next:` is `opv init …`; several matches are listed and `OPV_PROJECT` picks one.
+
 Acceptance:
 
-- The resolved path is always printed on stderr, whether found by discovery or given with `--config`.
+- The resolved path (or `manifest "opv · <name>" in vault <V> (matched …)`) is printed on stderr, unless given with `--config`.
 - `--config <path>` overrides discovery; no search is done.
 - Files are never merged; a `secrets.toml` further up is ignored once one is found.
 - No file found is a configuration error (exit 2) naming the directory the search started from.
 
 Constraints kept: FR-1, FR-2, FR-9. stdout is unchanged, so `config export --json` and FR-21 output stay parseable.
-
----
-
-## v0.3 multi-cloud targets (FR-28 to FR-33)
-
-The requirements below add Azure, AWS and GCP as targets without weakening any FR or SR above. The owner adopted them on 2026-10-08 after an FMECA review. They are delivered in phases (P0 to P4, issues #38 to #42); deferred items are listed in §8 under "v0.3 scope". Design: `docs/design/multi-cloud-targets.md`.
-
-## FR-28 — Targets, Ports and Routing
-
-A target is one secret store plus one runtime:
-
-| Cloud | Store | Runtimes |
-|---|---|---|
-| Fly | Fly secrets | Fly app (one adapter for both) |
-| Azure | Key Vault | Container Apps, App Service |
-| AWS | Secrets Manager | ECS |
-| GCP | Secret Manager | Cloud Run (which covers Cloud Run functions) |
-
-- Core logic reaches targets only through the `SecretStore` and `Runtime` ports (FR-12). `app/` and `domain/` name no target.
-- Each environment declares at most one target section: `fly`, `azure`, `aws` or `gcp`. Existing `fly` sections are unchanged.
-- **Routing by kind (FR-14).** A secret (concealed field) is written to the store and bound on the runtime as a reference. Config (text field) is set as a plain runtime env var, unless the environment sets `config = "store"`, which routes config like secrets. Routing a secret to plain env is not expressible. On Fly, config is not synced, as since v0.1; consumers read it with `config export`.
-- `opv plan <env>` and `opv sync <env>` work for every target. `opv fly plan` and `opv fly sync` remain as aliases that print a deprecation warning for one minor release and are then removed. Removed in 0.4.0.
-
-## FR-29 — Pinned References
-
-Every secret reference on a cloud runtime binds an explicit store version (Key Vault versioned URI, ECS `valueFrom` ARN with a version id, Cloud Run `secret:N`, App Service versioned `SecretUri`), never "latest".
-
-- A store write is the staging step: the running app does not see it, even on restart or scale-out.
-- Rebinding to the new version, and setting config env values, is the deploy step and happens only with `--deploy` (FR-7, FR-9).
-- `status` reports, per key: store value current, binding current, pending deploy, and drift (a binding to a version opv did not write). Drift is overwritten only with `--deploy`.
-
-## FR-30 — Store Naming and Limits
-
-- The env name comes from the naming template (fleet) or the field name (simple). Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged) and validates it when the configuration loads.
-- Two keys that map to one store name are a configuration error naming both keys.
-- Each store and runtime declares its value-size limits. They are checked with the rules, before any call, and a failure names the key and the limit, never the value (FR-15).
-
-## FR-31 — Compare Before Write; Read-Modify-Write on Runtimes
-
-- Before writing a secret, opv reads the store's current value into a redacting type and compares it in constant time. It writes only when the value differs or is missing, so an unchanged run creates no store version and reports no change.
-- A runtime change reads the current service spec, changes only managed names, and sends the whole spec on stdin. Config values are never in argv (SR-3).
-- The unmanaged part of the spec is fingerprinted before and after the write, and the platform's optimistic concurrency is used where it exists. A concurrent change fails with the changed paths (never values) and a "safe to re-run" exit.
-- On Azure and AWS, values travel through `/dev/stdin`. On native Windows those writes fail closed with a typed error naming WSL; reads, `plan` and `status` work everywhere.
-
-## FR-32 — Cloud Prune Order and Ownership
-
-- `--prune` without `--deploy` only reports on cloud targets.
-- With `--deploy`, opv unbinds the names on the runtime, waits for a healthy revision, then deletes them from the store. A store entry is never deleted while a running revision references it.
-- opv tags every store entry it creates with `opv-managed=<environment>` and refuses to delete one without that tag. The declared-set rule of FR-8 still applies.
-- A soft-deleted name (Key Vault soft delete, AWS recovery window) that blocks a re-create fails with the exact recover command. opv never recovers or purges by itself.
-
-## FR-33 — Runtime Access and Health
-
-- Before a cloud deploy, opv checks that the runtime identity (Container Apps or App Service managed identity, ECS execution role, Cloud Run service account) can read every referenced store entry. A missing grant blocks the deploy and names the identity and the entry.
-- After a deploy, opv waits for the new revision to report healthy or failed and reports the outcome with its exit category.
-- `doctor` checks the cloud CLI and login, store access on managed names, and runtime-identity access, and reports an identity that can read untagged secrets as broader than needed (SR-5).
-
-## v0.4 local development (FR-34 to FR-36)
-
-The requirements below make opv usable for local development without a deployment target, from issues #52, #53 and #54 found while adopting opv across products. The owner adopted them on 2026-10-08. Live account validation stays an owner-run receipt on those issues; automated tests use synthetic values and fake CLIs.
-
-## FR-34 — Local Check
-
-```bash
-opv check <environment> [--product <product>] [--json]
-```
-
-- Reads the environment's item once, by IDs (FR-13), and reports each selected key as saved, missing, wrong kind, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
-- Never lists, stages or deploys on a target, even when the environment has one; `--json` carries `target_checked: false`.
-- With `--product`, fields in other products' sections are skipped before they are validated, so they can neither block nor fail the check.
-- `--product` is required under the fleet profile and refused under the simple profile.
-
-## FR-35 — Managed-Key Isolation in `run`
-
-- Before starting `op run`, `run` removes from the inherited environment every key name declared in the loaded configuration (all products, all environments, mode-skipped keys included), then adds only the selected product's applicable references. Switching products in one shell never carries another product's managed key into the child.
-- PATH, shell and tool context, 1Password authentication and undeclared variables stay inherited: this is managed-key isolation, not a sandbox.
-- Key names that are the 1Password CLI's own environment (`PATH`, `HOME`, `XDG_CONFIG_HOME` and `OP_*`) are refused at configuration load, because removing them would break `op`.
-- A runner that cannot remove variables fails closed (exit 3) instead of starting the child with stale values.
-
-## FR-36 — Local-Only Onboarding and Diagnostics
-
-- `opv init` without `--fly-app` writes a run-only environment (vault and item IDs only); deployment `init` is unchanged.
-- On Linux and macOS, `doctor` reports `op local run`: the first `op` on PATH must be a native binary, because a Windows `op.exe` reached from WSL cannot start a Linux child. It fails a scope of environments without a target and warns otherwise, always with the remaining checks and a `Next step` line. `run` refuses such an `op` before starting anything (exit 3).
-- Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op` and its own sign-in; native Linux, macOS and Windows. Automatic Windows desktop-to-Linux execution is not provided.
-
-# 4. Security Requirements
 
 ## FR-26 — Diagnose and Guide
 
@@ -676,7 +613,7 @@ rollout (2026-10-07); each has a test.
 
 | Situation | Detection (no value is read) | Message and exit |
 |---|---|---|
-| 1Password session expired or never started | after any failed `op` call, run `op whoami` (free under rate limits, D0) | "not signed in to 1Password", then the sign-in command for the detected shell (bash/zsh: `eval $(op signin)`; PowerShell: `Invoke-Expression $(op signin)`), or "set OP_SERVICE_ACCOUNT_TOKEN" under CI; exit 7 (auth), not 4 |
+| 1Password session expired or never started | after any failed `op` call, run `op whoami` (free under rate limits, D0) | "not signed in to 1Password", then `sign in: opv login <env>` (the same in every shell, FR-40), or "set OP_SERVICE_ACCOUNT_TOKEN" under CI; exit 7 (auth), not 4 |
 | No 1Password account on this machine (fresh WSL or Linux) | `op account list --format json` is empty | `op account add --address <sign-in address> --email <email>`, then sign in; "type the Secret Key and password only at op's prompts, never into chat, tickets or files"; exit 7 |
 | Signed in, but the item or vault is not visible to this identity | `op whoami` succeeds and the item read fails | names the vault and item IDs and the identity type (user or service account, never the identity itself) and says to grant that identity access to the vault; exit 4 |
 | `op` or `flyctl` missing or untested version | existing `doctor` checks | the install command for the detected OS |
@@ -693,6 +630,11 @@ Acceptance:
 - Remediation text never asks for a secret to be pasted anywhere but the owning tool's own prompt.
 - Detection makes no extra 1Password item reads (FR-13). `op whoami` and `op account list`
   have no rate-limit cost.
+- With the 1Password app integration, `op whoami` fails until some other command has been
+  approved in the app. Before `doctor` reports "not signed in" outside CI, it makes one
+  `op vault list` call (output dropped unread), which asks the app to approve as a real read
+  would, and classifies again. The not-signed-in text names the app setting, except in WSL,
+  where `op` cannot use the Windows app.
 
 Constraints kept: SR-1, SR-2, FR-9 (text, never a prompt), FR-10 (stable exit categories), FR-13.
 
@@ -738,6 +680,185 @@ Acceptance:
   binary untouched).
 - `shellcheck` passes, and the script runs under `dash` and `bash`.
 
+## FR-28 — Targets, Ports and Routing
+
+A target is one secret store plus one runtime:
+
+| Cloud | Store | Runtimes |
+|---|---|---|
+| Fly | Fly secrets | Fly app (one adapter for both) |
+| Azure | Key Vault | Container Apps, App Service |
+| AWS | Secrets Manager | ECS |
+| GCP | Secret Manager | Cloud Run (which covers Cloud Run functions) |
+
+- Core logic reaches targets only through the `SecretStore` and `Runtime` ports (FR-12). `app/` and `domain/` name no target.
+- Each environment declares at most one target section: `fly`, `azure`, `aws` or `gcp`. Existing `fly` sections are unchanged.
+- **Routing by kind (FR-14).** A secret (concealed field) is written to the store and bound on the runtime as a reference. Config (text field) is set as a plain runtime env var, unless the environment sets `config = "store"`, which routes config like secrets. Routing a secret to plain env is not expressible. On Fly, config is not synced, as since v0.1; consumers read it with `config export`.
+- `opv plan <env>` and `opv sync <env>` work for every target. `opv fly plan` and `opv fly sync` remain as aliases that print a deprecation warning for one minor release and are then removed. Removed in 0.4.0.
+
+## FR-29 — Pinned References
+
+Every secret reference on a cloud runtime binds an explicit store version (Key Vault versioned URI, ECS `valueFrom` ARN with a version id, Cloud Run `secret:N`, App Service versioned `SecretUri`), never "latest".
+
+- A store write is the staging step: the running app does not see it, even on restart or scale-out.
+- Rebinding to the new version, and setting config env values, is the deploy step and happens only with `--deploy` (FR-7, FR-9).
+- `status` reports, per key: store value current, binding current, pending deploy, and drift (a binding to a version opv did not write). Drift is overwritten only with `--deploy`.
+
+## FR-30 — Store Naming and Limits
+
+- The env name comes from the naming template (fleet) or the field name (simple). Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged; Kubernetes: lower case, `_` becomes `-`) and validates it when the configuration loads, first and last characters included (a Kubernetes name cannot end in `-`, so a key ending in `_` is refused at load with the key and its line, never at sync).
+- Two keys that map to one store name are a configuration error naming both keys.
+- Each store and runtime declares its value-size limits. They are checked with the rules, before any call, and a failure names the key and the limit, never the value (FR-15).
+
+## FR-31 — Compare Before Write; Read-Modify-Write on Runtimes
+
+- Before writing a secret, opv reads the store's current value into a redacting type and compares it in constant time. It writes only when the value differs or is missing, so an unchanged run creates no store version and reports no change.
+- A runtime change reads the current service spec, changes only managed names, and sends the whole spec on stdin. Config values are never in argv (SR-3).
+- The unmanaged part of the spec is fingerprinted before and after the write, and the platform's optimistic concurrency is used where it exists. A concurrent change fails with the changed paths (never values) and a "safe to re-run" exit.
+- On Azure, values travel through `/dev/stdin`; on native Windows, through a named pipe only the user can open, served only to the `az` process opv started (FR-40). AWS and GCP will follow the same rule.
+
+## FR-32 — Cloud Prune Order and Ownership
+
+- `--prune` without `--deploy` only reports on cloud targets.
+- With `--deploy`, opv unbinds the names on the runtime, waits for a healthy revision, then deletes them from the store. A store entry is never deleted while a running revision references it. On Azure the pruned name's `opv-` Container Apps secret is dropped in the same apply, and any reference left over from an interrupted run is released (`PinnedRuntime::release`) before the Key Vault delete.
+- Kubernetes: every right `sync` needs is required; `doctor` fails a missing one with the exact grant and `sync` refuses in its Mutate preflight, before the first write, without the deploy-only rights. A failed collection of superseded versions after a healthy deploy is a warning, never the run's result.
+- Fly (known limitation): Fly hides a name as soon as `flyctl secrets unset --stage` runs. A run interrupted between that unset and `deploy` leaves the name on the machines and the next run cannot see it; the remedy is `opv sync <env> --deploy` again or `flyctl secrets deploy`.
+- After a healthy revision, superseded versions of every pinned name are collected where versions are separate objects (Kubernetes: version Secrets labelled `opv-managed=<env>` that neither the Deployment nor any ReplicaSet references); Key Vault keeps them as history. Every name is collected on every `--deploy` run, so an interrupted run's leftovers go on the next one (NR-1).
+- opv tags every store entry it creates with `opv-managed=<environment>` and refuses to delete one without that tag. The declared-set rule of FR-8 still applies.
+- A soft-deleted name (Key Vault soft delete, AWS recovery window) that blocks a re-create is recovered only when opv's own prune deleted it: just before deleting, opv tags the entry `opv-pruned=<env>` (keeping its other tags; if the tag cannot be set, nothing is deleted), and the deleted entry keeps that tag. A soft-deleted entry tagged `opv-managed=<env>` and `opv-pruned=<env>` is recovered, then written; any other fails with the exact recover command as its `Next:`. opv never purges. (Owner decision, 2026-10-09, after the live smoke test showed prune-then-re-add failing.)
+
+## FR-33 — Runtime Access and Health
+
+- Before a cloud deploy, opv checks that the runtime identity (Container Apps or App Service managed identity, ECS execution role, Cloud Run service account) can read every referenced store entry. A missing grant blocks the deploy and names the identity and the entry.
+- After a deploy, opv waits for the new revision to report healthy or failed and reports the outcome with its exit category.
+- `doctor` checks the cloud CLI and login, store access on managed names, and runtime-identity access, and reports an identity that can read untagged secrets as broader than needed (SR-5).
+
+## FR-34 — Local Check
+
+```bash
+opv check <environment> [--product <product>] [--json]
+```
+
+- Reads the environment's item once, by IDs (FR-13), and reports each selected key as saved, missing, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
+- Never lists, stages or deploys on a target, even when the environment has one; `--json` carries `target_checked: false`.
+- With `--product`, fields in other products' sections are skipped before they are validated, so they can neither block nor fail the check.
+- `--product` is required under the fleet profile and refused under the simple profile.
+
+## FR-35 — Managed-Key Isolation in `run`
+
+- Before starting `op run`, `run` removes from the inherited environment every key name declared in the loaded configuration (all products, all environments, mode-skipped keys included), then adds only the selected product's applicable references. Switching products in one shell never carries another product's managed key into the child.
+- PATH, shell and tool context, 1Password authentication and undeclared variables stay inherited: this is managed-key isolation, not a sandbox.
+- Key names that are the 1Password CLI's own environment (`PATH`, `HOME`, `XDG_CONFIG_HOME` and `OP_*`) are refused at configuration load, because removing them would break `op`.
+- A runner that cannot remove variables fails closed (exit 3) instead of starting the child with stale values.
+
+## FR-36 — Local-Only Onboarding and Diagnostics
+
+- `opv init` without `--fly-app` writes a run-only environment (vault and item IDs only); deployment `init` is unchanged.
+- On Linux and macOS, `doctor` reports `op local run`: the first `op` on PATH must be a native binary, because a Windows `op.exe` reached from WSL cannot start a Linux child. It fails a scope of environments without a target and warns otherwise, always with the remaining checks and a `Next step` line. `run` refuses such an `op` before starting anything (exit 3).
+- Supported: `op` 2.40.0 or newer; WSL 2 with the Linux `op` and its own sign-in; native Linux, macOS and Windows. Automatic Windows desktop-to-Linux execution is not provided.
+
+## FR-37 — Pluggable Providers
+
+Every deployment provider implements one plug-in contract (`docs/design/multi-cloud-targets.md`
+§11): config section parsing, name mapping and limits, ports, preflight, doctor and explain. Core
+modules (`app/`, `domain/`, `config.rs` and the config modules) never name a provider; a guard test scans whole files (skipping only `cfg(test)` items) and has self-tests. Provider data (pinned environment, not-found phrases, runnable `Next:` programs) comes from each provider's `Tool`, and help, schema and error lists name providers from the registry. Adding a
+provider changes no core code. Owner decision 2026-10-08.
+
+## FR-38 — Kubernetes Target
+
+`[environments.<env>.kubernetes]` targets a Deployment through `kubectl` with explicit
+`--context` and `--namespace`. Values are stored as immutable Secrets named
+`opv-<store name>-<random id>` (the id is the version, FR-29), bound through `secretKeyRef`. The id
+comes from the OS RNG and is never derived from the value: a content-hash name would let anyone
+who can list Secrets confirm a guessed value, so no name, label or annotation carries anything
+value-derived (SR-1, SR-2). Compare-before-write reads the bound value and compares it in
+constant time; an unchanged value writes nothing, and a version orphaned by a lost write is
+collected after the next healthy rollout (NR-1); the Deployment is updated with its
+`resourceVersion` (optimistic concurrency, FR-31); health is the rollout status (FR-33); old
+Secrets are pruned only after a successful rollout (FR-32). Design: §12 of the multi-cloud design.
+
+## FR-39 — Named Stores and Cross-Provider Bindings
+
+Stores can be declared once as `[stores.<name>]` and referenced by a runtime with
+`secrets_in = "<name>"`; without it, a runtime uses its own store. A binding registry lists the
+supported (store kind, runtime) pairs; an unsupported pair is a config error at load. 0.5.0 adds
+Key Vault → Kubernetes Deployment through the External Secrets Operator, with versions pinned
+(`refreshInterval: 0`, `remoteRef.version`), readiness checked before the Deployment is repinned,
+and prune only after a healthy rollout. Commands are unchanged. Design: §13 of the multi-cloud
+design. Owner decision 2026-10-08.
+
+## FR-40 — Sign-In, Per-Environment Account and Deploy Credentials
+
+Adopted by the owner on 2026-10-08 for 0.5.0. Goal: a user does not think about sign-in mechanics and ends up more secure; nothing secret lives outside 1Password except process memory (and the one SR-4 exception below).
+
+- **`opv login [<env>] [-- <command>]`** (replaces `opv session`, no alias) signs in to the 1Password account the environment uses, at op's own prompts, then opens a signed-in shell or runs `<command>` and exits with its code. No token is printed and nothing is evaluated; the session stays in opv's process and its child. Without `<env>`: the one account all environments use (or op's default, also when there is no configuration); when they differ, opv lists the environments with their accounts and asks. Like `setup` it needs an interactive terminal and refuses CI and service-account/Connect authentication (FR-9). Signing in to two environments in different accounts in one shell keeps both sessions (`OP_SESSION_<account>` only, no generic `OP_SESSION`, when an account is named).
+- **`account = "<sign-in address, email or account ID>"`** (optional, per environment): every `op` call for that environment carries it (`OP_ACCOUNT` in the child's environment), so `run`, `check`, `status`, `plan`, `sync`, `config export`, `item skeleton` and `doctor --env` act in the right account. Not added when a service-account or Connect credential is set (the credential decides). An invalid value is a configuration error with line and column (FR-2).
+- **`deploy_credentials = "op://<vault>/<item>"`** (optional, per environment): an item holding only that environment's least-privilege deploy identity (SR-5), read once by IDs or names (an `op://` reference with exactly a vault and an item; a field, a query or another form is a configuration error with line and column). Read only by commands that reach the target (`status`, `plan`, `sync`, `doctor --env`). Fields by convention: Fly `FLY_API_TOKEN` (concealed), set only in each `flyctl` call's environment (`FLY_API_TOKEN` and `FLY_ACCESS_TOKEN`); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed), signed in once with `az login --service-principal -u <client> -t <tenant> -p @<hand-off> --only-show-errors -o none` in a private per-run `AZURE_CONFIG_DIR` that every `az` call of the run uses and that is removed on every exit path, Ctrl-C, SIGTERM, SIGHUP and SIGQUIT included, and on Windows on Ctrl-C, Ctrl-Break and closing the console (stale directories of killed runs are swept at the start of every Azure run). Kubernetes: a configuration error (`kubectl` uses the kubeconfig), except a Kubernetes runtime whose secrets are in a Key Vault store (`secrets_in`, FR-39): its item holds the Azure fields and signs in the `az` that writes that store, with the same private `AZURE_CONFIG_DIR`. `doctor --env` never stops on a failed deploy sign-in: it prints one failing `deploy credentials` check with its next step (also in `--json`), runs the other checks and marks the checks that use the deploy identity's CLI (all but its version check) `skip … (deploy credentials failed)`. A failed `az login` shows its scrubbed `az said:` excerpt on stderr only, never in a `--json` document (NR-31); the credential values are registered with the scrubber when the item is read. On Windows the value pipe serves only the `az` process opv started or its descendants (`GetNamedPipeClientProcessId`); any other client is refused unread and fails the call. A missing, duplicate, empty or wrongly typed field is a source error naming the field, never a value. Values are `SecretValue`s and never reach argv, files (except az's own private directory, SR-4), logs or `Debug`.
+- **Azure per OS.** Linux/WSL: `$XDG_RUNTIME_DIR` must be RAM-backed (statfs `TMPFS_MAGIC`/`RAMFS_MAGIC`) and owned by the user; otherwise opv refuses before reading the credential ("deploy credentials for Azure need a private RAM directory ($XDG_RUNTIME_DIR on tmpfs), which this machine doesn't have; nothing was read or changed", next: `az login` and remove `deploy_credentials`, or OIDC in CI); the run directory is `opv-az.<pid>-<random>`, mode 0700. Windows: `%LOCALAPPDATA%\Temp\opv-az-<pid>-<random>` with a protected user-only ACL; az stores the secret DPAPI-encrypted (`service_principal_entries.bin`; `AZURE_CORE_ENCRYPT_TOKEN_CACHE=true` is set), and a plaintext `service_principal_entries.json` makes opv delete the directory and refuse; removal is retried for up to about 10 s because az's helper processes hold files briefly. macOS: refused with the same next step (no RAM directory, no verified encrypted store).
+- **Windows value hand-off (SR-3).** On native Windows, a value for `az` (the service-principal secret, Key Vault values, the Container App update) goes through a named pipe `\\.\pipe\opv-<random>` whose DACL grants only the current user and which rejects remote clients: opv waits for the connection, writes the bytes and closes the handle (never a disconnect, which corrupts the reader inside az), serving up to 3 connections; a call that succeeds without az ever reading the pipe is an error. Elsewhere values go on stdin (`/dev/stdin`). This replaces the earlier "use WSL for Key Vault writes" refusal.
+- **Sign-in advice.** Every sign-in hint in `doctor`, errors and `Next` lines is `opv login <env>` (`opv login` when no environment is known), the same in every shell.
+
+## FR-41 — Plan Id and `--expect-plan`
+
+- `plan` prints a short plan id (`plan 7f3c9a1e (1Password item v41): …`) and `plan --json` carries it as `plan_id`; `sync --json` reports the id of the plan it applied. A plan with blocking findings has no id.
+- The id is SHA-256 over names and integers only: the environment, the `--product` scope, the item's `version` integer, every row's product, key, kind, state and target state, the planned names (stage, prune, held, extras) and the store listing (names, pending flags, and a pinned store's version ids). No value, value length or value digest goes in: Fly digests are left out because they are digests of values. The id can neither reveal nor confirm a value (SR-1).
+- `sync <env> --expect-plan <id>` re-derives the id from what it reads and, if it differs, refuses before any write (exit 6) with the new id, the exact `sync … --expect-plan <new id>` command, and `Next: opv plan <env>`. Any edit to the item, a store version written or re-pinned by someone else, or a change to the configuration (`secrets.toml` or the manifest, FR-44) that changes the plan changes the id.
+- `--expect-plan` satisfies `confirm_env`, because the id is bound to its environment. It cannot be combined with `--rotate` or `--prune-immutable` (exit 2): `plan` never shows a rotation.
+- Decided in v0.5 (final review I2, manager ruling): a run's own partial apply is not a plan change, so exit 9 stays safe to re-run as is. A name the plan writes (it is staged, or it already holds the desired value and is pending a deploy, or carries an FR-42 stamp of the expected id) is hashed as `apply`: its listing entry, pending flag and version are left out. Only that boolean per name goes in, never a value. `sync --expect-plan <id>` re-run after an interrupted deploy therefore matches and finishes it. `plan`'s `Next:` is `opv sync <env> --deploy --expect-plan <id>`.
+- Stateless: the id is recomputed, never stored; no plan file (§7, §9). Owner decision 2026-10-08 (pass-2 A7).
+
+## FR-42 — Provenance Stamps
+
+- Every version or object opv writes on a pinned target records opv's run metadata: `opv-version`, `opv-written` (UTC, `YYYY-MM-DDTHH:MM:SSZ`), `opv-env` and `opv-plan` (the FR-41 id). Key Vault: tags on each written version. Kubernetes: annotations on each Secret, ExternalSecret and the Deployment opv writes. Never a value and never an identity (SR-1).
+- `status <env>` on such a target prints `<provider>: last changed by opv <version> at <time> (plan <id>)` from the latest stamp it lists; `status --json` carries it as `provenance`. Entries written before 0.5.0 carry no stamp and the line is left out.
+- Stateless: the target carries its own record, the way the `opv-managed` tag does; no state store (§7, §9). Fly is not stamped (a stamp would be one more secret and restart the machines). Owner decision 2026-10-08 (pass-2 H7).
+
+## FR-43 — Self-Healing Conventions
+
+Decided 2026-10-08 for 0.5.0. Users never get an error because 1Password is not laid out to opv's convention (§10.1). opv fixes the layout itself, never deletes information, and hides the convention. Design: `docs/design/self-healing-conventions.md`.
+
+- **Tolerant reads, every identity (CI included).** Each declared key's field is found wherever it is: labels match ignoring case, spaces, `-` and `_`; a field in the wrong section, at the top level or in a human-named section is found; of several candidates the choice is deterministic (a filled field in the right section, then any filled field, then an empty one; ties go to the field later in the item). A secret stored as text and config stored as concealed are read, not refused. Fields in product-shaped sections (`^[a-z][a-z0-9_-]*$`) are never claimed for another product, nor by the simple profile. A simple and a fleet configuration may share one item: the fleet profile reads a key-shaped field at the top level (the simple profile's home) but never moves, relabels, conceals, normalizes or keeps it, so the two never move a field back and forth; a key left that way is named in one note. Layout problems never block a read-only command.
+- **Auto-tidy for a signed-in person** (`setup`, `init`, `check`, `run`, `status`, `plan`, `sync`, `doctor --env`, `config export`): when `op whoami` reports `USER` and no `OP_SERVICE_ACCOUNT_TOKEN`, Connect token or CI is set. A service account, Connect or CI only reads tolerantly and prints one note that the next local run will tidy.
+- **The tidy plan (pure, `domain::convention`).** Create missing product sections and missing fields, empty and of the right kind; conceal a secret stored as text (never the reverse); rename labels to the key; move fields home; resolve duplicates. Normalize a value only when its rules make the intended form unambiguous: a trailing newline/CR/space is removed when the value fails its rules and the trimmed one passes; a missing `ensure_prefix` is added. Everything displaced or replaced goes to section `opv · kept`, labelled `<original label> (from <section>, <UTC date>)`; a normalized value's original is kept there as a concealed field, a renamed label as an empty breadcrumb. Nothing is ever deleted. A text field `opv/convention = 1` records the convention version, written only together with another fix.
+- **Missing items or vaults.** For a person running `setup` or `init`, opv creates the item (and the vault, when the account allows it) and writes its IDs into `secrets.toml`. Other commands report it with one `Next:`.
+- **Safe writes.** One read (FR-13), the plan applied to the item JSON in memory, one `op item edit` with the whole item on stdin (SR-3), then a verifying re-read. If the item's version changed between the read and the write, opv re-reads and re-plans once; if it changed again, nothing is written and the run says so. Every read a write is built from or checked against bypasses `op`'s local cache (`--cache=false`), and the template is always built from that fresh read (final review C1; also `item skeleton`, `setup` and every manifest write, FR-44). After the edit, the item must be exactly one version past that read (the version `op item edit` prints, else a fresh re-read): otherwise another edit landed in between, and opv reports `tidy_conflict` and never retries. The item read back must hold every field opv wrote or kept, so every original label and value (in place or in `opv · kept`); otherwise `tidy_unverified` and a note to restore it from the item's history. An item holding an attachment, a website list, or a field of a type other than concealed, text, URL, email or phone (OTP, SSH key, passkey, date, menu, ...) is never tidied, with one note, until a live check proves `op item edit` round-trips it. The edit is atomic: an interrupted write leaves the item untouched or fully tidied. A failed tidy never fails the command.
+- **Transparency.** One stderr line per run that tidied, e.g. `tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"`, and a `tidy` array (`{action, name}`) in `--json` when something was tidied; a tidy that did not complete puts its error code in `tidy_error` (`tidy_conflict` when the item changed twice). Missing values stay a human action: one line names the keys that still need one and ends with the item link (H1).
+- **One value whoever reads.** A read-only identity uses the value a person's tidy would write (trailing newline/space removed, `ensure_prefix` added) in memory, so `sync`, `status` and `check` behave the same before and after the tidy. `run` never injects a value: it keeps passing an `op://` reference for every key, so `op run` keeps masking secrets in the child's output (owner ruling, 0.5.0). When a key's stored value needs that normalization and the identity cannot tidy, `run` prints one warning per key on stderr: `<product>/<KEY> has a fixable formatting problem in 1Password; run as yourself (opv login <env>) and opv will tidy it`.
+- **Who tidies.** Only a person signed in with their own session (`opv login`, the desktop app). Never a service account, Connect, CI or a run that signed in to the target with the environment's `deploy_credentials` (FR-40); every `op` call uses the environment's `account` (FR-40). The project manifest item (FR-44) is never tidied: its own fields (`notesPlain`, `project`, `convention`) are never renamed, moved or concealed.
+- **Shared keys (FR-45).** A key with `from = product/KEY` never gets a field of its own (the tidy, `item skeleton` and the missing-value line skip it); its source's field is found tolerantly like any other. `item skeleton` uses the tolerant reader, so a field opv finds counts as present, and refuses an environment that points at the manifest item. `init --add-env` adds the new environment to a shared key exactly when it adds it to the key's source.
+- **Notes by cause.** A run under deploy credentials says `opv check <env>` tidies the item; `run` tells a read-only identity to run as itself and a person whose own tidy did not complete to see the note above.
+
+Acceptance: tests with a stateful fake `op` cover each fix kind; `run` under a read-only identity passes a reference and warns once per fixable key; a run under deploy credentials and the manifest item are never written; nothing deleted (every original label and value is still in the item after a tidy); a service account never writes; tolerant reads in CI; a concurrent edit detected and not overwritten; idempotency (a second run writes nothing); values never in argv, notes or JSON; an interrupted write leaves the item untouched or fully tidied.
+
+Constraints kept: SR-1, SR-2, SR-3, SR-4, SR-8, FR-9 (no prompts; the tidy is not destructive), FR-13.
+
+## FR-44 — Configuration in 1Password
+
+The configuration may live in 1Password instead of a committed file, so a checkout needs no file at all (`opv login dev; opv run dev -- npm run dev`). Owner decision 2026-10-08, for 0.5.0. Design: `docs/design/config-in-1password.md`.
+
+- **Manifest:** one Secure Note per project, titled `opv · <project>`, tagged `opv-manifest`. Its notes hold the same TOML as `secrets.toml` (validated by the same parser, FR-2); a text field `project`, a field `convention = 1`, and tags `opv-repo:<host>|<owner>|<repo>` (the normalized git remote, `/` written as `|` because 1Password reads `/` in a tag as nesting) and, in a monorepo, `opv-path:<dir>|<subdir>` per covered directory. It holds names, IDs and rules, never a value (SR-1).
+- **Discovery:** FR-25's order. Listing is one `op item list --tags opv-manifest --format json` (metadata only); loading is one `op item get` by vault ID and item ID, before the environment's item read (FR-13 otherwise unchanged). Both go through the runner (reads retried, NR-3) and honour the account: a `.opv` pointer's `account`, else `OP_ACCOUNT` (passed as `--account`, not under a service-account or Connect credential); a repository match not found in the default account is looked for in each other signed-in account. Once loaded, every call for an environment uses that environment's own `account` and `deploy_credentials` (FR-40), in `status --all` too (each project's environments, signed out again before the next). The git remote is read with a structured `git` call; its URL (which may hold credentials) is never printed or kept, only `host/owner/repo`.
+- **Commands:** `config import [--file] --vault [--project] [--path …]` creates the manifest from a validated file and prints the `Next:` step to delete the file (never deletes it); `config export [--toml|--json]` prints it (`config export <env> --json` keeps FR-18); `config edit` edits a 0600 temporary copy in `$VISUAL`/`$EDITOR`, validates, shows the diff, asks once, and writes only if the item version is unchanged since it was opened (else refuses and re-opens on the new version); `config check --file <path>` exits 8 with a diff when a committed copy differs; `init` for a new project saves a manifest unless `--file`; `projects [--long] [--json]` lists every visible manifest (one listing per account; `--long` reads each one for its environment names); `status --all [--json]` prints the overview of every project (one manifest read per project plus the overview's reads; an unreadable project is one line and the rest continue).
+- **Sessions:** `explain` and `config export` need a 1Password session when the configuration lives there; without one the error says so with `Next: opv login`. `opv login <env>` with no file uses the environment's account when op can already read the manifest, else the `.opv` account or op's default. `doctor` names the source on its config line.
+- **Edits:** `add` and `init --add-env` write through the same store as `config edit` (the file, or the manifest by item edit), with the same validation before the write and the same refusal when the configuration changed since it was read (nothing written). A configuration error in a manifest reads `manifest "opv · <project>": <field>: …` (no file or line) with `Next: opv config edit`.
+- **Plans:** the plan id (FR-41) covers what the configuration says, not where it lives: a file and a manifest with the same text give the same id; a deploy-credential run gives the same id as a plain one. `plan` and a stale-plan refusal name "the manifest" instead of `secrets.toml`.
+- **Writes:** `config import`, `config edit`, `init`, `init --add-env` and `add` write the manifest (owner commands; the write effect, never retried). They extend FR-11's read-only rule only to the manifest, which holds no secret, and only for a person signed in with their own session: under a service account, Connect, CI or deploy credentials (or when `op whoami` cannot tell) they are refused before any write (`policy_refused`, `Next: opv login`), as `init`'s acceptance requires (FR-23, SR-5). The read an edit starts from and the re-read before the write bypass `op`'s cache (`--cache=false`); after the edit the manifest must be exactly one version later and hold the new text, otherwise another edit landed in between and the command fails with `config_changed` (check the manifest's history; never retried). A refused write is a definite failure, never an unknown outcome.
+- **Accounts and paths:** a manifest found in a given account (a `.opv` pointer's `account`, `OP_ACCOUNT`, or the multi-account search) passes that account to every environment that sets none of its own, in `status --all` too. A `.opv` `account` (and `OP_ACCOUNT`) must be a sign-in address, email or account ID (`^[A-Za-z0-9][A-Za-z0-9.@+_-]*$`) before it reaches `--account`. In a monorepo a manifest whose path tags do not cover the current directory is never used, even when it is the only repository match; only a manifest without path tags covers the whole repository. Otherwise the candidates are listed with `OPV_PROJECT` as the next step.
+
+Acceptance: an existing `secrets.toml` still wins (the fleet's infra repo is unchanged); import then export is byte-identical; a concurrent edit is refused; no secret value appears in argv, stdin or output of any manifest call.
+
+## FR-45 — Shared Keys
+
+- A key may declare `from = "<product>/<KEY>"` (`"<KEY>"` under the simple profile) instead of having a field of its own. Its value is read from the source's field in the same environment's item, within the one item read (FR-13). References to another item or environment are refused at load with a configuration error.
+- Validated at load, with the line and column of `from` (FR-2): the source is declared; it is not itself a `from` (no chains, no cycles); it has the same `kind`; it is declared for every environment the referencing key uses; the referencing key sets neither `immutable` (it follows the source) nor a `refuse_in` environment where the source is declared.
+- The source's rules apply first; the referencing key's own rules are then checked against the value the source would stage. Failures name the key and rule only (FR-15, FR-22).
+- `run` exports the value under the referencing key's own name, as an `op://` reference to the source's field (FR-4, SR-3). `sync` writes it under the referencing key's own target name; each name is its own store entry or binding, so the managed set and prune are unchanged (FR-8). Changing the source changes every referencing target in the same sync; `--rotate` of an immutable source rotates its referencing keys too (FR-16).
+- `status`, `plan` and `check` show a referencing row as `shared from <product>/<KEY>` (JSON `shared_from`). A missing, wrong-kind or failing source is one finding, on the source's row, listing the referencing keys as affected; the referencing rows are `blocked by source` (JSON `source_blocked`) and are not counted again. A product-scoped `check`, `status`, `plan` or `sync` keeps the rows of its keys' sources, so a source's finding still blocks it.
+- `explain` shows the chain: the source's `op://` reference and `shared from` on a referencing key, `shared by` on a source.
+- `item skeleton`, and any later field creation, never creates a field for a referencing key. A field left under a referencing key is reported as an extra field.
+
+# 4. Security Requirements
+
 ## SR-1 — No Secret Logging
 
 Secret values shall never appear in:
@@ -749,6 +870,8 @@ Secret values shall never appear in:
 - panic output generated by project code.
 
 Debug logging shall redact conservatively.
+
+Child output: the stderr of every captured `op`, `flyctl`, `az` and `kubectl` call is held in memory only (never on disk) and shown only after the scrubber of NR-31 has masked secret values: at most 5 lines under the error of the call that failed, or every call's lines with `--verbose`. A child's stdout and anything opv sends on stdin (values, Kubernetes Secret manifests) are never shown; `--verbose` gives only stdout's size and JSON shape (NR-31). Registered values are masked on the raw text first, before control characters are stripped, and each value's stripped form and each line (4+ bytes) of a multi-line value are masked too. Every successful `op item get` registers its values, with or without `--verbose`.
 
 ## SR-2 — Secret-Safe Types
 
@@ -782,6 +905,8 @@ Secret transmission to external tools shall use:
 
 The CLI shall not create plaintext files containing resolved secrets, including temporary files.
 
+One documented exception (FR-40): with Azure `deploy_credentials`, the Azure CLI itself stores the service principal's secret in opv's per-run `AZURE_CONFIG_DIR`. That directory is private to the user and removed when the run ends (success, error, Ctrl-C, SIGTERM, SIGHUP, SIGQUIT, and Windows console events; a killed run's directory is swept at the start of the next Azure run). Core dumps are disabled for opv and its children. Linux/WSL: RAM-only private dir (`$XDG_RUNTIME_DIR` on tmpfs, mode 0700). Windows: private dir (protected user-only ACL) with az's DPAPI-encrypted store; plaintext refuses. macOS: not supported for Azure deploy credentials. opv itself still writes no secret to any file.
+
 ## SR-5 — Least Privilege
 
 A CI identity shall require only:
@@ -790,7 +915,11 @@ A CI identity shall require only:
 - the minimum Fly permissions required to manage secrets for the target application;
 - on cloud targets, read and write on the opv-tagged store entries and update on the one runtime service. Read is needed for compare-before-write (FR-31); it adds no exposure, because the same values are readable through the CI 1Password token.
 
-The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. This write exception does not apply to synchronization or CI.
+Deploy identities are per environment (FR-40): each environment's `deploy_credentials` item holds only what a sync of that environment needs (a Fly deploy token for one app; an Azure service principal limited to that Key Vault's opv-tagged secrets and that Container App), never a person's or an organisation-wide credential. Break-glass credentials (owner, admin, emergency access) are for people only, kept in 1Password, and never referenced by opv. In CI, one service-account token reads the environment's vaults; the target credential is a `deploy_credentials` item or the CI provider's OIDC federation.
+
+The CLI shall not require write access to 1Password for synchronization. Owner-guided `setup` may create a Secure Note or fill only missing declared fields after a concrete save confirmation. It preserves existing filled values and uses JSON stdin, never secret arguments or files. Because the owner may spend a long time at its prompts, `setup` reads the item again with `--cache=false` right before it writes: if the item's version moved since setup read it, nothing is overwritten; setup re-plans on the fresh item, keeps the values already entered in memory (they fill only fields that are still empty; a field filled elsewhere keeps its 1Password value and setup names it), says so and asks once more. A further change before the save writes nothing (`item_changed`). After the edit the same check as the tidy applies: exactly one version past the fresh read and every field setup wrote or kept present, else `item_changed` and a pointer to the item's history (final review, setup save). This write exception does not apply to synchronization or CI.
+
+A run by a signed-in person (not a service account, Connect or CI) may also tidy the item's layout (FR-43): one whole-item edit, JSON on stdin, nothing deleted, displaced values kept in `opv · kept`. Without write access the tidy is skipped with a note; no command needs write access to 1Password.
 
 ## SR-6 — Explicit Destructive Operations
 
@@ -812,46 +941,81 @@ Copies of secret values should be minimized.
 
 Security-sensitive dependencies should be kept small and audited.
 
+# 4a. Resilience Requirements (NR-1 to NR-31)
+
+Every realistic failure is a requirement (owner direction, 2026-10-08): designed for
+resiliency, transparency, and to keep the user effective. The argument, mechanisms and tests
+are in `docs/design/resilience.md`; each NR below is normative.
+
+- **NR-1 Convergence.** Every command is safe to interrupt after any external call; re-running it reaches the same end state, and no intermediate state leaves a live reference to a missing or half-written value. Proven by an interruption-matrix test per flow.
+- **NR-2 Unknown outcomes.** A write that fails, times out or is killed has an unknown outcome; opv reconciles by reading the state back before reporting. When it stays unknown, opv exits **9** ("outcome unknown; safe to re-run"), naming the step and the reconciled state. The runner records when the first target write started; after it, a read that times out or hits the spent run budget is exit 9 and never reports "nothing was changed", and a sign-in probe timeout is exit 9 too. An update the target refused with nothing applied (Azure: same revision, provisioning `Failed`) is exit 5 `update_refused` with `Next: opv doctor --env <env>`, so CI does not retry it. Extends FR-10.
+- **NR-3 Bounded read retry.** Reads (never writes) are retried up to 3 attempts with jittered backoff (1 s, 2 s, 4 s) inside the run budget; a definite refusal (not found, auth) is never retried. The runner's API makes write-retry unrepresentable. Since v0.5 (UX review P16) the 1Password item read is diagnosed after its first failed attempt (`op whoami`, then `op vault get <vault_id>`) and retried only when the identity is signed in and can open the vault; otherwise the diagnosis is reported at once.
+- **NR-4 Deadlines and progress.** Per-effect deadlines (probe 15 s, read 60 s, write 120 s, a write that waits for a rollout 15 min: `flyctl secrets deploy`, `az containerapp update`, `kubectl apply`/`replace`) and a run budget `--timeout` (default 1800 s, room for a 15-minute rollout write plus the reads and health waits around it). Waits poll with their own limit measured in elapsed monotonic time (never a sum of sleeps) and stop early when the run budget cannot hold one more poll, so their own message, naming the last state, comes before the budget error. Any wait, and a rollout write while it runs, prints progress on stderr at least every 15 s.
+- **NR-5 Output cap.** Captured CLI output over 8 MiB is refused and the child killed.
+- **NR-6 Validated outputs.** Every id, version and name read from a CLI is validated before reuse in argv or a document; unknown fields are ignored, missing required fields refused.
+- **NR-7 Explicit scope, pinned environment.** Every call names its scope explicitly (Fly `--app`, Azure `--subscription` from the now-required `azure.subscription`, 1Password IDs) and runs with an environment that neutralises behaviour-changing user config and prompts.
+- **NR-8 Detect, don't lock.** Concurrent edits and overlapping runs are detected (ownership tags, fingerprints, A/B compare, drift) and reported; opv takes no remote locks.
+- **NR-9 Fewest calls.** One list per store, reads only for ready keys, writes only on difference, deploy only on change; `--json` reports calls per program and duration.
+- **NR-10 Auth expiry.** Sign-in is probed before the first write; an auth failure after writes began is reported as such with the sign-in command and "re-run".
+- **NR-11 No prompts.** No captured call can wait on a prompt (no TTY stdin, prompt-disabling env, no dynamic extension install); a would-be prompt surfaces as a timeout naming the sign-in fix.
+- **NR-12 Signals.** SIGINT/SIGTERM/SIGHUP/SIGQUIT are forwarded to the running child (SIGQUIT as SIGTERM), which gets 5 s before it is killed; opv removes its private directories and exits 128 + the signal (130/143 for SIGINT/SIGTERM) naming the last completed step. On Windows a console control handler does the same and exits 130.
+- **NR-13 Version drift.** `doctor` checks minimum versions of op, flyctl and az; adapter tests use recorded real outputs.
+- **NR-14 OS differences.** Platform capabilities (stdin device, native op) are checked up front; value bytes are never re-encoded.
+- **NR-15 Value edge cases.** Byte-exact round trip per adapter; values a target would mangle are refused before any call (FR-15, FR-22).
+- **NR-16 Scale.** At most O(keys) calls; output starts with a one-line count summary (rows kept as they are, PR #63); `--product` scoping on status, plan and sync.
+- **NR-17 All blockers at once.** A refusal names every blocking key and its next command in one run.
+- **NR-18 Run summary.** Every mutating run ends with one summary (written, deployed, pruned, pending, unchanged, skipped, next step), mirrored in `--json`, consistent with the exit code.
+- **NR-19 Next step on every error.** Every non-zero exit ends with exactly one `Next:` line holding a runnable command (extends FR-22), the last line on stderr; `run` passes its child's exit code through and is exempt. Every error carries an optional next step; one without falls back to its category's (the install or sign-in line for dependency and authentication, the same command for outcome unknown, `opv doctor` otherwise). Tested by error category and by CLI exit path.
+- **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting (`will prune: <names>`); an environment with `confirm_env = true` requires `--confirm <env>` for `sync`, the only command that changes the target (`item skeleton` writes to 1Password and is exempt); a refusal is exit 6 before the first write, after the read-only checks so it also names any blocking keys (a `--confirm` naming another environment is refused before any call), with the exact command to re-run.
+- **NR-21 No clock assumptions.** No decision compares wall-clock times across machines; deadlines use monotonic local time.
+- **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call, followed by that call's scrubbed stderr and its stdout shape (NR-31). Child stderr is shown only scrubbed, stdout and stdin content never (SR-1).
+- **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written. The plan's own reads (the item read by IDs, the target's first list) are the CLI, sign-in and reachability checks, so preflight adds no second item read; tool versions stay with `doctor` (NR-13).
+- **NR-24 Fly state.** Deleted (`dead`) apps are refused with the reason and next step. A deploy in progress is waited for (releases re-read every 5 s, a progress line at least every 15 s, within the run budget and at most 10 minutes) and refused with nothing written only if it is still running then. Suspended or pending apps (on the Machines platform: no machines), missing machines and stopped machines are a `warn` line; secrets are app-level so they still stage, and `--deploy` is skipped with `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). `Partial` deploys are detected and reported with the exact command. Fixtures are recorded flyctl output (`tests/fixtures/fly/`).
+- **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported. Preflight has a mode: read commands (`status`, `plan`, `doctor`) run the same checks but never wait on an update in progress (provisioning `InProgress`, or any provider's equivalent); they print one note line on stderr and continue. Only `sync` waits, with progress, bounded by the run budget.
+- **NR-26 1Password state.** Moved, archived or deleted items, removed vault access, rate limits and a locked desktop app are diagnosed by ID with the next command; never a title fallback (FR-13).
+- **NR-27 Missing dependencies.** Each needed CLI is resolved once in preflight with the OS-specific install command; only the CLIs the chosen environment needs are required (FR-36).
+- **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page (Azure: azure.status.microsoft, code `provider_unavailable`); nothing written. Applies to every read before a write, `status` and `plan` included. An outage after a write started is NR-2.
+- **NR-29 Network glitches and proxies.** Covered by NR-3/NR-2; proxy and CA environment variables pass through to CLIs untouched.
+- **NR-30 Eventual consistency.** After a write, the confirming read polls until it observes the written version or the deadline; a stale read is never reported as "unchanged".
+- **NR-31 CLI output transparency.** Every failure shows what the CLI said, without leaking a secret. (1) Capture: the stderr of every captured call of every provider (`op`, `flyctl`, `az`, `kubectl`; reads, writes and probes) is read into a bounded, zeroized in-memory buffer (the last 64 KiB) and never written to disk; interactive calls (`run`, `setup`, `login`) keep the terminal. (2) Scrubbing: before any of it is shown, every registered value is replaced with `__SECRET__`. Registered: all field values of every 1Password item read in the run and every `SecretValue` created (transformed by `ensure_prefix`, staged, read from a target). Each is matched raw, JSON-escaped (plain, ASCII-only `\uXXXX` as az writes it, and Go's form with `<`, `>`, `&` escaped, as kubectl writes it), Go-quoted (`%q`), Python-`repr`-quoted, standard base64 (the form a Kubernetes Secret manifest carries), base64url (padded and unpadded) and percent-encoded. Values under 4 bytes and their encodings are matched as whole tokens only. Then patterns mask secrets opv never handled: JWTs, `Bearer <token>`, `OP_SESSION_*=…`, `ops_…` service-account tokens, Azure `sig=`, `AccountKey=`, `SharedAccessSignature=` and `client_secret=`, PEM private-key blocks (also a block whose BEGIN line was cut off), well-known API key prefixes (`sk-`, `sk_live_`, `ghp_`, `xoxb-`, `AKIA…`), and `password=`, `token=`, `secret=`, `apikey=` assignments in `key=value` or `"key": "value"` form. Names and ids (a Key Vault secret id, a Secret name) stay readable. Escape sequences and control characters are removed and lines cut at 240 characters. The registry holds values in `Zeroizing` memory; its `Debug` shows a count. (3) On failure: when a call fails (a refused read, a write or probe exiting non-zero) and opv exits with a dependency, authentication, source, target or unknown-outcome error, the last ≤5 non-empty scrubbed lines follow the error's first line, labelled `  <program> said: <line>` (`op said:`, `flyctl said:`, `az said:`, `kubectl said:`), before the rest of the error's text and the single `Next:` line, which stays last (NR-19). An excerpt attaches only to the error made from its own call: every call takes a new call id and clears the excerpt when it starts, a failure is stored with its call id, and it is shown only if no later call started before opv exits. The one exception is the read-only diagnosis of that failure (`op whoami`, `op vault get`, `az account show`, `flyctl auth whoami`, kubectl's context and version checks, and the read-back after a failed write): those calls neither clear nor replace the excerpt. Configuration, policy and findings errors never show one. (4) With `--verbose`: each call line is followed by its scrubbed stderr (`    stderr: <line>`, at most 20) and its stdout shape (`    stdout: <n> bytes`, plus the top-level JSON keys or array length). (5) Never shown: stdout content, and what opv sends on stdin (values, Kubernetes Secret manifests, Container App and Deployment bodies). The error's `Display` is unchanged (tests and `--json` too). Limit: a value opv has not read yet (a failure before or during the item read) is masked only by the patterns.
+
 ---
 
 # 5. CLI Surface
 
-The surface shipped in v0.1.0:
+The surface of 0.5.0 (`opv --help`, `opv schema`; global options `--config`, `--timeout`, `--verbose`, `--color`):
 
 ```text
-opv [--config <path>] doctor
-opv [--config <path>] status <environment>
-opv [--config <path>] run <environment> --product <product> -- <command>
-opv [--config <path>] fly plan <environment>
-opv [--config <path>] fly sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
-opv [--config <path>] config export <environment> --json
-opv [--config <path>] item skeleton <environment>
+opv login [<env>] [-- <command>]
+opv setup [--recipe <path>] [--account <a>] [--product <p>]
+opv doctor [--env <env> [--product <p>]] [--json]
+opv check <env> [--product <p>] [--json]
+opv status [<env>] [--product <p>] [--all] [--json]
+opv projects [--long] [--json]
+opv run <env> [--product <p>] -- <command>
+opv plan <env> [--product <p>] [--json]
+opv sync <env> [--deploy] [--prune] [--confirm <env>] [--product <p>] [--expect-plan <id>] [--json]
+         [--rotate <product/KEY>]... [--prune-immutable <product/KEY>]...
+opv config export [<env>] [--json | --toml]
+opv config import --vault <v> [--file <path>] [--project <p>] [--path <dir>]...
+opv config edit
+opv config check --file <path>
+opv item skeleton <env> [--json]
+opv explain <[product/]KEY> [--env <env>] [--json]
+opv open <[product/]KEY> [--env <env>] [--print] [--json]
+opv help [states | <command>]
+opv init <env> --vault <title> --item <title> [--target <provider>] [--<provider>-<field> <v>]...
+         [--add-env] [--profile simple|fleet] [--force] [--file] [--project <p>] [--json]
+opv add <[product/]KEY> [--kind secret|config] [--env <env>]... [--rule <name[=value]>]...
+        [--guidance <text>] [--immutable] [--json]
+opv completions <bash|zsh|fish|powershell>
+opv schema
+opv guide agent
 ```
 
-`--config` defaults to `secrets.toml`. `--json` exists only on `config export`; `--verbose` and `--quiet` are not implemented.
+History: v0.1 shipped `doctor`, `status`, `run`, `fly plan`, `fly sync`, `config export` and `item skeleton`; v0.2 added `--json` on `status` and `fly plan`, `explain`, `init` and config discovery (FR-25); v0.3 added `plan` and `sync` for every target (the `fly` aliases were removed in 0.4.0); v0.4 added `check` and `doctor --env`; v0.5 added the rest (`login` replaced `session` without an alias).
 
-Since v0.2 (FR-20 to FR-27), in addition to the above:
-
-```text
-opv [--config <path>] status <environment> [--json]
-opv [--config <path>] fly plan <environment> [--json]
-opv [--config <path>] explain <product>/<key> [--env <environment>]
-opv [--config <path>] init <environment> --vault <name> --item <name> --fly-app <app> [--profile simple|fleet] [--force]
-opv [--config <path>] run <environment> -- <command>        # simple profile: no --product
-```
-
-In v0.2, `--json` is on `status`, `fly plan` and `config export`, and `status` and `fly plan` print text without it. Without `--config`, `secrets.toml` is found by walking up parent directories, and the resolved path is printed on stderr (FR-25). `doctor` ends with a "Next step" line (FR-22). `--verbose` and `--quiet` stay unimplemented.
-
-Since v0.3 (FR-28 to FR-33), in addition to the above:
-
-```text
-opv [--config <path>] plan <environment> [--json]
-opv [--config <path>] sync <environment> [--deploy] [--prune] [--rotate <product>/<key>] [--prune-immutable <product>/<key>]
-```
-
-`plan` and `sync` work for every target. `fly plan` and `fly sync` are deprecated aliases for one minor release. Removed in 0.4.0.
-
-There should be no generic `secret get` command in the initial release because printing raw values conflicts with the tool's primary safety goals.
+There is no generic `secret get` command, because printing raw values conflicts with the tool's primary safety goals.
 
 ---
 
@@ -1131,7 +1295,7 @@ Version 0.1 is acceptable when:
 9. Secret values do not appear in logs, debug output, CLI arguments, or temporary files.
 10. Core planning and security behavior has automated test coverage.
 11. A full fleet `fly sync` (§10) costs at most 4 1Password requests per environment.
-12. `status` reports missing, extra, wrong-kind and rule-failing keys for every product without printing values.
+12. `status` reports missing, extra and rule-failing keys for every product without printing values (a field of the other type is accepted, FR-14).
 13. An immutable key that differs from the target is reported and not staged unless `--rotate` names it.
 14. `config export` never emits a secret-kind field.
 
@@ -1142,7 +1306,7 @@ Version 0.2 is acceptable when, in addition to 1–14:
 17. `status --json` and `fly plan --json` carry `schema_version`, contain no value (checked by a test that plants known values and searches the output), and exit with the same codes as the text output.
 18. `opv explain` prints the reference, kind, Fly name, rules and guidance, and an `op item get` command without `--reveal`; it makes no 1Password or Fly call and emits no value or value fragment.
 19. `doctor` ends with a "Next step" line naming a safe command, and never prompts.
-20. `opv init` writes a `secrets.toml` with IDs, names and kinds only, refuses to overwrite without `--force`, writes nothing to 1Password, and no title lookup is reachable from `fly sync`, `fly plan`, `status` or `config export`.
+20. `opv init` writes a `secrets.toml` with IDs, names and kinds only, refuses to overwrite without `--force`, writes to 1Password only as FR-43 allows a signed-in person, and no title lookup is reachable from `fly sync`, `fly plan`, `status` or `config export`.
 21. `ensure_prefix` + `pattern` reproduce `transform = "signoz_ingestion_header"` exactly, and the alias still works with a deprecation warning.
 22. Without `--config`, `secrets.toml` is found in a parent directory and its path is printed on stderr; `--config` overrides; files are never merged.
 23. Items 9 and 10 hold for every new command and flag.
@@ -1221,6 +1385,8 @@ vault <name>-<environment>   item <name>   section <product>   field <KEY>
 ```
 
 One vault per environment is the isolation boundary: service accounts are granted whole vaults, not items. One item per environment keeps a release to one read (FR-13).
+
+Nobody has to lay this out by hand: reads are tolerant and a signed-in person's run tidies the item to this layout (FR-43).
 
 ## 10.2 Configuration
 

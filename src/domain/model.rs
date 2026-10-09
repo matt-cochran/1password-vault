@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::provider::TargetConfig;
 
 /// Field kind. In 1Password a concealed field is a secret and a text field is config (FR-14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -89,6 +90,21 @@ pub struct KeySpec {
     pub immutable: bool,
     #[serde(default)]
     pub guidance: String,
+    /// Shared key (FR-45): `"<product>/<KEY>"` (`"<KEY>"` under the simple profile) names
+    /// the key whose field holds the value, in the same environment's item. The key then has
+    /// no field of its own. Validated at load: see [`KeySpec::source`].
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+impl KeySpec {
+    /// The source `(product, key)` of a shared key (FR-45), or `None` for a key with its
+    /// own field. `"<KEY>"` (no `/`) is the simple profile's implicit product. Only
+    /// meaningful after `config` validated the reference.
+    pub fn source(&self) -> Option<(&str, &str)> {
+        let from = self.from.as_deref()?;
+        Some(from.split_once('/').unwrap_or((SIMPLE_PRODUCT, from)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -97,80 +113,94 @@ pub struct Product {
     pub keys: BTreeMap<String, KeySpec>,
 }
 
-/// The Fly.io target of one environment (§10.3). Optional: an environment used only for
-/// `run`, `config export` and `item skeleton` needs no Fly app.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlyTarget {
-    pub app: String,
-    /// Fly secret name template containing `{PRODUCT}` and `{KEY}`; defines the managed set (FR-8).
-    pub secret_name_template: String,
-}
-
-impl FlyTarget {
-    /// Fly secret name for `product`/`key`: `{PRODUCT}` becomes the upper-cased product with
-    /// `-` replaced by `_`, `{KEY}` becomes the key verbatim.
-    pub fn target_name(&self, product: &str, key: &str) -> String {
-        let product = product.to_ascii_uppercase().replace('-', "_");
-        self.secret_name_template
-            .replace("{PRODUCT}", &product)
-            .replace("{KEY}", key)
-    }
-}
-
-/// The deployment target of one environment (FR-12, FR-28). Target-neutral domain names;
-/// today the only variant is Fly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Fly(FlyTarget),
-}
-
-impl Target {
-    /// Short, user-facing target name (`"Fly"`).
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Fly(_) => "Fly",
-        }
-    }
-
-    /// Store name for `product`/`key` on this target.
-    pub fn target_name(&self, product: &str, key: &str) -> String {
-        match self {
-            Self::Fly(f) => f.target_name(product, key),
-        }
-    }
-}
-
 /// One deployment environment: one 1Password item (by IDs, FR-13) and, optionally, one
 /// deployment target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environment {
+    /// The environment's name in the configuration (for messages: `opv login <name>`).
+    pub name: String,
     pub vault_id: String,
     pub item_id: String,
-    /// The deployment target (FR-28): `None` when the environment declares none.
-    pub target: Option<Target>,
+    /// The deployment target (FR-28, FR-37): `None` when the environment declares none.
+    pub target: Option<Box<dyn TargetConfig>>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
+    /// `confirm_env = true`: `sync` refuses without `--confirm <env>` (NR-20).
+    pub confirm_env: bool,
+    /// The 1Password account every `op` call for this environment uses (FR-40): a sign-in
+    /// address or account ID. `None`: op's default (or the service account in CI).
+    pub account: Option<String>,
+    /// The item holding this environment's least-privilege deploy identity (FR-40), read
+    /// by `status`, `plan` and `sync` to sign the target CLI in for the run only.
+    pub deploy_credentials: Option<ItemRef>,
+}
+
+/// An `op://<vault>/<item>` reference to a whole item, by IDs or names (FR-40).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemRef {
+    pub vault: String,
+    pub item: String,
+}
+
+impl std::fmt::Display for ItemRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "op://{}/{}", self.vault, self.item)
+    }
+}
+
+impl ItemRef {
+    /// Parse `op://<vault>/<item>`: exactly a vault and an item, each non-empty, unpadded,
+    /// free of control characters and not starting with `-` (safe as an argument). A field,
+    /// a query (`?attribute=`) or any other form is refused with the reason.
+    pub fn parse(s: &str) -> Result<Self, &'static str> {
+        let rest = s
+            .strip_prefix("op://")
+            .ok_or("must be an op://<vault>/<item> reference")?;
+        if rest.contains('?') {
+            return Err("must name an item, without a query (op://<vault>/<item>)");
+        }
+        let parts: Vec<&str> = rest.split('/').collect();
+        let [vault, item] = parts.as_slice() else {
+            return Err("must name exactly a vault and an item (op://<vault>/<item>), not a field");
+        };
+        for part in [vault, item] {
+            if part.is_empty() {
+                return Err("needs a non-empty vault and item (op://<vault>/<item>)");
+            }
+            if part.trim() != *part {
+                return Err("has leading or trailing whitespace in the vault or item");
+            }
+            if part.starts_with('-') || part.chars().any(char::is_control) {
+                return Err("vault and item may not start with - or hold control characters");
+            }
+        }
+        Ok(Self {
+            vault: (*vault).to_string(),
+            item: (*item).to_string(),
+        })
+    }
 }
 
 impl Environment {
     /// The environment's deployment target, or `None` when it has none.
-    pub fn target(&self) -> Option<&Target> {
-        self.target.as_ref()
+    pub fn target(&self) -> Option<&dyn TargetConfig> {
+        self.target.as_deref()
     }
 
-    /// Store name for `product`/`key`, or `None` when the environment has no target.
+    /// Target name (the runtime env var name) for `product`/`key`, or `None` when the
+    /// environment has no target.
     pub fn target_name(&self, product: &str, key: &str) -> Option<String> {
-        self.target().map(|t| t.target_name(product, key))
+        self.target().map(|t| t.env_name(product, key))
     }
 }
 
 /// Which `profile.kind` the configuration declared (§10.2, FR-20).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Profile {
-    /// Products with sections in the item and a Fly name template (§10.2). The default.
+    /// Products with sections in the item and a target name template (§10.2). The default.
     #[default]
     Fleet,
-    /// A flat `[keys]` map (FR-20): unsectioned item fields, Fly name = key name.
+    /// A flat `[keys]` map (FR-20): unsectioned item fields, target name = key name.
     Simple,
 }
 
@@ -180,7 +210,7 @@ pub enum Profile {
 /// [`key_label`].
 pub const SIMPLE_PRODUCT: &str = "";
 
-/// Fly name template of a simple-profile environment: the key name itself (FR-20).
+/// Target name template of a simple-profile environment: the key name itself (FR-20).
 pub const SIMPLE_TEMPLATE: &str = "{KEY}";
 
 /// The user-facing name of `product`/`key`: `product/KEY` under the fleet profile, `KEY`
@@ -197,13 +227,36 @@ pub fn key_label(product: &str, key: &str) -> String {
 ///
 /// A simple-profile file (FR-20) is desugared into the same model: one product named
 /// [`SIMPLE_PRODUCT`] holding every key, unsectioned item fields (section
-/// [`SIMPLE_PRODUCT`]), and a Fly template of [`SIMPLE_TEMPLATE`], so the planner, rules,
+/// [`SIMPLE_PRODUCT`]), and a target name template of [`SIMPLE_TEMPLATE`], so the planner, rules,
 /// stage-and-compare and prune logic are shared unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fleet {
     pub environments: BTreeMap<String, Environment>,
     pub products: BTreeMap<String, Product>,
     pub profile: Profile,
+    /// Where the configuration was read from, for wording only (FR-44).
+    pub origin: Origin,
+}
+
+/// Where a configuration was read from (FR-44). Wording only: the plan id and every other
+/// result depend on what the configuration says, never on where it lives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// A `secrets.toml` (or `--config`) file.
+    #[default]
+    File,
+    /// A project manifest in 1Password.
+    Manifest,
+}
+
+impl Origin {
+    /// How messages name it: `secrets.toml` or `the manifest`.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Origin::File => "secrets.toml",
+            Origin::Manifest => "the manifest",
+        }
+    }
 }
 
 impl Fleet {
@@ -213,45 +266,70 @@ impl Fleet {
     }
 
     /// Look up an environment by a (possibly user-supplied) name.
+    ///
+    /// An unknown name suggests the closest defined one, and the `Next:` step is a read-only
+    /// command for it (`status`, or `doctor --env` for an environment without a target), or
+    /// the `status` overview when nothing is close (H10).
     pub fn environment(&self, env: &str) -> Result<&Environment, Error> {
         self.environments.get(env).ok_or_else(|| {
             let known: Vec<&str> = self.environments.keys().map(String::as_str).collect();
-            Error::Config(format!(
-                "undefined environment {env:?} (defined: {})",
-                known.join(", ")
-            ))
+            let close = crate::app::suggest::close(env, known.iter().copied());
+            let (hint, next) = match close.first() {
+                Some(c) => (
+                    format!("; did you mean {c}?"),
+                    match self.environments.get(*c).and_then(|e| e.target()) {
+                        Some(_) => format!("opv status {c}"),
+                        None => format!("opv doctor --env {c}"),
+                    },
+                ),
+                None => (String::new(), "opv status".to_string()),
+            };
+            Error::Config(
+                format!(
+                    "undefined environment {env:?} (defined: {}){hint}",
+                    known.join(", ")
+                )
+                .into(),
+            )
+            .with_next(next)
+            .with_code(crate::error::Code::UnknownEnv)
         })
     }
 
-    /// The environment and its target; `Error::Config` naming the environment when it is
-    /// undefined or has no `fly` section (status, `fly plan`, `fly sync` need one).
-    pub fn target(&self, env: &str) -> Result<(&Environment, &Target), Error> {
-        let e = self.environment(env)?;
-        match &e.target {
-            Some(t) => Ok((e, t)),
-            None if self.is_simple() => Err(Error::Config(format!(
-                "environment {env:?} has no deployment target. For local settings use opv check {env} and opv run {env} -- <command>. To deploy, configure fly.app first."
-            ))),
-            None => Err(Error::Config(format!(
-                "environment {env:?} has no deployment target. For local settings use opv check {env} --product <name> and opv run {env} --product <name> -- <command>. To deploy, configure fly.app and fly.secret_name first."
-            ))),
-        }
+    /// The declared keys of `product` that are sources of shared keys (FR-45): each
+    /// `(source product, source key)` a key of `product` reads its value from. Empty for an
+    /// undeclared product.
+    pub fn sources_of(&self, product: &str) -> std::collections::BTreeSet<(String, String)> {
+        self.products
+            .get(product)
+            .into_iter()
+            .flat_map(|p| p.keys.values())
+            .filter_map(KeySpec::source)
+            .map(|(p, k)| (p.to_string(), k.to_string()))
+            .collect()
     }
 
-    /// Store name for `product`/`key` in `env`; `Error::Config` if `env` is undefined
-    /// or has no target.
-    pub fn try_target_name(&self, env: &str, product: &str, key: &str) -> Result<String, Error> {
-        Ok(self.target(env)?.1.target_name(product, key))
+    /// The keys declared for `env_name` that share the value of `product`/`key` (FR-45), as
+    /// `(product, key)`.
+    pub fn shared_by(&self, env_name: &str, product: &str, key: &str) -> Vec<(String, String)> {
+        self.products
+            .iter()
+            .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
+            .filter(|(_, _, s)| {
+                s.source() == Some((product, key)) && s.environments.iter().any(|e| e == env_name)
+            })
+            .map(|(p, k, _)| (p.clone(), k.clone()))
+            .collect()
     }
 
-    /// Store name for `product`/`key` in `env`.
+    /// Target name (runtime env var name) for `product`/`key` in `env`.
     ///
     /// # Panics
     /// If `env` is not a defined environment with a target. Callers resolve it first.
     pub fn target_name(&self, env: &str, product: &str, key: &str) -> String {
-        match self.environments.get(env).and_then(|e| e.target.as_ref()) {
-            Some(t) => t.target_name(product, key),
-            None => panic!("fly_name: environment {env:?} undefined or without fly"),
+        match self.environments.get(env).and_then(|e| e.target()) {
+            Some(t) => t.env_name(product, key),
+            None => panic!("target_name: environment {env:?} undefined or without a target"),
         }
     }
 }
@@ -259,34 +337,6 @@ impl Fleet {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn target_name_normalizes_product() {
-        let e = Environment {
-            vault_id: "v".into(),
-            item_id: "i".into(),
-            target: Some(Target::Fly(FlyTarget {
-                app: "a".into(),
-                secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
-            })),
-            modes: BTreeMap::new(),
-        };
-        assert_eq!(
-            e.target_name("my-app", "API_KEY").as_deref(),
-            Some("FLEET__MY_APP__API_KEY")
-        );
-        let no_fly = Environment { target: None, ..e };
-        assert_eq!(no_fly.target_name("my-app", "API_KEY"), None);
-    }
-
-    #[test]
-    fn simple_template_renders_the_key_name_itself() {
-        let t = FlyTarget {
-            app: "a".into(),
-            secret_name_template: SIMPLE_TEMPLATE.into(),
-        };
-        assert_eq!(t.target_name(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
-    }
 
     #[test]
     fn key_label_hides_the_implicit_product() {

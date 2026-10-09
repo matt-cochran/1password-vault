@@ -55,11 +55,29 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// `opv setup` found no recipe (P3): never a dead end. It offers `init` for an existing
+/// item, the generic recipe (docs/guided-setup.md) with the exact command that uses it, and
+/// `--recipe` for a recipe kept elsewhere.
+pub fn missing(start: &Path) -> Error {
+    Error::Config(
+        format!(
+            "this project has no setup recipe: no opv.setup.toml in {} or any parent directory.\n  \
+             New project?  copy the generic recipe from {}/guided-setup.md into opv.setup.toml \
+             (names and instructions only, never values), then run: opv setup\n  \
+             Recipe kept elsewhere?  opv setup --recipe <path>",
+            start.display(),
+            crate::DOCS_URL
+        )
+        .into(),
+    )
+    .with_next("opv init <env> --vault <vault title> --item <item title>")
+}
+
 impl Recipe {
     pub fn parse(text: &str) -> Result<Self, Error> {
         // Do not repeat input: a mistaken value in a recipe is still private.
         let recipe: Self = toml::from_str(text).map_err(|_| Error::Config(
-            "[SETUP-RECIPE] The setup recipe is not valid. Use the documented recipe format; values belong in 1Password, not this file.".into()
+            "The setup recipe is not valid. Use the documented recipe format; values belong in 1Password, not this file.".into()
         ))?;
         if recipe.fields.is_empty()
             || recipe.title.trim().is_empty()
@@ -67,8 +85,7 @@ impl Recipe {
             || recipe.item.trim().is_empty()
         {
             return Err(Error::Config(
-                "[SETUP-RECIPE] Give the recipe a title, vault, item, and at least one setting."
-                    .into(),
+                "Give the recipe a title, vault, item, and at least one setting.".into(),
             ));
         }
         let fleet = recipe.fields.iter().any(|f| f.product.is_some());
@@ -81,7 +98,7 @@ impl Recipe {
                 .len()
                 > 1
         {
-            return Err(Error::Config("[SETUP-RECIPE] Import a legacy file for one product at a time. A shared variable must not be copied into several products automatically.".into()));
+            return Err(Error::Config("Import a legacy file for one product at a time. A shared variable must not be copied into several products automatically.".into()));
         }
         let mut seen = BTreeSet::new();
         for f in &recipe.fields {
@@ -91,7 +108,7 @@ impl Recipe {
                 || f.product.is_some() != fleet
                 || !seen.insert((f.product.clone(), f.key.clone()))
             {
-                return Err(Error::Config("[SETUP-RECIPE] Each setting needs a unique key, a plain-language title, a reason and a source. Use product names on every setting or none.".into()));
+                return Err(Error::Config("Each setting needs a unique key, a plain-language title, a reason and a source. Use product names on every setting or none.".into()));
             }
         }
         // Reuse all normal name, rules, context-key and configuration validation.
@@ -203,5 +220,26 @@ mod tests {
     #[test]
     fn inherited_authentication_keys_cannot_be_declared() {
         assert!(Recipe::parse(&text().replace("API_KEY", "OP_SESSION")).is_err());
+    }
+
+    /// P3: no recipe is not a dead end; init is offered for an existing item.
+    #[test]
+    fn missing_recipe_offers_init_for_an_existing_item() {
+        let e = missing(Path::new("/project"));
+        assert_eq!(
+            e.next_step(),
+            Some("opv init <env> --vault <vault title> --item <item title>"),
+            "{e}"
+        );
+    }
+
+    /// P3: and the generic recipe with the exact command that uses it.
+    #[test]
+    fn missing_recipe_offers_the_generic_recipe_and_its_command() {
+        let e = missing(Path::new("/project")).to_string();
+        assert!(
+            e.contains("guided-setup.md into opv.setup.toml") && e.contains("then run: opv setup"),
+            "{e}"
+        );
     }
 }

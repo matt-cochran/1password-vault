@@ -110,6 +110,14 @@ copyFileSync(join(opvPackageDir, 'bin', 'opv.js'), shim);
 chmodSync(shim, 0o755);
 copyFileSync(join(opvPackageDir, 'README.md'), join(outDir, 'opv', 'README.md'));
 
+// The postinstall/preuninstall scripts are part of the published main package, so
+// they ship next to `bin/` and the shim can require them (`../install.js`).
+for (const script of ['install.js', 'uninstall.js']) {
+  const destination = join(outDir, 'opv', script);
+  copyFileSync(join(opvPackageDir, script), destination);
+  chmodSync(destination, 0o755);
+}
+
 // One package per platform, each carrying its prebuilt binary.
 const platformPackage = JSON.parse(readFileSync(platformTemplate, 'utf8'));
 for (const entry of TARGETS) {

@@ -12,7 +12,7 @@ use crate::app::testutil::{
 };
 use crate::app::{config_export, run as run_cmd, status, sync};
 use crate::runner::Output;
-use crate::runner::fake::FakeRunner;
+use crate::runner::fake::{FakeRunner, failed_read};
 
 const VAULT_ID: &str = "vaultid01";
 const ITEM_ID: &str = "itemid01";
@@ -38,10 +38,16 @@ fn args(profile: Option<Profile>, force: bool) -> InitArgs {
         env: "staging".into(),
         vault: "myapp-staging".into(),
         item: "myapp".into(),
-        fly_app: Some("myapp-staging".into()),
+        target: None,
+        fields: fly("myapp-staging"),
         profile,
         force,
     }
+}
+
+/// The Fly provider's `--fly-app` option.
+fn fly(app: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([("fly-app".to_string(), app.to_string())])
 }
 
 fn v(s: &str) -> String {
@@ -167,12 +173,12 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
     let path = dir.path().join(FILE_NAME);
     assert!(
         out.contains(&format!(
-            "wrote {} (simple profile): 2 secret, 1 config, skipped 0",
+            "wrote {} (simple profile, fly target): 2 secret, 1 config, skipped 0",
             path.display()
         )),
         "{out}"
     );
-    assert!(out.ends_with("Next step: opv plan staging\n"), "{out}");
+    assert!(out.ends_with("Next: opv plan staging\n"), "{out}");
     assert!(out.contains(VAULT_ID) && out.contains(ITEM_ID), "{out}");
 }
 
@@ -208,7 +214,7 @@ fn sectioned_item_writes_a_fleet_file_that_the_loader_accepts() {
     );
     assert!(
         run.out
-            .contains("(fleet profile): 2 secret, 1 config, skipped 0"),
+            .contains("(fleet profile, fly target): 2 secret, 1 config, skipped 0"),
         "{}",
         run.out
     );
@@ -223,11 +229,11 @@ fn mixed_item_fails_naming_both_shapes_and_writes_nothing() {
     assert_eq!(e.exit_code(), 2, "{e}");
     let m = e.to_string();
     assert!(
-        m.contains("3 unsectioned field(s) (the simple profile shape)"),
+        m.contains("3 unsectioned fields (the simple profile shape)"),
         "{m}"
     );
     assert!(
-        m.contains("3 sectioned field(s) (the fleet profile shape)"),
+        m.contains("3 sectioned fields (the fleet profile shape)"),
         "{m}"
     );
     assert!(m.contains("--profile simple or --profile fleet"), "{m}");
@@ -250,7 +256,7 @@ fn mixed_item_with_profile_simple_keeps_unsectioned_and_notes_the_rest() {
     let out = &run.out;
     assert!(
         out.contains(
-            "note: ignored 3 sectioned field(s) under --profile simple: \"api\"/\"OPENAI_API_KEY\""
+            "note: ignored 3 sectioned fields under --profile simple: \"api\"/\"OPENAI_API_KEY\""
         ),
         "{out}"
     );
@@ -271,9 +277,7 @@ fn mixed_item_with_profile_fleet_keeps_sections_and_notes_the_rest() {
     );
     let out = &run.out;
     assert!(
-        out.contains(
-            "note: ignored 3 unsectioned field(s) under --profile fleet: \"DATABASE_URL\""
-        ),
+        out.contains("note: ignored 3 unsectioned fields under --profile fleet: \"DATABASE_URL\""),
         "{out}"
     );
     assert!(out.contains("2 secret, 1 config, skipped 3"), "{out}");
@@ -296,6 +300,23 @@ fn no_matching_vault_lists_candidates_and_reads_nothing_more() {
     assert!(m.contains("\"Private\" (othervault)"), "{m}");
     assert_eq!(argvs(&run.r).len(), 1);
     assert!(run.file.is_none());
+}
+
+/// Found live: when opv may not create a missing vault, the person is told to create it
+/// (the bare step re-ran a command that could not succeed).
+#[test]
+fn a_vault_opv_may_not_create_asks_the_person_to_create_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(None, false);
+    a.vault = "myapp-prod".into();
+    let run = run_in(dir.path(), &a, vec![vaults()]);
+    assert_eq!(
+        run.err().action(),
+        Some(
+            "create the vault \"myapp-prod\" in 1Password (opv creates it only for a person \
+             signed in with their own account), then re-run"
+        )
+    );
 }
 
 #[test]
@@ -410,24 +431,19 @@ fn invalid_section_names_are_skipped_by_name() {
     assert!(!run.file().contains("TOKEN") && !run.file().contains("[products.my"));
     assert!(
         run.out
-            .contains("note: skipped section \"My App\" (1 field(s)): not a valid product name"),
+            .contains("note: skipped section \"My App\" (1 field): not a valid product name"),
         "{}",
         run.out
     );
 }
 
 #[test]
-fn duplicate_field_is_an_error_and_nothing_is_written() {
+fn duplicate_field_is_declared_once() {
+    // FR-43: a label given twice is read tolerantly, never an error.
     let mut fs_ = simple_fields();
     fs_.push(text("", "LOG_LEVEL", &v("debug")));
-    let (dir, run) = init_with(&fs_, &args(None, false));
-    assert_eq!(run.err().exit_code(), 4);
-    assert!(
-        run.err()
-            .to_string()
-            .contains("duplicate field \"LOG_LEVEL\"")
-    );
-    assert!(dir_entries(dir.path()).is_empty());
+    let (_dir, run) = init_with(&fs_, &args(None, false));
+    assert_eq!(run.file().matches("[keys.LOG_LEVEL]").count(), 1);
 }
 
 #[test]
@@ -441,7 +457,7 @@ fn bad_fly_app_or_env_name_fails_before_any_call() {
     ] {
         let mut a = args(None, false);
         a.env = env.into();
-        a.fly_app = Some(app.into());
+        a.fields = fly(app);
         let run = run_in(dir.path(), &a, vec![]);
         assert_eq!(run.err().exit_code(), 2, "{env} {app}");
         assert!(run.r.calls.borrow().is_empty());
@@ -453,12 +469,12 @@ fn bad_fly_app_or_env_name_fails_before_any_call() {
 fn bad_fly_app_error_quotes_the_app_name() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = args(None, false);
-    a.fly_app = Some("my app".into());
+    a.fields = fly("my app");
     let run = run_in(dir.path(), &a, vec![]);
     assert!(
         run.err()
             .to_string()
-            .contains("--fly-app \"my app\" must match"),
+            .contains("fly.app \"my app\" must match"),
         "{}",
         run.err()
     );
@@ -471,11 +487,9 @@ fn op_failure_goes_through_diagnosis() {
     let run = run_in(
         dir.path(),
         &args(None, false),
-        vec![
-            Output::failure(1),
-            Output::failure(1),
-            Output::success(b"[{}]".to_vec()),
-        ],
+        failed_read(1)
+            .chain([Output::failure(1), Output::success(b"[{}]".to_vec())])
+            .collect(),
     );
     assert_eq!(run.err().exit_code(), 7, "{}", run.err());
     assert!(run.err().to_string().contains("not signed in to 1Password"));
@@ -695,7 +709,7 @@ fn wrong_type_in_a_skipped_section_is_noted_as_rejected() {
     // The valid field in the skipped section has no per-field note, only the section one.
     assert!(!out.contains("\"My App\"/\"KEY\""), "{out}");
     assert!(
-        out.contains("skipped section \"My App\" (2 field(s))"),
+        out.contains("skipped section \"My App\" (2 fields)"),
         "{out}"
     );
 }
@@ -718,7 +732,7 @@ fn wrong_type_note_uses_the_rejection_wording() {
 
 /// The readers reject a label given twice whatever the field types, so init does too.
 #[test]
-fn duplicates_are_found_across_skipped_types_and_sections() {
+fn duplicates_never_fail_init() {
     let bad = json!({"id": "s", "label": "My App"});
     let cases: Vec<(Vec<serde_json::Value>, &str)> = vec![
         (
@@ -741,12 +755,10 @@ fn duplicates_are_found_across_skipped_types_and_sections() {
             "duplicate field \"TOKEN\"",
         ),
     ];
-    for (fields, want) in cases {
-        let (dir, run) = init_raw(fields, &args(None, false));
-        let e = run.err();
-        assert_eq!(e.exit_code(), 4, "{e}");
-        assert!(e.to_string().contains(want), "{e}");
-        assert!(dir_entries(dir.path()).is_empty());
+    // FR-43: duplicates are read tolerantly; init writes the file.
+    for (fields, _was) in cases {
+        let (_dir, run) = init_raw(fields, &args(None, false));
+        assert!(run.res.is_ok(), "{:?}", run.res);
     }
 }
 
@@ -812,7 +824,7 @@ fn no_ancestor_note_without_an_ancestor_file() {
 #[test]
 fn targetless_init_writes_no_fly_section() {
     let mut a = args(None, false);
-    a.fly_app = None;
+    a.fields.clear();
     let (_dir, run) = init_with(&simple_fields(), &a);
     assert!(!run.file().contains("fly."));
 }
@@ -820,7 +832,512 @@ fn targetless_init_writes_no_fly_section() {
 #[test]
 fn targetless_fleet_init_points_to_product_check() {
     let mut a = args(None, false);
-    a.fly_app = None;
+    a.fields.clear();
     let (_dir, run) = init_with(&fleet_fields(), &a);
-    assert!(run.out.contains("opv check staging --product <product>"));
+    assert!(run.out.contains("Next: opv doctor --env staging\n"));
+}
+
+/// Review #16: with one product, the next step names it instead of a placeholder.
+#[test]
+fn targetless_single_product_init_names_the_product() {
+    let mut a = args(None, false);
+    a.fields.clear();
+    let one: Vec<Field> = fleet_fields()
+        .into_iter()
+        .filter(|f| f.0 == "api")
+        .collect();
+    let (_dir, run) = init_with(&one, &a);
+    assert!(
+        run.out.contains("opv check staging --product api"),
+        "{}",
+        run.out
+    );
+}
+
+/// Review #16, #17: the rules reference is a URL a binary install can open.
+#[test]
+fn init_points_to_the_rules_reference_url() {
+    let (_dir, run) = init_with(&fleet_fields(), &args(None, false));
+    assert!(
+        run.out.contains("configuration.md#rules-reference"),
+        "{}",
+        run.out
+    );
+}
+
+// H3: `init --target <provider>` with the provider's own options, through the plug-in
+// contract.
+
+const GUID: &str = "00000000-0000-0000-0000-0000000000ab";
+
+fn with_target(target: Option<&str>, opts: &[(&str, &str)]) -> InitArgs {
+    let mut a = args(None, false);
+    a.target = target.map(String::from);
+    a.fields = opts
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    a
+}
+
+fn azure_opts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("azure-subscription", GUID),
+        ("azure-key-vault", "kv-myapp"),
+        ("azure-resource-group", "rg-myapp"),
+        ("azure-container-app", "myapp"),
+    ]
+}
+
+fn kubernetes_opts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("kubernetes-context", "kind-dev"),
+        ("kubernetes-namespace", "myapp"),
+        ("kubernetes-deployment", "web"),
+    ]
+}
+
+/// The provider section of the written file's environment, as loaded.
+fn loaded_target(dir: &Path) -> &'static str {
+    let fleet = config::load(dir.join(FILE_NAME)).unwrap();
+    fleet.environments["staging"]
+        .target
+        .as_ref()
+        .map_or("none", |t| t.provider().section())
+}
+
+#[test]
+fn fly_target_by_option_writes_a_file_that_loads() {
+    let (dir, _run) = init_with(
+        &fleet_fields(),
+        &with_target(Some("fly"), &[("fly-app", "a")]),
+    );
+    assert_eq!(loaded_target(dir.path()), "fly");
+}
+
+#[test]
+fn azure_target_writes_a_fleet_file_that_loads() {
+    let (dir, _run) = init_with(&fleet_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert_eq!(loaded_target(dir.path()), "azure");
+}
+
+#[test]
+fn azure_target_writes_a_simple_file_that_loads() {
+    let (dir, _run) = init_with(&simple_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert_eq!(loaded_target(dir.path()), "azure");
+}
+
+#[test]
+fn kubernetes_target_writes_a_fleet_file_that_loads() {
+    let (dir, _run) = init_with(
+        &fleet_fields(),
+        &with_target(Some("kubernetes"), &kubernetes_opts()),
+    );
+    assert_eq!(loaded_target(dir.path()), "kubernetes");
+}
+
+#[test]
+fn kubernetes_target_writes_a_simple_file_that_loads() {
+    let (dir, _run) = init_with(
+        &simple_fields(),
+        &with_target(Some("kubernetes"), &kubernetes_opts()),
+    );
+    assert_eq!(loaded_target(dir.path()), "kubernetes");
+}
+
+#[test]
+fn the_target_is_inferred_from_its_options() {
+    let (dir, _run) = init_with(&fleet_fields(), &with_target(None, &kubernetes_opts()));
+    assert_eq!(loaded_target(dir.path()), "kubernetes");
+}
+
+#[test]
+fn azure_identity_defaults_to_system() {
+    let (_dir, run) = init_with(&fleet_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert!(
+        run.file().contains("azure.identity = \"system\"\n"),
+        "{}",
+        run.file()
+    );
+}
+
+#[test]
+fn optional_options_are_written() {
+    let mut opts = kubernetes_opts();
+    opts.push(("kubernetes-container", "app"));
+    let (_dir, run) = init_with(&fleet_fields(), &with_target(Some("kubernetes"), &opts));
+    assert!(
+        run.file().contains("kubernetes.container = \"app\"\n"),
+        "{}",
+        run.file()
+    );
+}
+
+#[test]
+fn a_missing_required_option_is_refused_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(
+        dir.path(),
+        &with_target(Some("azure"), &azure_opts()[..3]),
+        vec![],
+    );
+    assert!(
+        run.err().to_string().contains("--azure-container-app"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn options_of_two_providers_without_target_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = kubernetes_opts();
+    opts.push(("fly-app", "a"));
+    let run = run_in(dir.path(), &with_target(None, &opts), vec![]);
+    assert!(
+        run.err().to_string().contains("pass --target"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn an_option_of_another_provider_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = kubernetes_opts();
+    opts.push(("fly-app", "a"));
+    let run = run_in(dir.path(), &with_target(Some("kubernetes"), &opts), vec![]);
+    assert!(
+        run.err()
+            .to_string()
+            .contains("--fly-app is an option of --target fly"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn an_invalid_option_value_is_refused_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = azure_opts();
+    opts[0] = ("azure-subscription", "not-a-guid");
+    let run = run_in(dir.path(), &with_target(Some("azure"), &opts), vec![]);
+    assert!(run.r.calls.borrow().is_empty());
+}
+
+#[test]
+fn an_unknown_target_is_refused_listing_the_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(dir.path(), &with_target(Some("heroku"), &[]), vec![]);
+    assert!(run.err().to_string().contains("known: "), "{}", run.err());
+}
+
+#[test]
+fn a_target_refusal_points_at_the_init_help() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(dir.path(), &with_target(Some("azure"), &[]), vec![]);
+    assert_eq!(run.err().next_step(), Some("opv init --help"));
+}
+
+// H2: `init <env> --add-env` adds one environment to an existing file.
+
+const EXISTING: &str = "# Fleet config; values live in 1Password.\n[profile]\nkind = \"fleet\"\n\n\
+[environments.prod]   # live\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\n\
+# api\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.api.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]  # going away\n";
+
+struct AddEnv {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+    res: Result<(), Error>,
+    out: String,
+    r: FakeRunner,
+}
+
+impl AddEnv {
+    fn text(&self) -> String {
+        fs::read_to_string(&self.path).unwrap()
+    }
+    fn fleet(&self) -> crate::domain::Fleet {
+        config::parse(&self.text()).unwrap()
+    }
+}
+
+fn add_env_with(file: &str, a: &InitArgs, fields: &[Field]) -> AddEnv {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    fs::write(&path, file).unwrap();
+    let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
+    let mut out = Vec::new();
+    let store = crate::config_store::FileStore { path: path.clone() };
+    let res = add_env(a, &store, &r, &mut out);
+    let run = AddEnv {
+        _dir: dir,
+        path,
+        res,
+        out: text_of(&out),
+        r,
+    };
+    assert_no_values(&run.text());
+    assert_no_values(&run.out);
+    assert_no_values_in_argv(&run.r);
+    run
+}
+
+fn staging() -> InitArgs {
+    let mut a = args(None, false);
+    a.fields.clear();
+    a
+}
+
+#[test]
+fn add_env_keeps_every_comment() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let text = run.text();
+    let comments: Vec<&str> = EXISTING.lines().filter(|l| l.contains('#')).collect();
+    assert!(comments.iter().all(|c| text.contains(c)), "{text}");
+}
+
+#[test]
+fn add_env_writes_the_environment_with_its_ids() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let env = &run.fleet().environments["staging"];
+    assert_eq!(
+        (env.vault_id.as_str(), env.item_id.as_str()),
+        (VAULT_ID, ITEM_ID)
+    );
+}
+
+#[test]
+fn add_env_includes_the_keys_the_item_has() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
+        vec!["prod", "staging"]
+    );
+}
+
+#[test]
+fn add_env_leaves_out_the_keys_the_item_lacks() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["api"].keys["LEGACY_TOKEN"].environments,
+        vec!["prod"]
+    );
+}
+
+#[test]
+fn add_env_names_the_item_fields_not_declared() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert!(
+        run.out
+            .contains("in the item but not declared: api/SIGNUP_POLICY, web-app/SESSION_KEY"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn add_env_writes_the_target_options() {
+    let mut a = staging();
+    a.fields = fly("myapp-staging");
+    let run = add_env_with(EXISTING, &a, &fleet_fields());
+    assert!(run.fleet().environments["staging"].target.is_some());
+}
+
+#[test]
+fn add_env_refuses_an_existing_environment_before_any_call() {
+    let mut a = staging();
+    a.env = "prod".into();
+    let run = add_env_with(EXISTING, &a, &fleet_fields());
+    assert!(run.r.calls.borrow().is_empty() && run.res.is_err());
+}
+
+#[test]
+fn add_env_without_a_target_points_at_check() {
+    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    assert!(
+        run.out.ends_with("Next: opv check staging --product api\n"),
+        "{}",
+        run.out
+    );
+}
+
+// --- init --add-env on a manifest (FR-44): the same edit through ConfigStore ---
+
+/// Manifest calls (`item get <manifest>`, `item edit`) and the identity probe (`whoami`) go
+/// to the stateful fake; the item lookups `init` makes go to the scripted one.
+struct Split<'a> {
+    op: &'a crate::adapters::fake_op::FakeOp,
+    rest: &'a FakeRunner,
+    manifest: String,
+}
+
+impl Split<'_> {
+    fn to_op(&self, call: &crate::runner::Call) -> bool {
+        call.args.contains(&self.manifest.as_str())
+            || call.args.starts_with(&["item", "edit"])
+            || call.args.starts_with(&["whoami"])
+    }
+}
+
+impl CommandRunner for Split<'_> {
+    fn read(
+        &self,
+        call: &crate::runner::Call,
+        refused: &[i32],
+    ) -> std::io::Result<crate::runner::Outcome> {
+        if self.to_op(call) {
+            self.op.read(call, refused)
+        } else {
+            self.rest.read(call, refused)
+        }
+    }
+    fn write(&self, call: &crate::runner::Call) -> std::io::Result<crate::runner::Outcome> {
+        if self.to_op(call) {
+            self.op.write(call)
+        } else {
+            self.rest.write(call)
+        }
+    }
+    fn probe(
+        &self,
+        call: &crate::runner::Call,
+        limit: std::time::Duration,
+    ) -> std::io::Result<Output> {
+        if self.to_op(call) {
+            self.op.probe(call, limit)
+        } else {
+            self.rest.probe(call, limit)
+        }
+    }
+    fn pause(&self, _: std::time::Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> std::io::Result<i32> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// `init --add-env` against a manifest holding `body`; returns the manifest's text after.
+fn add_env_to_manifest(body: &str, a: &InitArgs) -> (Result<(), Error>, String, String) {
+    use crate::adapters::onepassword_manifest::{Row, VaultRef, template};
+    use crate::config_store::{Found, ManifestStore, Matched, manifest_title};
+    let op = crate::adapters::fake_op::FakeOp::default();
+    let id = op.insert(
+        "myapp-dev",
+        template(&manifest_title("myapp"), "myapp", &[], body),
+    );
+    let row = Row {
+        id: id.clone(),
+        title: manifest_title("myapp"),
+        tags: Vec::new(),
+        version: 1,
+        vault: VaultRef {
+            id: "vdev0000000000000000000001".into(),
+            name: "myapp-dev".into(),
+        },
+    };
+    let found = Found::Manifest(ManifestStore::from_row(&row, None, Matched::Given));
+    let rest = FakeRunner::new(vec![vaults(), items(), item(&fleet_fields())]);
+    let r = Split {
+        op: &op,
+        rest: &rest,
+        manifest: id,
+    };
+    let mut out = Vec::new();
+    let res = add_env(a, found.store(), &r, &mut out);
+    let text = found.store().read(&op).unwrap().text;
+    assert_no_values(&text);
+    assert_no_values(&text_of(&out));
+    (res, text, text_of(&out))
+}
+
+#[test]
+fn add_env_on_a_manifest_saves_the_environment_in_it() {
+    let (res, text, _) = add_env_to_manifest(EXISTING, &staging());
+    res.unwrap();
+    assert!(
+        config::parse(&text)
+            .unwrap()
+            .environments
+            .contains_key("staging"),
+        "{text}"
+    );
+}
+
+#[test]
+fn add_env_on_a_manifest_keeps_its_comments() {
+    let (res, text, _) = add_env_to_manifest(EXISTING, &staging());
+    res.unwrap();
+    assert!(text.contains("# going away"), "{text}");
+}
+
+#[test]
+fn add_env_on_a_manifest_refuses_an_existing_environment_naming_config_edit() {
+    let mut a = staging();
+    a.env = "prod".into();
+    let (res, _, _) = add_env_to_manifest(EXISTING, &a);
+    assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
+}
+
+// ---- A5: `init --json` ----
+
+fn init_json(fields: &[Field], a: &InitArgs) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
+    let mut out = Vec::new();
+    let res = run_as(a, dir.path(), &r, &mut out, true);
+    let framed = crate::app::json_tests::framed(&out, &res, "opv init staging --json");
+    // The temp directory differs per run and per platform.
+    let framed = crate::app::json_tests::without_dir(&framed, dir.path());
+    (dir, framed)
+}
+
+#[test]
+fn init_json_success_golden() {
+    let (_dir, out) = init_json(&fleet_fields(), &args(None, false));
+    crate::app::json_tests::golden("init_success", &out);
+}
+
+#[test]
+fn init_json_refusal_golden() {
+    let mut a = args(None, false);
+    a.vault = "no-such-vault".into();
+    let (_dir, out) = init_json(&fleet_fields(), &a);
+    crate::app::json_tests::golden("init_unknown_vault", &out);
+}
+
+// ---- M6: `--add-env` and shared keys (FR-45) ----
+
+const SHARED: &str = "[profile]\nkind = \"fleet\"\n\n\
+[environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\n\
+[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.api.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.worker.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"api/OPENAI_API_KEY\"\n\n\
+[products.worker.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"api/LEGACY_TOKEN\"\n";
+
+#[test]
+fn add_env_adds_a_shared_key_with_its_source() {
+    let run = add_env_with(SHARED, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["worker"].keys["OPENAI_API_KEY"].environments,
+        vec!["prod", "staging"]
+    );
+}
+
+#[test]
+fn add_env_leaves_out_a_shared_key_whose_source_is_absent() {
+    let run = add_env_with(SHARED, &staging(), &fleet_fields());
+    assert_eq!(
+        run.fleet().products["worker"].keys["LEGACY_TOKEN"].environments,
+        vec!["prod"]
+    );
+}
+
+#[test]
+fn add_env_saves_despite_a_stray_field_for_a_shared_key() {
+    let mut fields = fleet_fields();
+    fields.push(secret("worker", "LEGACY_TOKEN", &v("stray")));
+    let run = add_env_with(SHARED, &staging(), &fields);
+    assert!(run.res.is_ok(), "{:?}", run.res);
 }

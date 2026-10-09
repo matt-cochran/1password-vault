@@ -1,6 +1,6 @@
 [package]
 name = "opv"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 # let-chains (`if let ... && let ...`) are stable from 1.88.
 rust-version = "1.88"
@@ -18,18 +18,48 @@ exclude = ["spike/", ".delivery/", ".github/", "packaging/", "docs/assets/"]
 fake = []
 
 [dependencies]
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env", "string"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1"
+# Edits secrets.toml in place for `add` and `init --add-env`, keeping comments and order.
+toml_edit = "0.25"
 secrecy = "0.10"
 zeroize = "1"
 thiserror = "2"
 base64 = "0.23"
 hex = "0.4"
 regex = "1"
+sha2 = "0.10"
+subtle = "2"
+# Random Kubernetes Secret version ids (FR-38, SR-1); already in the tree via tempfile.
+getrandom = "0.4"
 rpassword = "7.5"
+clap_complete = "4.6"
+
+[target.'cfg(unix)'.dependencies]
+# SIGINT/SIGTERM/SIGHUP/SIGQUIT forwarding to the running CLI (NR-12); libc is already in
+# the tree.
+signal-hook = "0.3"
+libc = "0.2"
+# Azure deploy credentials (FR-40, SR-4): statfs (RAM-backed check), file owner and the
+# liveness of the run that left a stale directory. Already in the tree via tempfile.
+rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+# Azure value hand-off and private az directory on native Windows (FR-40, SR-3, SR-4): a
+# user-only named pipe and ACL. Already in the tree (rustix, errno).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"
-sha2 = "0.10"

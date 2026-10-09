@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 fn refused() -> Error {
-    Error::Config("[SETUP-IMPORT] This settings file is not a supported literal .env file. Nothing was imported. opv never executes shell commands or expands variables; use quoted literal assignments or fill the missing setting privately in 1Password.".into())
+    Error::Config("This settings file is not a supported literal .env file. Nothing was imported. opv never executes shell commands or expands variables; use quoted literal assignments or fill the missing setting privately in 1Password.".into())
 }
 
 pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {

@@ -1,13 +1,14 @@
 $ op item get iprd --vault vprd --format json
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
+$ flyctl status --app mcproductlabs-portfolio-production --json
+$ flyctl releases --app mcproductlabs-portfolio-production --json
 $ flyctl secrets import --app mcproductlabs-portfolio-production --stage
 <stdin 147 bytes sha256=7e9f5f1b9b76e55cb886a49a06722f4a22ca268b9ad04fee94623adb7191af79>
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
 --- stdout
-2 to stage, 0 held (immutable), 0 to prune
-staged: 2 changed, 0 unchanged
-  changed: FLEET__ALLUMATA__INTEGRATION_ENC_KEY
-  changed: FLEET__ALLUMATA__OPENAI_API_KEY
-staged changes not deployed (no --deploy)
+written: allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+pending deploy (pass --deploy): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY), allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+summary: written 2 · unchanged 0 · held 0 · deployed no · pending 2 · pruned 0 · kept 0 · skipped 1
+Next: opv sync prod --deploy
 --- result
 Ok(())

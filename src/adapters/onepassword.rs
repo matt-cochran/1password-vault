@@ -4,14 +4,18 @@
 //!   call per environment, by ID only (FR-13). It returns the fields that live inside a
 //!   section, typed by field type (FR-14: CONCEALED = secret, STRING = config), plus the raw
 //!   item JSON so that [`write_skeleton`] needs no second read.
+//! - The item read is diagnosed after its first failed attempt, before any retry (P16):
+//!   it is retried only when the identity is signed in and can open the vault.
 //! - A failed `op` call is diagnosed with [`diagnose`] (FR-26): `op whoami`, then
 //!   `op account list` when it fails (both free under rate limits; never a second item
 //!   read; own 15 s limit). Not signed in, with no service-account or Connect credential
 //!   set, is `Auth` (exit 7) with the sign-in step for the detected shell
 //!   ([`crate::host`]); a set credential that fails whoami is `Source` (exit 4, ambiguous:
 //!   rejected or unreachable); signed in is `Source` (exit 4) naming the IDs and the
-//!   identity type. The host is detected only on failure. Only `user_type` is parsed from `whoami`, and only the entry count from
-//!   `account list`; identity is never printed or kept.
+//!   identity type. The host is detected only on failure. For diagnosis only `user_type` is
+//!   parsed from `whoami`, and only the entry count from `account list`; identity is never
+//!   printed or kept. [`account`] parses `account_uuid` and the sign-in host, identifiers
+//!   only, to build 1Password's private item link ([`item_link`], H1).
 //! - [`write_skeleton`] (FR-19, the only write) pipes the full current item, with the missing
 //!   sections and empty fields appended, to `op item edit <item_id> --vault <vault_id>
 //!   --format json` on stdin. This is the invocation the D0 spike proved (attempt 1). A
@@ -19,8 +23,10 @@
 //!
 //! Secrecy (SR-1, SR-3, SR-4, SR-8):
 //! - Nothing but IDs and fixed words goes in argv; the template goes on stdin; no files.
-//! - Child stderr is never read (`ProcessRunner` sends it to `Stdio::null()`), and no error
-//!   built here includes child output or serde_json's own messages (they can quote values).
+//! - Child stderr is held in memory by the runner and shown only scrubbed, on failure or
+//!   with `--verbose` (NR-31); every item read registers its field values with the
+//!   scrubber. No error built here includes child output or serde_json's own messages
+//!   (they can quote values).
 //! - Values are deserialized straight into [`SecretValue`] (zeroized on drop). The raw JSON
 //!   is kept in a `Zeroizing` buffer and never printed (`Item`'s `Debug` shows its length).
 //!
@@ -36,6 +42,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
@@ -45,11 +52,13 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT, key_label};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
-use crate::error::Error;
-use crate::host::{Host, OpCredential, Platform, Tool};
-use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
+use crate::error::{Code, Error};
+use crate::host::{Host, OP_CLI, OpCredential, Platform};
+use crate::runner::{
+    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
+};
 
-const OP: &str = "op";
+pub(crate) const OP: &str = "op";
 
 /// The result of one whole-item read.
 ///
@@ -57,20 +66,42 @@ const OP: &str = "op";
 /// [`write_skeleton`] uses only the raw JSON kept inside.
 pub struct Item {
     pub fields: Vec<ItemField>,
+    /// The item's `version` integer (bumped by 1Password on every edit), when `op` reports
+    /// it: an input of the plan id (FR-41). Never derived from a value.
+    pub version: Option<u64>,
     raw: Zeroizing<Vec<u8>>,
+}
+
+impl Item {
+    /// The item JSON exactly as `op` returned it (holds values; never print it).
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// An item from the JSON an `op item edit` printed (the item as written): no parsed
+    /// fields, its version read from the JSON.
+    pub(crate) fn from_raw(raw: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            fields: Vec::new(),
+            version: item_version(&raw),
+            raw,
+        }
+    }
 }
 
 impl fmt::Debug for Item {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Item")
             .field("fields", &self.fields)
+            .field("version", &self.version)
             .field("raw_len", &self.raw.len())
             .finish()
     }
 }
 
 /// The identity `op` is signed in as: its type only, from `op whoami`'s `user_type`
-/// field. Identity details (email, account URL, UUIDs) are never parsed or kept (SR-1).
+/// field. Identity details (email, user UUID) are never parsed or kept (SR-1); the account
+/// UUID and sign-in host are parsed only by [`account`], for a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityType {
     User,
@@ -115,7 +146,10 @@ pub enum Session {
 /// `user_type` is parsed; from `account list` only the number of entries. `op` missing is
 /// `Err(Dependency)` with the install hint. `host` is called only when needed.
 pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Session, Error> {
-    let who = match r.probe(OP, &["whoami", "--format", "json"], PROBE_TIMEOUT) {
+    let who = match r.probe(
+        &Call::new(OP, &["whoami", "--format", "json"]),
+        PROBE_TIMEOUT,
+    ) {
         Ok(o) => o,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(op_missing(&host())),
         Err(_) => return Ok(Session::Unknown),
@@ -131,30 +165,59 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
         return Ok(Session::NotSignedIn);
     }
     Ok(
-        match r.probe(OP, &["account", "list", "--format", "json"], PROBE_TIMEOUT) {
+        match r.probe(
+            &Call::new(OP, &["account", "list", "--format", "json"]),
+            PROBE_TIMEOUT,
+        ) {
             Ok(o) if o.status == 0 && account_count(&o.stdout) == Some(0) => Session::NoAccount,
             _ => Session::NotSignedIn,
         },
     )
 }
 
+/// Limit for [`wake`]: long enough for a person to approve the 1Password app's prompt.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Ask the 1Password app to authorize this terminal: `op whoami` never does, so with the
+/// app integration it reports "not signed in" until some other command has been approved.
+/// One `op vault list --format json` probe (exit status only; its output names vaults and
+/// is dropped unread, SR-1); `true` when it succeeded. Never an item read (FR-13).
+pub fn wake(r: &dyn CommandRunner) -> bool {
+    let ok = r
+        .probe(
+            &Call::new(OP, &["vault", "list", "--format", "json"]),
+            APPROVAL_TIMEOUT,
+        )
+        .is_ok_and(|o| o.status == 0);
+    if !ok {
+        // Its stderr must not attach to the error the caller reports (NR-31).
+        let _ = crate::runner::take_failure_excerpt();
+    }
+    ok
+}
+
 /// `user_type` from `op whoami --format json`, nothing else. Unknown fields (identity) are
-/// skipped by serde without being kept.
+/// skipped by serde without being kept. With the 1Password app integration, `whoami` has
+/// no `user_type`; a `user_uuid` (checked for presence only, never kept) then means a person,
+/// since a service account always reports `SERVICE_ACCOUNT`.
 fn identity_type(stdout: &[u8]) -> IdentityType {
     #[derive(Deserialize)]
     struct Who {
         #[serde(default)]
         user_type: Option<String>,
+        #[serde(default)]
+        user_uuid: Option<de::IgnoredAny>,
     }
-    let t = serde_json::from_slice::<Who>(stdout)
-        .ok()
-        .and_then(|w| w.user_type)
-        .filter(|t| {
-            !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
-        });
+    let Ok(w) = serde_json::from_slice::<Who>(stdout) else {
+        return IdentityType::Unknown;
+    };
+    let t = w.user_type.filter(|t| {
+        !t.is_empty() && t.len() <= 32 && t.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+    });
     match t.as_deref() {
         Some("SERVICE_ACCOUNT") => IdentityType::ServiceAccount,
         Some(_) => IdentityType::User,
+        None if w.user_uuid.is_some() => IdentityType::User,
         None => IdentityType::Unknown,
     }
 }
@@ -170,6 +233,95 @@ fn account_count(stdout: &[u8]) -> Option<usize> {
         .map(|v| v.len())
 }
 
+/// The 1Password account a private item link opens in (H1): `account_uuid` and the
+/// sign-in host from `op whoami`. Both are identifiers, not secrets, and are used only to
+/// build an `open:` link for the person who is already signed in; no email or user id is
+/// parsed (SR-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    uuid: String,
+    host: Option<String>,
+}
+
+/// The signed-in account from one `op whoami --format json` probe, or `None` when it fails
+/// or names no well-formed account (the link is then built without it). Never an item
+/// read (FR-13).
+pub fn account(r: &dyn CommandRunner) -> Option<Account> {
+    let who = r
+        .probe(
+            &Call::new(OP, &["whoami", "--format", "json"]),
+            PROBE_TIMEOUT,
+        )
+        .ok()?;
+    if who.status != 0 {
+        // A link without the account is still useful; this probe's stderr must not
+        // attach to the command's own result (NR-31).
+        let _ = crate::runner::take_failure_excerpt();
+        return None;
+    }
+    parse_account(&who.stdout)
+}
+
+/// `account_uuid` and the host of `url`, each checked against a strict character set so
+/// nothing but an identifier can reach a link.
+fn parse_account(stdout: &[u8]) -> Option<Account> {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        account_uuid: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+    }
+    let w = serde_json::from_slice::<Who>(stdout).ok()?;
+    let uuid = w.account_uuid.filter(|u| {
+        !u.is_empty() && u.len() <= 64 && u.bytes().all(|b| b.is_ascii_alphanumeric())
+    })?;
+    let host = w.url.and_then(|u| {
+        let h = u
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        (!h.is_empty()
+            && h.len() <= 253
+            && h.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'))
+        .then_some(h)
+    });
+    Some(Account { uuid, host })
+}
+
+/// 1Password's private item link, the form "Copy Private Link" produces:
+/// `https://start.1password.com/open/i?a=<account>&v=<vault>&i=<item>&h=<host>`. It opens
+/// the item in the 1Password app or web, the only place a value is typed. 1Password links
+/// to items, not to single fields, so callers name the section and field next to it. IDs
+/// only, never a value.
+pub fn item_link(account: Option<&Account>, vault_id: &str, item_id: &str) -> String {
+    let mut q = Vec::new();
+    if let Some(a) = account {
+        q.push(format!("a={}", a.uuid));
+    }
+    q.push(format!("v={}", url_part(vault_id)));
+    q.push(format!("i={}", url_part(item_id)));
+    if let Some(h) = account.and_then(|a| a.host.as_deref()) {
+        q.push(format!("h={h}"));
+    }
+    format!("https://start.1password.com/open/i?{}", q.join("&"))
+}
+
+/// Percent-encode everything but unreserved characters (IDs are alphanumeric in practice).
+fn url_part(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
 /// The remediation for a session that is not usable, or `None` for `SignedIn` / `Unknown`.
 /// `failed` names what failed first, if anything before `op whoami` (e.g. `op item get
 /// failed (exit 1)`). Text only, never a prompt (FR-9); never asks for a secret anywhere
@@ -180,7 +332,12 @@ fn account_count(stdout: &[u8]) -> Option<usize> {
 ///   CI.
 /// - `CredentialFailed`: [`Error::Source`] (exit 4, the pre-FR-26 category, FR-10): the
 ///   token was rejected or 1Password could not be reached; no interactive command.
-pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Option<Error> {
+pub fn session_error(
+    session: Session,
+    host: &Host,
+    failed: Option<&str>,
+    env: Option<&str>,
+) -> Option<Error> {
     let ctx = match failed {
         Some(f) => format!("{f}; op whoami failed"),
         None => "op whoami failed".to_string(),
@@ -188,43 +345,52 @@ pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Opt
     let ci_token = "set OP_SERVICE_ACCOUNT_TOKEN to a service account token that can read \
                     the vault (as a CI secret, never in the repository)";
     let network = "if you are signed in, check network access to 1Password";
-    let m = match session {
-        Session::SignedIn(_) | Session::Unknown => return None,
-        Session::CredentialFailed(c) => {
-            return Some(Error::Source(format!(
+    let m =
+        match session {
+            Session::SignedIn(_) | Session::Unknown => return None,
+            Session::CredentialFailed(c) => {
+                return Some(Error::Source(format!(
                 "{ctx}\n  1Password rejected the {} token or could not be reached: check the \
                  token in {} and network access",
                 c.label(),
                 c.var()
-            )));
-        }
-        Session::NotSignedIn => match host.signin_line("sign in") {
-            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-            Some(step) => format!(
-                "not signed in to 1Password ({ctx})\n  {step}\n  (a session from op signin \
-                 expires after 30 minutes idle; with the desktop app integration, unlock the \
-                 1Password app instead)\n  {network}"
-            ),
-        },
-        Session::NoAccount => match host.signin_line("then sign in") {
-            None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
-            Some(step) => {
-                let wsl = if host.platform == Platform::Wsl {
-                    " (op in WSL does not share the Windows app's accounts)"
-                } else {
-                    ""
-                };
-                format!(
-                    "no 1Password account is set up for op on this machine{wsl} ({ctx} \
+            ).into()));
+            }
+            Session::NotSignedIn => match host.signin_line("sign in", env) {
+                None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+                Some(step) => {
+                    // op in WSL cannot use the Windows app, so only other platforms name it.
+                    let app = if host.platform == Platform::Wsl {
+                        ""
+                    } else {
+                        "\n  or use the 1Password app: Settings > Developer > Integrate with \
+                         1Password CLI, then unlock the app and approve its prompt"
+                    };
+                    format!(
+                        "not signed in to 1Password ({ctx})\n  {step}{app}\n  (a 1Password CLI \
+                         session expires after 30 minutes idle)\n  {network}"
+                    )
+                }
+            },
+            Session::NoAccount => match host.signin_line("then sign in", env) {
+                None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+                Some(step) => {
+                    let wsl = if host.platform == Platform::Wsl {
+                        " (op in WSL does not share the Windows app's accounts)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "no 1Password account is set up for op on this machine{wsl} ({ctx} \
                      and op account list is empty)\n  add one: op account \
                      add --address <sign-in address> --email <email>\n  {step}\n  \
                      type the Secret Key and password only at op's prompts, never into chat, \
                      tickets or files"
-                )
-            }
-        },
-    };
-    Some(Error::Auth(format!("{m}\n  then run opv again")))
+                    )
+                }
+            },
+        };
+    Some(Error::Auth(format!("{m}\n  then run opv again").into()).with_code(Code::OpNotSignedIn))
 }
 
 /// After a failed `op` call: diagnose the session and return the error to report. Not
@@ -239,20 +405,120 @@ pub(crate) fn failed_op_error(
     failed: &str,
     grant: &str,
 ) -> Error {
+    failed_op_error_as(r, env, host, failed, grant, false)
+}
+
+/// [`failed_op_error`] for a read or (`write`) a write. For a write whose session cannot be
+/// diagnosed, the change may or may not have happened: `Error::Unknown` (exit 9, NR-2).
+pub(crate) fn failed_op_error_as(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+    grant: &str,
+    write: bool,
+) -> Error {
+    // The probes explain the failed call; its excerpt stays with the error (NR-31).
+    crate::runner::diagnosing(|| failed_op_session_error(r, env, host, failed, grant, write))
+}
+
+fn failed_op_session_error(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    host: &dyn Fn() -> Host,
+    failed: &str,
+    grant: &str,
+    write: bool,
+) -> Error {
     let session = match diagnose(r, host) {
         Ok(s) => s,
         Err(e) => return e,
     };
     match session {
-        Session::SignedIn(t) => Error::Source(format!(
-            "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not \
-             available to this identity\n  next: {grant} (vault {}), or check vault_id and \
-             item_id in the configuration",
-            env.item_id, env.vault_id, env.vault_id
-        )),
-        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env))),
-        s => session_error(s, &host(), Some(failed)).expect("every other session is an error"),
+        Session::SignedIn(t) if !write => item_unavailable(r, env, failed, t, grant),
+        Session::SignedIn(t) => Error::Source(not_available(env, failed, t, grant).into()),
+        Session::Unknown if write => Error::Unknown(
+            format!(
+                "{failed}; the item may or may not have been changed{}, then re-run",
+                rerun_hint(env)
+            )
+            .into(),
+        ),
+        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env)).into()),
+        s => session_error(s, &host(), Some(failed), Some(env.name.as_str()))
+            .expect("every other session is an error"),
     }
+}
+
+/// A signed-in item read failed (NR-26): one `op vault get <vault_id>` probe (exit status
+/// only; its output names the vault and is dropped unread, SR-1) tells removed vault access
+/// from an item that was moved, archived or deleted. IDs only, never a title (FR-13).
+fn item_unavailable(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    failed: &str,
+    t: IdentityType,
+    grant: &str,
+) -> Error {
+    unavailable_for(env, failed, t, grant, vault_access(r, env))
+}
+
+/// `op vault get <vault_id>`: `Some(true)` when the vault is readable, `Some(false)` when
+/// this identity cannot access it, `None` when the probe could not run. Exit status only;
+/// its output names the vault and is dropped unread (SR-1).
+fn vault_access(r: &dyn CommandRunner, env: &Environment) -> Option<bool> {
+    r.probe(
+        &Call::new(
+            OP,
+            &["vault", "get", env.vault_id.as_str(), "--format", "json"],
+        ),
+        PROBE_TIMEOUT,
+    )
+    .ok()
+    .map(|o| o.status == 0)
+}
+
+/// The signed-in item-read error for a known vault probe result (NR-26).
+fn unavailable_for(
+    env: &Environment,
+    failed: &str,
+    t: IdentityType,
+    grant: &str,
+    vault_readable: Option<bool>,
+) -> Error {
+    let (item, vault) = (&env.item_id, &env.vault_id);
+    let code = match vault_readable {
+        Some(true) => Code::ItemNotFound,
+        Some(false) => Code::VaultNoAccess,
+        None => Code::SourceError,
+    };
+    Error::Source(
+        match vault_readable {
+            Some(true) => format!(
+                "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
+             (moved, archived or deleted?)\n  next: check item_id in secrets.toml, then \
+             `{OP} item get {item} --vault {vault}`"
+            ),
+            Some(false) => format!(
+                "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
+             {vault}\n  next: {grant} (vault {vault}), or check vault_id in secrets.toml, \
+             then `{OP} vault get {vault}`"
+            ),
+            None => not_available(env, failed, t, grant),
+        }
+        .into(),
+    )
+    .with_code(code)
+}
+
+/// A signed-in failure whose cause is not known: access or the IDs.
+fn not_available(env: &Environment, failed: &str, t: IdentityType, grant: &str) -> String {
+    format!(
+        "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not available to \
+         this identity\n  next: {grant} (vault {}), or check vault_id and item_id in the \
+         configuration",
+        env.item_id, env.vault_id, env.vault_id
+    )
 }
 
 /// Read the environment's item once, by vault ID and item ID (FR-13). See the module docs.
@@ -283,6 +549,47 @@ pub fn read_item_in_sections(
     sections: &BTreeSet<String>,
 ) -> Result<Item, Error> {
     read_profile_on(r, env, profile, Some(sections), &Host::detect)
+}
+
+/// The environment's one item read (FR-13) with no field parsing: the tolerant reader
+/// ([`super::onepassword_tidy`], FR-43) parses the raw JSON itself. `fields` is empty.
+pub fn read_whole(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
+    read_whole_as(r, env, false)
+}
+
+/// `op`'s global flag that bypasses its local cache (op 2.x; `OP_CACHE=false` is the same
+/// setting as an environment variable). `op` caches item reads by default on UNIX-like
+/// systems, so a read that feeds a write must not be served from that cache, or the write
+/// would put stale values over a newer edit (FR-43, FR-44). Accepted (and a no-op) on
+/// Windows, where op documents the flag but keeps no cache.
+pub const NO_CACHE: &str = "--cache=false";
+
+/// [`read_whole`] straight from 1Password, bypassing `op`'s local cache ([`NO_CACHE`]):
+/// every read a 1Password write is built from or checked against (the tidy, `item
+/// skeleton`).
+pub fn read_whole_fresh(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
+    read_whole_as(r, env, true)
+}
+
+fn read_whole_as(r: &dyn CommandRunner, env: &Environment, fresh: bool) -> Result<Item, Error> {
+    let mut args = vec![
+        "item",
+        "get",
+        env.item_id.as_str(),
+        "--vault",
+        env.vault_id.as_str(),
+        "--format",
+        "json",
+    ];
+    if fresh {
+        args.push(NO_CACHE);
+    }
+    let raw = read_diagnosed(r, env, &args, &Host::detect)?;
+    Ok(Item {
+        fields: Vec::new(),
+        version: item_version(&raw),
+        raw,
+    })
 }
 
 /// [`read_item`] on a given host (tests). A non-zero exit is diagnosed with
@@ -319,24 +626,240 @@ fn read_profile_on(
         "--format",
         "json",
     ];
-    let Output { status, stdout } = run_op(r, &args, None, host)?;
-    if status != 0 {
-        return Err(failed_op_error(
-            r,
-            env,
-            host,
-            &format!("op item get failed (exit {status})"),
-            "grant this identity access to the vault",
-        ));
-    }
+    let stdout = read_diagnosed(r, env, &args, host)?;
     let fields = match profile {
         Profile::Fleet => parse_fields(&stdout, sections)?,
         Profile::Simple => parse_unsectioned_fields(&stdout)?,
     };
     Ok(Item {
         fields,
+        version: item_version(&stdout),
         raw: stdout,
     })
+}
+
+/// Read a `deploy_credentials` item once (FR-40), by the IDs or names in `reference`, and
+/// return exactly the conventional `fields`, keyed by label, as [`SecretValue`]s. Each must
+/// appear once (in any section), with its kind's field type (concealed = secret, text =
+/// config, FR-14) and a value; every other field is skipped unread. Errors name the
+/// reference and the field, never a value (SR-1). `env` names the environment in the
+/// sign-in step (`opv login <env>`) when 1Password is signed out.
+pub fn read_deploy_credentials(
+    r: &dyn CommandRunner,
+    reference: &crate::domain::ItemRef,
+    fields: &[crate::provider::CredentialField],
+    env: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
+    read_deploy_credentials_on(r, reference, fields, env, &Host::detect)
+}
+
+fn read_deploy_credentials_on(
+    r: &dyn CommandRunner,
+    reference: &crate::domain::ItemRef,
+    fields: &[crate::provider::CredentialField],
+    env: Option<&str>,
+    host: &dyn Fn() -> Host,
+) -> Result<std::collections::BTreeMap<String, SecretValue>, Error> {
+    let args = [
+        "item",
+        "get",
+        reference.item.as_str(),
+        "--vault",
+        reference.vault.as_str(),
+        "--format",
+        "json",
+    ];
+    // A failure is diagnosed at once, as for the environment's item: a signed-out user is
+    // told to sign in without blind retries; signed in, the read is retried (with backoff)
+    // before it is reported.
+    let call = Call::new(OP, &args);
+    let first = match r
+        .read(&call, &ANY_FAILURE)
+        .map_err(|e| op_spawn_error(&e, host))?
+    {
+        Outcome::Done(o) => {
+            crate::scrub::register_item_values(&o.stdout);
+            o
+        }
+        Outcome::Refused(o) => o,
+        Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
+    };
+    let Output { stdout, .. } = if first.status == 0 {
+        first
+    } else {
+        let failed = |status: i32| {
+            format!(
+                "cannot read deploy credentials {reference} (op item get failed ({}))",
+                status_text(status)
+            )
+        };
+        // The probes explain the failed read; its excerpt stays with the error (NR-31).
+        match crate::runner::diagnosing(|| diagnose(r, host))? {
+            Session::SignedIn(_) | Session::Unknown => {}
+            s => {
+                return Err(session_error(s, &host(), Some(&failed(first.status)), env)
+                    .expect("every other session is an error"));
+            }
+        }
+        let again = read_op(r, &args, host)?;
+        if again.status != 0 {
+            return Err(Error::Source(
+                format!(
+                    "{}; nothing was changed\n  next: check deploy_credentials in \
+                     secrets.toml and that this identity can read that item: {OP} item get \
+                     \"{}\" --vault \"{}\"",
+                    failed(again.status),
+                    reference.item,
+                    reference.vault
+                )
+                .into(),
+            ));
+        }
+        again
+    };
+    let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| json_error(&e))?;
+    let mut found: std::collections::BTreeMap<String, SecretValue> = Default::default();
+    for f in raw.fields {
+        let Some(want) = fields.iter().find(|w| w.label == f.label) else {
+            continue;
+        };
+        let expected = match want.kind {
+            Kind::Secret => "CONCEALED",
+            Kind::Config => "STRING",
+        };
+        if f.ty != expected {
+            return Err(Error::Source(
+                format!(
+                    "deploy credentials {reference}: field {} must be a {} field; nothing was \
+                 changed\n  next: change its type in 1Password, keeping the value",
+                    want.label,
+                    match want.kind {
+                        Kind::Secret => "Password (concealed)",
+                        Kind::Config => "Text",
+                    }
+                )
+                .into(),
+            ));
+        }
+        let value = f.value.map(|c| c.0).filter(|v| !v.expose().is_empty());
+        let Some(value) = value else {
+            return Err(Error::Source(
+                format!(
+                    "deploy credentials {reference}: field {} is empty; nothing was changed\n  \
+                 next: fill it in 1Password",
+                    want.label
+                )
+                .into(),
+            ));
+        };
+        if found.insert(want.label.to_string(), value).is_some() {
+            return Err(Error::Source(
+                format!(
+                    "deploy credentials {reference}: field {} appears more than once; nothing was \
+                 changed\n  next: keep one field with that name in the item",
+                    want.label
+                )
+                .into(),
+            ));
+        }
+    }
+    if let Some(missing) = fields.iter().find(|w| !found.contains_key(w.label)) {
+        return Err(Error::Source(
+            format!(
+                "deploy credentials {reference}: field {} is missing; nothing was changed\n  \
+             next: add it to the item as a {} field named {}",
+                missing.label,
+                match missing.kind {
+                    Kind::Secret => "Password (concealed)",
+                    Kind::Config => "Text",
+                },
+                missing.label
+            )
+            .into(),
+        ));
+    }
+    Ok(found)
+}
+
+/// Every non-zero exit status: the first item read is refused on any failure so that it
+/// is diagnosed before it is retried (P16).
+const ANY_FAILURE: [i32; 255] = {
+    let mut codes = [0; 255];
+    let mut i = 0;
+    while i < 255 {
+        codes[i] = i as i32 + 1;
+        i += 1;
+    }
+    codes
+};
+
+/// The environment's one item read (FR-13), diagnosed before it is retried (P16).
+///
+/// `op` exits 1 for "not signed in", "no access" and "not found" alike, so a failed first
+/// attempt is followed by the free diagnosis (`op whoami`, then `op vault get <vault_id>`)
+/// instead of the runner's blind retries. Only when that shows a signed-in identity that
+/// can read the vault (the failure may be transient) is the read retried, with the
+/// runner's usual attempts and backoff (NR-3); every other outcome is reported at once.
+/// A timed-out, killed or lost attempt is still retried by the runner itself, and one
+/// that never finished is the outage error (NR-28, exit 9).
+fn read_diagnosed(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    args: &[&str],
+    host: &dyn Fn() -> Host,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    const GRANT: &str = "grant this identity access to the vault";
+    let call = Call::new(OP, args);
+    let failed = |status: i32| format!("op item get failed ({})", status_text(status));
+    let status = match r
+        .read(&call, &ANY_FAILURE)
+        .map_err(|e| op_spawn_error(&e, host))?
+    {
+        Outcome::Done(o) => {
+            // Every item read registers its field values with the stderr scrubber (NR-31).
+            crate::scrub::register_item_values(&o.stdout);
+            return Ok(o.stdout);
+        }
+        Outcome::Refused(o) => o.status,
+        Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
+    };
+    // S2: op said the item (or vault) does not exist: not transient, so never retried.
+    let missing = crate::runner::last_failure_not_found();
+    // The probes explain the failed read; its excerpt stays with the error (NR-31). A
+    // retry below is a new call and owns its own excerpt.
+    let (t, readable) = crate::runner::diagnosing(|| -> Result<_, Error> {
+        let t = match diagnose(r, host)? {
+            Session::SignedIn(t) => t,
+            Session::Unknown => {
+                return Err(Error::Source(
+                    format!("{}{}", failed(status), rerun_hint(env)).into(),
+                ));
+            }
+            s => {
+                return Err(
+                    session_error(s, &host(), Some(&failed(status)), Some(&env.name))
+                        .expect("every other session is an error"),
+                );
+            }
+        };
+        let readable = vault_access(r, env);
+        if readable != Some(true) {
+            return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
+        }
+        if missing {
+            return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
+        }
+        Ok((t, readable))
+    })?;
+    r.note(&format!(
+        "{} failed; signed in with access to vault {}, so retrying",
+        call.step(),
+        env.vault_id
+    ));
+    match read_op(r, args, host)? {
+        Output { status: 0, stdout } => Ok(stdout),
+        Output { status, .. } => Err(unavailable_for(env, &failed(status), t, GRANT, readable)),
+    }
 }
 
 /// Add the `missing` (section label, field label, kind) entries to the item as empty fields
@@ -344,12 +867,13 @@ fn read_profile_on(
 /// existing section and field is sent back unchanged. Exactly one `op item edit` call, or
 /// none when `missing` is empty. An entry that already exists in the item, or is listed
 /// twice, is a `Source` error and nothing is written: skeleton never modifies a field.
+/// Returns the version of the item as written, when the edit printed one (I5).
 pub fn write_skeleton(
     r: &dyn CommandRunner,
     env: &Environment,
     item: &Item,
     missing: &[(String, String, Kind)],
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     write_skeleton_on(r, env, item, missing, &Host::detect)
 }
 
@@ -361,7 +885,7 @@ pub fn write_skeleton_with(
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &Host,
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     write_skeleton_on(r, env, item, missing, &|| *host)
 }
 
@@ -371,9 +895,9 @@ fn write_skeleton_on(
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &dyn Fn() -> Host,
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     if missing.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let mut doc = WipeOnDrop(serde_json::from_slice(&item.raw).map_err(|e| json_error(&e))?);
     add_missing(&mut doc.0, missing)?;
@@ -389,22 +913,45 @@ fn write_skeleton_on(
         "--format",
         "json",
     ];
-    // The edited item comes back on stdout (with values); it is dropped, zeroized, unread.
-    let out = run_op(r, &args, Some(&template), host)?;
-    if out.status != 0 {
-        return Err(failed_op_error(
+    // The edited item comes back on stdout (with values); only its version is read (I5),
+    // then it is dropped and zeroized.
+    // A write (NR-2): never retried. A non-zero exit keeps the session diagnosis (a
+    // definite read-back for access and sign-in); anything else is an unknown outcome,
+    // which is safe to re-run because the skeleton only adds what is still missing.
+    let call = Call::new(OP, &args).with_stdin(Some(&template));
+    let status = match r.write(&call).map_err(|e| op_spawn_error(&e, host))? {
+        Outcome::Done(o) => return Ok(item_version(&o.stdout)),
+        Outcome::Refused(o) => o.status,
+        Outcome::Unknown {
+            status: Some(s), ..
+        } => s,
+        Outcome::Unknown { reason, .. } => {
+            return Err(Error::Unknown(
+                format!(
+                    "{}: {}; the item may or may not have been changed\n  next: re-run the \
+                 same command (it adds only the fields still missing)",
+                    call.step(),
+                    unknown_text(OP, reason)
+                )
+                .into(),
+            ));
+        }
+    };
+    if status != 0 {
+        return Err(failed_op_error_as(
             r,
             env,
             host,
-            &format!("op item edit failed (exit {})", out.status),
+            &format!("op item edit failed ({})", status_text(status)),
             "grant this identity write access to the vault",
+            true,
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Last resort (FR-26), used only when the session could not be diagnosed: a value-free
-/// command to re-run by hand, since `op`'s stderr is discarded (SR-1). IDs only; without
+/// command to re-run by hand (`op`'s stderr is shown only as a scrubbed excerpt). IDs only; without
 /// `--format json` and `--reveal`, `op` conceals secret fields. (`op item edit` cannot be
 /// re-run without its stdin, so the hint reads the item.)
 fn rerun_hint(env: &Environment) -> String {
@@ -416,37 +963,64 @@ fn rerun_hint(env: &Environment) -> String {
 
 /// `op` is not on PATH: a dependency error with the install hint for this platform.
 pub fn op_missing(host: &Host) -> Error {
-    Error::Dependency(format!(
-        "op CLI not found on PATH\n  {}",
-        host.install_hint(Tool::Op)
-    ))
+    Error::Dependency(format!("op CLI not found on PATH\n  {}", host.install_hint(OP_CLI)).into())
 }
 
-pub(crate) fn run_op(
+/// An `op` spawn error: missing binary (with the install hint) or another start failure.
+pub(crate) fn op_spawn_error(e: &io::Error, host: &dyn Fn() -> Host) -> Error {
+    match e.kind() {
+        io::ErrorKind::NotFound => op_missing(&host()),
+        io::ErrorKind::TimedOut => Error::Source(format!("op: {e}").into()),
+        kind => Error::Dependency(format!("failed to run op: {kind}").into()),
+    }
+}
+
+/// One `op` read (NR-3: retried by the runner). The returned output may carry a non-zero
+/// status (still failing after the last attempt): callers diagnose it (FR-26). A read that
+/// never finished after its retries is the outage error naming the step and 1Password's
+/// status page (NR-28, exit 9); nothing was changed.
+pub(crate) fn read_op(
     r: &dyn CommandRunner,
     args: &[&str],
-    stdin: Option<&[u8]>,
     host: &dyn Fn() -> Host,
 ) -> Result<Output, Error> {
-    r.run(OP, args, stdin, &[]).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => op_missing(&host()),
-        // The runner's own message names the program and the limit (no child output).
-        io::ErrorKind::TimedOut => {
-            let sub: Vec<&str> = args.iter().take(2).copied().collect();
-            Error::Source(format!("op {}: {e}", sub.join(" ")))
+    let call = Call::new(OP, args);
+    match r.read(&call, &[]).map_err(|e| op_spawn_error(&e, host))? {
+        Outcome::Done(o) => {
+            // Every item read in this run registers all its field values with the stderr
+            // scrubber (NR-31), the selected sections' or not.
+            if args.starts_with(&["item", "get"]) {
+                crate::scrub::register_item_values(&o.stdout);
+            }
+            Ok(o)
         }
-        kind => Error::Dependency(format!("failed to run op: {kind}")),
-    })
+        Outcome::Refused(o) => Ok(o),
+        Outcome::Unknown { .. } => Err(OP_CLI.outage(&call.step())),
+    }
 }
 
 /// serde_json's Display can quote input (values), so report only position and category.
 pub(crate) fn json_error(e: &serde_json::Error) -> Error {
-    Error::Source(format!(
-        "op returned malformed item JSON ({:?} error at line {}, column {})",
-        e.classify(),
-        e.line(),
-        e.column()
-    ))
+    Error::Source(
+        format!(
+            "op returned malformed item JSON ({:?} error at line {}, column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        )
+        .into(),
+    )
+}
+
+/// The item's top-level `version` integer, when present. Every other field is skipped
+/// unread (`IgnoredAny`), so no value is copied (SR-8).
+pub(crate) fn item_version(json: &[u8]) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Versioned {
+        #[serde(default)]
+        version: Option<u64>,
+    }
+    serde_json::from_slice::<Versioned>(json).ok()?.version
 }
 
 #[derive(Deserialize)]
@@ -514,37 +1088,35 @@ fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<Item
         let section = match section.label {
             Some(l) if !l.is_empty() => l,
             _ => {
-                return Err(Error::Source(format!(
-                    "field {} is in a section without a label",
-                    f.label
-                )));
+                return Err(Error::Source(
+                    format!("field {} is in a section without a label", f.label).into(),
+                ));
             }
         };
         if f.label.is_empty() {
-            return Err(Error::Source(format!(
-                "field without a label in section {section}"
-            )));
+            return Err(Error::Source(
+                format!("field without a label in section {section}").into(),
+            ));
         }
         let kind = match f.ty.as_str() {
             "CONCEALED" => Kind::Secret,
             "STRING" => Kind::Config,
             _ => {
-                return Err(Error::Source(format!(
-                    "unsupported field type on {section}/{}",
-                    f.label
-                )));
+                return Err(Error::Source(
+                    format!("unsupported field type on {section}/{}", f.label).into(),
+                ));
             }
         };
         if !seen.insert((section.clone(), f.label.clone())) {
-            return Err(Error::Source(format!(
-                "duplicate field {section}/{} in item",
-                f.label
-            )));
+            return Err(Error::Source(
+                format!("duplicate field {section}/{} in item", f.label).into(),
+            ));
         }
         out.push(ItemField {
             section,
             label: f.label,
             kind,
+            concealed: kind == Kind::Secret,
             // D0: an empty field has no `value` key at all.
             value: f
                 .value
@@ -577,22 +1149,21 @@ fn parse_unsectioned_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
             "CONCEALED" => Kind::Secret,
             "STRING" => Kind::Config,
             _ => {
-                return Err(Error::Source(format!(
-                    "unsupported field type on {}",
-                    f.label
-                )));
+                return Err(Error::Source(
+                    format!("unsupported field type on {}", f.label).into(),
+                ));
             }
         };
         if !seen.insert(f.label.clone()) {
-            return Err(Error::Source(format!(
-                "duplicate field {} in item",
-                f.label
-            )));
+            return Err(Error::Source(
+                format!("duplicate field {} in item", f.label).into(),
+            ));
         }
         out.push(ItemField {
             section: SIMPLE_PRODUCT.to_string(),
             label: f.label,
             kind,
+            concealed: kind == Kind::Secret,
             value: f
                 .value
                 .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
@@ -632,6 +1203,8 @@ impl Drop for WipeOnDrop {
     }
 }
 
+// Field creation. `missing` never holds a shared key (FR-45, `from = ...`): callers
+// filter them out (see `app::skeleton`), and any self-healing that creates fields must too.
 fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<(), Error> {
     let obj = doc
         .as_object_mut()
@@ -670,16 +1243,18 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
     let mut listed = BTreeSet::new();
     for (s, l, _) in missing {
         if existing.contains(&(s.clone(), l.clone())) {
-            return Err(Error::Source(format!(
-                "skeleton: {} already exists in the item; not modified",
-                key_label(s, l)
-            )));
+            return Err(Error::Source(
+                format!(
+                    "skeleton: {} already exists in the item; not modified",
+                    key_label(s, l)
+                )
+                .into(),
+            ));
         }
         if !listed.insert((s.clone(), l.clone())) {
-            return Err(Error::Source(format!(
-                "skeleton: {} listed twice",
-                key_label(s, l)
-            )));
+            return Err(Error::Source(
+                format!("skeleton: {} listed twice", key_label(s, l)).into(),
+            ));
         }
     }
 
@@ -724,7 +1299,9 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             .entry(key)
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| Error::Source(format!("op item JSON: `{key}` is not an array")))?;
+            .ok_or_else(|| {
+                Error::Source(format!("op item JSON: `{key}` is not an array").into())
+            })?;
         arr.extend(add);
     }
     Ok(())
@@ -765,7 +1342,6 @@ pub(crate) fn serialize_exact(v: &Value) -> Result<Zeroizing<Vec<u8>>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::io;
 
     use serde_json::{Value, json};
@@ -773,7 +1349,7 @@ mod tests {
     use super::*;
     use crate::host::FakeEnv;
     use crate::runner::Output;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     const GET_ARGS: [&str; 7] = ["item", "get", "istg", "--vault", "vstg", "--format", "json"];
     const EDIT_ARGS: [&str; 7] = [
@@ -799,13 +1375,15 @@ mod tests {
 
     fn test_env() -> Environment {
         Environment {
+            name: "staging".into(),
             vault_id: "vstg".into(),
             item_id: "istg".into(),
-            target: Some(crate::domain::Target::Fly(crate::domain::FlyTarget {
+            target: Some(Box::new(crate::adapters::fly::FlyTarget {
                 app: "fleet-staging".into(),
                 secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
+                profile: crate::domain::Profile::Fleet,
             })),
-            modes: BTreeMap::new(),
+            ..Default::default()
         }
     }
 
@@ -923,6 +1501,12 @@ mod tests {
             assert_eq!((k.kind, k.value.expose()), (Kind::Secret, "<v>"));
             assert_eq!(find(&item.fields, s, "BASE_URL").kind, Kind::Config);
         }
+    }
+
+    /// FR-41: the item's `version` integer is kept for the plan id.
+    #[test]
+    fn item_read_keeps_the_item_version() {
+        assert_eq!(read(allumata_item()).version, Some(7));
     }
 
     #[test]
@@ -1046,7 +1630,7 @@ mod tests {
     /// IDs and the identity type, with the grant instruction; never "to see why".
     #[test]
     fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
-        let r = FakeRunner::new([Output::failure(1), Output::success(WHOAMI_SA)]);
+        let r = signed_in_vault_ok_item_missing();
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         let m = match &e {
             Error::Source(m) => m.clone(),
@@ -1058,20 +1642,173 @@ mod tests {
             "{m}"
         );
         assert!(m.contains("SERVICE_ACCOUNT"), "{m}");
-        assert!(m.contains("item istg in vault vstg"), "{m}");
-        assert!(m.contains("grant this identity access to the vault"), "{m}");
+        assert!(m.contains("item istg not found in vault vstg"), "{m}");
         assert!(!m.contains("to see why"), "{m}");
         assert!(
             !m.contains("example.com") && !m.contains("OPHINTMARKER"),
             "{m}"
         );
+    }
+
+    fn vault_ok() -> Output {
+        Output::success(br#"{"id":"vstg","name":"OPHINTMARKER"}"#.to_vec())
+    }
+
+    /// The first read fails, whoami and the vault probe pass, every retry fails too.
+    fn signed_in_vault_ok_item_missing() -> FakeRunner {
+        FakeRunner::new(
+            std::iter::once(Output::failure(1))
+                .chain([Output::success(WHOAMI_SA), vault_ok()])
+                .chain(failed_read(1)),
+        )
+    }
+
+    fn item_reads(r: &FakeRunner) -> usize {
+        argvs(r).iter().filter(|a| a.starts_with("op item")).count()
+    }
+
+    /// P16: a failed first read is diagnosed before any retry.
+    #[test]
+    fn failed_read_is_diagnosed_before_it_is_retried() {
+        let r = signed_in_vault_ok_item_missing();
+        let _ = read_item_with(&r, &test_env(), &linux());
         assert_eq!(
-            argvs(&r),
-            vec![
+            argvs(&r)[..4],
+            [
                 "op item get istg --vault vstg --format json",
-                "op whoami --format json"
+                "op whoami --format json",
+                "op vault get vstg --format json",
+                "op item get istg --vault vstg --format json",
             ]
         );
+    }
+
+    /// NR-31: the diagnosis probes after a failed first read keep that read's excerpt.
+    #[test]
+    fn diagnosed_first_read_keeps_its_stderr_excerpt() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] item istg isn't in vault vstg\n",
+        );
+        r.push_with_stderr(Output::failure(1), "[ERROR] not signed in\n");
+        r.push_with_stderr(accounts(1), "");
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(
+            crate::runner::take_failure_excerpt().map(|x| x.lines),
+            Some(vec!["[ERROR] item istg isn't in vault vstg".to_string()])
+        );
+    }
+
+    /// NR-31: a first read that succeeds registers its values with the stderr scrubber.
+    #[test]
+    fn first_read_registers_its_values_with_the_scrubber() {
+        let raw = br#"{"fields":[{"label":"K","value":"FirstReadMarker7Qz"}]}"#.to_vec();
+        let r = FakeRunner::new([Output::success(raw)]);
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert!(!crate::scrub::scrub("x FirstReadMarker7Qz").contains("FirstReadMarker7Qz"));
+    }
+
+    /// P16: signed in with vault access, the failure may be transient: a retry succeeds.
+    #[test]
+    fn signed_in_with_vault_access_retries_and_reads_the_item() {
+        let item_json = serde_json::to_vec(&json!({"fields": []})).unwrap();
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            vault_ok(),
+            Output::success(item_json),
+        ]);
+        assert!(read_item_with(&r, &test_env(), &linux()).is_ok());
+    }
+
+    /// S2: signed in with vault access, op said the item does not exist: reported at once
+    /// as missing, without a retry.
+    #[test]
+    fn item_op_says_does_not_exist_is_not_retried() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] \"istg\" isn't an item in the \"vstg\" vault.\n",
+        );
+        r.push_with_stderr(Output::success(WHOAMI_SA), "");
+        r.push_with_stderr(vault_ok(), "");
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
+    }
+
+    /// S2: the missing item is still named by IDs, with the command to check it.
+    #[test]
+    fn item_op_says_does_not_exist_is_named() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] \"istg\" isn't an item in the \"vstg\" vault.\n",
+        );
+        r.push_with_stderr(Output::success(WHOAMI_SA), "");
+        r.push_with_stderr(vault_ok(), "");
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(
+            e.to_string().contains("item istg not found in vault vstg"),
+            "{e}"
+        );
+    }
+
+    /// P16: not signed in is reported at once, without retrying the read.
+    #[test]
+    fn not_signed_in_is_reported_without_a_retry() {
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
+    }
+
+    /// P16: a vault this identity cannot open is reported at once, without retrying.
+    #[test]
+    fn vault_without_access_is_reported_without_a_retry() {
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            Output::failure(1),
+        ]);
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
+    }
+
+    /// NR-26: signed in, the item read fails and the vault is readable: the item was moved,
+    /// archived or deleted, named by IDs with the command to check it.
+    #[test]
+    fn item_missing_from_readable_vault_is_named() {
+        let r = signed_in_vault_ok_item_missing();
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("item istg not found in vault vstg (moved, archived or deleted?)"),
+            "{e}"
+        );
+    }
+
+    /// NR-26: signed in, the item read fails and so does `op vault get`: vault access.
+    #[test]
+    fn op_vault_without_access_is_named() {
+        let r = FakeRunner::new([
+            Output::failure(1),
+            Output::success(WHOAMI_SA),
+            Output::failure(1),
+        ]);
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("this identity cannot access vault vstg"),
+            "{e}"
+        );
+    }
+
+    /// NR-26: the vault probe's output names the vault; it is never echoed (SR-1).
+    #[test]
+    fn vault_probe_output_is_never_echoed() {
+        let r = signed_in_vault_ok_item_missing();
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(!format!("{e} {e:?}").contains("OPHINTMARKER"), "{e}");
     }
 
     /// FR-26: whoami fails → Auth (exit 7) with the sign-in command, whatever credential
@@ -1084,32 +1821,29 @@ mod tests {
         let t = e.to_string();
         assert!(t.contains("not signed in to 1Password"), "{t}");
         assert!(t.contains("op item get failed (exit 1)"), "{t}");
-        assert!(t.contains("\n  sign in: eval $(op signin)\n"), "{t}");
+        assert!(t.contains("\n  sign in: opv login staging\n"), "{t}");
         assert!(!t.contains("to see why"), "{t}");
     }
 
-    /// FR-13: diagnosis never reads the item a second time.
+    /// FR-13: diagnosis never reads the item itself; the retries after it (P16, NR-3)
+    /// are attempts of the same read: at most one first attempt plus READ_ATTEMPTS.
     #[test]
     fn diagnosis_makes_no_extra_item_read() {
-        for whoami in [Output::success(WHOAMI_SA), Output::failure(1)] {
-            let r = FakeRunner::new([Output::failure(1), whoami, accounts(0)]);
-            let _ = read_item_with(&r, &test_env(), &linux());
-            let reads = argvs(&r)
-                .iter()
-                .filter(|a| a.starts_with("op item"))
-                .count();
-            assert_eq!(reads, 1, "{:?}", argvs(&r));
-        }
+        let r = signed_in_vault_ok_item_missing();
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(
+            item_reads(&r),
+            1 + crate::runner::READ_ATTEMPTS as usize,
+            "{:?}",
+            argvs(&r)
+        );
     }
 
     /// The re-run hint survives only as the last resort: when whoami itself cannot run.
     #[test]
     fn rerun_hint_only_when_session_cannot_be_diagnosed() {
         let r = FakeRunner::new([Output::failure(1)]);
-        r.responses.borrow_mut().push_back(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "op did not finish within 300 s and was killed",
-        )));
+        r.push_unknown("timeout");
         let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
@@ -1128,7 +1862,7 @@ mod tests {
         };
         let sessions = || {
             [
-                vec![Output::success(WHOAMI_SA)],
+                vec![Output::success(WHOAMI_SA), leaky()],
                 vec![leaky(), accounts(1)],
                 vec![leaky(), accounts(0)],
             ]
@@ -1161,16 +1895,33 @@ mod tests {
         }
     }
 
+    /// Found live: a person's read that waits on the 1Password app's approval prompt
+    /// times out like an outage; the message says to approve it.
     #[test]
-    fn timeout_is_source_error_naming_op() {
+    fn read_outage_for_a_person_mentions_the_app_approval() {
         let r = FakeRunner::default();
-        r.responses.borrow_mut().push_back(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "op did not finish within 300 s and was killed",
-        )));
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        let e = crate::host::with_test_host(linux(), || {
+            read_item_with(&r, &test_env(), &linux()).unwrap_err()
+        });
         assert!(
-            matches!(&e, Error::Source(m) if m.starts_with("op item get: op did not finish")),
+            e.to_string()
+                .contains("If the 1Password app is asking to approve access, approve it."),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn read_outage_exits_9_naming_the_status_page() {
+        let r = FakeRunner::default();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        let ci = Host::from_env(&FakeEnv::new("linux").var("CI"));
+        let e =
+            crate::host::with_test_host(ci, || read_item_with(&r, &test_env(), &ci).unwrap_err());
+        assert!(
+            matches!(&e, Error::Unknown(m) if m == "1Password did not respond after 3 \
+                attempts (op item get); nothing was changed. Check \
+                https://status.1password.com, then re-run"),
             "{e:?}"
         );
     }
@@ -1220,6 +1971,18 @@ mod tests {
         assert_eq!(identity_type(b"{}"), IdentityType::Unknown);
     }
 
+    /// With the 1Password app integration, `op whoami` names the user but has no
+    /// `user_type` (recorded live, op 2.40.0): that is a person.
+    #[test]
+    fn app_integration_whoami_is_a_person() {
+        assert_eq!(
+            identity_type(
+                br#"{"url":"https://x.1password.com/","email":"a@b.c","user_uuid":"UX","account_uuid":"AX"}"#
+            ),
+            IdentityType::User
+        );
+    }
+
     #[test]
     fn account_count_cases() {
         assert_eq!(account_count(b""), Some(0));
@@ -1239,7 +2002,7 @@ mod tests {
             FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
             FakeEnv::new("linux").var("OP_CONNECT_HOST"),
         ] {
-            let r = FakeRunner::new([Output::failure(1)]);
+            let r = FakeRunner::new(failed_read(1));
             let h = Host::from_env(&env);
             diagnose(&r, &|| h).unwrap();
             assert_eq!(argvs(&r), vec!["op whoami --format json"], "{env:?}");
@@ -1476,7 +2239,7 @@ mod tests {
         let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m.starts_with("op item edit failed (exit 2): signed in")
-                && m.contains("grant this identity write access to the vault")
+                && m.mentions("grant this identity write access to the vault")
                 && !m.contains("to see why")),
             "{e:?}"
         );
@@ -1489,7 +2252,45 @@ mod tests {
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
         let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
-        assert!(e.to_string().contains("eval $(op signin)"), "{e}");
+        assert!(e.to_string().contains("opv login staging"), "{e}");
+    }
+
+    /// NR-2: an edit that timed out may or may not have happened: exit 9, safe to re-run.
+    #[test]
+    fn skeleton_edit_timeout_is_unknown_exit_9() {
+        let item = read(allumata_item());
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        assert_eq!(e.exit_code(), 9, "{e}");
+    }
+
+    /// NR-2: a failed edit whose session cannot be diagnosed is an unknown outcome.
+    #[test]
+    fn skeleton_edit_failure_without_diagnosis_is_unknown_exit_9() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        assert_eq!(e.exit_code(), 9, "{e}");
+    }
+
+    /// NR-2: the edit is a write, so it is never retried.
+    #[test]
+    fn skeleton_edit_is_never_retried() {
+        let item = read(allumata_item());
+        let r = FakeRunner::new([Output::failure(2), Output::success(WHOAMI_SA)]);
+        let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
+        let _ = write_skeleton_with(&r, &test_env(), &item, &missing, &linux());
+        assert_eq!(
+            argvs(&r)
+                .iter()
+                .filter(|a| a.starts_with("op item edit"))
+                .count(),
+            1
+        );
     }
 
     // ---------- simple profile (FR-20) ----------
@@ -1636,5 +2437,44 @@ mod tests {
         let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
         assert!(matches!(e, Error::Source(m) if m.contains("JWT_KEY")));
         assert!(r.calls.borrow().is_empty(), "nothing written");
+    }
+
+    // ------------------------------------------------------------ private item links (H1)
+
+    const WHOAMI_LINK: &[u8] = br#"{"url":"https://my.1password.com","email":"x-LINKMARKER@example.com","user_uuid":"ULINKMARKER","account_uuid":"ACCT123","user_type":"USER"}"#;
+
+    #[test]
+    fn item_link_carries_account_vault_item_and_host() {
+        let a = parse_account(WHOAMI_LINK);
+        assert_eq!(
+            item_link(a.as_ref(), "vprd", "iprd"),
+            "https://start.1password.com/open/i?a=ACCT123&v=vprd&i=iprd&h=my.1password.com"
+        );
+    }
+
+    #[test]
+    fn item_link_never_carries_email_or_user_id() {
+        let link = item_link(parse_account(WHOAMI_LINK).as_ref(), "v", "i");
+        assert!(!link.contains("LINKMARKER"), "{link}");
+    }
+
+    #[test]
+    fn item_link_without_account_names_vault_and_item() {
+        assert_eq!(
+            item_link(None, "vprd", "iprd"),
+            "https://start.1password.com/open/i?v=vprd&i=iprd"
+        );
+    }
+
+    #[test]
+    fn account_with_unexpected_characters_is_dropped() {
+        assert_eq!(parse_account(br#"{"account_uuid":"A&x=1"}"#), None);
+    }
+
+    #[test]
+    fn account_is_one_whoami_probe() {
+        let r = FakeRunner::new([Output::success(WHOAMI_LINK.to_vec())]);
+        account(&r);
+        assert_eq!(r.calls.borrow()[0].args, ["whoami", "--format", "json"]);
     }
 }

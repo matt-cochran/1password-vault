@@ -1,13 +1,20 @@
-//! Pure domain types. Nothing here knows about `op`, `flyctl` or subprocesses (FR-12).
+//! Pure domain types. Nothing here knows about a vendor CLI or subprocesses (FR-12).
 
+pub mod convention;
 pub mod model;
 pub mod secret;
 
 pub use model::{
-    Environment, Fleet, FlyTarget, KeySpec, Kind, OneOrMany, PrefixByMode, Product, Profile, Rules,
-    SIMPLE_PRODUCT, SIMPLE_TEMPLATE, Target, key_label,
+    Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product, Profile,
+    Rules, SIMPLE_PRODUCT, SIMPLE_TEMPLATE, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;
+pub mod provenance;
 pub mod rules;
+pub mod runtime;
 pub use plan::{ItemField, KeyState, Row, StoreEntry, SyncPlan, TargetState, build as build_plan};
+pub use provenance::Stamp;
+pub use runtime::{
+    AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
+};

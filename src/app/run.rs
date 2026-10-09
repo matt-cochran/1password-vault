@@ -1,8 +1,15 @@
 //! `run <env> --product <p> -- <cmd>` use case, delegating to `op run` (FR-4, §10.4).
 //!
-//! opv never resolves values. It hands `op run` a child environment of `op://`
-//! references (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`); `op run` resolves them and
-//! execs the command. No values pass through opv, argv or files (SR-1, SR-3, SR-4).
+//! opv reads the item once (FR-43: to tidy it for a person, or to find misplaced fields)
+//! and gives `op run` a child environment of `op://` references
+//! (`KEY=op://<vault_id>/<item_id>/<product>/<KEY>`, or `.../<field id>` for a field not yet
+//! where the convention puts it); `op run` resolves them and execs the command, so `op run`
+//! keeps masking the values in the child's output. Every key is a reference, always: when a
+//! read-only identity (service account, CI) reads a value a person's tidy would normalize
+//! (trailing newline or space, missing `ensure_prefix`), the child gets the stored value
+//! through its reference and opv prints one warning per such key naming the fix (`opv
+//! login <env>`, after which a run tidies it). No value passes through opv, argv or files
+//! (SR-1, SR-3, SR-4).
 
 use std::io;
 
@@ -34,11 +41,17 @@ pub fn run_for(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
+        ).into())
+        .with_next(super::check_command(
+            fleet,
+            Some(env_name),
+            fleet.products.keys().next().map(String::as_str),
         ))),
         (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
         (true, Some(_)) => Err(Error::Config(
             "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
-        )),
+        )
+        .with_next(super::check_command(fleet, Some(env_name), None))),
     }
 }
 
@@ -56,33 +69,68 @@ pub fn run(
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
     let env = fleet.environment(env_name)?;
-    let prod = fleet.products.get(product).ok_or_else(|| {
-        let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-        Error::Config(format!(
-            "undefined product {product:?} (defined: {})",
-            known.join(", ")
-        ))
-    })?;
+    let prod = fleet
+        .products
+        .get(product)
+        .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
     if command.is_empty() {
         return Err(Error::Config(
             "no command given (usage: run <env> --product <p> -- <cmd>...)".into(),
-        ));
+        )
+        .with_next("opv run --help"));
     }
 
+    // FR-43: one tolerant item read first, which tidies the item when a person runs opv.
+    // A key whose field is still not where the convention puts it (a read-only run) is
+    // referenced by field id. If the read fails, `op run` reports the problem itself.
+    let read = super::tidy::active()
+        .then(|| super::tidy::read(fleet, env_name, runner).ok())
+        .flatten();
+    let by_id = read.as_ref().map(|r| &r.refs);
+    let normalized = read.as_ref().map(|r| &r.normalized);
+    let who = read.as_ref().and_then(|r| r.identity);
     let refs: Vec<(&str, String)> = prod
         .keys
         .iter()
         .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
-        .map(|(key, _)| {
-            let field = if product == SIMPLE_PRODUCT {
-                key.clone()
+        .map(|(key, spec)| {
+            // A shared key (FR-45) is exported under its own name, referencing its source's
+            // field in the same item.
+            let (fp, fk) = spec.source().unwrap_or((product, key));
+            let field = if fp == SIMPLE_PRODUCT {
+                fk.to_string()
             } else {
-                format!("{product}/{key}")
+                format!("{fp}/{fk}")
             };
-            (
-                key.as_str(),
-                format!("op://{}/{}/{field}", env.vault_id, env.item_id),
-            )
+            // The field's key: the source's for a shared key (FR-45).
+            let id = (fp.to_string(), fk.to_string());
+            // Read-only and not yet normalized in 1Password (FR-43): still the reference, so
+            // `op run` masks the value; the person who can tidy it is told how.
+            if normalized.is_some_and(|m| m.contains_key(&id)) {
+                let name = crate::domain::key_label(fp, fk);
+                // M4: worded by why it is not tidied; a person whose own tidy did not
+                // complete is not told to sign in as themselves.
+                let how = match who {
+                    Some(super::tidy::Identity::Person) => {
+                        "opv could not tidy it in this run (see the note above)".to_string()
+                    }
+                    Some(super::tidy::Identity::DeployCredentials) => format!(
+                        "run opv check {env_name} (without deploy credentials) and opv will tidy it"
+                    ),
+                    Some(_) => {
+                        format!("run as yourself (opv login {env_name}) and opv will tidy it")
+                    }
+                    None => "opv does not tidy this item (see the note above)".to_string(),
+                };
+                runner.note(&format!(
+                    "{name} has a fixable formatting problem in 1Password; {how}"
+                ));
+            }
+            let reference = by_id
+                .and_then(|m| m.get(&id))
+                .cloned()
+                .unwrap_or_else(|| format!("op://{}/{}/{field}", env.vault_id, env.item_id));
+            (key.as_str(), reference)
         })
         .collect();
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -104,7 +152,7 @@ pub fn run(
         .run_inherited_clean(OP, &args, &env_pairs, &remove)
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
-            k => Error::Dependency(format!("cannot run {OP} ({k})")),
+            k => Error::Dependency(format!("cannot run {OP} ({k})").into()),
         })
 }
 
@@ -112,8 +160,8 @@ pub fn run(
 pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
     runner.local_run_supported().map_err(|e| {
         if e.kind() == io::ErrorKind::Unsupported {
-            Error::Dependency("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See docs/local-development.md (WSL).".into())
-        } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind())) }
+            Error::Dependency(format!("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See {}/local-development.md#wsl.", crate::DOCS_URL).into())
+        } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind()).into()) }
     })
 }
 

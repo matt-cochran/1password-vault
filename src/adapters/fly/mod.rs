@@ -1,9 +1,11 @@
 //! Fly.io adapter wrapping `flyctl` (S4; FR-6, FR-7, FR-8, SR-1, SR-3, SR-4, §6.4).
 //!
-//! Four operations, each exactly one `flyctl` call (none when there is nothing to do):
+//! Five operations, each one `flyctl` call (none when there is nothing to do), except
+//! [`preflight`], which makes two:
 //!
 //! | fn | argv |
 //! |---|---|
+//! | [`preflight`] | `status --app <app> --json`, `releases --app <app> --json` (NR-24) |
 //! | [`list`] | `secrets list --app <app> --json` |
 //! | [`stage`] | `secrets import --app <app> --stage` (values on stdin) |
 //! | [`unset_staged`] | `secrets unset <names...> --app <app> --stage` |
@@ -43,8 +45,14 @@
 //! every error, auth included, so authentication is told apart by the separate, read-only
 //! `flyctl auth whoami` call ([`auth_whoami`], shared with `doctor`), never by guessing.
 
+pub mod config;
+pub mod login;
+
+pub use config::{FLYCTL_TESTED, FlyTarget, PROVIDER};
+
 use std::collections::BTreeSet;
 use std::io;
+use std::time::Duration;
 
 use serde::Deserialize;
 use zeroize::Zeroizing;
@@ -53,11 +61,32 @@ use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::host::{Host, Tool};
-use crate::ports::{Runtime, SecretStore};
-use crate::runner::{CommandRunner, Output, PROBE_TIMEOUT};
+use crate::ports::{StagedRuntime, StagedStore, Store};
+use crate::provider::{Check, Preflight, Verdict};
+use crate::runner::{
+    Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, Wait, status_text, unknown_text,
+};
 
 /// The Fly CLI binary.
 pub const PROGRAM: &str = "flyctl";
+
+/// The Fly CLI and how to install it.
+pub const FLYCTL: Tool = Tool {
+    program: PROGRAM,
+    ci: "install flyctl in the CI job (GitHub Actions: \
+         uses: superfly/flyctl-actions/setup-flyctl@master)",
+    macos: "install: brew install flyctl",
+    windows: "install: iwr https://fly.io/install.ps1 -useb | iex",
+    linux: "install: curl -L https://fly.io/install.sh | sh",
+    vendor: "Fly",
+    status_page: "https://status.flyio.net",
+    pinned_env: &[("FLY_NO_UPDATE_CHECK", "1"), ("NO_COLOR", "1")],
+    not_found: &[],
+    aliases: &["fly"],
+};
+
+/// A Fly token in the environment, in the order they are tried (by name only).
+pub const CREDENTIAL_VARS: &[&str] = &["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"];
 
 /// Longest encoded stdin line (`NAME="""VALUE"""`, excluding the newline) we will send.
 ///
@@ -84,13 +113,16 @@ pub struct Fly<'a> {
     pub app: &'a str,
 }
 
-impl SecretStore for Fly<'_> {
+impl Store for Fly<'_> {
     fn list(&self) -> Result<Vec<StoreEntry>, Error> {
         list(self.runner, self.app)
     }
     fn refusal(&self, name: &str, value: &SecretValue) -> Option<(&'static str, &'static str)> {
         entry_refusal_reason(name, value)
     }
+}
+
+impl StagedStore for Fly<'_> {
     fn validate(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error> {
         validate_import(batch)
     }
@@ -102,7 +134,7 @@ impl SecretStore for Fly<'_> {
     }
 }
 
-impl Runtime for Fly<'_> {
+impl StagedRuntime for Fly<'_> {
     fn deploy(&self) -> Result<(), Error> {
         deploy(self.runner, self.app)
     }
@@ -112,28 +144,15 @@ impl Runtime for Fly<'_> {
 /// `flyctl secrets list --app <app> --json` call.
 pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<StoreEntry>, Error> {
     const WHAT: &str = "fly secrets list";
-    let out = run(
-        r,
-        WHAT,
-        app,
-        &["secrets", "list", "--app", app, "--json"],
-        None,
-        &["secrets", "list", "--app", app],
-    )?;
-    // serde_json messages can quote input fragments, so report only the position.
-    let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
-        Error::Target(format!(
-            "{WHAT} returned unexpected JSON (line {}, column {})",
-            e.line(),
-            e.column()
-        ))
-    })?;
+    let entries: Vec<ListEntry> =
+        read_json(r, WHAT, app, &["secrets", "list", "--app", app, "--json"])?;
     Ok(entries
         .into_iter()
         .map(|e| StoreEntry {
             name: e.name,
             version: e.digest,
             pending: matches!(e.status.as_deref(), Some("Staged" | "Partial")),
+            stamp: None,
         })
         .collect())
 }
@@ -154,6 +173,7 @@ pub fn stage(
     // whether access and authentication work.
     run(
         r,
+        Effect::Write,
         "fly secrets import",
         app,
         &["secrets", "import", "--app", app, "--stage"],
@@ -177,16 +197,25 @@ pub fn unset_staged(r: &dyn CommandRunner, app: &str, names: &[String]) -> Resul
     let mut args = vec!["secrets", "unset"];
     args.extend(names.iter().map(String::as_str));
     args.extend(["--app", app, "--stage"]);
-    run(r, "fly secrets unset", app, &args, None, &args)?;
+    run(
+        r,
+        Effect::Write,
+        "fly secrets unset",
+        app,
+        &args,
+        None,
+        &args,
+    )?;
     Ok(())
 }
 
 /// Deploy staged secrets: one `flyctl secrets deploy --app <app>` call (FR-7; S6 calls it
 /// only with `--deploy`). On an app with no machines flyctl exits 1 (D0), which maps to
-/// `Error::Target("fly secrets deploy failed (exit 1)")`.
+/// `Error::Target("fly secrets deploy failed (exit 1)".into())`.
 pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
     run(
         r,
+        Effect::Write,
         "fly secrets deploy",
         app,
         &["secrets", "deploy", "--app", app],
@@ -194,6 +223,176 @@ pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
         &["secrets", "deploy", "--app", app],
     )?;
     Ok(())
+}
+
+/// `flyctl status --app <app> --json`: only the app `Status` and each machine's `state`
+/// are read; every other field (organization, hostnames) is skipped unread. flyctl renders
+/// its Go structs as-is, so keys are `Status` / `Machines`; lower case is accepted too.
+#[derive(Deserialize)]
+struct AppStatus {
+    #[serde(rename = "Status", alias = "status", default)]
+    status: Option<String>,
+    #[serde(rename = "Machines", alias = "machines", default)]
+    machines: Option<Vec<MachineState>>,
+}
+
+#[derive(Deserialize)]
+struct MachineState {
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// One `flyctl releases --app <app> --json` entry: version and status only (the `User`
+/// field names an account and is skipped unread, SR-1).
+#[derive(Deserialize)]
+struct Release {
+    #[serde(rename = "Version", alias = "version", default)]
+    version: Option<i64>,
+    #[serde(rename = "Status", alias = "status", default)]
+    status: Option<String>,
+    #[serde(rename = "InProgress", alias = "inProgress", default)]
+    in_progress: Option<bool>,
+}
+
+/// Fly state before the first write (NR-24): two reads, `flyctl status --app <app> --json`
+/// and `flyctl releases --app <app> --json` (shapes recorded from real flyctl output in
+/// `tests/fixtures/fly/`).
+///
+/// - App `dead`: refused (`Target`); it cannot hold secrets.
+/// - No machines (`suspended` and `pending` apps on the Machines platform have none): a
+///   warning; secrets are app-level so they still stage, and `skip_deploy` is set because
+///   there is nothing to restart.
+/// - Machines present but none started: a warning; secrets still stage.
+/// - Latest release `InProgress`, `pending` or `running`: a deploy is running; `sync` waits
+///   for it, polling the releases every [`DEPLOY_POLL`] with a progress line at least every
+///   [`DEPLOY_PROGRESS`], inside the run budget (NR-4) and at most [`DEPLOY_WAIT_MAX`];
+///   still running then is refused with nothing changed.
+///
+/// A missing or unreachable app fails the read and is diagnosed like any flyctl call
+/// (FR-26); an unanswered read is the outage error (NR-28).
+pub fn preflight(r: &dyn CommandRunner, app: &str) -> Result<Preflight, Error> {
+    let status: AppStatus = read_json(r, "fly status", app, &["status", "--app", app, "--json"])?;
+    let state = status.status.unwrap_or_default().to_ascii_lowercase();
+    if state == "dead" {
+        return Err(Error::Target(
+            format!(
+                "Fly app {app} is dead (deleted) and cannot hold secrets; nothing was changed\n  \
+             Next: recreate it with `{PROGRAM} apps create {app}`, or correct the app name in \
+             secrets.toml, then re-run"
+            )
+            .into(),
+        ));
+    }
+    let machines = status.machines.unwrap_or_default();
+    let started = machines
+        .iter()
+        .filter(|m| matches!(m.state.as_deref(), Some("started" | "starting")))
+        .count();
+    let mut pre = Preflight::default();
+    let warn = |detail: String| Check {
+        name: format!("fly app {app}").into(),
+        outcome: Ok(Verdict::Warn(detail)),
+    };
+    if machines.is_empty() || matches!(state.as_str(), "suspended" | "pending") {
+        pre.checks.push(warn(format!(
+            "no machines; secrets are staged and apply when machines start (fly scale \
+             count 1 --app {app})"
+        )));
+        pre.skip_deploy = Some(format!(
+            "deploy skipped: {app} has no machines; staged secrets apply when machines start"
+        ));
+    } else if started == 0 {
+        pre.checks.push(warn(
+            "machines stopped; secrets are staged and apply when machines start".into(),
+        ));
+    }
+    wait_for_running_deploy(r, app)?;
+    Ok(pre)
+}
+
+/// How often `sync` re-reads the releases while a Fly deploy runs.
+pub const DEPLOY_POLL: Duration = Duration::from_secs(5);
+/// A progress line at least this often while waiting (NR-4).
+pub const DEPLOY_PROGRESS: Duration = Duration::from_secs(15);
+/// The longest `sync` waits for someone else's Fly deploy, whatever the run budget.
+pub const DEPLOY_WAIT_MAX: Duration = Duration::from_secs(600);
+
+/// Waits until the latest release is no longer running (see [`preflight`]).
+fn wait_for_running_deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
+    let wait = Wait::new(r, DEPLOY_WAIT_MAX);
+    let mut reported: Option<Duration> = None;
+    loop {
+        let releases: Vec<Release> = read_json(
+            r,
+            "fly releases",
+            app,
+            &["releases", "--app", app, "--json"],
+        )?;
+        let Some(latest) = releases
+            .iter()
+            .max_by_key(|r| r.version.unwrap_or(i64::MIN))
+            .filter(|l| release_running(l))
+        else {
+            return Ok(());
+        };
+        let waited = wait.elapsed(r);
+        if wait.over(r, DEPLOY_POLL) {
+            return Err(Error::Target(
+                format!(
+                    "a Fly deploy is still running for {app} after {} s; nothing was changed",
+                    waited.as_secs()
+                )
+                .into(),
+            )
+            .with_next(format!(
+                "{PROGRAM} releases --app {app} shows it; run the same command again once it \
+                 finishes (or with a larger --timeout)"
+            )));
+        }
+        let note = if reported.is_none_or(|at| waited.saturating_sub(at) >= DEPLOY_PROGRESS) {
+            reported = Some(waited);
+            let release = latest
+                .version
+                .map(|v| format!(" (release v{v})"))
+                .unwrap_or_default();
+            format!(
+                "waiting for the running Fly deploy of {app}{release} to finish, {} s",
+                waited.as_secs()
+            )
+        } else {
+            String::new()
+        };
+        wait.pause(r, DEPLOY_POLL, &note);
+    }
+}
+
+fn release_running(r: &Release) -> bool {
+    r.in_progress == Some(true)
+        || r.status
+            .as_deref()
+            .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "pending" | "running"))
+}
+
+/// One flyctl read whose stdout is JSON of type `T`. serde_json messages can quote input,
+/// so a parse error reports only the position.
+fn read_json<T: serde::de::DeserializeOwned>(
+    r: &dyn CommandRunner,
+    what: &str,
+    app: &str,
+    args: &[&str],
+) -> Result<T, Error> {
+    let hint = args.strip_suffix(&["--json"]).unwrap_or(args);
+    let out = run(r, Effect::Read, what, app, args, None, hint)?;
+    serde_json::from_slice(&out.stdout).map_err(|e| {
+        Error::Target(
+            format!(
+                "{what} returned unexpected JSON (line {}, column {})",
+                e.line(),
+                e.column()
+            )
+            .into(),
+        )
+    })
 }
 
 /// Check a batch against every import rule without running anything; S6 may call this
@@ -307,10 +506,13 @@ fn valid_name(name: &str) -> bool {
 /// A refusal names the key, the rule and its fixed reason, never the value (FR-15, FR-22,
 /// SR-1).
 fn refused(name: &str, rule: &str, op: &str) -> Error {
-    Error::Policy(format!(
-        "fly {op} refused for {name:?}: rule {rule} ({}); nothing was sent to Fly",
-        import_reason(rule)
-    ))
+    Error::Policy(
+        format!(
+            "fly {op} refused for {name:?}: rule {rule} ({}); nothing was sent to Fly",
+            import_reason(rule)
+        )
+        .into(),
+    )
 }
 
 /// The fixed reason for a Fly import or name rule (FR-22): a constant per rule, never
@@ -332,7 +534,7 @@ pub fn import_reason(rule: &str) -> &'static str {
 /// account (an email), so it is dropped unread (zeroized with the `Output`, SR-1). Shared
 /// by `doctor` and the failure diagnosis (FR-26).
 pub fn auth_whoami(r: &dyn CommandRunner) -> io::Result<bool> {
-    r.probe(PROGRAM, &["auth", "whoami"], PROBE_TIMEOUT)
+    r.probe(&Call::new(PROGRAM, &["auth", "whoami"]), PROBE_TIMEOUT)
         .map(|o| o.status == 0)
 }
 
@@ -351,9 +553,7 @@ pub fn not_logged_in(host: &Host, failed: Option<&str>) -> Error {
     } else {
         format!("log in: {PROGRAM} auth login")
     };
-    Error::Auth(format!(
-        "not logged in to Fly ({ctx})\n  {next}\n  then run opv again"
-    ))
+    Error::Auth(format!("not logged in to Fly ({ctx})\n  {next}\n  then run opv again").into())
 }
 
 /// The value-free next step for a failed call on `app` whose cause opv cannot tell apart:
@@ -377,70 +577,132 @@ fn check_app(app: &str, who: &str) -> String {
 fn failure(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
+    effect: Effect,
     what: &str,
     app: &str,
     status: i32,
     hint: &[&str],
 ) -> Error {
-    let failed = format!("{what} failed (exit {status})");
+    let failed = format!("{what} failed ({})", status_text(status));
     let h = host();
-    if let Some(var) = h.fly_token {
-        return Error::Target(format!(
-            "{failed}\n  {}",
-            check_app(app, &format!("the token in {var}"))
-        ));
+    if let Some(var) = h.token(CREDENTIAL_VARS) {
+        return Error::Target(
+            format!(
+                "{failed}\n  {}",
+                check_app(app, &format!("the token in {var}"))
+            )
+            .into(),
+        );
     }
-    match auth_whoami(r) {
+    // The probe explains the failed call; its excerpt stays with the error (NR-31).
+    match crate::runner::diagnosing(|| auth_whoami(r)) {
         Ok(false) => not_logged_in(&h, Some(&failed)),
-        Ok(true) => Error::Target(format!(
-            "{failed}: logged in to Fly\n  {}",
-            check_app(app, "the logged-in Fly account")
-        )),
-        Err(_) => Error::Target(format!(
-            "{failed}; run `{PROGRAM} {}` to see why",
-            hint.join(" ")
-        )),
+        Ok(true) => Error::Target(
+            format!(
+                "{failed}: logged in to Fly\n  {}",
+                check_app(app, "the logged-in Fly account")
+            )
+            .into(),
+        ),
+        Err(_) if effect == Effect::Write => Error::Unknown(
+            format!(
+                "{failed}; the change may or may not have been applied\n  next: run \
+             `{PROGRAM} {}` to see why, then re-run the same command",
+                hint.join(" ")
+            )
+            .into(),
+        ),
+        Err(_) => {
+            Error::Target(format!("{failed}; run `{PROGRAM} {}` to see why", hint.join(" ")).into())
+        }
     }
+}
+
+/// Whether a flyctl call changes the app (NR-2): reads are retried by the runner, writes
+/// never are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    Read,
+    Write,
 }
 
 /// Run one flyctl subcommand and map failures to typed, value-free errors. A non-zero exit
 /// is diagnosed by [`failure`] (child stderr is discarded, SR-1). The host is detected
 /// only on failure.
+///
+/// Mapping (NR-2): a read still failing after its retries, or a write that exited non-zero,
+/// is diagnosed as before (`auth whoami` is a definite read-back for sign-in); a write
+/// whose diagnosis cannot run, or that timed out, was killed or was lost, is
+/// `Error::Unknown` (exit 9, safe to re-run). A read that never finished after its retries
+/// is the outage error naming the step and Fly's status page (NR-28, exit 9).
 fn run(
     r: &dyn CommandRunner,
+    effect: Effect,
     what: &str,
     app: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
     hint: &[&str],
 ) -> Result<Output, Error> {
-    run_on(r, &Host::detect, what, app, args, stdin, hint)
+    run_on(r, &Host::detect, effect, what, app, args, stdin, hint)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_on(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
+    effect: Effect,
     what: &str,
     app: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
     hint: &[&str],
 ) -> Result<Output, Error> {
-    let out = r
-        .run(PROGRAM, args, stdin, &[])
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(format!(
-                "{PROGRAM} not found on PATH\n  {}",
-                host().install_hint(Tool::Flyctl)
-            )),
-            // The runner's own message names the program and the limit (no child output).
-            io::ErrorKind::TimedOut => Error::Target(format!("{what}: {e}")),
-            kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})")),
-        })?;
-    if out.status != 0 {
-        return Err(failure(r, host, what, app, out.status, hint));
+    let call = Call::new(PROGRAM, args).with_stdin(stdin);
+    // `secrets deploy` restarts the machines one by one and waits for their health checks:
+    // minutes on a multi-machine app (NR-4).
+    let call = if args.starts_with(&["secrets", "deploy"]) {
+        call.rollout()
+    } else {
+        call
+    };
+    let outcome = match effect {
+        Effect::Read => r.read(&call, &[]),
+        Effect::Write => r.write(&call),
     }
-    Ok(out)
+    .map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => Error::Dependency(
+            format!(
+                "{PROGRAM} not found on PATH\n  {}",
+                host().install_hint(FLYCTL)
+            )
+            .into(),
+        ),
+        // A spent run budget; the runner's own message names the program (no child output).
+        io::ErrorKind::TimedOut => FLYCTL
+            .budget_spent(r, &e)
+            .map_text(|m| format!("{what}: {m}")),
+        kind => Error::Target(format!("{what} could not start {PROGRAM} ({kind})").into()),
+    })?;
+    match outcome {
+        Outcome::Done(out) => Ok(out),
+        Outcome::Refused(out) => Err(failure(r, host, effect, what, app, out.status, hint)),
+        Outcome::Unknown {
+            status: Some(status),
+            ..
+        } => Err(failure(r, host, effect, what, app, status, hint)),
+        Outcome::Unknown { reason, .. } if effect == Effect::Write => Err(Error::Unknown(
+            format!(
+                "{what}: {}; the change may or may not have been applied\n  next: re-run \
+                 the same command",
+                unknown_text(PROGRAM, reason)
+            )
+            .into(),
+        )),
+        // A read unanswered after its last attempt: Fly is unreachable (NR-28), or, after
+        // this run's first write, the run stopped half way (NR-2).
+        Outcome::Unknown { .. } => Err(FLYCTL.unanswered(r, what)),
+    }
 }
 
 #[cfg(test)]
@@ -449,7 +711,7 @@ mod tests {
 
     use super::*;
     use crate::runner::Output;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     const MARK: &str = "sk-proj-LEAKCANARY";
 
@@ -646,7 +908,7 @@ mod tests {
     #[test]
     fn list_parses_names_and_digests() {
         let r = FakeRunner::new([Output::success(
-            &include_bytes!("../../tests/fixtures/fly_list.json")[..],
+            &include_bytes!("../../../tests/fixtures/fly_list.json")[..],
         )]);
         let s = list(&r, "app").unwrap();
         assert_eq!(
@@ -656,11 +918,13 @@ mod tests {
                     name: "A".into(),
                     version: Some("<digest-a>".into()),
                     pending: true,
+                    stamp: None,
                 },
                 StoreEntry {
                     name: "B".into(),
                     version: Some("<digest-b>".into()),
                     pending: true,
+                    stamp: None,
                 },
             ]
         );
@@ -724,12 +988,12 @@ mod tests {
 
     #[test]
     fn failure_is_target_error() {
-        let r = FakeRunner::new([Output::failure(1), logged_in()]);
+        let r = FakeRunner::new(failed_read(1).chain([logged_in()]));
         match list(&r, "app") {
             Err(Error::Target(m)) => assert_eq!(m, logged_in_msg("fly secrets list", 1)),
             other => panic!("{other:?}"),
         }
-        assert_eq!(r.calls.borrow()[1].args, vec!["auth", "whoami"]);
+        assert_eq!(r.calls.borrow()[3].args, vec!["auth", "whoami"]);
     }
 
     // ---------------------------------------------------------------- unset / deploy
@@ -800,7 +1064,7 @@ mod tests {
         // flyctl has no distinct auth exit code and stderr is discarded (SR-1): no exit
         // status is guessed into Auth; only a failing `auth whoami` is.
         for code in [1, 2, 3, 4, 5, 77, 126, 127, 255, -1] {
-            let r = FakeRunner::new([Output::failure(code), logged_in()]);
+            let r = FakeRunner::new(failed_read(code).chain([logged_in()]));
             assert!(matches!(list(&r, "app"), Err(Error::Target(_))), "{code}");
         }
     }
@@ -826,15 +1090,15 @@ mod tests {
     /// only.
     #[test]
     fn failure_hint_never_contains_a_value_or_stdin() {
-        for call in four_calls() {
-            let r = FakeRunner::new([Output {
+        for (attempts, call) in four_calls() {
+            let r = FakeRunner::new((0..attempts).map(|_| Output {
                 status: 1,
                 stdout: zeroize::Zeroizing::new(MARK.as_bytes().to_vec()),
-            }]);
+            }));
             r.push_io_error(io::ErrorKind::PermissionDenied);
             let e = call(&r).unwrap_err();
             let t = err_text(&e);
-            assert!(matches!(e, Error::Target(_)), "{t}");
+            assert!(matches!(e, Error::Target(_) | Error::Unknown(_)), "{t}");
             assert!(t.contains("run `flyctl secrets "), "{t}");
             assert!(t.contains("--app fleet-prod"), "{t}");
             assert!(t.contains("to see why"), "{t}");
@@ -868,15 +1132,24 @@ mod tests {
 
     type FlyCall = Box<dyn Fn(&FakeRunner) -> Result<(), Error>>;
 
-    fn four_calls() -> [FlyCall; 4] {
+    /// The four public calls, each with the number of attempts a failure takes (a read is
+    /// retried, a write never is).
+    fn four_calls() -> [(usize, FlyCall); 4] {
+        let reads = crate::runner::READ_ATTEMPTS as usize;
         [
-            Box::new(|r| list(r, "fleet-prod").map(|_| ())),
-            Box::new(|r| {
-                let v = sv(MARK);
-                stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)])
-            }),
-            Box::new(|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()])),
-            Box::new(|r| deploy(r, "fleet-prod")),
+            (reads, Box::new(|r| list(r, "fleet-prod").map(|_| ()))),
+            (
+                1,
+                Box::new(|r| {
+                    let v = sv(MARK);
+                    stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)])
+                }),
+            ),
+            (
+                1,
+                Box::new(|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()])),
+            ),
+            (1, Box::new(|r| deploy(r, "fleet-prod"))),
         ]
     }
 
@@ -888,14 +1161,53 @@ mod tests {
         host(crate::host::FakeEnv::new("linux").shell("/bin/bash"))
     }
 
+    #[test]
+    fn flyctl_install_hint_per_platform() {
+        let hints: Vec<String> = ["macos", "windows", "linux"]
+            .map(|os| host(crate::host::FakeEnv::new(os)).install_hint(FLYCTL))
+            .into();
+        assert_eq!(
+            hints,
+            [
+                "install: brew install flyctl",
+                "install: iwr https://fly.io/install.ps1 -useb | iex",
+                "install: curl -L https://fly.io/install.sh | sh",
+            ]
+        );
+    }
+
+    #[test]
+    fn flyctl_install_hint_under_ci_is_the_setup_action() {
+        let ci = host(crate::host::FakeEnv::new("linux").var("CI"));
+        assert!(ci.install_hint(FLYCTL).contains("setup-flyctl"));
+    }
+
+    #[test]
+    fn fly_api_token_wins_over_fly_access_token() {
+        let h = host(
+            crate::host::FakeEnv::new("linux")
+                .var("FLY_ACCESS_TOKEN")
+                .var("FLY_API_TOKEN"),
+        );
+        assert_eq!(h.token(CREDENTIAL_VARS), Some("FLY_API_TOKEN"));
+    }
+
     /// `run_on` for a failing `secrets <sub>` on `app` with `host`.
     fn fail_on(h: Host, sub: &str, app: &str, whoami: Option<Output>) -> (Error, FakeRunner) {
-        let r = FakeRunner::new([Output::failure(1)]);
+        let effect = if sub == "list" {
+            Effect::Read
+        } else {
+            Effect::Write
+        };
+        let r = match effect {
+            Effect::Read => FakeRunner::new(failed_read(1)),
+            Effect::Write => FakeRunner::new([Output::failure(1)]),
+        };
         if let Some(w) = whoami {
             r.responses.borrow_mut().push_back(Ok(w));
         }
         let what = format!("fly secrets {sub}");
-        let e = run_on(&r, &|| h, &what, app, &["secrets", sub], None, &[]).unwrap_err();
+        let e = run_on(&r, &|| h, effect, &what, app, &["secrets", sub], None, &[]).unwrap_err();
         (e, r)
     }
 
@@ -944,9 +1256,9 @@ mod tests {
         let h = host(crate::host::FakeEnv::new("linux").var("GITHUB_ACTIONS"));
         let (e, _) = fail_on(h, "deploy", "app", Some(logged_out()));
         assert_eq!(e.exit_code(), 7, "{e}");
-        let t = e.to_string();
+        let t = crate::error::report(&e, "-", None);
         assert!(t.contains("not logged in to Fly"), "{t}");
-        assert!(t.contains("\n  next: set FLY_API_TOKEN"), "{t}");
+        assert!(t.contains("\nDo: set FLY_API_TOKEN"), "{t}");
         assert!(
             !t.contains("auth login"),
             "no interactive command under CI: {t}"
@@ -1017,27 +1329,28 @@ mod tests {
     #[test]
     fn public_calls_with_fly_token_skip_whoami() {
         let h = host(crate::host::FakeEnv::new("linux").var("FLY_API_TOKEN"));
-        for call in four_calls() {
-            let r = FakeRunner::new([Output::failure(1)]);
+        for (attempts, call) in four_calls() {
+            let r = FakeRunner::new((0..attempts).map(|_| Output::failure(1)));
             let e = crate::host::with_test_host(h, || call(&r)).unwrap_err();
             assert_eq!(e.exit_code(), 5, "{e}");
             assert!(
                 err_text(&e).contains("flyctl failed for app fleet-prod"),
                 "{e}"
             );
-            assert_eq!(r.calls.borrow().len(), 1);
+            assert_eq!(r.calls.borrow().len(), attempts);
         }
     }
 
     /// FR-26: a diagnosis probe that times out is Unknown → the last-resort re-run hint.
     #[test]
     fn whoami_timeout_falls_back_to_rerun_hint() {
-        let r = FakeRunner::new([Output::failure(1)]);
+        let r = FakeRunner::new(failed_read(1));
         r.push_io_error(io::ErrorKind::TimedOut);
         let h = bash();
         let e = run_on(
             &r,
             &|| h,
+            Effect::Read,
             "fly secrets list",
             "app",
             &["secrets", "list"],
@@ -1056,18 +1369,185 @@ mod tests {
     #[test]
     fn no_failure_path_says_to_see_why_when_whoami_runs() {
         for who in [logged_in, logged_out] {
-            for call in four_calls() {
-                let r = FakeRunner::new([Output::failure(1), who()]);
+            for (attempts, call) in four_calls() {
+                let r = FakeRunner::new((0..attempts).map(|_| Output::failure(1)).chain([who()]));
                 let e = call(&r).unwrap_err();
                 let t = err_text(&e);
                 assert!(!t.contains("to see why"), "{t}");
                 assert!(!t.contains("FLYIDENTITY") && !t.contains(MARK), "{t}");
                 assert!(matches!(e, Error::Target(_) | Error::Auth(_)), "{t}");
                 let calls = r.calls.borrow();
-                assert_eq!(calls.len(), 2);
-                assert_eq!(calls[1].args, vec!["auth", "whoami"]);
+                assert_eq!(calls.len(), attempts + 1);
+                assert_eq!(calls[attempts].args, vec!["auth", "whoami"]);
             }
         }
+    }
+
+    /// NR-2: a write that timed out may or may not have happened: exit 9, safe to re-run.
+    fn timed_out_write(call: impl Fn(&FakeRunner) -> Result<(), Error>) -> i32 {
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        call(&r).unwrap_err().exit_code()
+    }
+
+    #[test]
+    fn import_timeout_is_unknown_exit_9() {
+        let v = sv(MARK);
+        assert_eq!(
+            timed_out_write(|r| stage(r, "fleet-prod", &[("FLEET__P__K".into(), &v)])),
+            9
+        );
+    }
+
+    #[test]
+    fn unset_timeout_is_unknown_exit_9() {
+        assert_eq!(
+            timed_out_write(|r| unset_staged(r, "fleet-prod", &["FLEET__P__OLD".into()])),
+            9
+        );
+    }
+
+    #[test]
+    fn deploy_timeout_is_unknown_exit_9() {
+        assert_eq!(timed_out_write(|r| deploy(r, "fleet-prod")), 9);
+    }
+
+    /// NR-2: a failed write whose `auth whoami` cannot run is an unknown outcome (exit 9).
+    #[test]
+    fn failed_write_without_diagnosis_is_unknown_exit_9() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_io_error(io::ErrorKind::TimedOut);
+        let e = crate::host::with_test_host(bash(), || deploy(&r, "fleet-prod")).unwrap_err();
+        assert_eq!(e.exit_code(), 9, "{e}");
+    }
+
+    /// NR-28: a read that timed out on every attempt is an outage: exit 9, nothing changed.
+    #[test]
+    fn read_timeout_is_an_outage_exit_9() {
+        let r = FakeRunner::default();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        assert_eq!(list(&r, "app").unwrap_err().exit_code(), 9);
+    }
+
+    /// A Fly target as configured (simple profile, app `app`).
+    fn fly_target() -> crate::domain::Fleet {
+        crate::config::parse(
+            "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
+             item_id = \"i\"\n[environments.prod.fly]\napp = \"app\"\n[keys.K]\n\
+             kind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+        .unwrap()
+    }
+
+    /// Read commands make no preflight call on Fly: the app's state matters only to writes.
+    #[test]
+    fn read_mode_preflight_makes_no_call() {
+        let fleet = fly_target();
+        let r = FakeRunner::new(Vec::<Output>::new());
+        let t = fleet.environments["prod"].target().unwrap();
+        t.preflight(&r, crate::provider::PreflightMode::Read)
+            .unwrap();
+        assert!(r.calls.borrow().is_empty());
+    }
+
+    const STARTED: &str = r#"{"Status":"deployed","Machines":[{"state":"started"}]}"#;
+    const RUNNING: &str = r#"[{"Version":2,"Status":"running"}]"#;
+    const COMPLETE: &str = r#"[{"Version":2,"Status":"complete"}]"#;
+
+    /// `sync` (mutate mode) waits for a running deploy, then goes on (UX1).
+    #[test]
+    fn mutate_mode_preflight_waits_for_a_running_deploy() {
+        let fleet = fly_target();
+        let r = FakeRunner::new([
+            Output::success(STARTED),
+            Output::success(RUNNING),
+            Output::success(COMPLETE),
+        ]);
+        let t = fleet.environments["prod"].target().unwrap();
+        assert!(
+            t.preflight(&r, crate::provider::PreflightMode::Mutate)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn waiting_for_a_running_deploy_prints_progress() {
+        let r = FakeRunner::new([
+            Output::success(STARTED),
+            Output::success(RUNNING),
+            Output::success(COMPLETE),
+        ]);
+        preflight(&r, "app").unwrap();
+        assert_eq!(
+            *r.notes.borrow(),
+            ["waiting for the running Fly deploy of app (release v2) to finish, 0 s"]
+        );
+    }
+
+    /// The progress line repeats at most every 15 s while the deploy keeps running.
+    #[test]
+    fn progress_while_waiting_is_at_most_every_15_seconds() {
+        let mut responses = vec![Output::success(STARTED)];
+        responses.extend((0..5).map(|_| Output::success(RUNNING)));
+        responses.push(Output::success(COMPLETE));
+        let r = FakeRunner::new(responses);
+        preflight(&r, "app").unwrap();
+        assert_eq!(r.notes.borrow().len(), 2, "{:?}", r.notes.borrow());
+    }
+
+    /// A deploy still running when the run budget is nearly spent refuses, nothing changed.
+    #[test]
+    fn deploy_still_running_at_the_end_of_the_budget_refuses() {
+        let r = FakeRunner::new([
+            Output::success(STARTED),
+            Output::success(RUNNING),
+            Output::success(RUNNING),
+            Output::success(RUNNING),
+        ]);
+        // Room for two polls, each with one read's limit to spare (NR-4).
+        r.budget.set(crate::runner::READ_TIMEOUT + DEPLOY_POLL * 2);
+        assert!(matches!(
+            preflight(&r, "app"),
+            Err(Error::Target(m)) if m.contains("still running for app after 10 s; nothing was changed")
+        ));
+    }
+
+    /// NR-24: preflight reads the app status, then its releases; nothing else.
+    #[test]
+    fn preflight_reads_status_then_releases() {
+        let r = FakeRunner::new([
+            Output::success(r#"{"Status":"deployed","Machines":[{"state":"started"}]}"#),
+            Output::success(r#"[{"Version":1,"Status":"complete"}]"#),
+        ]);
+        preflight(&r, "app").unwrap();
+        let argv: Vec<String> = r.calls.borrow().iter().map(|c| c.args.join(" ")).collect();
+        assert_eq!(
+            argv,
+            ["status --app app --json", "releases --app app --json"]
+        );
+    }
+
+    /// NR-24: `InProgress` on the latest release (by version) is a running deploy, whatever
+    /// its status: preflight reads the releases again.
+    #[test]
+    fn latest_release_in_progress_is_waited_for() {
+        let r = FakeRunner::new([
+            Output::success(r#"{"status":"deployed","machines":[{"state":"started"}]}"#),
+            Output::success(
+                r#"[{"Version":7,"InProgress":true,"Status":""},{"Version":6,"Status":"complete"}]"#,
+            ),
+            Output::success(r#"[{"Version":7,"Status":"complete"}]"#),
+        ]);
+        preflight(&r, "app").unwrap();
+        assert_eq!(r.calls.borrow().len(), 3);
+    }
+
+    /// NR-6, SR-1: an unexpected status document is a target error that never echoes it.
+    #[test]
+    fn unexpected_status_json_never_echoes_output() {
+        let r = FakeRunner::new([Output::success(r#"{"Machines":"LEAKCANARY"}"#)]);
+        let e = preflight(&r, "app").unwrap_err();
+        assert!(!format!("{e} {e:?}").contains("LEAKCANARY"), "{e}");
     }
 
     /// FR-26: host detection happens only on the failure path.
@@ -1082,6 +1562,7 @@ mod tests {
         run_on(
             &r,
             &host,
+            Effect::Read,
             "fly secrets list",
             "app",
             &["secrets", "list"],
@@ -1093,21 +1574,14 @@ mod tests {
     }
 
     #[test]
-    fn timeout_is_target_error_naming_the_program() {
+    fn read_outage_names_the_step_and_status_page() {
         let r = FakeRunner::default();
-        r.responses.borrow_mut().push_back(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "flyctl did not finish within 300 s and was killed",
-        )));
-        match list(&r, "app") {
-            Err(Error::Target(m)) => {
-                assert!(
-                    m.starts_with("fly secrets list: flyctl did not finish"),
-                    "{m}"
-                )
-            }
-            other => panic!("{other:?}"),
-        }
+        r.push_unknowns("lost", crate::runner::READ_ATTEMPTS);
+        assert_eq!(
+            list(&r, "app").unwrap_err().to_string(),
+            "outcome unknown: Fly did not respond after 3 attempts (fly secrets list); nothing \
+             was changed. Check https://status.flyio.net, then re-run"
+        );
     }
 
     /// FR-22: an import refusal names the rule and its fixed reason, never the value.

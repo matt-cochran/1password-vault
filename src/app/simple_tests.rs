@@ -73,7 +73,8 @@ fn sync_of(r: &FakeRunner, opts: &sync::SyncOpts) -> (Result<(), Error>, String)
 
 /// item, list A, import, list B, then spare responses so an unexpected call is recorded.
 fn fake_sync(item: Output, a: Output, b: Output) -> FakeRunner {
-    FakeRunner::new([item, a, ok(), b, ok(), ok(), ok()])
+    let [st, rel] = fly_preflight_ok();
+    FakeRunner::new([item, a, st, rel, ok(), b, ok(), ok(), ok()])
 }
 
 fn prune() -> sync::SyncOpts {
@@ -114,7 +115,7 @@ fn status_reads_one_item_by_ids_and_lists_the_app_once() {
 fn status_table_has_no_product_column() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = status_of(&r, false);
-    let header = out.lines().next().unwrap();
+    let header = out.lines().nth(1).unwrap();
     assert!(
         header.starts_with("KEY ") && !header.contains("PRODUCT"),
         "{out}"
@@ -133,7 +134,10 @@ fn status_complete_item_is_clean_and_value_free() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (res, out) = status_of(&r, false);
     res.unwrap();
-    assert!(out.contains("3 saved, 2 not yet on Fly"), "{out}");
+    assert!(
+        out.contains("3 saved · 1 skipped · 0 findings · 2 not yet on Fly"),
+        "{out}"
+    );
     assert_no_values(&out);
 }
 
@@ -141,7 +145,7 @@ fn status_complete_item_is_clean_and_value_free() {
 fn status_missing_key_is_a_finding_naming_the_key_with_guidance() {
     let r = FakeRunner::new([prod_item_without("DATABASE_URL"), fly_empty()]);
     let (res, out) = status_of(&r, false);
-    assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
     assert!(
         out.contains("guidance: Fly Postgres / connection string"),
         "{out}"
@@ -186,7 +190,7 @@ fn status_mode_rule_failure_names_the_key_alone() {
     ];
     let r = FakeRunner::new([item(&fs), fly_empty()]);
     let (res, out) = out_of(|o| status::run(&simple(), "staging", &r, o));
-    assert!(matches!(res, Err(Error::Findings(1))), "{res:?}");
+    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
     assert!(
         out.lines().any(|l| l.starts_with("STRIPE_SECRET_KEY")
             && l.contains("failed prefix_by_mode (wrong prefix for mode test)")),
@@ -242,10 +246,7 @@ fn plan_counts_an_undeclared_fly_name_as_unmanaged() {
 fn plan_never_lists_an_undeclared_fly_name_to_prune() {
     let r = FakeRunner::new([prod_item(), fly(&[(FOREIGN, "d-f")])]);
     let (_, out) = plan_of(&r, false);
-    assert!(
-        !out.contains(&format!("to prune (with --prune): {FOREIGN}")),
-        "{out}"
-    );
+    assert!(!out.contains(FOREIGN), "{out}");
     assert!(out.contains("0 to prune"), "{out}");
 }
 
@@ -254,7 +255,7 @@ fn plan_lists_a_declared_key_not_desired_here_to_prune() {
     let r = FakeRunner::new([prod_item(), fly(&[(STAGING_ONLY, "d-s")])]);
     let (_, out) = plan_of(&r, false);
     assert!(
-        out.contains(&format!("to prune (with --prune): {STAGING_ONLY}")),
+        out.contains(&format!("would prune (needs --prune): {STAGING_ONLY}")),
         "{out}"
     );
 }
@@ -270,7 +271,7 @@ fn plan_reads_the_item_once() {
 fn plan_table_has_no_product_column() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = plan_of(&r, false);
-    assert!(out.lines().next().unwrap().starts_with("KEY "), "{out}");
+    assert!(out.lines().nth(1).unwrap().starts_with("KEY "), "{out}");
 }
 
 #[test]
@@ -339,7 +340,7 @@ fn sync_prune_never_touches_an_undeclared_fly_name() {
     res.unwrap();
     assert_eq!(unset_argv(&r), None, "{:?}", argvs(&r));
     assert!(!r.argv_contains(FOREIGN), "{:?}", argvs(&r));
-    assert!(!out.contains("pruned"), "{out}");
+    assert!(!out.contains("pruned:"), "{out}");
 }
 
 #[test]
