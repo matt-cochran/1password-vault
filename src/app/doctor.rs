@@ -83,6 +83,7 @@ pub fn run_scoped_as(
         env,
         product,
         json,
+        source: None,
         deploy_failure: None,
     };
     run_request(config, request, r, out)
@@ -97,6 +98,9 @@ pub struct Request<'a> {
     pub product: Option<&'a str>,
     /// `--json`.
     pub json: bool,
+    /// Where the configuration came from, for the config line (`source: ./secrets.toml`,
+    /// `source: manifest "opv · app" in vault V (matched …)`, FR-44).
+    pub source: Option<&'a str>,
     /// The environment's deploy sign-in failed before doctor ran (FR-40). Doctor reports
     /// it as one failing check, runs the other checks and skips the target checks that
     /// need those credentials (owner ruling: doctor never aborts on it).
@@ -124,6 +128,7 @@ fn run_request_on(
         env,
         product,
         json,
+        source,
         deploy_failure,
     } = request;
     let config = match env {
@@ -142,6 +147,7 @@ fn run_request_on(
         product,
         local_only,
         json,
+        source,
     };
     run_on_with(config, r, host, scope, deploy_failure, out)
 }
@@ -175,6 +181,8 @@ struct Scope<'a> {
     local_only: bool,
     /// `--json` (P18).
     json: bool,
+    /// Where the configuration came from (FR-44).
+    source: Option<&'a str>,
 }
 
 /// The state of one check line.
@@ -339,7 +347,10 @@ fn run_on_with(
     let mut report = Report::default();
     let (fleet, config_line) = match config {
         Ok(f) => {
-            let summary = config_summary(&f);
+            let mut summary = config_summary(&f);
+            if let Some(src) = scope.source {
+                summary.push_str(&format!("; source: {src}"));
+            }
             (Some(f), Ok(Check::Ok(summary)))
         }
         Err(e) => (None, Err(e)),
@@ -1555,6 +1566,7 @@ mod tests {
             env: Some("prod"),
             product: Some("allumata"),
             json,
+            source: None,
             deploy_failure: Some(Error::Auth(
                 "deploy credentials: az login failed\n  next: check the item".into(),
             )),

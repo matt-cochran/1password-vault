@@ -950,3 +950,20 @@ fn no_message_or_doc_suggests_the_deprecated_apps_resume() {
     });
     assert_eq!(hits, Vec::<String>::new());
 }
+
+/// FR-44: `config export` without an environment prints the configuration as stored.
+#[test]
+fn config_export_without_env_prints_the_configuration_verbatim() {
+    let (code, out, err) = opv(&["--config", CFG, "config", "export"]);
+    assert!(
+        code == 0 && out == std::fs::read_to_string(CFG).unwrap(),
+        "{err}"
+    );
+}
+
+/// FR-44: `status --json` needs an environment or `--all`.
+#[test]
+fn status_json_without_env_or_all_exits_2() {
+    let (code, _, err) = opv(&["--config", CFG, "status", "--json"]);
+    assert_eq!(code, 2, "{err}");
+}

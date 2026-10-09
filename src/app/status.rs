@@ -137,38 +137,65 @@ pub(crate) fn fix_then(command: &str) -> String {
 /// rest are still shown; the first such error is the result, else `Findings` when any
 /// environment has findings.
 pub fn overview(fleet: &Fleet, r: &dyn CommandRunner, out: &mut dyn Write) -> Result<(), Error> {
-    let mut first_err: Option<(String, Error)> = None;
-    let mut findings = 0;
-    let mut first_finding: Option<&str> = None;
+    let o = overview_of(fleet, r);
+    for line in &o.lines {
+        writeln!(out, "{line}").map_err(write_err)?;
+    }
+    o.result()
+}
+
+/// The [`overview`] of one configuration, collected: its lines, the first error and the
+/// findings count (`status --all` prints several of these).
+pub struct Overview {
+    pub lines: Vec<String>,
+    first_err: Option<(String, Error)>,
+    findings: usize,
+    first_finding: Option<String>,
+}
+
+impl Overview {
+    /// The first error, else `Findings` when any environment has findings.
+    pub fn result(self) -> Result<(), Error> {
+        if let Some((name, e)) = self.first_err {
+            return Err(e.or_next(|| format!("opv status {name}")));
+        }
+        match self.first_finding {
+            Some(name) => Err(Error::findings(self.findings, format!("opv status {name}"))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Collect [`overview`]'s lines without printing them.
+pub fn overview_of(fleet: &Fleet, r: &dyn CommandRunner) -> Overview {
+    let mut o = Overview {
+        lines: Vec::new(),
+        first_err: None,
+        findings: 0,
+        first_finding: None,
+    };
     for (name, env) in &fleet.environments {
         let Some(t) = env.target() else {
-            writeln!(out, "{name}: run-only (no target)").map_err(write_err)?;
+            o.lines.push(format!("{name}: run-only (no target)"));
             continue;
         };
         match env_rows(fleet, name, t, r) {
             Ok(rows) => {
-                writeln!(out, "{}", count_line(name, &rows, t.provider().label()))
-                    .map_err(write_err)?;
+                o.lines.push(count_line(name, &rows, t.provider().label()));
                 let n = rows.iter().filter(|r| is_blocking(r)).count();
                 if n > 0 {
-                    findings += n;
-                    first_finding.get_or_insert(name);
+                    o.findings += n;
+                    o.first_finding.get_or_insert_with(|| name.clone());
                 }
             }
             Err(e) => {
                 let first = e.to_string().lines().next().unwrap_or_default().to_string();
-                writeln!(out, "{name}: not checked ({first})").map_err(write_err)?;
-                first_err.get_or_insert((name.clone(), e));
+                o.lines.push(format!("{name}: not checked ({first})"));
+                o.first_err.get_or_insert((name.clone(), e));
             }
         }
     }
-    if let Some((name, e)) = first_err {
-        return Err(e.or_next(|| format!("opv status {name}")));
-    }
-    match first_finding {
-        Some(name) => Err(Error::findings(findings, format!("opv status {name}"))),
-        None => Ok(()),
-    }
+    o
 }
 
 /// One environment's rows, for [`overview`]. Each environment uses its own 1Password

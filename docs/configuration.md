@@ -1,6 +1,6 @@
 # Configuration
 
-`secrets.toml` declares where each value lives in 1Password, which environments want it, and the rules it must pass. It holds IDs and rules, never values.
+`secrets.toml` declares where each value lives in 1Password, which environments want it, and the rules it must pass. It holds IDs and rules, never values. The same TOML can live in 1Password instead, as a project manifest, so no file is needed in the repository ([Configuration in 1Password](#configuration-in-1password)).
 
 ## Store layout
 
@@ -180,6 +180,42 @@ fly.app  = "example-portfolio-production"
 - `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this environment's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on Kubernetes, or on an environment without a target, is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials. Platform support and how each value is handled: [usage](usage.md#sign-in-accounts-and-deploy-credentials).
 
 Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App. Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
+
+Since 0.5.0, in a new project (no `secrets.toml` here or in a parent) `init` saves the same text as a project manifest in the item's vault instead of a file, tagged with the git remote; `--file` writes `./secrets.toml` as before, and `--project <name>` names the manifest (default: the repository's name). An existing manifest for the project is never overwritten: change it with `opv config edit`.
+
+## Configuration in 1Password
+
+The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes hold exactly the TOML of a `secrets.toml` (same schema, same validation). It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value.
+
+### How opv finds the configuration
+
+First match wins:
+
+1. `--config <file>` or `OPV_CONFIG`;
+2. `OPV_PROJECT=<name>`: the manifest titled `opv · <name>`;
+3. `secrets.toml` in the current directory or a parent (an existing file always wins over a manifest);
+4. a `.opv` file in the current directory or a parent, one line: `project = "<name>"` (optionally `account = "<account>"` for a second 1Password account);
+5. the manifest tagged with this checkout's git remote (`git remote get-url origin`, normalized to `host/owner/repo`; https, ssh and `git@host:owner/repo` forms are the same).
+
+`using …` on stderr names what was used. Steps 2, 4 and 5 make one `op item list --tags opv-manifest` call (names and tags only), and loading a manifest is one `op item get`, so these commands need a 1Password session even for `explain` and `config export`; without one the error says so and ends with `Next: opv login`. No match ends with `Next: opv init …`; several matches are listed, and `OPV_PROJECT` picks one.
+
+**Tags.** 1Password reads `/` in a tag as nesting, so the repository tag writes `/` as `|`: `opv-repo:github.com|acme|myapp`. In a monorepo a manifest can cover directories with path tags (`opv-path:apps|api`, from `opv config import --path apps/api`): among manifests for the remote, the one whose path is the longest prefix of the current directory (relative to the repository root) wins; a manifest without paths covers the whole repository at the lowest priority. At the root, or when no path matches and several manifests remain, they are listed with their paths.
+
+### Moving a file into 1Password
+
+```sh
+opv config import --vault myapp-dev                     # validates ./secrets.toml, creates the manifest
+OPV_PROJECT=myapp opv config check --file secrets.toml  # identical? exit 0; else exit 8 with a diff
+git rm secrets.toml                                     # opv never deletes it for you
+```
+
+`import` takes `--file <path>` (default: the `secrets.toml` found from here), `--project <name>` (default: the repository's name) and `--path <dir>` (repeatable). It refuses when a manifest for the same project, or for the same repository and paths, exists.
+
+### Reading and changing it
+
+- `opv config export` prints the configuration as TOML (byte for byte as stored); `--json` as JSON. `opv config export <env> --json` still prints that environment's config-kind values.
+- `opv config edit` opens `$VISUAL` or `$EDITOR` (default `vi`) on a temporary copy (mode 0600, removed afterwards), validates it, shows the diff and asks once. It saves only when nobody changed the configuration since it was opened; otherwise it refuses and re-opens on the new version. It works on a `secrets.toml` too.
+- `opv config check --file <path>` compares a committed copy with the manifest: exit 8 with a diff when they differ. Teams that want pull-request review keep a copy and run it in CI; 1Password's item history records every change either way.
 
 ## Targets
 

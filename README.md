@@ -69,6 +69,16 @@ opv check staging              # every key saved? names only, no deployment targ
 opv run staging -- ./server    # run a process with the secrets in its environment
 ```
 
+No file in the repository is needed: in a new project `opv init` saves the configuration as a manifest in 1Password (a Secure Note titled `opv · <project>`, tagged with the git remote), so any checkout of the repository finds it:
+
+```sh
+opv init dev --vault myapp-dev --item myapp    # once, by the project owner
+opv login dev                                  # in any checkout, no files: sign in once
+opv run dev -- npm run dev
+```
+
+An existing `secrets.toml` keeps working and wins over a manifest; `opv config import --vault <vault>` moves it into 1Password ([configuration](docs/configuration.md#configuration-in-1password)). `opv projects` lists every project you can see and `opv status --all` checks them all.
+
 A minimal `secrets.toml` for one app per environment:
 
 ```toml

@@ -63,6 +63,8 @@ opv add api/ENC_KEY --kind secret --rule base64_bytes=32 --immutable
 
 Both validate the file before writing and refuse a name that would collide on a target.
 
+In a new project (no `secrets.toml` anywhere above the current directory), `opv init` saves the configuration in 1Password as a project manifest instead of a file, tagged with the git remote, so other checkouts need no file; pass `--file` when the user wants a committed `secrets.toml`. To move an existing file into 1Password, run (with the user's yes) `opv config import --vault <vault>`, then `opv config check --file secrets.toml`, and let the user delete the file. `opv config edit` is interactive: leave it to the user. Without a 1Password session, commands on a manifest end with `Next: opv login`.
+
 If there is no item yet, write `secrets.toml` from the example in [configuration.md](configuration.md), then (with the user's yes) run `opv item skeleton <env>` to create the empty fields.
 
 Then:

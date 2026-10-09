@@ -8,6 +8,8 @@ opv check dev --product api
 opv run dev --product api -- npm run dev
 ```
 
+When the project's configuration lives in 1Password (a manifest, see [configuration](configuration.md#configuration-in-1password)), a checkout needs no file: sign in and run. `opv doctor` names the configuration it found on its `config` line.
+
 `opv login dev` signs in to the 1Password account the `dev` environment uses (its `account` setting) at 1Password's own prompts, and opens a terminal with the session available. Type `exit` to leave it. No export commands or token copying are needed, and no token is printed. Desktop integration can provide authentication without a session token. `opv login` without an environment signs in to the one account all environments use, or asks which environment when they use different accounts; before `secrets.toml` exists it uses your default account. `opv login dev -- <command>` runs one command signed in and returns its exit code.
 
 Signing in to environments in different accounts from the same terminal keeps both sessions, and `check`, `run`, `plan` and `sync` each use the account of the environment they act on. Every sign-in hint opv prints (from `doctor` and from errors) is `opv login <env>`.

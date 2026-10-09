@@ -6,9 +6,11 @@ use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
-    add, config_export, doctor, explain, init, run as run_cmd, signin, skeleton, status, sync,
+    add, config_cmd, config_export, doctor, explain, init, run as run_cmd, signin, skeleton,
+    status, sync,
 };
 use opv::config;
+use opv::config_store;
 use opv::runner::{Budget, CommandRunner, ProcessRunner};
 
 mod colour;
@@ -24,6 +26,7 @@ Start here:
 
 Everyday use:
   opv check dev --product api      Check that your app's settings are ready
+  opv projects                     Projects whose configuration lives in 1Password
   opv run dev --product api -- npm run dev
 
 Deployment:
@@ -54,6 +57,7 @@ Exit codes:
 
 Environment:
   OPV_CONFIG   default for --config
+  OPV_PROJECT  project whose manifest in 1Password to use (title opv · <name>)
   OPV_PRODUCT  default for --product on check, run, doctor, explain, status and plan
                (never sync)
   NO_COLOR     no colour under --color auto
@@ -179,11 +183,51 @@ More examples:
 
 const EXPORT_QUICK: &str = "\
 Examples:
-  opv config export staging        # config-kind values as one JSON object";
+  opv config export                # the configuration as TOML (file or manifest)
+  opv config export --json         # the configuration as JSON
+  opv config export staging --json # staging's config-kind values (reads 1Password)";
 
 const EXPORT_MORE: &str = "\
-Prints the values of config-kind keys by design, never secrets. Refuses (exit 6) when a
-config key is stored concealed or a secret key as text.";
+Without <ENV>, prints the configuration itself: IDs, names, kinds and rules, never a value.
+With <ENV>, prints the values of config-kind keys by design, never secrets; refuses (exit 6)
+when a config key is stored concealed or a secret key as text.";
+
+const IMPORT_QUICK: &str = "\
+Examples:
+  opv config import --vault myapp-dev              # secrets.toml found from here
+  opv config import --file infra/secrets.toml --vault shared --project api --path apps/api";
+
+const IMPORT_MORE: &str = "\
+Validates the file, then saves it as the manifest \"opv · <project>\" in the vault, tagged
+with this repository's git remote (and --path directories in a monorepo). Never deletes the
+file; Next: says how to check and remove it. An AI assistant asks the user first.";
+
+const EDIT_QUICK: &str = "\
+Examples:
+  opv config edit                  # the configuration in $VISUAL or $EDITOR
+  EDITOR=nano opv config edit";
+
+const EDIT_MORE: &str = "\
+Works on a manifest and on a file. Edits a private temporary copy, validates it, shows the
+diff and asks once; saves only if nobody changed it meanwhile (else re-opens on the new
+version). Needs your own interactive terminal.";
+
+const CONFIG_CHECK_QUICK: &str = "\
+Examples:
+  opv config check --file secrets.toml   # exit 8 with a diff when the copy differs";
+
+const CONFIG_CHECK_MORE: &str = "\
+Compares a committed copy with the project's manifest (for review in CI). Changes nothing.";
+
+const PROJECTS_QUICK: &str = "\
+Examples:
+  opv projects                 # name, vault, repo and paths
+  opv projects --long          # also environment names (one read per project)
+  opv projects --json          # the same, for scripts";
+
+const PROJECTS_MORE: &str = "\
+One metadata listing per signed-in 1Password account; names only, never a value. Changes
+nothing. opv status --all checks every project's environments.";
 
 const SKELETON_QUICK: &str = "\
 Examples:
@@ -227,9 +271,8 @@ Examples:
   opv init staging --vault myapp-staging --item app --add-env  # add to the configuration";
 
 const INIT_MORE: &str = "\
-Reads the item's field names and types once (never values) and writes IDs, key names and
-kinds to ./secrets.toml; writes nothing to 1Password and looks nothing up on the target.
---config and OPV_CONFIG are used only with --add-env. Fields: docs/configuration.md#targets.";
+Reads the item's field names and types once (never values); looks nothing up on the target.
+A project with a secrets.toml (or --file) gets the file; a new one a manifest in the vault.";
 
 const COMPLETIONS_QUICK: &str = "\
 Examples:
@@ -260,9 +303,11 @@ point at the docs of the same release.";
 struct Cli {
     /// Path to secrets.toml.
     ///
-    /// Without this option (or OPV_CONFIG), `secrets.toml` is looked for in the current
-    /// directory and then each parent directory, and the first one found is used. The
-    /// path in use is printed on stderr as `using <path>` unless given with --config.
+    /// Without this option (or OPV_CONFIG), the configuration is found in this order:
+    /// OPV_PROJECT (a manifest in 1Password), `secrets.toml` in the current directory or a
+    /// parent, a `.opv` file naming the project, then the manifest tagged with this
+    /// checkout's git remote. What is used is printed on stderr as `using ...` unless given
+    /// with --config.
     #[arg(
         long,
         global = true,
@@ -365,8 +410,27 @@ enum Cmd {
         /// [env: OPV_PRODUCT]
         #[arg(long, requires = "env")]
         product: Option<String>,
-        /// Print one machine-readable JSON document instead of the table.
-        #[arg(long, requires = "env")]
+        /// Print one machine-readable JSON document instead of the table (with <ENV> or
+        /// --all).
+        #[arg(long)]
+        json: bool,
+        /// One line per environment for every project manifest visible in 1Password. Costs
+        /// one manifest read per project plus one item read per environment (reads are
+        /// retried); a project that cannot be read is one line with its reason.
+        #[arg(long, conflicts_with = "env")]
+        all: bool,
+    },
+    /// List the projects whose configuration lives in 1Password (names only).
+    ///
+    /// One metadata listing per signed-in account shows each manifest's vault, repos and
+    /// paths; --long also reads each manifest once for its environment names.
+    #[command(before_help = PROJECTS_QUICK, after_help = PROJECTS_MORE)]
+    Projects {
+        /// Read each manifest for its environment names.
+        #[arg(long)]
+        long: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
         json: bool,
     },
     /// Run your app with the selected product's 1Password settings.
@@ -423,23 +487,26 @@ enum Cmd {
         /// used for local development. Nothing is looked up.
         #[arg(long, value_name = "PROVIDER")]
         target: Option<String>,
-        /// Add this environment to the existing secrets.toml (found like other commands:
-        /// --config, OPV_CONFIG or the nearest one) instead of writing a new file; comments
-        /// are kept, and every declared key the item has includes the environment.
+        /// Add this environment to the existing configuration (a secrets.toml or the
+        /// project's manifest, found like other commands) instead of writing a new one;
+        /// comments are kept, and every declared key the item has includes the environment.
         #[arg(long, conflicts_with_all = ["force", "profile"])]
         add_env: bool,
-        /// Profile to write; without it, it follows the item's shape.
-        #[arg(long, value_parser = ["simple", "fleet"])]
+        /// Profile to write, simple or fleet; without it, it follows the item's shape.
+        #[arg(long, value_parser = ["simple", "fleet"], hide_possible_values = true)]
         profile: Option<String>,
         /// Overwrite an existing secrets.toml.
         #[arg(long)]
         force: bool,
+        /// Write ./secrets.toml even for a new project (without it, a new project's
+        /// configuration is saved as a manifest in the item's vault).
+        #[arg(long)]
+        file: bool,
+        /// Project name of a new manifest; defaults to the repository's name.
+        #[arg(long, conflicts_with = "file")]
+        project: Option<String>,
     },
     /// Declare a key in secrets.toml, or add environments to a declared key.
-    ///
-    /// Edits the file in place (comments and order kept) and validates it like a
-    /// hand-written one before writing: a name that collides on a target, an unknown rule
-    /// or a bad rule value is refused. Makes no 1Password or target call.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
     Add {
         /// The key: PRODUCT/KEY (fleet profile) or KEY (simple profile).
@@ -552,14 +619,47 @@ impl From<SyncArgs> for sync::SyncOpts {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Print the config-kind (non-secret) values as JSON.
+    /// Print the configuration (no secrets), or with <ENV> its config-kind values as JSON.
     #[command(before_help = EXPORT_QUICK, after_help = EXPORT_MORE)]
     Export {
-        /// Environment name from the configuration (for example staging or prod).
-        env: String,
-        /// Output JSON (the default and only format; accepted for scripts that pass it).
-        #[arg(long)]
+        /// Environment whose config-kind (non-secret) values are printed as JSON; without
+        /// it, the configuration itself is printed.
+        env: Option<String>,
+        /// Output JSON.
+        #[arg(long, conflicts_with = "toml")]
         json: bool,
+        /// Output the configuration as TOML (the default without <ENV>).
+        #[arg(long, conflicts_with = "env")]
+        toml: bool,
+    },
+    /// Save a secrets.toml as this project's manifest in 1Password (never deletes the file).
+    #[command(before_help = IMPORT_QUICK, after_help = IMPORT_MORE)]
+    Import {
+        /// The file to import; defaults to the secrets.toml found from here.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Vault to create the manifest in (title or ID).
+        #[arg(long)]
+        vault: String,
+        /// Project name; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Monorepo directory this project covers, relative to the repository root
+        /// (repeatable).
+        #[arg(long = "path", value_name = "DIR")]
+        paths: Vec<String>,
+    },
+    /// Edit the configuration in $VISUAL/$EDITOR, validate, show the diff and save once
+    /// confirmed; refuses (and re-opens) when someone changed it meanwhile.
+    #[command(before_help = EDIT_QUICK, after_help = EDIT_MORE)]
+    Edit,
+    /// Compare a committed copy with the project's manifest; exit 8 with a diff when they
+    /// differ (for review in CI).
+    #[command(before_help = CONFIG_CHECK_QUICK, after_help = CONFIG_CHECK_MORE)]
+    Check {
+        /// The committed copy.
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
     },
 }
 
@@ -617,17 +717,21 @@ fn command_line() -> clap::Command {
     use opv::provider::init_flag;
     Cli::command().mut_subcommand("init", |mut c| {
         c = c.mut_arg("target", |a| {
-            a.value_parser(clap::builder::PossibleValuesParser::new(
-                registry::PROVIDERS
-                    .iter()
-                    .filter(|p| !p.init_fields().is_empty())
-                    .map(|p| p.section()),
-            ))
+            a.hide_possible_values(true)
+                .value_parser(clap::builder::PossibleValuesParser::new(
+                    registry::PROVIDERS
+                        .iter()
+                        .filter(|p| !p.init_fields().is_empty())
+                        .map(|p| p.section()),
+                ))
         });
         // One line per provider in the help (H9: --help fits on one screen); each option is
         // a hidden argument, so clap still parses and completes it.
         let mut summary = String::from("Target options (* required with that --target):");
-        for p in registry::PROVIDERS.iter().filter(|p| !p.init_fields().is_empty()) {
+        for p in registry::PROVIDERS
+            .iter()
+            .filter(|p| !p.init_fields().is_empty())
+        {
             let flags: Vec<String> = p
                 .init_fields()
                 .iter()
@@ -648,7 +752,10 @@ fn command_line() -> clap::Command {
                 );
             }
         }
-        let more = c.get_after_help().map(|a| a.to_string()).unwrap_or_default();
+        let more = c
+            .get_after_help()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
         c = c.after_help(format!("{summary}\n\n{more}"));
         c
     })
@@ -838,7 +945,8 @@ fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
             Some(e) => format!("explain {} --env {}", shell_word(target), shell_word(e)),
             None => format!("explain {}", shell_word(target)),
         },
-        Cmd::Item(ItemCmd::Skeleton { env }) | Cmd::Config(ConfigCmd::Export { env, .. }) => {
+        Cmd::Item(ItemCmd::Skeleton { env })
+        | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             format!("doctor --env {}", shell_word(env))
         }
         _ => "status".to_string(),
@@ -866,7 +974,7 @@ impl Cmd {
         match self {
             Cmd::Check { env, .. }
             | Cmd::Run { env, .. }
-            | Cmd::Config(ConfigCmd::Export { env, .. })
+            | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
             | Cmd::Item(ItemCmd::Skeleton { env }) => Some((env, Reach::Store)),
             Cmd::Status { env: Some(env), .. } => Some((env, Reach::Target)),
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
@@ -1011,20 +1119,57 @@ fn run(
     if let Cmd::Init { add_env: false, .. } = &cli.cmd {
         return run_init(cli, config_source, init_options, &r, out).map(|()| 0);
     }
+    match &cli.cmd {
+        Cmd::Projects { long, json } => {
+            return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        }
+        Cmd::Status {
+            all: true, json, ..
+        } => return config_cmd::status_all(&r, *json, out).map(|()| 0),
+        Cmd::Config(ConfigCmd::Import { .. }) | Cmd::Config(ConfigCmd::Check { .. }) => {
+            return run_config_manifest(cli, &r, out).map(|()| 0);
+        }
+        _ => {}
+    }
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
+    let found = request(&cli, config_source, false).and_then(|req| config_store::locate(&req, &r));
+    if let Ok(f) = &found
+        && let Some(line) = f.announce()
+    {
+        let _ = writeln!(io::stderr(), "{line}");
+    }
+    let source = found.as_ref().ok().map(|f| f.store().describe());
+    if let (Cmd::Config(ConfigCmd::Edit), Ok(f)) = (&cli.cmd, &found) {
+        use opv::app::setup_runtime;
+        setup_runtime::Console::require_terminal("config edit")?;
+        return config_cmd::edit(f, &r, &mut config_cmd::TerminalUi, out).map(|()| 0);
+    }
+    if let (
+        Cmd::Config(ConfigCmd::Export {
+            env: None, json, ..
+        }),
+        Ok(f),
+    ) = (&cli.cmd, &found)
+    {
+        let format = if *json {
+            config_cmd::Format::Json
+        } else {
+            config_cmd::Format::Toml
+        };
+        return config_cmd::export(f, format, &r, out).map(|()| 0);
+    }
     if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } = &cli.cmd {
         let path = config_path(cli.config.as_deref(), config_source);
         return run_edit(cli.cmd, &path?, init_options, &r, out).map(|()| 0);
     }
-    let loaded = find_config(cli.config.as_ref(), config_source).unwrap_or_else(|| {
-        Err(config::not_found(
-            &std::env::current_dir().unwrap_or_default(),
-        ))
-    });
+    let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
+    let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
-    // A file that does not load: re-check it with a read-only command (H10).
+    // A file that does not load: re-check it with a read-only command (H10). A manifest
+    // has no file to fix in place: `opv config edit` opens it (FR-44).
     let loaded = match loaded {
+        Err(e @ Error::Config(_)) if manifest => Err(e.or_next(|| "opv config edit".into())),
         Err(e) if !matches!(cmd, Cmd::Doctor { .. }) => {
             let flag = (config_source == ConfigSource::Flag)
                 .then_some(cli.config.as_deref())
@@ -1060,7 +1205,7 @@ fn run(
     {
         return run_cmd::run_for(&loaded?, env, product.as_deref(), command, runner);
     }
-    run_other(cmd, loaded, runner, deploy_failure, out).map(|()| 0)
+    run_other(cmd, loaded, source.as_deref(), runner, deploy_failure, out).map(|()| 0)
 }
 
 /// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
@@ -1088,9 +1233,77 @@ fn find_config(
     }
 }
 
+/// The discovery request from the command line and the environment (FR-25, FR-44).
+fn request(
+    cli: &Cli,
+    config_source: ConfigSource,
+    manifest_only: bool,
+) -> Result<config_store::Request, Error> {
+    let start = std::env::current_dir()
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    let given = match config_source {
+        ConfigSource::Env => config_store::Given::Env,
+        _ => config_store::Given::Flag,
+    };
+    Ok(config_store::Request {
+        start,
+        config: cli.config.clone().map(|p| (p, given)),
+        project: config_store::project_env(),
+        manifest_only,
+    })
+}
+
+/// `config import` and `config check`: they compare a file with the manifest, so the
+/// manifest is found without the `secrets.toml` walk-up (and without --config).
+fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
+    let dir = std::env::current_dir()
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    match cli.cmd {
+        Cmd::Config(ConfigCmd::Import {
+            file,
+            vault,
+            project,
+            paths,
+        }) => {
+            let file = match file {
+                Some(f) => f,
+                None => config::discover(&dir).ok_or_else(|| {
+                    Error::Config(
+                        format!(
+                            "no secrets.toml found in {} or any parent directory",
+                            dir.display()
+                        )
+                        .into(),
+                    )
+                    .with_next("opv config import --file <path> --vault <vault>")
+                })?,
+            };
+            let args = config_cmd::ImportArgs {
+                file,
+                vault,
+                project,
+                paths,
+            };
+            config_cmd::import(&args, &dir, r, out)
+        }
+        Cmd::Config(ConfigCmd::Check { file }) => {
+            let req = config_store::Request {
+                start: dir,
+                config: None,
+                project: config_store::project_env(),
+                manifest_only: true,
+            };
+            let found = config_store::locate(&req, r)?;
+            config_cmd::check(&found, &file, r, out)
+        }
+        _ => unreachable!("called for config import and check only"),
+    }
+}
+
 fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
+    source: Option<&str>,
     r: &dyn CommandRunner,
     deploy_failure: Option<Error>,
     out: &mut dyn Write,
@@ -1101,12 +1314,15 @@ fn run_other(
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
-        Cmd::Completions { .. } | Cmd::Guide { .. } => unreachable!("handled by run"),
+        Cmd::Completions { .. } | Cmd::Guide { .. } | Cmd::Projects { .. } => {
+            unreachable!("handled by run")
+        }
         Cmd::Doctor { env, product, json } => {
             let scope = doctor::Request {
                 env: env.as_deref(),
                 product: product.as_deref(),
                 json,
+                source,
                 deploy_failure,
             };
             doctor::run_request(loaded, scope, r, out)
@@ -1115,23 +1331,30 @@ fn run_other(
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
         Cmd::Status {
-            env: None,
-            product: _,
-            json: _,
-        } => status::overview(&loaded?, r, out),
+            env: None, json, ..
+        } => {
+            if json {
+                return Err(Error::Config("status --json needs <ENV> or --all".into())
+                    .with_next("opv status <env> --json"));
+            }
+            status::overview(&loaded?, r, out)
+        }
         Cmd::Status {
             env: Some(env),
             product,
             json,
+            ..
         } => status::run_scoped(&loaded?, &env, product.as_deref(), r, out, json),
         Cmd::Plan(a) => sync::plan_scoped(&loaded?, &a.env, a.product.as_deref(), r, out, a.json),
         Cmd::Sync(a) => {
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())
         }
-        Cmd::Config(ConfigCmd::Export { env, json: _ }) => {
+        Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             config_export::run(&loaded?, &env, r, out)
         }
+        // Reached only when discovery failed: its error is the result.
+        Cmd::Config(_) => loaded.map(|_| ()),
         Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
         Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
     }
@@ -1218,7 +1441,18 @@ fn run_init(
     }
     let dir = std::env::current_dir()
         .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
-    init::run(&init_args(cli.cmd, init_options)?, &dir, r, out)
+    let (file, project) = match &cli.cmd {
+        Cmd::Init { file, project, .. } => (*file, project.clone()),
+        _ => unreachable!("called for init only"),
+    };
+    let args = init_args(cli.cmd, init_options)?;
+    // A project that already has a secrets.toml keeps it; a new one gets a manifest
+    // unless --file asks for the file (FR-44).
+    if file || config::discover(&dir).is_some() {
+        init::run(&args, &dir, r, out)
+    } else {
+        init::run_manifest(&args, project.as_deref(), &dir, r, out)
+    }
 }
 
 /// `add` and `init --add-env`: edit the configuration file at `path` in place.
@@ -1266,6 +1500,8 @@ fn init_args(
         add_env: _,
         profile,
         force,
+        file: _,
+        project: _,
     } = cmd
     else {
         unreachable!("called for init only")
