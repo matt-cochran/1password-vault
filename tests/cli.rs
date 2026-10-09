@@ -6,6 +6,8 @@ fn opv(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         // An empty PATH guarantees no real `op` or `flyctl` can run from these tests.
         .env("PATH", "")
         .output()
@@ -52,6 +54,8 @@ fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
         .args(args)
         .current_dir(dir)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         .env("PATH", "")
         .output()
         .unwrap();
@@ -162,11 +166,7 @@ fn top_level_help_describes_config_discovery() {
 
 #[test]
 fn usage_errors_exit_2() {
-    for args in [
-        vec!["--config", CFG, "config", "export", "prod"], // --json is required
-        vec!["--config", CFG, "sync"],
-        vec!["nonsense"],
-    ] {
+    for args in [vec!["--config", CFG, "sync"], vec!["nonsense"]] {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{args:?}: {err}");
     }
@@ -396,6 +396,8 @@ mod run_with_fake_op {
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env_remove("OPV_CONFIG")
+            .env_remove("OPV_PRODUCT")
             .env("FAKE_OP_LOG", path.join("calls.log"))
             .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
             .output()
@@ -468,6 +470,8 @@ mod run_with_fake_op {
             .args(["--config", super::SIMPLE, "run", "prod", "--"])
             .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+            .env_remove("OPV_CONFIG")
+            .env_remove("OPV_PRODUCT")
             .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
             .output()
             .unwrap();
@@ -660,6 +664,8 @@ fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
     Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         .env_remove("OP_CONNECT_TOKEN")
         .env("PATH", dir.path())
         .env("OP_ITEM", "tests/fixtures/op_item.json")
@@ -736,6 +742,8 @@ fn proxy_env_is_inherited() {
     Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(["--config", CFG, "check", "prod", "--product", "allumata"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         .env_remove("OP_CONNECT_TOKEN")
         .env("PATH", dir.path())
         .env("HTTPS_PROXY", "http://proxy.example:3128")
@@ -764,6 +772,8 @@ fn sigterm_forwards_and_exits_143() {
     let child = Command::new(env!("CARGO_BIN_EXE_opv"))
         .args(["--config", CFG, "check", "prod", "--product", "allumata"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
         .env_remove("OP_CONNECT_TOKEN")
         .env("PATH", dir.path())
         .env("OPV_LOG", &log)

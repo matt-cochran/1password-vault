@@ -2,7 +2,11 @@
 
 ## Workflow
 
-Global option: `--config <PATH>`. Without it, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config`, the path is used exactly as given and no search is done. `<ENV>` is an environment name from the file.
+Global option: `--config <PATH>`, or the `OPV_CONFIG` environment variable (the flag wins). Without either, opv looks for `secrets.toml` in the current directory and then each parent directory up to the filesystem root, uses the first one found (files are never merged), and prints `using <absolute path>` on stderr before the command runs. With `--config` or `OPV_CONFIG`, the path is used exactly as given and no search is done; a path from `OPV_CONFIG` is announced as `using <path> (from OPV_CONFIG)` on stderr. `init` refuses both, because it always writes `./secrets.toml`. `<ENV>` is an environment name from the file.
+
+`OPV_PRODUCT` is the default for `--product` on `check`, `run`, `doctor --env` and `explain` (where a bare `KEY` means `$OPV_PRODUCT/KEY`). It applies under the fleet profile only, never to `sync`, and opv prints `product <p> (from OPV_PRODUCT)` on stderr whenever it uses it. A single-product repository inside a fleet can export it once (for example in `.envrc`) and then run `opv run dev -- npm run dev`.
+
+Every command's `--help` lists its own options first, then the global options (`--config`, `--timeout`, `--verbose`, `--color`) under `Global options:`, then a few examples.
 
 ```sh
 opv doctor                          # config, op and sign-in, flyctl and sign-in, op local run
@@ -199,6 +203,24 @@ Before the first run, `opv check dev` (fleet: `--product <p>`) tells you which k
 
 There is no command that writes a `.env` file or prints `export` lines, on purpose: a secret never lands on disk (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead (most frameworks fall back to it, and Compose's `env_file` can be replaced by `environment:` entries without values).
 
+## Shell completion
+
+`opv completions <bash|zsh|fish|powershell>` prints a completion script for commands and options (static: environment and product names are not completed). Install it once per shell:
+
+```sh
+opv completions bash > ~/.local/share/bash-completion/completions/opv
+opv completions zsh > "${fpath[1]}/_opv"            # then restart zsh
+opv completions fish > ~/.config/fish/completions/opv.fish
+```
+
+```powershell
+opv completions powershell | Out-String | Invoke-Expression   # add this line to $PROFILE
+```
+
+## Colour
+
+On a terminal, opv colours state words only: `ok`, `warn`, `FAIL` and `skip` in `doctor`, and the row state (`saved`, `missing`, `wrong kind`, `failed`, `skipped`) in `status`, `plan` and `check`. Nothing derived from a value is coloured, and JSON never is. `--color auto` (the default) colours only when stdout is a terminal and `NO_COLOR` is unset or empty; `--color never` turns it off and `--color always` forces it, even when piped. Piped output under `auto` is byte-for-byte the same as before colour existed.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -217,7 +239,7 @@ There is no command that writes a `.env` file or prints `export` lines, on purpo
 
 CI may retry a job that exited 9; codes 2 to 8 need a fix first.
 
-Global options: `--timeout <secs>` (default 900), `--verbose` and `--config`. Retries, progress and the per-call limits are described in [Retries, timeouts and interruptions](#retries-timeouts-and-interruptions). Each `op`, `flyctl`, `az` or `kubectl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s).
+Global options: `--timeout <secs>` (default 900), `--verbose`, `--config` and `--color auto|always|never`. Retries, progress and the per-call limits are described in [Retries, timeouts and interruptions](#retries-timeouts-and-interruptions). Each `op`, `flyctl`, `az` or `kubectl` call also has its own limit (diagnosis 15 s, read 60 s, write 120 s).
 
 `run` exits with the child's own exit code, which can equal one of the codes above; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result.
 

@@ -2,32 +2,110 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
 use opv::config;
 use opv::runner::{Budget, ProcessRunner};
 
-const QUICK_START: &str = "Start here:\n  opv setup                         Guided setup for this project\n  opv doctor                        Find a setup problem and its next step\n  opv session                       Sign in once for your terminal\n\nEveryday use:\n  opv check dev --product api        Check that your app's settings are ready\n  opv run dev --product api -- npm run dev\n\nDeployment:\n  opv plan staging                  Preview changes\n  opv sync staging --deploy         Save settings and deploy\n\nUse opv <command> --help for options. Advanced commands remain available below.";
+mod colour;
+mod completions;
+
+const QUICK_START: &str = "\
+Start here:
+  opv setup                        Guided setup for this project
+  opv doctor                       Find a setup problem and its next step
+  opv session                      Sign in once for your terminal
+
+Everyday use:
+  opv check dev --product api      Check that your app's settings are ready
+  opv run dev --product api -- npm run dev
+
+Deployment:
+  opv plan staging                 Preview changes
+  opv sync staging --deploy        Save settings and deploy
+
+Every command is listed above. Use opv <command> --help for its options and examples.";
 
 const EXAMPLES: &str = "\
 Examples:
-  opv setup                         # guided owner setup; resumes saved progress
-  opv session                       # authenticated owner terminal; type exit to leave
-  opv item skeleton staging          # add the missing (empty) fields to the 1Password item
-  opv status staging                 # one row per product and key; fill what is missing
-  opv plan staging                   # what a sync would stage, hold and prune
-  opv sync staging --deploy          # stage on the environment's target, deploy only if something changed
-  opv check dev --product api        # local keys saved? names only, no target touched
+  opv setup                        # guided owner setup; resumes saved progress
+  opv session                      # authenticated owner terminal; type exit to leave
+  opv item skeleton staging        # add the missing (empty) fields to the 1Password item
+  opv status staging               # one row per product and key; fill what is missing
+  opv plan staging                 # what a sync would write, hold and prune
+  opv sync staging --deploy        # write to the environment's target, deploy only if something changed
+  opv check dev --product api      # local keys saved? names only, no target touched
   opv run dev --product api -- cargo run   # local run with the product's secrets
 
 Exit codes:
-  0 ok, 2 configuration or usage, 3 dependency (op or flyctl missing), 4 1Password,
-  5 Fly, 6 refused (policy), 7 authentication, 8 findings (status, plan, check),
+  0 ok, 2 configuration or usage, 3 dependency (op or the target CLI (flyctl, az,
+  kubectl) missing), 4 1Password, 5 target (Fly, Azure, Kubernetes), 6 refused (policy),
+  7 authentication, 8 findings (status, plan, check),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
   130/143 interrupted (Ctrl-C / SIGTERM); safe to re-run.
-  `run` exits with the command's own exit code.";
+  `run` exits with the command's own exit code.
+
+Environment:
+  OPV_CONFIG   default for --config
+  OPV_PRODUCT  default for --product on check, run, doctor and explain (never sync)
+  NO_COLOR     no colour under --color auto
+
+Docs: https://github.com/matt-cochran/1password-vault/blob/main/docs/usage.md
+AI assistants: https://github.com/matt-cochran/1password-vault/blob/main/llms.txt";
+
+const SYNC_EXAMPLES: &str = "\
+Examples:
+  opv plan staging                       # preview first; changes nothing
+  opv sync staging                       # write changed settings; no deploy
+  opv sync staging --deploy              # write, then deploy only if something changed
+  opv sync staging --deploy --prune      # also remove managed names no longer declared
+  opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set";
+
+const RUN_EXAMPLES: &str = "\
+Examples:
+  opv run dev --product api -- npm run dev    # start the app with api's settings
+  opv run dev -- cargo test                   # simple profile: every declared key
+  opv run staging --product api -- ./migrate  # use staging's values locally
+  export OPV_PRODUCT=api; opv run dev -- npm run dev   # product from the environment";
+
+const CHECK_EXAMPLES: &str = "\
+Examples:
+  opv check dev --product api          # are api's keys saved and valid?
+  opv check dev                        # simple profile: every declared key
+  opv check dev --product api --json   # names and states for scripts";
+
+const INIT_EXAMPLES: &str = "\
+Examples:
+  opv init dev --vault myapp-dev --item app            # run-only environment
+  opv init prod --vault myapp-prod --item app --fly-app myapp
+  opv init prod --vault fleet-prod --item fleet --profile fleet --force";
+
+const EXPLAIN_EXAMPLES: &str = "\
+Examples:
+  opv explain api/OPENAI_API_KEY             # fleet profile: PRODUCT/KEY
+  opv explain DATABASE_URL                   # simple profile: KEY
+  opv explain api/OPENAI_API_KEY --env prod  # when several environments exist";
+
+const DOCTOR_EXAMPLES: &str = "\
+Examples:
+  opv doctor                           # every check, every environment
+  opv doctor --env dev                 # only what dev needs (no deployment CLI)
+  opv doctor --env prod --product api  # one product's configuration";
+
+const STATUS_EXAMPLES: &str = "\
+Examples:
+  opv status staging                   # one row per key: 1Password and the target
+  opv status prod --json               # the same, for scripts
+  opv status prod || opv item skeleton prod   # add missing fields when status finds gaps";
+
+const PLAN_EXAMPLES: &str = "\
+Examples:
+  opv plan staging                     # what a sync would write, hold and prune
+  opv plan prod --json                 # the same, for scripts
+  opv plan prod && opv sync prod --deploy     # sync only when nothing blocks it";
 
 /// Use 1Password settings in local apps and deployment targets.
 ///
@@ -39,34 +117,51 @@ Exit codes:
     name = "opv",
     bin_name = "opv",
     version,
-    about,
-    long_about,
     after_help = QUICK_START,
     after_long_help = EXAMPLES
 )]
 struct Cli {
-    /// Path to the fleet configuration.
+    /// Path to secrets.toml.
     ///
-    /// Without this option, `secrets.toml` is looked for in the current directory and
-    /// then each parent directory, and the first one found is used.
-    #[arg(long, global = true, value_name = "PATH")]
+    /// Without this option (or OPV_CONFIG), `secrets.toml` is looked for in the current
+    /// directory and then each parent directory, and the first one found is used. The
+    /// path in use is printed on stderr as `using <path>` unless given with --config.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        env = "OPV_CONFIG",
+        help_heading = "Global options"
+    )]
     config: Option<PathBuf>,
     /// Stop after this many seconds in total.
     ///
-    /// Every call to op or flyctl must finish inside this budget; a read that fails is
-    /// retried only while time remains.
+    /// Every call to op or the target CLI (flyctl, az, kubectl) must finish inside this
+    /// budget; a read that fails is retried only while time remains.
     #[arg(
         long,
         global = true,
         value_name = "SECS",
+        help_heading = "Global options",
         default_value_t = 900,
         value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     timeout: u64,
-    /// Print one line per call to op or flyctl on stderr: program, arguments, duration and
-    /// outcome (never values).
-    #[arg(long, global = true)]
+    /// Print one line per call to op or the target CLI on stderr: program, arguments,
+    /// duration and outcome (never values).
+    #[arg(long, global = true, help_heading = "Global options")]
     verbose: bool,
+    /// Colour state words (ok, warn, FAIL, saved, missing...): auto colours only on a
+    /// terminal with NO_COLOR unset; JSON and values are never coloured.
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = colour::ColorChoice::Auto,
+        help_heading = "Global options"
+    )]
+    color: colour::ColorChoice,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -93,29 +188,43 @@ enum Cmd {
     ///
     /// With no command, opens an owner terminal. Exit that terminal to end the session.
     /// With a command after --, returns its exit code. Requires your interactive terminal.
+    #[command(
+        after_help = "Examples:\n  opv session                      # signed-in terminal; type exit to leave\n  opv session -- opv check dev     # one signed-in command, then back"
+    )]
     Session {
+        /// 1Password account to sign in to (sign-in address, email or account ID);
+        /// without it, op's default account is used.
         #[arg(long)]
         account: Option<String>,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        /// Command and arguments to run signed in, after `--`; without one, opens a
+        /// signed-in terminal.
+        #[arg(
+            value_name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         command: Vec<String>,
     },
     /// Find setup problems and show the next step.
     ///
     /// Checks configuration, CLI installation and sign-in. --env limits checks to
     /// what that environment needs, including whether op can start local commands.
+    #[command(after_help = DOCTOR_EXAMPLES)]
     Doctor {
         /// Check only this environment.
         #[arg(long)]
         env: Option<String>,
-        /// Limit configuration checks to one product; requires --env.
+        /// Limit configuration checks to one product; requires --env. [env: OPV_PRODUCT]
         #[arg(long, requires = "env")]
         product: Option<String>,
     },
     /// Check whether your required settings are ready; contacts no deployment target.
+    #[command(after_help = CHECK_EXAMPLES)]
     Check {
         /// Environment name from the configuration (for example dev).
         env: String,
         /// Product whose keys are checked (fleet profile only; required there).
+        /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
         /// Print names and states as JSON, never values.
@@ -125,6 +234,7 @@ enum Cmd {
     /// Inspect settings in 1Password and on the deployment target (names only).
     ///
     /// Exits 8 when any key is missing, of the wrong kind or failing a rule.
+    #[command(after_help = STATUS_EXAMPLES)]
     Status {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
@@ -137,11 +247,13 @@ enum Cmd {
     /// Exits with the child's own exit code, so a child code can equal an opv
     /// category code (for example 2); opv's own errors print `opv: ...` on
     /// stderr.
+    #[command(after_help = RUN_EXAMPLES)]
     Run {
         /// Environment name from the configuration (for example dev or staging).
         env: String,
         /// Product whose declared keys are passed to the command (fleet profile only;
         /// a simple-profile file takes none and passes every declared key).
+        /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
         /// Command and arguments, after `--`.
@@ -151,11 +263,14 @@ enum Cmd {
     /// Preview deployment changes without changing anything.
     ///
     /// Exits 8 when any row (missing, wrong kind, failing a rule) would block a sync.
+    #[command(after_help = PLAN_EXAMPLES)]
     Plan(PlanArgs),
     /// Save managed settings on the configured deployment target.
     ///
     /// Refuses (exit 6) and stages nothing when any key is missing, of the wrong kind or
     /// failing a rule. Nothing is deployed or removed without the flags below.
+    /// Preview first with opv plan <ENV>.
+    #[command(after_help = SYNC_EXAMPLES)]
     Sync(SyncArgs),
     /// Configuration commands.
     #[command(subcommand)]
@@ -165,10 +280,13 @@ enum Cmd {
     Item(ItemCmd),
     /// Explain one declared key from the configuration alone; never reads a value.
     ///
-    /// Prints the op:// reference, kind, Fly name, rules, immutable and guidance, and the
-    /// `op item get` command to inspect the item yourself. Makes no 1Password or Fly call.
+    /// Prints the op:// reference, kind, target name, rules, immutable and guidance, and
+    /// the `op item get` command to inspect the item yourself. Makes no 1Password or
+    /// target call.
+    #[command(after_help = EXPLAIN_EXAMPLES)]
     Explain {
-        /// The key: PRODUCT/KEY, or KEY under the simple profile.
+        /// The key: PRODUCT/KEY, or KEY under the simple profile. Under the fleet profile
+        /// a bare KEY means OPV_PRODUCT/KEY when OPV_PRODUCT is set.
         #[arg(value_name = "[PRODUCT/]KEY")]
         target: String,
         /// Environment name; may be omitted when only one environment is declared.
@@ -179,6 +297,8 @@ enum Cmd {
     ///
     /// Looks the vault and item up by title once, reads the item's field names and types
     /// (never its values) and writes IDs, key names and kinds. Writes nothing to 1Password.
+    /// Does not use --config or OPV_CONFIG.
+    #[command(after_help = INIT_EXAMPLES)]
     Init {
         /// Environment name to declare (for example staging or prod).
         env: String,
@@ -198,6 +318,13 @@ enum Cmd {
         /// Overwrite an existing secrets.toml.
         #[arg(long)]
         force: bool,
+    },
+    /// Print a shell completion script for commands and options.
+    #[command(after_help = completions::INSTALL)]
+    Completions {
+        /// Shell to write the script for.
+        #[arg(value_enum)]
+        shell: completions::Shell,
     },
 }
 
@@ -249,8 +376,8 @@ enum ConfigCmd {
     Export {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
-        /// Output JSON (required; the only format).
-        #[arg(long, required = true)]
+        /// Output JSON (the default and only format; accepted for scripts that pass it).
+        #[arg(long)]
         json: bool,
     },
 }
@@ -300,14 +427,40 @@ impl<W: Write> Write for PipeSafe<W> {
     }
 }
 
+/// Where the configuration path came from, for the `using` line and `init`'s refusal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigSource {
+    Flag,
+    Env,
+    Discovered,
+}
+
 fn main() -> ExitCode {
     // clap prints usage errors itself and exits 2 (shared with configuration errors).
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let config_source = match matches.value_source("config") {
+        Some(ValueSource::EnvVariable) => ConfigSource::Env,
+        Some(_) => ConfigSource::Flag,
+        None => ConfigSource::Discovered,
+    };
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let mut stdout = PipeSafe {
         inner: io::stdout().lock(),
         closed: false,
     };
-    let res = run(cli, &mut stdout);
+    let paint = colour::enabled(
+        cli.color,
+        io::IsTerminal::is_terminal(&io::stdout()),
+        std::env::var_os("NO_COLOR"),
+    ) && cli.cmd.has_state_words();
+    let res = if paint {
+        let mut painter = colour::Painter::new(&mut stdout);
+        let res = run(cli, config_source, &mut painter);
+        let _ = painter.flush();
+        res
+    } else {
+        run(cli, config_source, &mut stdout)
+    };
     let _ = stdout.flush();
     match res {
         // `run` reports the child's exit code verbatim (FR-4); everything else yields 0.
@@ -321,7 +474,73 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
+impl Cmd {
+    /// Text output with state words worth colouring (never JSON, never values).
+    fn has_state_words(&self) -> bool {
+        match self {
+            Cmd::Doctor { .. } => true,
+            Cmd::Check { json, .. } | Cmd::Status { json, .. } => !json,
+            Cmd::Plan(a) => !a.json,
+            _ => false,
+        }
+    }
+}
+
+/// `--product`, or else `OPV_PRODUCT` (non-empty) under the fleet profile; the simple
+/// profile takes no product, so the variable is ignored there. Returns the product and
+/// whether it came from the variable.
+fn product_or_env(
+    flag: Option<String>,
+    env: Option<String>,
+    fleet_profile: bool,
+) -> (Option<String>, bool) {
+    match (flag, env) {
+        (Some(p), _) => (Some(p), false),
+        (None, Some(p)) if fleet_profile && !p.is_empty() => (Some(p), true),
+        _ => (None, false),
+    }
+}
+
+/// Apply `OPV_PRODUCT` to the commands that take a product (never `sync`), and say so on
+/// stderr.
+fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) {
+    let fleet_profile = matches!(loaded, Ok(f) if !f.is_simple());
+    let env = std::env::var("OPV_PRODUCT").ok();
+    let used = match cmd {
+        Cmd::Check { product, .. } | Cmd::Run { product, .. } => {
+            let (p, used) = product_or_env(product.take(), env, fleet_profile);
+            *product = p;
+            used.then(|| product.clone()).flatten()
+        }
+        Cmd::Doctor {
+            env: Some(_),
+            product,
+        } => {
+            let (p, used) = product_or_env(product.take(), env, fleet_profile);
+            *product = p;
+            used.then(|| product.clone()).flatten()
+        }
+        Cmd::Explain { target, .. } if !target.contains('/') => {
+            match product_or_env(None, env, fleet_profile) {
+                (Some(p), true) => {
+                    *target = format!("{p}/{target}");
+                    Some(p)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(p) = used {
+        let _ = writeln!(io::stderr(), "product {p} (from OPV_PRODUCT)");
+    }
+}
+
+fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32, Error> {
+    if let Cmd::Completions { shell } = &cli.cmd {
+        completions::write(*shell, &mut Cli::command(), out);
+        return Ok(0);
+    }
     if let Cmd::Session { account, command } = &cli.cmd {
         use opv::app::{setup, setup_runtime};
         use setup::Interaction;
@@ -368,12 +587,17 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
             .map_err(|e| Error::Dependency(format!("cannot install signal handlers: {e}")))?;
     }
     if let Cmd::Init { .. } = &cli.cmd {
-        return run_init(cli, &r, out).map(|()| 0);
+        return run_init(cli, config_source, &r, out).map(|()| 0);
     }
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
     let loaded = match &cli.config {
-        Some(path) => config::load(path),
+        Some(path) => {
+            if config_source == ConfigSource::Env {
+                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
+            }
+            config::load(path)
+        }
         None => match std::env::current_dir() {
             Err(e) => Err(Error::Config(format!(
                 "cannot read the current directory: {e}"
@@ -390,15 +614,17 @@ fn run(cli: Cli, out: &mut dyn Write) -> Result<i32, Error> {
             },
         },
     };
+    let mut cmd = cli.cmd;
+    apply_product_env(&mut cmd, &loaded);
     if let Cmd::Run {
         env,
         product,
         command,
-    } = &cli.cmd
+    } = &cmd
     {
         return run_cmd::run_for(&loaded?, env, product.as_deref(), command, &r);
     }
-    run_other(cli.cmd, loaded, &r, out).map(|()| 0)
+    run_other(cmd, loaded, &r, out).map(|()| 0)
 }
 
 fn run_other(
@@ -412,6 +638,7 @@ fn run_other(
         Cmd::Session { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
+        Cmd::Completions { .. } => unreachable!("handled by run"),
         Cmd::Doctor { env, product } => {
             doctor::run_scoped(loaded, env.as_deref(), product.as_deref(), r, out)
         }
@@ -433,7 +660,12 @@ fn run_other(
 }
 
 /// `init` writes `./secrets.toml`; it reads no configuration, so it runs before discovery.
-fn run_init(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
+fn run_init(
+    cli: Cli,
+    config_source: ConfigSource,
+    r: &ProcessRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let Cmd::Init {
         env,
         vault,
@@ -446,9 +678,14 @@ fn run_init(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Erro
         unreachable!("called for init only")
     };
     if cli.config.is_some() {
-        return Err(Error::Config(
-            "init writes secrets.toml in the current directory; --config is not used".into(),
-        ));
+        let how = if config_source == ConfigSource::Env {
+            "OPV_CONFIG is set; unset it for init"
+        } else {
+            "--config is not used"
+        };
+        return Err(Error::Config(format!(
+            "init writes secrets.toml in the current directory; {how}"
+        )));
     }
     let dir = std::env::current_dir()
         .map_err(|e| Error::Config(format!("cannot read the current directory: {e}")))?;
@@ -529,6 +766,40 @@ mod tests {
             assert!(t.contains("Usage: opv run"), "{argv0}: {t}");
             assert!(!t.contains("opv.exe"), "{argv0}: {t}");
         }
+    }
+
+    #[test]
+    fn product_flag_wins_over_opv_product() {
+        let got = product_or_env(Some("api".into()), Some("web".into()), true);
+        assert_eq!(got, (Some("api".into()), false));
+    }
+
+    #[test]
+    fn opv_product_applies_under_the_fleet_profile() {
+        let got = product_or_env(None, Some("web".into()), true);
+        assert_eq!(got, (Some("web".into()), true));
+    }
+
+    #[test]
+    fn opv_product_is_ignored_under_the_simple_profile() {
+        assert_eq!(
+            product_or_env(None, Some("web".into()), false),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn empty_opv_product_is_ignored() {
+        assert_eq!(
+            product_or_env(None, Some(String::new()), true),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn json_output_is_never_painted() {
+        let cli = Cli::try_parse_from(["opv", "status", "prod", "--json"]).unwrap();
+        assert!(!cli.cmd.has_state_words());
     }
 
     #[test]
