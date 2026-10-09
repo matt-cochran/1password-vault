@@ -319,16 +319,42 @@ config     = "env"                         # or "store" (a ConfigMap-free design
   (`_` → `-`, lower case, ≤ 253 with the suffix) and are collision-checked at load.
 - **Writes** go through `kubectl apply -f - --server-side --field-manager=opv` with the manifest on
   stdin (SR-3); values are base64 in `data`, never in argv.
-- **Compare before write** reads `kubectl get secret -l opv-key=<name>,opv-managed=<env> -o json`;
-  the current version is the one the Deployment binds; the desired version's name is computable
-  locally from the value hash, so an unchanged value is a name lookup, with no value read back.
+- **Compare before write** lists `kubectl get secret -l opv-key=<name>,opv-managed=<env>` with a
+  jsonpath of names and labels only (`-o json` returns `data`, recon K2); the current version is
+  the one the Deployment binds; the desired version's name is computable locally from the value
+  hash, so an unchanged value is a name lookup, with no value read back.
 - **Runtime apply** reads the Deployment (`kubectl get deployment -o json`), edits only managed
   env entries (`valueFrom.secretKeyRef` for secrets, `value` for config), and writes it back with
   `kubectl replace -f -` carrying `metadata.resourceVersion`: Kubernetes rejects the write if anyone
   changed the Deployment in between (true optimistic concurrency, stronger than R9).
-- **Health:** `kubectl rollout status deployment/<d> --timeout=<deadline>` plus the Deployment's
-  `status.conditions`; prune deletes old `opv-managed` Secrets only after a successful rollout, and
-  never one still referenced by any ReplicaSet the Deployment owns.
+- **Health:** opv polls the Deployment and judges it as `kubectl rollout status` does
+  (observedGeneration ≥ generation, then updated = replicas, no old replicas, available =
+  updated; a Deployment scaled to 0 is healthy once observed) within the remaining run budget.
+  It fails fast, without waiting for the progress deadline, on `ProgressDeadlineExceeded`, a
+  paused Deployment, or a pod of the *new* ReplicaSet waiting with `CreateContainerConfigError`,
+  `ImagePullBackOff`, `ErrImagePull` or `CrashLoopBackOff` (recon K4). Pods are judged only once
+  the new generation is observed, so an old ReplicaSet's pods are never misread as the new one's.
+- **Prune** deletes old `opv-managed=<env>` Secrets only after a successful rollout, and never one
+  named anywhere in the Deployment or in any ReplicaSet of the namespace. Decision (rollback):
+  Kubernetes keeps `revisionHistoryLimit` old ReplicaSets for `kubectl rollout undo`; a Secret
+  one of them references is kept, so a rollback never starts pods that bind a missing Secret.
+  Old versions are reclaimed as Kubernetes trims the history.
 - **Access** (FR-33 as amended by R6): the Deployment's ServiceAccount needs no secret access
   (kubelet mounts the env); `doctor` checks the operator's own rights with
-  `kubectl auth can-i` for get/create/delete secrets and get/update deployments.
+  `kubectl auth can-i` for get/create/delete/list secrets, get/update deployments and list
+  replicasets and pods; a missing right is a warning naming the `create role` /
+  `create rolebinding` commands that grant exactly it.
+
+As implemented (provider plug-in): `src/adapters/kubernetes/config.rs` holds the section, its
+`TargetConfig` and the doctor checks (`kubectl`, `kubernetes context`, `kubernetes cluster`,
+`kubernetes access`). Each identifier is validated while the section is deserialized, so a bad
+`context`, `namespace`, `deployment`, `container`, `env_name` or `config` shows its line and
+column. `namespace`/`deployment`/`container` are DNS-1123 labels; `context` allows
+`[A-Za-z0-9_.:/@+-]` and no leading `-` (cloud context names hold `:`, `/` and `@`). The store
+name is also the `opv-key` label value, so it is held to a label (≤ 63), which keeps the Secret
+name ≤ 253. `env_name` is required under the fleet profile and refused under the simple one.
+Two environments on the same context, namespace and Deployment with the same template are a
+configuration error. `TargetConfig::open` takes the managed env names (as on the Azure branch)
+and the rollout wait is the run budget left (`CommandRunner::remaining`), not a fixed 600 s.
+`KUBECONFIG` is inherited; no credential variable is required.
+

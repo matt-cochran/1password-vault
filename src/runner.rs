@@ -179,6 +179,12 @@ pub trait CommandRunner {
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32>;
 
+    /// Time left in the run budget (`--timeout`, NR-4), for waits that must end inside it
+    /// (a rollout); `None` when this runner has no budget.
+    fn remaining(&self) -> Option<Duration> {
+        None
+    }
+
     /// Check that the native CLI can execute a child for local run (not metadata reads).
     fn local_run_supported(&self) -> io::Result<()> {
         Ok(())
@@ -702,6 +708,10 @@ fn native_op_on(paths: &std::ffi::OsStr) -> io::Result<()> {
 }
 
 impl CommandRunner for ProcessRunner {
+    fn remaining(&self) -> Option<Duration> {
+        Some(left(self))
+    }
+
     fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
         read_on(self, call, refused)
     }
@@ -1044,6 +1054,10 @@ pub mod fake {
     }
 
     impl CommandRunner for FakeRunner {
+        fn remaining(&self) -> Option<Duration> {
+            Some(super::left(self))
+        }
+
         fn read(&self, call: &super::Call, refused: &[i32]) -> io::Result<Outcome> {
             super::read_on(self, call, refused)
         }
