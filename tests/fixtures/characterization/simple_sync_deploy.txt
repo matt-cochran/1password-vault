@@ -1,5 +1,7 @@
 $ op item get iprd --vault vprd --format json
 $ flyctl secrets list --app myapp-production --json
+$ flyctl status --app myapp-production --json
+$ flyctl releases --app myapp-production --json
 $ flyctl secrets import --app myapp-production --stage
 <stdin 59 bytes sha256=6e8ccf3fde3e4a81eac7d5a7e3cd29e5460105965ff2bad3bc62685cad5bb4be>
 $ flyctl secrets list --app myapp-production --json
