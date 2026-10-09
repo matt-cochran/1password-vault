@@ -4,6 +4,7 @@
   "exit_code": 8,
   "environment": "prod",
   "product": null,
+  "changes": "some",
   "rows": [
     {
       "product": "allumata",
@@ -27,7 +28,8 @@
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target": "present",
-      "action": null
+      "action": null,
+      "open_url": "https://start.1password.com/open/i?v=vprd&i=iprd"
     },
     {
       "product": "allumata",
@@ -68,7 +70,7 @@
     "held": 0,
     "to_prune": 0
   },
-  "next": "opv plan prod",
+  "next": "opv open allumata/OPENAI_API_KEY --env prod",
   "do": "fix the keys above in 1Password",
   "error": {
     "code": "findings",
@@ -78,6 +80,6 @@
     "retry": "after_fix",
     "human_required": true,
     "do": "fix the keys above in 1Password",
-    "next": "opv plan prod"
+    "next": "opv open allumata/OPENAI_API_KEY --env prod"
   }
 }

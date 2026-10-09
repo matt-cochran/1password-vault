@@ -3,6 +3,7 @@
   "ok": true,
   "environment": "prod",
   "product": null,
+  "changes": "some",
   "rows": [
     {
       "product": "allumata",

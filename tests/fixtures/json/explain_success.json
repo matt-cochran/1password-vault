@@ -21,6 +21,8 @@
   "guidance": "OpenAI platform / API keys",
   "required_here": true,
   "inspect": "op item get iprd --vault vprd",
+  "shared_from": null,
+  "shared_by": [],
   "next": null,
   "do": null
 }

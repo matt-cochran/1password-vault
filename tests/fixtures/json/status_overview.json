@@ -2,30 +2,40 @@
   "schema_version": 1,
   "ok": false,
   "exit_code": 8,
+  "product": null,
   "environments": [
     {
       "name": "dev",
       "target": null,
       "state": "run_only",
-      "keys": null,
-      "findings": null,
-      "error_code": null
+      "keys": 0,
+      "saved": 0,
+      "skipped": 0,
+      "findings": 0,
+      "error_code": null,
+      "error": null
     },
     {
       "name": "prod",
       "target": "fly",
       "state": "checked",
       "keys": 4,
+      "saved": 3,
+      "skipped": 1,
       "findings": 0,
-      "error_code": null
+      "error_code": null,
+      "error": null
     },
     {
       "name": "staging",
       "target": "fly",
       "state": "checked",
       "keys": 3,
+      "saved": 2,
+      "skipped": 0,
       "findings": 1,
-      "error_code": null
+      "error_code": null,
+      "error": null
     }
   ],
   "totals": {
