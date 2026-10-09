@@ -717,6 +717,13 @@ First-run router (no config → init vs setup choice; `opv setup` without a reci
 
 ### Task 9: Docs, requirements, changelog, version 0.5.0 (Azure, Kubernetes, resilience, plug-ins)
 
+Owner (2026-10-08): improve the documentation and align it with the current state before wrapping up. After every branch is merged:
+- Regenerate, don't guess: capture real `--help` and command output from the release binary (stub CLIs) for every command; rewrite README, docs/usage.md, configuration.md, install.md, local-development.md, guided-setup.md, agent-setup.md, llms.txt and CONTRIBUTING from it; resolve every `<!-- verify -->`.
+- Right content in the right place: README (what, quick start, accurate provider table: preview vs supported per Task 10), usage (all commands, exit codes incl. 9 and 130/143), configuration (every provider section, `[stores]`, `secrets_in`), a short "how opv handles failures" page (retries, exit 9, `Next:`, scrubbed stderr), CONTRIBUTING "adding a provider".
+- Design docs current: requirements FR-28..FR-39, NR-1..NR-31, SR-1 as amended; multi-cloud design = as built; plans/spikes marked done; docs/design/README index; CHANGELOG 0.5.0 complete with every contract change called out.
+- Drift guard: a test that extracts every `opv …` command line from the docs and checks the real CLI parser accepts it.
+- CLAUDE.md (local AI notes) updated to the new architecture and commands.
+
 **Files:**
 - Modify: `README.md` (Targets table: Azure Key Vault + Container Apps "supported (preview until the live receipt in #39)"; "Works today" line), `docs/configuration.md` (`[environments.<env>.azure]` reference, routing, naming rules, R1–R3), `docs/usage.md` (Azure sync flow, `--deploy`, `--prune` order, drift, soft delete), `docs/install.md` (prerequisite `az` ≥ 2.60, WSL for writes on Windows), `docs/agent-setup.md` + `llms.txt` (Azure steps and the identity grant), `docs/design/requirements.md` (§8 items 29–35 marked for Azure Container Apps; record R1–R6), `docs/design/multi-cloud-targets.md` (rulings, recon outcome), `CHANGELOG.md` (`## [0.5.0] - <date>` Added: Azure target; Changed: doctor flyctl patch range from [Unreleased]), `Cargo.toml` + `Cargo.lock` + `npm/*/package.json` version `0.5.0` (follow how 0.4.0 bumped them: `git show 98a56df --stat`).
 - [ ] **Step 1:** Write the docs. Every config example uses placeholder names (`kv-myapp-prod`), never real IDs.
