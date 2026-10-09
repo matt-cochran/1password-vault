@@ -293,6 +293,10 @@ impl Sim {
             let id = format!("https://{VAULT}.vault.azure.net/secrets/{display}/{ver}");
             return Output::success(id.into_bytes());
         }
+        if has(args, &["keyvault", "secret", "set-attributes"]) {
+            // The opv-pruned mark before a delete; tags are not modelled.
+            return Output::success(Vec::new());
+        }
         if has(args, &["keyvault", "secret", "delete"]) {
             w.kv.remove(name.as_deref().unwrap());
             return Output::success(Vec::new());

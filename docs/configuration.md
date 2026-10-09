@@ -255,7 +255,7 @@ Names and limits are checked when the file loads, before any call:
 - A Key Vault value may be at most 25 KB (25,600 bytes) and cannot be empty. A longer or empty value blocks the sync like a failed rule: `failed store_limit (longer than the Key Vault limit of 25 KB)`.
 - Every identifier is checked like `fly.app` (no leading `-`, no shell metacharacters).
 
-opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged secrets. `opv explain <KEY>` shows the Key Vault name and the variable it feeds.
+opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged secrets. Just before a prune deletes one, opv adds `opv-pruned=<env>`; Key Vault keeps deleted secrets for its retention period, and when that key comes back opv recovers the entry and writes the new version. A deleted secret without both tags is never recovered by opv: sync stops with the `az keyvault secret recover` command. opv never purges. `opv explain <KEY>` shows the Key Vault name and the variable it feeds.
 
 ### Kubernetes: Secrets + Deployment
 

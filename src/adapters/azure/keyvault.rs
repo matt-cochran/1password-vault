@@ -9,7 +9,7 @@
 //! | `list` | `keyvault secret list --vault-name <vault> -o json` |
 //! | `read` | `keyvault secret show --vault-name <vault> --name <name> -o json` |
 //! | `write_one` | `keyvault secret set --vault-name <vault> --name <name> --file /dev/stdin --encoding utf-8 --tags opv-managed=<env> opv-version=<v> opv-written=<utc> opv-env=<env> opv-plan=<id> --query id -o tsv`, then polls `secret show --query id -o tsv` until the new version shows (NR-30) |
-//! | `delete` | `keyvault secret delete --vault-name <vault> --name <name> -o none` |
+//! | `delete` | `keyvault secret set-attributes --vault-name <vault> --name <name> --tags <its tags> opv-pruned=<env> -o none`, then `keyvault secret delete --vault-name <vault> --name <name> -o none` |
 //! | `has_version` | `keyvault secret show --vault-name <vault> --name <name> --version <v> --query id -o tsv` (diagnosis only) |
 //!
 //! Every call also carries `--subscription <azure.subscription>` (NR-7).
@@ -22,8 +22,9 @@
 //! `list` and `read` are reads (the runner retries them); a `show` that exits 3 is a
 //! definite "absent", never retried. `set` and `delete` are writes (never retried
 //! blindly, NR-2). Every non-zero exit is diagnosed through [`az::diagnose`]; a failed
-//! `set` is first checked with a read-only `show-deleted` (stderr is discarded) so a
-//! soft-deleted name gets the recover command (FR-32). A `set` that fails for a reason that
+//! `set` is first checked with a read-only `show-deleted --query tags` (stderr is discarded):
+//! a soft-deleted name opv's own prune deleted (tagged `opv-pruned=<env>`) is recovered and
+//! written; any other gets the recover command (FR-32). A `set` that fails for a reason that
 //! is neither a soft-delete nor a sign-out may be a role grant still propagating; it is
 //! retried once, only after `secret list` proves the vault answers (NR-25).
 
@@ -55,6 +56,8 @@ const ACCESS_POLL: Duration = Duration::from_secs(15);
 const CONFIRM_WAIT: Duration = Duration::from_secs(30);
 /// Pause between confirmation polls (NR-30).
 const CONFIRM_POLL: Duration = Duration::from_secs(2);
+/// How long a recovery of a secret opv pruned may take before opv gives up (FR-32).
+const RECOVER_WAIT: Duration = Duration::from_secs(120);
 
 /// Key Vault as both pinned store ports (FR-28): each method is the operation of the same
 /// name.
@@ -144,6 +147,25 @@ impl KeyVault<'_> {
     /// Managed entries: tagged `opv-managed=<env>` and named in the managed template set
     /// (FR-8). Version comes from `show` / the binding, never `list`; nothing is pending.
     fn list_managed(&self) -> Result<Vec<StoreEntry>, Error> {
+        Ok(self
+            .list_entries()?
+            .into_iter()
+            .filter_map(|e| {
+                self.managed_name(&e).map(|name| StoreEntry {
+                    name: name.to_owned(),
+                    version: None,
+                    pending: false,
+                    stamp: e
+                        .tags
+                        .as_ref()
+                        .and_then(|t| Stamp::parse(|k| t.get(k).map(String::as_str))),
+                })
+            })
+            .collect())
+    }
+
+    /// Every entry of `keyvault secret list`, with its tags (names and tags only).
+    fn list_entries(&self) -> Result<Vec<ListEntry>, Error> {
         const OP: &str = "keyvault secret list";
         let args = [
             "keyvault",
@@ -169,7 +191,7 @@ impl KeyVault<'_> {
             )?,
         )?;
         // serde_json messages can quote input fragments, so report only the position.
-        let entries: Vec<ListEntry> = serde_json::from_slice(&out.stdout).map_err(|e| {
+        serde_json::from_slice(&out.stdout).map_err(|e| {
             Error::Target(
                 format!(
                     "az {OP} returned unexpected JSON (line {}, column {})",
@@ -178,21 +200,7 @@ impl KeyVault<'_> {
                 )
                 .into(),
             )
-        })?;
-        Ok(entries
-            .into_iter()
-            .filter_map(|e| {
-                self.managed_name(&e).map(|name| StoreEntry {
-                    name: name.to_owned(),
-                    version: None,
-                    pending: false,
-                    stamp: e
-                        .tags
-                        .as_ref()
-                        .and_then(|t| Stamp::parse(|k| t.get(k).map(String::as_str))),
-                })
-            })
-            .collect())
+        })
     }
 
     /// The managed env name stored as `e` when opv owns it: its Key Vault spelling matches
@@ -312,14 +320,21 @@ impl KeyVault<'_> {
             }
         ) {
             // These reads explain the failed set, so its excerpt stays (NR-31).
-            if crate::runner::diagnosing(|| self.is_soft_deleted(name))? {
-                return Err(soft_deleted_error(name, self.vault));
+            match crate::runner::diagnosing(|| self.deleted_tags(name))? {
+                // Only a secret opv's own prune deleted is recovered (FR-32).
+                Some(tags) if self.pruned_by_opv(&tags) => {
+                    self.recover(name)?;
+                    outcome = set()?;
+                }
+                Some(_) => return Err(soft_deleted_error(name, self.vault)),
+                None => {
+                    if !crate::runner::diagnosing(|| az::signed_in(self.runner))? {
+                        return Err(az::not_logged_in(None));
+                    }
+                    self.await_access()?;
+                    outcome = set()?;
+                }
             }
-            if !crate::runner::diagnosing(|| az::signed_in(self.runner))? {
-                return Err(az::not_logged_in(None));
-            }
-            self.await_access()?;
-            outcome = set()?;
         }
         match outcome {
             Outcome::Done(out) => {
@@ -477,9 +492,10 @@ impl KeyVault<'_> {
     }
 
     /// A follow-up read-only probe: `show-deleted` exits 0 only when `name` is
-    /// soft-deleted but recoverable; exit 1 or 3 means it is not (stderr is discarded, so
-    /// this is how opv tells). A probe that never finished says nothing either way.
-    fn is_soft_deleted(&self, name: &str) -> Result<bool, Error> {
+    /// soft-deleted but recoverable, and then prints only the deleted secret's tags
+    /// (`--query tags`, never its value); exit 1 or 3 means it is not (stderr is discarded,
+    /// so this is how opv tells). A probe that never finished says nothing either way.
+    fn deleted_tags(&self, name: &str) -> Result<Option<BTreeMap<String, String>>, Error> {
         const OP: &str = "keyvault secret show-deleted";
         let args = [
             "keyvault",
@@ -489,8 +505,10 @@ impl KeyVault<'_> {
             self.vault,
             "--name",
             name,
+            "--query",
+            "tags",
             "-o",
-            "none",
+            "json",
             az::ONLY_SHOW_ERRORS,
         ];
         match invoke(
@@ -501,8 +519,14 @@ impl KeyVault<'_> {
             None,
             &[1, 3],
         )? {
-            Outcome::Done(_) => Ok(true),
-            Outcome::Refused(_) => Ok(false),
+            // `null` or no output: deleted, without tags.
+            Outcome::Done(out) => Ok(Some(
+                serde_json::from_slice::<Option<BTreeMap<String, String>>>(&out.stdout)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+            )),
+            Outcome::Refused(_) => Ok(None),
             Outcome::Unknown { .. } => Err(Error::Unknown(
                 format!(
                     "could not tell whether {name} is soft-deleted in Key Vault {}; nothing was \
@@ -514,11 +538,107 @@ impl KeyVault<'_> {
         }
     }
 
+    /// Whether a deleted secret's `tags` prove opv's own prune for this environment deleted
+    /// it: `opv-managed=<env>` (opv wrote it) and [`PRUNED_TAG`]`=<env>` (opv marked it
+    /// just before deleting it). A secret anyone else deleted lacks the second tag.
+    fn pruned_by_opv(&self, tags: &BTreeMap<String, String>) -> bool {
+        let is_env = |k: &str| tags.get(k).is_some_and(|v| v == self.env);
+        is_env("opv-managed") && is_env(PRUNED_TAG)
+    }
+
+    /// Recover a secret opv's own prune deleted (FR-32): `keyvault secret recover`, a
+    /// write (never retried, NR-2; az waits until the secret is back).
+    fn recover(&self, name: &str) -> Result<(), Error> {
+        const OP: &str = "keyvault secret recover";
+        let args = [
+            "keyvault",
+            "secret",
+            "recover",
+            "--vault-name",
+            self.vault,
+            "--name",
+            name,
+            "-o",
+            "none",
+            az::ONLY_SHOW_ERRORS,
+        ];
+        write_output(
+            self.runner,
+            OP,
+            self.vault,
+            invoke(
+                self.runner,
+                Effect::Write,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[],
+            )?,
+        )?;
+        self.await_recovered(name)?;
+        self.runner.note(&format!(
+            "recovered {name} in Key Vault {} (deleted by an earlier opv prune)",
+            self.vault
+        ));
+        Ok(())
+    }
+
+    /// `recover` returns before the secret is back, and a `set` meanwhile is refused
+    /// (`ObjectIsBeingRecovered`, found live): poll `secret show --query id` (a read; exit
+    /// 3 is "not back yet") every [`CONFIRM_POLL`] for up to [`RECOVER_WAIT`].
+    fn await_recovered(&self, name: &str) -> Result<(), Error> {
+        const OP: &str = "keyvault secret show";
+        let args = [
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            self.vault,
+            "--name",
+            name,
+            "--query",
+            "id",
+            "-o",
+            "tsv",
+            az::ONLY_SHOW_ERRORS,
+        ];
+        let wait = Wait::new(self.runner, RECOVER_WAIT);
+        loop {
+            match invoke(
+                self.runner,
+                Effect::Read,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[3],
+            )? {
+                Outcome::Done(_) => return Ok(()),
+                Outcome::Refused(out) if out.status == 3 => {}
+                other => {
+                    read_output(self.runner, OP, self.vault, other)?;
+                }
+            }
+            if wait.over(self.runner, CONFIRM_POLL) {
+                return Err(Error::Unknown(
+                    format!(
+                        "Key Vault is still recovering {name}; nothing else was changed; re-run \
+                         in a minute"
+                    )
+                    .into(),
+                ));
+            }
+            wait.pause(self.runner, CONFIRM_POLL, "");
+        }
+    }
+
     /// Delete only an entry opv owns: `list` first, then the write (FR-32).
     fn delete_secret(&self, name: &str) -> Result<(), Error> {
         const OP: &str = "keyvault secret delete";
-        let managed = self.list_managed()?;
-        if !managed.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+        let entries = self.list_entries()?;
+        let Some(entry) = entries.iter().find(|e| {
+            self.managed_name(e)
+                .is_some_and(|m| m.eq_ignore_ascii_case(name))
+        }) else {
             return Err(Error::Policy(
                 format!(
                     "{name}: not tagged opv-managed={}; refusing to delete",
@@ -526,8 +646,9 @@ impl KeyVault<'_> {
                 )
                 .into(),
             ));
-        }
+        };
         let name = &AzureTarget::key_vault_name(name);
+        self.mark_pruned(name, entry.tags.as_ref())?;
         let args = [
             "keyvault",
             "secret",
@@ -540,6 +661,49 @@ impl KeyVault<'_> {
             "none",
             az::ONLY_SHOW_ERRORS,
         ];
+        write_output(
+            self.runner,
+            OP,
+            self.vault,
+            invoke(
+                self.runner,
+                Effect::Write,
+                OP,
+                &self.scoped(&args),
+                None,
+                &[],
+            )?,
+        )?;
+        Ok(())
+    }
+}
+
+impl KeyVault<'_> {
+    /// Tag the current version [`PRUNED_TAG`]`=<env>` just before opv deletes it, keeping
+    /// its other tags (`--tags` replaces them): the proof, kept by the soft-deleted secret,
+    /// that opv itself deleted it and may recover it (FR-32). A write, never retried; if it
+    /// fails, nothing is deleted.
+    fn mark_pruned(
+        &self,
+        name: &str,
+        tags: Option<&BTreeMap<String, String>>,
+    ) -> Result<(), Error> {
+        const OP: &str = "keyvault secret set-attributes";
+        let mut all = tags.cloned().unwrap_or_default();
+        all.insert(PRUNED_TAG.to_owned(), self.env.to_owned());
+        let pairs: Vec<String> = all.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let mut args = vec![
+            "keyvault",
+            "secret",
+            "set-attributes",
+            "--vault-name",
+            self.vault,
+            "--name",
+            name,
+            "--tags",
+        ];
+        args.extend(pairs.iter().map(String::as_str));
+        args.extend(["-o", "none", az::ONLY_SHOW_ERRORS]);
         write_output(
             self.runner,
             OP,
@@ -572,13 +736,20 @@ fn no_version_error(name: &str) -> Error {
     )
 }
 
-/// The soft-deleted refusal names the exact recover command, which is also its `Next:`
-/// (re-running sync first would fail again); opv never recovers itself (FR-32).
+/// Tag opv sets on a secret just before its prune deletes it (FR-32).
+const PRUNED_TAG: &str = "opv-pruned";
+
+/// The soft-deleted refusal for a secret opv did not delete itself: it names the exact
+/// recover command, which is also its `Next:` (re-running sync first would fail again).
+/// opv recovers only what its own prune deleted (FR-32).
 fn soft_deleted_error(name: &str, vault: &str) -> Error {
     let recover = format!("az keyvault secret recover --vault-name {vault} --name {name}");
     Error::Target(
-        format!("{name} is soft-deleted in Key Vault {vault}; recover it, then re-run: {recover}")
-            .into(),
+        format!(
+            "{name} is soft-deleted in Key Vault {vault}, and not by opv's prune, so opv leaves \
+             it alone; recover it, then re-run: {recover}"
+        )
+        .into(),
     )
     .with_next(recover)
 }
@@ -884,10 +1055,155 @@ mod tests {
 
     #[test]
     fn delete_of_tagged_entry_succeeds() {
-        let r = FakeRunner::new([Output::success(LIST_FIXTURE), Output::success("")]);
+        let r = FakeRunner::new([
+            Output::success(LIST_FIXTURE),
+            Output::success(""),
+            Output::success(""),
+        ]);
         let templates = names(&[NAME]);
         let result = vault(&r, "dev", &templates).delete(NAME);
         assert!(result.is_ok());
+    }
+
+    fn argv(r: &FakeRunner, i: usize) -> Vec<String> {
+        r.calls.borrow()[i].args.clone()
+    }
+
+    /// FR-32: before deleting, opv marks the entry opv-pruned=<env>, keeping its tags.
+    #[test]
+    fn delete_marks_the_entry_pruned_keeping_its_tags_first() {
+        let r = FakeRunner::new([
+            Output::success(LIST_FIXTURE),
+            Output::success(""),
+            Output::success(""),
+        ]);
+        let templates = names(&[NAME]);
+        vault(&r, "dev", &templates).delete(NAME).unwrap();
+        let a = argv(&r, 1);
+        let at = a.iter().position(|x| x == "--tags").unwrap();
+        assert_eq!(
+            (&a[2], &a[at + 1..at + 4]),
+            (
+                &"set-attributes".to_string(),
+                &[
+                    "file-encoding=utf-8".to_string(),
+                    "opv-managed=dev".into(),
+                    "opv-pruned=dev".into()
+                ][..]
+            )
+        );
+    }
+
+    /// FR-32: if the mark cannot be written, nothing is deleted.
+    #[test]
+    fn delete_without_the_pruned_mark_deletes_nothing() {
+        // The failed mark is diagnosed (az signed in); any further call would get these.
+        let r = FakeRunner::new([
+            Output::success(LIST_FIXTURE),
+            Output::failure(1),
+            Output::success("{}"),
+            Output::success(""),
+            Output::success(""),
+        ]);
+        let templates = names(&[NAME]);
+        let _ = vault(&r, "dev", &templates).delete(NAME);
+        assert!(
+            !r.calls
+                .borrow()
+                .iter()
+                .any(|c| c.args.contains(&"delete".to_string()))
+        );
+    }
+
+    fn deleted_tags(tags: &str) -> Output {
+        Output::success(tags.to_string())
+    }
+
+    /// FR-32: a name opv's own prune deleted is recovered, then written.
+    #[test]
+    fn write_recovers_a_secret_opv_pruned_itself() {
+        let mut q = vec![
+            Output::failure(1),
+            deleted_tags(r#"{"opv-managed":"prod","opv-pruned":"prod"}"#),
+            Output::success(""),
+            Output::success(id(VERSION)),
+        ];
+        q.extend(written());
+        let r = FakeRunner::new(q);
+        let templates = names(&[]);
+        let v = vault(&r, "prod", &templates)
+            .write_one("MY-SECRET", &secret(), &stamp())
+            .unwrap();
+        assert_eq!((argv(&r, 2)[2].as_str(), v.as_str()), ("recover", VERSION));
+    }
+
+    /// Found live: `recover` returns before the secret is back; opv waits for it before
+    /// writing.
+    #[test]
+    fn write_after_recover_waits_until_the_secret_is_back() {
+        let mut q = vec![
+            Output::failure(1),
+            deleted_tags(r#"{"opv-managed":"prod","opv-pruned":"prod"}"#),
+            Output::success(""),
+            Output::failure(3),
+            Output::success(id(VERSION)),
+        ];
+        q.extend(written());
+        let r = FakeRunner::new(q);
+        let templates = names(&[]);
+        vault(&r, "prod", &templates)
+            .write_one("MY-SECRET", &secret(), &stamp())
+            .unwrap();
+        assert_eq!(argv(&r, 5)[2], "set");
+    }
+
+    /// FR-32: a secret someone else deleted (no opv-pruned mark) is never recovered.
+    #[test]
+    fn write_never_recovers_a_secret_deleted_by_someone_else() {
+        let r = FakeRunner::new([
+            Output::failure(1),
+            deleted_tags(r#"{"opv-managed":"prod"}"#),
+        ]);
+        let templates = names(&[]);
+        let _ = vault(&r, "prod", &templates).write_one("MY-SECRET", &secret(), &stamp());
+        assert!(
+            !r.calls
+                .borrow()
+                .iter()
+                .any(|c| c.args.contains(&"recover".to_string()))
+        );
+    }
+
+    /// FR-32: another environment's prune mark does not count.
+    #[test]
+    fn write_never_recovers_a_secret_another_environment_pruned() {
+        let r = FakeRunner::new([
+            Output::failure(1),
+            deleted_tags(r#"{"opv-managed":"prod","opv-pruned":"staging"}"#),
+        ]);
+        let templates = names(&[]);
+        let _ = vault(&r, "prod", &templates).write_one("MY-SECRET", &secret(), &stamp());
+        assert!(
+            !r.calls
+                .borrow()
+                .iter()
+                .any(|c| c.args.contains(&"recover".to_string()))
+        );
+    }
+
+    /// The probe asks for the deleted secret's tags only, never its value.
+    #[test]
+    fn show_deleted_asks_for_tags_only() {
+        let r = FakeRunner::new([Output::failure(1), deleted_tags("null")]);
+        let templates = names(&[]);
+        let _ = vault(&r, "prod", &templates).write_one("MY-SECRET", &secret(), &stamp());
+        let a = argv(&r, 1);
+        assert_eq!(
+            a.iter()
+                .position(|x| x == "--query")
+                .map(|i| a[i + 1].as_str()),
+            Some("tags")
+        );
     }
 
     #[test]

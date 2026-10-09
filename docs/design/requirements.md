@@ -725,7 +725,7 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 - Fly (known limitation): Fly hides a name as soon as `flyctl secrets unset --stage` runs. A run interrupted between that unset and `deploy` leaves the name on the machines and the next run cannot see it; the remedy is `opv sync <env> --deploy` again or `flyctl secrets deploy`.
 - After a healthy revision, superseded versions of every pinned name are collected where versions are separate objects (Kubernetes: version Secrets labelled `opv-managed=<env>` that neither the Deployment nor any ReplicaSet references); Key Vault keeps them as history. Every name is collected on every `--deploy` run, so an interrupted run's leftovers go on the next one (NR-1).
 - opv tags every store entry it creates with `opv-managed=<environment>` and refuses to delete one without that tag. The declared-set rule of FR-8 still applies.
-- A soft-deleted name (Key Vault soft delete, AWS recovery window) that blocks a re-create fails with the exact recover command. opv never recovers or purges by itself.
+- A soft-deleted name (Key Vault soft delete, AWS recovery window) that blocks a re-create is recovered only when opv's own prune deleted it: just before deleting, opv tags the entry `opv-pruned=<env>` (keeping its other tags; if the tag cannot be set, nothing is deleted), and the deleted entry keeps that tag. A soft-deleted entry tagged `opv-managed=<env>` and `opv-pruned=<env>` is recovered, then written; any other fails with the exact recover command as its `Next:`. opv never purges. (Owner decision, 2026-10-09, after the live smoke test showed prune-then-re-add failing.)
 
 ## FR-33 — Runtime Access and Health
 

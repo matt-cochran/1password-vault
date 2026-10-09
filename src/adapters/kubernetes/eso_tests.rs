@@ -326,6 +326,10 @@ impl Sim {
                 "https://{VAULT}.vault.azure.net/secrets/{display}/{ver}"
             ));
         }
+        if has(args, &["keyvault", "secret", "set-attributes"]) {
+            // The opv-pruned mark before a delete; tags are not modelled.
+            return ok(Vec::new());
+        }
         if has(args, &["keyvault", "secret", "delete"]) {
             w.kv.remove(name.as_deref().unwrap());
             return ok(Vec::new());
@@ -583,6 +587,7 @@ impl Sim {
     fn writes(&self) -> usize {
         self.count("az", &["keyvault", "secret", "set"])
             + self.count("az", &["keyvault", "secret", "delete"])
+            + self.count("az", &["keyvault", "secret", "set-attributes"])
             + self.count("kubectl", &["apply"])
             + self.count("kubectl", &["replace"])
             + self.count("kubectl", &["delete"])

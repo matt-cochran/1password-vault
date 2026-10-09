@@ -1895,11 +1895,29 @@ mod tests {
         }
     }
 
+    /// Found live: a person's read that waits on the 1Password app's approval prompt
+    /// times out like an outage; the message says to approve it.
+    #[test]
+    fn read_outage_for_a_person_mentions_the_app_approval() {
+        let r = FakeRunner::default();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        let e = crate::host::with_test_host(linux(), || {
+            read_item_with(&r, &test_env(), &linux()).unwrap_err()
+        });
+        assert!(
+            e.to_string()
+                .contains("If the 1Password app is asking to approve access, approve it."),
+            "{e}"
+        );
+    }
+
     #[test]
     fn read_outage_exits_9_naming_the_status_page() {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let ci = Host::from_env(&FakeEnv::new("linux").var("CI"));
+        let e =
+            crate::host::with_test_host(ci, || read_item_with(&r, &test_env(), &ci).unwrap_err());
         assert!(
             matches!(&e, Error::Unknown(m) if m == "1Password did not respond after 3 \
                 attempts (op item get); nothing was changed. Check \

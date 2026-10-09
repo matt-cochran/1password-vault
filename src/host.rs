@@ -224,12 +224,25 @@ impl Tool {
         Error::Unknown(
             format!(
                 "{} did not respond after {READ_ATTEMPTS} attempts ({step}); nothing was changed. \
-             Check {}, then re-run",
-                self.vendor, self.status_page
+             {}Check {}, then re-run",
+                self.vendor,
+                self.stall_hint(),
+                self.status_page
             )
             .into(),
         )
         .with_code(crate::error::Code::ProviderUnavailable)
+    }
+
+    /// For `op` run by a person (no token, not CI): an unanswered 1Password app approval
+    /// prompt also looks like no response (found live: each attempt waited out its limit).
+    fn stall_hint(&self) -> &'static str {
+        let h = Host::detect();
+        if self.program == OP_CLI.program && !h.ci && h.op_credential.is_none() {
+            "If the 1Password app is asking to approve access, approve it. "
+        } else {
+            ""
+        }
     }
 
     /// A read of this service that never answered after its retries (NR-28): before this
