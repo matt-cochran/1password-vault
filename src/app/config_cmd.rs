@@ -444,8 +444,12 @@ pub fn projects(
                 o
             })
             .collect();
-        let s = serde_json::to_string_pretty(&json!({"projects": v, "notes": notes}))
-            .map_err(|_| Error::Config("cannot serialize the project list".into()))?;
+        let s = serde_json::to_string(&json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "projects": v,
+            "notes": notes,
+        }))
+        .map_err(|_| Error::Config("cannot serialize the project list".into()))?;
         return line(out, s);
     }
     if docs.is_empty() {
@@ -499,18 +503,28 @@ pub fn status_all(r: &dyn CommandRunner, json: bool, out: &mut dyn Write) -> Res
             .to_string();
         match store_of(l).load(r) {
             Ok(fleet) => {
-                let o = status::overview_of(&fleet, r);
+                let o = status::overview_of(&fleet, None, r);
                 let lines = o.lines.clone();
-                if let Err(e) = o.result() {
+                let envs = serde_json::to_value(&o.envs).unwrap_or_default();
+                if let Err(e) = o.result(&fleet) {
                     let e = e.map_text(|t| format!("{name}: {t}"));
                     first.get_or_insert(e);
                 }
-                docs.push((name, store::vault_label(&l.row).to_string(), Ok(lines)));
+                docs.push((
+                    name,
+                    store::vault_label(&l.row).to_string(),
+                    Ok((lines, envs)),
+                ));
             }
             Err(e) => {
                 let why = e.text().lines().next().unwrap_or_default().to_string();
+                let code = e.code().as_str();
                 first.get_or_insert(e);
-                docs.push((name, store::vault_label(&l.row).to_string(), Err(why)));
+                docs.push((
+                    name,
+                    store::vault_label(&l.row).to_string(),
+                    Err((why, code)),
+                ));
             }
         }
     }
@@ -518,12 +532,22 @@ pub fn status_all(r: &dyn CommandRunner, json: bool, out: &mut dyn Write) -> Res
         let v: Vec<serde_json::Value> = docs
             .iter()
             .map(|(name, vault, res)| match res {
-                Ok(lines) => json!({"project": name, "vault": vault, "environments": lines}),
-                Err(why) => json!({"project": name, "vault": vault, "error": why}),
+                Ok((_, envs)) => json!({
+                    "project": name, "vault": vault, "environments": envs,
+                    "error_code": null, "error": null,
+                }),
+                Err((why, code)) => json!({
+                    "project": name, "vault": vault, "environments": [],
+                    "error_code": code, "error": why,
+                }),
             })
             .collect();
-        let s = serde_json::to_string_pretty(&json!({"projects": v, "notes": notes}))
-            .map_err(|_| Error::Config("cannot serialize the status".into()))?;
+        let s = serde_json::to_string(&json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "projects": v,
+            "notes": notes,
+        }))
+        .map_err(|_| Error::Config("cannot serialize the status".into()))?;
         line(out, s)?;
     } else {
         if docs.is_empty() {
@@ -531,13 +555,13 @@ pub fn status_all(r: &dyn CommandRunner, json: bool, out: &mut dyn Write) -> Res
         }
         for (name, vault, res) in &docs {
             match res {
-                Ok(lines) => {
+                Ok((lines, _)) => {
                     line(out, format!("{name} (vault {vault}):"))?;
                     for l in lines {
                         line(out, format!("  {l}"))?;
                     }
                 }
-                Err(why) => line(out, format!("{name} (vault {vault}): not read ({why})"))?,
+                Err((why, _)) => line(out, format!("{name} (vault {vault}): not read ({why})"))?,
             }
         }
         for n in &notes {

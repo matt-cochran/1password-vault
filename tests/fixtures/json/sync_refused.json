@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 6,
+  "next": "opv explain allumata/OPENAI_API_KEY --env prod",
+  "do": "fix allumata/OPENAI_API_KEY in 1Password",
+  "error": {
+    "code": "keys_blocking",
+    "category": "policy",
+    "message": "sync refused, nothing staged: allumata/OPENAI_API_KEY (missing)",
+    "detail": [],
+    "retry": "after_fix",
+    "human_required": true,
+    "do": "fix allumata/OPENAI_API_KEY in 1Password",
+    "next": "opv explain allumata/OPENAI_API_KEY --env prod"
+  }
+}

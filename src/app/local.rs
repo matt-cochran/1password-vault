@@ -1,6 +1,6 @@
 //! Local-only validation. One item read, no deployment store, names-only output.
 use super::{read_and_plan_products, write_err};
-use crate::domain::{Fleet, KeyState};
+use crate::domain::Fleet;
 use crate::error::Error;
 use crate::runner::CommandRunner;
 use std::io::Write;
@@ -40,7 +40,16 @@ pub fn select(
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
     if let Some(p) = product {
-        selected.products.retain(|name, _| name == p);
+        // The sources of the product's shared keys (FR-45) stay, alone: the read then
+        // covers their sections too, and their findings are reported once, on them.
+        let sources = fleet.sources_of(p);
+        selected
+            .products
+            .retain(|name, _| name == p || sources.iter().any(|(s, _)| s == name));
+        for (name, prod) in selected.products.iter_mut().filter(|(n, _)| *n != p) {
+            prod.keys
+                .retain(|k, _| sources.contains(&(name.clone(), k.clone())));
+        }
     }
     Ok(selected)
 }
@@ -59,50 +68,72 @@ pub fn check(
         .get_mut(env)
         .expect("selected env")
         .target = None;
-    let mut plan = read_and_plan_products(&selected, env, runner)?;
+    let mut plan = read_and_plan_products(&selected, fleet, env, runner)?;
     plan.extras.clear();
     let findings = plan.blocking();
+    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
+    let link = if findings > 0 {
+        Some(super::item_url(&selected, env, runner)?)
+    } else {
+        None
+    };
     if json {
+        // The shared row shape (A6); no target is read, so `target` and `action` are null.
+        let declared = fleet.environment(env)?;
         let rows: Vec<_> = plan
             .rows
             .iter()
             .map(|row| {
-                serde_json::json!({
-                    "product": super::json_product(&row.product), "key": row.key,
-                    "state": super::json_state(&row.state), "rule": super::json_rule(&row.state),
-                    "reason": super::json_reason(&row.state)
-                })
+                let name = declared.target_name(&row.product, &row.key);
+                super::JsonRow {
+                    // H1: the item link to fix a blocking row in; IDs only.
+                    open_url: link.as_ref().filter(|_| super::is_blocking(row)).cloned(),
+                    ..super::JsonRow::new(row, name, None, None)
+                }
             })
             .collect();
-        let doc = serde_json::json!({"schema_version": 1, "environment": env,
-            "target_checked": false, "rows": rows, "findings": findings});
+        let mut doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env,
+            "product": product,
+            "target_checked": false,
+            "rows": rows,
+            "findings": findings,
+            "totals": {"rows": plan.rows.len(), "findings": findings},
+        });
+        // FR-43: what opv tidied in 1Password before reading, names only; omitted when none.
+        if !plan.tidy.is_empty() {
+            doc["tidy"] = serde_json::json!(super::json_tidy(&plan.tidy));
+        }
+        if let Some(code) = plan.tidy_error {
+            doc["tidy_error"] = code.into();
+        }
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
-        for row in &plan.rows {
+        for row in super::problems_first(&plan.rows) {
             let label = crate::domain::key_label(&row.product, &row.key);
-            let state = match &row.state {
-                KeyState::Ready => "saved".to_string(),
-                KeyState::Missing => "missing".to_string(),
-                KeyState::WrongKind => "wrong kind".to_string(),
-                KeyState::RuleFailed(rule, reason) => format!("failed {rule} ({reason})"),
-                KeyState::Skipped => "skipped".to_string(),
-            };
-            writeln!(out, "{label}: {state}").map_err(write_err)?;
-            if !matches!(row.state, KeyState::Ready | KeyState::Skipped) {
+            writeln!(
+                out,
+                "{label}: {}{}",
+                super::row_state_label(row),
+                super::shared_note(row)
+            )
+            .map_err(write_err)?;
+            if super::is_blocking(row) {
                 let guidance = &selected.products[&row.product].keys[&row.key].guidance;
                 if !guidance.is_empty() {
                     writeln!(out, "  guidance: {guidance}").map_err(write_err)?;
+                }
+                if let Some(url) = &link {
+                    writeln!(out, "  open: {url} ({})", super::field_locator(row))
+                        .map_err(write_err)?;
                 }
             }
         }
         writeln!(out, "{findings} finding(s); no deployment target checked").map_err(write_err)?;
     }
     if findings > 0 {
-        let cmd = match product {
-            Some(p) => format!("opv check {env} --product {p}"),
-            None => format!("opv check {env}"),
-        };
-        Err(Error::findings(findings, super::status::fix_then(&cmd)))
+        Err(super::findings_error(findings, &plan.rows, env))
     } else {
         Ok(())
     }
@@ -178,13 +209,14 @@ mod tests {
     }
 
     #[test]
-    fn check_kind_failure_reports_names_not_values() {
+    fn check_reads_a_secret_stored_as_text_without_values() {
+        // FR-43: the other kind is read tolerantly, never a finding.
         let r = FakeRunner::new([item(&[text("allumata", "OPENAI_API_KEY", OPENAI)])]);
         let mut out = Vec::new();
         let _ = check(&fleet(), "prod", Some("allumata"), &r, &mut out, true);
         let text = text_of(&out);
         assert_no_values(&text);
-        assert!(text.contains("wrong_kind"));
+        assert!(!text.contains("wrong_kind"), "{text}");
     }
     #[test]
     fn malformed_field_in_another_products_section_does_not_fail_the_check() {

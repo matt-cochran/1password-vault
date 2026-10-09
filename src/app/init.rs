@@ -25,7 +25,9 @@
 //! place, comments kept, [`crate::config_edit`]), and adds the environment to every
 //! declared key whose field the item has. It refuses an environment that already exists.
 //!
-//! Read-only against 1Password (FR-11, SR-5): the only write in opv stays `item skeleton`.
+//! Read-only against 1Password (FR-11, SR-5) except for a signed-in person (FR-43): a
+//! missing vault or item is created, and the declared item is tidied after the file is
+//! written ([`super::tidy`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -82,7 +84,20 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(args, dir, r, out, &Host::detect)
+    run_on(args, dir, r, out, &Host::detect, false)
+}
+
+/// [`run`], printing what was written as one JSON document when `json` (A5): `{path,
+/// manifest, environment, profile, target, vault_id, item_id, created, keys: [{product,
+/// key, kind}], skipped, next}`. Names, IDs and kinds only.
+pub fn run_as(
+    args: &InitArgs,
+    dir: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    run_on(args, dir, r, out, &Host::detect, json)
 }
 
 fn run_on(
@@ -91,6 +106,7 @@ fn run_on(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     host: &dyn Fn() -> Host,
+    json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
     let choice = choose_target(args).map_err(init_help)?;
@@ -99,8 +115,13 @@ fn run_on(
     refuse_existing(&target, args.force)?;
     let p = prepare(args, choice, r, host)?;
     write_atomic(&target, &p.text, args.force)?;
+    tidy_declared(args, &p, r);
+    let place = Place::File(target.display().to_string());
+    if json {
+        return write_json(out, args, &p, &place);
+    }
     let ancestor = ancestor_note(dir);
-    report(args, &p, &target.display().to_string(), ancestor, out)
+    report(args, &p, &place, ancestor, out)
 }
 
 /// `init` for a new project with no `secrets.toml` (FR-44): the same declaration, saved as
@@ -112,6 +133,7 @@ pub fn run_manifest(
     dir: &Path,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
+    json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
     let choice = choose_target(args).map_err(init_help)?;
@@ -128,7 +150,12 @@ pub fn run_manifest(
         &p.text,
         None,
     )?;
+    tidy_declared(args, &p, r);
     use crate::config_store::ConfigStore as _;
+    let place = Place::Manifest(m.describe());
+    if json {
+        return write_json(out, args, &p, &place);
+    }
     let note = match &repo {
         Some(repo) => format!("note: tagged for {repo}; any checkout of it finds this manifest"),
         None => format!(
@@ -136,7 +163,30 @@ pub fn run_manifest(
              a .opv file holding project = \"{project}\""
         ),
     };
-    report(args, &p, &m.describe(), Some(note), out)
+    report(args, &p, &place, Some(note), out)
+}
+
+/// FR-43: a person's init also tidies the item it just declared (a read; never fails init).
+fn tidy_declared(args: &InitArgs, p: &Prepared, r: &dyn CommandRunner) {
+    if super::tidy::active()
+        && let Ok(fleet) = config::parse(&p.text)
+    {
+        let _ = super::tidy::read(&fleet, &args.env, r);
+    }
+}
+
+/// Where `init` saved the configuration.
+enum Place {
+    File(String),
+    Manifest(String),
+}
+
+impl Place {
+    fn describe(&self) -> &str {
+        match self {
+            Place::File(s) | Place::Manifest(s) => s,
+        }
+    }
 }
 
 /// What `init` declares, before it is written anywhere.
@@ -147,17 +197,42 @@ struct Prepared {
     text: String,
     /// The target section written, if any.
     choice: Option<TargetChoice>,
+    /// What was created in 1Password for a signed-in person (FR-43), e.g. `vault "x"`.
+    created: Vec<String>,
 }
 
-/// Resolve, read field shapes, declare, render and validate (steps 2 to 5).
+/// Resolve (creating a missing vault or item for a signed-in person, FR-43), read field
+/// shapes, declare, render and validate (steps 2 to 5).
 fn prepare(
     args: &InitArgs,
     choice: Option<TargetChoice>,
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
 ) -> Result<Prepared, Error> {
-    let vault = onepassword_init::resolve_vault(r, &args.vault, host)?;
-    let item = onepassword_init::resolve_item(r, &vault.id, &args.item, host)?;
+    // FR-43: a person gets a missing vault or item created; anyone else gets the error.
+    let mut created = Vec::new();
+    let mut person = None;
+    let mut may_create = |r: &dyn CommandRunner| {
+        *person.get_or_insert_with(|| {
+            super::tidy::active() && super::tidy::identity(r) == super::tidy::Identity::Person
+        })
+    };
+    let vault = match onepassword_init::find_vault(r, &args.vault, host)? {
+        onepassword_init::Lookup::Found(v) => v,
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
+        onepassword_init::Lookup::Missing(_) => {
+            created.push(format!("vault {:?}", args.vault));
+            onepassword_init::create_vault(r, &args.vault)?
+        }
+    };
+    let item = match onepassword_init::find_item(r, &vault.id, &args.item, host)? {
+        onepassword_init::Lookup::Found(i) => i,
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
+        onepassword_init::Lookup::Missing(_) => {
+            created.push(format!("item {:?}", args.item));
+            onepassword_init::create_item(r, &vault.id, &args.item)?
+        }
+    };
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
 
     let decl = declare(&fields, args.profile, &args.item)?;
@@ -170,20 +245,27 @@ fn prepare(
         decl,
         text,
         choice,
+        created,
     })
 }
 
-/// The lines after a successful `init`: IDs, notes, counts, `where_` it was written, then
+/// The lines after a successful `init`: IDs, notes, counts, where it was written, then
 /// the next step.
 fn report(
     args: &InitArgs,
     p: &Prepared,
-    where_: &str,
+    place: &Place,
     extra: Option<String>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let (vault, item, decl, choice) = (&p.vault, &p.item, &p.decl, &p.choice);
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+    if !p.created.is_empty() {
+        w(
+            out,
+            format!("created {} in 1Password", p.created.join(" and ")),
+        )?;
+    }
     w(
         out,
         format!(
@@ -198,7 +280,8 @@ fn report(
     w(
         out,
         format!(
-            "wrote {where_} ({} profile{}): {secrets} secret, {configs} config, skipped {}",
+            "wrote {} ({} profile{}): {secrets} secret, {configs} config, skipped {}",
+            place.describe(),
             profile_word(decl.profile),
             target_word(choice.as_ref()),
             decl.skipped
@@ -216,28 +299,66 @@ fn report(
             crate::DOCS_URL
         ),
     )?;
-    let products: Vec<&str> = decl.keys.keys().map(String::as_str).collect();
-    w(
-        out,
-        format!(
-            "Next: {}",
-            next_command(&args.env, choice.is_some(), decl.profile, &products)
-        ),
-    )
+    w(out, format!("Next: {}", next_command(args, p)))
 }
 
-/// `opv plan <env>` with a target, else `opv check <env>` naming the one product (or a
-/// placeholder) under the fleet profile (review #16).
-fn next_command(env: &str, has_target: bool, profile: Profile, products: &[&str]) -> String {
-    if has_target {
+/// The command to run after `init`: `plan` for a target, else `check` (with the product
+/// when there is one); with several products, `doctor --env`, which checks them all.
+fn next_command(args: &InitArgs, p: &Prepared) -> String {
+    let env = &args.env;
+    if p.choice.is_some() {
         return format!("opv plan {env}");
     }
-    let product = match (profile, products) {
-        (Profile::Fleet, [one]) => format!(" --product {one}"),
-        (Profile::Fleet, _) => " --product <product>".to_string(),
-        (Profile::Simple, _) => String::new(),
+    match (p.decl.profile, p.decl.keys.len()) {
+        (Profile::Fleet, 1) => format!(
+            "opv check {env} --product {}",
+            p.decl.keys.keys().next().expect("one product")
+        ),
+        (Profile::Fleet, _) => format!("opv doctor --env {env}"),
+        (Profile::Simple, _) => format!("opv check {env}"),
+    }
+}
+
+/// `init --json` (A5).
+fn write_json(
+    out: &mut dyn Write,
+    args: &InitArgs,
+    p: &Prepared,
+    place: &Place,
+) -> Result<(), Error> {
+    let decl = &p.decl;
+    let keys: Vec<serde_json::Value> = decl
+        .keys
+        .iter()
+        .flat_map(|(product, keys)| {
+            keys.iter().map(move |(key, kind)| {
+                serde_json::json!({
+                    "product": (decl.profile == Profile::Fleet).then_some(product),
+                    "key": key,
+                    "kind": super::kind_label(*kind),
+                })
+            })
+        })
+        .collect();
+    let (path, manifest) = match place {
+        Place::File(f) => (Some(f.as_str()), None),
+        Place::Manifest(m) => (None, Some(m.as_str())),
     };
-    format!("opv check {env}{product}")
+    let doc = serde_json::json!({
+        "schema_version": crate::json::SCHEMA_VERSION,
+        "path": path,
+        "manifest": manifest,
+        "environment": args.env,
+        "profile": profile_word(decl.profile),
+        "target": p.choice.as_ref().map(|c| c.provider.section()),
+        "vault_id": p.vault.id,
+        "item_id": p.item.id,
+        "created": p.created,
+        "keys": keys,
+        "skipped": decl.skipped,
+        "next": next_command(args, p),
+    });
+    writeln!(out, "{doc}").map_err(write_err)
 }
 
 /// A configuration error in text opv generated: say so, and that nothing was written.
@@ -513,7 +634,8 @@ fn declare(
             ).into()));
             }
         };
-    check_duplicates(fields, profile, item_title)?;
+    // A label given twice is read tolerantly (FR-43): declared once, never an error.
+    let _ = item_title;
     let mut d = Declared {
         profile,
         keys: BTreeMap::new(),
@@ -597,7 +719,7 @@ fn declare(
 const REJECTED: &str = "status and sync will reject it until it is fixed in 1Password";
 
 /// Why `status` / `sync` (the item reader for `profile`) would reject this field, if
-/// they would; duplicates are checked separately ([`check_duplicates`]). Mirrors
+/// they would; a duplicate label is read tolerantly (FR-43). Mirrors
 /// `onepassword::parse_fields` (fleet) and `parse_unsectioned_fields` (simple).
 fn reader_rejects(f: &FieldShape, profile: Profile) -> Option<String> {
     let bad_type = !matches!(f.ty.as_str(), "CONCEALED" | "STRING");
@@ -628,34 +750,6 @@ fn skip_note(f: &FieldShape, why: Option<&str>, profile: Profile) -> String {
         parts.push(REJECTED.to_string());
     }
     format!("skipped {}: {}", display_name(f), parts.join("; "))
-}
-
-/// A label given twice where the reader for `profile` looks (every sectioned field under
-/// fleet, every unsectioned key-named field under simple), whatever its type: the reader
-/// rejects the item, so init writes nothing (`Source`, names only).
-fn check_duplicates(
-    fields: &[FieldShape],
-    profile: Profile,
-    item_title: &str,
-) -> Result<(), Error> {
-    let mut seen = std::collections::BTreeSet::new();
-    for f in fields {
-        let read = match profile {
-            Profile::Fleet => f.section.is_some() && !f.label.is_empty(),
-            Profile::Simple => f.section.is_none() && config::is_env_name(&f.label),
-        };
-        if read && !seen.insert((f.section.as_deref(), f.label.as_str())) {
-            return Err(Error::Source(
-                format!(
-                    "duplicate field {} in item {item_title:?}; rename one in 1Password \
-                 (nothing written)",
-                    display_name(f)
-                )
-                .into(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// `"section"/"label"` or `"label"`, quoted and escaped. A name, never a value.
@@ -741,7 +835,19 @@ pub fn add_env(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    add_env_on(args, store, r, out, &Host::detect)
+    add_env_on(args, store, r, out, &Host::detect, false)
+}
+
+/// [`add_env`], printing `{environment, target, saved_in, vault_id, item_id, added,
+/// absent, undeclared, next}` as one JSON document when `json` (A5). Names only.
+pub fn add_env_as(
+    args: &InitArgs,
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    add_env_on(args, store, r, out, &Host::detect, json)
 }
 
 fn add_env_on(
@@ -750,6 +856,7 @@ fn add_env_on(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     host: &dyn Fn() -> Host,
+    json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
     let base = store.read(r)?;
@@ -775,8 +882,9 @@ fn add_env_on(
     let choice = choose_target(args).map_err(init_help)?;
     probe_target(args, choice.as_ref(), Some(profile)).map_err(init_help)?;
 
-    let vault = onepassword_init::resolve_vault(r, &args.vault, host)?;
-    let item = onepassword_init::resolve_item(r, &vault.id, &args.item, host)?;
+    // The item must exist: its fields are what --add-env declares (nothing is created).
+    let vault = onepassword_init::find_vault(r, &args.vault, host)?.found()?;
+    let item = onepassword_init::find_item(r, &vault.id, &args.item, host)?.found()?;
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
     let decl = declare(&fields, Some(profile), &args.item)?;
 
@@ -849,6 +957,36 @@ fn add_env_on(
         .map_err(|e| would_write(e, "init --add-env"))?;
     crate::config_store::save(store, r, &base, &text)?;
 
+    let next = match (added.is_empty(), undeclared.first()) {
+        (true, Some((name, kind))) => format!(
+            "opv add {name} --kind {} --env {}",
+            kind_word(*kind),
+            args.env
+        ),
+        (true, None) => format!("opv add <key> --kind secret --env {}", args.env),
+        (false, _) if choice.is_some() => format!("opv plan {}", args.env),
+        (false, _) => match (profile, products.as_slice()) {
+            (Profile::Fleet, [one]) => format!("opv check {} --product {one}", args.env),
+            (Profile::Fleet, _) => format!("opv doctor --env {}", args.env),
+            (Profile::Simple, _) => format!("opv check {}", args.env),
+        },
+    };
+    if json {
+        let names: Vec<&str> = undeclared.iter().map(|(n, _)| n.as_str()).collect();
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": args.env,
+            "target": choice.as_ref().map(|c| c.provider.section()),
+            "saved_in": place,
+            "vault_id": vault.id,
+            "item_id": item.id,
+            "added": added,
+            "absent": absent,
+            "undeclared": names,
+            "next": next,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     w(
         out,
@@ -909,18 +1047,6 @@ fn add_env_on(
             ),
         )?;
     }
-    let next = match (added.is_empty(), undeclared.first()) {
-        (true, Some((name, kind))) => format!(
-            "opv add {name} --kind {} --env {}",
-            kind_word(*kind),
-            args.env
-        ),
-        (true, None) => format!("opv add <key> --kind secret --env {}", args.env),
-        (false, _) => {
-            let ps: Vec<&str> = products.iter().map(String::as_str).collect();
-            next_command(&args.env, choice.is_some(), profile, &ps)
-        }
-    };
     w(out, format!("Next: {next}"))
 }
 

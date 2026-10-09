@@ -17,7 +17,7 @@ use std::io::Write;
 use super::{kind_label, suggest, write_err};
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
 use crate::domain::{Fleet, rules};
-use crate::error::Error;
+use crate::error::{Code, Error};
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
@@ -36,9 +36,44 @@ pub fn run(
     env: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_as(fleet, target, env, out, false)
+}
+
+/// [`run`], printing one JSON document instead of lines when `json` (A5): `{environment,
+/// product, key, reference, kind, field, target: [{label, value}], rules, immutable,
+/// guidance, required_here, inspect}`. Configuration only, never a value.
+pub fn run_as(
+    fleet: &Fleet,
+    target: &str,
+    env: Option<&str>,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     let t = resolve(fleet, target).map_err(|e| runnable_next(fleet, env, e))?;
     let env_name = environment(fleet, &t, env)?;
-    explain_in(fleet, &t, env_name, out)
+    explain_in(fleet, &t, env_name, out, json)
+}
+
+/// The declared key and environment `opv open` names (H1), resolved exactly as `explain`
+/// resolves them: `(product, key, environment)`. Configuration only.
+pub(crate) fn locate<'a>(
+    fleet: &'a Fleet,
+    target: &str,
+    env: Option<&'a str>,
+) -> Result<(String, String, &'a str), Error> {
+    // The same resolution as `explain`; a suggestion names `opv open` instead.
+    let t = resolve(fleet, target).map_err(|e| {
+        let e = runnable_next(fleet, env, e);
+        match e.next_step().and_then(|n| n.strip_prefix("opv explain ")) {
+            Some(rest) => {
+                let next = format!("opv open {rest}");
+                e.with_next(next)
+            }
+            None => e,
+        }
+    })?;
+    let env_name = environment(fleet, &t, env)?;
+    Ok((t.product.to_string(), t.key.to_string(), env_name))
 }
 
 /// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
@@ -181,6 +216,7 @@ fn did_you_mean(text: String, close: &[&str]) -> Error {
         many => Error::Config(format!("{text}; did you mean {}?", many.join(" or ")).into())
             .with_next(format!("opv explain {}", many[0])),
     }
+    .with_code(Code::UndeclaredKey)
 }
 
 /// `e` with a `Next:` step that runs as-is (H10): an `opv explain <label>` step gains the
@@ -252,6 +288,7 @@ fn environment<'a>(
                         )
                         .into(),
                     )
+                    .with_code(Code::Usage)
                     .with_next(explain_command(fleet, &label, None)));
                 }
             }
@@ -265,7 +302,8 @@ fn environment<'a>(
                 t.spec.environments.join(", ")
             )
             .into(),
-        );
+        )
+        .with_code(Code::UndeclaredKey);
         if let Some(first) = t.spec.environments.first() {
             err = err.with_next(format!("opv explain {label} --env {first}"));
         }
@@ -279,6 +317,7 @@ fn explain_in(
     t: &Target<'_>,
     env_name: &str,
     out: &mut dyn Write,
+    json: bool,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let (product, key, spec) = (t.product, t.key, t.spec);
@@ -316,16 +355,64 @@ fn explain_in(
     };
     // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
+    let required_here = rules::applies(spec, env_name, env, product);
+    // A shared key (FR-45) has no field: its reference is its source's field.
+    let source = spec
+        .source()
+        .map(|(p, k)| (p, k, &fleet.products[p].keys[k]));
+    let field_label = source.map_or_else(|| label.clone(), |(p, k, _)| key_label(p, k));
+    let shared_by: Vec<String> = fleet
+        .shared_by(env_name, product, key)
+        .iter()
+        .map(|(p, k)| key_label(p, k))
+        .collect();
+    if json {
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env_name,
+            "product": super::json_product(product),
+            "key": key,
+            "reference": format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
+            "kind": kind_label(spec.kind),
+            "field": field,
+            "target": target_lines
+                .iter()
+                .map(|(l, v)| serde_json::json!({"label": l, "value": v}))
+                .collect::<Vec<_>>(),
+            "rules": rules,
+            "immutable": spec.immutable,
+            "guidance": (!spec.guidance.is_empty()).then_some(spec.guidance.as_str()),
+            "required_here": required_here,
+            "inspect": inspect_command(&env.item_id, &env.vault_id),
+            // FR-45: the key whose field holds this one's value, and the keys reading this one.
+            "shared_from": source.map(|_| field_label.clone()),
+            "shared_by": shared_by,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
     let mut rows: Vec<(String, String)> = vec![
         (
             "reference".into(),
-            format!("op://{}/{}/{label}", env.vault_id, env.item_id),
+            format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
         ),
         (
             "kind".into(),
             format!("{} ({field})", kind_label(spec.kind)),
         ),
     ];
+    if let Some((_, _, src)) = source {
+        rows.push((
+            "shared from".into(),
+            format!("{field_label} (its field holds the value; {label} has none)"),
+        ));
+        let src_rules = describe_rules(&src.rules);
+        if !src_rules.is_empty() {
+            rows.push(("source rules".into(), src_rules.join(", ")));
+        }
+    }
+    if !shared_by.is_empty() {
+        rows.push(("shared by".into(), shared_by.join(", ")));
+    }
     rows.extend(target_lines);
     rows.extend([
         (
@@ -338,11 +425,16 @@ fn explain_in(
         ),
         (
             "immutable".into(),
-            if spec.immutable { "yes" } else { "no" }.into(),
+            match (spec.immutable, source) {
+                (true, Some(_)) => format!("yes (follows {field_label})"),
+                (false, Some(_)) => format!("no (follows {field_label})"),
+                (true, None) => "yes".into(),
+                (false, None) => "no".into(),
+            },
         ),
         ("guidance".into(), guidance.to_string()),
     ]);
-    if !rules::applies(spec, env_name, env, product) {
+    if !required_here {
         rows.push((
             "note".into(),
             "not required here (its prefix_by_mode mode is skipped)".into(),
@@ -352,6 +444,8 @@ fn explain_in(
         "inspect".into(),
         inspect_command(&env.item_id, &env.vault_id),
     ));
+    // H1: the command that opens the item in 1Password, where the value is typed.
+    rows.push(("open".into(), format!("opv open {label} --env {env_name}")));
     // One value column, however long a provider's label is (P4).
     let width = rows
         .iter()

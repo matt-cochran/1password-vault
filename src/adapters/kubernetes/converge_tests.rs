@@ -479,7 +479,7 @@ fn kubernetes_sync_ends_with_the_shared_summary_line() {
     let text = String::from_utf8(out).unwrap();
     let last = text.lines().last().unwrap_or_default();
     let re = regex::Regex::new(
-        r"^summary: written \d+ · deployed \S+ · pruned \d+ · pending \d+ · unchanged \d+ · skipped \d+$",
+        r"^summary: written \d+ · unchanged \d+ · held \d+ · deployed \S+( \(\d+ pending from an earlier run\))? · pending \d+ · pruned \d+ · kept \d+ · skipped \d+$",
     )
     .unwrap();
     assert!(re.is_match(last), "{text}");

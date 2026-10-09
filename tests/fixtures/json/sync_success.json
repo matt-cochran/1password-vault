@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "environment": "prod",
+  "provider": "fly",
+  "product": null,
+  "written": [
+    {
+      "product": "allumata",
+      "key": "INTEGRATION_ENC_KEY",
+      "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY"
+    },
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY"
+    }
+  ],
+  "unchanged": [],
+  "held": [],
+  "deployed": false,
+  "revision": null,
+  "deploy_reason": [],
+  "deployed_names": [],
+  "pending": [
+    {
+      "product": "allumata",
+      "key": "INTEGRATION_ENC_KEY",
+      "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY"
+    },
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY"
+    }
+  ],
+  "pruned": [],
+  "kept": [],
+  "skipped": [
+    {
+      "product": "allumata",
+      "key": "STRIPE_SECRET_KEY",
+      "target_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY"
+    }
+  ],
+  "written_names": [
+    "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
+    "FLEET__ALLUMATA__OPENAI_API_KEY"
+  ],
+  "plan_id": "eff45945",
+  "next": "opv sync prod --deploy",
+  "do": null
+}

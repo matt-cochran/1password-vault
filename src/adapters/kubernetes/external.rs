@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn missing_version_names_sync_deploy_as_the_next_step() {
-        assert!(diagnosis(Some(false), vec![]).contains("Next: run opv sync dev --deploy again"));
+        assert!(diagnosis(Some(false), vec![]).contains("Next: opv sync dev --deploy\n"));
     }
 
     #[test]

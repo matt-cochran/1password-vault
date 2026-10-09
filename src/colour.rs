@@ -43,8 +43,9 @@ const DOCTOR: [(&str, &str); 4] = [
 ];
 
 /// Row states, as printed by `state_label` (a failing rule starts with `failed`).
-const STATES: [(&str, &str); 5] = [
+const STATES: [(&str, &str); 6] = [
     ("saved", GREEN),
+    ("blocked", YELLOW),
     ("missing", RED),
     ("wrong kind", RED),
     ("failed", RED),
@@ -97,7 +98,8 @@ impl<W: Write> Painter<W> {
             {
                 return p;
             }
-            if line.starts_with("    guidance: ") {
+            // Guidance and `open:` lines under a row keep the table going.
+            if line.starts_with("    ") {
                 return line.to_string();
             }
             self.state_col = None;

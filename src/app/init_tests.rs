@@ -423,17 +423,12 @@ fn invalid_section_names_are_skipped_by_name() {
 }
 
 #[test]
-fn duplicate_field_is_an_error_and_nothing_is_written() {
+fn duplicate_field_is_declared_once() {
+    // FR-43: a label given twice is read tolerantly, never an error.
     let mut fs_ = simple_fields();
     fs_.push(text("", "LOG_LEVEL", &v("debug")));
-    let (dir, run) = init_with(&fs_, &args(None, false));
-    assert_eq!(run.err().exit_code(), 4);
-    assert!(
-        run.err()
-            .to_string()
-            .contains("duplicate field \"LOG_LEVEL\"")
-    );
-    assert!(dir_entries(dir.path()).is_empty());
+    let (_dir, run) = init_with(&fs_, &args(None, false));
+    assert_eq!(run.file().matches("[keys.LOG_LEVEL]").count(), 1);
 }
 
 #[test]
@@ -722,7 +717,7 @@ fn wrong_type_note_uses_the_rejection_wording() {
 
 /// The readers reject a label given twice whatever the field types, so init does too.
 #[test]
-fn duplicates_are_found_across_skipped_types_and_sections() {
+fn duplicates_never_fail_init() {
     let bad = json!({"id": "s", "label": "My App"});
     let cases: Vec<(Vec<serde_json::Value>, &str)> = vec![
         (
@@ -745,12 +740,10 @@ fn duplicates_are_found_across_skipped_types_and_sections() {
             "duplicate field \"TOKEN\"",
         ),
     ];
-    for (fields, want) in cases {
-        let (dir, run) = init_raw(fields, &args(None, false));
-        let e = run.err();
-        assert_eq!(e.exit_code(), 4, "{e}");
-        assert!(e.to_string().contains(want), "{e}");
-        assert!(dir_entries(dir.path()).is_empty());
+    // FR-43: duplicates are read tolerantly; init writes the file.
+    for (fields, _was) in cases {
+        let (_dir, run) = init_raw(fields, &args(None, false));
+        assert!(run.res.is_ok(), "{:?}", run.res);
     }
 }
 
@@ -826,7 +819,7 @@ fn targetless_fleet_init_points_to_product_check() {
     let mut a = args(None, false);
     a.fields.clear();
     let (_dir, run) = init_with(&fleet_fields(), &a);
-    assert!(run.out.contains("opv check staging --product <product>"));
+    assert!(run.out.contains("Next: opv doctor --env staging\n"));
 }
 
 /// Review #16: with one product, the next step names it instead of a placeholder.
@@ -1268,4 +1261,31 @@ fn add_env_on_a_manifest_refuses_an_existing_environment_naming_config_edit() {
     a.env = "prod".into();
     let (res, _, _) = add_env_to_manifest(EXISTING, &a);
     assert!(res.unwrap_err().to_string().contains("opv config edit"));
+}
+
+// ---- A5: `init --json` ----
+
+fn init_json(fields: &[Field], a: &InitArgs) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
+    let mut out = Vec::new();
+    let res = run_as(a, dir.path(), &r, &mut out, true);
+    let framed = crate::app::json_tests::framed(&out, &res, "opv init staging --json");
+    // The temp directory differs per run.
+    let framed = framed.replace(&dir.path().display().to_string(), "<dir>");
+    (dir, framed)
+}
+
+#[test]
+fn init_json_success_golden() {
+    let (_dir, out) = init_json(&fleet_fields(), &args(None, false));
+    crate::app::json_tests::golden("init_success", &out);
+}
+
+#[test]
+fn init_json_refusal_golden() {
+    let mut a = args(None, false);
+    a.vault = "no-such-vault".into();
+    let (_dir, out) = init_json(&fleet_fields(), &a);
+    crate::app::json_tests::golden("init_unknown_vault", &out);
 }

@@ -12,7 +12,7 @@ will prune: allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
 pruned: allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
 held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
 pending deploy (pass --deploy): allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
-summary: written 0 · deployed no · pruned 1 · pending 1 · unchanged 1 · skipped 1
+summary: written 0 · unchanged 1 · held 1 · deployed no · pending 1 · pruned 1 · kept 0 · skipped 1
 Next: opv sync prod --deploy --prune
 --- result
 Ok(())

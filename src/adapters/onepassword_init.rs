@@ -55,11 +55,22 @@ pub struct FieldShape {
 
 /// The vault whose name is exactly `title` (case-sensitive). One `op vault list` call.
 /// No match or several matches is `Error::Config` listing the candidates by name and ID.
+#[cfg(test)]
 pub fn resolve_vault(
     r: &dyn CommandRunner,
     title: &str,
     host: &dyn Fn() -> Host,
 ) -> Result<Named, Error> {
+    find_vault(r, title, host)?.found()
+}
+
+/// [`resolve_vault`] telling "no such vault" apart from every other failure, so `init`
+/// can create it for a person (FR-43).
+pub fn find_vault(
+    r: &dyn CommandRunner,
+    title: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Lookup, Error> {
     #[derive(Deserialize)]
     struct Row {
         id: String,
@@ -76,17 +87,28 @@ pub fn resolve_vault(
             name: v.name,
         })
         .collect();
-    pick(all, title, "vault", "")
+    lookup(all, title, "vault", "")
 }
 
 /// The item in `vault_id` whose title is exactly `title` (case-sensitive). One `op item
 /// list --vault <vault_id>` call (item metadata only; it carries no field values).
+#[cfg(test)]
 pub fn resolve_item(
     r: &dyn CommandRunner,
     vault_id: &str,
     title: &str,
     host: &dyn Fn() -> Host,
 ) -> Result<Named, Error> {
+    find_item(r, vault_id, title, host)?.found()
+}
+
+/// [`resolve_item`] telling "no such item" apart from every other failure (FR-43).
+pub fn find_item(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    title: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Lookup, Error> {
     #[derive(Deserialize)]
     struct Row {
         id: String,
@@ -104,7 +126,7 @@ pub fn resolve_item(
             name: i.title,
         })
         .collect();
-    pick(all, title, "item", &format!(" in vault {vault_id}"))
+    lookup(all, title, "item", &format!(" in vault {vault_id}"))
 }
 
 /// Read the item once, by IDs, keeping only each field's section, label and type. Built-in
@@ -214,14 +236,32 @@ fn parse_list<T: for<'de> Deserialize<'de>>(out: &Output) -> Result<Vec<T>, Erro
     serde_json::from_slice(&out.stdout).map_err(|e| json_error(&e))
 }
 
-/// Exactly one entry named `title`, or `Error::Config` listing the candidates.
-fn pick(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Named, Error> {
+/// A title lookup: the one match, or no match with the error that names the candidates.
+#[derive(Debug)]
+pub enum Lookup {
+    Found(Named),
+    Missing(Error),
+}
+
+impl Lookup {
+    /// The match, or the no-match error.
+    pub fn found(self) -> Result<Named, Error> {
+        match self {
+            Lookup::Found(n) => Ok(n),
+            Lookup::Missing(e) => Err(e),
+        }
+    }
+}
+
+/// Exactly one entry named `title`; none is [`Lookup::Missing`] (an `Error::Config` listing
+/// the candidates); several, or an invalid ID, is an error.
+fn lookup(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Lookup, Error> {
     all.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     let matches: Vec<&Named> = all.iter().filter(|n| n.name == title).collect();
     match matches.as_slice() {
         // The ID goes into argv next: check it like a hand-written ID (§10.2, SR-7) and never
         // echo an ID that fails the check.
-        [one] if config::is_id(&one.id) => Ok((*one).clone()),
+        [one] if config::is_id(&one.id) => Ok(Lookup::Found((*one).clone())),
         [_] => Err(Error::Source(
             format!(
                 "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
@@ -229,13 +269,13 @@ fn pick(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Nam
             )
             .into(),
         )),
-        [] => Err(Error::Config(
+        [] => Ok(Lookup::Missing(Error::Config(
             format!(
                 "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
                 candidates(all.iter())
             )
             .into(),
-        )),
+        ))),
         many => Err(Error::Config(
             format!(
                 "{} {what}s are titled {title:?}{scope}; rename all but one in 1Password: {}",
@@ -245,6 +285,71 @@ fn pick(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Nam
             .into(),
         )),
     }
+}
+
+/// Create the vault `title` for a person running `init` (FR-43): `op vault create <title>
+/// --format json`, one write, never retried (NR-2). The title is a name, never a value. A
+/// refused create (the account may not allow it) names the manual step.
+pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> {
+    let args = ["vault", "create", title, "--format", "json"];
+    created(
+        r,
+        &args,
+        None,
+        "vault",
+        title,
+        "create the vault in the 1Password app (or ask an admin), then re-run opv init",
+    )
+}
+
+/// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
+/// the same `op item create` call `setup` makes, the template on stdin.
+pub fn create_item(r: &dyn CommandRunner, vault_id: &str, title: &str) -> Result<Named, Error> {
+    let args = [
+        "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
+    ];
+    let template = br#"{"category":"SECURE_NOTE","fields":[],"sections":[]}"#;
+    created(
+        r,
+        &args,
+        Some(template),
+        "item",
+        title,
+        "create the item in the 1Password app, then re-run opv init",
+    )
+}
+
+fn created(
+    r: &dyn CommandRunner,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    what: &str,
+    title: &str,
+    manual: &str,
+) -> Result<Named, Error> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(default)]
+        id: String,
+    }
+    let call = crate::runner::Call::new("op", args).with_stdin(stdin);
+    let failed = || {
+        Error::Source(
+            format!("could not create the {what} {title:?} in 1Password\n  next: {manual}").into(),
+        )
+    };
+    let out = match r.write(&call) {
+        Ok(crate::runner::Outcome::Done(o)) => o,
+        _ => return Err(failed()),
+    };
+    let row: Row = serde_json::from_slice(&out.stdout).map_err(|e| json_error(&e))?;
+    if !config::is_id(&row.id) {
+        return Err(failed());
+    }
+    Ok(Named {
+        id: row.id,
+        name: title.to_string(),
+    })
 }
 
 fn candidates<'a>(it: impl ExactSizeIterator<Item = &'a Named>) -> String {

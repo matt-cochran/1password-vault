@@ -224,6 +224,7 @@ fn every_documented_opv_command_parses() {
             }
             checked += 1;
             let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+                .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
                 .args(&cmd.args)
                 .current_dir(sandbox.path())
                 .env_clear()

@@ -623,7 +623,7 @@ mod tests {
         r.push_with_stderr(ok("v1.36"), "");
         let e = kubectl_get_deployment(&r).unwrap_err();
         let excerpt = crate::runner::take_failure_excerpt();
-        let text = crate::error::report(&e, &e.default_next("opv sync prod"), excerpt.as_ref());
+        let text = crate::error::report(&e, "opv sync prod", excerpt.as_ref());
         let first = format!("opv: {}", e.to_string().lines().next().unwrap());
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
@@ -636,7 +636,7 @@ mod tests {
             (
                 first.as_str(),
                 "  kubectl said: Error from server (Forbidden): deployments.apps \"api\" is forbidden",
-                Some(format!("Next: {}", e.next_step().unwrap_or("opv doctor")).as_str()),
+                Some(format!("Next: {}", e.step("opv sync prod", "-").next).as_str()),
                 1
             ),
             "{text}"

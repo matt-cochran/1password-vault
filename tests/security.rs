@@ -333,6 +333,7 @@ impl Harness {
 
     fn run_config(&self, config: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Run {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .arg("--config")
             .arg(config.as_ref())
             .args(args)
@@ -501,7 +502,13 @@ fn no_secret_in_any_argv() {
         h.run(cmd);
         assert_argv_and_env_clean(&h);
     }
-    let run_env = &h.calls()[0].env;
+    // `run` reads the item first (FR-43); the env is on the `op run` call.
+    let calls = h.calls();
+    let run_env = &calls
+        .iter()
+        .find(|c| c.argv.first().is_some_and(|a| a == "run"))
+        .expect("op run")
+        .env;
     assert!(
         run_env.contains("op://vprd/iprd/allumata/OPENAI_API_KEY"),
         "{run_env}"
@@ -790,8 +797,9 @@ fn import_failure_stops_the_run() {
 #[test]
 fn rule_failure_names_key_not_value() {
     let h = Harness::new(&good_item());
+    // A trailing newline alone is normalized, not refused (FR-43): see
+    // `trailing_newline_is_read_in_its_intended_form`.
     for (value, rule) in [
-        ("sk-proj-S7MARKERVALUEnewline0007\n", "single_line"),
         (" sk-proj-S7MARKERVALUEspace0008", "no_surrounding_space"),
         ("pk-S7MARKERVALUEprefix0009", "prefix"),
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
@@ -827,6 +835,16 @@ fn rule_failure_names_key_not_value() {
             assert_clean_output(cmd, &r);
         }
     }
+}
+
+/// FR-43: a value whose only problem is a trailing newline is read in its intended form,
+/// so sync goes ahead, and opv's output still carries no value.
+#[test]
+fn trailing_newline_is_read_in_its_intended_form() {
+    let h = Harness::new(&item(good_fields("sk-proj-S7MARKERVALUEnewline0007\n")));
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    assert_clean_output(&["sync"], &r);
 }
 
 /// Commands that read the item (every `op item get` failure path).
@@ -1094,6 +1112,7 @@ fn exit_codes() {
     fs::write(&bad, "[profile]\nkind = 42\n").unwrap();
     h.reset();
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", bad.to_str().unwrap(), "sync", "prod"])
         .env_clear()
         .env("PATH", &h.bin)
@@ -1205,6 +1224,7 @@ fn broken_stdout_returns_the_command_result() {
     ] {
         let h = Harness::new(&item_json);
         let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .arg("--config")
             .arg(CONFIG)
             .args(cmd)
@@ -1476,23 +1496,69 @@ fn fly_plan_json_exit_code_matches_text_on_findings() {
     assert_eq!((text, json), (8, 8));
 }
 
-/// FR-10 / FR-21: an error before the document is produced still exits 4 on stderr with
-/// no partial document on stdout.
+/// FR-10 / A1: an error before the document is produced still exits 4, and stdout is the
+/// one failure document, not a partial one.
 #[test]
-fn status_json_error_prints_no_document_on_stdout() {
+fn status_json_error_prints_the_failure_document_on_stdout() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["status", "prod", "--json"]);
-    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(
+        (r.code, doc["ok"].clone(), doc["exit_code"].clone()),
+        (4, json!(false), json!(4)),
+        "{}",
+        r.all()
+    );
 }
 
-/// FR-10 / FR-21: `fly plan --json` likewise reports errors on stderr only.
+/// FR-10 / A1: `plan --json` likewise.
 #[test]
-fn fly_plan_json_error_prints_no_document_on_stdout() {
+fn plan_json_error_names_its_code() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["plan", "prod", "--json"]);
-    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["error"]["code"], "item_not_found", "{}", r.all());
+}
+
+/// SR-1 / A1: the failure document carries no value, though the failed call's stderr
+/// (masked in the text) carried one.
+#[test]
+fn json_failure_document_carries_no_value() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_OP_ITEM_EXIT", "1");
+    let r = h.run(&["status", "prod", "--json"]);
+    assert!(!r.stdout.contains(MARK), "{}", r.stdout);
+}
+
+/// SR-1 / A6: no `--json` document carries a value or the child's stderr, whatever the
+/// command.
+#[test]
+fn json_documents_carry_no_value() {
+    let h = Harness::new(&good_item());
+    let mut leaked = Vec::new();
+    for args in [
+        &["status", "prod", "--json"][..],
+        &["plan", "prod", "--json"],
+        &["check", "prod", "--product", "allumata", "--json"],
+        &["sync", "prod", "--json"],
+        &["doctor", "--env", "prod", "--json"],
+        &[
+            "explain",
+            "allumata/OPENAI_API_KEY",
+            "--env",
+            "prod",
+            "--json",
+        ],
+    ] {
+        h.reset();
+        let r = h.run(args);
+        if r.stdout.contains(MARK) || r.stdout.contains(CHILD_STDERR) {
+            leaked.push(format!("{args:?}: {}", r.stdout));
+        }
+    }
+    assert!(leaked.is_empty(), "{leaked:?}");
 }
 
 // ------------------------------------------------------------ simple profile (FR-20)
@@ -2361,7 +2427,13 @@ fn sync_json_stdout_is_one_document() {
     let h = Harness::new(&good_item());
     let r = h.run(&["sync", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["pending"], json!([N_ENC, N_OPENAI]), "{}", r.all());
+    let pending: Vec<&Value> = doc["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["target_name"])
+        .collect();
+    assert_eq!(pending, [N_ENC, N_OPENAI], "{}", r.all());
 }
 
 /// P22: `status` without an environment prints one line per environment.
@@ -2375,4 +2447,30 @@ fn status_without_env_prints_one_line_per_environment() {
         .map(|l| l.split(':').next().unwrap_or_default())
         .collect();
     assert_eq!(envs, ["prod", "staging"], "{}", r.all());
+}
+
+/// H8, SR-1: with `GITHUB_STEP_SUMMARY` set, status, plan and sync (missing keys and
+/// complete ones) append a names-only summary: no value, no identity, no link.
+#[test]
+fn step_summary_never_carries_a_value() {
+    let summary_dir = TempDir::new().unwrap();
+    let path = summary_dir.path().join("summary.md");
+    let mut h = Harness::new(&good_item());
+    h.set("GITHUB_STEP_SUMMARY", path.to_str().unwrap());
+    for item_json in [item(vec![]), good_item()] {
+        h.set_item(&item_json);
+        for cmd in [
+            &["status", "prod"][..],
+            &["plan", "prod"],
+            &["sync", "prod"],
+        ] {
+            h.reset();
+            h.run(cmd);
+        }
+    }
+    let md = fs::read_to_string(&path).unwrap();
+    assert!(
+        md.contains("### opv plan prod") && !md.contains(MARK) && !md.contains("1password.com"),
+        "{md}"
+    );
 }

@@ -10,9 +10,11 @@ pub mod config_store;
 pub mod domain;
 pub mod error;
 pub mod host;
+pub mod json;
 pub mod ports;
 pub mod provider;
 pub mod runner;
+pub mod schema;
 pub mod scrub;
 
 pub use error::Error;

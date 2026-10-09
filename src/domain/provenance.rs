@@ -64,6 +64,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             KeyState::RuleFailed(rule, _) => rule,
             KeyState::Ready => "ready",
             KeyState::Skipped => "skipped",
+            KeyState::SourceBlocked => "source-blocked",
         });
         put(match r.target {
             TargetState::Absent => "absent",
@@ -254,6 +255,8 @@ mod tests {
             state: KeyState::Ready,
             target: TargetState::Absent,
             guidance: String::new(),
+            source: None,
+            shared_by: Vec::new(),
         }
     }
 
@@ -269,6 +272,8 @@ mod tests {
             prune: vec![],
             held_from_prune: vec![],
             config: BTreeMap::new(),
+            tidy: Vec::new(),
+            tidy_error: None,
         }
     }
 

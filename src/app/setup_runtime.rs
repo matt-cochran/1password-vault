@@ -220,7 +220,9 @@ impl Console {
             return Err(Error::Policy(format!(
                 "{what} needs your own interactive terminal. Automation signs in with OP_SERVICE_ACCOUNT_TOKEN and uses init, doctor, check, item skeleton, run and sync with declared configuration."
             ).into())
-            .with_next(format!("run opv {command} in your own terminal")));
+            .with_code(crate::error::Code::TerminalRequired)
+            .with_do("ask the user to run this in their own terminal")
+            .with_next(format!("opv {command}")));
         }
         for key in [
             "OP_SERVICE_ACCOUNT_TOKEN",
@@ -231,7 +233,9 @@ impl Console {
                 return Err(Error::Policy(format!(
                     "A service-account or Connect credential is active. Use a separate owner terminal for opv {command}; existing automation authentication is unchanged."
                 ).into())
-                .with_next(format!("run opv {command} in a terminal without {key}")));
+                .with_code(crate::error::Code::TerminalRequired)
+                .with_do(format!("ask the user to run this in their own terminal, without {key} set"))
+                .with_next(format!("opv {command}")));
             }
         }
         Ok(())

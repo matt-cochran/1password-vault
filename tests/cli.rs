@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn opv(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -51,6 +52,7 @@ fn missing_config_file_exits_2() {
 /// Run opv with `dir` as the working directory and no `op` or `flyctl` on PATH.
 fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .current_dir(dir)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -391,7 +393,9 @@ mod run_with_fake_op {
             let op = dir.join("op");
             std::fs::write(
                 &op,
-                "#!/bin/sh\necho called >> \"$FAKE_OP_LOG\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+                // `run` first reads the item once (FR-43): an empty item, and a session
+                // whoami cannot classify, so nothing is tidied and nothing is printed.
+                "#!/bin/sh\necho \"$1\" >> \"$FAKE_OP_LOG\"\ncase \"$1\" in\n  item) echo '{\"fields\":[]}'; exit 0 ;;\n  whoami) exit 1 ;;\n  account) echo '[]'; exit 0 ;;\nesac\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
             )
             .unwrap();
             std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -412,6 +416,7 @@ mod run_with_fake_op {
 
     fn run(path: &std::path::Path, args: &[&str]) -> (i32, String, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args(["--config", CFG])
             .args(args)
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -458,7 +463,8 @@ mod run_with_fake_op {
         );
         assert_eq!(code, 7, "{err}");
         assert!(err.is_empty(), "no opv message for a child exit: {err}");
-        assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 1);
+        let log = std::fs::read_to_string(log).unwrap();
+        assert_eq!(log.lines().filter(|l| *l == "run").count(), 1, "{log}");
     }
 
     #[test]
@@ -486,6 +492,7 @@ mod run_with_fake_op {
     fn simple_child_sees_unsectioned_op_references() {
         let (dir, _) = fake_op_dir("simple-env");
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args(["--config", super::SIMPLE, "run", "prod", "--"])
             .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
@@ -504,6 +511,7 @@ mod run_with_fake_op {
     #[test]
     fn missing_op_exits_3() {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .args([
                 "--config",
                 CFG,
@@ -688,6 +696,7 @@ fn code_with_op(script: &str, args: &[&str]) -> Option<i32> {
     std::fs::write(&op, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
     Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -820,6 +829,7 @@ fn proxy_env_is_inherited() {
     let dir = fake_op("printf '%s' \"$HTTPS_PROXY\" > \"$OPV_LOG\"; /bin/cat \"$OP_ITEM\"");
     let log = dir.path().join("log");
     Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", CFG, "check", "prod", "--product", "allumata"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -850,6 +860,7 @@ fn sigterm_forwards_and_exits_143() {
     );
     let log = dir.path().join("log");
     let child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", CFG, "check", "prod", "--product", "allumata"])
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -880,8 +891,7 @@ fn sigterm_forwards_and_exits_143() {
             Some(143),
             "forwarded",
             "opv: interrupted during op item get; safe to re-run\n\
-             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata \
-             (safe to re-run)"
+             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata"
         )
     );
 }
@@ -961,9 +971,129 @@ fn config_export_without_env_prints_the_configuration_verbatim() {
     );
 }
 
-/// FR-44: `status --json` needs an environment or `--all`.
+// --- A1, A4, A5: the JSON contract at the process boundary ---
+
+fn json_of(stdout: &str) -> serde_json::Value {
+    serde_json::from_str(stdout).expect("stdout is one JSON document")
+}
+
 #[test]
-fn status_json_without_env_or_all_exits_2() {
-    let (code, _, err) = opv(&["--config", CFG, "status", "--json"]);
-    assert_eq!(code, 2, "{err}");
+fn json_failure_before_any_call_prints_the_envelope_on_stdout() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "qa", "--json"]);
+    assert_eq!(json_of(&out)["error"]["code"], "unknown_env", "{out}");
+}
+
+#[test]
+fn json_failure_keeps_the_human_text_on_stderr() {
+    let (_, _, err) = opv(&["--config", CFG, "status", "qa", "--json"]);
+    assert!(
+        err.starts_with("opv: configuration error: undefined environment"),
+        "{err}"
+    );
+}
+
+#[test]
+fn json_failure_keeps_the_exit_code() {
+    let (code, out, _) = opv(&["--config", CFG, "plan", "qa", "--json"]);
+    assert_eq!(
+        (code, json_of(&out)["exit_code"].clone()),
+        (2, serde_json::json!(2))
+    );
+}
+
+#[test]
+fn json_usage_error_prints_the_envelope() {
+    let (_, out, _) = opv(&["--config", CFG, "sync", "prod", "--frobnicate", "--json"]);
+    assert_eq!(json_of(&out)["error"]["code"], "usage", "{out}");
+}
+
+#[test]
+fn json_dependency_failure_names_a_runnable_next() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "prod", "--json"]);
+    assert_eq!(
+        json_of(&out)["next"],
+        "opv --config tests/fixtures/secrets.toml status prod --json",
+        "{out}"
+    );
+}
+
+#[test]
+fn config_export_failure_is_the_envelope() {
+    let (_, out, _) = opv(&["--config", CFG, "config", "export", "qa"]);
+    assert_eq!(json_of(&out)["ok"], false, "{out}");
+}
+
+#[test]
+fn status_json_without_an_environment_lists_every_environment() {
+    let (_, out, _) = opv(&["--config", CFG, "status", "--json"]);
+    let names: Vec<String> = json_of(&out)["environments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["prod", "staging"], "{out}");
+}
+
+#[test]
+fn schema_is_one_json_document_listing_sync() {
+    let (code, out, _) = opv(&["schema"]);
+    let doc = json_of(&out);
+    let sync = doc["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "sync" && c["effect"] == "writes_target");
+    assert!(code == 0 && sync, "{out}");
+}
+
+#[test]
+fn schema_lists_every_error_code_with_its_retry() {
+    let (_, out, _) = opv(&["schema"]);
+    let codes = json_of(&out)["error_codes"].as_array().unwrap().clone();
+    assert!(
+        codes
+            .iter()
+            .any(|c| c["code"] == "outcome_unknown" && c["retry"] == "safe"),
+        "{out}"
+    );
+}
+
+#[test]
+fn explain_json_names_the_reference() {
+    let (_, out, _) = opv(&[
+        "--config",
+        CFG,
+        "explain",
+        "allumata/OPENAI_API_KEY",
+        "--env",
+        "prod",
+        "--json",
+    ]);
+    assert_eq!(
+        json_of(&out)["reference"],
+        "op://vprd/iprd/allumata/OPENAI_API_KEY",
+        "{out}"
+    );
+}
+
+#[test]
+fn every_text_failure_ends_with_a_runnable_next() {
+    // A3: `Next:` is followed by a command, never prose or a placeholder.
+    let mut bad = Vec::new();
+    for args in [
+        &["--config", CFG, "status", "qa"][..],
+        &["--config", CFG, "status", "prod"],
+        &["--config", CFG, "sync", "prod", "--rotate", "allumata/NOPE"],
+        &["--config", CFG, "explain", "OPENAI_API_KEY"],
+        &["--config", CFG, "status", "prod", "--product", "nope"],
+        &["--config", "does-not-exist.toml", "status", "prod"],
+    ] {
+        let (_, _, err) = opv(args);
+        let next = err.lines().last().unwrap_or_default();
+        if !opv::error::is_runnable(next.strip_prefix("Next: ").unwrap_or("not a next line")) {
+            bad.push(format!("{args:?}: {next}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:?}");
 }

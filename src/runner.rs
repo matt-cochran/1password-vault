@@ -179,6 +179,18 @@ pub trait CommandRunner {
     /// parseable): e.g. a read command's preflight note. Names only, never a value.
     fn note(&self, line: &str);
 
+    /// Append Markdown to the CI job summary (H8): the file `$GITHUB_STEP_SUMMARY` names,
+    /// when set. Names and states only, never a value or a link. Best effort: a summary
+    /// that cannot be written never fails the command. The default writes nothing.
+    fn step_summary(&self, _markdown: &str) {}
+
+    /// True when this run signed in to the target with an environment's deploy
+    /// credentials (FR-40). The 1Password tidy (FR-43) never writes under them: only a
+    /// person's own sign-in tidies. The default is false.
+    fn deploy_signed_in(&self) -> bool {
+        false
+    }
+
     /// Run `program` with inherited stdin/stdout/stderr and the given extra `env`, wait, and
     /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
@@ -217,6 +229,15 @@ pub trait CommandRunner {
     /// fails closed (`az` cannot open `/dev/stdin` on Windows); nothing leaks.
     fn spawns_processes(&self) -> bool {
         false
+    }
+}
+
+/// Append `markdown` to the job summary file at `path` (H8), creating it if needed. Errors
+/// are ignored: the summary is a convenience, never part of the command's result.
+pub fn append_summary(path: &std::path::Path, markdown: &str) {
+    use std::fs::OpenOptions;
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(markdown.as_bytes());
     }
 }
 
@@ -377,7 +398,14 @@ pub fn stdout_shape(stdout: &[u8]) -> String {
     };
     match &doc {
         serde_json::Value::Object(m) => {
-            let mut keys: Vec<String> = m.keys().take(12).map(|k| crate::scrub::scrub(k)).collect();
+            // Sorted, as before JSON objects kept their order (A6).
+            let mut sorted: Vec<&String> = m.keys().collect();
+            sorted.sort();
+            let mut keys: Vec<String> = sorted
+                .into_iter()
+                .take(12)
+                .map(|k| crate::scrub::scrub(k))
+                .collect();
             if m.len() > 12 {
                 keys.push("…".into());
             }
@@ -1080,6 +1108,12 @@ impl CommandRunner for ProcessRunner {
         Engine::note(self, line)
     }
 
+    fn step_summary(&self, markdown: &str) {
+        if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY").filter(|p| !p.is_empty()) {
+            append_summary(std::path::Path::new(&path), markdown);
+        }
+    }
+
     fn local_run_supported(&self) -> io::Result<()> {
         if cfg!(windows) {
             return Ok(());
@@ -1146,6 +1180,40 @@ pub mod signals {
     /// Private directories to remove before the process exits on a signal (SR-4: the
     /// Azure CLI's RAM-only configuration directory of a deploy sign-in, FR-40).
     static CLEANUP: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+
+    /// `--json`: an interruption also prints the failure document on stdout (A1).
+    static JSON: AtomicBool = AtomicBool::new(false);
+
+    /// Record whether stdout is one JSON document, for the interruption report.
+    pub fn set_json(json: bool) {
+        JSON.store(json, Ordering::SeqCst);
+    }
+
+    /// The `--json` document for an interruption by signal `sig`.
+    pub fn interrupted_json(sig: i32, message: &str, rerun: &str) -> String {
+        let code = crate::error::Code::Interrupted;
+        let step = crate::error::Step {
+            action: None,
+            next: rerun.to_string(),
+        };
+        serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "ok": false,
+            "exit_code": 128 + sig,
+            "next": rerun,
+            "do": null,
+            "error": crate::error::error_object(
+                code.as_str(),
+                "interrupted",
+                message,
+                Vec::new(),
+                code.retry(),
+                code.human_required(),
+                &step,
+            ),
+        })
+        .to_string()
+    }
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1240,11 +1308,11 @@ pub mod signals {
                 run_cleanups();
                 let step = lock(&STEP).clone();
                 let rerun = lock(&RERUN).clone();
-                eprint!(
-                    "opv: {}\n{}",
-                    interrupted_message(&step),
-                    crate::error::next_line(&format!("{rerun} (safe to re-run)"))
-                );
+                let message = interrupted_message(&step);
+                if JSON.load(Ordering::SeqCst) {
+                    println!("{}", interrupted_json(sig, &message, &rerun));
+                }
+                eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
                 std::process::exit(128 + sig);
             }
         });
@@ -1337,6 +1405,8 @@ pub mod fake {
         pub verbose: Cell<bool>,
         /// Child stderr per call index (see [`FakeRunner::push_with_stderr`]).
         stderr: RefCell<HashMap<usize, Vec<u8>>>,
+        /// Markdown passed to [`CommandRunner::step_summary`], in order.
+        pub summaries: RefCell<Vec<String>>,
     }
 
     impl Default for FakeRunner {
@@ -1351,6 +1421,7 @@ pub mod fake {
                 budget: Cell::new(super::DEFAULT_RUN_TIMEOUT),
                 verbose: Cell::new(false),
                 stderr: RefCell::default(),
+                summaries: RefCell::default(),
             }
         }
     }
@@ -1495,7 +1566,19 @@ pub mod fake {
 
         /// A queued `TimedOut` comes back as that error, like a real probe timeout. A
         /// non-zero exit keeps its stderr for the failure excerpt, like the real probe.
+        ///
+        /// An `op whoami` probe with nothing queued answers exit 1 (no account known), so a
+        /// test that is not about the optional link probe after findings (H1) need not
+        /// queue it; its argv is still recorded.
         fn probe(&self, call: &super::Call, _limit: Duration) -> io::Result<Output> {
+            if call.program == "op"
+                && call.args.first() == Some(&"whoami")
+                && self.responses.borrow().is_empty()
+            {
+                self.responses
+                    .borrow_mut()
+                    .push_back(Ok(Output::failure(1)));
+            }
             let id = super::failure::begin();
             let index = self.calls.borrow().len();
             let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
@@ -1512,6 +1595,11 @@ pub mod fake {
 
         fn note(&self, line: &str) {
             super::Engine::note(self, line)
+        }
+
+        /// Recorded in [`FakeRunner::summaries`]; no file is written.
+        fn step_summary(&self, markdown: &str) {
+            self.summaries.borrow_mut().push(markdown.to_string());
         }
 
         fn local_run_supported(&self) -> io::Result<()> {
@@ -2255,7 +2343,7 @@ mod tests {
         let e = crate::error::Error::Config("bad secrets.toml".into());
         assert_eq!(
             crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: configuration error: bad secrets.toml\nNext: opv doctor\n"
+            "opv: configuration error: bad secrets.toml\nDo: fix the cause above\nNext: opv doctor\n"
         );
     }
 

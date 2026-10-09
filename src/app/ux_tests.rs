@@ -99,7 +99,7 @@ fn sync_summary_counts_every_outcome() {
     let (_, out) = sync_out(&fleet(), &new_secrets(), &SyncOpts::default());
     assert!(
         out.contains(
-            "summary: written 2 · deployed no · pruned 0 · pending 2 · unchanged 0 · skipped 1\n"
+            "summary: written 2 · unchanged 0 · held 0 · deployed no · pending 2 · pruned 0 · kept 0 · skipped 1\n"
         ),
         "{out}"
     );
@@ -150,7 +150,7 @@ fn sync_json_is_one_versioned_document() {
 #[test]
 fn sync_json_names_written_keys_by_target_name() {
     assert_eq!(
-        json_doc(&new_secrets())["written"],
+        json_doc(&new_secrets())["written_names"],
         serde_json::json!([ENC_FLY, OPENAI_FLY])
     );
 }
@@ -554,12 +554,12 @@ fn plan_for_a_guarded_environment_suggests_confirm() {
 }
 
 #[test]
-fn plan_findings_next_step_is_plan_again() {
+fn plan_findings_next_step_opens_the_first_key() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), fly_empty()]);
     let (res, _) = plan_out(&fleet(), &r, None);
     assert_eq!(
         res.unwrap_err().next_step(),
-        Some("fix the keys above in 1Password, then run opv plan prod")
+        Some("opv open allumata/OPENAI_API_KEY --env prod")
     );
 }
 
@@ -623,7 +623,7 @@ fn status_product_under_the_simple_profile_is_a_config_error() {
 /// Staging's and prod's items and lists, in environment name order (prod first).
 fn overview_out(fleet: &Fleet, r: &FakeRunner) -> (Result<(), Error>, String) {
     let mut out = Vec::new();
-    let res = status::overview(fleet, r, &mut out);
+    let res = status::overview(fleet, None, r, &mut out, false);
     (res, text_of(&out))
 }
 
@@ -646,11 +646,66 @@ fn status_without_env_prints_one_line_per_environment() {
 }
 
 #[test]
-fn status_without_env_marks_an_environment_without_target_run_only() {
+fn status_without_env_reads_a_run_only_environment() {
     let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
-    let r = FakeRunner::new([complete_item(), fly_empty(), staging_item(), fly_empty()]);
+    let r = FakeRunner::new([
+        item_without("allumata", "OPENAI_API_KEY"),
+        complete_item(),
+        fly_empty(),
+        staging_item(),
+        fly_empty(),
+    ]);
     let (_, out) = overview_out(&f, &r);
-    assert!(out.starts_with("dev: run-only (no target)\n"), "{out}");
+    assert!(out.starts_with("dev: run-only · "), "{out}");
+}
+
+/// H11 (bug 8): a broken run-only environment is a finding, not a green overview.
+#[test]
+fn status_without_env_counts_run_only_findings() {
+    let f = fleet_with(
+        "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+         [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
+    let r = FakeRunner::new([
+        item_without("allumata", "OPENAI_API_KEY"),
+        complete_item(),
+        fly_empty(),
+        complete_item(),
+        fly_empty(),
+    ]);
+    let (res, _) = overview_out(&f, &r);
+    assert_eq!(
+        res.unwrap_err().next_step(),
+        Some("opv check dev --product allumata")
+    );
+}
+
+#[test]
+fn status_without_env_scopes_to_a_product() {
+    let r = FakeRunner::new([with_web_token(), fly_empty(), with_web_token(), fly_empty()]);
+    let mut out = Vec::new();
+    let _ = status::overview(&two_products(), Some("web"), &r, &mut out, false);
+    assert!(
+        text_of(&out).starts_with("prod: 1 key · "),
+        "{}",
+        text_of(&out)
+    );
+}
+
+#[test]
+fn status_without_env_json_lists_every_environment() {
+    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    let r = FakeRunner::new([
+        complete_item(),
+        complete_item(),
+        fly_empty(),
+        complete_item(),
+        fly_empty(),
+    ]);
+    let mut out = Vec::new();
+    let _ = status::overview(&f, None, &r, &mut out, true);
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["environments"][0]["target"], Value::Null);
 }
 
 #[test]
@@ -705,7 +760,7 @@ fn check_labels_guidance_as_guidance() {
 }
 
 #[test]
-fn check_findings_next_step_is_check_again() {
+fn check_findings_next_step_opens_the_first_key() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY")]);
     let res = super::local::check(
         &fleet(),
@@ -717,7 +772,7 @@ fn check_findings_next_step_is_check_again() {
     );
     assert_eq!(
         res.unwrap_err().next_step(),
-        Some("fix the keys above in 1Password, then run opv check prod --product allumata")
+        Some("opv open allumata/OPENAI_API_KEY --env prod")
     );
 }
 

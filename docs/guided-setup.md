@@ -34,7 +34,7 @@ source = "Your provider dashboard → API keys."
 
 Omit every `product` for a single app. All fields must consistently use sections or be unsectioned. Optional field properties are `kind = "config"` (default secret), `immutable = true`, `multiline = true`, and `rules` using the existing configuration rule format. The resulting configuration declares every recipe product so local execution can clear other products' managed variables.
 
-A missing vault requires creation in the 1Password app, or selecting the account that owns it; setup does not guess where to store credentials. Duplicate titles require a rename. An existing item must be a Secure Note. Wrong field types require changing the field to Password/concealed or Text, keeping its value. A conflicting configuration is left intact: review it or choose a separate `--config PATH`.
+A missing vault requires creation in the 1Password app, or selecting the account that owns it; setup does not guess where to store credentials. Duplicate vault or item titles require a rename. An existing item must be a Secure Note. You don't need to lay the existing item out by hand: setup tidies it to opv's layout (it conceals secrets saved as text, renames and moves fields, sets duplicates aside in a section named `opv · kept`, and deletes nothing), says what it changed, and saves the tidy with your progress only after you confirm. A conflicting configuration is left intact: review it or choose a separate `--config PATH`.
 
 ## Adding a setting later
 
@@ -57,5 +57,5 @@ Multiline settings need the exact full value from that private file, or entry in
 
 Partial setup exits 8 and lists the remaining settings by their human names. Cancellation exits 6 without saving. Successful saving does not prove provider permissions: `check` validates declared kinds and rules; the application or owner provisioning command verifies actual access. Saved progress survives an expired sign-in.
 
-These commands require an owner terminal and refuse CI, service-account and Connect authentication. Existing `init`, `doctor`, `check`, `run`, `status`, `plan`, `sync`, `config export`, `item skeleton` and `explain` remain noninteractive. Deployment, rotation and pruning retain their explicit flags.
+These commands require an owner terminal and refuse CI, service-account and Connect authentication. Existing `init`, `doctor`, `check`, `run`, `status`, `plan`, `sync`, `config export`, `item skeleton` and `explain` remain noninteractive; when you run them signed in as yourself they also tidy the item's layout the same way, with one line saying what changed, and under CI or a service account they only read. Deployment, rotation and pruning retain their explicit flags.
 

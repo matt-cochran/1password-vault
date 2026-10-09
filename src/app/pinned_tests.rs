@@ -262,7 +262,7 @@ fn azure_plan_stages_only_the_changed_secret() {
 }
 
 #[test]
-fn azure_plan_shows_an_unchanged_secret_as_unchanged() {
+fn azure_plan_shows_an_unchanged_secret_as_same() {
     let r = FakeRunner::new(preflight().into_iter().chain([
         azure_item(),
         kv_list(&["API-KEY", "DB-URL"]),
@@ -274,7 +274,7 @@ fn azure_plan_shows_an_unchanged_secret_as_unchanged() {
     assert!(
         text_of(&out)
             .lines()
-            .any(|l| l.starts_with("API_KEY") && l.ends_with("unchanged")),
+            .any(|l| l.starts_with("API_KEY") && l.ends_with("same")),
         "{}",
         text_of(&out)
     );

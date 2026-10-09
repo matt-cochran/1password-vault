@@ -1236,7 +1236,7 @@ fn sync_through_external_secrets_ends_with_the_shared_summary_line() {
     let (_, out) = sync_on(&sim, &fleet_a(), &deploy_prune());
     let last = out.lines().last().unwrap_or_default();
     let re = regex::Regex::new(
-        r"^summary: written \d+ · deployed \S+ · pruned \d+ · pending \d+ · unchanged \d+ · skipped \d+$",
+        r"^summary: written \d+ · unchanged \d+ · held \d+ · deployed \S+( \(\d+ pending from an earlier run\))? · pending \d+ · pruned \d+ · kept \d+ · skipped \d+$",
     )
     .unwrap();
     assert!(re.is_match(last), "{out}");
@@ -1296,7 +1296,7 @@ fn sync_json_reports_key_vault_writes_and_the_deploy() {
         (
             res.is_ok(),
             doc["provider"].clone(),
-            doc["written"].clone(),
+            doc["written_names"].clone(),
             doc["deployed"].clone(),
             doc["next"].clone()
         ),

@@ -131,11 +131,13 @@ fn run_request_on(
         source,
         deploy_failure,
     } = request;
-    let config = match env {
-        Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
-        None if product.is_some() => Err(Error::Config("--product requires --env".into())),
-        None => config,
-    };
+    let config =
+        match env {
+            Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
+            None if product.is_some() => Err(Error::Config("--product requires --env".into())
+                .with_code(crate::error::Code::Usage)),
+            None => config,
+        };
     // Scoped to environments without a target: local runs are all they are for, so a
     // Windows op.exe is a failure there and only a warning elsewhere (#54).
     let local_only = env.is_some()
@@ -452,7 +454,7 @@ fn run_on_with(
     }
     report.push("opv", opv_on_path(r));
     if scope.json {
-        print_json(&report, out)?;
+        print_json(&report, &doctor_command(&scope), scope.source, out)?;
     } else {
         print_text(&report, out)?;
     }
@@ -472,7 +474,7 @@ fn run_on_with(
         }
         None => {
             if !scope.json {
-                writeln!(out, "Next: nothing pending").map_err(write_err)?;
+                writeln!(out, "all clear: nothing pending").map_err(write_err)?;
             }
             Ok(())
         }
@@ -491,28 +493,57 @@ fn print_text(report: &Report, out: &mut dyn Write) -> Result<(), Error> {
     Ok(())
 }
 
-/// P18: `{schema_version: 1, checks: [{name, status, detail, next}], next}`. `detail` is
-/// the first line of the check's text (names, versions and commands only), `next` its
-/// remediation or null; the top-level `next` is the first failing check's, or null.
-fn print_json(report: &Report, out: &mut dyn Write) -> Result<(), Error> {
+/// `opv doctor` with the scope's flags, the command to run again once a fix is done.
+fn doctor_command(scope: &Scope<'_>) -> String {
+    let mut c = "opv doctor".to_string();
+    if let Some(e) = scope.env {
+        c.push_str(&format!(" --env {e}"));
+    }
+    if let Some(p) = scope.product {
+        c.push_str(&format!(" --product {p}"));
+    }
+    c
+}
+
+/// P18, A3: `{schema_version: 1, config_source, checks: [{name, status, detail, next, do}],
+/// next, do}`. `config_source` is where the configuration was found (FR-44), or null.
+/// `detail` is the first line of the check's text (names, versions and commands only);
+/// a check with something to do has `do` (the action only a person can take, or null)
+/// and `next` (a command that runs as typed), both null otherwise; the top-level pair is
+/// the first failing check's.
+fn print_json(
+    report: &Report,
+    rerun: &str,
+    source: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let split = |row: &Row| row.next().map(|n| crate::error::split_step(&n, rerun));
     let checks: Vec<serde_json::Value> = report
         .rows
         .iter()
         .map(|row| {
+            let step = split(row);
             serde_json::json!({
                 "name": row.name,
                 "status": row.state.json(),
                 "detail": row.text.lines().next().unwrap_or(""),
-                "next": row.next(),
+                "next": step.as_ref().map(|s| s.next.clone()),
+                "do": step.and_then(|s| s.action),
             })
         })
         .collect();
-    let next = report
+    let first = report
         .rows
         .iter()
         .find(|r| r.state == State::Fail)
-        .map(Row::step);
-    let doc = serde_json::json!({"schema_version": 1, "checks": checks, "next": next});
+        .map(|r| crate::error::split_step(&r.step(), rerun));
+    let doc = serde_json::json!({
+        "schema_version": crate::json::SCHEMA_VERSION,
+        "config_source": source,
+        "checks": checks,
+        "next": first.as_ref().map(|s| s.next.clone()),
+        "do": first.and_then(|s| s.action),
+    });
     writeln!(out, "{doc}").map_err(write_err)
 }
 
@@ -530,12 +561,8 @@ fn item_check(
         return report.skip(ITEM_CHECK, "not checked (undefined environment)".into());
     };
     let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
-    let item = if fleet.is_simple() {
-        onepassword::read_item_as(r, env, fleet.profile)
-    } else {
-        onepassword::read_item_in_sections(r, env, fleet.profile, &sections)
-    };
-    let item = match item {
+    // Tolerant, and tidied when a person runs doctor (FR-43).
+    let item = match super::tidy::read(fleet, env_name, r) {
         Ok(i) => i,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
@@ -572,7 +599,7 @@ fn item_check(
                 KeyState::Missing => "missing".to_string(),
                 KeyState::WrongKind => "wrong kind".to_string(),
                 KeyState::RuleFailed(rule, _) => format!("failed {rule}"),
-                KeyState::Ready | KeyState::Skipped => return None,
+                KeyState::Ready | KeyState::Skipped | KeyState::SourceBlocked => return None,
             };
             Some(format!("{} ({state})", key_label(&row.product, &row.key)))
         })
@@ -587,7 +614,7 @@ fn item_check(
             let first = plan
                 .rows
                 .iter()
-                .find(|r| !matches!(r.state, KeyState::Ready | KeyState::Skipped))
+                .find(|r| super::is_blocking(r))
                 .map_or("<product>", |r| r.product.as_str());
             format!("opv check {env_name} --product {first}")
         }
@@ -863,7 +890,7 @@ mod tests {
     fn terminal(res: &Result<(), Error>, out: &[u8]) -> String {
         let mut t = text_of(out);
         if let Err(e) = res {
-            t.push_str(&crate::error::report(e, "-", None));
+            t.push_str(&crate::error::report(e, "opv doctor", None));
         }
         t
     }
@@ -885,12 +912,25 @@ mod tests {
     /// `Next:` line and the error report are not checks).
     fn checks(out: &str) -> Vec<&str> {
         out.lines()
-            .filter(|l| !l.starts_with("  ") && !l.starts_with("Next: ") && !l.starts_with("opv: "))
+            .filter(|l| {
+                !l.starts_with("  ")
+                    && !l.starts_with("Next: ")
+                    && !l.starts_with("Do: ")
+                    && !l.starts_with("opv: ")
+                    && !l.starts_with("all clear")
+            })
             .collect()
     }
 
     fn next_line(out: &str) -> &str {
         out.lines().last().unwrap()
+    }
+
+    /// The `Do:` line of the error report (A3), or "" without one.
+    fn do_line(out: &str) -> &str {
+        out.lines()
+            .find(|l| l.starts_with("Do: "))
+            .unwrap_or_default()
     }
 
     #[test]
@@ -1227,7 +1267,7 @@ mod tests {
     fn next_step_is_the_last_line_when_all_checks_pass() {
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(next_line(&out), "Next: nothing pending", "{out}");
+        assert_eq!(next_line(&out), "all clear: nothing pending", "{out}");
     }
 
     #[test]
@@ -1252,8 +1292,8 @@ mod tests {
         r.responses.borrow_mut().push_back(Ok(good().remove(3)));
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(
-            next_line(&out),
-            "Next: install op from https://developer.1password.com/docs/cli/get-started/ \
+            do_line(&out),
+            "Do: install op from https://developer.1password.com/docs/cli/get-started/ \
              (apt, dnf or the zip for this Linux distribution)",
             "{out}"
         );
@@ -1266,7 +1306,7 @@ mod tests {
         g.insert(2, Output::success(br#"[{"url":"x"}]"#.to_vec()));
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(next_line(&out), "Next: sign in: opv login", "{out}");
+        assert_eq!(do_line(&out), "Do: sign in: opv login", "{out}");
     }
 
     #[test]
@@ -1277,7 +1317,7 @@ mod tests {
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
         assert!(
-            next_line(&out).starts_with("Next: add one: op account add"),
+            do_line(&out).starts_with("Do: add one: op account add"),
             "{out}"
         );
     }
@@ -1288,7 +1328,7 @@ mod tests {
         g[3] = Output::failure(1);
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(next_line(&out), "Next: log in: flyctl auth login", "{out}");
+        assert_eq!(do_line(&out), "Do: log in: flyctl auth login", "{out}");
     }
 
     #[test]
@@ -1299,17 +1339,16 @@ mod tests {
         g[4] = Output::failure(1); // fly auth fails too
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert!(next_line(&out).starts_with("Next: sign in"), "{out}");
+        assert!(do_line(&out).starts_with("Do: sign in"), "{out}");
     }
 
-    const CONFIG_STEP: &str =
-        "Next: fix secrets.toml (see the config line above), then run opv doctor";
+    const CONFIG_STEP: &str = "Do: fix secrets.toml (see the config line above)";
 
     #[test]
     fn next_step_for_invalid_config_is_fix_and_rerun() {
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
-        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+        assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
     }
 
     /// A real TOML syntax error carries a `  |` source gutter; it is never the step.
@@ -1319,7 +1358,7 @@ mod tests {
         assert!(e.to_string().contains("  |"), "{e}");
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(e), &r);
-        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+        assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
     }
 
     #[test]
@@ -1333,7 +1372,7 @@ mod tests {
         assert!(e.to_string().contains("bogus"), "{e}");
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(e), &r);
-        assert_eq!(next_line(&out), CONFIG_STEP, "{out}");
+        assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
     }
 
     #[test]
@@ -1342,11 +1381,7 @@ mod tests {
         g[0] = Output::failure(2);
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert_eq!(
-            next_line(&out),
-            "Next: fix the op failure above, then run opv doctor",
-            "{out}"
-        );
+        assert_eq!(do_line(&out), "Do: fix the op failure above", "{out}");
     }
 
     #[test]
@@ -1377,7 +1412,7 @@ mod tests {
         let res = run_with(Ok(fleet()), &r, &h, &mut out);
         let out = terminal(&res, &out);
         assert!(
-            next_line(&out).starts_with("Next: set OP_SERVICE_ACCOUNT_TOKEN"),
+            do_line(&out).starts_with("Do: set OP_SERVICE_ACCOUNT_TOKEN"),
             "{out}"
         );
     }
@@ -1434,7 +1469,7 @@ mod tests {
         let (_, out) = doctor_local_only(windows_op(&r));
         assert!(
             out.ends_with(
-                "Next: install the Linux 1Password CLI in WSL and sign in: see https://github.com/matt-cochran/1password-vault/blob/main/docs/local-development.md#wsl\n"
+                "Do: install the Linux 1Password CLI in WSL and sign in: see https://github.com/matt-cochran/1password-vault/blob/main/docs/local-development.md#wsl\nNext: opv doctor\n"
             ),
             "{out}"
         );
@@ -1585,12 +1620,12 @@ mod tests {
         );
     }
 
-    /// Its remediation is the next step.
+    /// Its remediation is the person's step (A3: `Do:`, then the re-check as `Next:`).
     #[test]
     fn deploy_failure_names_its_fix() {
         let (res, out) = doctor_deploy_failed(false);
         let t = terminal(&res, out.as_bytes());
-        assert_eq!(next_line(&t), "Next: check the item", "{t}");
+        assert_eq!(do_line(&t), "Do: check the item", "{t}");
     }
 
     /// UX1: the failing line carries its fix under it, like every other check.
@@ -1651,7 +1686,7 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(
-            (check["status"].clone(), check["next"].clone()),
+            (check["status"].clone(), check["do"].clone()),
             ("fail".into(), "check the item".into()),
             "{out}"
         );
@@ -1806,8 +1841,32 @@ mod tests {
         let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
         assert_eq!(
             json_doc(&out)["next"],
-            "fill them in 1Password, then opv check prod --product allumata",
+            "opv check prod --product allumata",
             "{out}"
+        );
+    }
+
+    #[test]
+    fn json_do_is_the_first_failing_checks_action() {
+        let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
+        assert_eq!(json_doc(&out)["do"], "fill them in 1Password", "{out}");
+    }
+
+    #[test]
+    fn json_success_golden() {
+        let (res, out, _) = doctor_scoped(complete_item(), true);
+        crate::app::json_tests::golden(
+            "doctor_success",
+            &crate::app::json_tests::framed(out.as_bytes(), &res, "opv doctor --env prod --json"),
+        );
+    }
+
+    #[test]
+    fn json_failure_golden() {
+        let (res, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
+        crate::app::json_tests::golden(
+            "doctor_failure",
+            &crate::app::json_tests::framed(out.as_bytes(), &res, "opv doctor --env prod --json"),
         );
     }
 
@@ -1841,7 +1900,7 @@ mod tests {
         let h = Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty());
         let mut out = Vec::new();
         let res = run_with(Ok(fleet()), &r, &h, &mut out);
-        assert_eq!(next_line(&terminal(&res, &out)), "Next: sign in: opv login");
+        assert_eq!(do_line(&terminal(&res, &out)), "Do: sign in: opv login");
     }
 
     /// #12: the returned error does not repeat a long check message printed above.
@@ -1869,8 +1928,8 @@ mod tests {
         let missing = crate::config::not_found(std::path::Path::new("/nowhere"));
         let (_, out) = doctor(Err(missing), &r);
         assert_eq!(
-            next_line(&out),
-            "Next: opv init <env> --vault <vault title> --item <item title>",
+            do_line(&out),
+            "Do: fill in and run: opv init <env> --vault <vault title> --item <item title>",
             "{out}"
         );
     }

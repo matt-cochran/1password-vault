@@ -4,7 +4,15 @@
 
 ## Store layout
 
-One vault per environment (`<name>-<env>`), one item in it, one section per product, one field per key. A concealed field is a secret; a text field is config. A key stored with the wrong field type is an error.
+One vault per environment (`<name>-<env>`), one item in it, one section per product, one field per key. A concealed field is a secret; a text field is config.
+
+You don't need to lay out 1Password by hand. opv finds each declared key wherever its field is (a label spelled `openai api key`, a field in the wrong section or at the top level, a secret saved as text, a duplicate), so a layout difference never stops a command. When you run opv yourself (signed in to `op` as a person), it also tidies the item to this layout: it creates missing sections and empty fields, conceals secrets saved as text, renames and moves fields, and sets duplicates aside. It deletes nothing: anything it displaces or replaces goes to a section named `opv · kept`, labelled with where it came from and the date. It prints one line saying what it changed:
+
+```text
+tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"
+```
+
+Under a service account, Connect or in CI, opv never writes to 1Password: it reads the item as it is and prints one note that your next local run will tidy it. A value it can fix unambiguously from the key's rules (a trailing newline, a missing `ensure_prefix`) is used in its fixed form, and the tidy writes it back, keeping the original in `opv · kept`. Filling in a missing value is always up to you; opv names the keys that still need one. Design: [self-healing conventions](design/self-healing-conventions.md).
 
 ```text
 vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY   (concealed)
@@ -62,6 +70,31 @@ rules = { enum = ["open", "invite_only"] }
 
 Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A product name is upper-cased into the template (`allumata` becomes `ALLUMATA`), so `OPENAI_API_KEY` is staged on Fly as `FLEET__ALLUMATA__OPENAI_API_KEY`. The template must contain `{PRODUCT}` and `{KEY}`.
 
+### Shared keys: `from`
+
+When two products need the same value (both `api` and `worker` read `DATABASE_URL`), keep one field in 1Password and point the second key at it with `from`:
+
+```toml
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging", "prod"]
+guidance = "Neon / connection string"
+
+[products.worker.keys.DATABASE_URL]
+kind = "secret"
+from = "api/DATABASE_URL"            # read api's field; worker has no field of its own
+environments = ["prod"]
+rules = { prefix = "postgres://" }   # optional: checked as well as api's own rules
+```
+
+- The value comes from the source's field in the **same environment's item**. References to another item or environment (`op://...`, `staging/api/KEY`) are refused at load.
+- Each key keeps its own target name: `sync` writes `FLEET__API__DATABASE_URL` and `FLEET__WORKER__DATABASE_URL` from the one field, and `run --product worker` exports `DATABASE_URL` from `op://<vault>/<item>/api/DATABASE_URL`. Change the source and every key sharing it changes in the same sync.
+- Checked at load, with the line of the `from`: the source is declared, has its own field (no chains or cycles), has the same `kind`, and is declared for every environment the sharing key uses.
+- The source's rules apply first, then the sharing key's own `rules` on the same value. `immutable` follows the source and may not be set on the sharing key; `--rotate api/DATABASE_URL` rotates both.
+- `item skeleton` never adds a field for a sharing key. A leftover field from before the switch (`worker/DATABASE_URL`) is reported as an extra field; delete it in 1Password.
+
+Under the simple profile, `from` names a bare key: `from = "DATABASE_URL"`.
+
 ### Simple profile (one app per environment)
 
 For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item (a field outside any section) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
@@ -102,7 +135,7 @@ Kinds, rules, guidance, modes and `immutable` work as in the fleet profile. Key 
 
 Under the simple profile, commands name a key by its name alone: `status` and `plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
 
-One caveat for `run` under the simple profile: it hands `op run` references of the form `op://<vault>/<item>/KEY`, and `op` matches a field with that label in *any* section. Keep simple-profile keys only as unsectioned fields: a sectioned field with the same label can be picked up by `run` while `status` reports the key missing, and having both can make `op` report the reference as ambiguous.
+`run` under the simple profile hands `op run` references of the form `op://<vault>/<item>/KEY`. It reads the item first, so a key whose field is not yet where the convention puts it (in a section, or given twice, before your next local run tidies it) is referenced by its field ID instead, and `op` never sees an ambiguous reference.
 
 Changed in v0.2 for fleet files: `run` without `--product` is now an opv configuration error (still exit 2) rather than a usage error, and a bad `profile.kind` names both supported profiles.
 
@@ -117,7 +150,7 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--p
 - It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs. No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
 - It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
 - The profile follows the item's shape: only unsectioned fields gives a simple file, only sectioned fields gives a fleet file (one product per section, `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"`). An item with both is an error naming both shapes; `--profile` then decides, and the fields of the other shape are ignored with a note.
-- A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed: rename the field in 1Password and run `init --force` again. When `status` and `sync` would reject such a field (a wrong type, a field in a section without a label, a sectioned field without a label), the note says so. A label given twice where opv reads the item is an error and nothing is written.
+- A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed by `init` itself: rename the field in 1Password and run `init --force` again. A label given twice is declared once. When you run `init` yourself and the vault or item does not exist yet, it creates them (the vault only if your account allows it) and writes their IDs; under a service account or in CI it stops and names the next step.
 - The target is optional; omitting it creates a run-only environment. `--target fly|azure|kubernetes` picks the provider and its options are `--<provider>-<field>`, one per field of that provider's section below. Nothing is looked up (no flyctl, az or kubectl call); the section is validated like a hand-written one before any 1Password call, so a bad value or a missing required option is refused first. `--target` can be left out when the options name one provider, and `--fly-app` alone still means a Fly target. Under the fleet profile the name template (`fly.secret_name`, `azure.env_name`, `kubernetes.env_name`) defaults to `FLEET__{PRODUCT}__{KEY}`; `azure.identity` defaults to `system`. `opv init --help` lists every option.
 
   | Target | Required | Optional |

@@ -37,6 +37,33 @@ pub struct AddArgs {
     pub rules: Vec<String>,
     pub guidance: Option<String>,
     pub immutable: bool,
+    /// `--json`: print `{key, product, kind, environments, saved_in, changed, next}` (A5).
+    pub json: bool,
+}
+
+/// `add --json` (A5): what was declared, names and kinds only.
+#[allow(clippy::too_many_arguments)]
+fn write_json(
+    out: &mut dyn Write,
+    product: Option<&str>,
+    key: &str,
+    kind: &str,
+    envs: &[String],
+    place: &str,
+    changed: bool,
+    next: &str,
+) -> Result<(), Error> {
+    let doc = serde_json::json!({
+        "schema_version": crate::json::SCHEMA_VERSION,
+        "product": product,
+        "key": key,
+        "kind": kind,
+        "environments": envs,
+        "saved_in": place,
+        "changed": changed,
+        "next": next,
+    });
+    writeln!(out, "{doc}").map_err(write_err)
 }
 
 fn cfg(msg: String) -> Error {
@@ -106,6 +133,10 @@ fn run_inner(
         let new: Vec<String> = envs.into_iter().filter(|e| !existing.contains(e)).collect();
         if new.is_empty() {
             let first = existing.first().map_or("<env>", String::as_str);
+            if args.json {
+                let next = check_command(first, product);
+                return write_json(out, product, key, declared, &existing, &place, false, &next);
+            }
             writeln!(
                 out,
                 "{label} is already declared for {}; nothing changed",
@@ -120,6 +151,7 @@ fn run_inner(
         (
             format!("added {} to {label} in {place}", new.join(", ")),
             new,
+            declared.to_string(),
         )
     } else {
         let kind = match args.kind.as_deref() {
@@ -169,9 +201,10 @@ fn run_inner(
         (
             format!("added {label} to {place} ({})", parts.join("; ")),
             envs,
+            kind.to_string(),
         )
     };
-    let (line, envs) = summary;
+    let (line, envs, kind) = summary;
 
     let text = doc.to_string();
     // The same validation as a hand-written file: names on every target (collisions
@@ -185,6 +218,10 @@ fn run_inner(
     config_store::save(store, r, &base, &text)?;
 
     let first = &envs[0];
+    if args.json {
+        let next = format!("opv item skeleton {first}");
+        return write_json(out, product, key, &kind, &envs, &place, true, &next);
+    }
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     w(out, line)?;
     w(

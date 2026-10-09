@@ -266,3 +266,26 @@ fn product_setup_prompts_only_selected_product_but_declares_all_managed_names() 
     let body: Value = serde_json::from_slice(calls.last().unwrap().1.as_ref().unwrap()).unwrap();
     assert_eq!(body["fields"].as_array().unwrap().len(), 1);
 }
+
+/// FR-43: a person's setup tidies the existing item instead of refusing its layout.
+#[test]
+fn setup_conceals_a_secret_stored_as_text_and_saves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut replies = metadata();
+    replies.extend([ok(r#"[{"id":"item-id","title":"api"}]"#),ok(r#"{"category":"SECURE_NOTE","fields":[{"id":"k","label":"api key","type":"STRING","value":"synthetic-private"}]}"#), ok("{}")]);
+    let mut backend = Fake::new(replies);
+    let mut ui = Ui::new(vec![true], &[]);
+    let _on = super::super::tidy::activate();
+    run(&path, None, None, None, &mut backend, &mut ui).unwrap();
+    let calls = backend.calls.borrow();
+    let body: Value = serde_json::from_slice(calls.last().unwrap().1.as_ref().unwrap()).unwrap();
+    assert!(
+        body["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["label"] == "API_KEY" && f["type"] == "CONCEALED"),
+        "{body}"
+    );
+}

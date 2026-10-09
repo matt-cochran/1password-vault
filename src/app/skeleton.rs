@@ -1,4 +1,5 @@
-//! `item skeleton <env>` use case (FR-19), the only 1Password write.
+//! `item skeleton <env>` use case (FR-19): the explicit 1Password write, for any identity.
+//! (A signed-in person's runs also tidy the item, FR-43, [`super::tidy`].)
 //!
 //! One read of the item, then at most one edit adding every key declared for `env` (all
 //! products, mode-skipped keys included) that has no field yet, as an empty field of the
@@ -7,8 +8,8 @@
 use std::io::Write;
 
 use super::{kind_label, write_err};
-use crate::adapters::onepassword;
-use crate::domain::{Fleet, Kind, key_label};
+use crate::adapters::{onepassword, onepassword_tidy};
+use crate::domain::{Fleet, Kind, convention, key_label};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -18,29 +19,64 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_as(fleet, env_name, r, out, false)
+}
+
+/// [`run`], printing `{schema_version, environment, added: [{product, key, kind}]}` instead
+/// of lines when `json` (A5). Names and kinds only.
+pub fn run_as(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_item_as(r, env, fleet.profile)?;
+    // The tolerant reader (FR-43): a field opv would read for a key (another label
+    // spelling, a wrong section, another type, a duplicate) counts as present, so no
+    // second field is added beside it, and an item the strict reader refuses still works.
+    let item = onepassword::read_whole(r, env)?;
+    let (layout, _) = onepassword_tidy::parse(item.raw())?;
+    let found = convention::resolve(&layout, fleet).chosen;
     let missing: Vec<(String, String, Kind)> = fleet
         .products
         .iter()
         .flat_map(|(product, p)| {
             p.keys
                 .iter()
+                // A shared key (FR-45) reads its source's field and never gets one of its
+                // own. Task X (self-healing): keep this filter wherever fields are created.
+                .filter(|(_, spec)| spec.from.is_none())
                 .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
                 .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
         })
-        .filter(|(product, key, _)| {
-            !item
-                .fields
-                .iter()
-                .any(|f| f.section == *product && f.label == *key)
-        })
+        .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
         .collect();
+    if !missing.is_empty() {
+        onepassword::write_skeleton(r, env, &item, &missing)?;
+    }
+    if json {
+        let added: Vec<serde_json::Value> = missing
+            .iter()
+            .map(|(product, key, kind)| {
+                serde_json::json!({
+                    "product": super::json_product(product),
+                    "key": key,
+                    "kind": kind_label(*kind),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env_name,
+            "added": added,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
     if missing.is_empty() {
         writeln!(out, "nothing to add: every declared field exists").map_err(write_err)?;
         return Ok(());
     }
-    onepassword::write_skeleton(r, env, &item, &missing)?;
     for (product, key, kind) in &missing {
         writeln!(
             out,

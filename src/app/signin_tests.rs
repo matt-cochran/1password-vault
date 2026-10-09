@@ -225,7 +225,11 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
         open_on(&fl, "prod", &r, Reach::Target, &linux).map(|_| ())
     });
     let e = res.expect_err("signed out");
-    assert_eq!(e.default_next("-"), "sign in: opv login prod", "{e:?}");
+    assert_eq!(
+        e.step("opv status prod", "-").action.as_deref(),
+        Some("sign in: opv login prod"),
+        "{e:?}"
+    );
 }
 
 /// `doctor --env` keeps the failed deploy read's scrubbed stderr in `error::report`'s
@@ -240,11 +244,15 @@ fn doctor_deploy_failure_puts_the_excerpt_after_the_error_line() {
     );
 }
 
-/// The excerpt never replaces the sign-in step, which stays the error's `Next:`.
+/// The excerpt never replaces the sign-in step, which stays the error's `Do:` (A3).
 #[test]
 fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
     let e = doctor_signed_out_deploy_failure();
-    assert_eq!(e.next_step(), Some("sign in: opv login prod"), "{e:?}");
+    assert_eq!(
+        e.step("opv doctor", "-").action.as_deref(),
+        Some("sign in: opv login prod"),
+        "{e:?}"
+    );
 }
 
 fn doctor_signed_out_deploy_failure() -> Error {

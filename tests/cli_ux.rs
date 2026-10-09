@@ -10,6 +10,7 @@ const SIMPLE: &str = "tests/fixtures/simple.toml";
 /// inherited from the developer's shell.
 fn opv_with(envs: &[(&str, &str)], args: &[&str]) -> (i32, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_opv"));
+    cmd.env_remove("GITHUB_STEP_SUMMARY"); // never the job summary of the run testing opv
     cmd.args(args)
         .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
         .env_remove("OPV_CONFIG")
@@ -166,6 +167,7 @@ fn config_help_shows_opv_config() {
 fn init_refuses_opv_config() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["init", "dev", "--vault", "v", "--item", "i"])
         .current_dir(dir.path())
         .env("OPV_CONFIG", "elsewhere.toml")

@@ -105,6 +105,16 @@ pub fn open_for_doctor_on<'a>(
     (runner, failed)
 }
 
+/// A deploy sign-in error (FR-40) with its stable code: a credential the target rejected is
+/// `deploy_credentials_failed` (exit 7); a missing CLI or field, a refused private
+/// directory or an unknown outcome keeps its own code and exit.
+fn deploy_failed(e: Error) -> Error {
+    match e {
+        e @ Error::Auth(_) => e.with_code(crate::error::Code::DeployCredentialsFailed),
+        e => e,
+    }
+}
+
 /// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) after its
 /// first line, as doctor runs more calls before it prints and the excerpt would otherwise
 /// be dropped. The order is the one `error::report` prints: error line, excerpt, the rest
@@ -167,8 +177,9 @@ impl<'a> EnvRunner<'a> {
         fields: &[CredentialField],
         env_name: Option<&str>,
     ) -> Result<(), Error> {
-        let values = onepassword::read_deploy_credentials(&*self, reference, fields, env_name)?;
-        login.sign_in(values, &*self)?;
+        let values = onepassword::read_deploy_credentials(&*self, reference, fields, env_name)
+            .map_err(deploy_failed)?;
+        login.sign_in(values, &*self).map_err(deploy_failed)?;
         self.login = Some(login);
         Ok(())
     }
@@ -247,6 +258,14 @@ impl CommandRunner for EnvRunner<'_> {
 
     fn spawns_processes(&self) -> bool {
         self.inner.spawns_processes()
+    }
+
+    fn step_summary(&self, markdown: &str) {
+        self.inner.step_summary(markdown)
+    }
+
+    fn deploy_signed_in(&self) -> bool {
+        self.login.is_some() || self.inner.deploy_signed_in()
     }
 
     fn local_run_supported(&self) -> io::Result<()> {

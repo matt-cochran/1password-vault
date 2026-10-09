@@ -14,5 +14,7 @@ pub mod onepassword;
 pub(crate) mod onepassword_init;
 /// The project manifest (configuration in 1Password, FR-44).
 pub mod onepassword_manifest;
+/// Tolerant item parse and the tidy write (FR-43).
+pub mod onepassword_tidy;
 pub(crate) mod probe;
 pub mod registry;

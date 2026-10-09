@@ -15,13 +15,19 @@ Sync secrets from 1Password into the places your apps run, without ever printing
 
 ```console
 $ opv status prod
+prod: 4 keys · 2 saved · 1 skipped · 1 finding · 1 not yet on Fly
 PRODUCT   KEY                  KIND    STATE    TARGET
-allumata  INTEGRATION_ENC_KEY  secret  saved    absent
-allumata  OPENAI_API_KEY       secret  saved    absent
-allumata  SIGNUP_POLICY        config  saved    -
-allumata  STRIPE_SECRET_KEY    secret  skipped  absent
-3 saved, 2 not yet on Fly (staged by the next sync), 0 findings
+allumata  OPENAI_API_KEY       secret  missing  new
+    guidance: OpenAI platform / API keys
+    open: https://start.1password.com/open/i?a=<account>&v=vprd&i=iprd&h=my.1password.com (section allumata, field OPENAI_API_KEY)
+allumata  INTEGRATION_ENC_KEY  secret  saved    new
+allumata  SIGNUP_POLICY        config  saved    n/a
+allumata  STRIPE_SECRET_KEY    secret  skipped  n/a
+opv: 1 finding
+Next: opv open allumata/OPENAI_API_KEY --env prod
 ```
+
+Problems come first, each with its fix and a link to the item in 1Password, the only place a value is typed. `opv help states` explains every word.
 
 ## Why
 
@@ -62,7 +68,9 @@ Then, with `op` and your target CLI (`flyctl`, `az` or `kubectl`) signed in:
 ```sh
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging   # starter secrets.toml from an existing item
 opv doctor                     # config, op, flyctl and sign-in; ends with the next step
-opv status staging             # one row per key: saved, missing, wrong kind or failing a rule
+opv status                     # one line per environment, run-only ones included
+opv status staging             # one row per key, problems first: saved, missing, wrong kind or failed
+opv open api/KEY --env staging # open a key's item in 1Password to fill it in
 opv plan staging               # what a sync would stage, hold and prune; changes nothing
 opv sync staging --deploy      # stage on the target, deploy only if something changed
 opv check staging              # every key saved? names only, no deployment target touched

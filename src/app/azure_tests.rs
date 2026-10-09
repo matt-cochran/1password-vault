@@ -812,12 +812,12 @@ fn prune_without_deploy_only_reports() {
 }
 
 #[test]
-fn not_desired_without_prune_is_kept() {
+fn not_desired_without_prune_is_extra_not_pruned() {
     let sim = converged();
     let (_, out) = sync_on(&sim, &fleet_b(), &deploy());
     assert!(
         out.lines()
-            .any(|l| l == "not desired here, kept (pass --prune to remove): OLD_KEY"),
+            .any(|l| l == "extra, not pruned (pass --prune to remove): OLD_KEY"),
         "{out}"
     );
 }
@@ -1021,7 +1021,7 @@ fn no_change_deploy_with_failed_latest_revision_says_opv_changed_nothing() {
         matches!(&res, Err(Error::Target(m)) if m.starts_with("nothing to change; the latest revision")
             && m.contains("(with these settings) is unhealthy")
             && m.contains("opv changed nothing")
-            && m.next().is_some_and(|n| n.starts_with("az containerapp revision show"))),
+            && m.action().is_some_and(|n| n.starts_with("az containerapp revision show"))),
         "{res:?}"
     );
 }
@@ -1066,10 +1066,9 @@ fn azure_sync_summary_names_the_deployed_revision() {
     let sim = api_changed();
     let (_, out) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        out.lines().any(
-            |l| l.starts_with("summary: written 1 · deployed opv-fixture-app--")
-                && l.ends_with(" · pruned 0 · pending 0 · unchanged 2 · skipped 0")
-        ),
+        out.lines().any(|l| l
+            .starts_with("summary: written 1 · unchanged 2 · held 0 · deployed opv-fixture-app--")
+            && l.ends_with(" · pending 0 · pruned 0 · kept 0 · skipped 0")),
         "{out}"
     );
 }

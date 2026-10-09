@@ -6,8 +6,8 @@ use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
-    add, config_cmd, config_export, doctor, explain, init, run as run_cmd, signin, skeleton,
-    status, sync,
+    STATES_HELP, add, config_cmd, config_export, doctor, explain, init, open, run as run_cmd,
+    signin, skeleton, status, sync,
 };
 use opv::config;
 use opv::config_store;
@@ -27,6 +27,7 @@ Start here:
 Everyday use:
   opv check dev --product api      Check that your app's settings are ready
   opv run dev --product api -- npm run dev
+  opv open api/KEY --env dev       Open a key's item in 1Password to fill it in
   opv add api/KEY --kind secret    Declare a new key
   opv config edit                  Change the configuration (file or 1Password)
   opv projects                     Projects whose configuration lives in 1Password
@@ -35,7 +36,8 @@ Deployment:
   opv plan staging                 Preview changes; prints a plan id
   opv sync staging --deploy --expect-plan <id>   Apply exactly that plan, then deploy
 
-Every command is listed above. Use opv <command> --help for its options and examples.";
+Every command is listed above. Use opv <command> --help for its options and examples,
+and opv help states for what each state word means.";
 
 const EXAMPLES: &str = "\
 Examples:
@@ -143,8 +145,10 @@ Examples:
   opv status prod --json       # the same, for scripts";
 
 const STATUS_MORE: &str = "\
-Changes nothing. Exits 8 when any key is missing, of the wrong kind or failing a rule;
-opv explain <product>/<KEY> --env <ENV> shows how to fix one.
+Changes nothing. Problems come first, each with its reason and a link to its item in
+1Password. Exits 8 when any key is missing, of the wrong kind or failing a rule; opv explain
+<product>/<KEY> --env <ENV> shows how to fix one. Without <ENV>, one line per environment,
+run-only ones included.
 
 More examples:
   opv status prod --product api   # one product's rows and findings
@@ -243,9 +247,9 @@ Examples:
   opv item skeleton staging        # add the missing declared fields, empty";
 
 const SKELETON_MORE: &str = "\
-The only opv command that writes to 1Password: it adds missing fields, empty, and never
-fills or changes one. Needs an identity that may edit the item; an AI assistant asks the
-user first.";
+Adds missing fields, empty, and never fills or changes one. A signed-in person's other runs
+tidy the item the same way; this is the explicit form. Needs an identity that may edit
+the item; an AI assistant asks the user first.";
 
 const ADD_QUICK: &str = "\
 Examples:
@@ -279,14 +283,35 @@ Examples:
   opv init prod --vault myapp-prod --item app --fly-app myapp  # deploys to Fly
   opv init staging --vault myapp-staging --item app --add-env  # add to the configuration";
 
-const INIT_MORE: &str = "\
-Reads the item's field names and types once (never values); looks nothing up on the target.
-A project with a secrets.toml (or --file) gets the file; a new one a manifest in the vault.";
-
 const COMPLETIONS_QUICK: &str = "\
 Examples:
   opv completions bash > ~/.local/share/bash-completion/completions/opv
   opv completions fish > ~/.config/fish/completions/opv.fish";
+
+const OPEN_QUICK: &str = "\
+Examples:
+  opv open api/DATABASE_URL --env prod   # open prod's item where DATABASE_URL is typed
+  opv open DATABASE_URL                  # the one product and environment declaring it
+  opv open api/DATABASE_URL --print      # print the link only (SSH, CI or agents)";
+
+const OPEN_MORE: &str = "\
+Prints the key's section and field and the item's private link, then opens the link with
+the desktop's opener. Over SSH, under CI, without a display or with --print it only prints
+the link. Never reads a value.";
+
+const SCHEMA_QUICK: &str = "\
+Examples:
+  opv schema                       # the whole description
+  opv schema | jq '.error_codes[].code'";
+
+const SCHEMA_MORE: &str = "\
+Generated from the installed binary, so it matches the version you run: commands, flags,
+exit codes, error codes and JSON documents. Agents read it instead of scraping --help.";
+
+const HELP_QUICK: &str = "\
+Examples:
+  opv help states                  # what each state word means
+  opv help sync                    # the same as opv sync --help";
 
 const GUIDE_QUICK: &str = "\
 Examples:
@@ -307,7 +332,8 @@ point at the docs of the same release.";
     bin_name = "opv",
     version,
     after_help = QUICK_START,
-    after_long_help = EXAMPLES
+    after_long_help = EXAMPLES,
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Path to secrets.toml.
@@ -417,10 +443,10 @@ enum Cmd {
         env: Option<String>,
         /// Only this product's rows, totals and findings (fleet profile only).
         /// [env: OPV_PRODUCT]
-        #[arg(long, requires = "env")]
+        #[arg(long)]
         product: Option<String>,
-        /// Print one machine-readable JSON document instead of the table (with <ENV> or
-        /// --all).
+        /// Print one machine-readable JSON document instead of the table (without <ENV>,
+        /// one entry per environment; with --all, per project).
         #[arg(long)]
         json: bool,
         /// One line per environment for every project manifest visible in 1Password. Costs
@@ -479,16 +505,43 @@ enum Cmd {
         /// Environment name; may be omitted when only one environment is declared.
         #[arg(long)]
         env: Option<String>,
+        /// Print the explanation as one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open a key's item in 1Password, the place its value is typed; never reads a value.
+    #[command(before_help = OPEN_QUICK, after_help = OPEN_MORE)]
+    Open {
+        /// The key, resolved as `opv explain` resolves it. [env: OPV_PRODUCT]
+        #[arg(value_name = "[PRODUCT/]KEY")]
+        target: String,
+        /// Environment name; may be omitted when only one environment is declared.
+        #[arg(long)]
+        env: Option<String>,
+        /// Print the link only; do not start a browser or the 1Password app.
+        #[arg(long)]
+        print: bool,
+        /// Print the key's section, field and link as one JSON document; opens nothing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print help for a command, or a topic: `opv help states` defines every state word.
+    #[command(before_help = HELP_QUICK)]
+    Help {
+        /// `states`, or a command name (for example `sync` or `item skeleton`).
+        #[arg(value_name = "TOPIC")]
+        topic: Vec<String>,
     },
     /// Generate configuration from a 1Password item you have already set up.
-    #[command(before_help = INIT_QUICK, after_help = INIT_MORE)]
+    #[command(before_help = INIT_QUICK)]
     Init {
         /// Environment name to declare (for example staging or prod).
         env: String,
         /// Vault title, matched exactly.
         #[arg(long)]
         vault: String,
-        /// Item title in that vault, matched exactly.
+        /// Item title in that vault, matched exactly; its field names and types are read
+        /// once, never its values.
         #[arg(long)]
         item: String,
         /// Deployment target of the environment; its options follow (--<target>-<field>).
@@ -507,6 +560,9 @@ enum Cmd {
         /// Overwrite an existing secrets.toml.
         #[arg(long)]
         force: bool,
+        /// Print what was written (names and kinds) as one JSON document.
+        #[arg(long)]
+        json: bool,
         /// Write ./secrets.toml even for a new project (without it, a new project's
         /// configuration is saved as a manifest in the item's vault).
         #[arg(long)]
@@ -538,6 +594,9 @@ enum Cmd {
         /// Staged only when absent on the target unless rotated.
         #[arg(long)]
         immutable: bool,
+        /// Print what was written (the key, its kind and environments) as one JSON document.
+        #[arg(long)]
+        json: bool,
     },
     /// Print a shell completion script for commands and options.
     #[command(before_help = COMPLETIONS_QUICK, after_help = completions::INSTALL)]
@@ -546,6 +605,9 @@ enum Cmd {
         #[arg(value_enum)]
         shell: completions::Shell,
     },
+    /// Describe this opv as JSON: commands, flags, exit codes, error codes, documents.
+    #[command(before_help = SCHEMA_QUICK, after_help = SCHEMA_MORE)]
+    Schema,
     /// Print a guide that matches this version of opv (for AI assistants: agent).
     #[command(before_help = GUIDE_QUICK, after_help = GUIDE_MORE)]
     Guide {
@@ -674,11 +736,14 @@ enum ConfigCmd {
 
 #[derive(Subcommand)]
 enum ItemCmd {
-    /// Add every missing declared field to the item, empty; the only 1Password write.
+    /// Add every missing declared field to the item, empty (a signed-in person's runs do this too).
     #[command(before_help = SKELETON_QUICK, after_help = SKELETON_MORE)]
     Skeleton {
         /// Environment name from the configuration (for example staging or prod).
         env: String,
+        /// Print the fields added as one JSON document.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -761,11 +826,10 @@ fn command_line() -> clap::Command {
                 );
             }
         }
-        let more = c
-            .get_after_help()
-            .map(|a| a.to_string())
-            .unwrap_or_default();
-        c = c.after_help(format!("{summary}\n\n{more}"));
+        c = match c.get_after_help().map(|a| a.to_string()) {
+            Some(more) => c.after_help(format!("{summary}\n\n{more}")),
+            None => c.after_help(summary),
+        };
         c
     })
 }
@@ -813,17 +877,25 @@ fn main() -> ExitCode {
     };
     let init_options = init_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
+    let help = help_command();
+    let json = cli.cmd.json_mode();
     opv::runner::signals::set_rerun(&rerun);
+    opv::runner::signals::set_json(json.is_some());
     let mut stdout = PipeSafe {
         inner: io::stdout().lock(),
         closed: false,
     };
+    // `--json`: the command's document is buffered and framed once the result is known
+    // (A1), so stdout carries exactly one document whatever happens.
+    let mut body: Vec<u8> = Vec::new();
     let paint = colour::enabled(
         cli.color,
         io::IsTerminal::is_terminal(&io::stdout()),
         std::env::var_os("NO_COLOR"),
     ) && cli.cmd.has_state_words();
-    let res = if paint {
+    let res = if json.is_some() {
+        run(cli, config_source, &init_options, &mut body)
+    } else if paint {
         let mut painter = colour::Painter::new(&mut stdout);
         let res = run(cli, config_source, &init_options, &mut painter);
         let _ = painter.flush();
@@ -831,6 +903,14 @@ fn main() -> ExitCode {
     } else {
         run(cli, config_source, &init_options, &mut stdout)
     };
+    let step = res.as_ref().err().map(|e| e.step(&rerun, &help));
+    if let Some(raw) = json {
+        let framed = match (&res, &step) {
+            (Err(e), Some(step)) => opv::json::finish(&body, Err((e, step)), raw),
+            _ => opv::json::finish(&body, Ok(()), raw),
+        };
+        let _ = stdout.write_all(&framed);
+    }
     let _ = stdout.flush();
     match res {
         // `run` reports the child's exit code verbatim (FR-4); everything else yields 0.
@@ -839,13 +919,14 @@ fn main() -> ExitCode {
         Err(e) => {
             // Error messages never contain secret values (SR-1). The failed call's stderr
             // follows the error's first line only as a scrubbed excerpt of at most 5 lines
-            // (NR-31); the `Next:` line is always the last line (NR-19).
+            // (NR-31); `Do:` (when a person must act) and the runnable `Next:` line are
+            // always last (NR-19, A3). Under `--json` the same text still goes to stderr.
             let excerpt = opv::runner::take_failure_excerpt();
-            let fallback = e.default_next(&rerun);
+            let step = step.unwrap_or_else(|| e.step(&rerun, &help));
             let _ = write!(
                 io::stderr(),
                 "{}",
-                opv::error::report(&e, &fallback, excerpt.as_ref())
+                opv::error::report_with(&e, &step, excerpt.as_ref())
             );
             ExitCode::from(exit_byte(e.exit_code()))
         }
@@ -901,24 +982,75 @@ fn usage_error(e: clap::Error) -> ExitCode {
         e.exit();
     }
     let _ = e.print();
+    let help = help_command();
+    let _ = write!(io::stderr(), "{}", opv::error::next_line(&help));
+    // `--json` asked for one document on stdout even when the command line is wrong (A1).
+    if std::env::args().skip(1).any(|a| a == "--json") {
+        let text = e.render().to_string();
+        let message = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("error: ")
+            .to_string();
+        let code = opv::error::Code::Usage;
+        let step = opv::error::Step {
+            action: None,
+            next: help,
+        };
+        let doc = serde_json::json!({
+            "schema_version": opv::json::SCHEMA_VERSION,
+            "ok": false,
+            "exit_code": e.exit_code(),
+            "next": step.next,
+            "do": null,
+            "error": opv::error::error_object(
+                code.as_str(),
+                "usage",
+                &message,
+                Vec::new(),
+                code.retry(),
+                code.human_required(),
+                &step,
+            ),
+        });
+        let _ = writeln!(io::stdout(), "{doc}");
+    }
+    ExitCode::from(exit_byte(e.exit_code()))
+}
+
+/// `opv <command> --help` for the subcommand on the command line, else `opv --help`.
+fn help_command() -> String {
     let cmd = cli_command();
     let sub = std::env::args()
         .skip(1)
         .find(|a| cmd.get_subcommands().any(|s| s.get_name() == a));
-    let help = match sub {
+    match sub {
         Some(s) => format!("opv {s} --help"),
         None => "opv --help".to_string(),
-    };
-    let _ = write!(io::stderr(), "{}", opv::error::next_line(&help));
-    ExitCode::from(exit_byte(e.exit_code()))
+    }
 }
 
 /// The command line as typed, for "run it again" next steps. Arguments are names, flags
 /// and paths, never values (SR-3); `run` and `login` carry the user's own command, which
-/// is never repeated.
+/// is never repeated: for `run` the step is the `check` of the same keys, for `login` a
+/// plain `opv login` for the same environment.
 fn rerun_command(cmd: &Cmd) -> String {
-    if matches!(cmd, Cmd::Run { .. } | Cmd::Login { .. }) {
-        return "the same command".to_string();
+    match cmd {
+        Cmd::Run { env, product, .. } => {
+            let mut c = format!("opv check {}", shell_word(env));
+            if let Some(p) = product {
+                c.push_str(&format!(" --product {}", shell_word(p)));
+            }
+            return c;
+        }
+        Cmd::Login { env, .. } => {
+            return match env {
+                Some(e) => format!("opv login {}", shell_word(e)),
+                None => "opv login".to_string(),
+            };
+        }
+        _ => {}
     }
     let mut parts = vec!["opv".to_string()];
     parts.extend(std::env::args().skip(1).map(|a| shell_word(&a)));
@@ -950,11 +1082,11 @@ fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
             product,
             ..
         } => with_product("status", env, product),
-        Cmd::Explain { target, env } => match env {
+        Cmd::Explain { target, env, .. } => match env {
             Some(e) => format!("explain {} --env {}", shell_word(target), shell_word(e)),
             None => format!("explain {}", shell_word(target)),
         },
-        Cmd::Item(ItemCmd::Skeleton { env })
+        Cmd::Item(ItemCmd::Skeleton { env, .. })
         | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             format!("doctor --env {}", shell_word(env))
         }
@@ -963,17 +1095,7 @@ fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
     format!("{c} {tail}")
 }
 
-/// `a`, single-quoted when the shell would split or expand it.
-fn shell_word(a: &str) -> String {
-    let plain = !a.is_empty()
-        && a.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@,+%".contains(c));
-    if plain {
-        a.to_string()
-    } else {
-        format!("'{}'", a.replace('\'', "'\\''"))
-    }
-}
+use opv::error::shell_word;
 
 impl Cmd {
     /// The environment the command acts on, and whether it reaches the deployment target
@@ -984,13 +1106,39 @@ impl Cmd {
             Cmd::Check { env, .. }
             | Cmd::Run { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
-            | Cmd::Item(ItemCmd::Skeleton { env }) => Some((env, Reach::Store)),
+            | Cmd::Item(ItemCmd::Skeleton { env, .. }) => Some((env, Reach::Store)),
             Cmd::Status { env: Some(env), .. } => Some((env, Reach::Target)),
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
             _ => None,
         }
+    }
+
+    /// `Some(raw)` when stdout is one JSON document (A1): `--json`, or a command that only
+    /// prints JSON. `raw` keeps a successful document unframed (`config export`).
+    fn json_mode(&self) -> Option<bool> {
+        let json = match self {
+            Cmd::Doctor { json, .. }
+            | Cmd::Check { json, .. }
+            | Cmd::Status { json, .. }
+            | Cmd::Projects { json, .. }
+            | Cmd::Explain { json, .. }
+            | Cmd::Open { json, .. }
+            | Cmd::Init { json, .. }
+            | Cmd::Add { json, .. }
+            | Cmd::Item(ItemCmd::Skeleton { json, .. }) => *json,
+            Cmd::Plan(a) => a.json,
+            Cmd::Sync(a) => a.json,
+            Cmd::Schema => true,
+            // With <ENV> (config-kind values) or --json (the configuration) the document is
+            // printed as is; without either, the configuration is TOML text.
+            Cmd::Config(ConfigCmd::Export { env, json, .. }) => {
+                return (env.is_some() || *json).then_some(true);
+            }
+            _ => false,
+        };
+        json.then_some(false)
     }
 
     /// Text output with state words worth colouring (never JSON, never values).
@@ -1028,11 +1176,7 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
         Cmd::Check { product, .. }
         | Cmd::Run { product, .. }
         | Cmd::Plan(PlanArgs { product, .. })
-        | Cmd::Status {
-            env: Some(_),
-            product,
-            ..
-        } => {
+        | Cmd::Status { product, .. } => {
             let (p, used) = product_or_env(product.take(), env, fleet_profile);
             *product = p;
             used.then(|| product.clone()).flatten()
@@ -1046,7 +1190,7 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
             *product = p;
             used.then(|| product.clone()).flatten()
         }
-        Cmd::Explain { target, .. } if !target.contains('/') => {
+        Cmd::Explain { target, .. } | Cmd::Open { target, .. } if !target.contains('/') => {
             match product_or_env(None, env, fleet_profile) {
                 (Some(p), true) => {
                     *target = format!("{p}/{target}");
@@ -1071,6 +1215,15 @@ fn run(
     if let Cmd::Completions { shell } = &cli.cmd {
         completions::write(*shell, &mut command_line(), out);
         return Ok(0);
+    }
+    if let Cmd::Schema = &cli.cmd {
+        let doc = opv::schema::describe(&cli_command(), env!("CARGO_PKG_VERSION"));
+        writeln!(out, "{doc}")
+            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))?;
+        return Ok(0);
+    }
+    if let Cmd::Help { topic } = &cli.cmd {
+        return help(topic, out).map(|()| 0);
     }
     if let Cmd::Guide { topic } = &cli.cmd {
         match topic {
@@ -1349,7 +1502,11 @@ fn run_other(
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
-        Cmd::Completions { .. } | Cmd::Guide { .. } | Cmd::Projects { .. } => {
+        Cmd::Completions { .. }
+        | Cmd::Guide { .. }
+        | Cmd::Projects { .. }
+        | Cmd::Schema
+        | Cmd::Help { .. } => {
             unreachable!("handled by run")
         }
         Cmd::Doctor { env, product, json } => {
@@ -1366,14 +1523,11 @@ fn run_other(
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
         Cmd::Status {
-            env: None, json, ..
-        } => {
-            if json {
-                return Err(Error::Config("status --json needs <ENV> or --all".into())
-                    .with_next("opv status <env> --json"));
-            }
-            status::overview(&loaded?, r, out)
-        }
+            env: None,
+            product,
+            json,
+            ..
+        } => status::overview(&loaded?, product.as_deref(), r, out, json),
         Cmd::Status {
             env: Some(env),
             product,
@@ -1390,9 +1544,60 @@ fn run_other(
         }
         // Reached only when discovery failed: its error is the result.
         Cmd::Config(_) => loaded.map(|_| ()),
-        Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
-        Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
+        Cmd::Item(ItemCmd::Skeleton { env, json }) => {
+            skeleton::run_as(&loaded?, &env, r, out, json)
+        }
+        Cmd::Explain { target, env, json } => {
+            explain::run_as(&loaded?, &target, env.as_deref(), out, json)
+        }
+        Cmd::Open {
+            target,
+            env,
+            print,
+            json,
+        } => {
+            // `--json` prints the link and never opens anything.
+            let opener = if print || json {
+                None
+            } else {
+                open::opener(&opv::host::ProcessEnv)
+            };
+            open::run_as(&loaded?, &target, env.as_deref(), opener, r, out, json)
+        }
     }
+}
+
+/// `opv help [TOPIC...]`: `states` prints the state vocabulary (H5); a command path prints
+/// that command's full help; nothing prints the top-level help.
+fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
+    let write = |out: &mut dyn Write, text: &str| {
+        writeln!(out, "{}", text.trim_end())
+            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))
+    };
+    if topic.len() == 1 && topic[0] == "states" {
+        return write(out, STATES_HELP);
+    }
+    let mut cmd = cli_command();
+    // Built first, so a subcommand's usage line reads `opv <command>`.
+    cmd.build();
+    let mut current = &mut cmd;
+    for t in topic {
+        let names: Vec<String> = current
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        match current.find_subcommand_mut(t) {
+            Some(sub) => current = sub,
+            None => {
+                return Err(Error::Config(
+                    format!("no help topic {t:?}; topics: states, {}", names.join(", ")).into(),
+                )
+                .with_next("opv --help"));
+            }
+        }
+    }
+    let text = current.render_long_help().to_string();
+    write(out, &text)
 }
 
 /// `init` writes `./secrets.toml`; it reads no configuration, so it runs before discovery.
@@ -1403,6 +1608,7 @@ fn run_init(
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    let json = matches!(cli.cmd, Cmd::Init { json: true, .. });
     if cli.config.is_some() {
         let Cmd::Init {
             env,
@@ -1440,6 +1646,9 @@ fn run_init(
         if *force {
             again.push_str(" --force");
         }
+        if json {
+            again.push_str(" --json");
+        }
         if config_source == ConfigSource::Env {
             again = format!("env -u OPV_CONFIG {again}");
         }
@@ -1450,6 +1659,7 @@ fn run_init(
             )
             .into(),
         )
+        .with_code(opv::error::Code::Usage)
         .with_next(again));
     }
     let dir = std::env::current_dir()
@@ -1462,9 +1672,9 @@ fn run_init(
     // A project that already has a secrets.toml keeps it; a new one gets a manifest
     // unless --file asks for the file (FR-44).
     if file || config::discover(&dir).is_some() {
-        init::run(&args, &dir, r, out)
+        init::run_as(&args, &dir, r, out, json)
     } else {
-        init::run_manifest(&args, project.as_deref(), &dir, r, out)
+        init::run_manifest(&args, project.as_deref(), &dir, r, out, json)
     }
 }
 
@@ -1486,6 +1696,7 @@ fn run_edit(
             rule,
             guidance,
             immutable,
+            json,
         } => add::run(
             &add::AddArgs {
                 name,
@@ -1494,12 +1705,15 @@ fn run_edit(
                 rules: rule,
                 guidance,
                 immutable,
+                json,
             },
             store,
             r,
             out,
         ),
-        cmd @ Cmd::Init { .. } => init::add_env(&init_args(cmd, init_options)?, store, r, out),
+        cmd @ Cmd::Init { json, .. } => {
+            init::add_env_as(&init_args(cmd, init_options)?, store, r, out, json)
+        }
         _ => unreachable!("called for add and init --add-env only"),
     }
 }
@@ -1518,6 +1732,7 @@ fn init_args(
         force,
         file: _,
         project: _,
+        json: _,
     } = cmd
     else {
         unreachable!("called for init only")
@@ -1658,6 +1873,35 @@ mod tests {
         assert!(matches!(cli.cmd, Cmd::Login { env: None, .. }));
     }
 
+    /// H11: the overview takes --json and --product without an environment.
+    #[test]
+    fn status_overview_accepts_json_and_product() {
+        assert!(Cli::try_parse_from(["opv", "status", "--json", "--product", "api"]).is_ok());
+    }
+
+    /// H5: `opv help states` prints the state vocabulary.
+    #[test]
+    fn help_states_prints_the_vocabulary() {
+        let mut out = Vec::new();
+        help(&["states".to_string()], &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().starts_with("SOURCE: "));
+    }
+
+    #[test]
+    fn help_with_a_command_prints_its_help() {
+        let mut out = Vec::new();
+        help(&["open".to_string()], &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("Usage: opv open"));
+    }
+
+    #[test]
+    fn help_with_an_unknown_topic_is_a_config_error() {
+        assert!(matches!(
+            help(&["nope".to_string()], &mut Vec::new()),
+            Err(Error::Config(_))
+        ));
+    }
+
     #[test]
     fn json_output_is_never_painted() {
         let cli = Cli::try_parse_from(["opv", "status", "prod", "--json"]).unwrap();
@@ -1769,6 +2013,78 @@ mod tests {
     #[test]
     fn guide_agent_parses() {
         assert!(Cli::try_parse_from(["opv", "guide", "agent"]).is_ok());
+    }
+
+    /// A4: every runnable command is in `opv schema`, with its effect, so the description
+    /// cannot drift from the clap definitions.
+    #[test]
+    fn schema_lists_every_command_with_an_effect() {
+        fn leaves(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let path = format!("{prefix}{}", sub.get_name());
+                if sub.has_subcommands() {
+                    leaves(sub, &format!("{path} "), out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let mut want = Vec::new();
+        leaves(&cli_command(), "", &mut want);
+        let doc = opv::schema::describe(&cli_command(), "test");
+        let got: Vec<String> = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| !c["effect"].is_null())
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// A4: every flag effect in the schema table names a flag that exists.
+    #[test]
+    fn schema_flag_effects_name_existing_flags() {
+        let doc = opv::schema::describe(&cli_command(), "test");
+        let found = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["flags"].as_array().unwrap())
+            .filter(|f| !f["effect"].is_null())
+            .count();
+        assert_eq!(found, opv::schema::FLAG_EFFECTS.len());
+    }
+
+    /// A1: every command with `--json` frames its stdout.
+    #[test]
+    fn every_json_flag_selects_json_mode() {
+        let mut missing = Vec::new();
+        for args in [
+            &["opv", "doctor", "--json"][..],
+            &["opv", "check", "dev", "--json"],
+            &["opv", "status", "--json"],
+            &["opv", "status", "prod", "--json"],
+            &["opv", "plan", "prod", "--json"],
+            &["opv", "sync", "prod", "--json"],
+            &["opv", "explain", "KEY", "--json"],
+            &[
+                "opv", "init", "dev", "--vault", "v", "--item", "i", "--json",
+            ],
+            &["opv", "item", "skeleton", "prod", "--json"],
+            &["opv", "config", "export", "prod"],
+            &["opv", "schema"],
+            &["opv", "projects", "--json"],
+            &["opv", "status", "--all", "--json"],
+            &["opv", "add", "api/KEY", "--kind", "secret", "--json"],
+            &["opv", "config", "export", "--json"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            if cli.cmd.json_mode().is_none() {
+                missing.push(args.join(" "));
+            }
+        }
+        assert!(missing.is_empty(), "{missing:?}");
     }
 
     #[test]

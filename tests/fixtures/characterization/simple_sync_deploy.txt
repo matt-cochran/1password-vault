@@ -10,6 +10,6 @@ $ flyctl secrets deploy --app myapp-production
 written: DATABASE_URL
 held (immutable), not rewritten (pass --rotate KEY to replace): JWT_KEY
 deployed: DATABASE_URL
-summary: written 1 · deployed yes · pruned 0 · pending 0 · unchanged 0 · skipped 1
+summary: written 1 · unchanged 0 · held 1 · deployed yes · pending 0 · pruned 0 · kept 0 · skipped 1
 --- result
 Ok(())

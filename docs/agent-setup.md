@@ -10,14 +10,15 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 2. **Never read a value.** Do not run `op item get --reveal`, `op read`, `op inject`, `op run -- env`, or anything that prints a field's value. opv has no command that prints a secret; do not build one out of other commands.
 3. **Never write a value to disk or argv.** No `.env` files, no `secrets.toml` values, no values in command arguments or CI logs. `secrets.toml` holds IDs, names, kinds and rules only.
 4. **Ask before anything that changes something outside the repo.** Get the user's explicit yes, for this run, before:
-   - `opv item skeleton <env>` (adds empty fields to the 1Password item; the only opv command that writes to an item that holds values);
+   - `opv item skeleton <env>` (adds empty fields to the 1Password item);
    - `opv config import`, `opv init` in a new project and `opv add` or `opv init --add-env` on a configuration that lives in 1Password (they write the project's manifest, which holds names and IDs only);
+   - any opv command run in the user's own signed-in session (`opv login`), the first time: it tidies the 1Password item's layout (creates missing sections and empty fields, conceals secrets saved as text, renames and moves fields, sets duplicates aside in `opv · kept`). It never deletes or prints a value and says what it changed in one line; tell the user before the first run. Service accounts, CI and runs under `deploy_credentials` never tidy, and the project manifest item is never tidied;
    - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
    - `--deploy` (restarts or redeploys the app, or starts a new revision or rollout), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed), and `--confirm <env>` (approves a sync to a guarded environment).
    `doctor`, `status` (also `status --all`), `plan`, `check`, `explain`, `guide`, `projects`, `config export` and `config check` change nothing. `setup`, `login` and `config edit` need the user's own terminal: hand those commands to the user.
 5. **Sign-in is the user's, at 1Password's own prompts.** When opv says `sign in: opv login <env>`, ask the user to run exactly that in their own terminal (it needs one, and the password goes only to op's prompt). Never ask for a password, token or Secret Key, and never script `op signin` or `eval`.
 6. **Never point opv at a break-glass credential.** `deploy_credentials` names an item holding only that environment's least-privilege deploy identity, created by the user; owner or admin credentials stay with people.
-7. **Use exit codes, not guesses.** Every opv failure prints a typed error and, as its last line, a `Next:` line with one command that runs as-is and changes nothing outside the repo unless it is the command the user already approved. Run that command or show it to the user; do not invent workarounds. A configuration error names the file, line and field and prints `fix:` with the edit to make.
+7. **Use the machine contract, not guesses.** Run `opv schema` once: it describes the installed opv (commands, flags, which commands change something and which to ask about first, exit codes, error codes and JSON shapes). Prefer `--json`: stdout is then one document on success and on failure. On failure read `error.code`, not the message text. Re-run the same command only when `error.retry` is `safe` (now) or `after_fix` (once `do` is done); never when it is `never`, then run `next` instead. When `error.human_required` is `true`, or a text failure has a `Do:` line, hand that step to the user (it is something only they can do: sign in, fill a value in 1Password, approve a guarded environment, type in their own terminal) and wait; do not try to do it yourself. `next` and the `Next:` line are always one command that runs as typed; run it (if rule 4 allows) or show it to the user. Do not invent workarounds. A configuration error names the file, line and field, and its `Do:` line is the edit to make.
 
 ## 1. Check the tools
 
@@ -38,7 +39,7 @@ Ask the user how their secrets are organised, or look at the 1Password item's sh
 - **simple**: one app per environment, fields directly in the item (no sections). Most projects.
 - **fleet**: several products on one app, one section per product, names built from a template such as `FLEET__{PRODUCT}__{KEY}`.
 
-A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own vault and item.
+A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own vault and item. Do not ask the user to rearrange 1Password: opv finds fields wherever they are, and the user's own runs tidy the layout (see [configuration.md](configuration.md#store-layout)).
 
 ## 3. Create `secrets.toml`
 
@@ -66,7 +67,9 @@ Both validate the file before writing and refuse a name that would collide on a 
 
 In a new project (no `secrets.toml` anywhere above the current directory), `opv init` saves the configuration in 1Password as a project manifest instead of a file, tagged with the git remote, so other checkouts need no file; pass `--file` when the user wants a committed `secrets.toml`. To move an existing file into 1Password, run (with the user's yes) `opv config import --vault <vault>`, then `opv config check --file secrets.toml`, and let the user delete the file. `opv config edit` is interactive: leave it to the user. Without a 1Password session, commands on a manifest end with `Next: opv login`.
 
-If there is no item yet, write `secrets.toml` from the example in [configuration.md](configuration.md), then (with the user's yes) run `opv item skeleton <env>` to create the empty fields.
+When two products use the same value, declare it once and point the other key at it with `from = "<product>/<KEY>"` ([configuration.md](configuration.md#shared-keys-from)) instead of asking the user to fill in a second copy.
+
+If there is no item yet, `opv init` run by the user creates it (and the vault, if their account allows it) and writes the IDs. Otherwise write `secrets.toml` from the example in [configuration.md](configuration.md); the user's next opv run creates the empty fields (or, with the user's yes, run `opv item skeleton <env>`).
 
 Then:
 
@@ -74,7 +77,7 @@ Then:
 opv doctor
 ```
 
-It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`), and ends with a `Next:` line (on stderr when a check fails). Do what that line says before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks and the next step as JSON.
+It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`). When a check fails it ends with a `Do:` line (the user's part, such as signing in) and a `Next:` command on stderr; when all pass, the last line is `all clear: nothing pending`. Do what those lines say before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks, `do` and `next` as JSON.
 
 ### Azure or Kubernetes instead of Fly
 
@@ -112,15 +115,15 @@ Give `opv init` (or `opv init --add-env`) the target instead of `--fly-app`: `--
 opv status staging
 ```
 
-Each row is `saved`, `missing`, `wrong kind`, `failed <rule> (<reason>)` or `skipped` (not wanted in this environment). For each row that is not `saved`:
+Problem rows come first. Each row's STATE is `saved`, `missing`, `wrong kind (...)`, `failed <rule> (<reason>)` or `skipped` (not wanted in this environment); `opv help states` defines every word. For each missing, wrong-kind or failed row:
 
-- tell the user which key it is, in which environment, and the `guidance` line printed under it;
-- run `opv explain <KEY> --env staging` (fleet: `<product>/<KEY>`) to show the field reference and its rules;
+- tell the user which key it is, in which environment, the `guidance` line printed under it, and the `open:` link under that (the 1Password item, with the section and field to fix; it holds IDs only, never a value). `opv open <KEY> --env staging --print` (fleet: `<product>/<KEY>`) prints the same link;
+- run `opv explain <KEY> --env staging` to show the field reference and its rules;
 - the user fills or fixes the field in 1Password; you re-run `status`.
 
 Never ask for the value to check it yourself. A failed rule prints the rule and a reason (for example `failed prefix (expected prefix sk-)`), which is enough to tell the user what is wrong.
 
-For scripts, `opv status staging --json` returns names and states only (`schema_version` 1); see [usage.md](usage.md#machine-readable-status-and-plan).
+For scripts, `opv status staging --json` returns names and states only (`schema_version` 1); see [usage.md](usage.md#machine-readable-status-and-plan). Exit 8 still prints the rows, plus `error` with `code: "findings"` and `human_required: true`: the user fills the values.
 
 ## 5. Plan, then sync
 
@@ -137,7 +140,9 @@ opv sync staging --deploy --expect-plan 674d43e2 # stage and deploy, only if som
 
 If anything changed since the plan (the item, the target or the configuration), `--expect-plan` refuses (exit 6) with nothing written and prints the new id: show the new plan to the user again. On an environment with `confirm_env = true`, a reviewed plan id counts as the confirmation.
 
-`sync` refuses (exit 6) and stages nothing while any key is missing, of the wrong kind or failing a rule. Go back to step 4. On an environment with `confirm_env = true` the same refusal also says that `--confirm <env>` is needed, so one run tells you everything.
+`sync` refuses (exit 6, `error.code` `keys_blocking`) and stages nothing while any key is missing, of the wrong kind or failing a rule. Go back to step 4. A guarded environment (`confirm_env = true`) refuses with `confirm_required`: ask the user, and only with their yes run the `next` command, which adds `--confirm <env>`; the same refusal also lists the blocking keys, so one run tells you everything. A changed plan refuses with `stale_plan`: show the new plan to the user.
+
+`opv setup`, `opv login` and `opv config edit` need the user's own terminal. Without one they refuse with `terminal_required`, `Do: ask the user to run this in their own terminal` and the command on `Next:`; pass both to the user.
 
 ## 6. Local development
 
@@ -168,9 +173,11 @@ More patterns: [usage.md](usage.md#local-development).
 
 - CI uses one 1Password service account with **read-only** access to each environment's vault (`OP_SERVICE_ACCOUNT_TOKEN`). The target credential is either a `deploy_credentials` item in that vault (no separate CI secret) or the CI provider's OIDC federation (for example `azure/login` with a federated credential). Without either, the user stores a Fly deploy token as `FLY_API_TOKEN`. The user creates every credential; you never see them.
 - Add `opv sync <env>` (and `--deploy` only if the user wants CI to deploy) to the workflow. A ready-made GitHub Actions job is in [usage.md](usage.md#github-actions-example).
-- `item skeleton` needs a write-capable identity; never give one to CI.
+- `item skeleton` needs a write-capable identity; never give one to CI. Under a service account opv never writes to 1Password; it reads the item as it is and notes that the next local run will tidy it.
 
 ## Exit codes
+
+Every failure also has a stable `error.code` with `--json`; the full list, with `retry` and `human_required` for each, is in [usage.md](usage.md#json-contract) and in `opv schema`.
 
 | Code | Meaning | What to do |
 |---|---|---|
@@ -179,7 +186,7 @@ More patterns: [usage.md](usage.md#local-development).
 | 3 | `op`, `flyctl`, `az` or `kubectl` missing | install it (`opv doctor` prints how) |
 | 4 | 1Password error | the message names the vault and item; the identity may need access |
 | 5 | target error (Fly, Azure or Kubernetes) | the message names the app and, for a deploy, the unhealthy revision or rollout; the old one keeps serving; follow the `Next:` line |
-| 6 | refused | read the message: a key is missing, of the wrong kind or failing a rule (run `opv status <env>`); a guarded environment needs `--confirm <env>` (ask the user); `setup`, `login` or another interactive command needs the user's own terminal (hand it to them); or `config export` refused a key stored with the wrong kind (fix the field type in 1Password) |
+| 6 | refused | `keys_blocking`: a key is missing, of the wrong kind or failing a rule (run `opv status <env>`); `confirm_required`: ask the user, then run `next`; `stale_plan`: run `opv plan <env>` and show the new plan; `terminal_required`: hand `next` (`setup`, `login`, `config edit`) to the user; `ram_dir_unavailable`: Azure deploy credentials need a RAM-backed directory, follow `do`; `policy_refused` (e.g. `config export` refused a key stored with the wrong kind): follow `do` |
 | 7 | not signed in | run the sign-in command opv prints |
 | 8 | findings | `status`, `plan` or `check` found keys to fix; see step 4 |
 | 9 | outcome unknown, or a provider did not answer | a change may or may not have been applied, or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command (a CI job may retry it) |
