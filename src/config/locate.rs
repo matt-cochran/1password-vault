@@ -1,6 +1,7 @@
 //! Configuration errors that point at the file (H10, FR-2): `<file>:<line>: <field>:
-//! <problem>`, the offending line, and the exact fix where one can be derived from the
-//! message. Names and positions only: `secrets.toml` holds no values.
+//! <problem>` and the exact fix where one can be derived from the message. Names and
+//! positions only, never the offending line (C1, SR-1): a file given by mistake (a `.env`)
+//! may hold values, so no error quotes the text it came from.
 //!
 //! `parse` reports errors against the name `secrets.toml` (it never sees a path), in the
 //! TOML parser's layout or as a bare message that starts with its owner (`environment
@@ -27,7 +28,7 @@ pub(super) fn relocate(e: Error, text: &str, file: &Path) -> Error {
 
 /// [`relocate`] for any [`super::Source`]: a file is named with the line
 /// (`<file>:<line>: <field>`); a manifest has no file, so it is named by its title
-/// (`manifest "opv · app": <field>`, FR-44), still with the offending line shown.
+/// (`manifest "opv · app": <field>`, FR-44).
 pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Error {
     let Error::Config(m) = &e else { return e };
     let next = m.next().map(str::to_string);
@@ -41,18 +42,18 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
             let field = field_on_line(text, p.line);
             let line = numbered.then_some(p.line);
             (
-                render(&file, line, &field, Some(p.snippet), &p.msg),
+                render(&file, line, &field, &p.msg),
                 fix_for(&p.msg, &field, text),
             )
         }
         None => {
-            let (field, line, snippet) = match owner_path(body) {
+            let (field, line) = match owner_path(body) {
                 Some(path) => locate_path(text, &path),
-                None => (String::new(), None, None),
+                None => (String::new(), None),
             };
             let line = line.filter(|_| numbered);
             (
-                render(&file, line, &field, snippet, body),
+                render(&file, line, &field, body),
                 fix_for(body, &field, text),
             )
         }
@@ -68,36 +69,24 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
     }
 }
 
-/// An error in the TOML parser's layout: the 0-based line, the three snippet lines and the
-/// message after them.
+/// An error in [`super::toml_error`]'s layout: the 0-based line and the message after it.
 struct Placed {
     line: usize,
-    snippet: String,
     msg: String,
 }
 
 fn placed(body: &str) -> Option<Placed> {
     let rest = body.strip_prefix(AT_LINE)?;
-    let (head, rest) = rest.split_once('\n')?;
+    let (head, rest) = rest.split_once('\n').unwrap_or((rest, ""));
     let num: usize = head.split(',').next()?.trim().parse().ok()?;
-    let mut lines = rest.splitn(4, '\n');
-    let snippet = [lines.next()?, lines.next()?, lines.next()?].join("\n");
-    let msg = lines.next().unwrap_or("").trim_end().to_string();
     Some(Placed {
         line: num.checked_sub(1)?,
-        snippet,
-        msg,
+        msg: rest.trim_end().to_string(),
     })
 }
 
-/// `file:line: field: msg`, the snippet and the rest of the message.
-fn render(
-    file: &str,
-    line: Option<usize>,
-    field: &str,
-    snippet: Option<String>,
-    msg: &str,
-) -> String {
+/// `file:line: field: msg` and the rest of the message. Never a source line (C1).
+fn render(file: &str, line: Option<usize>, field: &str, msg: &str) -> String {
     let (first, rest) = msg.split_once('\n').unwrap_or((msg, ""));
     let first = if field.is_empty() {
         first
@@ -113,10 +102,6 @@ fn render(
         out.push_str(": ");
     }
     out.push_str(first);
-    if let Some(s) = snippet {
-        out.push('\n');
-        out.push_str(&s);
-    }
     if !rest.trim().is_empty() {
         out.push('\n');
         out.push_str(rest.trim_end());
@@ -233,10 +218,10 @@ fn owner_path(msg: &str) -> Option<Vec<String>> {
     }
 }
 
-/// The deepest declared part of `path`: its dotted name, 0-based line and snippet.
-fn locate_path(text: &str, path: &[String]) -> (String, Option<usize>, Option<String>) {
+/// The deepest declared part of `path`: its dotted name and 0-based line.
+fn locate_path(text: &str, path: &[String]) -> (String, Option<usize>) {
     let Ok(root) = DeTable::parse(text) else {
-        return (path.join("."), None, None);
+        return (path.join("."), None);
     };
     let mut table = Some(root.get_ref());
     let mut found: Option<std::ops::Range<usize>> = None;
@@ -253,30 +238,10 @@ fn locate_path(text: &str, path: &[String]) -> (String, Option<usize>, Option<St
     match found {
         Some(span) => {
             let line = text[..span.start].matches('\n').count();
-            (
-                path[..depth].join("."),
-                Some(line),
-                Some(snippet(text, span)),
-            )
+            (path[..depth].join("."), Some(line))
         }
-        None => (path.join("."), None, None),
+        None => (path.join("."), None),
     }
-}
-
-/// The three snippet lines of the TOML parser's layout for `span`.
-fn snippet(text: &str, span: std::ops::Range<usize>) -> String {
-    let before = &text[..span.start];
-    let line = before.matches('\n').count();
-    let column = before.len() - before.rfind('\n').map_or(0, |i| i + 1);
-    let content = text.split('\n').nth(line).unwrap_or("");
-    let num = (line + 1).to_string();
-    let pad = " ".repeat(num.len() + 1);
-    let width = span.len().min(content.len().saturating_sub(column)).max(1);
-    format!(
-        "{pad}|\n{num} | {content}\n{pad}|{}{}",
-        " ".repeat(column + 1),
-        "^".repeat(width)
-    )
 }
 
 /// The edit that fixes `msg` at `field`, when the message names what is allowed.
@@ -467,8 +432,59 @@ mod tests {
     }
 
     #[test]
-    fn located_error_keeps_the_offending_line() {
+    fn located_error_never_shows_the_offending_line() {
         let (e, _) = load_err("kind = \"secret\"", "kind = \"secert\"");
-        assert!(e.text().contains("19 | kind = \"secert\""), "{e}");
+        assert!(!e.text().contains("kind = \"secert\""), "{e}");
+    }
+
+    /// C1 (SR-1): a `.env` given as the configuration, with its value quoted or bare.
+    const MARKER: &str = "sk-live-C1MARKERVALUE";
+
+    fn env_file_error(text: &str) -> Error {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, text).unwrap();
+        crate::config::load(&path).unwrap_err()
+    }
+
+    #[test]
+    fn quoted_env_file_error_never_shows_the_value() {
+        let e = env_file_error(&format!("OPENAI_API_KEY=\"{MARKER}\"\n"));
+        assert!(!e.text().contains("C1MARKER"), "{e}");
+    }
+
+    #[test]
+    fn bare_env_file_error_never_shows_the_value() {
+        let e = env_file_error(&format!("OPENAI_API_KEY={MARKER}\n"));
+        assert!(!e.text().contains("C1MARKER"), "{e}");
+    }
+
+    #[test]
+    fn env_file_error_still_names_line_and_column() {
+        let e = env_file_error(&format!("# comment\nOPENAI_API_KEY={MARKER}\n"));
+        assert!(e.text().contains(":2:"), "{e}");
+    }
+
+    #[test]
+    fn manifest_error_never_shows_the_value() {
+        let text = format!("OPENAI_API_KEY=\"{MARKER}\"\n");
+        let e = crate::config::parse_at(&text, crate::config::Source::Manifest("opv · app"))
+            .unwrap_err();
+        assert!(!e.text().contains("C1MARKER"), "{e}");
+    }
+
+    #[test]
+    fn mistyped_string_error_never_shows_the_value() {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let bad = text.replacen("[profile]", &format!("profile = \"{MARKER}\"\n[x]"), 1);
+        let e = crate::config::parse(&bad).unwrap_err();
+        assert!(!e.text().contains("C1MARKER"), "{e}");
+    }
+
+    #[test]
+    fn env_file_error_json_envelope_never_shows_the_value() {
+        let e = env_file_error(&format!("OPENAI_API_KEY=\"{MARKER}\"\n"));
+        let v = crate::error::envelope(&e, &e.step("opv status prod", "opv status --help"));
+        assert!(!v.to_string().contains("C1MARKER"), "{v}");
     }
 }

@@ -1493,7 +1493,7 @@ fn run_other(
     loaded: Result<opv::domain::Fleet, Error>,
     source: Option<&str>,
     r: &dyn CommandRunner,
-    deploy_failure: Option<Error>,
+    deploy_failure: Option<opv::app::signin::DeployFailure>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     match cmd {

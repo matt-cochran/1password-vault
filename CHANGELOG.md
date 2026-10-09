@@ -86,6 +86,8 @@ before upgrading.
 
 ### Fixed
 
+- Secret safety (SR-1, SR-4): a configuration error never prints the file's text, so a `.env` given as `--config`, `OPV_CONFIG`, `config import --file` or `config check --file` no longer shows its values (also in `--json`); the stderr scrubber masks values holding CR, BEL or ESC and each line of a multi-line value; every `op item get` registers its values without `--verbose`; the `az said:` excerpt of a failed deploy sign-in stays out of `doctor --json`; the private Azure directory is removed on SIGHUP and SIGQUIT and on Windows console events, and stale ones are swept at the start of every Azure run; the Windows value pipe serves only the `az` process opv started; a config key stored concealed is shown as `<concealed in 1Password>` by `config export` and warned about by `status`.
+
 - A failed write is read back before opv reports a result, so a dropped connection no longer looks like "nothing happened". <!-- verify -->
 
 ## [0.4.0] - 2026-10-08

@@ -47,7 +47,13 @@ pub fn export(
         Format::Toml => out.write_all(snap.text.as_bytes()).map_err(write_err),
         Format::Json => {
             let v: toml::Value = toml::from_str(&snap.text).map_err(|e| {
-                Error::Config(format!("invalid configuration: {}", e.message()).into())
+                Error::Config(
+                    format!(
+                        "invalid configuration: {}",
+                        config::toml_error_inline(&snap.text, e.span(), e.message())
+                    )
+                    .into(),
+                )
             })?;
             let s = serde_json::to_string_pretty(&v)
                 .map_err(|_| Error::Config("cannot serialize the configuration".into()))?;
@@ -76,7 +82,7 @@ pub fn import(
 ) -> Result<(), Error> {
     let text = fs::read_to_string(&args.file)
         .map_err(|e| Error::Config(format!("cannot read {}: {e}", args.file.display()).into()))?;
-    config::parse(&text)?;
+    config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
     let repo = store::git_repo(r);
     if repo.is_none() && !paths.is_empty() {
@@ -163,6 +169,9 @@ pub fn check(
 ) -> Result<(), Error> {
     let committed = fs::read_to_string(file)
         .map_err(|e| Error::Config(format!("cannot read {}: {e}", file.display()).into()))?;
+    // The file must be a configuration before any of it is printed as a diff: a `.env`
+    // given by mistake would otherwise reach stdout line by line (C1, SR-1).
+    config::parse_at(&committed, config::Source::File(file))?;
     let current = found.store().read(r)?;
     let (a, b) = (
         current.text.replace("\r\n", "\n"),

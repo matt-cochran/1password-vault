@@ -83,8 +83,17 @@ pub fn open_for_doctor<'a>(
     fleet: &Fleet,
     env_name: &str,
     r: &'a dyn CommandRunner,
-) -> (EnvRunner<'a>, Option<Error>) {
+) -> (EnvRunner<'a>, Option<DeployFailure>) {
     open_for_doctor_on(fleet, env_name, r, &Host::detect)
+}
+
+/// A failed deploy sign-in for `doctor --env` (FR-40): the error, and beside it the failed
+/// call's scrubbed stderr excerpt (`  az said: …`, NR-31). The excerpt is never part of the
+/// error's text, so it reaches stderr only and never a JSON document (M2, SR-1).
+#[derive(Debug)]
+pub struct DeployFailure {
+    pub error: Error,
+    pub excerpt: Option<crate::scrub::Excerpt>,
 }
 
 /// [`open_for_doctor`] on a given host (tests).
@@ -93,10 +102,16 @@ pub fn open_for_doctor_on<'a>(
     env_name: &str,
     r: &'a dyn CommandRunner,
     host: &dyn Fn() -> Host,
-) -> (EnvRunner<'a>, Option<Error>) {
+) -> (EnvRunner<'a>, Option<DeployFailure>) {
     let mut runner = match open_on(fleet, env_name, r, Reach::Store, host) {
         Ok(runner) => runner,
-        Err(e) => return (EnvRunner::new(r, None), Some(e)),
+        Err(e) => {
+            let failure = DeployFailure {
+                error: e,
+                excerpt: None,
+            };
+            return (EnvRunner::new(r, None), Some(failure));
+        }
     };
     let failed = runner
         .deploy_sign_in(fleet, env_name)
@@ -115,29 +130,13 @@ fn deploy_failed(e: Error) -> Error {
     }
 }
 
-/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) after its
-/// first line, as doctor runs more calls before it prints and the excerpt would otherwise
-/// be dropped. The order is the one `error::report` prints: error line, excerpt, the rest
-/// of the text; the next step stays the error's own.
-fn with_excerpt(e: Error) -> Error {
-    let Some(x) = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call()) else {
-        return e;
-    };
-    // A sign-in or dependency error's step is its first indented line (`default_next`):
-    // pin it before the excerpt becomes that line.
-    let e = match e {
-        Error::Auth(_) | Error::Dependency(_) if e.next_step().is_none() => {
-            let step = e.default_next("opv doctor");
-            e.with_next(step)
-        }
-        e => e,
-    };
-    let excerpt = x.render();
-    let excerpt = excerpt.trim_end();
-    e.map_text(|t| match t.split_once('\n') {
-        Some((head, rest)) => format!("{head}\n{excerpt}\n{rest}"),
-        None => format!("{t}\n{excerpt}"),
-    })
+/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) taken now,
+/// as doctor runs more calls before it prints and the excerpt would otherwise be dropped.
+/// It is kept beside the error, never in its text: doctor prints it under the FAIL line in
+/// text output only (M2).
+fn with_excerpt(e: Error) -> DeployFailure {
+    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
+    DeployFailure { error: e, excerpt }
 }
 
 impl<'a> EnvRunner<'a> {

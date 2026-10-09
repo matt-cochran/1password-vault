@@ -666,7 +666,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 - One documented exception to "no files" (SR-4): with Azure `deploy_credentials`, the Azure CLI stores the service principal's secret in opv's private per-run `AZURE_CONFIG_DIR`, which is RAM-only on Linux/WSL, DPAPI-encrypted on Windows, and removed when the run ends. macOS is not supported for Azure deploy credentials.
 - The stderr of `op` and `flyctl` is suppressed so it cannot leak a value.
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
-- `config export` prints config-kind values by design. It refuses if a config key is stored concealed or a secret key as text.
+- `config export` prints config-kind values by design. A config key stored concealed in 1Password shows as `<concealed in 1Password>`, never its value (`status` warns about it once per key); a secret key is never printed.
 - `run` hands secret values to the child process through `op run`; the child can read them.
 - No multiline values. Two profiles: `fleet` (products, sections, a naming template) and `simple` (one app per environment, unsectioned fields, Fly name = key name). `--json` on `status` and `plan` prints names, states and counts only; `config export --json` prints config-kind values by design.
 - In CI a release reads each item once, by vault ID and item ID.

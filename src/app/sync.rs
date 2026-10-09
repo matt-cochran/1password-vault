@@ -1245,6 +1245,7 @@ fn copy_field(f: &ItemField) -> ItemField {
         label: f.label.clone(),
         kind: f.kind,
         value: SecretValue::new(f.value.expose().to_string()),
+        concealed: f.concealed,
     }
 }
 

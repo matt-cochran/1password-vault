@@ -2474,3 +2474,70 @@ fn step_summary_never_carries_a_value() {
         "{md}"
     );
 }
+
+// --- C1 (SR-1): a `.env` given as the configuration never prints a value ---
+
+const ENV_FILE: &str =
+    "OPENAI_API_KEY=\"sk-live-S7MARKERVALUEenv01\"\nSTRIPE_KEY=sk_live_S7MARKERVALUEenv02\n";
+
+fn env_file(h: &Harness) -> PathBuf {
+    let p = h.fix.join(".env");
+    fs::write(&p, ENV_FILE).unwrap();
+    p
+}
+
+#[test]
+fn env_file_as_config_flag_never_prints_a_value() {
+    let h = Harness::new(&good_item());
+    let r = h.run_config(env_file(&h), &["status", "prod"]);
+    assert_no_marker("--config .env", &format!("{}{}", r.stdout, r.stderr));
+}
+
+#[test]
+fn env_file_as_config_flag_json_never_prints_a_value() {
+    let h = Harness::new(&good_item());
+    let r = h.run_config(env_file(&h), &["status", "prod", "--json"]);
+    assert_no_marker("--config .env --json", &format!("{}{}", r.stdout, r.stderr));
+}
+
+#[test]
+fn env_file_as_opv_config_never_prints_a_value() {
+    let mut h = Harness::new(&good_item());
+    let p = env_file(&h);
+    h.set("OPV_CONFIG", p.to_str().unwrap());
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["status", "prod", "--json"])
+        .env_clear()
+        .env("PATH", &h.bin)
+        .env("TMPDIR", &h.tmp)
+        .env("FAKE_REC", &h.rec)
+        .env("FAKE_FIX", &h.fix)
+        .envs(h.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&h.cwd)
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_marker("OPV_CONFIG=.env", &all);
+}
+
+#[test]
+fn env_file_given_to_config_import_never_prints_a_value() {
+    let h = Harness::new(&good_item());
+    let p = env_file(&h);
+    let r = h.run(&[
+        "config",
+        "import",
+        "--file",
+        p.to_str().unwrap(),
+        "--vault",
+        "v",
+    ]);
+    assert_no_marker(
+        "config import --file .env",
+        &format!("{}{}", r.stdout, r.stderr),
+    );
+}

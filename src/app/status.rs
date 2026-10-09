@@ -140,6 +140,7 @@ pub fn run_scoped(
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     print_legend(out, &words, t.provider().label())?;
     print_extras(out, &plan)?;
+    print_concealed_config(out, &plan)?;
     if let Some(p) = &pinned {
         p.print(out, env_name, &names)?;
     }
@@ -148,6 +149,21 @@ pub fn run_scoped(
     }
     if n > 0 {
         return Err(findings());
+    }
+    Ok(())
+}
+
+/// M4 (owner ruling): one warning per config key whose 1Password field is concealed. The
+/// key is accepted and delivered, as a plain environment value; its value is never shown.
+fn print_concealed_config(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
+    for (product, key) in &plan.concealed_config {
+        writeln!(
+            out,
+            "warning: {} is concealed in 1Password but declared config; it is delivered as a \
+             plain environment value",
+            crate::domain::key_label(product, key)
+        )
+        .map_err(write_err)?;
     }
     Ok(())
 }
@@ -582,6 +598,18 @@ mod tests {
         assert!(lines[i + 1].starts_with("    guidance: "), "{out}");
         assert!(lines[i + 1].contains("OpenAI platform / API keys"), "{out}");
         assert_no_values(&out);
+    }
+
+    /// M4: a config key kept concealed in 1Password warns once, naming the key.
+    #[test]
+    fn status_warns_once_for_config_stored_concealed() {
+        let (_, out, _) = status_of(
+            complete_with(secret("allumata", "SIGNUP_POLICY", POLICY)),
+            fly_empty(),
+        );
+        let want = "warning: allumata/SIGNUP_POLICY is concealed in 1Password but declared \
+                    config; it is delivered as a plain environment value";
+        assert_eq!(out.lines().filter(|l| *l == want).count(), 1, "{out}");
     }
 
     /// Review Focus 2: a missing product section reports every desired key missing.

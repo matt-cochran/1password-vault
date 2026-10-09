@@ -18,6 +18,9 @@ pub struct ItemField {
     pub label: String,
     pub kind: Kind,
     pub value: SecretValue,
+    /// The 1Password field is concealed (M4): a config key read from a concealed field is
+    /// delivered, but its value is never printed (`config export`) and `status` warns.
+    pub concealed: bool,
 }
 
 impl fmt::Debug for ItemField {
@@ -26,6 +29,7 @@ impl fmt::Debug for ItemField {
             .field("section", &self.section)
             .field("label", &self.label)
             .field("kind", &self.kind)
+            .field("concealed", &self.concealed)
             .field("value", &"<REDACTED>")
             .finish()
     }
@@ -102,6 +106,10 @@ pub struct SyncPlan {
     pub held_from_prune: Vec<(String, String, String)>,
     /// product -> key -> value, config keys only.
     pub config: BTreeMap<String, BTreeMap<String, String>>,
+    /// (product, key): config keys whose 1Password field is concealed (M4, owner ruling).
+    /// Accepted and delivered as plain environment values, but their values are never
+    /// printed, and `status` warns once per key.
+    pub concealed_config: Vec<(String, String)>,
     /// What this run tidied in 1Password (FR-43), names only; set by the application layer.
     pub tidy: Vec<crate::domain::convention::Change>,
     /// The error code of a tidy that did not complete (`tidy_conflict`, ...), set by the
@@ -245,6 +253,7 @@ pub fn build_with(
         prune: Vec::new(),
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
+        concealed_config: Vec::new(),
         tidy: Vec::new(),
         tidy_error: None,
     };
@@ -297,6 +306,10 @@ pub fn build_with(
             // When the source has a finding, the finding is reported once, on the source
             // row; this row only says it waits on it.
             let source = spec.source();
+            let concealed = match source {
+                None => field.is_some_and(|f| f.concealed),
+                Some((sp, sk)) => by_name.get(&(sp, sk)).is_some_and(|f| f.concealed),
+            };
             let outcome = match source {
                 None => evaluate(product, key, spec, field.map(|f| (f.kind, &f.value))),
                 Some((sp, sk)) => {
@@ -360,6 +373,9 @@ pub fn build_with(
                     row.state = KeyState::Ready;
                     match spec.kind {
                         Kind::Config => {
+                            if concealed {
+                                plan.concealed_config.push((product.clone(), key.clone()));
+                            }
                             plan.config
                                 .entry(product.clone())
                                 .or_default()
@@ -443,11 +459,13 @@ mod tests {
             label: label.into(),
             kind: Kind::Secret,
             value: SecretValue::new(v.into()),
+            concealed: true,
         }
     }
     fn config_field(section: &str, label: &str, v: &str) -> ItemField {
         ItemField {
             kind: Kind::Config,
+            concealed: false,
             ..secret(section, label, v)
         }
     }

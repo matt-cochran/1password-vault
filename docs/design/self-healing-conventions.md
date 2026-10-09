@@ -81,7 +81,7 @@ reported to the user:
 
 - create missing product sections and missing fields (keys declared for this environment,
   mode-skipped ones included, like `item skeleton`), empty and of the right kind;
-- conceal a secret stored as text; never the reverse (config kept concealed is accepted);
+- conceal a secret stored as text; never the reverse (config kept concealed is accepted, delivered as a plain environment value, never printed by `config export`, which shows `<concealed in 1Password>`, and `status` warns once per such key);
 - rename a label to the key; relabel a product section spelled differently;
 - move a field home (into its product section, or to the top level under the simple profile);
 - move duplicates to `opv · kept`;

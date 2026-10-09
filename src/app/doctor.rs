@@ -104,7 +104,7 @@ pub struct Request<'a> {
     /// The environment's deploy sign-in failed before doctor ran (FR-40). Doctor reports
     /// it as one failing check, runs the other checks and skips the target checks that
     /// need those credentials (owner ruling: doctor never aborts on it).
-    pub deploy_failure: Option<Error>,
+    pub deploy_failure: Option<super::signin::DeployFailure>,
 }
 
 /// [`run_scoped_as`] for a whole [`Request`].
@@ -226,6 +226,9 @@ struct Row {
     text: String,
     /// The failure's own next step (NR-19), printed as `  fix: <step>` under the line.
     fix: Option<String>,
+    /// A failed call's scrubbed stderr excerpt (`  az said: …`), printed under the line in
+    /// text output only, never in `--json` (M2, NR-31).
+    excerpt: Option<String>,
 }
 
 impl Row {
@@ -287,6 +290,7 @@ impl Report {
             state,
             text,
             fix,
+            excerpt: None,
         });
     }
 
@@ -301,6 +305,7 @@ impl Report {
             state: State::Fail,
             text,
             fix,
+            excerpt: None,
         });
     }
 
@@ -310,6 +315,7 @@ impl Report {
             state: State::Skip,
             text,
             fix: None,
+            excerpt: None,
         });
     }
 
@@ -343,7 +349,7 @@ fn run_on_with(
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
     scope: Scope<'_>,
-    deploy_failure: Option<Error>,
+    deploy_failure: Option<super::signin::DeployFailure>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut report = Report::default();
@@ -393,8 +399,12 @@ fn run_on_with(
     // The checks that run the deploy identity's CLI, when its sign-in failed: every check
     // of that provider but the first (its tool version).
     let mut needs_deploy: Vec<&str> = Vec::new();
-    if let Some(e) = deploy_failure {
-        report.push(DEPLOY_CHECK, Err(e));
+    if let Some(failure) = deploy_failure {
+        report.push(DEPLOY_CHECK, Err(failure.error));
+        // Text output only, under the FAIL line; never in `--json` (M2, NR-31).
+        if let Some(row) = report.rows.last_mut() {
+            row.excerpt = failure.excerpt.map(|x| x.render());
+        }
         if let Some(f) = &fleet {
             for t in f.environments.values().filter_map(|e| e.target()) {
                 let checks = crate::provider::deploy_provider(t).doctor_checks();
@@ -456,7 +466,7 @@ fn run_on_with(
     if scope.json {
         print_json(&report, &doctor_command(&scope), scope.source, out)?;
     } else {
-        print_text(&report, out)?;
+        print_text(&report, out, &mut std::io::stderr())?;
     }
     // The first failure is the result: its FAIL line above has the detail, so the error
     // names the check only, and its next step is that check's remediation (NR-19). The
@@ -483,9 +493,15 @@ fn run_on_with(
 
 /// One line per check, with `  fix: <step>` under a failure whose step is not already
 /// in its text. The closing `Next:` line is `run_on`'s (all clear) or the error report's.
-fn print_text(report: &Report, out: &mut dyn Write) -> Result<(), Error> {
+/// The report as text on `out`; a failed call's scrubbed excerpt goes to `err` (stderr)
+/// right after its FAIL line, never to stdout or a JSON document (M2, NR-31).
+fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Error> {
     for row in &report.rows {
         writeln!(out, "{}  {}: {}", row.state.word(), row.name, row.text).map_err(write_err)?;
+        if let Some(x) = &row.excerpt {
+            out.flush().map_err(write_err)?;
+            let _ = write!(err, "{x}");
+        }
         if let (State::Fail, Some(fix)) = (row.state, &row.fix) {
             writeln!(out, "  fix: {fix}").map_err(write_err)?;
         }
@@ -1351,11 +1367,10 @@ mod tests {
         assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
     }
 
-    /// A real TOML syntax error carries a `  |` source gutter; it is never the step.
+    /// A real TOML syntax error carries its position; it is never the step.
     #[test]
     fn next_step_for_toml_syntax_error_is_the_fixed_config_step() {
         let e = crate::config::parse("[profile\nkind = \"fleet\"\n").unwrap_err();
-        assert!(e.to_string().contains("  |"), "{e}");
         let r = FakeRunner::new(good());
         let (_, out) = doctor(Err(e), &r);
         assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
@@ -1602,9 +1617,16 @@ mod tests {
             product: Some("allumata"),
             json,
             source: None,
-            deploy_failure: Some(Error::Auth(
-                "deploy credentials: az login failed\n  next: check the item".into(),
-            )),
+            deploy_failure: Some(crate::app::signin::DeployFailure {
+                error: Error::Auth(
+                    "deploy credentials: az login failed\n  next: check the item".into(),
+                ),
+                excerpt: crate::scrub::Excerpt::from_stderr(
+                    "az",
+                    b"ERROR: AADSTS7000215 invalid client secret\n",
+                    false,
+                ),
+            }),
         };
         let res = run_request_on(Ok(fleet()), request, &r, &|| linux(), &mut out);
         (res, text_of(&out))
@@ -1690,6 +1712,31 @@ mod tests {
             ("fail".into(), "check the item".into()),
             "{out}"
         );
+    }
+
+    /// M2: the failed call's excerpt goes to stderr, after its FAIL line.
+    #[test]
+    fn excerpt_row_prints_the_excerpt_on_stderr() {
+        let mut report = Report::default();
+        report.push(DEPLOY_CHECK, Err(Error::Auth("az login failed".into())));
+        report.rows[0].excerpt = Some("  az said: ERROR: bad\n".into());
+        let mut err = Vec::new();
+        print_text(&report, &mut Vec::new(), &mut err).unwrap();
+        assert_eq!(String::from_utf8(err).unwrap(), "  az said: ERROR: bad\n");
+    }
+
+    /// M2: stdout never carries the excerpt, text or JSON.
+    #[test]
+    fn deploy_failure_text_stdout_has_no_excerpt() {
+        let (_, out) = doctor_deploy_failed(false);
+        assert!(!out.contains("said:"), "{out}");
+    }
+
+    /// M2: no `said:` excerpt in the JSON document; it stays on stderr-style text only.
+    #[test]
+    fn deploy_failure_json_has_no_excerpt() {
+        let (_, out) = doctor_deploy_failed(true);
+        assert!(!out.contains("said:"), "{out}");
     }
 
     /// The JSON output marks the skipped target check.

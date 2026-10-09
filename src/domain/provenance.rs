@@ -272,6 +272,7 @@ mod tests {
             prune: vec![],
             held_from_prune: vec![],
             config: BTreeMap::new(),
+            concealed_config: Vec::new(),
             tidy: Vec::new(),
             tidy_error: None,
         }

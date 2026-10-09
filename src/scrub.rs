@@ -69,7 +69,32 @@ impl Registry {
     }
 
     /// Add `value` and its encodings. Blank values are ignored.
+    ///
+    /// Also added (I1): the value with control characters and escape sequences removed
+    /// (the form a terminal-safe excerpt shows), and each line of a multi-line value,
+    /// trimmed, when it is at least [`MIN_SUBSTRING`] bytes (a CLI that re-indents or
+    /// prefixes each line defeats the whole-value needle).
     pub fn register(&mut self, value: &str) {
+        self.register_one(value);
+        let stripped = strip_escapes(value);
+        if stripped.as_str() != value {
+            self.register_one(&stripped);
+        }
+        if value.contains(['\n', '\r']) {
+            for line in value.split(['\n', '\r']) {
+                let line = line.trim();
+                if line.len() >= MIN_SUBSTRING && line != value {
+                    self.register_one(line);
+                    let s = strip_escapes(line);
+                    if s.len() >= MIN_SUBSTRING && s.as_str() != line {
+                        self.register_one(&s);
+                    }
+                }
+            }
+        }
+    }
+
+    fn register_one(&mut self, value: &str) {
         if value.trim().is_empty() {
             return;
         }
@@ -378,7 +403,9 @@ pub fn scrub(text: &str) -> String {
 }
 
 /// The last `max` non-empty lines of a child's `stderr`, scrubbed and safe to print:
-/// escape sequences and control characters removed, each line cut at 240 characters.
+/// registered values masked on the raw text, then escape sequences and control
+/// characters removed, then values and patterns scrubbed again, each line cut at 240
+/// characters.
 /// When the buffer was `truncated` (only its tail was kept), the first, partial line is
 /// dropped so no value cut in half can show.
 pub fn tail_lines(stderr: &[u8], truncated: bool, max: usize) -> Vec<String> {
@@ -393,7 +420,11 @@ pub fn tail_lines(stderr: &[u8], truncated: bool, max: usize) -> Vec<String> {
         return Vec::new();
     }
     let text = Zeroizing::new(String::from_utf8_lossy(bytes).into_owned());
-    let plain = strip_escapes(&text);
+    // Registered values are masked on the raw text first (I1): a value holding CR, BEL or
+    // ESC no longer matches once control characters are stripped. The stripped text is
+    // masked again (stripped and per-line forms), then pattern-scrubbed.
+    let raw = with_registry(|r| r.scrub_values(&text));
+    let plain = strip_escapes(&raw);
     let clean = scrub(&plain);
     let lines: Vec<&str> = clean
         .lines()

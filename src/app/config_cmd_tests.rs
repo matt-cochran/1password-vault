@@ -351,3 +351,55 @@ fn status_all_json_has_one_entry_per_project() {
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["projects"].as_array().unwrap().len(), 2);
 }
+
+// --- C1 (SR-1): a `.env` given by mistake never reaches the output ---
+
+const ENV_FILE: &str =
+    "OPENAI_API_KEY=\"sk-live-C1MARKERVALUE\"\nSTRIPE_KEY=sk_live_C1MARKERVALUE\n";
+
+fn env_file(dir: &Path) -> PathBuf {
+    let p = dir.join(".env");
+    std::fs::write(&p, ENV_FILE).unwrap();
+    p
+}
+
+#[test]
+fn import_of_an_env_file_never_shows_a_value() {
+    let (dir, op) = checkout();
+    let mut args = import_args(dir.path());
+    args.file = env_file(dir.path());
+    let mut out = Vec::new();
+    let e = import(&args, dir.path(), &op, &mut out).unwrap_err();
+    assert!(!format!("{e}{}", text(&out)).contains("C1MARKER"), "{e}");
+}
+
+#[test]
+fn check_of_an_env_file_never_shows_a_value() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    let found = manifest_of(dir.path(), &op);
+    let mut out = Vec::new();
+    let e = check(&found, &env_file(dir.path()), &op, &mut out).unwrap_err();
+    assert!(!format!("{e}{}", text(&out)).contains("C1MARKER"), "{e}");
+}
+
+#[test]
+fn edit_to_an_env_file_never_shows_a_value() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    let found = manifest_of(dir.path(), &op);
+    struct EnvOnce;
+    impl EditUi for EnvOnce {
+        fn edit(&mut self, _: &str) -> Result<String, Error> {
+            Ok(ENV_FILE.into())
+        }
+        fn confirm(&mut self, _: &str) -> Result<bool, Error> {
+            Ok(false)
+        }
+    }
+    let mut out = Vec::new();
+    let res = edit(&found, &op, &mut EnvOnce, &mut out);
+    let err = res.err().map(|e| e.to_string()).unwrap_or_default();
+    let shown = format!("{err}{}", text(&out));
+    assert!(!shown.contains("C1MARKER"), "{shown}");
+}

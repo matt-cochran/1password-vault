@@ -136,6 +136,7 @@ fn shared_key_own_rule_fails_on_the_shared_value() {
         label: "DATABASE_URL".into(),
         kind: Kind::Secret,
         value: SecretValue::new(DB.into()),
+        concealed: true,
     }];
     let none: &[StoreEntry] = &[];
     let plan = build_plan(&f, "prod", fields, none, &BTreeSet::new(), &|_| None);
@@ -220,6 +221,7 @@ fn rotating_an_immutable_source_restages_the_keys_sharing_it() {
         label: "INTEGRATION_ENC_KEY".into(),
         kind: Kind::Secret,
         value: SecretValue::new(enc()),
+        concealed: true,
     }];
     let listed = |n: &str| StoreEntry {
         name: n.into(),

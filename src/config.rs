@@ -92,7 +92,15 @@ pub fn not_found(start: &Path) -> Error {
 /// file that does not parse, takes the fleet path exactly as in v0.1, which reports any
 /// other kind as a configuration error.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
-    let invalid = |e| Error::Config(format!("invalid secrets.toml: {e}").into());
+    let invalid = |e: toml::de::Error| {
+        Error::Config(
+            format!(
+                "invalid secrets.toml: {}",
+                toml_error(text, e.span(), e.message())
+            )
+            .into(),
+        )
+    };
     if peek_kind(text).as_deref() == Some("simple") {
         let raw: RawSimpleConfig = toml::from_str(text).map_err(invalid)?;
         let doc = Doc::parse(text).map_err(invalid)?;
@@ -200,21 +208,79 @@ impl<'t> Doc<'t> {
     }
 }
 
-/// `msg` under the source line holding `span`, in the TOML parser's error layout.
+/// `msg` placed at `span`: `TOML parse error at line L, column C` and the message, never
+/// the source line (C1, SR-1). A file given by mistake may hold values (a `.env`), so no
+/// configuration error quotes the text it came from.
 fn located(text: &str, span: std::ops::Range<usize>, msg: &str) -> String {
-    let before = &text[..span.start];
-    let line = before.matches('\n').count();
-    let column = before.len() - before.rfind('\n').map_or(0, |i| i + 1);
-    let content = text.split('\n').nth(line).unwrap_or("");
-    let num = (line + 1).to_string();
-    let pad = " ".repeat(num.len() + 1);
-    let width = span.len().min(content.len().saturating_sub(column)).max(1);
-    format!(
-        "TOML parse error at line {num}, column {}\n{pad}|\n{num} | {content}\n{pad}|{}{}\n{msg}\n",
-        column + 1,
-        " ".repeat(column + 1),
-        "^".repeat(width)
-    )
+    format!("{}\n", toml_error(text, Some(span), msg))
+}
+
+/// A TOML parse or deserialize error as text that quotes nothing from `text` (C1, SR-1):
+/// `TOML parse error at line L, column C` and the message with any quoted value removed.
+/// Never `Display` a `toml` or `toml_edit` error: theirs prints the offending line.
+pub fn toml_error(text: &str, span: Option<std::ops::Range<usize>>, message: &str) -> String {
+    let msg = with_duplicate_key(text, span.clone(), sanitize_toml_message(message));
+    match span.and_then(|s| line_column(text, s.start)) {
+        Some((line, column)) => format!("TOML parse error at line {line}, column {column}\n{msg}"),
+        None => msg,
+    }
+}
+
+/// [`toml_error`] on one line: `line L, column C: message`.
+pub fn toml_error_inline(
+    text: &str,
+    span: Option<std::ops::Range<usize>>,
+    message: &str,
+) -> String {
+    let msg = with_duplicate_key(text, span.clone(), sanitize_toml_message(message));
+    let msg = msg.split_whitespace().collect::<Vec<_>>().join(" ");
+    match span.and_then(|s| line_column(text, s.start)) {
+        Some((line, column)) => format!("line {line}, column {column}: {msg}"),
+        None => msg,
+    }
+}
+
+/// `duplicate key` names the key it points at: a key name is never a value, and only a
+/// name of key characters (`[A-Za-z0-9_.-]`, at most 128) is shown.
+fn with_duplicate_key(text: &str, span: Option<std::ops::Range<usize>>, msg: String) -> String {
+    if msg != "duplicate key" {
+        return msg;
+    }
+    let key = span
+        .and_then(|s| text.get(s))
+        .map(|k| k.trim_matches(|c| c == '"' || c == '\''));
+    match key {
+        Some(k)
+            if !k.is_empty()
+                && k.len() <= 128
+                && k.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)) =>
+        {
+            format!("duplicate key `{k}`")
+        }
+        _ => msg,
+    }
+}
+
+/// 1-based line and column (in characters) of byte offset `at`.
+fn line_column(text: &str, at: usize) -> Option<(usize, usize)> {
+    let before = text.get(..at)?;
+    let line = before.matches('\n').count() + 1;
+    let start = before.rfind('\n').map_or(0, |i| i + 1);
+    Some((line, before[start..].chars().count() + 1))
+}
+
+/// A parser or serde message with every quoted value dropped: serde's `invalid type:
+/// string "…"` / `invalid value: …` quote the value they saw, which may be a secret. Field
+/// and variant names (`unknown field `X``) stay: they name what to fix.
+fn sanitize_toml_message(message: &str) -> String {
+    static QUOTED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?s)\b(invalid (?:type|value|length): )([a-z ]+?)\s*(?:"(?:[^"\\]|\\.)*"|`[^`]*`|'[^']*')"#,
+        )
+        .expect("static regex")
+    });
+    QUOTED.replace_all(message.trim_end(), "$1$2").into_owned()
 }
 
 /// `profile.kind` when the text parses as TOML and holds it as a string.
@@ -1758,15 +1824,19 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         ));
     }
 
-    /// FR-2: an unknown entry under an environment shows its line, as the parser's own
-    /// errors do.
+    /// FR-2: an unknown entry under an environment names its line, as the parser's own
+    /// errors do (never the line's text, C1).
     #[test]
-    fn unknown_target_section_shows_its_line() {
+    fn unknown_target_section_names_its_line() {
         let bad = mutate(
             "fly.app = \"mcproductlabs-portfolio-production\"",
             "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
-        assert!(config_err(&bad).contains(" | flyy.app = \"x\"\n"));
+        assert!(
+            config_err(&bad).contains("at line "),
+            "{}",
+            config_err(&bad)
+        );
     }
 
     /// A plain value is a mistyped field, not a target section.
@@ -1850,8 +1920,8 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         assert!(m.contains("kubeconfig") && m.contains("line "), "{m}");
     }
 
-    /// FR-2, FR-37: an unknown field in the Fly section reports line, column, the line and
-    /// the field exactly as 0.4 did, before the section moved behind the provider contract.
+    /// FR-2, FR-37: an unknown field in the Fly section reports line, column and the field;
+    /// never the line itself (C1, SR-1).
     #[test]
     fn fly_section_unknown_field_points_at_the_field() {
         let bad = "[profile]\nkind = \"fleet\"\n[environments.prod]\nvault_id = \"v\"\n\
@@ -1859,8 +1929,8 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
                    fly.region = \"ams\"\n";
         assert_eq!(
             config_err(bad),
-            "invalid secrets.toml: TOML parse error at line 8, column 5\n  |\n8 | fly.region = \
-             \"ams\"\n  |     ^^^^^^\nunknown field `region`, expected `app` or `secret_name`\n"
+            "invalid secrets.toml: TOML parse error at line 8, column 5\nunknown field `region`, \
+             expected `app` or `secret_name`"
         );
     }
 
@@ -1960,7 +2030,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         let e = config_err(&shared(
             "kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]",
         ));
-        assert!(e.contains("| from = \"api/DB_URL\""), "{e}");
+        assert!(e.contains("at line 49, column 1"), "{e}");
     }
 
     #[test]

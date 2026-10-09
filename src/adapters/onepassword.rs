@@ -1048,6 +1048,7 @@ fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<Item
             section,
             label: f.label,
             kind,
+            concealed: kind == Kind::Secret,
             // D0: an empty field has no `value` key at all.
             value: f
                 .value
@@ -1094,6 +1095,7 @@ fn parse_unsectioned_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
             section: SIMPLE_PRODUCT.to_string(),
             label: f.label,
             kind,
+            concealed: kind == Kind::Secret,
             value: f
                 .value
                 .map_or_else(|| SecretValue::new(String::new()), |c| c.0),

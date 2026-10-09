@@ -312,6 +312,7 @@ pub fn read_fields(layout: &Layout, fleet: &Fleet, env_name: &str) -> Vec<ItemFi
                 label: key.clone(),
                 kind: spec.kind,
                 value,
+                concealed: f.ty == "CONCEALED",
             });
         }
     }
@@ -338,6 +339,7 @@ pub fn read_fields(layout: &Layout, fleet: &Fleet, env_name: &str) -> Vec<ItemFi
                 Kind::Config
             },
             value: SecretValue::new(f.value.expose().to_string()),
+            concealed: f.ty == "CONCEALED",
         });
     }
     out

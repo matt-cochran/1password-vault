@@ -48,7 +48,12 @@ impl ConfigDoc {
     pub fn parse(text: &str) -> Result<Self, Error> {
         text.parse::<DocumentMut>()
             .map(|doc| Self { doc })
-            .map_err(|e| cfg(format!("invalid secrets.toml: {e}")))
+            .map_err(|e| {
+                cfg(format!(
+                    "invalid secrets.toml: {}",
+                    crate::config::toml_error(text, e.span(), e.message())
+                ))
+            })
     }
 
     /// Environment names, in file order.
@@ -221,9 +226,12 @@ impl ConfigDoc {
     /// Add `[environments.<env>]` from `table_text` (a TOML fragment holding exactly that
     /// table), after the last environment.
     pub fn add_environment(&mut self, env: &str, table_text: &str) -> Result<(), Error> {
-        let frag = table_text
-            .parse::<DocumentMut>()
-            .map_err(|e| cfg(format!("invalid environment table: {e}")))?;
+        let frag = table_text.parse::<DocumentMut>().map_err(|e| {
+            cfg(format!(
+                "invalid environment table: {}",
+                crate::config::toml_error_inline(table_text, e.span(), e.message())
+            ))
+        })?;
         let mut table = frag
             .get("environments")
             .and_then(|e| e.get(env))
