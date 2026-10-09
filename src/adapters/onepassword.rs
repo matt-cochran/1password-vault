@@ -63,6 +63,9 @@ const OP: &str = "op";
 /// [`write_skeleton`] uses only the raw JSON kept inside.
 pub struct Item {
     pub fields: Vec<ItemField>,
+    /// The item's `version` integer (bumped by 1Password on every edit), when `op` reports
+    /// it: an input of the plan id (FR-41). Never derived from a value.
+    pub version: Option<u64>,
     raw: Zeroizing<Vec<u8>>,
 }
 
@@ -70,6 +73,7 @@ impl fmt::Debug for Item {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Item")
             .field("fields", &self.fields)
+            .field("version", &self.version)
             .field("raw_len", &self.raw.len())
             .finish()
     }
@@ -438,6 +442,7 @@ fn read_profile_on(
     };
     Ok(Item {
         fields,
+        version: item_version(&stdout),
         raw: stdout,
     })
 }
@@ -627,6 +632,8 @@ fn read_diagnosed(
         Outcome::Refused(o) => o.status,
         Outcome::Unknown { .. } => return Err(OP_CLI.outage(&call.step())),
     };
+    // S2: op said the item (or vault) does not exist: not transient, so never retried.
+    let missing = crate::runner::last_failure_not_found();
     // The probes explain the failed read; its excerpt stays with the error (NR-31). A
     // retry below is a new call and owns its own excerpt.
     let (t, readable) = crate::runner::diagnosing(|| -> Result<_, Error> {
@@ -646,6 +653,9 @@ fn read_diagnosed(
         };
         let readable = vault_access(r, env);
         if readable != Some(true) {
+            return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
+        }
+        if missing {
             return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
         }
         Ok((t, readable))
@@ -807,6 +817,17 @@ pub(crate) fn json_error(e: &serde_json::Error) -> Error {
         )
         .into(),
     )
+}
+
+/// The item's top-level `version` integer, when present. Every other field is skipped
+/// unread (`IgnoredAny`), so no value is copied (SR-8).
+fn item_version(json: &[u8]) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Versioned {
+        #[serde(default)]
+        version: Option<u64>,
+    }
+    serde_json::from_slice::<Versioned>(json).ok()?.version
 }
 
 #[derive(Deserialize)]
@@ -1285,6 +1306,12 @@ mod tests {
         }
     }
 
+    /// FR-41: the item's `version` integer is kept for the plan id.
+    #[test]
+    fn item_read_keeps_the_item_version() {
+        assert_eq!(read(allumata_item()).version, Some(7));
+    }
+
     #[test]
     fn fields_outside_sections_are_ignored() {
         let mut n = notes();
@@ -1496,6 +1523,38 @@ mod tests {
             Output::success(item_json),
         ]);
         assert!(read_item_with(&r, &test_env(), &linux()).is_ok());
+    }
+
+    /// S2: signed in with vault access, op said the item does not exist: reported at once
+    /// as missing, without a retry.
+    #[test]
+    fn item_op_says_does_not_exist_is_not_retried() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] \"istg\" isn't an item in the \"vstg\" vault.\n",
+        );
+        r.push_with_stderr(Output::success(WHOAMI_SA), "");
+        r.push_with_stderr(vault_ok(), "");
+        let _ = read_item_with(&r, &test_env(), &linux());
+        assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
+    }
+
+    /// S2: the missing item is still named by IDs, with the command to check it.
+    #[test]
+    fn item_op_says_does_not_exist_is_named() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "[ERROR] \"istg\" isn't an item in the \"vstg\" vault.\n",
+        );
+        r.push_with_stderr(Output::success(WHOAMI_SA), "");
+        r.push_with_stderr(vault_ok(), "");
+        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        assert!(
+            e.to_string().contains("item istg not found in vault vstg"),
+            "{e}"
+        );
     }
 
     /// P16: not signed in is reported at once, without retrying the read.

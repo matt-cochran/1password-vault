@@ -97,6 +97,8 @@ struct KvEntry {
     /// (version id, value), oldest first.
     versions: Vec<(String, String)>,
     tag: String,
+    /// The provenance tags of the latest `set` (FR-42): `key=value` after `opv-managed`.
+    stamp: Vec<String>,
 }
 
 /// The fake world `op` and `az` act on.
@@ -239,7 +241,14 @@ impl Sim {
         if has(args, &["keyvault", "secret", "list"]) {
             let v: Vec<Value> =
                 w.kv.values()
-                    .map(|e| json!({"name": e.name, "tags": {"opv-managed": e.tag}}))
+                    .map(|e| {
+                        let mut tags = json!({"opv-managed": e.tag});
+                        for kv in &e.stamp {
+                            let (k, v) = kv.split_once('=').unwrap();
+                            tags[k] = json!(v);
+                        }
+                        json!({"name": e.name, "tags": tags})
+                    })
                     .collect();
             return ok_json(&json!(v));
         }
@@ -265,14 +274,22 @@ impl Sim {
             let tag = flag(args, "--tags")
                 .unwrap()
                 .trim_start_matches("opv-managed=");
+            let at = args.iter().position(|a| a == "--tags").unwrap();
+            let stamp: Vec<String> = args[at + 2..]
+                .iter()
+                .take_while(|a| !a.starts_with("--"))
+                .cloned()
+                .collect();
             let value = String::from_utf8(stdin.unwrap().to_vec()).unwrap();
             let e = w.kv.entry(name.unwrap()).or_insert(KvEntry {
                 name: display.clone(),
                 versions: Vec::new(),
                 tag: tag.into(),
+                stamp: Vec::new(),
             });
             e.versions.push((ver.clone(), value));
             e.tag = tag.into();
+            e.stamp = stamp;
             let id = format!("https://{VAULT}.vault.azure.net/secrets/{display}/{ver}");
             return Output::success(id.into_bytes());
         }
@@ -1066,4 +1083,162 @@ fn azure_sync_without_deploy_names_the_deploy_command_last() {
         Some("Next: opv sync prod --deploy"),
         "{out}"
     );
+}
+
+// ---- A7 / H7: plan ids and provenance stamps (FR-41, FR-42) ----
+
+/// The plan id `opv plan prod --json` reports for `sim`.
+fn plan_id(sim: &Sim, fleet: &Fleet) -> String {
+    sim.reset();
+    let mut out = Vec::new();
+    sync::plan_with(fleet, "prod", sim, &mut out, true).unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    doc["plan_id"].as_str().unwrap().to_string()
+}
+
+fn expecting(id: &str) -> SyncOpts {
+    SyncOpts {
+        deploy: true,
+        expect_plan: Some(id.to_string()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn plan_id_is_stable_when_nothing_changed() {
+    let sim = api_changed();
+    assert_eq!(plan_id(&sim, &fleet_a()), plan_id(&sim, &fleet_a()));
+}
+
+#[test]
+fn plan_id_changes_when_the_item_changes() {
+    let sim = converged();
+    let before = plan_id(&sim, &fleet_a());
+    sim.set_item(item_with(API_V2, LOG_V1));
+    assert_ne!(before, plan_id(&sim, &fleet_a()));
+}
+
+#[test]
+fn plan_id_changes_when_a_store_version_changes() {
+    let sim = api_changed();
+    let before = plan_id(&sim, &fleet_a());
+    sync_on(&sim, &fleet_a(), &SyncOpts::default()).0.unwrap();
+    assert_ne!(before, plan_id(&sim, &fleet_a()));
+}
+
+#[test]
+fn sync_with_the_reviewed_plan_id_applies_it() {
+    let sim = api_changed();
+    let id = plan_id(&sim, &fleet_a());
+    sync_on(&sim, &fleet_a(), &expecting(&id)).0.unwrap();
+    assert!(sim.called(&["containerapp", "update"]));
+}
+
+#[test]
+fn sync_with_a_stale_plan_id_is_refused_with_exit_6() {
+    let sim = api_changed();
+    let (res, _) = sync_on(&sim, &fleet_a(), &expecting("00000000"));
+    assert_eq!(res.unwrap_err().exit_code(), 6);
+}
+
+#[test]
+fn sync_with_a_stale_plan_id_writes_nothing() {
+    let sim = api_changed();
+    let _ = sync_on(&sim, &fleet_a(), &expecting("00000000"));
+    assert!(
+        !sim.called(&["keyvault", "secret", "set"]),
+        "{:?}",
+        sim.argvs()
+    );
+}
+
+#[test]
+fn stale_plan_refusal_names_the_new_id_and_the_exact_command() {
+    let sim = api_changed();
+    let id = plan_id(&sim, &fleet_a());
+    let (res, _) = sync_on(&sim, &fleet_a(), &expecting("00000000"));
+    assert!(
+        res.unwrap_err()
+            .to_string()
+            .contains(&format!("opv sync prod --deploy --expect-plan {id}")),
+    );
+}
+
+#[test]
+fn sync_report_json_carries_the_plan_id() {
+    let sim = api_changed();
+    let id = plan_id(&sim, &fleet_a());
+    sim.reset();
+    let mut out = Vec::new();
+    let opts = SyncOpts {
+        json: true,
+        ..Default::default()
+    };
+    sync::run(&fleet_a(), "prod", &sim, &mut out, &opts).unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["plan_id"], json!(id));
+}
+
+#[test]
+fn written_version_is_stamped_with_the_plan_id() {
+    let sim = api_changed();
+    let id = plan_id(&sim, &fleet_a());
+    sync_on(&sim, &fleet_a(), &deploy()).0.unwrap();
+    assert!(
+        sim.argvs()
+            .iter()
+            .any(|a| a.contains("keyvault secret set") && a.contains(&format!("opv-plan={id}"))),
+        "{:?}",
+        sim.argvs()
+    );
+}
+
+#[test]
+fn provenance_stamp_never_carries_a_value() {
+    let sim = api_changed();
+    sync_on(&sim, &fleet_a(), &deploy()).0.unwrap();
+    let stamps: Vec<String> = sim
+        .world
+        .borrow()
+        .kv
+        .values()
+        .flat_map(|e| e.stamp.clone())
+        .collect();
+    assert!(
+        !stamps.is_empty() && stamps.iter().all(|s| !s.contains("FIXTUREVALUE")),
+        "{stamps:?}"
+    );
+}
+
+#[test]
+fn status_shows_when_opv_last_changed_the_target() {
+    // A first sync: every version carries this run's stamp.
+    let sim = Sim::new(item_with(API_V1, LOG_V1));
+    let id = plan_id(&sim, &fleet_a());
+    sync_on(&sim, &fleet_a(), &deploy()).0.unwrap();
+    sim.reset();
+    let mut out = Vec::new();
+    super::status::run(&fleet_a(), "prod", &sim, &mut out).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        text_of(&out).lines().any(
+            |l| l.contains(&format!("last changed by opv {version} at "))
+                && l.ends_with(&format!("(plan {id})"))
+        ),
+        "{}",
+        text_of(&out)
+    );
+}
+
+#[test]
+fn status_json_carries_the_provenance_stamp() {
+    // A first sync: every version carries this run's stamp.
+    let sim = Sim::new(item_with(API_V1, LOG_V1));
+    let id = plan_id(&sim, &fleet_a());
+    sync_on(&sim, &fleet_a(), &deploy()).0.unwrap();
+    sim.reset();
+    let mut out = Vec::new();
+    super::status::run_with(&fleet_a(), "prod", &sim, &mut out, true).unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["provenance"]["plan_id"], json!(id));
 }

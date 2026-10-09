@@ -149,6 +149,7 @@ pub fn list(r: &dyn CommandRunner, app: &str) -> Result<Vec<StoreEntry>, Error> 
             name: e.name,
             version: e.digest,
             pending: matches!(e.status.as_deref(), Some("Staged" | "Partial")),
+            stamp: None,
         })
         .collect())
 }
@@ -905,11 +906,13 @@ mod tests {
                     name: "A".into(),
                     version: Some("<digest-a>".into()),
                     pending: true,
+                    stamp: None,
                 },
                 StoreEntry {
                     name: "B".into(),
                     version: Some("<digest-b>".into()),
                     pending: true,
+                    stamp: None,
                 },
             ]
         );

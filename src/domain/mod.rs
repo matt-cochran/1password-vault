@@ -9,9 +9,11 @@ pub use model::{
 };
 pub use secret::SecretValue;
 pub mod plan;
+pub mod provenance;
 pub mod rules;
 pub mod runtime;
 pub use plan::{ItemField, KeyState, Row, StoreEntry, SyncPlan, TargetState, build as build_plan};
+pub use provenance::Stamp;
 pub use runtime::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };

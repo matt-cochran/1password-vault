@@ -169,15 +169,13 @@ Examples:
   opv sync prod --deploy --confirm prod  # an environment with confirm_env = true";
 
 const SYNC_MORE: &str = "\
-Refuses (exit 6) and stages nothing when any key is missing, of the wrong kind or failing a
-rule; on a guarded environment the same refusal says --confirm is needed too. Nothing is
-deployed or removed without --deploy or --prune.
+Refuses (exit 6) and stages nothing when a key is missing, of the wrong kind or failing a
+rule, naming a missing --confirm too. Nothing is deployed or removed without --deploy/--prune.
 
 More examples:
-  opv sync staging                       # write changed settings; no deploy
+  opv sync prod --deploy --expect-plan 674d43e2  # exactly the plan opv plan showed
   opv sync staging --deploy --prune      # also remove managed names no longer declared
-  opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set
-  opv sync prod --product api --deploy   # only api's names; other products untouched";
+  opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set";
 
 const EXPORT_QUICK: &str = "\
 Examples:
@@ -522,6 +520,10 @@ struct SyncArgs {
     /// still restarts the whole app. OPV_PRODUCT is never used here.
     #[arg(long)]
     product: Option<String>,
+    /// Apply only the plan `opv plan` showed with this id; refused (exit 6) if anything
+    /// changed since. Also satisfies confirm_env.
+    #[arg(long, value_name = "PLAN_ID")]
+    expect_plan: Option<String>,
     /// Print the run report as one JSON document (names only) instead of text.
     #[arg(long)]
     json: bool,
@@ -543,6 +545,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             product: a.product,
             confirm: a.confirm,
             json: a.json,
+            expect_plan: a.expect_plan,
         }
     }
 }

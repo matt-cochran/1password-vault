@@ -135,7 +135,8 @@ pub(crate) fn list(k: &Kubectl<'_>, selector: &str) -> Result<Vec<Listed>, Error
         .collect())
 }
 
-/// The ExternalSecret manifest. It carries names and a version id only, never a value.
+/// The ExternalSecret manifest. It carries names, a version id and opv's provenance stamp
+/// (FR-42) only, never a value.
 pub(crate) fn manifest(
     t: &KubeTarget,
     name: &str,
@@ -143,8 +144,9 @@ pub(crate) fn manifest(
     remote_key: &str,
     version: &str,
     cluster_store: &str,
+    stamp: Option<&crate::domain::Stamp>,
 ) -> Vec<u8> {
-    json!({
+    let mut doc = json!({
         "apiVersion": API,
         "kind": "ExternalSecret",
         "metadata": {
@@ -161,9 +163,11 @@ pub(crate) fn manifest(
                 "remoteRef": { "key": remote_key, "version": version },
             }],
         },
-    })
-    .to_string()
-    .into_bytes()
+    });
+    if let Some(s) = stamp {
+        doc["metadata"]["annotations"] = super::annotations(s);
+    }
+    doc.to_string().into_bytes()
 }
 
 /// Applies the ExternalSecret `name` (server-side, idempotent). A lost outcome is
@@ -772,11 +776,16 @@ impl PinnedStore for ExternalStore<'_> {
         self.inner.read(name)
     }
 
-    fn write_one(&self, name: &str, value: &SecretValue) -> Result<String, Error> {
+    fn write_one(
+        &self,
+        name: &str,
+        value: &SecretValue,
+        stamp: &crate::domain::Stamp,
+    ) -> Result<String, Error> {
         if let Some((rule, reason)) = super::store::refusal(name, value) {
             return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
         }
-        self.inner.write_one(name, value)
+        self.inner.write_one(name, value, stamp)
     }
 
     /// The ExternalSecrets of `name` nothing references, then the store entry (FR-32): a
@@ -863,6 +872,7 @@ mod tests {
             "DB-URL",
             "46687ce78b76487cb0c1da470360b638",
             "prod-vault",
+            None,
         ))
         .unwrap();
         assert_eq!(
@@ -872,6 +882,24 @@ mod tests {
             ),
             (Some("0"), Some("46687ce78b76487cb0c1da470360b638"))
         );
+    }
+
+    /// FR-42: an ExternalSecret opv writes carries its provenance stamp as annotations.
+    #[test]
+    fn manifest_carries_the_provenance_stamp() {
+        let t = super::super::testutil::target();
+        let stamp = crate::domain::provenance::fixture();
+        let doc: Value = serde_json::from_slice(&manifest(
+            &t,
+            "opv-x-0123456789",
+            "x",
+            "X",
+            "0123456789ab",
+            "s",
+            Some(&stamp),
+        ))
+        .unwrap();
+        assert_eq!(doc["metadata"]["annotations"]["opv-plan"], "7f3c9a1e");
     }
 
     #[test]
@@ -884,6 +912,7 @@ mod tests {
             "X",
             "0123456789ab",
             "s",
+            None,
         ))
         .unwrap();
         assert_eq!(doc["spec"]["target"]["creationPolicy"], "Owner");
@@ -910,7 +939,12 @@ mod tests {
         fn read(&self, _: &str) -> Result<Option<(SecretValue, String)>, Error> {
             unreachable!()
         }
-        fn write_one(&self, _: &str, _: &SecretValue) -> Result<String, Error> {
+        fn write_one(
+            &self,
+            _: &str,
+            _: &SecretValue,
+            _: &crate::domain::Stamp,
+        ) -> Result<String, Error> {
             unreachable!()
         }
         fn delete(&self, _: &str) -> Result<(), Error> {

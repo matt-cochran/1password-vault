@@ -145,8 +145,11 @@ failing rule when `state` is `failing_rule`, and `reason` says why (see
 target for every provider (`fly_name` holds the same value and is kept for older scripts; it
 is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
 a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. With `--product`,
-the document carries `"product": "<p>"` and only that product's rows and totals. The
-document is meant for the scheduled drift check.
+the document carries `"product": "<p>"` and only that product's rows and totals. `plan
+--json` adds `"plan_id"` when nothing blocks ([`--expect-plan`](#review-then-apply-exactly-that-plan---expect-plan)),
+and `status --json` on Azure or Kubernetes adds `"provenance": {"opv_version", "written",
+"plan_id"}` once opv has stamped the target. The document is meant for the scheduled drift
+check.
 
 ### One product: `--product`
 
@@ -178,10 +181,34 @@ PRODUCT   KEY                  KIND    STATE    TARGET
 would stage: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
 would prune (needs --prune): allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
 held (immutable): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY) (pass --rotate PRODUCT/KEY to replace)
+plan 7f3c9a1e (1Password item v41): sync --expect-plan 7f3c9a1e applies exactly this plan and refuses if the item, the target or secrets.toml changed
 Next: opv sync prod --deploy --prune
 ```
 
 On Azure and Kubernetes the line says `would write`. The `Next:` command adds `--prune` only when something would be pruned, `--product` when you scoped the plan, and `--confirm <env>` for a [guarded environment](#guarded-environments). When a key blocks the sync, `plan` exits 8 and the `Next:` line says to fix it and run `plan` again.
+
+### Review, then apply exactly that plan: `--expect-plan`
+
+`plan` prints a short plan id, and `plan --json` carries it as `plan_id`. Pass it to `sync` to apply exactly what was reviewed:
+
+```sh
+opv plan prod                                         # a person or reviewer reads it: plan 7f3c9a1e (...)
+opv sync prod --deploy --expect-plan 7f3c9a1e         # applies it, or refuses if anything changed
+```
+
+`sync` re-derives the id from what it reads. If a teammate edited the 1Password item, another tool wrote or re-pinned a store version, or `secrets.toml` changed the plan, the id differs and `sync` refuses before any write (exit 6), naming the new id and the exact command to apply it:
+
+```text
+opv: policy denied: stale plan: the plan changed since 7f3c9a1e; it is now 1b2c3d4e (1Password item v42) (the 1Password item, the target or secrets.toml changed); nothing was changed
+  review it, then apply exactly that plan with: opv sync prod --deploy --expect-plan 1b2c3d4e
+Next: opv plan prod
+```
+
+- The id covers names, states, version ids and the item's version number, never a value or a digest of one, so it is safe to paste into a PR or chat. Any edit to the item changes it, even to a field this environment does not use.
+- Nothing is stored: there is no plan file. A CI job can plan in a pull request and apply on merge with the id from the plan step.
+- On a [guarded environment](#guarded-environments), `--expect-plan` is enough on its own: the id is bound to that environment.
+- `--expect-plan` cannot be combined with `--rotate` or `--prune-immutable` (exit 2), because `plan` never shows a rotation.
+- `sync --json` reports the id of the plan it applied as `plan_id`.
 
 ### Change detection on Fly
 
@@ -212,6 +239,7 @@ opv sync prod --deploy --prune           # also remove names no longer wanted, a
 - **Superseded versions (Kubernetes).** After a healthy rollout, `--deploy` deletes the older version Secrets of each key that neither the Deployment nor any ReplicaSet still references (so `kubectl rollout undo` keeps working); Key Vault keeps old versions as history.
 - **Changed while applying.** opv changes only the variables it manages and checks that the rest of the app did not change under it. If it did, opv stops with the changed setting names (never values), and it is safe to re-run.
 - **Soft-deleted names (Key Vault).** A deleted secret name stays reserved until it is purged, so writing it again fails. opv prints the exact command, `az keyvault secret recover --vault-name <vault> --name <name>`; it never recovers or purges anything itself.
+- **Provenance.** Each Key Vault version opv writes is tagged, and each Kubernetes Secret, ExternalSecret and Deployment it writes is annotated, with `opv-version`, `opv-written` (UTC), `opv-env` and `opv-plan` (the [plan id](#review-then-apply-exactly-that-plan---expect-plan)). Never a value. `status` reads them back as one line, e.g. `Azure: last changed by opv 0.5.0 at 2026-10-08T14:02:11Z (plan 7f3c9a1e)`, and `status --json` as `provenance`. Nothing is stored anywhere else; Fly is not stamped.
 - **Access.** The app's identity needs read access to the vault secrets. `opv doctor` warns, with the grant command, if it cannot confirm that. If the identity really cannot read a secret, Azure refuses the new revision, the old one keeps serving, and `sync` reports it.
 
 #### Key Vault → Kubernetes through External Secrets (`secrets_in`)
@@ -259,7 +287,8 @@ Next: opv sync prod --deploy
   "skipped": [],
   "held": [],
   "kept": [],
-  "next": "opv sync prod --deploy"
+  "next": "opv sync prod --deploy",
+  "plan_id": "7f3c9a1e"
 }
 ```
 
@@ -267,7 +296,7 @@ Names are target names. `held` lists immutable keys left alone, `kept` names not
 
 ### Retries, timeouts and interruptions
 
-- **Reads are retried, writes are not.** A failed read (`op item get`, a list, a status check) is tried up to 3 times, with a 1 s then 2 s pause, printing `retrying az keyvault secret list (2/3) in 2 s`. A refusal such as not found or not signed in is never retried. A write is never repeated blindly: opv reads the target back to see what happened.
+- **Reads are retried, writes are not.** A failed read (`op item get`, a list, a status check) is tried up to 3 times, with a 1 s then 2 s pause, printing `retrying az keyvault secret list (2/3) in 2 s`. A refusal such as not found or not signed in is never retried: when `op` says an item or vault does not exist, `kubectl` reports `NotFound`, or `az` reports a missing secret or resource, opv reports it at once (failure text it does not recognise keeps its retries). A write is never repeated blindly: opv reads the target back to see what happened.
 - **One time budget.** `--timeout <secs>` (default 900) caps the whole run, including waits for a revision or rollout. There is no separate deploy timeout.
 - **`--verbose`** prints one stderr line per external call: the program, its arguments, how long it took and the outcome. Under it come the call's own error output (`    stderr: ...`, every secret masked as `__SECRET__`) and the size and JSON shape of its result (`    stdout: 412 bytes, JSON object with keys: ...`). A result's content is never shown.
 - **Safe to re-run.** Stopping opv at any point (Ctrl-C, a CI cancel, a lost connection) leaves the app working. Run the same command again and it finishes the rest.

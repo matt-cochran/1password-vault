@@ -677,6 +677,20 @@ Key Vault → Kubernetes Deployment through the External Secrets Operator, with 
 and prune only after a healthy rollout. Commands are unchanged. Design: §13 of the multi-cloud
 design. Owner decision 2026-10-08.
 
+## FR-41 — Plan Id and `--expect-plan`
+
+- `plan` prints a short plan id (`plan 7f3c9a1e (1Password item v41): …`) and `plan --json` carries it as `plan_id`; `sync --json` reports the id of the plan it applied. A plan with blocking findings has no id.
+- The id is SHA-256 over names and integers only: the environment, the `--product` scope, the item's `version` integer, every row's product, key, kind, state and target state, the planned names (stage, prune, held, extras) and the store listing (names, pending flags, and a pinned store's version ids). No value, value length or value digest goes in: Fly digests are left out because they are digests of values. The id can neither reveal nor confirm a value (SR-1).
+- `sync <env> --expect-plan <id>` re-derives the id from what it reads and, if it differs, refuses before any write (exit 6) with the new id, the exact `sync … --expect-plan <new id>` command, and `Next: opv plan <env>`. Any edit to the item, a store version written or re-pinned by someone else, or a change to `secrets.toml` that changes the plan changes the id.
+- `--expect-plan` satisfies `confirm_env`, because the id is bound to its environment. It cannot be combined with `--rotate` or `--prune-immutable` (exit 2): `plan` never shows a rotation.
+- Stateless: the id is recomputed, never stored; no plan file (§7, §9). Owner decision 2026-10-08 (pass-2 A7).
+
+## FR-42 — Provenance Stamps
+
+- Every version or object opv writes on a pinned target records opv's run metadata: `opv-version`, `opv-written` (UTC, `YYYY-MM-DDTHH:MM:SSZ`), `opv-env` and `opv-plan` (the FR-41 id). Key Vault: tags on each written version. Kubernetes: annotations on each Secret, ExternalSecret and the Deployment opv writes. Never a value and never an identity (SR-1).
+- `status <env>` on such a target prints `<provider>: last changed by opv <version> at <time> (plan <id>)` from the latest stamp it lists; `status --json` carries it as `provenance`. Entries written before 0.5.0 carry no stamp and the line is left out.
+- Stateless: the target carries its own record, the way the `opv-managed` tag does; no state store (§7, §9). Fly is not stamped (a stamp would be one more secret and restart the machines). Owner decision 2026-10-08 (pass-2 H7).
+
 ## v0.4 local development (FR-34 to FR-36)
 
 The requirements below make opv usable for local development without a deployment target, from issues #52, #53 and #54 found while adopting opv across products. The owner adopted them on 2026-10-08. Live account validation stays an owner-run receipt on those issues; automated tests use synthetic values and fake CLIs.
