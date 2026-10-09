@@ -16,6 +16,8 @@ pub mod explain;
 mod guidance_tests;
 pub mod init;
 pub mod local;
+#[cfg(test)]
+mod pinned_tests;
 pub mod run;
 pub mod setup;
 mod setup_import;
@@ -27,6 +29,7 @@ pub mod skeleton;
 pub mod status;
 pub mod sync;
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
 use std::io::{self, Write};
 
@@ -37,7 +40,7 @@ use crate::domain::{
     TargetState, key_label,
 };
 use crate::error::Error;
-use crate::ports::{Ports, Store};
+use crate::ports::{PinnedStore, Ports, Store};
 use crate::provider::TargetConfig;
 use crate::runner::CommandRunner;
 
@@ -47,24 +50,25 @@ fn no_digest(_: &SecretValue) -> Option<String> {
     None
 }
 
-/// Read the environment's item once (FR-13), list the target's store once when `store` is
+/// Read the environment's item once (FR-13), list the target's store once when `ports` are
 /// given, and build the plan. `env_name` must already be resolved, and the target opened,
 /// by the caller (so a missing target is `Error::Config` before any call).
 ///
 /// With a store, every ready secret is also checked against the store's own rules
 /// ([`Store::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
-/// failing rule naming product/KEY.
+/// failing rule naming product/KEY. A pinned store is also read once per ready secret it
+/// lists, and the value compared exactly (FR-31); a staged store (Fly) is never read.
 pub(crate) fn read_and_plan(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
-    store: Option<&dyn Store>,
+    ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let env = fleet.environment(env_name)?;
     let item = onepassword::read_item_as(r, env, fleet.profile)?;
-    plan_item(fleet, env_name, item.fields, store, rotate, prune_immutable)
+    plan_item(fleet, env_name, item.fields, ports, rotate, prune_immutable)
 }
 
 /// [`read_and_plan`] for a local check of the products in `fleet` only, with no target: the
@@ -89,15 +93,36 @@ fn plan_item(
     fleet: &Fleet,
     env_name: &str,
     fields: Vec<plan::ItemField>,
-    store: Option<&dyn Store>,
+    ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
+    let store: Option<&dyn Store> = ports.map(Ports::store);
     let on_target = match store {
         Some(s) => s.list()?,
         None => Vec::new(),
     };
     let refusal = |n: &str, v: &SecretValue| store.and_then(|s| s.refusal(n, v));
+    // The first failed read; the planner itself cannot fail.
+    let failed: RefCell<Option<Error>> = RefCell::new(None);
+    let read = |pinned: &dyn PinnedStore, name: &str, desired: &SecretValue| {
+        if failed.borrow().is_some() {
+            return None;
+        }
+        match pinned.read(name) {
+            Ok(Some((current, _version))) => Some(compare(&current, desired)),
+            Ok(None) => Some(plan::CurrentState::Absent),
+            Err(e) => {
+                failed.replace(Some(e));
+                None
+            }
+        }
+    };
+    let pinned = match ports {
+        Some(Ports::Pinned { store, .. }) => Some(store.as_ref()),
+        _ => None,
+    };
+    let current = pinned.map(|s| move |n: &str, v: &SecretValue| read(s, n, v));
     let p = plan::build_with(
         fleet,
         env_name,
@@ -108,9 +133,28 @@ fn plan_item(
             prune_immutable,
             digest: &no_digest,
             target_check: &refusal,
+            current: current.as_ref().map(|c| c as &plan::CurrentCheck<'_>),
         },
     );
-    Ok((p, on_target))
+    match failed.into_inner() {
+        Some(e) => Err(e),
+        None => Ok((p, on_target)),
+    }
+}
+
+/// Exact, constant-time compare of a stored value with the desired one (FR-31, SR-1).
+fn compare(current: &SecretValue, desired: &SecretValue) -> plan::CurrentState {
+    use subtle::ConstantTimeEq as _;
+    if bool::from(
+        current
+            .expose()
+            .as_bytes()
+            .ct_eq(desired.expose().as_bytes()),
+    ) {
+        plan::CurrentState::Same
+    } else {
+        plan::CurrentState::Differs
+    }
 }
 
 /// A failed write to the output stream. A closed pipe never gets here: `main` swallows

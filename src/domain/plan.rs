@@ -66,9 +66,10 @@ pub struct Row {
     pub key: String,
     pub kind: Kind,
     pub state: KeyState,
-    /// Only meaningful for secrets. Secrets absent from Fly are `Absent`; `Present` and
-    /// `WouldChange` need both digests; everything else present on Fly is `Unknown`.
-    /// Config keys are always `Unknown` (they are not Fly secrets).
+    /// Only meaningful for secrets. Secrets absent from the store are `Absent`; `Present`
+    /// and `WouldChange` need both digests, or the store's current value
+    /// ([`PlanOptions::current`]); everything else present is `Unknown`. Config keys are
+    /// always `Unknown` (they are not store secrets).
     pub target: TargetState,
     pub guidance: String,
 }
@@ -134,6 +135,20 @@ impl SyncPlan {
 /// refuse and that rule's fixed reason (FR-22), or `None`.
 pub type TargetCheck<'a> = dyn Fn(&str, &SecretValue) -> Option<(&'static str, &'static str)> + 'a;
 
+/// How the store's current value of a name compares with the desired one (FR-31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentState {
+    /// Byte-for-byte equal.
+    Same,
+    Differs,
+    /// Not in the store.
+    Absent,
+}
+
+/// The store's current value check: for (target name, desired value), how the stored value
+/// compares, or `None` when the store cannot say.
+pub type CurrentCheck<'a> = dyn Fn(&str, &SecretValue) -> Option<CurrentState> + 'a;
+
 /// Target-specific inputs to [`build_with`]. The planner stays target-agnostic (FR-12):
 /// the application layer supplies the digest function and the value check.
 pub struct PlanOptions<'a> {
@@ -147,6 +162,9 @@ pub struct PlanOptions<'a> {
     /// reason, e.g. a value the Fly import cannot carry. A refusal makes the row
     /// `RuleFailed(rule, reason)`; not staged.
     pub target_check: &'a TargetCheck<'a>,
+    /// For a store that can read its values back (pinned flow, FR-31): each ready secret
+    /// the store lists is compared exactly. `None` keeps the digest compare alone (Fly).
+    pub current: Option<&'a CurrentCheck<'a>>,
 }
 
 /// Plan a sync of `item` into the Fly app for `env_name`, with no prune overrides and no
@@ -173,6 +191,7 @@ pub fn build(
             prune_immutable: &none,
             digest,
             target_check: &|_, _| None,
+            current: None,
         },
     )
 }
@@ -310,9 +329,20 @@ pub fn build_with(
                                     (Some(_), Some(_)) => TargetState::WouldChange,
                                     _ => TargetState::Unknown,
                                 };
+                                if let (Some(current), Some(name)) =
+                                    (opts.current, target_name.as_deref())
+                                    && let Some(state) = current(name, &value)
+                                {
+                                    row.target = match state {
+                                        CurrentState::Same => TargetState::Present,
+                                        CurrentState::Differs => TargetState::WouldChange,
+                                        CurrentState::Absent => TargetState::Absent,
+                                    };
+                                }
                             }
                             let rotated = opts.rotate.contains(&(product.clone(), key.clone()));
-                            if spec.immutable && target_entry.is_some() && !rotated {
+                            let on_target = row.target != TargetState::Absent;
+                            if spec.immutable && on_target && !rotated {
                                 plan.held_immutable.push((product.clone(), key.clone()));
                             } else if let Some(name) = target_name
                                 && (row.target != TargetState::Present || rotated)
@@ -686,6 +716,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
             prune_immutable,
             digest: &none,
             target_check,
+            current: None,
         }
     }
 

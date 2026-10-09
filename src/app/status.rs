@@ -37,7 +37,7 @@ pub fn run_with(
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
     let none = BTreeSet::new();
-    let (plan, _) = read_and_plan(fleet, env_name, r, Some(ports.store()), &none, &none)?;
+    let (plan, _) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     if json {
         write_json(out, fleet, env_name, &plan)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -77,8 +77,9 @@ fn summary(rows: &[Row], target: &str) -> String {
     )
 }
 
-/// Target state of a row. Digests cannot be compared locally (P1), so a secret on the
-/// target is "present"; `sync` reports whether staging changed it.
+/// Target state of a row. A store that reads its values back is compared exactly, so a
+/// differing secret is "would change" (FR-31); Fly digests cannot be compared locally (P1),
+/// so a secret there is "present" and `sync` reports whether staging changed it.
 fn target(r: &Row) -> String {
     match (r.kind, r.target) {
         (Kind::Config, _) => "-",

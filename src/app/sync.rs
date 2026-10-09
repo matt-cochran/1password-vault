@@ -51,8 +51,8 @@ pub fn run(
 ) -> Result<(), Error> {
     // Every check below happens before any subprocess call.
     let (t, ports) = open_target(fleet, env_name, r)?;
-    let (store, runtime) = match ports {
-        Ports::Staged { store, runtime } => (store, runtime),
+    let (store, runtime) = match &ports {
+        Ports::Staged { store, runtime } => (store.as_ref(), runtime.as_ref()),
         // Replaced by the pinned sync flow (FR-29, FR-31).
         Ports::Pinned { .. } => {
             return Err(Error::Target(
@@ -62,14 +62,8 @@ pub fn run(
     };
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
-    let (plan, list_a) = read_and_plan(
-        fleet,
-        env_name,
-        r,
-        Some(store.as_ref()),
-        &rotate,
-        &prune_immutable,
-    )?;
+    let (plan, list_a) =
+        read_and_plan(fleet, env_name, r, Some(&ports), &rotate, &prune_immutable)?;
 
     let blocking = row_names(&plan.rows, is_blocking);
     if !blocking.is_empty() {
@@ -206,7 +200,7 @@ pub fn plan_with(
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let (t, ports) = open_target(fleet, env_name, r)?;
     let none = BTreeSet::new();
-    let (plan, on_target) = read_and_plan(fleet, env_name, r, Some(ports.store()), &none, &none)?;
+    let (plan, on_target) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     if json {
         write_json(out, fleet, env_name, &plan)?;
         let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
@@ -267,7 +261,8 @@ fn print_counts(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Error> {
     .map_err(write_err)
 }
 
-/// Target column of `plan`. Keys present on Fly cannot be compared locally, so a
+/// Target column of `plan`. A store that reads its values back is compared exactly
+/// ("unchanged" / "changed", FR-31); keys present on Fly cannot be compared locally, so a
 /// desired key there is "potentially changed" (FR-5, P1).
 fn plan_target(r: &Row, held: bool) -> String {
     match (r.kind, r.target, &r.state) {
@@ -275,6 +270,8 @@ fn plan_target(r: &Row, held: bool) -> String {
         (Kind::Secret, TargetState::Absent, KeyState::Ready) => "absent (new)",
         (Kind::Secret, TargetState::Absent, _) => "absent",
         (Kind::Secret, _, _) if held => "present (immutable, held)",
+        (Kind::Secret, TargetState::Present, KeyState::Ready) => "unchanged",
+        (Kind::Secret, TargetState::WouldChange, KeyState::Ready) => "changed",
         (Kind::Secret, _, KeyState::Ready) => "potentially changed",
         (Kind::Secret, _, KeyState::Skipped) => "present (not desired)",
         (Kind::Secret, _, _) => "present",

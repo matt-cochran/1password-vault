@@ -245,6 +245,8 @@ Where Fly exposes sufficient metadata or digests, the CLI should use that metada
 
 Decided in v0.1.0: Fly digests cannot be computed locally, so a desired key that is already on Fly is shown as "potentially changed"; real change detection happens in `fly sync` (§6.4). A key removed from the configuration is no longer declared, so it is neither reported nor pruned; unset it manually. Unmanaged names on Fly are only counted.
 
+Decided in v0.5 (FR-31): a pinned store that can read its values back (Azure Key Vault) is read once per ready secret it lists, and the value compared exactly in constant time, so `plan` shows "unchanged" or "changed" and `status` "present" or "would change" for it. Fly is unchanged.
+
 ## FR-6 — Fly Synchronization
 
 The CLI shall provide:
