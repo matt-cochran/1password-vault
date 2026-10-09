@@ -5,8 +5,11 @@ use std::process::ExitCode;
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
-use opv::app::{config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync};
+use opv::app::{
+    config_cmd, config_export, doctor, explain, init, run as run_cmd, skeleton, status, sync,
+};
 use opv::config;
+use opv::config_store;
 use opv::runner::{Budget, ProcessRunner};
 
 mod colour;
@@ -21,6 +24,7 @@ Start here:
 
 Everyday use:
   opv check dev --product api      Check that your app's settings are ready
+  opv projects                     Projects whose configuration lives in 1Password
   opv run dev --product api -- npm run dev
 
 Deployment:
@@ -51,6 +55,7 @@ Exit codes:
 
 Environment:
   OPV_CONFIG   default for --config
+  OPV_PROJECT  project whose manifest in 1Password to use (title opv · <name>)
   OPV_PRODUCT  default for --product on check, run, doctor, explain, status and plan
                (never sync)
   NO_COLOR     no colour under --color auto
@@ -132,9 +137,11 @@ Examples:
 struct Cli {
     /// Path to secrets.toml.
     ///
-    /// Without this option (or OPV_CONFIG), `secrets.toml` is looked for in the current
-    /// directory and then each parent directory, and the first one found is used. The
-    /// path in use is printed on stderr as `using <path>` unless given with --config.
+    /// Without this option (or OPV_CONFIG), the configuration is found in this order:
+    /// OPV_PROJECT (a manifest in 1Password), `secrets.toml` in the current directory or a
+    /// parent, a `.opv` file naming the project, then the manifest tagged with this
+    /// checkout's git remote. What is used is printed on stderr as `using ...` unless given
+    /// with --config.
     #[arg(
         long,
         global = true,
@@ -258,8 +265,29 @@ enum Cmd {
         /// [env: OPV_PRODUCT]
         #[arg(long, requires = "env")]
         product: Option<String>,
-        /// Print one machine-readable JSON document instead of the table.
-        #[arg(long, requires = "env")]
+        /// Print one machine-readable JSON document instead of the table (with <ENV> or
+        /// --all).
+        #[arg(long)]
+        json: bool,
+        /// One line per environment for every project manifest visible in 1Password. Costs
+        /// one manifest read per project plus one item read per environment (reads are
+        /// retried); a project that cannot be read is one line with its reason.
+        #[arg(long, conflicts_with = "env")]
+        all: bool,
+    },
+    /// List the projects whose configuration lives in 1Password (names only).
+    ///
+    /// One metadata listing per signed-in account shows each manifest's vault, repos and
+    /// paths; --long also reads each manifest once for its environment names.
+    #[command(
+        after_help = "Examples:\n  opv projects            # name, vault, repo and paths\n  opv projects --long     # also environment names (one read per project)\n  opv projects --json     # the same, for scripts"
+    )]
+    Projects {
+        /// Read each manifest for its environment names.
+        #[arg(long)]
+        long: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
         json: bool,
     },
     /// Run your app with the selected product's 1Password settings.
@@ -317,8 +345,10 @@ enum Cmd {
     /// Generate configuration from a 1Password item you have already set up.
     ///
     /// Looks the vault and item up by title once, reads the item's field names and types
-    /// (never its values) and writes IDs, key names and kinds. Writes nothing to 1Password.
-    /// Does not use --config or OPV_CONFIG.
+    /// (never its values) and writes IDs, key names and kinds. In a project with a
+    /// secrets.toml (or with --file) it writes that file; in a new project it saves the
+    /// configuration as a manifest in the item's vault (never a value). Does not use
+    /// --config or OPV_CONFIG.
     #[command(after_help = INIT_EXAMPLES)]
     Init {
         /// Environment name to declare (for example staging or prod).
@@ -339,6 +369,13 @@ enum Cmd {
         /// Overwrite an existing secrets.toml.
         #[arg(long)]
         force: bool,
+        /// Write ./secrets.toml even for a new project (without it, a new project's
+        /// configuration is saved as a manifest in the item's vault).
+        #[arg(long)]
+        file: bool,
+        /// Project name of a new manifest; defaults to the repository's name.
+        #[arg(long, conflicts_with = "file")]
+        project: Option<String>,
     },
     /// Print a shell completion script for commands and options.
     #[command(after_help = completions::INSTALL)]
@@ -410,13 +447,51 @@ impl From<SyncArgs> for sync::SyncOpts {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Print the config-kind (non-secret) values as JSON.
+    /// Print the configuration (no secrets), or with <ENV> its config-kind values as JSON.
+    #[command(
+        after_help = "Examples:\n  opv config export                 # the configuration as TOML\n  opv config export --json          # the configuration as JSON\n  opv config export prod --json     # prod's config-kind values (reads 1Password)"
+    )]
     Export {
-        /// Environment name from the configuration (for example staging or prod).
-        env: String,
-        /// Output JSON (the default and only format; accepted for scripts that pass it).
-        #[arg(long)]
+        /// Environment whose config-kind (non-secret) values are printed as JSON; without
+        /// it, the configuration itself is printed.
+        env: Option<String>,
+        /// Output JSON.
+        #[arg(long, conflicts_with = "toml")]
         json: bool,
+        /// Output the configuration as TOML (the default without <ENV>).
+        #[arg(long, conflicts_with = "env")]
+        toml: bool,
+    },
+    /// Save a secrets.toml as this project's manifest in 1Password (never deletes the file).
+    #[command(
+        after_help = "Examples:\n  opv config import --vault myapp-dev\n  opv config import --file infra/secrets.toml --vault shared --project api --path apps/api"
+    )]
+    Import {
+        /// The file to import; defaults to the secrets.toml found from here.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Vault to create the manifest in (title or ID).
+        #[arg(long)]
+        vault: String,
+        /// Project name; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Monorepo directory this project covers, relative to the repository root
+        /// (repeatable).
+        #[arg(long = "path", value_name = "DIR")]
+        paths: Vec<String>,
+    },
+    /// Edit the configuration in $VISUAL/$EDITOR, validate, show the diff and save once
+    /// confirmed; refuses (and re-opens) when someone changed it meanwhile.
+    #[command(after_help = "Examples:\n  opv config edit\n  EDITOR=nano opv config edit")]
+    Edit,
+    /// Compare a committed copy with the project's manifest; exit 8 with a diff when they
+    /// differ (for review in CI).
+    #[command(after_help = "Examples:\n  opv config check --file secrets.toml")]
+    Check {
+        /// The committed copy.
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
     },
 }
 
@@ -699,28 +774,47 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     if let Cmd::Init { .. } = &cli.cmd {
         return run_init(cli, config_source, &r, out).map(|()| 0);
     }
+    match &cli.cmd {
+        Cmd::Projects { long, json } => {
+            return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        }
+        Cmd::Status {
+            all: true, json, ..
+        } => return config_cmd::status_all(&r, *json, out).map(|()| 0),
+        Cmd::Config(ConfigCmd::Import { .. }) | Cmd::Config(ConfigCmd::Check { .. }) => {
+            return run_config_manifest(cli, &r, out).map(|()| 0);
+        }
+        _ => {}
+    }
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
-    let loaded = match &cli.config {
-        Some(path) => {
-            if config_source == ConfigSource::Env {
-                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
-            }
-            config::load(path)
-        }
-        None => match std::env::current_dir() {
-            Err(e) => Err(Error::Config(
-                format!("cannot read the current directory: {e}").into(),
-            )),
-            Ok(start) => match config::discover(&start) {
-                Some(found) => {
-                    let _ = writeln!(io::stderr(), "using {}", found.display());
-                    config::load(&found)
-                }
-                None => Err(config::not_found(&start)),
-            },
-        },
-    };
+    let found = request(&cli, config_source, false).and_then(|req| config_store::locate(&req, &r));
+    if let Ok(f) = &found
+        && let Some(line) = f.announce()
+    {
+        let _ = writeln!(io::stderr(), "{line}");
+    }
+    let source = found.as_ref().ok().map(|f| f.store().describe());
+    if let (Cmd::Config(ConfigCmd::Edit), Ok(f)) = (&cli.cmd, &found) {
+        use opv::app::setup_runtime;
+        setup_runtime::Console::require_terminal("config edit")?;
+        return config_cmd::edit(f, &r, &mut config_cmd::TerminalUi, out).map(|()| 0);
+    }
+    if let (
+        Cmd::Config(ConfigCmd::Export {
+            env: None, json, ..
+        }),
+        Ok(f),
+    ) = (&cli.cmd, &found)
+    {
+        let format = if *json {
+            config_cmd::Format::Json
+        } else {
+            config_cmd::Format::Toml
+        };
+        return config_cmd::export(f, format, &r, out).map(|()| 0);
+    }
+    let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
     apply_product_env(&mut cmd, &loaded);
     if let Cmd::Run {
@@ -731,12 +825,80 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     {
         return run_cmd::run_for(&loaded?, env, product.as_deref(), command, &r);
     }
-    run_other(cmd, loaded, &r, out).map(|()| 0)
+    run_other(cmd, loaded, source.as_deref(), &r, out).map(|()| 0)
+}
+
+/// The discovery request from the command line and the environment (FR-25, FR-44).
+fn request(
+    cli: &Cli,
+    config_source: ConfigSource,
+    manifest_only: bool,
+) -> Result<config_store::Request, Error> {
+    let start = std::env::current_dir()
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    let given = match config_source {
+        ConfigSource::Env => config_store::Given::Env,
+        _ => config_store::Given::Flag,
+    };
+    Ok(config_store::Request {
+        start,
+        config: cli.config.clone().map(|p| (p, given)),
+        project: config_store::project_env(),
+        manifest_only,
+    })
+}
+
+/// `config import` and `config check`: they compare a file with the manifest, so the
+/// manifest is found without the `secrets.toml` walk-up (and without --config).
+fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
+    let dir = std::env::current_dir()
+        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    match cli.cmd {
+        Cmd::Config(ConfigCmd::Import {
+            file,
+            vault,
+            project,
+            paths,
+        }) => {
+            let file = match file {
+                Some(f) => f,
+                None => config::discover(&dir).ok_or_else(|| {
+                    Error::Config(
+                        format!(
+                            "no secrets.toml found in {} or any parent directory",
+                            dir.display()
+                        )
+                        .into(),
+                    )
+                    .with_next("opv config import --file <path> --vault <vault>")
+                })?,
+            };
+            let args = config_cmd::ImportArgs {
+                file,
+                vault,
+                project,
+                paths,
+            };
+            config_cmd::import(&args, &dir, r, out)
+        }
+        Cmd::Config(ConfigCmd::Check { file }) => {
+            let req = config_store::Request {
+                start: dir,
+                config: None,
+                project: config_store::project_env(),
+                manifest_only: true,
+            };
+            let found = config_store::locate(&req, r)?;
+            config_cmd::check(&found, &file, r, out)
+        }
+        _ => unreachable!("called for config import and check only"),
+    }
 }
 
 fn run_other(
     cmd: Cmd,
     loaded: Result<opv::domain::Fleet, Error>,
+    source: Option<&str>,
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -745,31 +907,44 @@ fn run_other(
         Cmd::Session { .. } => unreachable!("handled before configuration discovery"),
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
-        Cmd::Completions { .. } => unreachable!("handled by run"),
-        Cmd::Doctor { env, product, json } => {
-            doctor::run_scoped_as(loaded, env.as_deref(), product.as_deref(), json, r, out)
-        }
+        Cmd::Completions { .. } | Cmd::Projects { .. } => unreachable!("handled by run"),
+        Cmd::Doctor { env, product, json } => doctor::run_scoped_from(
+            loaded,
+            source,
+            env.as_deref(),
+            product.as_deref(),
+            json,
+            r,
+            out,
+        ),
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
         Cmd::Status {
-            env: None,
-            product: _,
-            json: _,
-        } => status::overview(&loaded?, r, out),
+            env: None, json, ..
+        } => {
+            if json {
+                return Err(Error::Config("status --json needs <ENV> or --all".into())
+                    .with_next("opv status <env> --json"));
+            }
+            status::overview(&loaded?, r, out)
+        }
         Cmd::Status {
             env: Some(env),
             product,
             json,
+            ..
         } => status::run_scoped(&loaded?, &env, product.as_deref(), r, out, json),
         Cmd::Plan(a) => sync::plan_scoped(&loaded?, &a.env, a.product.as_deref(), r, out, a.json),
         Cmd::Sync(a) => {
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())
         }
-        Cmd::Config(ConfigCmd::Export { env, json: _ }) => {
+        Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             config_export::run(&loaded?, &env, r, out)
         }
+        // Reached only when discovery failed: its error is the result.
+        Cmd::Config(_) => loaded.map(|_| ()),
         Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
         Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
     }
@@ -789,6 +964,8 @@ fn run_init(
         fly_app,
         profile,
         force,
+        file,
+        project,
     } = cli.cmd
     else {
         unreachable!("called for init only")
@@ -813,7 +990,13 @@ fn run_init(
         profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
     };
-    init::run(&args, &dir, r, out)
+    // A project that already has a secrets.toml keeps it; a new one gets a manifest
+    // unless --file asks for the file (FR-44).
+    if file || config::discover(&dir).is_some() {
+        init::run(&args, &dir, r, out)
+    } else {
+        init::run_manifest(&args, project.as_deref(), &dir, r, out)
+    }
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

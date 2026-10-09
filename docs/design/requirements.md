@@ -150,7 +150,7 @@ Only explicitly managed secrets may be deleted.
 
 ## FR-1 — Configuration
 
-The CLI shall load a repository-local configuration file named `secrets.toml` by default.
+The CLI shall load its configuration from a repository-local file named `secrets.toml` or, since 0.5.0, from a project manifest in 1Password holding the same TOML (FR-44). The schema is the same in both homes.
 
 The configuration shall support:
 
@@ -162,7 +162,7 @@ The configuration shall support:
 - a flat key map with no products (simple profile, v0.2, FR-20);
 - future extension to additional secret sources and targets.
 
-Since v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25).
+Since v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25). Since 0.5.0 the file is optional: discovery also finds the project's manifest in 1Password (FR-25, FR-44).
 
 Configuration shall never contain secret values.
 
@@ -577,9 +577,11 @@ Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, 
 
 When `--config` is not given, the CLI shall look for `secrets.toml` in the current directory and then in each parent directory, and use the first one found.
 
+Since 0.5.0 (FR-44) the full order is, first match wins: `--config <file>` (or `OPV_CONFIG`); `OPV_PROJECT=<name>` (the manifest titled `opv · <name>`); a `secrets.toml` found by the walk-up (so an existing file keeps working unchanged); a one-line `.opv` file (`project = "<name>"`, optionally `account = "…"`) found by the same walk-up; the manifest whose repo tag matches the normalized `git remote get-url origin` (in a monorepo, the one whose path tag is the longest prefix of the current directory). No match is a configuration error whose `Next:` is `opv init …`; several matches are listed and `OPV_PROJECT` picks one.
+
 Acceptance:
 
-- The resolved path is always printed on stderr, whether found by discovery or given with `--config`.
+- The resolved path (or `manifest "opv · <name>" in vault <V> (matched …)`) is printed on stderr, unless given with `--config`.
 - `--config <path>` overrides discovery; no search is done.
 - Files are never merged; a `secrets.toml` further up is ignored once one is found.
 - No file found is a configuration error (exit 2) naming the directory the search started from.
@@ -672,6 +674,18 @@ Key Vault → Kubernetes Deployment through the External Secrets Operator, with 
 (`refreshInterval: 0`, `remoteRef.version`), readiness checked before the Deployment is repinned,
 and prune only after a healthy rollout. Commands are unchanged. Design: §13 of the multi-cloud
 design. Owner decision 2026-10-08.
+
+## FR-44 — Configuration in 1Password
+
+The configuration may live in 1Password instead of a committed file, so a checkout needs no file at all (`opv login dev; opv run dev -- npm run dev`). Owner decision 2026-10-08, for 0.5.0. Design: `docs/design/config-in-1password.md`.
+
+- **Manifest:** one Secure Note per project, titled `opv · <project>`, tagged `opv-manifest`. Its notes hold the same TOML as `secrets.toml` (validated by the same parser, FR-2); a text field `project`, a field `convention = 1`, and tags `opv-repo:<host>|<owner>|<repo>` (the normalized git remote, `/` written as `|` because 1Password reads `/` in a tag as nesting) and, in a monorepo, `opv-path:<dir>|<subdir>` per covered directory. It holds names, IDs and rules, never a value (SR-1).
+- **Discovery:** FR-25's order. Listing is one `op item list --tags opv-manifest --format json` (metadata only); loading is one `op item get` by vault ID and item ID, before the environment's item read (FR-13 otherwise unchanged). Both go through the runner (reads retried, NR-3) and honour the account (`.opv` `account`, `OP_ACCOUNT`). The git remote is read with a structured `git` call; its URL (which may hold credentials) is never printed or kept, only `host/owner/repo`.
+- **Commands:** `config import [--file] --vault [--project] [--path …]` creates the manifest from a validated file and prints the `Next:` step to delete the file (never deletes it); `config export [--toml|--json]` prints it (`config export <env> --json` keeps FR-18); `config edit` edits a 0600 temporary copy in `$VISUAL`/`$EDITOR`, validates, shows the diff, asks once, and writes only if the item version is unchanged since it was opened (else refuses and re-opens on the new version); `config check --file <path>` exits 8 with a diff when a committed copy differs; `init` for a new project saves a manifest unless `--file`; `projects [--long] [--json]` lists every visible manifest (one listing per account; `--long` reads each one for its environment names); `status --all [--json]` prints the overview of every project (one manifest read per project plus the overview's reads; an unreadable project is one line and the rest continue).
+- **Sessions:** `explain` and `config export` need a 1Password session when the configuration lives there; without one the error says so with `Next: opv login`. `doctor` names the source on its config line.
+- **Writes:** `config import`, `config edit` and `init` write the manifest (owner commands; the write effect, never retried). They extend FR-11's read-only rule only to the manifest, which holds no secret.
+
+Acceptance: an existing `secrets.toml` still wins (the fleet's infra repo is unchanged); import then export is byte-identical; a concurrent edit is refused; no secret value appears in argv, stdin or output of any manifest call.
 
 ## v0.4 local development (FR-34 to FR-36)
 

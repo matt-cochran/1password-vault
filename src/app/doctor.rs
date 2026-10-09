@@ -79,6 +79,20 @@ pub fn run_scoped_as(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_scoped_from(config, None, env, product, json, r, out)
+}
+
+/// [`run_scoped_as`] naming where the configuration came from on the config line
+/// (`source: ./secrets.toml`, `source: manifest "opv · app" in vault V (matched …)`, FR-44).
+pub fn run_scoped_from(
+    config: Result<Fleet, Error>,
+    source: Option<&str>,
+    env: Option<&str>,
+    product: Option<&str>,
+    json: bool,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let config = match env {
         Some(e) => config.and_then(|f| super::local::select(&f, e, product, false)),
         None if product.is_some() => Err(Error::Config("--product requires --env".into())),
@@ -95,6 +109,7 @@ pub fn run_scoped_as(
         product,
         local_only,
         json,
+        source,
     };
     run_on(config, r, &Host::detect, scope, out)
 }
@@ -128,6 +143,8 @@ struct Scope<'a> {
     local_only: bool,
     /// `--json` (P18).
     json: bool,
+    /// Where the configuration came from (FR-44).
+    source: Option<&'a str>,
 }
 
 /// The state of one check line.
@@ -274,7 +291,10 @@ fn run_on(
     let mut report = Report::default();
     let (fleet, config_line) = match config {
         Ok(f) => {
-            let summary = config_summary(&f);
+            let mut summary = config_summary(&f);
+            if let Some(src) = scope.source {
+                summary.push_str(&format!("; source: {src}"));
+            }
             (Some(f), Ok(Check::Ok(summary)))
         }
         Err(e) => (None, Err(e)),

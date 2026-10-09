@@ -163,6 +163,33 @@ staging: 14 keys · 11 saved · 1 skipped · 2 findings · 1 not yet on Fly
 
 It reads each environment's item once. An environment it cannot read is one line `prod: not checked (<error>)` and the others are still shown; the exit code is that error's, else 8 when any environment has findings (with `Next: opv status <env>` for the first), else 0.
 
+### Every project: `opv projects` and `opv status --all`
+
+When configurations live in 1Password (see [configuration](configuration.md#configuration-in-1password)):
+
+```text
+$ opv projects
+api: vault acme-dev; repo github.com/acme/platform; paths apps/api
+web: vault acme-dev; repo github.com/acme/platform; paths apps/web
+$ opv projects --long          # adds "environments dev, prod" (one read per project)
+$ opv status --all
+api (vault acme-dev):
+  dev: run-only (no target)
+  prod: 14 keys · 13 saved · 1 skipped · 0 findings · 0 not yet on Fly
+```
+
+`projects` makes one metadata listing per 1Password account op knows (no manifest is read unless `--long`). `status --all` reads each manifest once and then does what `opv status` does per environment, with the usual read retries; a project that cannot be read is one line `name (vault V): not read (<reason>)` and the others still run. Both take `--json`. Names only, never values.
+
+### Configuration commands
+
+| Command | What it does |
+|---|---|
+| `opv config export [--toml\|--json]` | print the configuration (no values) |
+| `opv config export <env> --json` | that environment's config-kind values |
+| `opv config import --vault V [--file F] [--project P] [--path D]...` | save a `secrets.toml` as the project manifest; never deletes the file |
+| `opv config edit` | edit in `$VISUAL`/`$EDITOR`, validate, diff, confirm, save unless changed meanwhile |
+| `opv config check --file F` | exit 8 with a diff when a committed copy differs from the manifest |
+
 ### Plan
 
 `plan` starts with one count line, then the rows, then what a sync would do, by name, and ends with the sync command:

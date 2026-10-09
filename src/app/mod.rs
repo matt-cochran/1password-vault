@@ -11,6 +11,7 @@
 mod azure_tests;
 #[cfg(test)]
 mod characterization_tests;
+pub mod config_cmd;
 pub mod config_export;
 pub mod doctor;
 pub mod explain;

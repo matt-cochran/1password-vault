@@ -45,6 +45,8 @@ opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging
 
 Repeat per environment by adding the next `[environments.<env>]` block by hand (vault ID and item ID, plus `fly.app` only for an environment that deploys to Fly; a local-only `dev` environment has none), copying the IDs from `opv init` output or from `op vault list --format json` and `op item list --vault <vault> --format json` (these list IDs and titles, not values). Then add rules where the user knows the format of a value, for example `rules = { prefix = "sk-" }` or `rules = { base64_bytes = 32 }`; see [configuration.md](configuration.md#rules-reference). Mark keys that must never change once set (encryption keys) with `immutable = true`.
 
+In a new project (no `secrets.toml` anywhere above the current directory), `opv init` saves the configuration in 1Password as a project manifest instead of a file, tagged with the git remote, so other checkouts need no file; pass `--file` when the user wants a committed `secrets.toml`. To move an existing file into 1Password, run (with the user's yes) `opv config import --vault <vault>`, then `opv config check --file secrets.toml`, and let the user delete the file. `opv config edit` is interactive: leave it to the user. Without a 1Password session, commands on a manifest end with `Next: opv login`.
+
 If there is no item yet, write `secrets.toml` from the example in [configuration.md](configuration.md), then (with the user's yes) run `opv item skeleton <env>` to create the empty fields.
 
 Then:

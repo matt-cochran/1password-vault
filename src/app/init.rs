@@ -78,7 +78,60 @@ fn run_on(
     check_args(args)?;
     let target = dir.join(FILE_NAME);
     refuse_existing(&target, args.force)?;
+    let p = prepare(args, r, host)?;
+    write_atomic(&target, &p.text, args.force)?;
+    let ancestor = ancestor_note(dir);
+    report(args, &p, &target.display().to_string(), ancestor, out)
+}
 
+/// `init` for a new project with no `secrets.toml` (FR-44): the same declaration, saved as
+/// a project manifest in the item's vault, tagged with the git remote. `--force` does not
+/// overwrite a manifest; `opv config edit` changes one.
+pub fn run_manifest(
+    args: &InitArgs,
+    project: Option<&str>,
+    dir: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    check_args(args)?;
+    let p = prepare(args, r, &Host::detect)?;
+    let repo = crate::config_store::git_repo(r);
+    let project = crate::config_store::default_project(project, repo.as_deref(), dir)?;
+    let m = crate::config_store::create_manifest(
+        r,
+        &p.vault.id,
+        &project,
+        repo.as_deref(),
+        &[],
+        &p.text,
+        None,
+    )?;
+    use crate::config_store::ConfigStore as _;
+    let note = match &repo {
+        Some(repo) => format!("note: tagged for {repo}; any checkout of it finds this manifest"),
+        None => format!(
+            "note: no git remote origin; point a checkout at it with OPV_PROJECT={project} or \
+             a .opv file holding project = \"{project}\""
+        ),
+    };
+    report(args, &p, &m.describe(), Some(note), out)
+}
+
+/// What `init` declares, before it is written anywhere.
+struct Prepared {
+    vault: onepassword_init::Named,
+    item: onepassword_init::Named,
+    decl: Declared,
+    text: String,
+}
+
+/// Resolve, read field shapes, declare, render and validate (steps 2 to 5).
+fn prepare(
+    args: &InitArgs,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+) -> Result<Prepared, Error> {
     let vault = onepassword_init::resolve_vault(r, &args.vault, host)?;
     let item = onepassword_init::resolve_item(r, &vault.id, &args.item, host)?;
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
@@ -92,8 +145,24 @@ fn run_on(
         }
         other => other,
     })?;
-    write_atomic(&target, &text, args.force)?;
+    Ok(Prepared {
+        vault,
+        item,
+        decl,
+        text,
+    })
+}
 
+/// The lines after a successful `init`: IDs, notes, counts, `where_` it was written, then
+/// the next step.
+fn report(
+    args: &InitArgs,
+    p: &Prepared,
+    where_: &str,
+    extra: Option<String>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (vault, item, decl) = (&p.vault, &p.item, &p.decl);
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     w(
         out,
@@ -109,13 +178,12 @@ fn run_on(
     w(
         out,
         format!(
-            "wrote {} ({} profile): {secrets} secret, {configs} config, skipped {}",
-            target.display(),
+            "wrote {where_} ({} profile): {secrets} secret, {configs} config, skipped {}",
             profile_word(decl.profile),
             decl.skipped
         ),
     )?;
-    if let Some(note) = ancestor_note(dir) {
+    if let Some(note) = extra {
         w(out, note)?;
     }
     // A URL: the rules reference moved to docs/configuration.md (review #16, #17).
