@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use super::sync::{DRIFT, pinned_diff, pinned_want};
+use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
     PinnedRow, is_blocking, open_target, print_extras, print_rows, read_and_plan, write_err,
     write_json,
@@ -101,21 +101,24 @@ struct PinnedStatus {
 
 impl PinnedStatus {
     fn print(&self, out: &mut dyn Write, env_name: &str) -> Result<(), Error> {
-        let mut line = |label: String, names: &[String]| {
-            if names.is_empty() {
-                return Ok(());
-            }
-            writeln!(out, "{label}: {}", names.join(", ")).map_err(write_err)
-        };
-        line(
-            format!("pending deploy (opv sync {env_name} --deploy)"),
-            &self.pending,
-        )?;
-        line(DRIFT.to_string(), &self.drift)?;
-        line(
-            format!("env-routed (visible to readers of {})", self.runtime),
-            &self.env_routed,
-        )
+        let mut line = |text: String| writeln!(out, "{text}").map_err(write_err);
+        if !self.pending.is_empty() {
+            line(format!(
+                "pending deploy (opv sync {env_name} --deploy): {}",
+                self.pending.join(", ")
+            ))?;
+        }
+        if !self.drift.is_empty() {
+            line(drift_line(env_name, &self.drift.join(", ")))?;
+        }
+        if !self.env_routed.is_empty() {
+            line(format!(
+                "env-routed (visible to readers of {}): {}",
+                self.runtime,
+                self.env_routed.join(", ")
+            ))?;
+        }
+        Ok(())
     }
 }
 

@@ -108,6 +108,8 @@ struct World {
     serial: u32,
     /// New revisions fail to provision.
     fail_revisions: bool,
+    /// New revisions stay provisioning (the health wait times out).
+    stall_revisions: bool,
 }
 
 /// One recorded call.
@@ -150,9 +152,11 @@ fn ok_json(v: &Value) -> Output {
     Output::success(serde_json::to_vec(v).unwrap())
 }
 
-fn revision(name: &str, template: &Value, failed: bool) -> Value {
+fn revision(name: &str, template: &Value, failed: bool, stalled: bool) -> Value {
     let (prov, run, health) = if failed {
         ("Failed", "Failed", "Unhealthy")
+    } else if stalled {
+        ("Provisioning", "Activating", "None")
     } else {
         ("Provisioned", "Running", "Healthy")
     };
@@ -182,7 +186,7 @@ impl Sim {
         let first = format!("{APP}--0000001");
         app["properties"]["latestRevisionName"] = json!(first);
         app["properties"]["latestReadyRevisionName"] = json!(first);
-        let rev = revision(&first, &app["properties"]["template"], false);
+        let rev = revision(&first, &app["properties"]["template"], false, false);
         Self {
             world: RefCell::new(World {
                 item,
@@ -191,6 +195,7 @@ impl Sim {
                 revisions: BTreeMap::from([(first, rev)]),
                 serial: 1,
                 fail_revisions: false,
+                stall_revisions: false,
             }),
             calls: RefCell::default(),
             fail_at: Cell::new(None),
@@ -293,11 +298,11 @@ impl Sim {
             if doc["properties"]["template"] != w.app["properties"]["template"] {
                 w.serial += 1;
                 let rev = format!("{APP}--{:07}", w.serial);
-                let failed = w.fail_revisions;
-                let r = revision(&rev, &doc["properties"]["template"], failed);
+                let (failed, stalled) = (w.fail_revisions, w.stall_revisions);
+                let r = revision(&rev, &doc["properties"]["template"], failed, stalled);
                 w.revisions.insert(rev.clone(), r);
                 latest = json!(rev);
-                if !failed {
+                if !failed && !stalled {
                     ready = json!(rev);
                 }
             }
@@ -663,7 +668,7 @@ fn drift_is_reported_by_status() {
     assert!(
         text_of(&out)
             .lines()
-            .any(|l| l == format!("{}: API_KEY", sync::DRIFT)),
+            .any(|l| l == sync::drift_line("prod", "API_KEY")),
         "{}",
         text_of(&out)
     );
@@ -950,4 +955,73 @@ fn no_change_deploy_reports_a_failed_latest_revision() {
     let _ = sync_on(&sim, &fleet_a(), &deploy());
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(matches!(res, Err(Error::Target(_))), "{res:?}");
+}
+
+/// Shortens the health wait for targets opened on this thread; no test waits 300 s.
+fn short_wait() {
+    crate::adapters::azure::config::TEST_WAIT
+        .with(|w| w.set(Some((Duration::from_secs(1), Duration::from_secs(2)))));
+}
+
+#[test]
+fn timed_out_revision_names_revision_and_keeps_previous_serving() {
+    short_wait();
+    let sim = api_changed();
+    sim.world.borrow_mut().stall_revisions = true;
+    let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
+    let new_rev = format!("{APP}--{:07}", sim.world.borrow().serial);
+    assert!(
+        matches!(&res, Err(Error::Target(m)) if m.contains(&new_rev)
+            && m.contains("previous revision keeps serving")
+            && m.contains("not healthy yet")),
+        "{res:?}"
+    );
+}
+
+#[test]
+fn no_change_deploy_with_failed_latest_revision_says_opv_changed_nothing() {
+    let sim = api_changed();
+    sim.world.borrow_mut().fail_revisions = true;
+    let _ = sync_on(&sim, &fleet_a(), &deploy());
+    let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
+    assert!(
+        matches!(&res, Err(Error::Target(m)) if m.starts_with("nothing to change; the latest revision")
+            && m.contains("(with these settings) is unhealthy")
+            && m.contains("opv changed nothing")
+            && m.contains("Next: `az containerapp revision show")),
+        "{res:?}"
+    );
+}
+
+/// A world synced with config in the store, whose LOG_LEVEL key is then withdrawn.
+fn config_withdrawn() -> (Sim, Fleet) {
+    let sim = converged_with(&fleet_store());
+    let fleet = config::parse(&toml(r#"["prod"]"#, r#"config = "store""#).replace(
+        "[keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"prod\"]",
+        "[keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"staging\"]",
+    ))
+    .unwrap();
+    (sim, fleet)
+}
+
+#[test]
+fn prune_with_deploy_deletes_withdrawn_config_entry_from_the_store() {
+    let (sim, fleet) = config_withdrawn();
+    sync_on(&sim, &fleet, &deploy_prune()).0.unwrap();
+    assert!(!sim.end_state().1.contains_key("log-level"));
+}
+
+#[test]
+fn withdrawn_config_entry_is_kept_without_prune() {
+    let (sim, fleet) = config_withdrawn();
+    sync_on(&sim, &fleet, &deploy()).0.unwrap();
+    assert!(sim.end_state().1.contains_key("log-level"));
+}
+
+#[test]
+fn withdrawn_config_entry_is_not_deleted_before_a_healthy_revision() {
+    let (sim, fleet) = config_withdrawn();
+    sim.world.borrow_mut().fail_revisions = true;
+    let _ = sync_on(&sim, &fleet, &deploy_prune());
+    assert!(!sim.called(&["keyvault", "secret", "delete"]));
 }

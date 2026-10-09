@@ -277,12 +277,15 @@ fn run_pinned(
     let snap = runtime.bindings()?;
     let d = pinned_diff(c.t, &want, &written, &snap, &plan, opts.prune);
     if !d.drift.is_empty() {
-        p(out, format!("{DRIFT}: {}", join(&d.drift)))?;
+        p(out, drift_line(env_name, &join(&d.drift)))?;
     }
+    // Pruned like secrets: opv-managed names no longer desired, including config routed to
+    // the store (the planner names only secrets).
+    let prune_set = prune_names(fleet, env_name, &plan, &listed, &want)?;
     let stray: BTreeSet<&str> = d
         .not_desired
         .iter()
-        .chain(&plan.prune)
+        .chain(&prune_set)
         .map(String::as_str)
         .collect();
     if !stray.is_empty() && !opts.prune {
@@ -315,7 +318,7 @@ fn run_pinned(
     let change = d.change(c.t, &written);
     let pending = change_names(&change);
     let deletes: &[String] = if opts.prune && opts.deploy {
-        &plan.prune
+        &prune_set
     } else {
         &[]
     };
@@ -363,7 +366,23 @@ fn run_pinned(
             runtime.describe()
         )));
     };
-    match runtime.await_healthy(&revision)? {
+    let health = runtime.await_healthy(&revision)?;
+    if pending.is_empty() && !matches!(health, Health::Healthy) {
+        // Nothing was applied: say so, so a failure is not read as caused by this run.
+        let state = match &health {
+            Health::TimedOut => "not healthy yet".to_string(),
+            Health::Unhealthy(detail) => format!("unhealthy\n  {detail}"),
+            Health::Healthy => unreachable!(),
+        };
+        return Err(Error::Target(format!(
+            "nothing to change; the latest revision {} (with these settings) is {state}; opv \
+             changed nothing\n  Next: `{}` to see its state; if it cannot read its secrets, \
+             run opv doctor --env {env_name}",
+            revision.0,
+            runtime.inspect_hint(&revision)
+        )));
+    }
+    match health {
         Health::Healthy => {}
         Health::Unhealthy(detail) => {
             return Err(Error::Target(format!(
@@ -409,8 +428,49 @@ fn run_pinned(
     env_routed(out)
 }
 
-/// The drift line's label (status and sync).
-pub(crate) const DRIFT: &str = "drift (bound to a version other than the store's current one)";
+/// The drift line (status and sync): a binding older than the store's current version
+/// is either a hand re-pin or a sync that ran without `--deploy`; opv cannot tell which.
+pub(crate) fn drift_line(env_name: &str, names: &str) -> String {
+    format!(
+        "drift: {names} point to an older Key Vault version than the latest (re-pinned by \
+         hand, or synced without --deploy); opv sync {env_name} --deploy repins them"
+    )
+}
+
+/// Store names to prune: the plan's secrets plus managed config entries (config routed to
+/// the store) whose key is no longer desired here. Only entries the store lists as
+/// opv-managed for this environment; immutable keys are held as for secrets.
+fn prune_names(
+    fleet: &Fleet,
+    env_name: &str,
+    plan: &SyncPlan,
+    listed: &[StoreEntry],
+    want: &PinnedWant,
+) -> Result<Vec<String>, Error> {
+    let env = fleet.environment(env_name)?;
+    let mut names = plan.prune.clone();
+    for (product, p) in &fleet.products {
+        for (key, spec) in &p.keys {
+            let desired = plan
+                .config
+                .get(product)
+                .is_some_and(|k| k.contains_key(key));
+            let Some(name) = env.target_name(product, key) else {
+                continue;
+            };
+            if spec.kind == Kind::Config
+                && !spec.immutable
+                && !desired
+                && !want.store.contains_key(&name)
+                && listed.iter().any(|e| e.name == name)
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    Ok(names)
+}
 
 /// Applies `change`. An apply whose outcome is unknown (NR-2) is reconciled by reading the
 /// bindings back: when they show the change, the run goes on with the revision they name;

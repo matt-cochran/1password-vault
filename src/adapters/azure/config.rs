@@ -189,6 +189,13 @@ impl AzureTarget {
     }
 }
 
+// Test-only: health poll interval and limit for targets opened on this thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_WAIT: std::cell::Cell<Option<(std::time::Duration, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl TargetConfig for AzureTarget {
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
@@ -238,22 +245,39 @@ impl TargetConfig for AzureTarget {
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error> {
+        // Tests shorten the health wait and never sleep; production has no such switch.
+        #[cfg(test)]
+        let test_wait = TEST_WAIT.with(std::cell::Cell::get);
+        #[cfg(test)]
+        let pacer: &dyn az::Pacer = if test_wait.is_some() {
+            &az::NO_WAIT
+        } else {
+            &az::SYSTEM_PACER
+        };
+        #[cfg(not(test))]
+        let pacer: &dyn az::Pacer = &az::SYSTEM_PACER;
+        let app = ContainerApp::new(
+            r,
+            self,
+            None,
+            managed.clone(),
+            format!("https://{}.vault.azure.net", self.key_vault),
+            pacer,
+        );
+        #[cfg(test)]
+        let app = match test_wait {
+            Some((every, max)) => app.with_wait(every, max),
+            None => app,
+        };
         Ok(Ports::Pinned {
             store: Box::new(KeyVault {
                 runner: r,
                 vault: &self.key_vault,
                 env,
-                managed: managed.clone(),
-                pacer: &az::SYSTEM_PACER,
-            }),
-            runtime: Box::new(ContainerApp::new(
-                r,
-                self,
-                None,
                 managed,
-                format!("https://{}.vault.azure.net", self.key_vault),
-                &az::SYSTEM_PACER,
-            )),
+                pacer,
+            }),
+            runtime: Box::new(app),
         })
     }
 
