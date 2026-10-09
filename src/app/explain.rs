@@ -14,7 +14,7 @@
 
 use std::io::Write;
 
-use super::{kind_label, write_err};
+use super::{kind_label, suggest, write_err};
 use crate::adapters::registry;
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
 use crate::domain::{Fleet, rules};
@@ -43,17 +43,29 @@ pub fn run(
 }
 
 /// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
-/// under the simple profile. The other profile's form is a configuration error.
+/// under the simple profile (FR-20). P8: a bare `<KEY>` under the fleet profile resolves to
+/// the one product that declares it, or lists every product that does; a `<product>/<KEY>`
+/// under the simple profile names the bare key; an unknown name suggests close declared
+/// names. Configuration only: names, never values.
 fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
     if fleet.is_simple() {
-        if target.contains('/') {
+        let keys = fleet.products.get(SIMPLE_PRODUCT).map(|p| &p.keys);
+        let names = || keys.into_iter().flat_map(|k| k.keys().map(String::as_str));
+        if let Some((_, key)) = target.split_once('/') {
+            let hint = if keys.is_some_and(|k| k.contains_key(key)) {
+                format!("; did you mean {key}?")
+            } else {
+                suggest::hint(key, names())
+            };
             return Err(Error::Config(format!(
-                "explain expects <KEY> under the simple profile, got {target:?}"
+                "explain expects <KEY> under the simple profile, got {target:?}{hint}"
             )));
         }
-        let keys = fleet.products.get(SIMPLE_PRODUCT).map(|p| &p.keys);
         let Some((key, spec)) = keys.and_then(|k| k.get_key_value(target)) else {
-            return Err(Error::Config(format!("undeclared key {target:?}")));
+            return Err(Error::Config(format!(
+                "undeclared key {target:?}{}",
+                suggest::hint(target, names())
+            )));
         };
         return Ok(Target {
             product: SIMPLE_PRODUCT,
@@ -62,23 +74,83 @@ fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
         });
     }
     let Some((product, key)) = target.split_once('/') else {
-        return Err(Error::Config(format!(
-            "explain expects <product>/<key>, got {target:?}"
-        )));
+        return resolve_bare(fleet, target);
     };
     let Some((product, p)) = fleet.products.get_key_value(product) else {
         let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
         return Err(Error::Config(format!(
-            "undeclared product {product:?} (declared: {})",
-            known.join(", ")
+            "undeclared product {product:?} (declared: {}){}",
+            known.join(", "),
+            suggest::hint(product, known.iter().copied())
         )));
     };
     let Some((key, spec)) = p.keys.get_key_value(key) else {
+        let elsewhere: Vec<String> = fleet
+            .products
+            .iter()
+            .filter(|(_, other)| other.keys.contains_key(key))
+            .map(|(name, _)| key_label(name, key))
+            .collect();
+        let hint = if elsewhere.is_empty() {
+            suggest::hint(key, p.keys.keys().map(String::as_str))
+        } else {
+            format!("; declared as {}", elsewhere.join(", "))
+        };
         return Err(Error::Config(format!(
-            "undeclared key {key:?} in product {product}"
+            "undeclared key {key:?} in product {product}{hint}"
         )));
     };
     Ok(Target { product, key, spec })
+}
+
+/// A bare `<KEY>` under the fleet profile: the one product that declares it, or an error
+/// listing every candidate (ambiguous) or the closest declared keys (unknown).
+fn resolve_bare<'a>(fleet: &'a Fleet, key: &str) -> Result<Target<'a>, Error> {
+    let found: Vec<(&'a str, &'a str, &'a KeySpec)> = fleet
+        .products
+        .iter()
+        .filter_map(|(name, p)| {
+            p.keys
+                .get_key_value(key)
+                .map(|(k, spec)| (name.as_str(), k.as_str(), spec))
+        })
+        .collect();
+    match found.as_slice() {
+        [(product, key, spec)] => Ok(Target { product, key, spec }),
+        [] => {
+            let all: Vec<String> = fleet
+                .products
+                .iter()
+                .flat_map(|(name, p)| p.keys.keys().map(move |k| key_label(name, k)))
+                .collect();
+            let bare: Vec<&str> = all
+                .iter()
+                .map(|l| l.split_once('/').map_or(l.as_str(), |(_, k)| k))
+                .collect();
+            let close: Vec<&str> = suggest::close(key, bare.iter().copied());
+            let labels: Vec<&str> = all
+                .iter()
+                .zip(&bare)
+                .filter(|(_, b)| close.contains(b))
+                .map(|(l, _)| l.as_str())
+                .collect();
+            let hint = if labels.is_empty() {
+                String::new()
+            } else {
+                format!("; did you mean {}?", labels.join(" or "))
+            };
+            Err(Error::Config(format!(
+                "undeclared key {key:?} (explain takes <product>/<KEY>){hint}"
+            )))
+        }
+        many => Err(Error::Config(format!(
+            "ambiguous key {key:?}: declared as {}; pass one of them",
+            many.iter()
+                .map(|(p, k, _)| key_label(p, k))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 /// The environment to explain: `--env` when given (it must be defined and the key declared
@@ -590,9 +662,66 @@ mod tests {
         );
     }
 
+    /// P8: a bare key declared by one product resolves to that product.
     #[test]
-    fn target_without_slash_is_config_error() {
-        let e = explain(&fleet(), "OPENAI_API_KEY", Some("prod")).unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
+    fn bare_key_unique_across_products_resolves() {
+        let out = explain(&fleet(), "OPENAI_API_KEY", Some("prod")).unwrap();
+        assert!(
+            out.starts_with("allumata/OPENAI_API_KEY in prod\n"),
+            "{out}"
+        );
+    }
+
+    fn two_products() -> Fleet {
+        fleet_with(
+            "[products.web.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        )
+    }
+
+    #[test]
+    fn bare_key_in_several_products_lists_the_candidates() {
+        let e = explain(&two_products(), "OPENAI_API_KEY", Some("prod")).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("ambiguous key \"OPENAI_API_KEY\": declared as allumata/OPENAI_API_KEY, web/OPENAI_API_KEY"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn bare_unknown_key_suggests_a_close_declared_key() {
+        let e = explain(&fleet(), "OPENAI_API_KY", Some("prod")).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("did you mean allumata/OPENAI_API_KEY?"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn misspelt_key_in_a_product_suggests_the_declared_key() {
+        let e = explain(&fleet(), "allumata/OPENAI_API_KY", Some("prod")).unwrap_err();
+        assert!(
+            e.to_string().contains("did you mean OPENAI_API_KEY?"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn misspelt_product_suggests_the_declared_product() {
+        let e = explain(&fleet(), "alumata/OPENAI_API_KEY", Some("prod")).unwrap_err();
+        assert!(e.to_string().contains("did you mean allumata?"), "{e}");
+    }
+
+    #[test]
+    fn simple_product_form_suggests_the_bare_key() {
+        let e = explain(&simple(), "api/DATABASE_URL", Some("prod")).unwrap_err();
+        assert!(e.to_string().contains("did you mean DATABASE_URL?"), "{e}");
+    }
+
+    #[test]
+    fn simple_misspelt_key_suggests_the_declared_key() {
+        let e = explain(&simple(), "DATABASE_UR", Some("prod")).unwrap_err();
+        assert!(e.to_string().contains("did you mean DATABASE_URL?"), "{e}");
     }
 }

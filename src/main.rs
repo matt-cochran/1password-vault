@@ -218,6 +218,9 @@ enum Cmd {
         /// Limit configuration checks to one product; requires --env. [env: OPV_PRODUCT]
         #[arg(long, requires = "env")]
         product: Option<String>,
+        /// Print one JSON document (check names, states and next steps) instead of lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Check whether your required settings are ready; contacts no deployment target.
     #[command(after_help = CHECK_EXAMPLES)]
@@ -481,7 +484,7 @@ impl Cmd {
     /// Text output with state words worth colouring (never JSON, never values).
     fn has_state_words(&self) -> bool {
         match self {
-            Cmd::Doctor { .. } => true,
+            Cmd::Doctor { json, .. } => !json,
             Cmd::Check { json, .. } | Cmd::Status { json, .. } => !json,
             Cmd::Plan(a) => !a.json,
             _ => false,
@@ -518,6 +521,7 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
         Cmd::Doctor {
             env: Some(_),
             product,
+            ..
         } => {
             let (p, used) = product_or_env(product.take(), env, fleet_profile);
             *product = p;
@@ -547,7 +551,7 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     if let Cmd::Session { account, command } = &cli.cmd {
         use opv::app::{setup, setup_runtime};
         use setup::Interaction;
-        setup_runtime::Console::require_terminal()?;
+        setup_runtime::Console::require_terminal("session")?;
         let mut runtime = setup_runtime::Runtime::with_account(account.as_deref());
         let mut console = setup_runtime::Console;
         setup::prepare(account.as_deref(), &mut runtime, &mut console)?;
@@ -563,12 +567,13 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
     } = &cli.cmd
     {
         use opv::app::{setup, setup_recipe, setup_runtime};
-        setup_runtime::Console::require_terminal()?;
+        setup_runtime::Console::require_terminal("setup")?;
         let start = std::env::current_dir()
             .map_err(|_| Error::Config("Cannot locate the current directory.".into()))?;
-        let recipe = recipe.clone().or_else(|| setup_recipe::discover(&start)).ok_or_else(|| Error::Config(
-            "[SETUP-RECIPE] This project has no setup recipe yet. Add opv.setup.toml, or use opv setup --recipe <path>. See docs/guided-setup.md for the reusable recipe format.".into()
-        ))?;
+        let recipe = recipe
+            .clone()
+            .or_else(|| setup_recipe::discover(&start))
+            .ok_or_else(|| setup_recipe::missing(&start))?;
         return setup::run(
             &recipe,
             cli.config.as_deref(),
@@ -610,10 +615,7 @@ fn run(cli: Cli, config_source: ConfigSource, out: &mut dyn Write) -> Result<i32
                     let _ = writeln!(io::stderr(), "using {}", found.display());
                     config::load(&found)
                 }
-                None => Err(Error::Config(format!(
-                    "no secrets.toml found in {} or any parent directory. New project? Run opv setup. Already configured? Pass --config <path> to select its configuration.",
-                    start.display()
-                ))),
+                None => Err(config::not_found(&start)),
             },
         },
     };
@@ -642,8 +644,8 @@ fn run_other(
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Completions { .. } => unreachable!("handled by run"),
-        Cmd::Doctor { env, product } => {
-            doctor::run_scoped(loaded, env.as_deref(), product.as_deref(), r, out)
+        Cmd::Doctor { env, product, json } => {
+            doctor::run_scoped_as(loaded, env.as_deref(), product.as_deref(), json, r, out)
         }
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)

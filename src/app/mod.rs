@@ -30,6 +30,7 @@ pub mod setup_runtime;
 mod simple_tests;
 pub mod skeleton;
 pub mod status;
+pub(crate) mod suggest;
 pub mod sync;
 
 use std::cell::RefCell;

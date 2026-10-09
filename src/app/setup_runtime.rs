@@ -71,7 +71,7 @@ fn dependency(error: io::Error) -> Error {
         crate::adapters::onepassword::op_missing(&crate::host::Host::detect())
     } else {
         Error::Dependency(format!(
-            "[SETUP-CLI] Cannot execute the 1Password CLI ({:?}). Check its installation and executable permissions.",
+            "Cannot execute the 1Password CLI ({:?}). Check its installation and executable permissions.",
             error.kind()
         ))
     }
@@ -79,7 +79,7 @@ fn dependency(error: io::Error) -> Error {
 
 pub fn session_assignment(output: &[u8]) -> Result<Option<(String, SecretValue)>, Error> {
     let fail = || {
-        Error::Auth("[SETUP-SESSION] 1Password returned an unexpected sign-in response. Nothing was evaluated or printed. Run op signin --help for this CLI version.".into())
+        Error::Auth("1Password returned an unexpected sign-in response. Nothing was evaluated or printed. Run op signin --help for this CLI version.".into())
     };
     let text = std::str::from_utf8(output).map_err(|_| fail())?;
     let pattern = Regex::new(r#"^export[ \t]+(OP_SESSION(?:_[A-Za-z0-9_]+)?)=(?:"([A-Za-z0-9._/+=-]+)"|'([A-Za-z0-9._/+=-]+)'|([A-Za-z0-9._/+=-]+));?[ \t]*$"#).expect("fixed session pattern");
@@ -136,7 +136,7 @@ impl Backend for Runtime {
                 stdout: Zeroizing::new(Vec::new()),
             }),
             Outcome::Unknown { reason, .. } => Err(Error::Unknown(format!(
-                "[SETUP-UNKNOWN] 1Password did not answer in time ({reason}). Fields already saved are kept. Run opv setup again to check and resume."
+                "1Password did not answer in time ({reason}). Fields already saved are kept. Run opv setup again to check and resume."
             ))),
         }
     }
@@ -167,7 +167,7 @@ impl Backend for Runtime {
                 .map_err(dependency)?;
         let status = child.wait().map_err(dependency)?;
         if !status.success() {
-            return Err(Error::Auth("[SETUP-SIGNIN] 1Password could not sign in. Check the account and password at its prompts, then rerun opv setup. Session output was not printed.".into()));
+            return Err(Error::Auth("1Password could not sign in. Check the account and password at its prompts, then rerun opv setup. Session output was not printed.".into()));
         }
         if !add_account && let Some((name, value)) = session_assignment(&output)? {
             self.session = vec![(
@@ -184,13 +184,22 @@ impl Backend for Runtime {
 
 pub struct Console;
 impl Console {
-    pub fn require_terminal() -> Result<(), Error> {
+    /// `command` (`setup` or `session`) needs the owner's own terminal; the refusal names
+    /// that command (review #8).
+    pub fn require_terminal(command: &str) -> Result<(), Error> {
+        let what = if command == "session" {
+            "opv session signs in at 1Password's own prompts, so it"
+        } else {
+            "Guided setup (opv setup)"
+        };
         if !io::stdin().is_terminal()
             || !io::stdout().is_terminal()
             || std::env::var_os("CI").is_some_and(|v| !v.is_empty() && v != "false" && v != "0")
             || std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true")
         {
-            return Err(Error::Policy("[SETUP-TERMINAL] Guided setup needs your own interactive terminal. Automation should use init, doctor, check, item skeleton and run with declared configuration.".into()));
+            return Err(Error::Policy(format!(
+                "{what} needs your own interactive terminal. Automation should use init, doctor, check, item skeleton and run with declared configuration."
+            )));
         }
         for key in [
             "OP_SERVICE_ACCOUNT_TOKEN",
@@ -198,7 +207,9 @@ impl Console {
             "OP_CONNECT_TOKEN",
         ] {
             if std::env::var_os(key).is_some_and(|v| !v.is_empty()) {
-                return Err(Error::Policy("[SETUP-AUTH-MODE] A service-account or Connect credential is active. Use a separate owner terminal for guided setup; existing automation authentication is unchanged.".into()));
+                return Err(Error::Policy(format!(
+                    "A service-account or Connect credential is active. Use a separate owner terminal for opv {command}; existing automation authentication is unchanged."
+                )));
             }
         }
         Ok(())
@@ -230,7 +241,7 @@ impl Interaction for Console {
         ))
     }
     fn secret(&mut self, title: &str) -> Result<SecretValue, Error> {
-        let value = rpassword::prompt_password(format!("{title} (hidden; Enter to skip): ")).map_err(|_| Error::Dependency("[SETUP-INPUT] Cannot read hidden input. Use your own interactive terminal, or fill this field privately in 1Password.".into()))?;
+        let value = rpassword::prompt_password(format!("{title} (hidden; Enter to skip): ")).map_err(|_| Error::Dependency("Cannot read hidden input. Use your own interactive terminal, or fill this field privately in 1Password.".into()))?;
         Ok(SecretValue::new(value))
     }
     fn choose(&mut self, question: &str, choices: &[String]) -> Result<String, Error> {

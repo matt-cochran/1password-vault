@@ -143,6 +143,25 @@ fn missing_discovered_config_names_starting_directory() {
     assert!(same_file(named, &nested), "{err}");
 }
 
+/// P3: the first-run router offers both starting paths.
+#[test]
+fn missing_discovered_config_offers_init_and_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, err) = opv_in(dir.path(), &["status", "prod"]);
+    assert!(
+        err.contains("opv init <env> --vault <vault title> --item <item title>")
+            && err.contains("opv setup"),
+        "{err}"
+    );
+}
+
+/// Review #8: `opv session` without a terminal names itself, not guided setup.
+#[test]
+fn session_without_a_terminal_names_session() {
+    let (_, _, err) = opv(&["session"]);
+    assert!(err.contains("opv session"), "{err}");
+}
+
 #[test]
 fn missing_discovered_config_suggests_config_flag() {
     let dir = tempfile::tempdir().unwrap();
@@ -571,9 +590,9 @@ fn explain_product_form_under_simple_exits_2() {
     assert_eq!(code, 2, "{err}");
 }
 
-/// FR-22, FR-20: a bare key under the fleet profile is a configuration error.
+/// P8: a bare key declared by one product resolves to it under the fleet profile.
 #[test]
-fn explain_bare_key_under_fleet_exits_2() {
+fn explain_bare_key_unique_under_fleet_exits_0() {
     let (code, _, err) = opv(&[
         "--config",
         CFG,
@@ -582,6 +601,13 @@ fn explain_bare_key_under_fleet_exits_2() {
         "--env",
         "prod",
     ]);
+    assert_eq!(code, 0, "{err}");
+}
+
+/// FR-22: an undeclared bare key under the fleet profile is a configuration error.
+#[test]
+fn explain_undeclared_bare_key_under_fleet_exits_2() {
+    let (code, _, err) = opv(&["--config", CFG, "explain", "NOPE", "--env", "prod"]);
     assert_eq!(code, 2, "{err}");
 }
 
@@ -834,7 +860,6 @@ fn guided_commands_refuse_headless_execution_before_vendor_calls() {
         let (code, stdout, stderr) = opv(&[command]);
         assert_eq!(code, 6);
         assert!(stdout.is_empty());
-        assert!(stderr.contains("SETUP-TERMINAL"));
         assert!(stderr.contains("interactive terminal"));
     }
 }

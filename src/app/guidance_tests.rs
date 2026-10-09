@@ -83,12 +83,12 @@ fn fake_op(s: S, ci: bool) -> FakeRunner {
     match s {
         S::OpMissing => q.push_back(Err(io::ErrorKind::NotFound.into())),
         S::NotVisible => {
-            q.extend(failed_read(1).map(Ok));
+            q.push_back(Ok(Output::failure(1)));
             q.push_back(Ok(Output::success(WHOAMI_USER)));
             q.push_back(Ok(Output::failure(1)));
         }
         S::Expired | S::NoAccount => {
-            q.extend(failed_read(1).map(Ok));
+            q.push_back(Ok(Output::failure(1)));
             q.push_back(Ok(Output::failure(1)));
             if !ci {
                 let list = if matches!(s, S::Expired) {
@@ -197,12 +197,8 @@ fn expired(p: P) {
     assert!(!t.contains("to see why"), "{t}");
     assert_signin_syntax(p, &t);
     assert_no_values(&t);
-    // FR-13: one item read; its attempts (NR-3 retries) are not extra reads.
-    assert_eq!(
-        op_item_reads(&r),
-        crate::runner::READ_ATTEMPTS as usize,
-        "FR-13"
-    );
+    // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
+    assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
 }
 
 fn no_account(p: P) {
@@ -228,12 +224,8 @@ fn no_account(p: P) {
         assert!(t.contains("WSL"), "{t}");
     }
     assert_no_values(&t);
-    // FR-13: one item read; its attempts (NR-3 retries) are not extra reads.
-    assert_eq!(
-        op_item_reads(&r),
-        crate::runner::READ_ATTEMPTS as usize,
-        "FR-13"
-    );
+    // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
+    assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
 }
 
 fn not_visible(p: P) {
@@ -248,12 +240,8 @@ fn not_visible(p: P) {
         "{t}"
     );
     assert_no_values(&t);
-    // FR-13: one item read; its attempts (NR-3 retries) are not extra reads.
-    assert_eq!(
-        op_item_reads(&r),
-        crate::runner::READ_ATTEMPTS as usize,
-        "FR-13"
-    );
+    // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
+    assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
 }
 
 fn op_missing(p: P) {
@@ -379,7 +367,7 @@ fn rejected_or_unreachable_credential_is_source_exit_4() {
         ),
     ] {
         let h = Host::from_env(&fake);
-        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1)]));
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
         let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
         let t = e.to_string();
         assert_eq!(e.exit_code(), 4, "{t}");
@@ -393,7 +381,7 @@ fn rejected_or_unreachable_credential_is_source_exit_4() {
         assert!(!t.contains("op signin") && !t.contains("to see why"), "{t}");
         assert_eq!(
             r.calls.borrow().len(),
-            crate::runner::READ_ATTEMPTS as usize + 1,
+            2,
             "no account list with a credential"
         );
     }
@@ -408,10 +396,14 @@ fn connect_item_not_found_is_source_exit_4() {
             .var("OP_CONNECT_HOST")
             .var("OP_CONNECT_TOKEN"),
     );
-    let r = FakeRunner::new(failed_read(1).chain([
-        Output::success(WHOAMI_USER),
-        Output::success(b"{}".to_vec()),
-    ]));
+    let r = FakeRunner::new(
+        std::iter::once(Output::failure(1))
+            .chain([
+                Output::success(WHOAMI_USER),
+                Output::success(b"{}".to_vec()),
+            ])
+            .chain(failed_read(1)),
+    );
     let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
     let t = e.to_string();
     assert_eq!(e.exit_code(), 4, "{t}");
@@ -424,7 +416,7 @@ fn connect_item_not_found_is_source_exit_4() {
 fn connect_whoami_failing_is_not_auth_with_interactive_command() {
     for shell in ["/bin/bash", "/usr/bin/fish"] {
         let h = Host::from_env(&FakeEnv::new("linux").shell(shell).var("OP_CONNECT_HOST"));
-        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1)]));
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
         let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
         let t = e.to_string();
         assert_ne!(e.exit_code(), 7, "{t}");
