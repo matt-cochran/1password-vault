@@ -263,3 +263,43 @@ fn doctor_signed_out_deploy_failure() -> Error {
     crate::host::with_test_host(tty, || open_for_doctor_on(&fl, "prod", &r, &linux).1)
         .expect("signed out")
 }
+
+// ---- FR-41 plan ids on deploy-credential runs and manifest configurations ----
+
+/// The plan id `opv plan prod --json` reports through `r`.
+fn plan_id_of(fl: &Fleet, r: &dyn CommandRunner) -> String {
+    let mut out = Vec::new();
+    crate::app::sync::plan_with(fl, "prod", r, &mut out, true).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    doc["plan_id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn plan_id_through_deploy_credentials_matches_a_plain_run() {
+    let fl = fleet_with_credentials();
+    let signed = FakeRunner::new([deploy_item(), complete_item(), fly_empty()]);
+    let env_runner = open_on(&fl, "prod", &signed, Reach::Target, &linux).unwrap();
+    let through = plan_id_of(&fl, &env_runner);
+    let plain = FakeRunner::new([complete_item(), fly_empty()]);
+    assert_eq!(through, plan_id_of(&fl, &plain));
+}
+
+#[test]
+fn plan_id_of_a_manifest_configuration_matches_the_same_file() {
+    let file = fleet_with_credentials();
+    let mut manifest = file.clone();
+    manifest.origin = crate::domain::Origin::Manifest;
+    let a = plan_id_of(&file, &FakeRunner::new([complete_item(), fly_empty()]));
+    let b = plan_id_of(&manifest, &FakeRunner::new([complete_item(), fly_empty()]));
+    assert_eq!(a, b);
+}
+
+#[test]
+fn plan_of_a_manifest_configuration_names_the_manifest_not_the_file() {
+    let mut fl = fleet_with_credentials();
+    fl.origin = crate::domain::Origin::Manifest;
+    let mut out = Vec::new();
+    let r = FakeRunner::new([complete_item(), fly_empty()]);
+    crate::app::sync::plan_with(&fl, "prod", &r, &mut out, false).unwrap();
+    assert!(text_of(&out).contains("the target or the manifest changed"));
+}

@@ -18,18 +18,20 @@ pub fn account(
     env: Option<&str>,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
+    account_or(fleet, None, env, ui)
+}
+
+/// [`account`], with the account to use when there is no configuration to read yet: a
+/// project whose configuration lives in 1Password (FR-44) cannot be read before signing
+/// in, so its `.opv` pointer's account (or op's default) is used for any environment.
+pub fn account_or(
+    fleet: Option<&Fleet>,
+    fallback: Option<&str>,
+    env: Option<&str>,
+    ui: &mut dyn Interaction,
+) -> Result<Option<String>, Error> {
     let Some(fleet) = fleet else {
-        return match env {
-            Some(e) => Err(Error::Config(
-                format!(
-                    "no secrets.toml found, so environment {e:?} is unknown; opv login without \
-                 an environment uses your default 1Password account\n  next: opv --config \
-                 <path> login {e}"
-                )
-                .into(),
-            )),
-            None => Ok(None),
-        };
+        return Ok(fallback.map(str::to_string));
     };
     if let Some(e) = env {
         return Ok(fleet.environment(e)?.account.clone());
@@ -72,7 +74,19 @@ pub fn run(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<i32, Error> {
-    let account = account(fleet, env, ui)?;
+    run_or(fleet, None, env, command, backend, ui)
+}
+
+/// [`run`] with [`account_or`]'s fallback account.
+pub fn run_or(
+    fleet: Option<&Fleet>,
+    fallback: Option<&str>,
+    env: Option<&str>,
+    command: &[String],
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<i32, Error> {
+    let account = account_or(fleet, fallback, env, ui)?;
     backend.use_account(account.as_deref());
     prepare(account.as_deref(), backend, ui)?;
     if command.is_empty() {

@@ -239,6 +239,14 @@ pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::Cur
 
 /// A failed write to the output stream. A closed pipe never gets here: `main` swallows
 /// `BrokenPipe` so the command still returns its own result (e.g. `status | head`).
+/// `text` with `note` appended to its first line (before a snippet or `fix:` lines).
+pub(crate) fn on_first_line(text: &str, note: &str) -> String {
+    match text.split_once('\n') {
+        Some((first, rest)) => format!("{first}{note}\n{rest}"),
+        None => format!("{text}{note}"),
+    }
+}
+
 pub(crate) fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()).into())
 }

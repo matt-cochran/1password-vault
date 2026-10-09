@@ -1061,7 +1061,8 @@ fn add_env_with(file: &str, a: &InitArgs, fields: &[Field]) -> AddEnv {
     fs::write(&path, file).unwrap();
     let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
     let mut out = Vec::new();
-    let res = add_env(a, &path, &r, &mut out);
+    let store = crate::config_store::FileStore { path: path.clone() };
+    let res = add_env(a, &store, &r, &mut out);
     let run = AddEnv {
         _dir: dir,
         path,
@@ -1152,4 +1153,119 @@ fn add_env_without_a_target_points_at_check() {
         "{}",
         run.out
     );
+}
+
+// --- init --add-env on a manifest (FR-44): the same edit through ConfigStore ---
+
+/// Manifest calls (`item get <manifest>`, `item edit`) go to the stateful fake; the item
+/// lookups `init` makes go to the scripted one.
+struct Split<'a> {
+    op: &'a crate::adapters::fake_op::FakeOp,
+    rest: &'a FakeRunner,
+    manifest: String,
+}
+
+impl Split<'_> {
+    fn to_op(&self, call: &crate::runner::Call) -> bool {
+        call.args.contains(&self.manifest.as_str()) || call.args.starts_with(&["item", "edit"])
+    }
+}
+
+impl CommandRunner for Split<'_> {
+    fn read(
+        &self,
+        call: &crate::runner::Call,
+        refused: &[i32],
+    ) -> std::io::Result<crate::runner::Outcome> {
+        if self.to_op(call) {
+            self.op.read(call, refused)
+        } else {
+            self.rest.read(call, refused)
+        }
+    }
+    fn write(&self, call: &crate::runner::Call) -> std::io::Result<crate::runner::Outcome> {
+        if self.to_op(call) {
+            self.op.write(call)
+        } else {
+            self.rest.write(call)
+        }
+    }
+    fn probe(
+        &self,
+        call: &crate::runner::Call,
+        limit: std::time::Duration,
+    ) -> std::io::Result<Output> {
+        if self.to_op(call) {
+            self.op.probe(call, limit)
+        } else {
+            self.rest.probe(call, limit)
+        }
+    }
+    fn pause(&self, _: std::time::Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> std::io::Result<i32> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// `init --add-env` against a manifest holding `body`; returns the manifest's text after.
+fn add_env_to_manifest(body: &str, a: &InitArgs) -> (Result<(), Error>, String, String) {
+    use crate::adapters::onepassword_manifest::{Row, VaultRef, template};
+    use crate::config_store::{Found, ManifestStore, Matched, manifest_title};
+    let op = crate::adapters::fake_op::FakeOp::default();
+    let id = op.insert(
+        "myapp-dev",
+        template(&manifest_title("myapp"), "myapp", &[], body),
+    );
+    let row = Row {
+        id: id.clone(),
+        title: manifest_title("myapp"),
+        tags: Vec::new(),
+        version: 1,
+        vault: VaultRef {
+            id: "vdev0000000000000000000001".into(),
+            name: "myapp-dev".into(),
+        },
+    };
+    let found = Found::Manifest(ManifestStore::from_row(&row, None, Matched::Given));
+    let rest = FakeRunner::new(vec![vaults(), items(), item(&fleet_fields())]);
+    let r = Split {
+        op: &op,
+        rest: &rest,
+        manifest: id,
+    };
+    let mut out = Vec::new();
+    let res = add_env(a, found.store(), &r, &mut out);
+    let text = found.store().read(&op).unwrap().text;
+    assert_no_values(&text);
+    assert_no_values(&text_of(&out));
+    (res, text, text_of(&out))
+}
+
+#[test]
+fn add_env_on_a_manifest_saves_the_environment_in_it() {
+    let (res, text, _) = add_env_to_manifest(EXISTING, &staging());
+    res.unwrap();
+    assert!(
+        config::parse(&text)
+            .unwrap()
+            .environments
+            .contains_key("staging"),
+        "{text}"
+    );
+}
+
+#[test]
+fn add_env_on_a_manifest_keeps_its_comments() {
+    let (res, text, _) = add_env_to_manifest(EXISTING, &staging());
+    res.unwrap();
+    assert!(text.contains("# going away"), "{text}");
+}
+
+#[test]
+fn add_env_on_a_manifest_refuses_an_existing_environment_naming_config_edit() {
+    let mut a = staging();
+    a.env = "prod".into();
+    let (res, _, _) = add_env_to_manifest(EXISTING, &a);
+    assert!(res.unwrap_err().to_string().contains("opv config edit"));
 }

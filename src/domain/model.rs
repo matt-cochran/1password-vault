@@ -219,6 +219,29 @@ pub struct Fleet {
     pub environments: BTreeMap<String, Environment>,
     pub products: BTreeMap<String, Product>,
     pub profile: Profile,
+    /// Where the configuration was read from, for wording only (FR-44).
+    pub origin: Origin,
+}
+
+/// Where a configuration was read from (FR-44). Wording only: the plan id and every other
+/// result depend on what the configuration says, never on where it lives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// A `secrets.toml` (or `--config`) file.
+    #[default]
+    File,
+    /// A project manifest in 1Password.
+    Manifest,
+}
+
+impl Origin {
+    /// How messages name it: `secrets.toml` or `the manifest`.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Origin::File => "secrets.toml",
+            Origin::Manifest => "the manifest",
+        }
+    }
 }
 
 impl Fleet {

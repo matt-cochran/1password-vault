@@ -286,8 +286,9 @@ impl Ctx<'_> {
         Err(Error::Policy(
             format!(
                 "stale plan: the plan changed since {expected}; it is now {id}{item} (the \
-                 1Password item, the target or secrets.toml changed); nothing was changed\n  \
-                 review it, then apply exactly that plan with: {apply}"
+                 1Password item, the target or {} changed); nothing was changed\n  \
+                 review it, then apply exactly that plan with: {apply}",
+                self.fleet.origin.noun()
             )
             .into(),
         )
@@ -1403,7 +1404,7 @@ pub fn plan_scoped(
     if n > 0 {
         return Err(findings());
     }
-    line(plan_id_line(&id, item_version))?;
+    line(plan_id_line(&id, item_version, fleet.origin.noun()))?;
     let next = SyncOpts {
         deploy: true,
         prune: !plan.prune.is_empty(),
@@ -1420,13 +1421,13 @@ pub fn plan_scoped(
 
 /// `plan <id> (1Password item v<n>): sync --expect-plan <id> applies exactly this plan`
 /// (FR-41).
-fn plan_id_line(id: &str, item_version: Option<u64>) -> String {
+fn plan_id_line(id: &str, item_version: Option<u64>, config: &str) -> String {
     let item = item_version
         .map(|v| format!("1Password item v{v}"))
         .unwrap_or_else(|| "1Password item".into());
     format!(
         "plan {id} ({item}): sync --expect-plan {id} applies exactly this plan and refuses \
-         if the item, the target or secrets.toml changed"
+         if the item, the target or {config} changed"
     )
 }
 

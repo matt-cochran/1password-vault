@@ -10,10 +10,11 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 2. **Never read a value.** Do not run `op item get --reveal`, `op read`, `op inject`, `op run -- env`, or anything that prints a field's value. opv has no command that prints a secret; do not build one out of other commands.
 3. **Never write a value to disk or argv.** No `.env` files, no `secrets.toml` values, no values in command arguments or CI logs. `secrets.toml` holds IDs, names, kinds and rules only.
 4. **Ask before anything that changes something outside the repo.** Get the user's explicit yes, for this run, before:
-   - `opv item skeleton <env>` (adds empty fields to the 1Password item; the only opv command that writes to 1Password);
+   - `opv item skeleton <env>` (adds empty fields to the 1Password item; the only opv command that writes to an item that holds values);
+   - `opv config import`, `opv init` in a new project and `opv add` or `opv init --add-env` on a configuration that lives in 1Password (they write the project's manifest, which holds names and IDs only);
    - `opv sync <env>` (stages values on the target; on Azure and Kubernetes it writes new secret versions, though the app keeps using the old ones until `--deploy`);
    - `--deploy` (restarts or redeploys the app, or starts a new revision or rollout), `--prune` (removes secrets), `--rotate` and `--prune-immutable` (replace or remove keys that are meant to stay fixed), and `--confirm <env>` (approves a sync to a guarded environment).
-   `doctor`, `status`, `plan`, `check`, `explain`, `guide` and `config export` change nothing. `setup` and `login` need the user's own terminal: hand those commands to the user.
+   `doctor`, `status` (also `status --all`), `plan`, `check`, `explain`, `guide`, `projects`, `config export` and `config check` change nothing. `setup`, `login` and `config edit` need the user's own terminal: hand those commands to the user.
 5. **Sign-in is the user's, at 1Password's own prompts.** When opv says `sign in: opv login <env>`, ask the user to run exactly that in their own terminal (it needs one, and the password goes only to op's prompt). Never ask for a password, token or Secret Key, and never script `op signin` or `eval`.
 6. **Never point opv at a break-glass credential.** `deploy_credentials` names an item holding only that environment's least-privilege deploy identity, created by the user; owner or admin credentials stay with people.
 7. **Use exit codes, not guesses.** Every opv failure prints a typed error and, as its last line, a `Next:` line with one command that runs as-is and changes nothing outside the repo unless it is the command the user already approved. Run that command or show it to the user; do not invent workarounds. A configuration error names the file, line and field and prints `fix:` with the edit to make.
@@ -127,12 +128,14 @@ For scripts, `opv status staging --json` returns names and states only (`schema_
 opv plan staging          # what would be staged, held and pruned; changes nothing
 ```
 
-Show the plan to the user. With their yes:
+Show the plan to the user. It ends with a plan id (`plan 674d43e2 …`). With their yes, apply exactly the plan they saw:
 
 ```sh
-opv sync staging          # stage only; the running app is unchanged
-opv sync staging --deploy # stage and deploy, only if something changed (needs a separate yes)
+opv sync staging --expect-plan 674d43e2          # stage only; the running app is unchanged
+opv sync staging --deploy --expect-plan 674d43e2 # stage and deploy, only if something changed (needs a separate yes)
 ```
+
+If anything changed since the plan (the item, the target or the configuration), `--expect-plan` refuses (exit 6) with nothing written and prints the new id: show the new plan to the user again. On an environment with `confirm_env = true`, a reviewed plan id counts as the confirmation.
 
 `sync` refuses (exit 6) and stages nothing while any key is missing, of the wrong kind or failing a rule. Go back to step 4. On an environment with `confirm_env = true` the same refusal also says that `--confirm <env>` is needed, so one run tells you everything.
 

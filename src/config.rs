@@ -40,6 +40,21 @@ pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
     parse(&text).map_err(|e| locate::relocate(e, &text, path))
 }
 
+/// Where a configuration text came from, for its error messages (H10, FR-44).
+#[derive(Debug, Clone, Copy)]
+pub enum Source<'a> {
+    /// A `secrets.toml` (or `--config`) file: errors read `<path>:<line>: <field>: …`.
+    File(&'a Path),
+    /// A project manifest in 1Password, by title: errors read
+    /// `manifest "opv · app": <field>: …`.
+    Manifest(&'a str),
+}
+
+/// [`parse`] with errors naming `source`, the line and the field, with `fix:` lines.
+pub fn parse_at(text: &str, source: Source<'_>) -> Result<Fleet, Error> {
+    parse(text).map_err(|e| locate::relocate_at(e, text, source))
+}
+
 /// Walk up from `start`, returning the first directory that holds `secrets.toml`.
 ///
 /// The start directory is an argument so the walk is testable with temp dirs, and only
@@ -536,6 +551,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         environments,
         products: raw.products,
         profile: Profile::Fleet,
+        origin: Default::default(),
     };
     check_names(&fleet, doc)?;
     Ok(fleet)
@@ -576,6 +592,7 @@ fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> 
         environments,
         products: BTreeMap::from([(SIMPLE_PRODUCT.to_string(), Product { keys: raw.keys })]),
         profile: Profile::Simple,
+        origin: Default::default(),
     };
     check_names(&fleet, doc)?;
     Ok(fleet)

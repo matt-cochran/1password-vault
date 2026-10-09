@@ -22,20 +22,32 @@ const AT_LINE: &str = "TOML parse error at line ";
 /// the line and the field, with a `fix:` line when the message names what is allowed. Its
 /// next step, if any, is kept. Any other error is returned unchanged.
 pub(super) fn relocate(e: Error, text: &str, file: &Path) -> Error {
+    relocate_at(e, text, super::Source::File(file))
+}
+
+/// [`relocate`] for any [`super::Source`]: a file is named with the line
+/// (`<file>:<line>: <field>`); a manifest has no file, so it is named by its title
+/// (`manifest "opv · app": <field>`, FR-44), still with the offending line shown.
+pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Error {
     let Error::Config(m) = &e else { return e };
     let next = m.next().map(str::to_string);
     let body = m.text().strip_prefix(INVALID).unwrap_or(m.text());
-    let file = file.display().to_string();
+    let (file, numbered) = match source {
+        super::Source::File(f) => (f.display().to_string(), true),
+        super::Source::Manifest(title) => (format!("manifest {title:?}"), false),
+    };
     let rewritten = match placed(body) {
         Some(p) => {
             let field = field_on_line(text, p.line);
-            render(&file, Some(p.line), &field, Some(p.snippet), &p.msg, text)
+            let line = numbered.then_some(p.line);
+            render(&file, line, &field, Some(p.snippet), &p.msg, text)
         }
         None => {
             let (field, line, snippet) = match owner_path(body) {
                 Some(path) => locate_path(text, &path),
                 None => (String::new(), None, None),
             };
+            let line = line.filter(|_| numbered);
             render(&file, line, &field, snippet, body, text)
         }
     };

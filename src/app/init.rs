@@ -38,6 +38,7 @@ use crate::adapters::onepassword_init::{self, FieldShape};
 use crate::adapters::registry;
 use crate::config;
 use crate::config_edit::{self, ConfigDoc};
+use crate::config_store::ConfigStore;
 use crate::domain::{Kind, Profile};
 use crate::error::Error;
 use crate::host::Host;
@@ -242,9 +243,9 @@ fn next_command(env: &str, has_target: bool, profile: Profile, products: &[&str]
 /// A configuration error in text opv generated: say so, and that nothing was written.
 fn would_write(e: Error, command: &str) -> Error {
     match e {
-        e @ Error::Config(_) => {
-            e.map_text(|m| format!("{m} (in the file {command} would write; nothing written)"))
-        }
+        e @ Error::Config(_) => e.map_text(|m| {
+            format!("{m} (in the configuration {command} would write; nothing written)")
+        }),
         other => other,
     }
 }
@@ -736,36 +737,36 @@ pub(crate) fn write_atomic(target: &Path, text: &str, force: bool) -> Result<(),
 /// Run `init <env> --add-env`: add the environment to the existing file at `path`.
 pub fn add_env(
     args: &InitArgs,
-    path: &Path,
+    store: &dyn ConfigStore,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    add_env_on(args, path, r, out, &Host::detect)
+    add_env_on(args, store, r, out, &Host::detect)
 }
 
 fn add_env_on(
     args: &InitArgs,
-    path: &Path,
+    store: &dyn ConfigStore,
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     host: &dyn Fn() -> Host,
 ) -> Result<(), Error> {
     check_args(args)?;
-    let original = std::fs::read_to_string(path)
-        .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
-    let fleet = config::parse(&original).map_err(|e| match e {
-        e @ Error::Config(_) => {
-            e.map_text(|m| format!("{m} (fix {} first; nothing written)", path.display()))
-        }
+    let base = store.read(r)?;
+    let original = &base.text;
+    let place = store.describe();
+    let fleet = store.parse(original).map_err(|e| match e {
+        e @ Error::Config(_) => e
+            .map_text(|m| super::on_first_line(&m, " (fix it first; nothing written)"))
+            .or_next(|| "opv config edit".into()),
         other => other,
     })?;
     if fleet.environments.contains_key(&args.env) {
         return Err(Error::Config(
             format!(
-                "environment {} already exists in {}; --add-env never overwrites: edit it \
-                 by hand",
+                "environment {} already exists in {place}; --add-env never overwrites: edit \
+                 it by hand (opv config edit)",
                 args.env,
-                path.display()
             )
             .into(),
         ));
@@ -779,7 +780,7 @@ fn add_env_on(
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
     let decl = declare(&fields, Some(profile), &args.item)?;
 
-    let mut doc = ConfigDoc::parse(&original)?;
+    let mut doc = ConfigDoc::parse(original)?;
     let section = choice.as_ref().map(|c| target_section(c, profile));
     doc.add_environment(
         &args.env,
@@ -843,8 +844,10 @@ fn add_env_on(
         .collect();
 
     let text = doc.to_string();
-    config::parse(&text).map_err(|e| would_write(e, "init --add-env"))?;
-    config_edit::replace(path, &original, &text)?;
+    store
+        .parse(&text)
+        .map_err(|e| would_write(e, "init --add-env"))?;
+    crate::config_store::save(store, r, &base, &text)?;
 
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     w(
@@ -866,7 +869,7 @@ fn add_env_on(
                 .as_ref()
                 .map(|c| format!(" ({} target)", c.provider.section()))
                 .unwrap_or_default(),
-            path.display(),
+            place,
             super::plural(added.len(), "key", "keys"),
             if added.len() == 1 {
                 "includes"

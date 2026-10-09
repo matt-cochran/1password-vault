@@ -1,26 +1,28 @@
 //! `opv add <[product/]KEY> --kind secret|config [--env e …] [--rule name=value …]` (H2).
 //!
-//! Declares one key in `secrets.toml` without hand-editing it, or adds environments to a
-//! key already declared. The file is edited in place ([`crate::config_edit`]): comments,
-//! blank lines and order are kept. The edited text is validated with the same loader as a
+//! Declares one key in the configuration without hand-editing it, or adds environments to
+//! a key already declared. The configuration is a `secrets.toml` or a project manifest in
+//! 1Password; both are edited through [`ConfigStore`] the same way (FR-44). The text is
+//! edited in place ([`crate::config_edit`]): comments, blank lines and order are kept. The edited text is validated with the same loader as a
 //! hand-written file before anything is written, so a name that would collide on any
 //! environment's target (FR-30), an unknown rule or a bad rule value is refused and the file
-//! is left alone. The write is atomic (a temporary file in the same directory, then a
-//! rename).
+//! is left alone. The write is atomic (a file: a temporary file, then a rename; a manifest:
+//! one item edit) and refused when someone changed the configuration since it was read.
 //!
-//! Makes no 1Password or target call: the field itself is added by `opv item skeleton` and
+//! Makes no target call and reads no item: the field itself is added by `opv item skeleton` and
 //! its value typed in 1Password (FR-11, SR-5). Names, kinds and rules only, never a value.
 
 use std::io::Write;
-use std::path::Path;
 
 use toml_edit::Value;
 
 use super::write_err;
 use crate::config;
-use crate::config_edit::{self, ConfigDoc, NewKey};
+use crate::config_edit::{ConfigDoc, NewKey};
+use crate::config_store::{self, ConfigStore};
 use crate::domain::Rules;
 use crate::error::Error;
+use crate::runner::CommandRunner;
 
 /// `opv add` arguments.
 #[derive(Debug, Clone, Default)]
@@ -41,27 +43,38 @@ fn cfg(msg: String) -> Error {
     Error::Config(msg.into())
 }
 
-/// Run `add` against the configuration file at `path`. A refusal names `opv add --help`
-/// as its next step unless it names its own.
-pub fn run(args: &AddArgs, path: &Path, out: &mut dyn Write) -> Result<(), Error> {
-    run_inner(args, path, out).map_err(|e| match e {
+/// Run `add` against the configuration in `store` (a file or a manifest; `r` reaches a
+/// manifest). A refusal names `opv add --help` as its next step unless it names its own.
+pub fn run(
+    args: &AddArgs,
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    run_inner(args, store, r, out).map_err(|e| match e {
         e @ Error::Config(_) => e.or_next(|| "opv add --help".into()),
         other => other,
     })
 }
 
-fn run_inner(args: &AddArgs, path: &Path, out: &mut dyn Write) -> Result<(), Error> {
-    let original = std::fs::read_to_string(path)
-        .map_err(|e| cfg(format!("cannot read {}: {e}", path.display())))?;
-    let fleet = config::parse(&original).map_err(|e| match e {
-        e @ Error::Config(_) => {
-            e.map_text(|m| format!("{m} (fix {} first; nothing written)", path.display()))
-        }
+fn run_inner(
+    args: &AddArgs,
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let base = store.read(r)?;
+    let original = &base.text;
+    let place = store.describe();
+    let fleet = store.parse(original).map_err(|e| match e {
+        e @ Error::Config(_) => e
+            .map_text(|m| super::on_first_line(&m, " (fix it first; nothing written)"))
+            .or_next(|| "opv config edit".into()),
         other => other,
     })?;
     let fleet_profile = !fleet.is_simple();
     let (product, key) = split_name(&args.name, fleet_profile, &fleet)?;
-    let mut doc = ConfigDoc::parse(&original)?;
+    let mut doc = ConfigDoc::parse(original)?;
     let envs = environments(&args.envs, &doc, &fleet)?;
     let label = match product {
         Some(p) => format!("{p}/{key}"),
@@ -81,15 +94,13 @@ fn run_inner(args: &AddArgs, path: &Path, out: &mut dyn Write) -> Result<(), Err
         {
             return Err(cfg(format!(
                 "{label} is already declared as {declared}; opv add never changes a key's \
-                 kind: edit {} by hand",
-                path.display()
+                 kind: edit {place} by hand (opv config edit)"
             )));
         }
         if !args.rules.is_empty() || args.guidance.is_some() || args.immutable {
             return Err(cfg(format!(
                 "{label} is already declared; opv add only adds environments to it: change \
-                 its rules, guidance or immutable in {} by hand",
-                path.display()
+                 its rules, guidance or immutable in {place} by hand (opv config edit)"
             )));
         }
         let new: Vec<String> = envs.into_iter().filter(|e| !existing.contains(e)).collect();
@@ -107,7 +118,7 @@ fn run_inner(args: &AddArgs, path: &Path, out: &mut dyn Write) -> Result<(), Err
             doc.add_key_env(product, key, e)?;
         }
         (
-            format!("added {} to {label} in {}", new.join(", "), path.display()),
+            format!("added {} to {label} in {place}", new.join(", ")),
             new,
         )
     } else {
@@ -156,7 +167,7 @@ fn run_inner(args: &AddArgs, path: &Path, out: &mut dyn Write) -> Result<(), Err
             parts.push("immutable".into());
         }
         (
-            format!("added {label} to {} ({})", path.display(), parts.join("; ")),
+            format!("added {label} to {place} ({})", parts.join("; ")),
             envs,
         )
     };
@@ -165,13 +176,13 @@ fn run_inner(args: &AddArgs, path: &Path, out: &mut dyn Write) -> Result<(), Err
     let text = doc.to_string();
     // The same validation as a hand-written file: names on every target (collisions
     // included, FR-30), rules, environments.
-    config::parse(&text).map_err(|e| match e {
-        e @ Error::Config(_) => {
-            e.map_text(|m| format!("{m} (in the file opv add would write; nothing written)"))
-        }
+    store.parse(&text).map_err(|e| match e {
+        e @ Error::Config(_) => e.map_text(|m| {
+            format!("{m} (in the configuration opv add would write; nothing written)")
+        }),
         other => other,
     })?;
-    config_edit::replace(path, &original, &text)?;
+    config_store::save(store, r, &base, &text)?;
 
     let first = &envs[0];
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);

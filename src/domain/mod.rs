@@ -4,8 +4,8 @@ pub mod model;
 pub mod secret;
 
 pub use model::{
-    Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, PrefixByMode, Product, Profile, Rules,
-    SIMPLE_PRODUCT, SIMPLE_TEMPLATE, key_label,
+    Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product, Profile,
+    Rules, SIMPLE_PRODUCT, SIMPLE_TEMPLATE, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;

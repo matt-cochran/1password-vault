@@ -20,18 +20,20 @@ const QUICK_START: &str = "\
 Start here:
   opv setup                        Guided setup for a new project
   opv init dev --vault V --item I  Use a 1Password item you already set up
-  opv doctor                       Find a setup problem and its next step
   opv login dev                    Sign in to 1Password for an environment
+  opv doctor                       Find a setup problem and its next step
   opv guide agent                  Setup guide for AI assistants (this version)
 
 Everyday use:
   opv check dev --product api      Check that your app's settings are ready
-  opv projects                     Projects whose configuration lives in 1Password
   opv run dev --product api -- npm run dev
+  opv add api/KEY --kind secret    Declare a new key
+  opv config edit                  Change the configuration (file or 1Password)
+  opv projects                     Projects whose configuration lives in 1Password
 
 Deployment:
-  opv plan staging                 Preview changes
-  opv sync staging --deploy        Save settings and deploy
+  opv plan staging                 Preview changes; prints a plan id
+  opv sync staging --deploy --expect-plan <id>   Apply exactly that plan, then deploy
 
 Every command is listed above. Use opv <command> --help for its options and examples.";
 
@@ -39,10 +41,13 @@ const EXAMPLES: &str = "\
 Examples:
   opv setup                        # guided owner setup; resumes saved progress
   opv login prod                   # signed-in terminal for prod's account; type exit to leave
+  opv add api/KEY --kind secret    # declare a key, in secrets.toml or the manifest
   opv item skeleton staging        # add the missing (empty) fields to the 1Password item
   opv status staging               # one row per product and key; fill what is missing
-  opv plan staging                 # what a sync would write, hold and prune
-  opv sync staging --deploy        # write to the environment's target, deploy only if something changed
+  opv status --all                 # every project in 1Password, one line per environment
+  opv plan staging                 # what a sync would write, hold and prune, and its plan id
+  opv sync prod --expect-plan ID   # exactly the plan reviewed (add --deploy to deploy)
+  opv config edit                  # change the configuration; refuses a concurrent edit
   opv check dev --product api      # local keys saved? names only, no target touched
   opv run dev --product api -- cargo run   # local run with the product's secrets
 
@@ -58,6 +63,8 @@ Exit codes:
 Environment:
   OPV_CONFIG   default for --config
   OPV_PROJECT  project whose manifest in 1Password to use (title opv · <name>)
+  OP_ACCOUNT   1Password account to find a manifest in (an environment's own
+               `account` setting is used for its reads)
   OPV_PRODUCT  default for --product on check, run, doctor, explain, status and plan
                (never sync)
   NO_COLOR     no colour under --color auto
@@ -140,7 +147,8 @@ Changes nothing. Exits 8 when any key is missing, of the wrong kind or failing a
 opv explain <product>/<KEY> --env <ENV> shows how to fix one.
 
 More examples:
-  opv status prod --product api   # one product's rows and findings";
+  opv status prod --product api   # one product's rows and findings
+  opv status --all                # every project whose configuration lives in 1Password";
 
 const RUN_QUICK: &str = "\
 Examples:
@@ -164,7 +172,8 @@ Examples:
 
 const PLAN_MORE: &str = "\
 Changes nothing. Exits 8 when any row (missing, wrong kind, failing a rule) would block a
-sync, and ends with the exact sync command to run once it is clean.";
+sync, and ends with the exact sync command to run once it is clean. A clean plan prints its
+plan id: opv sync <ENV> --expect-plan <id> applies exactly that plan or refuses (exit 6).";
 
 const SYNC_QUICK: &str = "\
 Examples:
@@ -245,10 +254,10 @@ Examples:
   opv add api/STRIPE_KEY --env staging          # include a declared key in staging";
 
 const ADD_MORE: &str = "\
-Edits the configuration in place (comments and order kept) and validates it like a
-hand-written one before writing: a name that collides on a target, an unknown rule or a bad
-rule value is refused. Makes no 1Password or target call. Then add the value in 1Password
-(opv item skeleton <env> adds the empty field).
+Edits the configuration where it lives (secrets.toml, or the project's manifest in
+1Password) with comments and order kept, and validates it like a hand-written one first: a
+name colliding on a target or a bad rule is refused and nothing is written. Never reads an
+item or a target. Then opv item skeleton <env> adds the empty field to fill in 1Password.
 
 More examples:
   opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable \\
@@ -506,7 +515,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "file")]
         project: Option<String>,
     },
-    /// Declare a key in secrets.toml, or add environments to a declared key.
+    /// Declare a key in the configuration, or add environments to a declared key.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
     Add {
         /// The key: PRODUCT/KEY (fleet profile) or KEY (simple profile).
@@ -1072,9 +1081,15 @@ fn run(
     if let Cmd::Login { env, command } = &cli.cmd {
         use opv::app::{login, setup_runtime};
         setup_runtime::Console::require_terminal("login")?;
-        let fleet = find_config(cli.config.as_ref(), config_source).transpose()?;
-        return login::run(
+        let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
+            Some(f) => Some(f),
+            None => manifest_for_login(&cli, config_source),
+        };
+        let start = std::env::current_dir().unwrap_or_default();
+        let fallback = config_store::pointer_account(&start);
+        return login::run_or(
             fleet.as_ref(),
+            fallback.as_deref(),
             env.as_deref(),
             command,
             &mut setup_runtime::Runtime::default(),
@@ -1159,9 +1174,10 @@ fn run(
         };
         return config_cmd::export(f, format, &r, out).map(|()| 0);
     }
+    // `add` and `init --add-env` edit the configuration where it lives, file or manifest
+    // (FR-44), with the same validation and concurrency refusal.
     if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } = &cli.cmd {
-        let path = config_path(cli.config.as_deref(), config_source);
-        return run_edit(cli.cmd, &path?, init_options, &r, out).map(|()| 0);
+        return run_edit(cli.cmd, &found?, init_options, &r, out).map(|()| 0);
     }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
     let loaded = found.and_then(|f| f.load(&r));
@@ -1233,6 +1249,23 @@ fn find_config(
     }
 }
 
+/// `opv login` in a project whose configuration lives in 1Password (FR-44): the manifest,
+/// when op can already read it (an unlocked desktop app or a live session), so the
+/// environment's own `account` is used; else `None` and login falls back to the `.opv`
+/// account or op's default. Quiet: a failure here is not the command's error.
+fn manifest_for_login(cli: &Cli, config_source: ConfigSource) -> Option<opv::domain::Fleet> {
+    let r = ProcessRunner::new(
+        Budget::starting_now(std::time::Duration::from_secs(cli.timeout.min(30))),
+        false,
+    );
+    let fleet = request(cli, config_source, false)
+        .and_then(|req| config_store::locate(&req, &r))
+        .and_then(|f| f.load(&r))
+        .ok();
+    let _ = opv::runner::take_failure_excerpt();
+    fleet
+}
+
 /// The discovery request from the command line and the environment (FR-25, FR-44).
 fn request(
     cli: &Cli,
@@ -1250,6 +1283,7 @@ fn request(
         config: cli.config.clone().map(|p| (p, given)),
         project: config_store::project_env(),
         manifest_only,
+        account: config_store::account_env(),
     })
 }
 
@@ -1292,6 +1326,7 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
                 config: None,
                 project: config_store::project_env(),
                 manifest_only: true,
+                account: config_store::account_env(),
             };
             let found = config_store::locate(&req, r)?;
             config_cmd::check(&found, &file, r, out)
@@ -1357,28 +1392,6 @@ fn run_other(
         Cmd::Config(_) => loaded.map(|_| ()),
         Cmd::Item(ItemCmd::Skeleton { env }) => skeleton::run(&loaded?, &env, r, out),
         Cmd::Explain { target, env } => explain::run(&loaded?, &target, env.as_deref(), out),
-    }
-}
-
-/// The configuration file to use: `--config` / `OPV_CONFIG`, else the nearest
-/// `secrets.toml` from the current directory up. Prints `using <path>` on stderr unless
-/// the path came from `--config`.
-fn config_path(flag: Option<&std::path::Path>, source: ConfigSource) -> Result<PathBuf, Error> {
-    match flag {
-        Some(path) => {
-            if source == ConfigSource::Env {
-                let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
-            }
-            Ok(path.to_path_buf())
-        }
-        None => {
-            let start = std::env::current_dir().map_err(|e| {
-                Error::Config(format!("cannot read the current directory: {e}").into())
-            })?;
-            let found = config::discover(&start).ok_or_else(|| config::not_found(&start))?;
-            let _ = writeln!(io::stderr(), "using {}", found.display());
-            Ok(found)
-        }
     }
 }
 
@@ -1455,14 +1468,16 @@ fn run_init(
     }
 }
 
-/// `add` and `init --add-env`: edit the configuration file at `path` in place.
+/// `add` and `init --add-env`: edit the configuration where it was found (a file or a
+/// manifest) in place, through its [`config_store::ConfigStore`].
 fn run_edit(
     cmd: Cmd,
-    path: &std::path::Path,
+    found: &config_store::Found,
     init_options: &std::collections::BTreeMap<String, String>,
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    let store = found.store();
     match cmd {
         Cmd::Add {
             name,
@@ -1480,10 +1495,11 @@ fn run_edit(
                 guidance,
                 immutable,
             },
-            path,
+            store,
+            r,
             out,
         ),
-        cmd @ Cmd::Init { .. } => init::add_env(&init_args(cmd, init_options)?, path, r, out),
+        cmd @ Cmd::Init { .. } => init::add_env(&init_args(cmd, init_options)?, store, r, out),
         _ => unreachable!("called for add and init --add-env only"),
     }
 }

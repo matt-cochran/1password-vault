@@ -5,7 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::*;
+use crate::adapters::fake_op::FakeOp;
+use crate::adapters::onepassword_manifest::template;
 use crate::app::testutil::text_of;
+use crate::config_store::{FileStore, Found, ManifestStore, Matched, Snapshot, manifest_title};
 use crate::domain::Kind;
 
 const COMMENTED: &str = "# Our services. Values live in 1Password.\n\n[profile]\nkind = \"fleet\"\n\n\
@@ -39,7 +42,8 @@ fn add_to(file: &str, a: AddArgs) -> Added {
     let path = dir.path().join("secrets.toml");
     fs::write(&path, file).unwrap();
     let mut out = Vec::new();
-    let res = run(&a, &path, &mut out);
+    let store = FileStore { path: path.clone() };
+    let res = run(&a, &store, &FakeOp::default(), &mut out);
     Added {
         _dir: dir,
         path,
@@ -287,5 +291,112 @@ fn a_refusal_points_at_the_add_help() {
     assert_eq!(
         a.res.as_ref().unwrap_err().next_step(),
         Some("opv add --help")
+    );
+}
+
+// --- a manifest in 1Password (FR-44): the same edit through ConfigStore ---
+
+/// A manifest holding `body`, and its store as discovery returns it.
+fn manifest(body: &str) -> (FakeOp, Found) {
+    let op = FakeOp::default();
+    let id = op.insert(
+        "myapp-dev",
+        template(&manifest_title("myapp"), "myapp", &[], body),
+    );
+    let row = crate::adapters::onepassword_manifest::Row {
+        id,
+        title: manifest_title("myapp"),
+        tags: Vec::new(),
+        version: 1,
+        vault: crate::adapters::onepassword_manifest::VaultRef {
+            id: "vdev0000000000000000000001".into(),
+            name: "myapp-dev".into(),
+        },
+    };
+    let found = Found::Manifest(ManifestStore::from_row(&row, None, Matched::Given));
+    (op, found)
+}
+
+fn add_to_manifest(body: &str, a: AddArgs) -> (FakeOp, Found, Result<(), Error>, String) {
+    let (op, found) = manifest(body);
+    let mut out = Vec::new();
+    let res = run(&a, found.store(), &op, &mut out);
+    (op, found, res, text_of(&out))
+}
+
+#[test]
+fn adding_to_a_manifest_saves_the_key_in_it() {
+    let (op, found, res, _) = add_to_manifest(COMMENTED, new_key("api/STRIPE_KEY"));
+    res.unwrap();
+    let fleet = found.load(&op).unwrap();
+    assert!(fleet.products["api"].keys.contains_key("STRIPE_KEY"));
+}
+
+#[test]
+fn adding_to_a_manifest_keeps_its_comments() {
+    let (op, found, res, _) = add_to_manifest(COMMENTED, new_key("api/STRIPE_KEY"));
+    res.unwrap();
+    let text = found.store().read(&op).unwrap().text;
+    assert!(
+        text.starts_with("# Our services. Values live in 1Password."),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_refused_add_to_a_manifest_edits_nothing() {
+    let mut args = new_key("api/STRIPE_KEY");
+    args.rules = vec!["regex=([a-z".into()];
+    let (op, _, res, _) = add_to_manifest(COMMENTED, args);
+    assert!(res.is_err() && op.count(&["op", "item", "edit"]) == 0);
+}
+
+#[test]
+fn a_manifest_add_names_the_manifest_in_its_summary() {
+    let (_, _, res, out) = add_to_manifest(COMMENTED, new_key("api/STRIPE_KEY"));
+    res.unwrap();
+    assert!(out.contains("manifest \"opv · myapp\""), "{out}");
+}
+
+#[test]
+fn a_broken_manifest_names_the_manifest_and_points_at_config_edit() {
+    let broken = COMMENTED.replace("kind = \"fleet\"", "kind = \"flet\"");
+    let (_, _, res, _) = add_to_manifest(&broken, new_key("api/STRIPE_KEY"));
+    let e = res.unwrap_err();
+    assert!(
+        e.text().starts_with("manifest \"opv · myapp\": ")
+            && e.next_step() == Some("opv config edit"),
+        "{e} / {:?}",
+        e.next_step()
+    );
+}
+
+#[test]
+fn a_manifest_changed_since_it_was_read_is_refused() {
+    let (op, found) = manifest(COMMENTED);
+    let base: Snapshot = found.store().read(&op).unwrap();
+    let Found::Manifest(m) = &found else {
+        unreachable!()
+    };
+    op.bump(&m.item_id);
+    let e = crate::config_store::save(found.store(), &op, &base, COMMENTED).unwrap_err();
+    assert!(
+        e.to_string().contains("changed while opv was editing it"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_file_changed_since_it_was_read_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    fs::write(&path, COMMENTED).unwrap();
+    let store = FileStore { path: path.clone() };
+    let base = store.read(&FakeOp::default()).unwrap();
+    fs::write(&path, format!("{COMMENTED}\n# someone else\n")).unwrap();
+    let e = crate::config_store::save(&store, &FakeOp::default(), &base, COMMENTED).unwrap_err();
+    assert!(
+        e.to_string().contains("changed while opv was editing it"),
+        "{e}"
     );
 }

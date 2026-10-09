@@ -74,6 +74,33 @@ pub trait ConfigStore {
         base: &Snapshot,
         text: &str,
     ) -> Result<Replaced, Error>;
+    /// How errors in its text name it (`<path>:<line>: …` or `manifest "opv · app": …`).
+    fn source(&self) -> config::Source<'_>;
+    /// Validate `text` as this configuration, with errors naming it (H10, FR-44).
+    fn parse(&self, text: &str) -> Result<Fleet, Error> {
+        config::parse_at(text, self.source())
+    }
+}
+
+/// Write `text` over `base` through `store`, refusing (nothing written) when someone
+/// changed the configuration since it was read. For commands that edit once and stop
+/// (`add`, `init --add-env`); `config edit` re-opens instead.
+pub fn save(
+    store: &dyn ConfigStore,
+    r: &dyn CommandRunner,
+    base: &Snapshot,
+    text: &str,
+) -> Result<(), Error> {
+    match store.replace(r, base, text)? {
+        Replaced::Saved => Ok(()),
+        Replaced::Changed(_) => Err(Error::Config(
+            format!(
+                "{} changed while opv was editing it; nothing written: run the command again",
+                store.describe()
+            )
+            .into(),
+        )),
+    }
 }
 
 /// `secrets.toml` (or any `--config` path).
@@ -107,8 +134,19 @@ impl ConfigStore for FileStore {
         if now.text != base.text {
             return Ok(Replaced::Changed(now));
         }
-        crate::app::init::write_atomic(&self.path, text, true)?;
-        Ok(Replaced::Saved)
+        // Atomic (temporary file, then rename), symlinks followed, permissions kept, and
+        // compared once more right before the rename.
+        match crate::config_edit::replace(&self.path, &base.text, text) {
+            Ok(()) => Ok(Replaced::Saved),
+            Err(e) => match self.read(r) {
+                Ok(now) if now.text != base.text => Ok(Replaced::Changed(now)),
+                _ => Err(e),
+            },
+        }
+    }
+
+    fn source(&self) -> config::Source<'_> {
+        config::Source::File(&self.path)
     }
 }
 
@@ -211,6 +249,15 @@ impl ConfigStore for ManifestStore {
         )?;
         Ok(Replaced::Saved)
     }
+    fn source(&self) -> config::Source<'_> {
+        config::Source::Manifest(&self.title)
+    }
+
+    fn parse(&self, text: &str) -> Result<Fleet, Error> {
+        let mut fleet = config::parse_at(text, self.source())?;
+        fleet.origin = crate::domain::Origin::Manifest;
+        Ok(fleet)
+    }
 }
 
 /// How `--config` was given.
@@ -262,18 +309,10 @@ impl Found {
     }
 }
 
-/// [`config::parse`] with errors naming the manifest instead of `secrets.toml`.
+/// [`config::parse`] with errors naming where the text came from: `<path>:<line>: <field>`
+/// for a file, `manifest "opv · app": <field>` for a manifest (H10, FR-44).
 pub fn parse_from(found: &Found, text: &str) -> Result<Fleet, Error> {
-    config::parse(text).map_err(|e| match found {
-        Found::Manifest(m) => e.map_text(|t| {
-            t.replacen(
-                "invalid secrets.toml",
-                &format!("invalid configuration in manifest {:?}", m.title),
-                1,
-            )
-        }),
-        Found::File { .. } => e,
-    })
+    found.store().parse(text)
 }
 
 /// What discovery starts from.
@@ -288,6 +327,19 @@ pub struct Request {
     /// Skip step 3 (`secrets.toml`): `config check` and `config import` compare a file with
     /// the manifest, so the file itself must not be the match.
     pub manifest_only: bool,
+    /// The 1Password account to look in (`OP_ACCOUNT`, [`account_env`]); a `.opv`
+    /// pointer's own `account` wins. Without one, op's default account is listed first and
+    /// a repository match not found there is looked for in every other signed-in account.
+    pub account: Option<String>,
+}
+
+/// `OP_ACCOUNT`, when set and non-empty and no service-account or Connect credential is
+/// set (that credential decides the account, as for environments, FR-40).
+pub fn account_env() -> Option<String> {
+    if Host::detect().op_credential.is_some() {
+        return None;
+    }
+    std::env::var("OP_ACCOUNT").ok().filter(|a| !a.is_empty())
 }
 
 /// `OPV_PROJECT`, when set and non-empty.
@@ -330,6 +382,14 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
     Ok(d)
 }
 
+/// The account named by the nearest `.opv` pointer, if any (read without any `op` call,
+/// for `opv login` before a manifest can be read).
+pub fn pointer_account(start: &Path) -> Option<String> {
+    let path = walk_up(start, DOT_FILE)?;
+    let text = fs::read_to_string(&path).ok()?;
+    parse_dot_opv(&text, &path).ok()?.account
+}
+
 /// The nearest file named `name` in `start` or a parent.
 fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
     start
@@ -347,7 +407,7 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         });
     }
     if let Some(project) = &req.project {
-        return by_project(r, project, None, Matched::ProjectEnv);
+        return by_project(r, project, req.account.clone(), Matched::ProjectEnv);
     }
     if !req.manifest_only
         && let Some(path) = config::discover(&req.start)
@@ -361,10 +421,11 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         let text = fs::read_to_string(&path)
             .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
         let dot = parse_dot_opv(&text, &path)?;
-        return by_project(r, &dot.project, dot.account, Matched::DotFile(path));
+        let account = dot.account.or_else(|| req.account.clone());
+        return by_project(r, &dot.project, account, Matched::DotFile(path));
     }
     match git_repo(r) {
-        Some(repo) => by_repo(r, &repo, &req.start),
+        Some(repo) => by_repo(r, &repo, &req.start, req.account.as_deref()),
         None => Err(not_found(&req.start, None)),
     }
 }
@@ -410,14 +471,36 @@ fn by_project(
 /// The manifests whose repo tag is `repo`; in a monorepo the one whose path tag is the
 /// longest prefix of the current directory (relative to the repository root) wins, and a
 /// manifest without paths covers the whole repository at the lowest priority.
-fn by_repo(r: &dyn CommandRunner, repo: &str, start: &Path) -> Result<Found, Error> {
-    let rows = manifest::list(r, None, &Host::detect)?;
+fn by_repo(
+    r: &dyn CommandRunner,
+    repo: &str,
+    start: &Path,
+    account: Option<&str>,
+) -> Result<Found, Error> {
     let tag = repo_tag(repo);
+    let mut rows = manifest::list(r, account, &Host::detect)?;
+    let mut account = account.map(str::to_string);
+    // Not in the default account: look in each other signed-in account (FR-40: projects
+    // may live in different accounts), and use the first one that has a match.
+    if account.is_none() && !rows.iter().any(|r| r.tags.contains(&tag)) {
+        let accounts = manifest::accounts(r);
+        let several = accounts.len() > 1;
+        for a in accounts.into_iter().filter(|_| several) {
+            let Ok(more) = manifest::list(r, Some(&a.account_uuid), &Host::detect) else {
+                continue;
+            };
+            if more.iter().any(|r| r.tags.contains(&tag)) {
+                rows = more;
+                account = Some(a.account_uuid);
+                break;
+            }
+        }
+    }
     let hits: Vec<&Row> = rows.iter().filter(|r| r.tags.contains(&tag)).collect();
     let found = |row: &Row| {
         Ok(Found::Manifest(ManifestStore::from_row(
             row,
-            None,
+            account.clone(),
             Matched::Repo(repo.to_string()),
         )))
     };
