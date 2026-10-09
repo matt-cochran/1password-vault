@@ -252,6 +252,7 @@ pub(crate) fn write_json(
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
                 drift: bound.map(|b| b.drift),
+                chain: bound.and_then(|b| b.chain.clone()),
                 product: json_product(&r.product),
                 key: r.key.clone(),
                 kind: kind_label(r.kind),
@@ -339,6 +340,8 @@ struct JsonRow {
     pending_deploy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     drift: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain: Option<String>,
 }
 
 /// One desired row's binding on a pinned target (R5): `binding` is `current` (bound as
@@ -347,6 +350,9 @@ pub(crate) struct PinnedRow {
     pub binding: &'static str,
     pub pending_deploy: bool,
     pub drift: bool,
+    /// How the bound name reaches the app when it passes through more than one object
+    /// (FR-39), e.g. Key Vault → ExternalSecret → env. Names and version ids only.
+    pub chain: Option<String>,
 }
 
 #[derive(serde::Serialize)]

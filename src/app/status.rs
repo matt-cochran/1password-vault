@@ -186,9 +186,6 @@ struct PinnedStatus {
     drift: Vec<String>,
     env_routed: Vec<String>,
     runtime: String,
-    /// How each bound name reaches the app, when it passes through more than one object
-    /// (FR-39). Names and version ids only.
-    chains: Vec<String>,
 }
 
 impl PinnedStatus {
@@ -203,8 +200,11 @@ impl PinnedStatus {
         if !self.drift.is_empty() {
             line(drift_line(env_name, &names.join(&self.drift)))?;
         }
-        for chain in &self.chains {
-            line(format!("chain: {chain}"))?;
+        for (name, row) in &self.rows {
+            if let Some(chain) = &row.chain {
+                let rest = chain.strip_prefix(name.as_str()).unwrap_or(chain);
+                line(format!("chain: {}{rest}", names.label(name)))?;
+            }
         }
         if !self.env_routed.is_empty() {
             line(format!(
@@ -249,10 +249,17 @@ fn pinned_status(
                 (true, true) => "stale",
                 (false, true) => "unbound",
             };
+            let chain = match snap.bindings.get(n) {
+                Some(Binding::Pinned { version, .. }) if want.store.contains_key(n) => {
+                    runtime.chain(n, version)
+                }
+                _ => None,
+            };
             let row = PinnedRow {
                 binding,
                 pending_deploy: is_pending,
                 drift: d.drift.contains(n),
+                chain,
             };
             (n.clone(), row)
         })
@@ -263,14 +270,6 @@ fn pinned_status(
         drift: d.drift.iter().cloned().collect(),
         env_routed: want.plain.keys().cloned().collect(),
         runtime: runtime.describe(),
-        chains: want
-            .store
-            .keys()
-            .filter_map(|n| match snap.bindings.get(n) {
-                Some(Binding::Pinned { version, .. }) => runtime.chain(n, version),
-                _ => None,
-            })
-            .collect(),
     })
 }
 
