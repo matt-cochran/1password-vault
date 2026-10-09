@@ -53,10 +53,7 @@ pub fn run(
     r: &dyn CommandRunner,
     mode: PreflightMode,
 ) -> Result<Preflight, Error> {
-    subscription(t, r)?;
-    let vault = vault(t, r)?;
-    t.vault_uri.set(vault_uri(&vault, &t.key_vault)?);
-    vault_answers(t, r, &vault)?;
+    t.vault_uri.set(store_checks(&t.vault_ref(), r)?);
     let app = match mode {
         PreflightMode::Mutate => settled_app(t, r)?,
         PreflightMode::Read => app(t, r)?,
@@ -85,7 +82,7 @@ pub fn vault_uri_of(t: &AzureTarget, r: &dyn CommandRunner) -> Result<String, Er
     if let Some(uri) = t.vault_uri.get() {
         return Ok(uri.to_string());
     }
-    let uri = vault_uri(&vault(t, r)?, &t.key_vault)?;
+    let uri = vault_uri(&vault(&t.vault_ref(), r)?, &t.key_vault)?;
     t.vault_uri.set(uri.clone());
     Ok(uri)
 }
@@ -128,21 +125,49 @@ pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
     Ok(format!("https://{host}"))
 }
 
+/// One Key Vault and the subscription it is read in, with the configuration fields that
+/// name them (for messages): an `azure` section's or a `[stores.<name>]` table's.
+pub struct Vault {
+    pub name: String,
+    pub subscription: String,
+    /// e.g. `azure.key_vault`, `stores.prod-vault.azure_key_vault`.
+    pub vault_field: String,
+    /// e.g. `azure.subscription`.
+    pub subscription_field: String,
+}
+
+/// The vault's preflight (NR-25): the subscription is visible, the vault exists and its
+/// data plane answers this account. Returns its validated `vaultUri` (NR-6).
+pub fn store_checks(v: &Vault, r: &dyn CommandRunner) -> Result<String, Error> {
+    subscription(v, r)?;
+    let show = vault(v, r)?;
+    let uri = vault_uri(&show, &v.name)?;
+    vault_answers(v, r, &show)?;
+    Ok(uri)
+}
+
 /// `base` plus `--only-show-errors` (R7) and `--subscription` (NR-7).
-fn scoped<'s>(t: &'s AzureTarget, base: &[&'s str]) -> Vec<&'s str> {
+fn scoped<'s>(subscription: &'s str, base: &[&'s str]) -> Vec<&'s str> {
     let mut v = base.to_vec();
-    v.extend([az::ONLY_SHOW_ERRORS, "--subscription", &t.subscription]);
+    v.extend([az::ONLY_SHOW_ERRORS, "--subscription", subscription]);
     v
 }
 
 fn read(
-    t: &AzureTarget,
+    subscription: &str,
     r: &dyn CommandRunner,
     op: &str,
     base: &[&str],
     refused: &[i32],
 ) -> Result<Outcome, Error> {
-    az::invoke(r, Effect::Read, op, &scoped(t, base), None, refused)
+    az::invoke(
+        r,
+        Effect::Read,
+        op,
+        &scoped(subscription, base),
+        None,
+        refused,
+    )
 }
 
 /// A read that never finished: nothing was changed.
@@ -171,32 +196,36 @@ fn parse(out: &Output, op: &str) -> Result<Value, Error> {
     })
 }
 
-/// The signed-in account can see `azure.subscription` (NR-7). One probe when it can; a
+/// The signed-in account can see the subscription (NR-7). One probe when it can; a
 /// second (`az account show`) tells a sign-out from a subscription it cannot see.
-fn subscription(t: &AzureTarget, r: &dyn CommandRunner) -> Result<(), Error> {
-    if az::sees_subscription(r, &t.subscription)? {
+fn subscription(v: &Vault, r: &dyn CommandRunner) -> Result<(), Error> {
+    if az::sees_subscription(r, &v.subscription)? {
         return Ok(());
     }
     if !az::signed_in(r)? {
         return Err(az::not_logged_in(None));
     }
-    Err(Error::Auth(format!(
-        "signed in to Azure, but this account cannot see subscription {s} (azure.subscription); \
+    Err(Error::Auth(
+        format!(
+            "signed in to Azure, but this account cannot see subscription {s} ({f}); \
          nothing was changed\n  next: `az account list -o table` lists the subscriptions it \
          can see; sign in with an account that can see {s} (`az login`), or correct \
-         azure.subscription",
-        s = t.subscription
-    ).into()))
+         {f}",
+            s = v.subscription,
+            f = v.subscription_field
+        )
+        .into(),
+    ))
 }
 
 /// `keyvault show`: the vault exists in the subscription (NR-25). On failure a read-only
 /// `keyvault show-deleted` tells a soft-deleted vault (the recover command) from one that
 /// is missing or unreadable.
-fn vault(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
+fn vault(v: &Vault, r: &dyn CommandRunner) -> Result<Value, Error> {
     const OP: &str = "keyvault show";
-    let (kv, s) = (t.key_vault.as_str(), t.subscription.as_str());
+    let (kv, s) = (v.name.as_str(), v.subscription.as_str());
     match read(
-        t,
+        s,
         r,
         OP,
         &["keyvault", "show", "-n", kv, "-o", "json"],
@@ -207,7 +236,7 @@ fn vault(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
         Outcome::Refused(_) => {
             const DELETED: &str = "keyvault show-deleted";
             let probe = ["keyvault", "show-deleted", "-n", kv, "-o", "none"];
-            match read(t, r, DELETED, &probe, &[1, 3])? {
+            match read(s, r, DELETED, &probe, &[1, 3])? {
                 Outcome::Done(_) => Err(Error::Target(
                     format!(
                         "Key Vault {kv} is deleted but still recoverable (soft-deleted); nothing \
@@ -220,8 +249,9 @@ fn vault(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
                 Outcome::Refused(_) => Err(Error::Target(
                     format!(
                         "Key Vault {kv} was not found in subscription {s}, or this account cannot \
-                     read it; nothing was changed\n  next: check azure.key_vault and \
-                     azure.subscription with `az keyvault show -n {kv} --subscription {s}`"
+                     read it; nothing was changed\n  next: check {} and {} with `az keyvault \
+                     show -n {kv} --subscription {s}`",
+                        v.vault_field, v.subscription_field
                     )
                     .into(),
                 )),
@@ -232,9 +262,9 @@ fn vault(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
 
 /// `keyvault secret list -o none`: the vault's data plane answers this account (NR-25).
 /// A refusal is network access when the vault restricts it, else a missing role.
-fn vault_answers(t: &AzureTarget, r: &dyn CommandRunner, vault: &Value) -> Result<(), Error> {
+fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), Error> {
     const OP: &str = "keyvault secret list";
-    let (kv, s) = (t.key_vault.as_str(), t.subscription.as_str());
+    let (kv, s) = (v.name.as_str(), v.subscription.as_str());
     let base = [
         "keyvault",
         "secret",
@@ -244,7 +274,7 @@ fn vault_answers(t: &AzureTarget, r: &dyn CommandRunner, vault: &Value) -> Resul
         "-o",
         "none",
     ];
-    match read(t, r, OP, &base, &[])? {
+    match read(s, r, OP, &base, &[])? {
         Outcome::Done(_) => Ok(()),
         Outcome::Unknown { reason, .. } => Err(unfinished(OP, reason)),
         Outcome::Refused(_) if network_restricted(vault) => Err(Error::Target(
@@ -292,7 +322,7 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
     );
     let base = ["containerapp", "show", "-g", rg, "-n", a, "-o", "json"];
     let app =
-        match read(t, r, OP, &base, &[3])? {
+        match read(s, r, OP, &base, &[3])? {
             Outcome::Done(out) => parse(&out, OP)?,
             Outcome::Unknown { reason, .. } => return Err(unfinished(OP, reason)),
             Outcome::Refused(_) => {
@@ -359,61 +389,18 @@ fn settled_app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
 /// `doctor` lines of an Azure target, in [`DOCTOR_CHECKS`] order. Once `az`, the sign-in
 /// or the subscription fails, the later lines say they were not checked.
 pub fn doctor(t: &AzureTarget, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
-    let mut checks = Vec::new();
-    let mut push = |name: &'static str, outcome: Result<Verdict, Error>| {
-        let ok = outcome.is_ok();
-        checks.push(Check {
-            name: name.into(),
-            outcome,
-        });
-        ok
-    };
-    let gate = if !push("az", az_version(r, host)) {
-        Some("az is not available (see the az line)")
-    } else if !push("az login", az_login(r)) {
-        Some("not signed in to Azure (see the az login line)")
-    } else if !push(
-        "azure subscription",
-        subscription(t, r).map(|()| {
-            Verdict::Ok(format!(
-                "{} (azure.subscription) is visible to this account",
-                t.subscription
-            ))
-        }),
-    ) {
-        Some("the subscription is not visible (see the azure subscription line)")
-    } else {
-        None
-    };
-    if let Some(why) = gate {
-        let done = checks.len();
-        for name in &DOCTOR_CHECKS[done..] {
-            checks.push(not_checked(name, why));
+    let (mut checks, uri) = store_doctor_with_uri(&t.vault_ref(), r, host);
+    if checks[..3].iter().any(|c| c.outcome.is_err()) {
+        // Gated: the key vault line already says why; the app lines say the same.
+        let why = match &checks[3].outcome {
+            Ok(Verdict::Warn(m)) => m.trim_start_matches("not checked: ").to_string(),
+            _ => "the lines above did not pass".to_string(),
+        };
+        for name in &DOCTOR_CHECKS[checks.len()..] {
+            checks.push(not_checked(name, &why));
         }
         return checks;
     }
-    let uri = vault(t, r).and_then(|v| {
-        let uri = vault_uri(&v, &t.key_vault)?;
-        vault_answers(t, r, &v)?;
-        Ok(uri)
-    });
-    let kv = &t.key_vault;
-    let uri = match uri {
-        Ok(uri) => {
-            checks.push(Check {
-                name: "key vault".into(),
-                outcome: Ok(Verdict::Ok(format!("{kv} answers at {uri}"))),
-            });
-            Some(uri)
-        }
-        Err(e) => {
-            checks.push(Check {
-                name: "key vault".into(),
-                outcome: Err(e),
-            });
-            None
-        }
-    };
     let app_ok = match app(t, r) {
         Ok(app) => {
             checks.push(Check {
@@ -441,6 +428,78 @@ pub fn doctor(t: &AzureTarget, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -
         ),
     });
     checks
+}
+
+/// The `doctor` lines of a Key Vault store: the first four of [`DOCTOR_CHECKS`].
+pub const STORE_CHECKS: &[&str] = &["az", "az login", "azure subscription", "key vault"];
+
+/// `doctor` lines of a Key Vault, in [`STORE_CHECKS`] order.
+pub fn store_doctor(v: &Vault, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check> {
+    store_doctor_with_uri(v, r, host).0
+}
+
+/// [`store_doctor`] and the vault URI when the key vault line passed. Once `az`, the
+/// sign-in or the subscription fails, the later lines say they were not checked.
+fn store_doctor_with_uri(
+    v: &Vault,
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+) -> (Vec<Check>, Option<String>) {
+    let mut checks = Vec::new();
+    let mut push = |name: &'static str, outcome: Result<Verdict, Error>| {
+        let ok = outcome.is_ok();
+        checks.push(Check {
+            name: name.into(),
+            outcome,
+        });
+        ok
+    };
+    let gate = if !push("az", az_version(r, host)) {
+        Some("az is not available (see the az line)")
+    } else if !push("az login", az_login(r)) {
+        Some("not signed in to Azure (see the az login line)")
+    } else if !push(
+        "azure subscription",
+        subscription(v, r).map(|()| {
+            Verdict::Ok(format!(
+                "{} ({}) is visible to this account",
+                v.subscription, v.subscription_field
+            ))
+        }),
+    ) {
+        Some("the subscription is not visible (see the azure subscription line)")
+    } else {
+        None
+    };
+    if let Some(why) = gate {
+        let done = checks.len();
+        for name in &STORE_CHECKS[done..] {
+            checks.push(not_checked(name, why));
+        }
+        return (checks, None);
+    }
+    let uri = vault(v, r).and_then(|show| {
+        let uri = vault_uri(&show, &v.name)?;
+        vault_answers(v, r, &show)?;
+        Ok(uri)
+    });
+    let kv = &v.name;
+    match uri {
+        Ok(uri) => {
+            checks.push(Check {
+                name: "key vault".into(),
+                outcome: Ok(Verdict::Ok(format!("{kv} answers at {uri}"))),
+            });
+            (checks, Some(uri))
+        }
+        Err(e) => {
+            checks.push(Check {
+                name: "key vault".into(),
+                outcome: Err(e),
+            });
+            (checks, None)
+        }
+    }
 }
 
 fn not_checked(name: &'static str, why: &str) -> Check {

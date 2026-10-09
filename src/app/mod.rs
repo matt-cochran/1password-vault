@@ -775,7 +775,8 @@ fn production_code(src: &str) -> String {
     kept.join("\n")
 }
 
-/// FR-37: `app/`, `domain/` and `config.rs` never name a provider, its CLI or its store;
+/// FR-37, FR-39: `app/`, `domain/` and `config.rs` never name a provider, its CLI, its store
+/// or a store kind or binding;
 /// provider lines come from `TargetConfig`. Only `init` writes a provider section by design.
 #[cfg(test)]
 #[test]
@@ -794,6 +795,11 @@ fn core_modules_name_no_provider() {
         "containerapp",
         "kubectl",
         "flyctl",
+        // Store kinds and bindings (FR-39): core sees only `StoreConfig`.
+        "azure_key_vault",
+        "external-secrets",
+        "externalsecrets?",
+        "clustersecretstores?",
     ];
     let re = regex::Regex::new(&format!(r"(?i)\b({})\b|\baz\s", words.join("|"))).unwrap();
     let hits: Vec<String> = files

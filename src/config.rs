@@ -18,7 +18,7 @@ use crate::adapters::registry;
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{Environment, Fleet, KeySpec, Product, Profile, SIMPLE_PRODUCT, key_label};
 use crate::error::Error;
-use crate::provider::{Section, TargetConfig};
+use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetConfig};
 
 /// Read and validate the configuration at `path`.
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
@@ -78,12 +78,7 @@ impl<'t> Doc<'t> {
 
     /// `environments.<env>.<key>`: present for every entry the typed parse saw.
     fn entry(&self, env: &str, key: &str) -> Option<&Spanned<DeValue<'t>>> {
-        let (_, envs) = self
-            .root
-            .get_ref()
-            .iter()
-            .find(|(n, _)| n.get_ref().as_ref() == "environments")?;
-        envs.get_ref().get(env)?.get_ref().get(key)
+        self.value(&["environments", env, key])
     }
 
     /// `msg` located at the declaration of key `key` of `product` (`[products.<p>.keys.<K>]`,
@@ -121,16 +116,23 @@ impl<'t> Doc<'t> {
     /// its own errors (line, column, the line itself), so every configuration error points
     /// at the file (FR-2). Just `msg` if the key cannot be found.
     fn at(&self, env: &str, key: &str, msg: String) -> Error {
-        let span = self
-            .root
-            .get_ref()
-            .iter()
-            .find(|(n, _)| n.get_ref().as_ref() == "environments")
-            .and_then(|(_, envs)| envs.get_ref().as_table())
-            .and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == env))
-            .and_then(|(_, e)| e.get_ref().as_table())
-            .and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == key))
-            .map(|(n, _)| n.span());
+        self.at_path(&["environments", env, key], msg)
+    }
+
+    /// `msg` located at the key `path` (e.g. `["stores", "prod-vault"]`), like [`Doc::at`].
+    fn at_path(&self, path: &[&str], msg: String) -> Error {
+        let mut table = Some(self.root.get_ref());
+        let mut span = None;
+        for part in path {
+            let Some((n, v)) =
+                table.and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == *part))
+            else {
+                span = None;
+                break;
+            };
+            span = Some(n.span());
+            table = v.get_ref().as_table();
+        }
         match span {
             Some(span) => cfg(format!(
                 "invalid secrets.toml: {}",
@@ -138,6 +140,21 @@ impl<'t> Doc<'t> {
             )),
             None => cfg(msg),
         }
+    }
+
+    /// The value at `path`, with its place in the file.
+    fn value(&self, path: &[&str]) -> Option<&Spanned<DeValue<'t>>> {
+        let (first, rest) = path.split_first()?;
+        let mut v = self
+            .root
+            .get_ref()
+            .iter()
+            .find(|(n, _)| n.get_ref().as_ref() == *first)
+            .map(|(_, v)| v)?;
+        for part in rest {
+            v = v.get_ref().get(*part)?;
+        }
+        Some(v)
     }
 }
 
@@ -184,6 +201,8 @@ struct RawSimpleConfig {
     keys: BTreeMap<String, KeySpec>,
     #[serde(default)]
     products: Option<toml::Value>,
+    #[serde(default)]
+    stores: BTreeMap<String, toml::Value>,
 }
 
 /// product → mode name → mode value.
@@ -196,6 +215,9 @@ struct RawConfig {
     environments: BTreeMap<String, RawEnvironment<FleetModes>>,
     #[serde(default)]
     products: BTreeMap<String, Product>,
+    /// Named stores (FR-39), parsed by the provider that declares their kind.
+    #[serde(default)]
+    stores: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -224,12 +246,74 @@ fn cfg(msg: String) -> Error {
     Error::Config(msg.into())
 }
 
+/// The named stores of a file (FR-39), by name.
+type Stores = BTreeMap<String, Box<dyn StoreConfig>>;
+
+/// Every `[stores.<name>]` table, parsed by the provider that declares its kind (FR-39). The
+/// kind is the key that names it (`azure_key_vault = "..."`). A store name is a DNS label,
+/// so it can name in-cluster objects as it is.
+fn stores(raw: &BTreeMap<String, toml::Value>, doc: &Doc<'_>) -> Result<Stores, Error> {
+    let mut out = Stores::new();
+    for (name, value) in raw {
+        let at = |msg: String| doc.at_path(&["stores", name], msg);
+        if !is_store_name(name) {
+            return Err(at(format!(
+                "store {name:?}: name must match ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 \
+                 characters)"
+            )));
+        }
+        let known = registry::store_kinds().join(", ");
+        let Some(table) = value.as_table() else {
+            return Err(at(format!(
+                "store {name}: must be a table, e.g. [stores.{name}] with one of: {known}"
+            )));
+        };
+        let kinds: Vec<&str> = table
+            .keys()
+            .map(String::as_str)
+            .filter(|k| registry::store_kind(k).is_some())
+            .collect();
+        let kind = match kinds.as_slice() {
+            [kind] => *kind,
+            [] => {
+                return Err(at(format!(
+                    "store {name}: names no store kind; add one of: {known}"
+                )));
+            }
+            [a, b, ..] => {
+                return Err(at(format!(
+                    "store {name}: declares both {a} and {b}; a store has one kind"
+                )));
+            }
+        };
+        let provider = registry::store_kind(kind).expect("kind found above");
+        let value = doc
+            .value(&["stores", name])
+            .ok_or_else(|| cfg(format!("store {name}: table not found")))?;
+        let store = provider.parse_store(kind, &Section::new(name, value, doc.text))?;
+        out.insert(name.clone(), store);
+    }
+    Ok(out)
+}
+
+/// A store name: a DNS-1123 label.
+fn is_store_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    let alnum = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    (1..=63).contains(&b.len())
+        && b.iter().all(|c| alnum(c) || *c == b'-')
+        && b.first().is_some_and(alnum)
+        && b.last().is_some_and(alnum)
+}
+
 /// The environment's target section, parsed by its provider (FR-28, FR-37): an unknown
-/// section names the registered ones; two sections are refused.
+/// section names the registered ones; two sections are refused. `secrets_in` binds it to
+/// a named store when the registry declares the pair (FR-39).
 fn target_of(
     name: &str,
     sections: &BTreeMap<String, toml::Value>,
     profile: Profile,
+    stores: &Stores,
     doc: &Doc<'_>,
 ) -> Result<Option<Box<dyn TargetConfig>>, Error> {
     if let Some((unknown, v)) = sections.iter().find(|(s, _)| registry::find(s).is_none()) {
@@ -254,14 +338,46 @@ fn target_of(
     match present.as_slice() {
         [] => Ok(None),
         [p] => {
-            let value = doc.entry(name, p.section()).ok_or_else(|| {
-                cfg(format!(
-                    "environment {name}: {} section not found",
-                    p.section()
-                ))
-            })?;
-            p.parse(&Section::new(name, value, doc.text), profile)
-                .map(Some)
+            let section = p.section();
+            let value = doc
+                .entry(name, section)
+                .ok_or_else(|| cfg(format!("environment {name}: {section} section not found")))?;
+            // `secrets_in` is generic (FR-39): taken out here, the rest goes to the provider.
+            let mut rest = value.clone();
+            let secrets_in = match rest.get_mut() {
+                DeValue::Table(t) => t.remove("secrets_in"),
+                _ => None,
+            };
+            let target = p.parse(&Section::new(name, &rest, doc.text), profile)?;
+            let Some(secrets_in) = secrets_in else {
+                return Ok(Some(target));
+            };
+            let at = |msg: String| doc.at_path(&["environments", name, section, "secrets_in"], msg);
+            let Some(store_name) = secrets_in.get_ref().as_str() else {
+                return Err(at(format!(
+                    "environment {name}: {section}.secrets_in must be the name of a [stores.<name>] table"
+                )));
+            };
+            let Some(store) = stores.get(store_name) else {
+                let defined: Vec<&str> = stores.keys().map(String::as_str).collect();
+                return Err(at(format!(
+                    "environment {name}: {section}.secrets_in = {store_name:?} names no store; {}",
+                    if defined.is_empty() {
+                        format!("declare it as [stores.{store_name}]")
+                    } else {
+                        format!("defined: {}", defined.join(", "))
+                    }
+                )));
+            };
+            if !registry::binds(section, store.kind()) {
+                return Err(at(format!(
+                    "environment {name}: {section} cannot keep its secrets in store {store_name:?} \
+                     ({}); supported secrets_in pairs: {}",
+                    store.kind(),
+                    registry::supported_pairs().join("; ")
+                )));
+            }
+            p.bind(target, store.as_ref()).map(Some)
         }
         [a, b, ..] => Err(doc.at(
             name,
@@ -280,10 +396,11 @@ fn environment<M>(
     name: &str,
     e: RawEnvironment<M>,
     profile: Profile,
+    stores: &Stores,
     doc: &Doc<'_>,
 ) -> Result<(Environment, M), Error> {
     check_ids(name, &e.vault_id, &e.item_id)?;
-    let target = target_of(name, &e.sections, profile, doc)?;
+    let target = target_of(name, &e.sections, profile, stores, doc)?;
     Ok((
         Environment {
             vault_id: e.vault_id,
@@ -307,9 +424,10 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         return Err(cfg("no environments defined".into()));
     }
 
+    let stores = stores(&raw.stores, doc)?;
     let mut environments = BTreeMap::new();
     for (name, e) in raw.environments {
-        let (mut env, modes) = environment(&name, e, Profile::Fleet, doc)?;
+        let (mut env, modes) = environment(&name, e, Profile::Fleet, &stores, doc)?;
         env.modes = modes;
         environments.insert(name, env);
     }
@@ -351,9 +469,10 @@ fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> 
         return Err(cfg("no environments defined".into()));
     }
 
+    let stores = stores(&raw.stores, doc)?;
     let mut environments = BTreeMap::new();
     for (name, e) in raw.environments {
-        let (mut env, modes) = environment(&name, e, Profile::Simple, doc)?;
+        let (mut env, modes) = environment(&name, e, Profile::Simple, &stores, doc)?;
         if !modes.is_empty() {
             env.modes = BTreeMap::from([(SIMPLE_PRODUCT.to_string(), modes)]);
         }
@@ -516,12 +635,17 @@ fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<
 /// render the same name would otherwise be both staged and pruned in one run (FR-2, FR-8,
 /// FR-30).
 fn check_names(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    // Store names already taken in a named store, case-folded as it compares them, by
+    // every environment that keeps its secrets there (FR-39): (store, id) → (env, owner).
+    let mut shared: Vec<(&dyn StoreConfig, String, String, String)> = Vec::new();
     for (env_name, env) in &fleet.environments {
         let Some(t) = env.target() else {
             continue;
         };
         let rules = t.name_rules();
+        let store = t.secrets_in();
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        let mut seen_in_store: BTreeMap<String, String> = BTreeMap::new();
         for (product, p) in &fleet.products {
             for key in p.keys.keys() {
                 let name = t.env_name(product, key);
@@ -535,55 +659,118 @@ fn check_names(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                 let id = match &rules.store {
                     None => name.clone(),
                     Some(s) => {
-                        let store = t.store_name(&name);
-                        if store.is_empty()
-                            || store.len() > s.max_len
-                            || !store.chars().all(s.allowed)
-                        {
-                            return Err(cfg(format!(
-                                "environment {env_name}: {owner} renders {} of {} characters, which must match {}",
-                                s.label,
-                                store.len(),
-                                s.pattern
-                            )));
-                        }
-                        // The first and last characters, e.g. a key ending in `_` renders a
-                        // Kubernetes name ending in `-`: refused here, never at sync.
-                        let edges = [store.chars().next(), store.chars().last()];
-                        if !edges.into_iter().flatten().all(s.edge) {
-                            return Err(doc.key_at(
-                                product,
-                                key,
-                                format!(
-                                    "environment {env_name}: {owner} renders {} {store:?}, which \
-                                     must start and end with a letter or digit ({})",
-                                    s.label, s.pattern
-                                ),
-                            ));
-                        }
-                        if s.case_insensitive {
-                            store.to_ascii_lowercase()
-                        } else {
-                            store
-                        }
+                        let at = Place {
+                            env_name,
+                            product,
+                            key,
+                            owner: &owner,
+                        };
+                        store_id(&at, &t.store_name(&name), s, doc)?
                     }
                 };
-                if let Some(prev) = seen.insert(id.clone(), owner.clone()) {
-                    return Err(cfg(match &rules.store {
-                        None => format!(
-                            "environment {env_name}: {prev} and {owner} both render {} {id}",
-                            rules.env_label
-                        ),
-                        Some(s) => format!(
-                            "environment {env_name}: {prev} and {owner} both map to {} {id}",
-                            s.label
-                        ),
-                    }));
+                check_unique(&mut seen, env_name, &rules, id, &owner)?;
+                if let Some(store) = store {
+                    let s = store.name_rules();
+                    let at = Place {
+                        env_name,
+                        product,
+                        key,
+                        owner: &owner,
+                    };
+                    let id = store_id(&at, &store.store_name(&name), &s, doc)?;
+                    let named = NameRules {
+                        env_label: rules.env_label,
+                        store: Some(s),
+                    };
+                    check_unique(&mut seen_in_store, env_name, &named, id.clone(), &owner)?;
+                    if let Some((_, _, other, prev)) = shared
+                        .iter()
+                        .find(|(st, i, e, _)| st.same_store(store) && *i == id && e != env_name)
+                    {
+                        return Err(cfg(format!(
+                            "environments {other} and {env_name} both keep {} {id} in {} ({prev} \
+                             and {owner}); each would overwrite and prune the other's value\n  \
+                             next: give one of them its own store, or an env_name template that \
+                             renders different names",
+                            s.label,
+                            store.describe()
+                        )));
+                    }
+                    shared.push((store, id, env_name.clone(), owner.clone()));
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Where a rendered name comes from, for messages.
+struct Place<'a> {
+    env_name: &'a str,
+    product: &'a str,
+    key: &'a str,
+    owner: &'a str,
+}
+
+/// A rendered store name checked against `s` (FR-30): its identity for collisions,
+/// case-folded when the store ignores case.
+fn store_id(
+    at: &Place<'_>,
+    store: &str,
+    s: &StoreNameRules,
+    doc: &Doc<'_>,
+) -> Result<String, Error> {
+    let (env_name, owner) = (at.env_name, at.owner);
+    if store.is_empty() || store.len() > s.max_len || !store.chars().all(s.allowed) {
+        return Err(cfg(format!(
+            "environment {env_name}: {owner} renders {} of {} characters, which must match {}",
+            s.label,
+            store.len(),
+            s.pattern
+        )));
+    }
+    // The first and last characters, e.g. a key ending in `_` renders a Kubernetes name
+    // ending in `-`: refused here, never at sync.
+    let edges = [store.chars().next(), store.chars().last()];
+    if !edges.into_iter().flatten().all(s.edge) {
+        return Err(doc.key_at(
+            at.product,
+            at.key,
+            format!(
+                "environment {env_name}: {owner} renders {} {store:?}, which must start and end \
+                 with a letter or digit ({})",
+                s.label, s.pattern
+            ),
+        ));
+    }
+    Ok(if s.case_insensitive {
+        store.to_ascii_lowercase()
+    } else {
+        store.to_string()
+    })
+}
+
+/// Two keys of one environment must not render the same name (FR-8).
+fn check_unique(
+    seen: &mut BTreeMap<String, String>,
+    env_name: &str,
+    rules: &NameRules,
+    id: String,
+    owner: &str,
+) -> Result<(), Error> {
+    let Some(prev) = seen.insert(id.clone(), owner.to_string()) else {
+        return Ok(());
+    };
+    Err(cfg(match &rules.store {
+        None => format!(
+            "environment {env_name}: {prev} and {owner} both render {} {id}",
+            rules.env_label
+        ),
+        Some(s) => format!(
+            "environment {env_name}: {prev} and {owner} both map to {} {id}",
+            s.label
+        ),
+    }))
 }
 
 /// IDs and app names go into argv, so they must not start with `-` (read as a flag) and

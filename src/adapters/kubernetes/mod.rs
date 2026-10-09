@@ -3,9 +3,11 @@
 //! adapter: `docs/design/spike-k8s-findings.md` (K1–K7).
 //!
 //! - **Store** ([`KubeSecrets`]): one immutable Secret per value version, named
-//!   `opv-<store name>-<first 10 hex of SHA-256(value)>` and labelled `opv-managed=<env>`,
-//!   `opv-key=<store name>`; the value is base64 in `data.value`. The hash suffix is the version
-//!   (FR-29), so compare-before-write is a name lookup and writes are idempotent.
+//!   `opv-<store name>-<id>` and labelled `opv-managed=<env>`, `opv-key=<store name>`; the value
+//!   is base64 in `data.value`. The id is the version (FR-29): 10 random base32 characters from
+//!   the OS RNG, never derived from the value, so a name, label or annotation discloses nothing
+//!   about it (SR-1). Compare-before-write reads the bound value and compares it in constant
+//!   time; an unchanged value writes nothing.
 //! - **Runtime** ([`KubeDeployment`]): managed env entries of one container bind
 //!   `valueFrom.secretKeyRef {name: <secret>, key: value}` (secrets) or `value` (config). The
 //!   Deployment is written back with `replace` carrying its `resourceVersion` (FR-31, K3).
@@ -21,18 +23,20 @@
 //! exit 9, NR-28); otherwise the step itself was refused ([`Error::Target`]).
 
 pub mod config;
+pub mod external;
 pub mod runtime;
 pub mod store;
 
 #[cfg(test)]
 mod converge_tests;
+#[cfg(test)]
+mod eso_tests;
 
 use std::io;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::domain::SecretValue;
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{
@@ -64,8 +68,10 @@ pub const VALUE_KEY: &str = "value";
 pub const LABEL_MANAGED: &str = "opv-managed";
 /// The store name the Secret is a version of.
 pub const LABEL_KEY: &str = "opv-key";
-/// Hex characters of SHA-256(value) in a Secret name: the version.
+/// Characters of the random version id in a Secret name.
 pub const VERSION_LEN: usize = 10;
+/// Alphabet of version ids: lower-case RFC 4648 base32 (5 bits per character, 50 in all).
+const ID_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// Environment every call runs with (NR-7); `KUBECONFIG` is inherited untouched.
 const PINNED_ENV: &[(&str, &str)] = &[("NO_COLOR", "1")];
 
@@ -90,10 +96,21 @@ pub fn store_name(env_name: &str) -> String {
     env_name.to_ascii_lowercase().replace('_', "-")
 }
 
-/// The version of `value`: the first [`VERSION_LEN`] hex characters of its SHA-256.
-pub fn version_of(value: &SecretValue) -> String {
-    let digest = Sha256::digest(value.expose().as_bytes());
-    hex::encode(digest)[..VERSION_LEN].to_string()
+/// A fresh version id: [`VERSION_LEN`] base32 characters from the OS RNG. It is never
+/// derived from the value, so a Secret's name is no fingerprint of it (FR-38, SR-1).
+pub fn new_version() -> Result<String, Error> {
+    let mut bits =
+        getrandom::u64().map_err(|e| {
+            Error::Dependency(format!(
+            "the operating system's random number generator failed ({e}); nothing was written"
+        ).into())
+        })?;
+    let mut id = String::with_capacity(VERSION_LEN);
+    for _ in 0..VERSION_LEN {
+        id.push(char::from(ID_ALPHABET[(bits & 31) as usize]));
+        bits >>= 5;
+    }
+    Ok(id)
 }
 
 /// The Secret holding version `version` of `store`: `opv-<store>-<version>`.
@@ -107,10 +124,8 @@ pub fn split_secret_name(name: &str) -> Option<(&str, &str)> {
     let cut = rest.len().checked_sub(VERSION_LEN + 1)?;
     let (store, tail) = rest.split_at(cut);
     let version = tail.strip_prefix('-')?;
-    let hex = version
-        .bytes()
-        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    (hex && valid_label_value(store)).then_some((store, version))
+    let id = version.bytes().all(|b| ID_ALPHABET.contains(&b));
+    (id && valid_label_value(store)).then_some((store, version))
 }
 
 /// A DNS-1123 label: 1–63 of `a-z0-9-`, starting and ending alphanumeric. Store names must
@@ -488,10 +503,6 @@ mod tests {
     use super::*;
     use crate::runner::fake::{FakeRunner, failed_read};
 
-    fn sv(v: &str) -> SecretValue {
-        SecretValue::new(v.to_string())
-    }
-
     fn kubectl_get_deployment(r: &FakeRunner) -> Result<Value, Error> {
         let t = target();
         Kubectl::new(r, &t).get_deployment()
@@ -503,26 +514,30 @@ mod tests {
     }
 
     #[test]
-    fn secret_name_is_content_hash() {
-        // The K1 recon wrote `opv-k8s-marker-1` as opv-fleet--api--db-url-f85b191f16.
-        let v = sv("opv-k8s-marker-1");
+    fn new_version_is_a_parseable_secret_name_suffix() {
+        let v = new_version().unwrap();
         assert_eq!(
-            secret_name(&store_name("FLEET__API__DB_URL"), &version_of(&v)),
-            "opv-fleet--api--db-url-f85b191f16"
+            split_secret_name(&secret_name("db-url", &v)),
+            Some(("db-url", v.as_str()))
         );
+    }
+
+    #[test]
+    fn new_versions_differ_between_calls() {
+        assert_ne!(new_version().unwrap(), new_version().unwrap());
     }
 
     #[test]
     fn split_secret_name_returns_store_and_version() {
         assert_eq!(
-            split_secret_name("opv-fleet--api--db-url-f85b191f16"),
-            Some(("fleet--api--db-url", "f85b191f16"))
+            split_secret_name("opv-fleet--api--db-url-q3vz7kd2mx"),
+            Some(("fleet--api--db-url", "q3vz7kd2mx"))
         );
     }
 
     #[test]
-    fn split_secret_name_rejects_non_hex_version() {
-        assert_eq!(split_secret_name("opv-db-url-f85b191fzz"), None);
+    fn split_secret_name_rejects_a_version_outside_base32() {
+        assert_eq!(split_secret_name("opv-db-url-q3vz7kd2m0"), None);
     }
 
     #[test]

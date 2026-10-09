@@ -180,7 +180,39 @@ env_name   = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
 config     = "env"                       # or "store"
 ```
 
-opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<10 hex of the value's hash>`, labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. A changed value is a new Secret; old ones are removed only by `--prune`, after a healthy rollout. The Secret name is the variable name lower-cased with `_` changed to `-`, so it must be a valid DNS-1123 name (at most 253 characters with the suffix), and collisions are an error. A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused when the configuration loads, naming the key and its line. <!-- verify: name length/limit message -->
+opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. A changed value is a new Secret; old ones are removed only by `--prune`, after a healthy rollout. The Secret name is the variable name lower-cased with `_` changed to `-`, so it must be a valid DNS-1123 name (at most 253 characters with the suffix), and collisions are an error. A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused when the configuration loads, naming the key and its line. <!-- verify: name length/limit message -->
+
+### Secrets in a named store: `[stores.<name>]` and `secrets_in`
+
+A runtime can keep its secrets in a store from another provider. Declare the store once and point the runtime at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).
+
+```toml
+[stores.prod-vault]                        # any name: lower-case letters, digits and -
+azure_key_vault = "kv-myapp-prod"          # the store kind is the key; its value is the vault
+subscription    = "00000000-0000-0000-0000-000000000000"   # required
+# secret_store  = "prod-vault"             # the in-cluster ClusterSecretStore; default: the store name
+
+[environments.prod.kubernetes]
+context    = "aks-prod"
+namespace  = "api"
+deployment = "api"
+secrets_in = "prod-vault"                  # optional; without it, opv's own Kubernetes Secrets
+```
+
+| Field | Meaning |
+|---|---|
+| `azure_key_vault` | The vault that holds the values (3 to 24 letters, digits and `-`). |
+| `subscription` | Required subscription id. opv passes it on every `az` call. |
+| `secret_store` | Optional. The `ClusterSecretStore` that reads this vault in the cluster. Defaults to the store's name. |
+| `secrets_in` | On a runtime section: the store its secrets live in. |
+
+- **What opv does.** Each secret is written to Key Vault as a new version (as for an Azure target). With `--deploy`, opv creates an `ExternalSecret` named `opv-<name>-<first 10 characters of the version id>` that fetches exactly that version once (`refreshInterval: "0"`), waits until it is `Ready` (its Secret exists), and only then points the Deployment's variable at that Secret. The version id is random, so no name or label says anything about the value.
+- **Names.** Key Vault rules apply (`_` becomes `-`, names ignore case), and the name must also fit a Kubernetes name of at most 63 characters, starting and ending with a letter or digit. Two environments that keep the same Key Vault name in one store are an error naming both, because each would overwrite and prune the other's value.
+- **Config.** `config = "env"` (default) keeps config as plain variables on the Deployment; `config = "store"` routes it through Key Vault and an ExternalSecret like a secret.
+- **Unsupported pairs.** `secrets_in` on `fly` or `azure`, or a store name that is not declared, is a configuration error that lists the defined stores or the supported pairs, at its line.
+- **Prerequisites.** ESO serving `external-secrets.io/v1` (tested with 2.11) and a `ClusterSecretStore` that can read the vault. `opv doctor` checks both; [agent-setup.md](agent-setup.md#azure-or-kubernetes-instead-of-fly) shows how to create the store.
+
+`opv explain <KEY>` prints the whole chain, for example `DB_URL → Key Vault kv-myapp-prod (pinned version) → ExternalSecret opv-db-url-<version> → Secret of the same name → env DB_URL`.
 
 ### Guarding an environment: `confirm_env`
 
