@@ -17,7 +17,7 @@ use std::io::Write;
 use super::{kind_label, suggest, write_err};
 use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
 use crate::domain::{Fleet, rules};
-use crate::error::Error;
+use crate::error::{Code, Error};
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
@@ -36,9 +36,22 @@ pub fn run(
     env: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    run_as(fleet, target, env, out, false)
+}
+
+/// [`run`], printing one JSON document instead of lines when `json` (A5): `{environment,
+/// product, key, reference, kind, field, target: [{label, value}], rules, immutable,
+/// guidance, required_here, inspect}`. Configuration only, never a value.
+pub fn run_as(
+    fleet: &Fleet,
+    target: &str,
+    env: Option<&str>,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     let t = resolve(fleet, target)?;
     let env_name = environment(fleet, &t, env)?;
-    explain_in(fleet, &t, env_name, out)
+    explain_in(fleet, &t, env_name, out, json)
 }
 
 /// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
@@ -176,6 +189,7 @@ fn did_you_mean(text: String, close: &[&str]) -> Error {
             .with_next(format!("opv explain {one}")),
         many => Error::Config(format!("{text}; did you mean {}?", many.join(" or ")).into()),
     }
+    .with_code(Code::UndeclaredKey)
 }
 
 /// The environment to explain: `--env` when given (it must be defined and the key declared
@@ -202,7 +216,8 @@ fn environment<'a>(
                             known.join(", ")
                         )
                         .into(),
-                    ));
+                    )
+                    .with_code(Code::Usage));
                 }
             }
         }
@@ -215,7 +230,8 @@ fn environment<'a>(
                 t.spec.environments.join(", ")
             )
             .into(),
-        ));
+        )
+        .with_code(Code::UndeclaredKey));
     }
     Ok(name)
 }
@@ -225,6 +241,7 @@ fn explain_in(
     t: &Target<'_>,
     env_name: &str,
     out: &mut dyn Write,
+    json: bool,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     let (product, key, spec) = (t.product, t.key, t.spec);
@@ -262,6 +279,28 @@ fn explain_in(
     };
     // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
+    let required_here = rules::applies(spec, env_name, env, product);
+    if json {
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env_name,
+            "product": super::json_product(product),
+            "key": key,
+            "reference": format!("op://{}/{}/{label}", env.vault_id, env.item_id),
+            "kind": kind_label(spec.kind),
+            "field": field,
+            "target": target_lines
+                .iter()
+                .map(|(l, v)| serde_json::json!({"label": l, "value": v}))
+                .collect::<Vec<_>>(),
+            "rules": rules,
+            "immutable": spec.immutable,
+            "guidance": (!spec.guidance.is_empty()).then_some(spec.guidance.as_str()),
+            "required_here": required_here,
+            "inspect": inspect_command(&env.item_id, &env.vault_id),
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
     let mut rows: Vec<(String, String)> = vec![
         (
             "reference".into(),
@@ -288,7 +327,7 @@ fn explain_in(
         ),
         ("guidance".into(), guidance.to_string()),
     ]);
-    if !rules::applies(spec, env_name, env, product) {
+    if !required_here {
         rows.push((
             "note".into(),
             "not required here (its prefix_by_mode mode is skipped)".into(),

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 2,
+  "next": "opv init staging --json",
+  "do": "fix the cause above",
+  "error": {
+    "code": "config_invalid",
+    "category": "config",
+    "message": "no vault titled \"no-such-vault\" (exact, case-sensitive match); candidates: \"Private\" (othervault), \"myapp-staging\" (vaultid01)",
+    "detail": [],
+    "retry": "after_fix",
+    "human_required": false,
+    "do": "fix the cause above",
+    "next": "opv init staging --json"
+  }
+}

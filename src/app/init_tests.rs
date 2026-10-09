@@ -820,7 +820,7 @@ fn targetless_fleet_init_points_to_product_check() {
     let mut a = args(None, false);
     a.fly_app = None;
     let (_dir, run) = init_with(&fleet_fields(), &a);
-    assert!(run.out.contains("opv check staging --product <product>"));
+    assert!(run.out.contains("Next: opv doctor --env staging\n"));
 }
 
 /// Review #16: with one product, the next step names it instead of a placeholder.
@@ -849,4 +849,31 @@ fn init_points_to_the_rules_reference_url() {
         "{}",
         run.out
     );
+}
+
+// ---- A5: `init --json` ----
+
+fn init_json(fields: &[Field], a: &InitArgs) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let r = FakeRunner::new(vec![vaults(), items(), item(fields)]);
+    let mut out = Vec::new();
+    let res = run_as(a, dir.path(), &r, &mut out, true);
+    let framed = crate::app::json_tests::framed(&out, &res, "opv init staging --json");
+    // The temp directory differs per run.
+    let framed = framed.replace(&dir.path().display().to_string(), "<dir>");
+    (dir, framed)
+}
+
+#[test]
+fn init_json_success_golden() {
+    let (_dir, out) = init_json(&fleet_fields(), &args(None, false));
+    crate::app::json_tests::golden("init_success", &out);
+}
+
+#[test]
+fn init_json_refusal_golden() {
+    let mut a = args(None, false);
+    a.vault = "no-such-vault".into();
+    let (_dir, out) = init_json(&fleet_fields(), &a);
+    crate::app::json_tests::golden("init_unknown_vault", &out);
 }

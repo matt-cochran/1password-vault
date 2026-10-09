@@ -33,33 +33,35 @@ opv run prod -- ./server            # simple profile: no --product
 3. `plan` shows the same rows plus the target side, then names what a sync would do and ends with the command that does it (see [Plan](#plan)). It changes nothing.
 4. `sync` stages the values on the target (on Fly, through `flyctl secrets import --stage`, values on stdin; Azure and Kubernetes: [below](#sync-on-azure-and-kubernetes)). It refuses (exit 6) and stages nothing if any key is missing, of the wrong kind or failing a rule; the refusal names every blocking key and an `opv explain` command for them. Before its first write it checks the Fly app (`flyctl status`, `flyctl releases`): a deleted (`dead`) app stops it with nothing written. A Fly deploy already running is waited for: opv reads the releases again every 5 s, prints `waiting for the running Fly deploy of <app> (release vN) to finish, 15 s` on stderr at least every 15 s, and goes on once it has finished; if it is still running when the `--timeout` budget is nearly spent (or after 10 minutes), opv stops with nothing written and a `Next:` line. A suspended or never-deployed app has no machines; secrets are app-level, so staging goes ahead with a `warn  fly app <app>: no machines; ...` line, and `--deploy` prints `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). Stopped machines are a `warn` line too.
 5. `--rotate PRODUCT/KEY` (repeatable) stages an immutable key that is already on Fly. `--prune-immutable PRODUCT/KEY` (repeatable) lets `--prune` unset a named immutable key.
-6. `config export <ENV> --json` prints the config-kind values for deployment tooling. `--json` is required and is the only format.
-7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. A failing key's declared guidance is printed under it as `  guidance: <text>`. `--json` prints `schema_version`, `environment`, `target_checked: false`, `rows` (product, key, state, rule, reason) and `findings`.
+6. `config export <ENV>` prints the config-kind values for deployment tooling as JSON, the only format (`--json` is accepted). On failure stdout is the [failure document](#json-contract) instead.
+7. `check <ENV> [--product <p>]` validates the environment's keys for local work, by name only: it reads the item once, skips other products' sections, never calls a deployment target, and exits 8 when a key is missing, of the wrong kind or failing a rule. A failing key's declared guidance is printed under it as `  guidance: <text>`. `--json` prints `schema_version`, `ok`, `environment`, `product`, `target_checked: false`, `rows` (the [shared row shape](#machine-readable-status-and-plan); `target` and `action` are `null`), `findings` and `totals`.
 8. `run <ENV> --product <p> -- <cmd>` runs a command with the product's keys in its environment under plain names (`OPENAI_API_KEY`, not the Fly name), through `op run`. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. It writes no `.env` file. See [Local development](#local-development).
 
 ### Next step
 
-Every command that fails (any exit code other than 0, except `run`, which passes the command's own code through) ends with exactly one `Next:` line, the last line on stderr. It holds the command to run, or the fix and then the command:
+Every command that fails (any exit code other than 0, except `run`, which passes the command's own code through) ends with exactly one `Next:` line, the last line on stderr. `Next:` is always one command that runs as typed: no prose, no placeholders, no parentheses. When something only a person can do comes first (fill a value in 1Password, sign in, approve a guarded environment), it is on its own `Do:` line right before `Next:`:
 
 ```text
 opv: policy denied: sync refused, nothing staged: api/OPENAI_API_KEY (missing)
+Do: fix api/OPENAI_API_KEY in 1Password
 Next: opv explain api/OPENAI_API_KEY --env prod
 ```
 
 ```text
 opv: 1 finding
-Next: fix the keys above in 1Password, then run opv check dev --product api
+Do: fix the keys above in 1Password
+Next: opv check dev --product api
 ```
 
-When the failure came from an external call, what that program wrote on stderr (at most 5 lines, every secret masked as `__SECRET__`) sits between the error line and `Next:`:
+When the failure came from an external call, what that program wrote on stderr (at most 5 lines, every secret masked as `__SECRET__`) sits between the error line and `Do:`/`Next:`:
 
 ```text
 opv: target error: az keyvault secret list failed for kv-prod
   az said: ERROR: (Forbidden) The user does not have secrets list permission
-Next: opv doctor
+Next: opv sync prod
 ```
 
-A usage error ends with `Next: opv <command> --help`; an outcome that is unknown (exit 9) or an interruption (130/143) ends with the same command line and `(safe to re-run)`. Scripts and AI assistants can rely on the pattern `^Next: `. Guidance from the configuration is labelled `guidance:` and is never a `Next:` line.
+When the fix is not a command, `Next:` is the command you ran, to run again once the `Do:` step is done. A usage error, a misspelt environment or product and an undeclared key end with `Next: opv <command> --help` instead, because running the same line again cannot work. An outcome that is unknown (exit 9) or an interruption (130/143) ends with the same command line: re-running it is safe. A command that needs your own terminal (`opv setup`, `opv session`) says so on `Do:` and names itself on `Next:`. Scripts and AI assistants can rely on the patterns `^Do: ` and `^Next: `. Guidance from the configuration is labelled `guidance:` and is never a `Next:` line. With `--json`, the same `do` and `next` are fields of the [failure document](#json-contract).
 
 `doctor` prints one line per check; a failing check has its fix on the line under it (`  fix: ...`) when the fix is not already in its text. When a check fails, `doctor` exits with the first failing check as the error, and its `Next:` line is that check's fix:
 
@@ -67,16 +69,17 @@ A usage error ends with `Next: opv <command> --help`; an outcome that is unknown
 FAIL  op auth: authentication error: not signed in to 1Password
 ...
 opv: authentication error: op auth check failed (see the FAIL line above)
-Next: sign in: eval $(op signin)
+Do: sign in: eval $(op signin)
+Next: opv doctor
 ```
 
 On an interactive terminal (not CI, no service-account token) the sign-in step is `opv session   (or: eval $(op signin))`.
 
-With `--env`, doctor also reads that environment's item once, by IDs, and checks the selected product's keys as `check` does: `ok    item: <vault_id>/<item_id> readable (<n> field(s) in section <product>)`, or a `FAIL  item:` line naming each key that is missing, of the wrong kind or failing a rule, with `fill them in 1Password, then opv check <env> --product <p>` as the next step (exit 8). So doctor is never all clear when `check` would fail. Without `--env` no item is read.
+With `--env`, doctor also reads that environment's item once, by IDs, and checks the selected product's keys as `check` does: `ok    item: <vault_id>/<item_id> readable (<n> field(s) in section <product>)`, or a `FAIL  item:` line naming each key that is missing, of the wrong kind or failing a rule, with `Do: fill them in 1Password` and `Next: opv check <env> --product <p>` (exit 8). So doctor is never all clear when `check` would fail. Without `--env` no item is read.
 
-`--json` prints `{"schema_version": 1, "checks": [{"name", "status": "ok"|"warn"|"fail"|"skip", "detail", "next"}], "next"}`: `detail` is the check's first line (names, versions and commands only), `next` its remediation or `null`, and the top-level `next` is the first failing check's step, or `null` when nothing is pending. The exit code is the same as without `--json`; on failure stderr still ends with the `Next:` line.
+`--json` prints `{"schema_version": 1, "ok", "checks": [{"name", "status": "ok"|"warn"|"fail"|"skip", "detail", "next", "do"}], "next", "do"}`: `detail` is the check's first line (names, versions and commands only); a check with something to do has `do` (the action only a person can take, or `null`) and `next` (a command), both `null` otherwise; the top-level pair is the first failing check's, or `null` when nothing is pending. On failure the document also carries `exit_code` and `error` ([JSON contract](#json-contract)). The exit code is the same as without `--json`; on failure stderr still ends with the `Do:`/`Next:` lines.
 
-With no `secrets.toml` at all, the `Next:` step is `opv init <env> --vault <vault title> --item <item title>` for an existing item; the config line also lists `opv setup` for a project that ships `opv.setup.toml` and `--config <path>`. An invalid configuration always gets `Next: fix secrets.toml (see the config line above), then run opv doctor`; another failure with no command of its own gets `Next: fix the <check> failure above, then run opv doctor`. When every check passes, the last line is `Next: nothing pending`. The line is text, never a prompt.
+With no `secrets.toml` at all, the step is `Do: fill in and run: opv init <env> --vault <vault title> --item <item title>` for an existing item; the config line also lists `opv setup` for a project that ships `opv.setup.toml` and `--config <path>`. An invalid configuration always gets `Do: fix secrets.toml (see the config line above)`; another failure with no command of its own gets `Do: fix the <check> failure above`; both end with `Next: opv doctor`. When every check passes, the last line is `all clear: nothing pending`. The lines are text, never a prompt.
 
 ### Explain a key
 
@@ -105,14 +108,17 @@ It reads only the configuration: no 1Password or Fly call, and no value or value
 
 `status <ENV> --json` and `plan <ENV> --json` print exactly one JSON document on stdout
 and nothing else. It contains names, states and counts only: no value, no value fragment,
-no value length and no guidance. Exit codes are unchanged, and an error is still reported
-on stderr with no partial document on stdout. The top-level `schema_version` is `1`; adding
-a field keeps it, while renaming or removing a field, or changing its meaning, increments it.
+no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
+and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
+[failure document](#json-contract). The top-level `schema_version` is `1`; adding a field
+keeps it, while renaming or removing a field, or changing its meaning, increments it.
 
 ```json
 {
   "schema_version": 1,
+  "ok": true,
   "environment": "prod",
+  "product": null,
   "rows": [
     {
       "product": "allumata",
@@ -121,8 +127,8 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
       "state": "saved",
       "rule": null,
       "reason": null,
-      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target": "absent",
       "action": "would_stage"
     }
@@ -131,7 +137,9 @@ a field keeps it, while renaming or removing a field, or changing its meaning, i
   "stage": ["FLEET__ALLUMATA__OPENAI_API_KEY"],
   "held": [],
   "prune": [],
-  "totals": { "rows": 1, "findings": 0, "extras": 0, "to_stage": 1, "held": 0, "to_prune": 0 }
+  "totals": { "rows": 1, "findings": 0, "extras": 0, "to_stage": 1, "held": 0, "to_prune": 0 },
+  "next": "opv sync prod --deploy",
+  "do": null
 }
 ```
 
@@ -140,9 +148,14 @@ failing rule when `state` is `failing_rule`, and `reason` says why (see
 [Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
 target for every provider (`fly_name` holds the same value and is kept for older scripts; it
 is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
-a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. With `--product`,
-the document carries `"product": "<p>"` and only that product's rows and totals. The
-document is meant for the scheduled drift check.
+a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
+in the same key order, is used by `status`, `plan` and `check`. With `--product`,
+the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
+totals. `next` is the sync command for `plan`, `null` for `status`. The document is meant
+for the scheduled drift check.
+
+`opv status --json` without an environment prints one entry per environment:
+`{"environments": [{"name", "target", "state": "checked"|"run_only"|"not_checked", "keys", "findings", "error_code"}], "totals": {"environments", "findings"}}`.
 
 ### One product: `--product`
 
@@ -177,7 +190,7 @@ held (immutable): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC
 Next: opv sync prod --deploy --prune
 ```
 
-On Azure and Kubernetes the line says `would write`. The `Next:` command adds `--prune` only when something would be pruned, `--product` when you scoped the plan, and `--confirm <env>` for a [guarded environment](#guarded-environments). When a key blocks the sync, `plan` exits 8 and the `Next:` line says to fix it and run `plan` again.
+On Azure and Kubernetes the line says `would write`. The `Next:` command adds `--prune` only when something would be pruned, `--product` when you scoped the plan, and `--confirm <env>` for a [guarded environment](#guarded-environments). When a key blocks the sync, `plan` exits 8 with `Do: fix the keys above in 1Password` and `Next: opv plan <env>`.
 
 ### Change detection on Fly
 
@@ -232,34 +245,39 @@ Long steps print a progress line on stderr at least every 15 seconds (`waiting f
 written: api/OPENAI_API_KEY (FLEET__API__OPENAI_API_KEY)
 unchanged: api/DATABASE_URL (FLEET__API__DATABASE_URL)
 pending deploy (pass --deploy): api/OPENAI_API_KEY (FLEET__API__OPENAI_API_KEY)
-summary: written 1 · deployed no · pruned 0 · pending 1 · unchanged 1 · skipped 0
+summary: written 1 · unchanged 1 · held 0 · deployed no · pending 1 · pruned 0 · kept 0 · skipped 0
 Next: opv sync prod --deploy
 ```
 
-`written` counts new values (staged on Fly, new versions on Azure and Kubernetes); `deployed` is the revision name (`yes` on Fly, which names none) or `no`; `pending` counts names still waiting for a deploy after this run; `skipped` counts declared keys not desired in this environment. The `Next:` line follows only when something is left to do: a deploy for pending names, or `--prune` for names kept because `--prune` was not given. `--prune` prints `will prune: <names>` before it removes anything.
+The line is always `summary: written N · unchanged N · held N · deployed <revision|yes|no>[ (N pending from an earlier run)] · pending N · pruned N · kept N · skipped N`. `written` counts new values (staged on Fly, new versions on Azure and Kubernetes); `held` counts immutable keys left alone; `deployed` is the revision name (`yes` on Fly, which names none) or `no`, and says when the deploy applied names an earlier run left pending (so a run that wrote nothing can still deploy); `pending` counts names still waiting for a deploy after this run; `kept` counts names not desired here that stayed because `--prune` was not given; `skipped` counts declared keys not desired in this environment. The `Next:` line follows only when something is left to do: a deploy for pending names, or `--prune` for names kept because `--prune` was not given. `--prune` prints `will prune: <names>` before it removes anything.
 
 `sync --json` prints the same report as one JSON document on stdout (names only, never values; detail lines are not printed, and preflight warnings go to stderr):
 
 ```json
 {
   "schema_version": 1,
+  "ok": true,
   "environment": "prod",
   "provider": "fly",
   "product": null,
-  "written": ["FLEET__API__OPENAI_API_KEY"],
+  "written": [{"product": "api", "key": "OPENAI_API_KEY", "target_name": "FLEET__API__OPENAI_API_KEY"}],
+  "unchanged": [{"product": "api", "key": "DATABASE_URL", "target_name": "FLEET__API__DATABASE_URL"}],
+  "held": [],
   "deployed": false,
   "revision": null,
+  "deploy_reason": [],
+  "deployed_names": [],
+  "pending": [{"product": "api", "key": "OPENAI_API_KEY", "target_name": "FLEET__API__OPENAI_API_KEY"}],
   "pruned": [],
-  "pending": ["FLEET__API__OPENAI_API_KEY"],
-  "unchanged": ["FLEET__API__DATABASE_URL"],
-  "skipped": [],
-  "held": [],
   "kept": [],
-  "next": "opv sync prod --deploy"
+  "skipped": [],
+  "written_names": ["FLEET__API__OPENAI_API_KEY"],
+  "next": "opv sync prod --deploy",
+  "do": null
 }
 ```
 
-Names are target names. `held` lists immutable keys left alone, `kept` names not desired here that stayed because `--prune` was not given, and `next` is the `Next:` command or `null`. Every failure ends with exactly one `Next:` line ([Next step](#next-step)); with `--json`, stdout is empty on failure.
+Lists follow the summary line's order and hold `{product, key, target_name}` objects (`product` is `null` under the simple profile). `deploy_reason` says why a deploy happened (`written`, `pruned`, `pending_from_earlier_run`), `deployed_names` and `written_names` are bare target names, and `next` is the `Next:` command or `null`. Every failure ends with one `Next:` line ([Next step](#next-step)); with `--json`, stdout is then the [failure document](#json-contract).
 
 ### Retries, timeouts and interruptions
 
@@ -336,6 +354,68 @@ opv completions powershell | Out-String | Invoke-Expression   # add this line to
 
 On a terminal, opv colours state words only: `ok`, `warn`, `FAIL` and `skip` in `doctor`, and the row state (`saved`, `missing`, `wrong kind`, `failed`, `skipped`) in `status`, `plan` and `check`. Nothing derived from a value is coloured, and JSON never is. `--color auto` (the default) colours only when stdout is a terminal and `NO_COLOR` is unset or empty; `--color never` turns it off and `--color always` forces it, even when piped. Piped output under `auto` is byte-for-byte the same as before colour existed.
 
+## JSON contract
+
+Every command that takes `--json` (`doctor`, `check`, `status`, `plan`, `sync`, `explain`, `init`, `item skeleton`), plus `config export` and `opv schema`, prints exactly one JSON document on stdout, success or failure, and the human text on stderr. No document ever contains a secret value. Each one starts with `schema_version` and `ok` and ends with `next` (a command that runs as typed, or `null`) and `do` (an action only a person can take, or `null`). A failure adds `exit_code` after `ok` and an `error` object last:
+
+```json
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 6,
+  "next": "opv explain api/OPENAI_API_KEY --env prod",
+  "do": "fix api/OPENAI_API_KEY in 1Password",
+  "error": {
+    "code": "keys_blocking",
+    "category": "policy",
+    "message": "sync refused, nothing staged: api/OPENAI_API_KEY (missing)",
+    "detail": [],
+    "retry": "after_fix",
+    "human_required": true,
+    "do": "fix api/OPENAI_API_KEY in 1Password",
+    "next": "opv explain api/OPENAI_API_KEY --env prod"
+  }
+}
+```
+
+A failure after the command produced its document (findings, exit 8) keeps that document's fields between `exit_code` and `next`. `config export` prints the bare config map on success and the failure document on failure. Usage errors (`--json` with an unknown flag) print the failure document with code `usage`.
+
+`retry` says whether to run the same command again: `safe` (now; nothing is known to be broken), `after_fix` (once `do` is done) or `never` (the command itself must change: run `next`). `human_required` is `true` when only a person can take the next step; an assistant then hands `do` and `next` to the user instead of acting. `code` is one of a closed list:
+
+| `code` | Exit | `retry` | Human | Meaning |
+|---|---|---|---|---|
+| `usage` | 2 | never | no | the command line is not valid |
+| `config_not_found` | 2 | after_fix | no | no `secrets.toml` here or in a parent |
+| `config_invalid` | 2 | after_fix | no | `secrets.toml` or a value is not valid |
+| `unknown_env` | 2 | never | no | the environment is not defined |
+| `unknown_product` | 2 | never | no | the product is not declared (or the simple profile takes none) |
+| `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
+| `no_target` | 2 | never | no | the environment has no deployment target |
+| `dependency_missing` | 3 | after_fix | no | `op` or the target CLI is missing or unusable |
+| `source_error` | 4 | after_fix | no | 1Password could not be read |
+| `item_not_found` | 4 | after_fix | no | the item is not in the vault |
+| `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot access the vault |
+| `target_error` | 5 | after_fix | no | the target refused or failed |
+| `target_unhealthy` | 5 | after_fix | no | the new revision is not healthy; the previous one keeps serving |
+| `policy_refused` | 6 | after_fix | no | opv refused the operation |
+| `keys_blocking` | 6 | after_fix | yes | `sync` refused: keys missing, of the wrong kind or failing a rule |
+| `confirm_required` | 6 | never | yes | the environment sets `confirm_env`; confirm with the user, then run `next` |
+| `confirm_mismatch` | 6 | never | no | `--confirm` names another environment |
+| `terminal_required` | 6 | never | yes | the command needs the user's own terminal |
+| `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
+| `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `findings` | 8 | after_fix | yes | keys are missing, of the wrong kind or failing a rule |
+| `outcome_unknown` | 9 | safe | no | a change may or may not have been applied |
+| `provider_unavailable` | 9 | safe | no | a provider did not answer; nothing was changed |
+| `interrupted` | 130/143 | safe | no | interrupted by SIGINT or SIGTERM |
+
+`opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
+
+```sh
+opv schema | jq '.commands[] | select(.ask_user_first) | .name'
+opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
+```
+
 ## Exit codes
 
 | Code | Meaning |
@@ -349,7 +429,7 @@ On a terminal, opv colours state words only: `ok`, `warn`, `FAIL` and `skip` in 
 | 7 | authentication |
 | 8 | findings: `status`, `plan` or `check` found blocking keys |
 | 9 | outcome unknown, or a provider did not answer: a change may or may not have been applied (a `flyctl secrets deploy` that timed out, an `az` call that lost its connection), or a provider was unreachable before anything was written; nothing is known to be broken; re-run the same command |
-| 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` and `Next: <the same command> (safe to re-run)` |
+| 130 / 143 | interrupted by Ctrl-C (SIGINT) / SIGTERM (Unix): the running `op` or `flyctl` call gets the signal and 5 s to stop, then opv prints `interrupted during <step>; safe to re-run` and `Next: <the same command>` (with `--json`, also the failure document with code `interrupted`) |
 | 101 | internal panic (Rust default) |
 
 CI may retry a job that exited 9; codes 2 to 8 need a fix first.

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 2,
+  "next": "opv item --help",
+  "do": null,
+  "error": {
+    "code": "unknown_env",
+    "category": "config",
+    "message": "undefined environment \"qa\" (defined: prod, staging)",
+    "detail": [],
+    "retry": "never",
+    "human_required": false,
+    "do": null,
+    "next": "opv item --help"
+  }
+}

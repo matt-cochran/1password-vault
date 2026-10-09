@@ -1,3 +1,3 @@
 --- stdout
 --- result
-Err(Config("environment \"dev\" has no deployment target. For local settings use opv check dev --product <name> and opv run dev --product <name> -- <command>. To deploy, add one target section (fly, azure, kubernetes) to environment dev in secrets.toml first." next "https://github.com/matt-cochran/1password-vault/blob/main/docs/configuration.md"))
+Err(Config("environment \"dev\" has no deployment target. For local settings use opv check dev --product <name> and opv run dev --product <name> -- <command>. To deploy, add one target section (fly, azure, kubernetes) to environment dev in secrets.toml first." next "opv doctor --env dev"))

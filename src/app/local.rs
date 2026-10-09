@@ -71,19 +71,25 @@ pub fn check(
     plan.extras.clear();
     let findings = plan.blocking();
     if json {
+        // The shared row shape (A6); no target is read, so `target` and `action` are null.
+        let declared = fleet.environment(env)?;
         let rows: Vec<_> = plan
             .rows
             .iter()
             .map(|row| {
-                serde_json::json!({
-                    "product": super::json_product(&row.product), "key": row.key,
-                    "state": super::json_state(&row.state), "rule": super::json_rule(&row.state),
-                    "reason": super::json_reason(&row.state)
-                })
+                let name = declared.target_name(&row.product, &row.key);
+                super::JsonRow::new(row, name, None, None)
             })
             .collect();
-        let doc = serde_json::json!({"schema_version": 1, "environment": env,
-            "target_checked": false, "rows": rows, "findings": findings});
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env,
+            "product": product,
+            "target_checked": false,
+            "rows": rows,
+            "findings": findings,
+            "totals": {"rows": plan.rows.len(), "findings": findings},
+        });
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
         for row in &plan.rows {

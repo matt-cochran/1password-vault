@@ -368,7 +368,14 @@ pub fn stdout_shape(stdout: &[u8]) -> String {
     };
     match &doc {
         serde_json::Value::Object(m) => {
-            let mut keys: Vec<String> = m.keys().take(12).map(|k| crate::scrub::scrub(k)).collect();
+            // Sorted, as before JSON objects kept their order (A6).
+            let mut sorted: Vec<&String> = m.keys().collect();
+            sorted.sort();
+            let mut keys: Vec<String> = sorted
+                .into_iter()
+                .take(12)
+                .map(|k| crate::scrub::scrub(k))
+                .collect();
             if m.len() > 12 {
                 keys.push("…".into());
             }
@@ -1083,6 +1090,40 @@ pub mod signals {
     pub fn set_rerun(command: &str) {
         *lock(&RERUN) = command.to_string();
     }
+
+    /// `--json`: an interruption also prints the failure document on stdout (A1).
+    static JSON: AtomicBool = AtomicBool::new(false);
+
+    /// Record whether stdout is one JSON document, for the interruption report.
+    pub fn set_json(json: bool) {
+        JSON.store(json, Ordering::SeqCst);
+    }
+
+    /// The `--json` document for an interruption by signal `sig`.
+    pub fn interrupted_json(sig: i32, message: &str, rerun: &str) -> String {
+        let code = crate::error::Code::Interrupted;
+        let step = crate::error::Step {
+            action: None,
+            next: rerun.to_string(),
+        };
+        serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "ok": false,
+            "exit_code": 128 + sig,
+            "next": rerun,
+            "do": null,
+            "error": crate::error::error_object(
+                code.as_str(),
+                "interrupted",
+                message,
+                Vec::new(),
+                code.retry(),
+                code.human_required(),
+                &step,
+            ),
+        })
+        .to_string()
+    }
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1146,11 +1187,11 @@ pub mod signals {
                 forward(sig);
                 let step = lock(&STEP).clone();
                 let rerun = lock(&RERUN).clone();
-                eprint!(
-                    "opv: {}\n{}",
-                    interrupted_message(&step),
-                    crate::error::next_line(&format!("{rerun} (safe to re-run)"))
-                );
+                let message = interrupted_message(&step);
+                if JSON.load(Ordering::SeqCst) {
+                    println!("{}", interrupted_json(sig, &message, &rerun));
+                }
+                eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
                 std::process::exit(128 + sig);
             }
         });
@@ -2104,7 +2145,7 @@ mod tests {
         let e = crate::error::Error::Config("bad secrets.toml".into());
         assert_eq!(
             crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: configuration error: bad secrets.toml\nNext: opv doctor\n"
+            "opv: configuration error: bad secrets.toml\nDo: fix the cause above\nNext: opv doctor\n"
         );
     }
 

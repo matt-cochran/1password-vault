@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 8,
+  "environments": [
+    {
+      "name": "dev",
+      "target": null,
+      "state": "run_only",
+      "keys": null,
+      "findings": null,
+      "error_code": null
+    },
+    {
+      "name": "prod",
+      "target": "fly",
+      "state": "checked",
+      "keys": 4,
+      "findings": 0,
+      "error_code": null
+    },
+    {
+      "name": "staging",
+      "target": "fly",
+      "state": "checked",
+      "keys": 3,
+      "findings": 1,
+      "error_code": null
+    }
+  ],
+  "totals": {
+    "environments": 3,
+    "findings": 1
+  },
+  "next": "opv status staging",
+  "do": "fix the keys in 1Password",
+  "error": {
+    "code": "findings",
+    "category": "findings",
+    "message": "1 finding",
+    "detail": [],
+    "retry": "after_fix",
+    "human_required": true,
+    "do": "fix the keys in 1Password",
+    "next": "opv status staging"
+  }
+}

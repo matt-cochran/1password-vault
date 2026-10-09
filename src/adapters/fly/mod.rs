@@ -1242,7 +1242,7 @@ mod tests {
         assert_eq!(e.exit_code(), 7, "{e}");
         let t = crate::error::report(&e, "-", None);
         assert!(t.contains("not logged in to Fly"), "{t}");
-        assert!(t.contains("\nNext: set FLY_API_TOKEN"), "{t}");
+        assert!(t.contains("\nDo: set FLY_API_TOKEN"), "{t}");
         assert!(
             !t.contains("auth login"),
             "no interactive command under CI: {t}"

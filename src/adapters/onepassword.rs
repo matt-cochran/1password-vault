@@ -49,7 +49,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT, key_label};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::host::{Host, OP_CLI, OpCredential, Platform};
 use crate::runner::{
     Call, CommandRunner, Outcome, Output, PROBE_TIMEOUT, status_text, unknown_text,
@@ -237,7 +237,7 @@ pub fn session_error(session: Session, host: &Host, failed: Option<&str>) -> Opt
                 }
             },
         };
-    Some(Error::Auth(format!("{m}\n  then run opv again").into()))
+    Some(Error::Auth(format!("{m}\n  then run opv again").into()).with_code(Code::OpNotSignedIn))
 }
 
 /// After a failed `op` call: diagnose the session and return the error to report. Not
@@ -333,6 +333,11 @@ fn unavailable_for(
     vault_readable: Option<bool>,
 ) -> Error {
     let (item, vault) = (&env.item_id, &env.vault_id);
+    let code = match vault_readable {
+        Some(true) => Code::ItemNotFound,
+        Some(false) => Code::VaultNoAccess,
+        None => Code::SourceError,
+    };
     Error::Source(
         match vault_readable {
             Some(true) => format!(
@@ -349,6 +354,7 @@ fn unavailable_for(
         }
         .into(),
     )
+    .with_code(code)
 }
 
 /// A signed-in failure whose cause is not known: access or the IDs.

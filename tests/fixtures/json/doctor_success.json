@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "checks": [
+    {
+      "name": "config",
+      "status": "ok",
+      "detail": "valid (1 environment(s), 1 product(s))",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "op",
+      "status": "ok",
+      "detail": "version 2.40.0",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "op auth",
+      "status": "ok",
+      "detail": "signed in (SERVICE_ACCOUNT)",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "item",
+      "status": "ok",
+      "detail": "vprd/iprd readable (3 field(s) in section allumata)",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "flyctl",
+      "status": "ok",
+      "detail": "version v0.4.112",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "fly auth",
+      "status": "ok",
+      "detail": "signed in",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "op local run",
+      "status": "ok",
+      "detail": "native op; opv run can start local commands",
+      "next": null,
+      "do": null
+    },
+    {
+      "name": "opv",
+      "status": "ok",
+      "detail": "not found on PATH",
+      "next": null,
+      "do": null
+    }
+  ],
+  "next": null,
+  "do": null
+}

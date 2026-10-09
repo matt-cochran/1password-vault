@@ -1468,23 +1468,69 @@ fn fly_plan_json_exit_code_matches_text_on_findings() {
     assert_eq!((text, json), (8, 8));
 }
 
-/// FR-10 / FR-21: an error before the document is produced still exits 4 on stderr with
-/// no partial document on stdout.
+/// FR-10 / A1: an error before the document is produced still exits 4, and stdout is the
+/// one failure document, not a partial one.
 #[test]
-fn status_json_error_prints_no_document_on_stdout() {
+fn status_json_error_prints_the_failure_document_on_stdout() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["status", "prod", "--json"]);
-    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(
+        (r.code, doc["ok"].clone(), doc["exit_code"].clone()),
+        (4, json!(false), json!(4)),
+        "{}",
+        r.all()
+    );
 }
 
-/// FR-10 / FR-21: `fly plan --json` likewise reports errors on stderr only.
+/// FR-10 / A1: `plan --json` likewise.
 #[test]
-fn fly_plan_json_error_prints_no_document_on_stdout() {
+fn plan_json_error_names_its_code() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["plan", "prod", "--json"]);
-    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["error"]["code"], "item_not_found", "{}", r.all());
+}
+
+/// SR-1 / A1: the failure document carries no value, though the failed call's stderr
+/// (masked in the text) carried one.
+#[test]
+fn json_failure_document_carries_no_value() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_OP_ITEM_EXIT", "1");
+    let r = h.run(&["status", "prod", "--json"]);
+    assert!(!r.stdout.contains(MARK), "{}", r.stdout);
+}
+
+/// SR-1 / A6: no `--json` document carries a value or the child's stderr, whatever the
+/// command.
+#[test]
+fn json_documents_carry_no_value() {
+    let h = Harness::new(&good_item());
+    let mut leaked = Vec::new();
+    for args in [
+        &["status", "prod", "--json"][..],
+        &["plan", "prod", "--json"],
+        &["check", "prod", "--product", "allumata", "--json"],
+        &["sync", "prod", "--json"],
+        &["doctor", "--env", "prod", "--json"],
+        &[
+            "explain",
+            "allumata/OPENAI_API_KEY",
+            "--env",
+            "prod",
+            "--json",
+        ],
+    ] {
+        h.reset();
+        let r = h.run(args);
+        if r.stdout.contains(MARK) || r.stdout.contains(CHILD_STDERR) {
+            leaked.push(format!("{args:?}: {}", r.stdout));
+        }
+    }
+    assert!(leaked.is_empty(), "{leaked:?}");
 }
 
 // ------------------------------------------------------------ simple profile (FR-20)
@@ -2353,7 +2399,13 @@ fn sync_json_stdout_is_one_document() {
     let h = Harness::new(&good_item());
     let r = h.run(&["sync", "prod", "--json"]);
     let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
-    assert_eq!(doc["pending"], json!([N_ENC, N_OPENAI]), "{}", r.all());
+    let pending: Vec<&Value> = doc["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["target_name"])
+        .collect();
+    assert_eq!(pending, [N_ENC, N_OPENAI], "{}", r.all());
 }
 
 /// P22: `status` without an environment prints one line per environment.

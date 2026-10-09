@@ -99,7 +99,7 @@ fn sync_summary_counts_every_outcome() {
     let (_, out) = sync_out(&fleet(), &new_secrets(), &SyncOpts::default());
     assert!(
         out.contains(
-            "summary: written 2 · deployed no · pruned 0 · pending 2 · unchanged 0 · skipped 1\n"
+            "summary: written 2 · unchanged 0 · held 0 · deployed no · pending 2 · pruned 0 · kept 0 · skipped 1\n"
         ),
         "{out}"
     );
@@ -150,7 +150,7 @@ fn sync_json_is_one_versioned_document() {
 #[test]
 fn sync_json_names_written_keys_by_target_name() {
     assert_eq!(
-        json_doc(&new_secrets())["written"],
+        json_doc(&new_secrets())["written_names"],
         serde_json::json!([ENC_FLY, OPENAI_FLY])
     );
 }

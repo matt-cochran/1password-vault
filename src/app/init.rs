@@ -65,7 +65,20 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on(args, dir, r, out, &Host::detect)
+    run_on(args, dir, r, out, &Host::detect, false)
+}
+
+/// [`run`], printing what was written as one JSON document when `json` (A5): `{path,
+/// environment, profile, vault_id, item_id, keys: [{product, key, kind}], skipped, next}`.
+/// Names, IDs and kinds only.
+pub fn run_as(
+    args: &InitArgs,
+    dir: &Path,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    run_on(args, dir, r, out, &Host::detect, json)
 }
 
 fn run_on(
@@ -74,6 +87,7 @@ fn run_on(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
     host: &dyn Fn() -> Host,
+    json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
     let target = dir.join(FILE_NAME);
@@ -93,6 +107,10 @@ fn run_on(
         other => other,
     })?;
     write_atomic(&target, &text, args.force)?;
+    let next = next_command(args, &decl);
+    if json {
+        return write_json(out, args, &target, &vault.id, &item.id, &decl, &next);
+    }
 
     let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     w(
@@ -126,23 +144,59 @@ fn run_on(
             crate::DOCS_URL
         ),
     )?;
-    let next = if args.fly_app.is_some() {
-        "plan"
-    } else {
-        "check"
-    };
-    // One product: its name, not a placeholder (review #16).
-    let product = match (args.fly_app.is_none(), decl.profile, decl.keys.len()) {
-        (true, Profile::Fleet, 1) => {
-            format!(
-                " --product {}",
-                decl.keys.keys().next().expect("one product")
-            )
-        }
-        (true, Profile::Fleet, _) => " --product <product>".to_string(),
-        _ => String::new(),
-    };
-    w(out, format!("Next: opv {next} {}{product}", args.env))
+    w(out, format!("Next: {next}"))
+}
+
+/// The command to run after `init`: `plan` for a target, else `check` (with the product
+/// when there is one); with several products, `doctor --env`, which checks them all.
+fn next_command(args: &InitArgs, decl: &Declared) -> String {
+    let env = &args.env;
+    match (args.fly_app.is_some(), decl.profile, decl.keys.len()) {
+        (true, _, _) => format!("opv plan {env}"),
+        (false, Profile::Fleet, 1) => format!(
+            "opv check {env} --product {}",
+            decl.keys.keys().next().expect("one product")
+        ),
+        (false, Profile::Fleet, _) => format!("opv doctor --env {env}"),
+        _ => format!("opv check {env}"),
+    }
+}
+
+/// `init --json` (A5).
+fn write_json(
+    out: &mut dyn Write,
+    args: &InitArgs,
+    target: &Path,
+    vault_id: &str,
+    item_id: &str,
+    decl: &Declared,
+    next: &str,
+) -> Result<(), Error> {
+    let keys: Vec<serde_json::Value> = decl
+        .keys
+        .iter()
+        .flat_map(|(product, keys)| {
+            keys.iter().map(move |(key, kind)| {
+                serde_json::json!({
+                    "product": (decl.profile == Profile::Fleet).then_some(product),
+                    "key": key,
+                    "kind": super::kind_label(*kind),
+                })
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "schema_version": crate::json::SCHEMA_VERSION,
+        "path": target.display().to_string(),
+        "environment": args.env,
+        "profile": profile_word(decl.profile),
+        "vault_id": vault_id,
+        "item_id": item_id,
+        "keys": keys,
+        "skipped": decl.skipped,
+        "next": next,
+    });
+    writeln!(out, "{doc}").map_err(write_err)
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 2,
+  "next": "opv explain allumata/OPENAI_API_KEY",
+  "do": null,
+  "error": {
+    "code": "undeclared_key",
+    "category": "config",
+    "message": "undeclared key \"OPENAI_KEY\" in product allumata; did you mean allumata/OPENAI_API_KEY?",
+    "detail": [],
+    "retry": "never",
+    "human_required": false,
+    "do": null,
+    "next": "opv explain allumata/OPENAI_API_KEY"
+  }
+}

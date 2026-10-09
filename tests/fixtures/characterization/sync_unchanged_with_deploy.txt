@@ -8,6 +8,6 @@ $ flyctl secrets list --app mcproductlabs-portfolio-production --json
 --- stdout
 unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
 held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
-summary: written 0 · deployed no · pruned 0 · pending 0 · unchanged 1 · skipped 1
+summary: written 0 · unchanged 1 · held 1 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
 --- result
 Ok(())

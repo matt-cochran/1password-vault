@@ -59,6 +59,7 @@ pub fn not_found(start: &Path) -> Error {
         )
         .into(),
     )
+    .with_code(crate::error::Code::ConfigNotFound)
     .with_next("opv init <env> --vault <vault title> --item <item title>")
 }
 

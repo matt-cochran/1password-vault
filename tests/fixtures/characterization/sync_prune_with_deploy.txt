@@ -13,6 +13,6 @@ will prune: allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
 pruned: allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
 held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
 deployed: allumata/STRIPE_SECRET_KEY (FLEET__ALLUMATA__STRIPE_SECRET_KEY)
-summary: written 0 · deployed yes · pruned 1 · pending 0 · unchanged 1 · skipped 1
+summary: written 0 · unchanged 1 · held 1 · deployed yes · pending 0 · pruned 1 · kept 0 · skipped 1
 --- result
 Ok(())
