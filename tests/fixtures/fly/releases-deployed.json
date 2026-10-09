@@ -1,0 +1,19 @@
+[
+  {
+    "ID": "FIXTURE",
+    "Version": 1,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-07-21T00:08:41Z",
+    "ImageRef": "FIXTURE"
+  }
+]

@@ -426,18 +426,23 @@ mod tests {
         let r = FakeRunner::new(failed_read(1).chain([Output::success(
             br#"{"email":"x-FIXTUREVALUE@example.com","user_type":"SERVICE_ACCOUNT"}"#.to_vec(),
         )]));
+        r.responses
+            .borrow_mut()
+            .push_back(Ok(crate::runner::Output::failure(1)));
         let mut out = Vec::new();
         let e = run(&fleet(), "prod", &r, &mut out).unwrap_err();
         assert!(matches!(e, Error::Source(_)), "{e}");
         assert_no_values(&e.to_string());
-        // One item read (retried, NR-3), then the free session check; no Fly call.
+        // One item read (retried, NR-3), then the free session and vault checks (NR-26);
+        // no Fly call.
         assert_eq!(
             argvs(&r),
             vec![
                 "op item get iprd --vault vprd --format json",
                 "op item get iprd --vault vprd --format json",
                 "op item get iprd --vault vprd --format json",
-                "op whoami --format json"
+                "op whoami --format json",
+                "op vault get vprd --format json"
             ]
         );
     }

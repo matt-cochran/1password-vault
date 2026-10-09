@@ -522,6 +522,8 @@ impl CommandRunner for Sim {
         Ok(self.handle(call))
     }
 
+    fn pause(&self, _: Duration, _: &str) {}
+
     fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> io::Result<i32> {
         unreachable!("sync never runs a child")
     }

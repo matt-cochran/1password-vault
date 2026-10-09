@@ -170,6 +170,10 @@ pub trait CommandRunner {
     /// status is returned as is.
     fn probe(&self, call: &Call, limit: Duration) -> io::Result<Output>;
 
+    /// Wait `d` (never past the run budget) before polling again, printing `note` on
+    /// stderr first: the confirming read after a write (NR-30). The fake advances its clock.
+    fn pause(&self, d: Duration, note: &str);
+
     /// Run `program` with inherited stdin/stdout/stderr and the given extra `env`, wait, and
     /// return its exit code (`128 + signal` if it was killed by a signal). Used by `run`
     /// (FR-4) to spawn `op run -- <cmd>`. Same contract: no secret values in `args`.
@@ -337,6 +341,11 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         ));
         e.sleep(delay);
     }
+}
+
+fn pause_on(e: &dyn Engine, d: Duration, note: &str) {
+    e.note(note);
+    e.sleep(d.min(left(e)));
 }
 
 /// The call was never started: the run budget (`--timeout`) is spent.
@@ -705,6 +714,10 @@ impl CommandRunner for ProcessRunner {
         probe_on(self, call, limit)
     }
 
+    fn pause(&self, d: Duration, note: &str) {
+        pause_on(self, d, note)
+    }
+
     fn local_run_supported(&self) -> io::Result<()> {
         if cfg!(windows) {
             return Ok(());
@@ -1042,6 +1055,10 @@ pub mod fake {
         /// A queued `TimedOut` comes back as that error, like a real probe timeout.
         fn probe(&self, call: &super::Call, _limit: Duration) -> io::Result<Output> {
             self.record(call.program, call.args, call.stdin, call.env, false)
+        }
+
+        fn pause(&self, d: Duration, note: &str) {
+            super::pause_on(self, d, note)
         }
 
         fn local_run_supported(&self) -> io::Result<()> {

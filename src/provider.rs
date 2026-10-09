@@ -100,9 +100,11 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
         managed: BTreeSet<String>,
         r: &'a dyn CommandRunner,
     ) -> Result<Ports<'a>, Error>;
-    /// Read-only checks run before a command touches the target (NR-23 to NR-26): the
-    /// first failure stops the command before anything is read or written.
-    fn preflight(&self, r: &dyn CommandRunner) -> Result<(), Error>;
+    /// Read-only checks of the target's own state, run by mutating commands before their
+    /// first write (NR-23, NR-24): `Err` refuses the run with nothing written, and so does
+    /// a returned check that failed. The other returned checks are printed one line each,
+    /// like `doctor`'s; return only those worth a line (warnings), a passing state is silent.
+    fn preflight(&self, r: &dyn CommandRunner) -> Result<Preflight, Error>;
     /// `doctor` lines: tool versions and sign-in, never identities or values (FR-3).
     fn doctor(&self, r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Vec<Check>;
     /// `explain` lines for a secret `product`/`key`: (label, value), e.g. ("fly name", ..).
@@ -161,8 +163,18 @@ pub struct StoreNameRules {
 /// One named `doctor` check line.
 #[derive(Debug)]
 pub struct Check {
-    pub name: &'static str,
+    pub name: std::borrow::Cow<'static, str>,
     pub outcome: Result<Verdict, Error>,
+}
+
+/// What a target's read-only state checks found (NR-24): lines to print, and whether a
+/// requested deploy has nothing to act on.
+#[derive(Debug, Default)]
+pub struct Preflight {
+    pub checks: Vec<Check>,
+    /// Set when the runtime has nothing to restart: `sync --deploy` skips the deploy and
+    /// prints this line instead (exit 0).
+    pub skip_deploy: Option<String>,
 }
 
 /// A passing check: ok, or ok with a warning.
@@ -170,4 +182,14 @@ pub struct Check {
 pub enum Verdict {
     Ok(String),
     Warn(String),
+}
+
+impl Verdict {
+    /// The one-line form `doctor` and preflight print: `ok    <name>: <detail>`.
+    pub fn line(&self, name: &str) -> String {
+        match self {
+            Verdict::Ok(detail) => format!("ok    {name}: {detail}"),
+            Verdict::Warn(detail) => format!("warn  {name}: {detail}"),
+        }
+    }
 }

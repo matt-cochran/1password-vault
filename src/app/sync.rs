@@ -2,8 +2,10 @@
 //!
 //! Fly digests cannot be computed locally (D0 Q4), so `sync` is stage-and-compare
 //! (ruling P1): read the item once → list A → plan → refuse if anything blocks (nothing
-//! staged) → validate the import batch → stage → list B → report each staged key as
-//! changed or unchanged by digest → `--prune`: unset the plan's prune list (staged; never
+//! staged; `opv explain` named for the first key, NR-17) → validate the import batch →
+//! preflight the target's state (NR-23, NR-24; `super::preflight`) → stage → list B, polled
+//! until every staged name shows a digest (NR-30) → report each staged key as changed or
+//! unchanged by digest → `--prune`: unset the plan's prune list (staged; never
 //! an immutable key unless named with `--prune-immutable`) →
 //! `--deploy`: deploy when a staged digest changed, a prune happened, or a managed name is
 //! still `Staged`/`Partial` on Fly from an earlier run (FR-7). Without `--deploy`
@@ -17,14 +19,15 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::time::Duration;
 
 use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
 use super::{
-    compare, is_blocking, managed_names, open_target, plan_item, print_extras, print_rows,
-    read_and_plan, read_fields, row_names, unmanaged_on_target, write_err, write_json,
+    compare, is_blocking, managed_names, open_target, plan_item, preflight, print_extras,
+    print_rows, read_and_plan, read_fields, row_names, unmanaged_on_target, write_err, write_json,
 };
 use crate::domain::plan::CurrentState::Same;
 use crate::domain::rules;
@@ -111,13 +114,18 @@ fn run_staged(
         c.rotate,
         c.prune_immutable,
     )?;
-    refuse_blocking(&plan)?;
+    refuse_blocking(&plan, env_name)?;
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
     store.validate(&batch)?;
+    // Last read-only step before the first write (NR-23, NR-24).
+    let skip_deploy = preflight::run(t, c.r, out)?;
     print_extras(out, &plan)?;
     print_counts(out, &plan)?;
 
+    let label = t.provider().label();
+    // Writes this run completed, named when a later step fails (NR-10).
+    let mut done: Vec<String> = Vec::new();
     let mut changed = Vec::new();
     let mut unchanged = Vec::new();
     // Nothing staged by this run: list A is the current state, no second list needed.
@@ -125,7 +133,8 @@ fn run_staged(
         list_a.clone()
     } else {
         store.write(&batch)?;
-        store.list()?
+        done.push(format!("staged {} secret(s)", batch.len()));
+        confirm(store, &batch, c.r, label, &done)?
     };
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
@@ -143,7 +152,10 @@ fn run_staged(
     let pruned = if plan.prune.is_empty() {
         false
     } else if opts.prune {
-        store.remove(&plan.prune)?;
+        store
+            .remove(&plan.prune)
+            .map_err(|e| after_writes(e, &done))?;
+        done.push(format!("pruned {} name(s)", plan.prune.len()));
         p(out, format!("pruned (staged): {}", plan.prune.join(", ")))?;
         true
     } else {
@@ -177,22 +189,16 @@ fn run_staged(
         .map(|s| s.name.as_str())
         .collect();
     if !pending.is_empty() {
-        p(
-            out,
-            format!(
-                "pending on {}: {}",
-                t.provider().label(),
-                pending.join(", ")
-            ),
-        )?;
+        p(out, format!("pending on {label}: {}", pending.join(", ")))?;
     }
 
     let needs_deploy = !changed.is_empty() || pruned || !pending.is_empty();
     match (needs_deploy, opts.deploy) {
         (false, true) => p(out, "nothing pending; not deploying".into()),
         (false, false) => p(out, "nothing pending".into()),
+        (true, true) if skip_deploy.is_some() => p(out, skip_deploy.unwrap_or_default()),
         (true, true) => {
-            runtime.deploy()?;
+            runtime.deploy().map_err(|e| after_writes(e, &done))?;
             p(out, "deployed staged secrets".into())
         }
         (true, false) => p(out, "staged changes not deployed (no --deploy)".into()),
@@ -219,7 +225,10 @@ fn run_pinned(
     let fields = read_fields(fleet, env_name, c.r)?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
-    refuse_blocking(&plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0)?;
+    refuse_blocking(
+        &plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0,
+        env_name,
+    )?;
     let (plan, listed) = plan_item(
         fleet,
         env_name,
@@ -228,7 +237,7 @@ fn run_pinned(
         c.rotate,
         c.prune_immutable,
     )?;
-    refuse_blocking(&plan)?;
+    refuse_blocking(&plan, env_name)?;
     let want = pinned_want(
         fleet,
         env_name,
@@ -243,6 +252,8 @@ fn run_pinned(
             want.refused.join(", ")
         )));
     }
+    // Last read-only step before the first write (NR-23, NR-24).
+    let skip_deploy = preflight::run(c.t, c.r, out)?;
     print_extras(out, &plan)?;
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
 
@@ -344,6 +355,10 @@ fn run_pinned(
                 format!("pending deploy (pass --deploy): {}", join(&pending))
             },
         )?;
+        return env_routed(out);
+    }
+    if let Some(line) = skip_deploy.filter(|_| !pending.is_empty()) {
+        p(out, line)?;
         return env_routed(out);
     }
     let revision = if !pending.is_empty() {
@@ -763,16 +778,92 @@ fn join_keys<V>(m: &BTreeMap<String, V>) -> String {
     join(m.keys())
 }
 
-/// Refuses the whole run, before any write, when a row blocks (FR-15).
-fn refuse_blocking(plan: &SyncPlan) -> Result<(), Error> {
+/// Refuses the whole run, before any write, when a row blocks (FR-15), naming the next
+/// command (NR-17).
+fn refuse_blocking(plan: &SyncPlan, env_name: &str) -> Result<(), Error> {
     let blocking = row_names(&plan.rows, is_blocking);
     if blocking.is_empty() {
         return Ok(());
     }
     Err(Error::Policy(format!(
-        "sync refused, nothing staged: {}",
-        blocking.join(", ")
+        "sync refused, nothing staged: {}\n  {}",
+        blocking.join(", "),
+        explain_next(&plan.rows, env_name)
     )))
+}
+
+/// Longest wait for staged names to show a digest (NR-30).
+const CONFIRM_LIMIT: Duration = Duration::from_secs(30);
+
+/// List B (NR-30): the store's list right after staging can lag. Polls, waiting 1 s, 2 s,
+/// 4 s, ... on the runner's clock, until every staged name shows a digest or
+/// [`CONFIRM_LIMIT`] has passed; a name still without one is then counted as changed,
+/// never as unchanged. A read that never answers is reported with what was already done.
+fn confirm(
+    store: &dyn StagedStore,
+    batch: &[(String, &SecretValue)],
+    r: &dyn CommandRunner,
+    label: &str,
+    done: &[String],
+) -> Result<Vec<StoreEntry>, Error> {
+    let mut waited = Duration::ZERO;
+    let mut delay = Duration::from_secs(1);
+    loop {
+        let list = store.list().map_err(|e| match e {
+            Error::Unknown(_) => Error::Unknown(format!(
+                "{label} did not respond while confirming the staged secrets ({}); not \
+                 confirmed\n  next: re-run the same command (safe)",
+                done.join(", ")
+            )),
+            e => after_writes(e, done),
+        })?;
+        let unseen = batch
+            .iter()
+            .filter(|(n, _)| digest(&list, n).is_none())
+            .count();
+        if unseen == 0 || waited >= CONFIRM_LIMIT {
+            return Ok(list);
+        }
+        let d = delay.min(CONFIRM_LIMIT - waited);
+        r.pause(
+            d,
+            &format!(
+                "confirming {unseen} staged secret(s) on {label} ({} s)",
+                waited.as_secs()
+            ),
+        );
+        waited += d;
+        delay *= 2;
+    }
+}
+
+/// NR-10: a sign-in lost after this run's first write names what had completed. Other
+/// errors already say what is known (NR-2).
+fn after_writes(e: Error, done: &[String]) -> Error {
+    match e {
+        Error::Auth(m) if !done.is_empty() => Error::Auth(format!(
+            "{m}\n  {} write(s) had completed: {}; re-running the same command is safe",
+            done.len(),
+            done.join(", ")
+        )),
+        e => e,
+    }
+}
+
+/// The next command for a refusal (NR-17): `opv explain` for the first blocking key, one
+/// line however many keys block.
+fn explain_next(rows: &[Row], env_name: &str) -> String {
+    let keys: Vec<String> = rows
+        .iter()
+        .filter(|r| is_blocking(r))
+        .map(|r| key_label(&r.product, &r.key))
+        .collect();
+    let first = format!("opv explain {} --env {env_name}", keys[0]);
+    if keys.len() == 1 {
+        format!("next: {first}")
+    } else {
+        format!("next: {first} (and likewise for each key above)")
+    }
 }
 
 /// The result line, then the per-key change lists (names only).
@@ -1025,14 +1116,15 @@ mod tests {
     fn fake_with(item: crate::runner::Output, fly_a: crate::runner::Output) -> FakeRunner {
         FakeRunner::new([item, fly_a])
     }
-    /// item, list A, import, list B, then spare responses so an unexpected call (deploy,
+    /// item, list A, the two preflight reads, import, list B, then spare responses so an unexpected call (deploy,
     /// unset) is recorded rather than panicking, and the test can assert it never happened.
     fn fake_sync(
         item: crate::runner::Output,
         a: crate::runner::Output,
         b: crate::runner::Output,
     ) -> FakeRunner {
-        FakeRunner::new([item, a, ok(), b, ok(), ok(), ok()])
+        let [st, rel] = fly_preflight_ok();
+        FakeRunner::new([item, a, st, rel, ok(), b, ok(), ok(), ok()])
     }
     fn fake_complete() -> FakeRunner {
         fake_sync(
@@ -1187,6 +1279,8 @@ mod tests {
             vec![
                 "op item get iprd --vault vprd --format json".to_string(),
                 format!("flyctl secrets list --app {app} --json"),
+                format!("flyctl status --app {app} --json"),
+                format!("flyctl releases --app {app} --json"),
                 format!("flyctl secrets import --app {app} --stage"),
                 format!("flyctl secrets list --app {app} --json"),
             ]
@@ -1306,7 +1400,8 @@ mod tests {
         ))
         .unwrap();
         let a = || fly_st(&[(ENC_FLY, "d2", "Staged"), (OPENAI_FLY, "d1", "Deployed")]);
-        let r = FakeRunner::new([complete_item(), a(), ok(), ok()]);
+        let [st, rel] = fly_preflight_ok();
+        let r = FakeRunner::new([complete_item(), a(), st, rel, ok(), ok()]);
         let o = SyncOpts {
             deploy: true,
             ..opts()
@@ -1319,6 +1414,8 @@ mod tests {
             vec![
                 "op item get iprd --vault vprd --format json".to_string(),
                 format!("flyctl secrets list --app {app} --json"),
+                format!("flyctl status --app {app} --json"),
+                format!("flyctl releases --app {app} --json"),
                 format!("flyctl secrets deploy --app {app}"),
             ],
             "{out}"
@@ -1370,11 +1467,13 @@ mod tests {
     /// deploy must not be skipped on missing evidence.
     #[test]
     fn staged_key_without_digest_after_staging_counts_as_changed() {
-        let r = fake_sync(
-            complete_item(),
-            fly(&[(ENC_FLY, "d2")]),
-            fly(&[(ENC_FLY, "d2")]),
-        );
+        let b = || fly(&[(ENC_FLY, "d2")]);
+        let [st, rel] = fly_preflight_ok();
+        // List B is polled until the 30 s limit (NR-30): six lists, then the deploy.
+        let r = FakeRunner::new([complete_item(), b(), st, rel, ok()]);
+        r.responses
+            .borrow_mut()
+            .extend((0..6).map(|_| Ok(b())).chain([Ok(ok())]));
         let o = SyncOpts {
             deploy: true,
             ..opts()
@@ -1390,7 +1489,8 @@ mod tests {
     #[test]
     fn immutable_present_on_fly_is_held_not_staged() {
         let a = || fly(&[(ENC_FLY, "d-enc")]);
-        let r = fake_sync(complete_item(), a(), a());
+        let b = fly(&[(ENC_FLY, "d-enc"), (OPENAI_FLY, "d-openai")]);
+        let r = fake_sync(complete_item(), a(), b);
         let (res, out) = sync_out(&f(), &r, &opts());
         res.unwrap();
         let stdin = import_stdin(&r).unwrap();
@@ -1402,7 +1502,8 @@ mod tests {
     #[test]
     fn rotate_stages_an_immutable_key() {
         let a = || fly(&[(ENC_FLY, "d-enc")]);
-        let r = fake_sync(complete_item(), a(), fly(&[(ENC_FLY, "d-enc2")]));
+        let b = fly(&[(ENC_FLY, "d-enc2"), (OPENAI_FLY, "d-openai")]);
+        let r = fake_sync(complete_item(), a(), b);
         let o = SyncOpts {
             rotate: vec!["allumata/INTEGRATION_ENC_KEY".into()],
             ..opts()
@@ -1462,10 +1563,23 @@ mod tests {
         // prod has payments = "off", so the Stripe key is managed but not desired → prune.
         fly(&[(STRIPE_FLY, "d-s"), ("OTHER_TOOL_TOKEN", "d-o")])
     }
+    /// [`fly_with_prunable`] after this run staged its two keys.
+    fn fly_with_prunable_staged() -> crate::runner::Output {
+        fly(&[
+            (STRIPE_FLY, "d-s"),
+            ("OTHER_TOOL_TOKEN", "d-o"),
+            (OPENAI_FLY, "d-openai"),
+            (ENC_FLY, "d-enc"),
+        ])
+    }
 
     #[test]
     fn sync_never_prunes_without_flag() {
-        let r = fake_sync(complete_item(), fly_with_prunable(), fly_with_prunable());
+        let r = fake_sync(
+            complete_item(),
+            fly_with_prunable(),
+            fly_with_prunable_staged(),
+        );
         sync_out(&f(), &r, &opts()).0.unwrap();
         assert!(
             !called(&r, "flyctl", &["secrets", "unset"]),
@@ -1476,7 +1590,11 @@ mod tests {
 
     #[test]
     fn sync_prunes_only_managed_names_with_flag() {
-        let r = fake_sync(complete_item(), fly_with_prunable(), fly_with_prunable());
+        let r = fake_sync(
+            complete_item(),
+            fly_with_prunable(),
+            fly_with_prunable_staged(),
+        );
         let o = SyncOpts {
             prune: true,
             ..opts()
@@ -1720,6 +1838,8 @@ mod tests {
         let r = FakeRunner::new([
             complete_item(),
             fly_empty(),
+            fly_app_ok(),
+            fly_releases("complete"),
             crate::runner::Output::failure(1),
             ok(),
             ok(),
@@ -1733,8 +1853,8 @@ mod tests {
         assert!(matches!(e, Error::Target(_)), "{e}");
         // The failed import is followed only by the login check (FR-26): no list B, no
         // unset, no deploy.
-        assert_eq!(r.calls.borrow().len(), 4);
-        assert_eq!(r.calls.borrow()[3].args, vec!["auth", "whoami"]);
+        assert_eq!(r.calls.borrow().len(), 6);
+        assert_eq!(r.calls.borrow()[5].args, vec!["auth", "whoami"]);
     }
 
     // ---- fly plan -------------------------------------------------------------------
@@ -1806,5 +1926,275 @@ mod tests {
         assert!(out.contains("failed not_prefix ("), "{out}");
         assert_no_values(&out);
         assert_no_values(&e.to_string());
+    }
+
+    // ---- preflight before the first write (NR-10, NR-17, NR-23..NR-28, NR-30) ----------
+
+    const APP: &str = "mcproductlabs-portfolio-production";
+    type Out = crate::runner::Output;
+
+    /// Every write call made (import, unset, deploy).
+    fn writes(r: &FakeRunner) -> Vec<String> {
+        argvs(r)
+            .into_iter()
+            .filter(|a| ["import", "unset", "deploy"].iter().any(|w| a.contains(w)))
+            .collect()
+    }
+    /// Item and list A succeed (a prunable name on Fly), then `rest`; spare responses so
+    /// an unexpected write is recorded, not a panic.
+    fn after_list_a(rest: impl IntoIterator<Item = Out>) -> FakeRunner {
+        let r = FakeRunner::new([complete_item(), fly_with_prunable()]);
+        r.responses.borrow_mut().extend(rest.into_iter().map(Ok));
+        r
+    }
+    fn spare(r: &FakeRunner) {
+        r.responses
+            .borrow_mut()
+            .extend((0..6).map(|_| Ok(fly_with_prunable_staged())));
+    }
+    fn sync_err(r: &FakeRunner) -> Error {
+        spare(r);
+        let bash =
+            crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"));
+        crate::host::with_test_host(bash, || run(&f(), "prod", r, &mut Vec::new(), &all_flags()))
+            .unwrap_err()
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_app_dead() {
+        let r = after_list_a([fly_app_dead()]);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_deploy_running() {
+        let r = after_list_a([fly_app_ok(), fly_releases("running")]);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_fly_does_not_respond() {
+        let r = after_list_a([]);
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_signed_out_of_fly() {
+        let r = FakeRunner::new([complete_item()]);
+        r.responses.borrow_mut().extend(
+            crate::runner::fake::failed_read(1)
+                .chain([Out::failure(1)])
+                .map(Ok),
+        );
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_flyctl_missing() {
+        let r = FakeRunner::new([complete_item()]);
+        r.push_io_error(std::io::ErrorKind::NotFound);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_1password_does_not_respond() {
+        let r = FakeRunner::default();
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    #[test]
+    fn preflight_failure_makes_no_write_calls_when_vault_access_is_missing() {
+        let r = FakeRunner::new(crate::runner::fake::failed_read(1).chain([
+            Out::success(br#"{"user_type":"USER"}"#.to_vec()),
+            Out::failure(1),
+        ]));
+        sync_err(&r);
+        assert_eq!(writes(&r), Vec::<String>::new());
+    }
+
+    fn deploy_opts() -> SyncOpts {
+        SyncOpts {
+            deploy: true,
+            ..SyncOpts::default()
+        }
+    }
+    fn no_machines_warning() -> String {
+        format!(
+            "warn  fly app {APP}: no machines; secrets are staged and apply when machines \
+             start (fly scale count 1 --app {APP})\n"
+        )
+    }
+    fn staged_after(status: Out) -> (FakeRunner, Result<(), Error>, String) {
+        let r = after_list_a([status, fly_releases("complete")]);
+        spare(&r);
+        let (res, out) = sync_out(&f(), &r, &deploy_opts());
+        (r, res, out)
+    }
+
+    #[test]
+    fn suspended_fly_app_stages_with_the_no_machines_warning() {
+        let (r, res, out) = staged_after(fly_status("suspended"));
+        assert!(
+            res.is_ok() && out.contains(&no_machines_warning()) && import_stdin(&r).is_some(),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn suspended_fly_app_with_deploy_skips_the_deploy_and_exits_ok() {
+        let (r, res, out) = staged_after(fly_status("suspended"));
+        assert!(
+            res.is_ok()
+                && !called(&r, "flyctl", &["secrets", "deploy"])
+                && out.contains(&format!(
+                    "deploy skipped: {APP} has no machines; staged secrets apply when machines \
+                     start\n"
+                )),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn pending_fly_app_with_deploy_skips_the_deploy_and_exits_ok() {
+        let (r, res, out) = staged_after(fly_status("pending"));
+        assert!(
+            res.is_ok()
+                && !called(&r, "flyctl", &["secrets", "deploy"])
+                && out.contains(&no_machines_warning())
+                && out.contains("deploy skipped:"),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn stopped_machines_are_reported_not_refused() {
+        let (_r, res, out) = staged_after(fly_app_machines("stopped"));
+        assert!(
+            res.is_ok()
+                && out.contains(&format!(
+                    "warn  fly app {APP}: machines stopped; secrets are staged and apply when \
+                     machines start\n"
+                )),
+            "{res:?}\n{out}"
+        );
+    }
+
+    #[test]
+    fn dead_fly_app_refuses_with_a_next_step() {
+        let r = after_list_a([fly_app_dead()]);
+        let e = sync_err(&r).to_string();
+        assert!(
+            e.contains(&format!(
+                "Next: recreate it with `flyctl apps create {APP}`"
+            )),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn deploy_in_progress_refuses() {
+        let r = after_list_a([fly_app_ok(), fly_releases("running")]);
+        let e = sync_err(&r);
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "target error: a Fly deploy is already running for {APP}; nothing was \
+                 changed\n  Next: wait for it to finish, then re-run"
+            )
+        );
+    }
+
+    #[test]
+    fn provider_outage_before_writes_exits_9_with_status_page() {
+        let r = after_list_a([]);
+        r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
+        let e = sync_err(&r);
+        assert_eq!(
+            (e.exit_code(), e.to_string()),
+            (
+                9,
+                "outcome unknown: Fly did not respond after 3 attempts (fly status); nothing \
+                 was changed. Check https://status.flyio.net, then re-run"
+                    .to_string()
+            )
+        );
+    }
+
+    /// NR-30: list B right after staging still lacks the staged names; it is read again
+    /// until they show a digest.
+    #[test]
+    fn stale_list_after_stage_is_polled() {
+        let [st, rel] = fly_preflight_ok();
+        let fresh = fly(&[(OPENAI_FLY, "d-openai"), (ENC_FLY, "d-enc")]);
+        let r = FakeRunner::new([
+            complete_item(),
+            fly_empty(),
+            st,
+            rel,
+            ok(),
+            fly_empty(),
+            fresh,
+        ]);
+        sync_out(&f(), &r, &opts()).0.unwrap();
+        let lists = argvs(&r)
+            .iter()
+            .filter(|a| a.contains("secrets list"))
+            .count();
+        assert_eq!(lists, 3);
+    }
+
+    /// NR-30: the poll gives up after 30 s on the runner's clock.
+    #[test]
+    fn stale_list_poll_is_bounded_at_30_seconds() {
+        let [st, rel] = fly_preflight_ok();
+        let r = FakeRunner::new([complete_item(), fly_empty(), st, rel, ok()]);
+        r.responses
+            .borrow_mut()
+            .extend((0..6).map(|_| Ok(fly_empty())));
+        sync_out(&f(), &r, &opts()).0.unwrap();
+        assert_eq!(r.elapsed.get(), Duration::from_secs(30));
+    }
+
+    /// NR-10: sign-in lost after the stage: the error names the completed write.
+    #[test]
+    fn auth_loss_after_first_write_names_completed_writes() {
+        let r = after_list_a([
+            fly_app_ok(),
+            fly_releases("complete"),
+            ok(),
+            fly_with_prunable_staged(),
+            Out::failure(1), // unset
+            Out::failure(1), // auth whoami: signed out
+        ]);
+        let e = sync_err(&r);
+        assert!(
+            matches!(&e, Error::Auth(m) if m.ends_with(
+                "1 write(s) had completed: staged 2 secret(s); re-running the same command is safe"
+            )),
+            "{e}"
+        );
+    }
+
+    /// NR-17: a refusal names the next command, in one line.
+    #[test]
+    fn refusal_names_explain_as_the_next_command() {
+        let r = fake_with(
+            item_without("allumata", "OPENAI_API_KEY"),
+            fly_with_prunable(),
+        );
+        let e = sync_err(&r);
+        assert!(
+            e.to_string()
+                .ends_with("\n  next: opv explain allumata/OPENAI_API_KEY --env prod"),
+            "{e}"
+        );
     }
 }

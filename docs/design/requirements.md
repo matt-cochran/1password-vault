@@ -857,12 +857,12 @@ are in `docs/design/resilience.md`; each NR below is normative.
 - **NR-20 Guarded destruction.** Destructive flags stay explicit (SR-6); `--prune` lists names before acting; an environment with `confirm_env = true` requires `--confirm <env>` for mutating commands.
 - **NR-21 No clock assumptions.** No decision compares wall-clock times across machines; deadlines use monotonic local time.
 - **NR-22 Safe diagnostics.** `--verbose` adds program, argv, duration and outcome per call only; child stderr is still never captured (SR-1).
-- **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written.
-- **NR-24 Fly state.** Suspended or deleted apps, missing or stopped machines, a deploy in progress and `Partial` deploys are detected and reported with the exact command.
+- **NR-23 Preflight before the first write.** Mutating commands check every needed CLI, sign-in, provider reachability and target state read-only first; any failure stops the run with nothing written. The plan's own reads (the item read by IDs, the target's first list) are the CLI, sign-in and reachability checks, so preflight adds no second item read; tool versions stay with `doctor` (NR-13).
+- **NR-24 Fly state.** Deleted (`dead`) apps and a deploy in progress are refused with the reason and next step. Suspended or pending apps (on the Machines platform: no machines), missing machines and stopped machines are a `warn` line; secrets are app-level so they still stage, and `--deploy` is skipped with `deploy skipped: <app> has no machines; staged secrets apply when machines start` (exit 0). `Partial` deploys are detected and reported with the exact command. Fixtures are recorded flyctl output (`tests/fixtures/fly/`).
 - **NR-25 Azure state.** Soft-deleted or firewalled vaults, RBAC propagation delay (bounded wait with progress), resource locks, app provisioning in progress or failed, and revision mode are detected and handled or reported.
 - **NR-26 1Password state.** Moved, archived or deleted items, removed vault access, rate limits and a locked desktop app are diagnosed by ID with the next command; never a title fallback (FR-13).
 - **NR-27 Missing dependencies.** Each needed CLI is resolved once in preflight with the OS-specific install command; only the CLIs the chosen environment needs are required (FR-36).
-- **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page; nothing written.
+- **NR-28 Provider outage.** Reads exhausted before any write ⇒ exit 9 "provider unavailable", naming the provider, the step and its status page; nothing written. Applies to every read before a write, `status` and `plan` included.
 - **NR-29 Network glitches and proxies.** Covered by NR-3/NR-2; proxy and CA environment variables pass through to CLIs untouched.
 - **NR-30 Eventual consistency.** After a write, the confirming read polls until it observes the written version or the deadline; a stale read is never reported as "unchanged".
 

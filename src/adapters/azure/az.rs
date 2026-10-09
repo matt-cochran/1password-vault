@@ -27,6 +27,8 @@ pub const AZ_CLI: Tool = Tool {
     macos: "install: brew install azure-cli",
     windows: "install: winget install Microsoft.AzureCLI",
     linux: "install: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash",
+    vendor: "Azure",
+    status_page: "https://azure.status.microsoft",
 };
 
 /// Global flag that keeps `az` quiet apart from errors (R7).

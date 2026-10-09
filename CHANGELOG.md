@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `opv sync` checks the Fly app before its first write (`flyctl status`, `flyctl releases`): a deleted (`dead`) app or a deploy already running stops it with nothing written and the next step; suspended, pending or stopped-machine apps print a `warn` line and staging goes ahead, and `--deploy` is skipped with a notice when the app has no machines (NR-23, NR-24).
+- After staging, `sync` re-reads Fly's list for up to 30 seconds until every staged name shows a digest, so a lagging list is never reported as unchanged (NR-30).
+
 ### Changed
 
+- A 1Password or Fly read that gets no answer after 3 attempts exits 9 naming the provider, the step and its status page (status.1password.com, status.flyio.net); nothing was changed. It was exit 4 (1Password) or 5 (Fly) (NR-28).
+- A failed item read while signed in now tells removed vault access from a moved, archived or deleted item (`op vault get <vault_id>`, by ID), with the next command (NR-26).
+- A `sync` refusal ends with the `opv explain` command for the blocking keys (NR-17). A sign-in lost after `sync` wrote something names the writes that completed (NR-10).
 - `opv doctor` no longer warns for a later `flyctl` patch release in the tested minor (0.4.113 and up). Another minor, or a patch older than 0.4.112, still warns.
 
 ## [0.4.0] - 2026-10-08

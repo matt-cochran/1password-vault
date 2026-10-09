@@ -14,7 +14,9 @@ use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
-use crate::provider::{Check, NameRules, Provider, Section, StoreNameRules, TargetConfig, eq_as};
+use crate::provider::{
+    Check, NameRules, Preflight, Provider, Section, StoreNameRules, TargetConfig, eq_as,
+};
 use crate::runner::CommandRunner;
 
 /// The registered Azure provider.
@@ -281,8 +283,9 @@ impl TargetConfig for AzureTarget {
         })
     }
 
-    fn preflight(&self, _r: &dyn CommandRunner) -> Result<(), Error> {
-        Ok(())
+    fn preflight(&self, _r: &dyn CommandRunner) -> Result<Preflight, Error> {
+        // Vault and Container App state arrive with the Azure flow (NR-25).
+        Ok(Preflight::default())
     }
 
     fn doctor(&self, _r: &dyn CommandRunner, _host: &dyn Fn() -> Host) -> Vec<Check> {
