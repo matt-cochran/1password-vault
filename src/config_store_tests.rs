@@ -807,6 +807,46 @@ fn recording_the_account_keeps_the_pointers_project() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn recording_the_account_never_writes_through_a_symlinked_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep me\n").unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join(DOT_FILE)).unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn recording_the_account_never_creates_a_dangling_symlinks_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join(DOT_FILE)).unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001");
+    assert!(!victim.exists());
+}
+
+#[test]
+fn recording_the_account_refuses_a_pointer_that_does_not_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "not = [toml\n").unwrap();
+    assert!(record_account(dir.path(), "ALABS000000000000000000001").is_err());
+}
+
+#[test]
+fn recording_the_account_ignores_a_pointer_above_the_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "project = \"outer\"\n").unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let written = record_account(&repo, "ALABS000000000000000000001").unwrap();
+    assert_eq!(written, repo.join(DOT_FILE));
+}
+
 /// Found live: in WSL, op keeps its own accounts, so the step for an email op does not
 /// know is `op account add` here, not the Windows app.
 #[test]

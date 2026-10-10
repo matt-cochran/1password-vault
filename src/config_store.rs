@@ -491,21 +491,45 @@ pub fn pointer_account(start: &Path) -> Option<String> {
 }
 
 /// Record `account` (an account ID) as this checkout's 1Password account: in the nearest
-/// `.opv`, keeping its `project`, or in a new `.opv` at the repository root (or `start`
-/// outside a repository). Returns the file written. It holds an ID, never a secret, and
-/// is meant to be committed so every checkout uses the same account.
+/// `.opv` up to the repository root, keeping its `project`, or in a new `.opv` at the
+/// repository root (or `start` outside a repository). Returns the file written. It holds an
+/// ID, never a secret, and is meant to be committed so every checkout uses the same account.
+///
+/// A cloned repository is untrusted, so the file is never written through a symlink, an
+/// existing `.opv` that does not parse is refused rather than replaced, and nothing above
+/// the repository root is touched.
 pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
-    let path = walk_up(start, DOT_FILE).unwrap_or_else(|| {
-        start
-            .ancestors()
-            .find(|d| d.join(".git").exists())
-            .unwrap_or(start)
-            .join(DOT_FILE)
-    });
-    let project = fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| parse_dot_opv(&t, &path).ok())
-        .and_then(|d| d.project);
+    let root = start
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(start);
+    let path = start
+        .ancestors()
+        .scan(false, |past_root, d| {
+            (!*past_root).then(|| {
+                *past_root = d == root;
+                d.join(DOT_FILE)
+            })
+        })
+        .find(|p| p.symlink_metadata().is_ok())
+        .unwrap_or_else(|| root.join(DOT_FILE));
+    let refuse =
+        |why: String| Error::Config(format!("cannot write {}: {why}", path.display()).into());
+    let project = match path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(refuse(e.to_string())),
+        Ok(m) if !m.file_type().is_file() => {
+            return Err(refuse(
+                "it is a symlink or not a regular file, and opv only writes a plain .opv; \
+                 replace it with a plain file or remove it"
+                    .into(),
+            ));
+        }
+        Ok(_) => {
+            let text = fs::read_to_string(&path).map_err(|e| refuse(e.to_string()))?;
+            parse_dot_opv(&text, &path)?.project
+        }
+    };
     let mut text = String::from(
         "# opv: this project's 1Password account (an ID, not a secret). Commit this file.\n",
     );
@@ -513,9 +537,22 @@ pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
         text.push_str(&format!("project = \"{p}\"\n"));
     }
     text.push_str(&format!("account = \"{account}\"\n"));
-    fs::write(&path, text)
-        .map_err(|e| Error::Config(format!("cannot write {}: {e}", path.display()).into()))?;
+    write_no_follow(&path, &text).map_err(|e| refuse(e.to_string()))?;
     Ok(path)
+}
+
+/// Write `text` to `path`, refusing (rather than following) a symlink put there since the
+/// check above.
+fn write_no_follow(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(path)?.write_all(text.as_bytes())
 }
 
 /// The nearest file named `name` in `start` or a parent.
