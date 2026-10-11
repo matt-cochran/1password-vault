@@ -600,9 +600,22 @@ mod failure {
 /// not a match, so such a failure keeps its retries. Searched in place, never copied or
 /// printed (NR-31).
 fn says_not_found(program: &str, stderr: &[u8]) -> bool {
+    says(program, stderr, |t| t.not_found)
+}
+
+/// True when `stderr` says no one is signed in to `program`'s service: not transient.
+fn says_signed_out(program: &str, stderr: &[u8]) -> bool {
+    says(program, stderr, |t| t.signed_out)
+}
+
+fn says(
+    program: &str,
+    stderr: &[u8],
+    phrases: impl Fn(&crate::host::Tool) -> &'static [&'static str],
+) -> bool {
     crate::host::tool(program)
         .into_iter()
-        .flat_map(|t| t.not_found.iter())
+        .flat_map(|t| phrases(t).iter())
         .any(|phrase| stderr.windows(phrase.len()).any(|w| w == phrase.as_bytes()))
 }
 
@@ -655,6 +668,11 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
             }
             // S2: a missing object is not transient; refused at once, never retried.
             Attempt::Exited(o) if says_not_found(call.program, &stderr.bytes) => {
+                failure::record(id, call.program, stderr);
+                return Ok(Outcome::Refused(o));
+            }
+            // Signed out is not transient either: refused at once, never retried.
+            Attempt::Exited(o) if says_signed_out(call.program, &stderr.bytes) => {
                 failure::record(id, call.program, stderr);
                 return Ok(Outcome::Refused(o));
             }
@@ -1964,6 +1982,19 @@ mod tests {
     }
 
     /// S2: `op` saying the item does not exist is refused at once, never retried.
+    #[test]
+    fn read_while_signed_out_of_op_is_not_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| {
+            r.push_with_stderr(
+                Output::failure(1),
+                "[ERROR] 2026/10/11 03:47:46 You are not currently signed in. Please run `op signin --help` for instructions\n",
+            )
+        });
+        let _ = read_fake(&r);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
     #[test]
     fn read_of_missing_op_item_is_not_retried() {
         let r = FakeRunner::default();

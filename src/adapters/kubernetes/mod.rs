@@ -64,6 +64,7 @@ pub const KUBECTL: Tool = Tool {
     pinned_env: PINNED_ENV,
     // The API's `NotFound` reason.
     not_found: &["(NotFound)"],
+    signed_out: &[],
     aliases: &[],
 };
 /// The `data` key every opv Secret stores its value under.

@@ -90,6 +90,7 @@ pub fn run_or(
     backend.use_account(account.as_deref());
     prepare(account.as_deref(), backend, ui)?;
     if command.is_empty() {
+        let account = account.as_deref().map(|a| backend.account_label(a));
         let scope = match (env, &account) {
             (Some(e), Some(a)) => format!(" for {e} ({a})"),
             (Some(e), None) => format!(" for {e}"),

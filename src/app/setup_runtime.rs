@@ -159,6 +159,21 @@ impl Backend for Runtime {
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
     }
+    fn account_label(&self, account: &str) -> String {
+        use crate::adapters::onepassword_manifest as manifest;
+        let listed = self
+            .call(&["account", "list", "--format", "json"], None)
+            .ok()
+            .filter(|o| o.status == 0)
+            .and_then(|o| serde_json::from_slice::<Vec<manifest::Account>>(&o.stdout).ok())
+            .unwrap_or_default();
+        manifest::resolve(&listed, account)
+            .ok()
+            .and_then(|uuid| listed.into_iter().find(|a| a.account_uuid == uuid))
+            .map(|a| a.email)
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| account.to_string())
+    }
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.spawn_child(command)
     }

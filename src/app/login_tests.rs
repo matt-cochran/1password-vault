@@ -71,6 +71,13 @@ impl Backend for Fake {
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
     }
+    fn account_label(&self, account: &str) -> String {
+        if account == "ALABS000000000000000000001" {
+            "me@labs.example".to_string()
+        } else {
+            account.to_string()
+        }
+    }
     fn add_account(&mut self, email: Option<&str>, shorthand: &str) -> Result<(), Error> {
         self.added.push(email.map(str::to_owned));
         self.shorthands.push(shorthand.to_owned());
@@ -323,4 +330,24 @@ fn an_added_accounts_name_never_repeats_one_already_on_the_machine() {
 #[test]
 fn an_account_added_without_an_email_is_named_account() {
     assert_eq!(free_shorthand(None, &[]), "account");
+}
+
+/// Found live: "Signed in to 6AINMAIK…" named the account by an ID no person recognises.
+#[test]
+fn the_signed_in_message_names_the_account_by_its_email() {
+    let mut ui = Ui::default();
+    run_or(
+        None,
+        Some("ALABS000000000000000000001"),
+        None,
+        &[],
+        &mut Fake::signed_in(0),
+        &mut ui,
+    )
+    .unwrap();
+    assert!(
+        ui.shown
+            .iter()
+            .any(|m| m.starts_with("Signed in to me@labs.example."))
+    );
 }

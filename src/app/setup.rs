@@ -24,6 +24,10 @@ pub trait Backend {
     fn add_account(&mut self, _email: Option<&str>, _shorthand: &str) -> Result<(), Error> {
         self.sign_in(None, true)
     }
+    /// How to name `account` (an ID) to the person: the email op knows it by, when it does.
+    fn account_label(&self, account: &str) -> String {
+        account.to_string()
+    }
     /// Use `account` for every later call (`opv login`, FR-40).
     fn use_account(&mut self, _account: Option<&str>) {}
     /// Run `command` signed in (a signed-in shell when empty); its exit code (`opv login`).
