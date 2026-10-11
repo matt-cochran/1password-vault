@@ -62,7 +62,7 @@
     "findings": 1
   },
   "next": "opv open allumata/OPENAI_API_KEY --env prod",
-  "do": "fix the keys above in 1Password",
+  "do": "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)",
   "error": {
     "code": "findings",
     "category": "findings",
@@ -70,7 +70,7 @@
     "detail": [],
     "retry": "after_fix",
     "human_required": true,
-    "do": "fix the keys above in 1Password",
+    "do": "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)",
     "next": "opv open allumata/OPENAI_API_KEY --env prod"
   }
 }

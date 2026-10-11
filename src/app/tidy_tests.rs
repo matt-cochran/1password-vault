@@ -910,7 +910,7 @@ fn still_needs_a_value_names_the_source_not_the_shared_key() {
 }
 
 #[test]
-fn still_needs_a_value_carries_the_item_link() {
+fn still_needs_a_value_names_the_command_that_opens_it() {
     let op = FakeOp::person(item(&[]));
     tidied(&op);
     let line = op
@@ -919,7 +919,7 @@ fn still_needs_a_value_carries_the_item_link() {
         .find(|l| l.starts_with("still needs a value"))
         .unwrap()
         .to_string();
-    assert!(line.contains(" · open: https://"), "{line}");
+    assert!(line.contains("Open it with opv open "), "{line}");
 }
 
 #[test]
@@ -1465,4 +1465,21 @@ fn item_skeleton_reports_an_edit_landing_with_it() {
     op.racing.set(Some(someone_edits_session));
     crate::app::skeleton::run(&fleet(), "dev", &op, &mut Vec::new()).unwrap();
     assert!(op.notes().contains("another edit landed"), "{}", op.notes());
+}
+
+/// Found live: an empty key reached the app as "" with no word from `run`.
+#[test]
+fn run_names_a_key_that_still_needs_a_value() {
+    let op = FakeOp::person(item(&[
+        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
+        ("api", "LOG_LEVEL", "STRING", ""),
+        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
+        ("opv", "convention", "STRING", "1"),
+    ]));
+    let _on = activate();
+    crate::app::run::run(&fleet(), "dev", "api", &["true".into()], &op).unwrap();
+    assert!(
+        op.notes()
+            .contains("still needs a value in 1Password (dev): api/LOG_LEVEL. Open it with opv open api/LOG_LEVEL --env dev, then click Edit")
+    );
 }

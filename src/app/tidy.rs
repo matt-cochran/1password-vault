@@ -209,6 +209,9 @@ pub(crate) struct Read {
     /// The item's `version` integer as last read (after a tidy, the tidied item's): an
     /// input of the plan id (FR-41).
     pub version: Option<u64>,
+    /// The declared keys whose field is missing or empty ([`needing_values`]): `run` names
+    /// them before the command starts, so an empty value is never passed silently.
+    pub needing_values: Vec<String>,
     /// Who ran opv, when the item needed a tidy (`None` when it did not, or tidying is
     /// off): `run` words its warning by it (a person whose tidy failed is not told to sign
     /// in as themselves).
@@ -290,7 +293,11 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
                     "tidied 1Password ({env_name}): {}",
                     convention::summary(&t.changes)
                 ));
-                missing_values(r, &t.layout, fleet, env_name, env);
+                note_needing_values(
+                    r,
+                    env_name,
+                    &needing_values(&t.layout, fleet, env_name, env),
+                );
             }
             Ok(done(t.layout, t.changes, t.error, t.version, Some(who)))
         }
@@ -449,16 +456,16 @@ fn tidy(
     Ok(None)
 }
 
-/// One line naming the keys that still need a value: a human action (FR-43).
-fn missing_values(
-    r: &dyn CommandRunner,
+/// The declared keys (applying in `env_name`, shared keys excepted) whose field is missing
+/// or empty: they still need a value, typed by a person (FR-43).
+fn needing_values(
     layout: &Layout,
     fleet: &Fleet,
     env_name: &str,
     env: &Environment,
-) {
+) -> Vec<String> {
     let res = convention::resolve(layout, fleet);
-    let empty: Vec<String> = fleet
+    fleet
         .products
         .iter()
         .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
@@ -471,17 +478,18 @@ fn missing_values(
                 .is_none_or(|&i| layout.fields[i].value.expose().is_empty())
         })
         .map(|(p, k, _)| key_label(p, k))
-        .collect();
-    if !empty.is_empty() {
-        // H1: the item link (IDs only) to type the values in.
-        let link = onepassword::item_link(
-            onepassword::account(r).as_ref(),
-            &env.vault_id,
-            &env.item_id,
-        );
+        .collect()
+}
+
+/// One line naming the keys that still need a value and how to reach them: `opv open`,
+/// then Edit, because 1Password shows an empty field only in edit mode (found live: the
+/// field opv created looked missing). Names only, never a value.
+pub(crate) fn note_needing_values(r: &dyn CommandRunner, env_name: &str, keys: &[String]) {
+    if let Some(first) = keys.first() {
         r.note(&format!(
-            "still needs a value in 1Password ({env_name}): {} · open: {link}",
-            empty.join(", ")
+            "still needs a value in 1Password ({env_name}): {}. Open it with opv open {first} \
+             --env {env_name}, then click Edit: 1Password hides empty fields until then.",
+            keys.join(", ")
         ));
     }
 }
@@ -517,6 +525,7 @@ fn finish(
         }
     }
     Read {
+        needing_values: needing_values(&layout, fleet, env_name, env),
         fields: convention::read_fields(&layout, fleet, env_name),
         changes,
         refs,

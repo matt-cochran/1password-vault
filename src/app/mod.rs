@@ -897,7 +897,20 @@ pub(crate) fn item_url(
 /// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
 /// and `Next:` opens the first blocking key in 1Password (H1).
 pub(crate) fn findings_error(n: usize, rows: &[Row], env_name: &str) -> Error {
-    Error::findings(n, open_next(rows, env_name)).with_do("fix the keys above in 1Password")
+    // Found live: 1Password shows an empty field only in edit mode, so "fix the keys" sent
+    // the person looking for a field that seemed not to exist.
+    let empty = rows.iter().any(|r| {
+        matches!(
+            r.state,
+            KeyState::Missing | KeyState::RuleFailed("nonempty", _)
+        )
+    });
+    let action = if empty {
+        "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)"
+    } else {
+        "fix the keys above in 1Password"
+    };
+    Error::findings(n, open_next(rows, env_name)).with_do(action)
 }
 
 /// The next step for findings (H1): open the first blocking key's field in 1Password.
