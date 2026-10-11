@@ -127,9 +127,9 @@ pub fn session_vars(
 }
 
 impl Backend for Runtime {
-    fn add_account(&mut self, email: Option<&str>) -> Result<(), Error> {
+    fn add_account(&mut self, email: Option<&str>, shorthand: &str) -> Result<(), Error> {
         let mut command = Command::new("op");
-        command.args(["account", "add", "--signin"]);
+        command.args(["account", "add", "--signin", "--shorthand", shorthand]);
         if let Some(e) = email {
             command.args(["--email", e]);
         }
@@ -145,9 +145,9 @@ impl Backend for Runtime {
         let status = child.wait().map_err(dependency)?;
         if !status.success() {
             return Err(Error::Auth(
-                "1Password did not add the account. Check the sign-in address, Secret Key and \
-                 password at its prompts (your Emergency Kit has them), then run opv login again. \
-                 Session output was not printed."
+                "1Password did not add the account; its reason is above. If a sign-in address, \
+                 Secret Key or password was mistyped, run opv login again (your Emergency Kit \
+                 has them). Session output was not printed."
                     .into(),
             ));
         }

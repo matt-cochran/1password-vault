@@ -18,8 +18,10 @@ pub trait Backend {
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error>;
     /// Add a 1Password account to this machine's `op` at op's own prompts and sign in to
     /// it in the same step (`opv login`, found in a fresh-account run-through: the person
-    /// otherwise had to leave opv for `op account add`). `email` pre-fills op's question.
-    fn add_account(&mut self, _email: Option<&str>) -> Result<(), Error> {
+    /// otherwise had to leave opv for `op account add`). `email` pre-fills op's question;
+    /// `shorthand` is a name no account on this machine has yet (op otherwise names every
+    /// account at my.1password.com `my`, so a second one, personal beside business, fails).
+    fn add_account(&mut self, _email: Option<&str>, _shorthand: &str) -> Result<(), Error> {
         self.sign_in(None, true)
     }
     /// Use `account` for every later call (`opv login`, FR-40).

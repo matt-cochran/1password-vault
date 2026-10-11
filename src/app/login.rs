@@ -128,7 +128,7 @@ pub fn choose_account(
         Some(who) => match manifest::resolve(&accounts, who) {
             Ok(u) => u,
             Err(_) if own_op && who.contains('@') && crate::config::is_account(who) => {
-                let now = add_account(r, backend, ui, Some(who))?;
+                let now = add_account(r, backend, ui, Some(who), &accounts)?;
                 manifest::resolve(&now, who)?
             }
             Err(e) => return Err(e),
@@ -143,7 +143,7 @@ pub fn choose_account(
             if !own_op {
                 return Ok(None);
             }
-            let now = add_account(r, backend, ui, None)?;
+            let now = add_account(r, backend, ui, None, &accounts)?;
             match now.as_slice() {
                 [one] => one.account_uuid.clone(),
                 _ => return Ok(None),
@@ -173,7 +173,7 @@ pub fn choose_account(
                 &labels,
             )?;
             if picked == ADD {
-                let now = add_account(r, backend, ui, None)?;
+                let now = add_account(r, backend, ui, None, &accounts)?;
                 // The new one: in the list now, not before.
                 match now
                     .iter()
@@ -202,14 +202,41 @@ fn add_account(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
     email: Option<&str>,
+    known: &[crate::adapters::onepassword_manifest::Account],
 ) -> Result<Vec<crate::adapters::onepassword_manifest::Account>, Error> {
     ui.show(&format!(
         "Adding {} to 1Password on this machine. Type the sign-in address, Secret Key and \
          password only at 1Password's prompts (your Emergency Kit has them).",
         email.unwrap_or("your account")
     ))?;
-    backend.add_account(email)?;
+    backend.add_account(email, &free_shorthand(email, known))?;
     Ok(crate::adapters::onepassword_manifest::accounts(r))
+}
+
+/// A shorthand for a new account that no account on this machine has: the email's domain
+/// (`me@labs.example` → `labs`), else `account`, with `-2`, `-3`… until it is free.
+fn free_shorthand(
+    email: Option<&str>,
+    taken: &[crate::adapters::onepassword_manifest::Account],
+) -> String {
+    let base: String = email
+        .and_then(|e| e.rsplit_once('@'))
+        .and_then(|(_, domain)| domain.split('.').next())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let base = if base.is_empty() {
+        "account".to_string()
+    } else {
+        base
+    };
+    let used = |s: &str| taken.iter().any(|a| a.shorthand.eq_ignore_ascii_case(s));
+    std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}-{n}")))
+        .find(|s| !used(s))
+        .expect("an unused shorthand")
 }
 
 #[cfg(test)]

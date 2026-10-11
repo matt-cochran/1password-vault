@@ -14,6 +14,7 @@ struct Fake {
     account: Option<String>,
     sign_ins: Vec<Option<String>>,
     added: Vec<Option<String>>,
+    shorthands: Vec<String>,
     child_code: i32,
     children: RefCell<Vec<Vec<String>>>,
 }
@@ -31,6 +32,7 @@ impl Fake {
             account: None,
             sign_ins: Vec::new(),
             added: Vec::new(),
+            shorthands: Vec::new(),
             child_code,
             children: RefCell::default(),
         }
@@ -69,8 +71,9 @@ impl Backend for Fake {
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
     }
-    fn add_account(&mut self, email: Option<&str>) -> Result<(), Error> {
+    fn add_account(&mut self, email: Option<&str>, shorthand: &str) -> Result<(), Error> {
         self.added.push(email.map(str::to_owned));
+        self.shorthands.push(shorthand.to_owned());
         Ok(())
     }
     fn child(&self, command: &[String]) -> Result<i32, Error> {
@@ -285,4 +288,39 @@ fn several_accounts_offer_a_menu_with_add_another() {
             "Add another 1Password account"
         ]
     );
+}
+
+// --- a second account at the same sign-in address (found live: personal and business
+// accounts are both at my.1password.com, and op names each one `my` unless told otherwise)
+
+const MY: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001","shorthand":"my"}]"#;
+const MY_AND_LABS: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001","shorthand":"my"},{"url":"my.1password.com","email":"me@labs.example","account_uuid":"ALABS000000000000000000001","shorthand":"labs"}]"#;
+
+#[test]
+fn an_added_account_is_named_after_its_email_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[MY, MY_AND_LABS]),
+            Some("me@labs.example"),
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(b.shorthands, ["labs"]);
+}
+
+#[test]
+fn an_added_accounts_name_never_repeats_one_already_on_the_machine() {
+    let taken: Vec<crate::adapters::onepassword_manifest::Account> =
+        serde_json::from_str(MY_AND_LABS).unwrap();
+    assert_eq!(free_shorthand(Some("you@labs.example"), &taken), "labs-2");
+}
+
+#[test]
+fn an_account_added_without_an_email_is_named_account() {
+    assert_eq!(free_shorthand(None, &[]), "account");
 }
