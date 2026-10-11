@@ -60,20 +60,18 @@ opv sync staging --deploy --expect-plan 674d43e2   # exactly that plan, then dep
 
 ## Status, plan and sync
 
-`status` shows what is missing or failing a rule, problems first, each with its reason, its declared `guidance` and an `open:` link to its item in 1Password. `plan` adds what a sync would do and ends with the command that does it. `sync` writes. All three read the environment's item once, by IDs, and print names, never values.
+`status` shows what is missing or failing a rule, problems first, each with its reason and its declared `guidance`; the findings end with `Next: opv open <KEY>`, which opens the first key's item in 1Password. `plan` adds what a sync would do and ends with the command that does it. `sync` writes. All three read the environment's item once, by IDs, and print names, never values.
 
 ```text
 $ opv status prod
 prod: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
 PRODUCT  KEY             KIND    STATE                                             TARGET
 api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
-    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field LOG_LEVEL)
 api      OPENAI_API_KEY  secret  missing                                           unknown
     guidance: OpenAI platform / API keys
-    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field OPENAI_API_KEY)
 unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
 opv: 2 findings
-Do: fix the keys above in 1Password
+Do: fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)
 Next: opv open api/LOG_LEVEL --env prod
 ```
 
@@ -110,17 +108,11 @@ The first line counts the rows. `status`, `plan` and `check` exit 8 when a key i
 opv open <[product/]KEY> [--env <environment>] [--print] [--json]
 ```
 
-Every missing or failing row in `status`, `plan` and `check` carries the link to its item, with the field to fix:
+`status`, `plan` and `check` end their findings with `Next: opv open <KEY> --env <env>` for the first key to fix; `--json` rows carry the item link as `open_url`.
 
-```text
-allumata  OPENAI_API_KEY  secret  missing  new
-    guidance: OpenAI platform / API keys
-    open: https://start.1password.com/open/i?a=<account>&v=vprd&i=iprd&h=my.1password.com (section allumata, field OPENAI_API_KEY)
-```
+The link is 1Password's private item link, the form "Copy Private Link" produces: account, vault and item IDs and the sign-in host, never a value. 1Password links to items, not single fields, so the section and field are named next to it. opv takes the account from one free `op whoami` call; when that call fails the link has the vault and item only.
 
-The link is 1Password's private item link, the form "Copy Private Link" produces: account, vault and item IDs and the sign-in host, never a value. 1Password links to items, not single fields, so the section and field are named next to it. opv takes the account from one free `op whoami` call, made only when there is something to fix; when that call fails the link has the vault and item only.
-
-`opv open` resolves the key as `explain` does (a bare `KEY` under one product, `--env` optional with one environment), prints its section and field and the link, and opens the link with the desktop's opener: `xdg-open` (Linux with a display), `wslview` (WSL), `open` (macOS) or `rundll32 url.dll,FileProtocolHandler` (Windows). The opener gets the link as its only argument; no shell is involved. Over SSH, under CI, on a machine without a display, or with `--print` it only prints the link, which is what an assistant should show its user. It never reads the item. A shared key (`from = ...`) opens its source's field. `--json` prints `{environment, product, key, section, field, open_url}` and opens nothing.
+`opv open` resolves the key as `explain` does (a bare `KEY` under one product, `--env` optional with one environment), prints its section and field and the link, and opens the link with the desktop's opener: `xdg-open` (Linux with a display), Windows' `rundll32 url.dll,FileProtocolHandler` from WSL (else `wslview`), `open` (macOS) or `rundll32 url.dll,FileProtocolHandler` (Windows). The opener gets the link as its only argument; no shell is involved. Over SSH, under CI, on a machine without a display, or with `--print` it only prints the link, which is what an assistant should show its user. It never reads the item. A shared key (`from = ...`) opens its source's field. `--json` prints `{environment, product, key, section, field, open_url}` and opens nothing.
 
 ### Every environment: `opv status`
 

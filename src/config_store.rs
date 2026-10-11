@@ -343,8 +343,11 @@ impl Found {
         }
     }
 
-    /// The `using …` line for stderr, or `None` for a path given with `--config`.
-    pub fn announce(&self) -> Option<String> {
+    /// The `using …` line for stderr, or `None` for a path given with `--config`, and for a
+    /// manifest found the usual way (git remote, `.opv`) unless `verbose`: it is the same on
+    /// every run, and a person saw it repeated on every command (found live). An
+    /// environment variable's choice (`OPV_CONFIG`, `OPV_PROJECT`) is always named.
+    pub fn announce(&self, verbose: bool) -> Option<String> {
         match self {
             Found::File {
                 given: Some(Given::Flag),
@@ -355,6 +358,11 @@ impl Found {
                 given: Some(Given::Env),
             } => Some(format!("using {} (from OPV_CONFIG)", store.describe())),
             Found::File { store, given: None } => Some(format!("using {}", store.describe())),
+            Found::Manifest(m)
+                if !verbose && matches!(m.matched, Matched::Repo(_) | Matched::DotFile(_)) =>
+            {
+                None
+            }
             Found::Manifest(m) => Some(format!("using {}", m.describe())),
         }
     }

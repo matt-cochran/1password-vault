@@ -133,10 +133,8 @@ pub fn check(
                 if !guidance.is_empty() {
                     writeln!(out, "  guidance: {guidance}").map_err(write_err)?;
                 }
-                if let Some(url) = &link {
-                    writeln!(out, "  open: {url} ({})", super::field_locator(row))
-                        .map_err(write_err)?;
-                }
+                // The item link is left to `Next: opv open …` (found live: the long link
+                // read like a secret and repeated what the next step already says).
             }
         }
         // With findings, the error line counts them (`opv: 1 finding`); not twice (M4).

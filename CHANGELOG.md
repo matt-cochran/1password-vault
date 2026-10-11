@@ -38,6 +38,7 @@ Azure and Kubernetes targets, configuration kept in 1Password, self-healing 1Pas
 
 Contract changes first; scripts and CI that parse output or exit codes may need updating.
 
+- **Quieter output.** `status`, `plan` and `check` no longer print the item link under each finding (`Next: opv open <KEY>` gets you there; `--json` keeps `open_url`); the `using manifest …` line appears only with `--verbose` when the git remote or `.opv` found it; `opv init` drops its tagging note and docs pointer; account lines name the account by its email. In WSL, `opv open` uses Windows' own opener (`rundll32`), falling back to `wslview`.
 - **Exit code 9** is new: outcome unknown, or a provider did not answer (`outcome_unknown`, `provider_unavailable`); re-run the same command, CI may retry it. A 1Password or Fly read that never answers is now exit 9 naming the provider and its status page, in `status` and `plan` too; it was exit 4 (1Password) or 5 (Fly). After a run has started writing, an unanswered read is exit 9, never "nothing was changed". An Azure update refused with nothing applied is exit 5 `update_refused`, not retried (NR-2, NR-28).
 - **Interruptions** exit 130 (SIGINT) or 143 (SIGTERM) after giving the running call 5 s to stop, with `interrupted during <step>; safe to re-run` (NR-12).
 - **`--timeout` defaults to 1800 s** for the whole run; each call also has its own limit (diagnosis 15 s, read 60 s, write 120 s, a write that waits for a rollout 15 min) (NR-4).

@@ -864,3 +864,25 @@ fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
         Some("op account add --email new@labs.example")
     );
 }
+
+fn repo_manifest() -> Found {
+    Found::Manifest(ManifestStore {
+        vault_id: "v".into(),
+        vault_name: "app-dev".into(),
+        item_id: "i".into(),
+        title: "opv · app".into(),
+        account: None,
+        matched: Matched::Repo("github.com/o/app".into()),
+    })
+}
+
+/// Found live: the same "using manifest …" line on every command.
+#[test]
+fn a_manifest_found_by_the_git_remote_is_named_only_with_verbose() {
+    assert_eq!(repo_manifest().announce(false), None);
+}
+
+#[test]
+fn verbose_names_the_manifest_found_by_the_git_remote() {
+    assert!(repo_manifest().announce(true).is_some());
+}

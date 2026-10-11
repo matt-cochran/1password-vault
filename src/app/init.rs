@@ -158,14 +158,15 @@ pub fn run_manifest(
     if json {
         return write_json(out, args, &p, &place);
     }
-    let note = match &repo {
-        Some(repo) => format!("note: tagged for {repo}; any checkout of it finds this manifest"),
-        None => format!(
+    // Only the case a person must act on: a checkout with a remote finds the manifest by
+    // itself (found live: a note on every new project that asked nothing of anyone).
+    let note = repo.is_none().then(|| {
+        format!(
             "note: no git remote origin; point a checkout at it with OPV_PROJECT={project} or \
              a .opv file holding project = \"{project}\""
-        ),
-    };
-    report(args, &p, &place, Some(note), out)
+        )
+    });
+    report(args, &p, &place, note, out)
 }
 
 /// FR-43: a person's init also tidies the item it just declared (a read; never fails init).
@@ -306,15 +307,17 @@ fn report(
     if let Some(note) = extra {
         w(out, note)?;
     }
-    // A URL: the rules reference moved to docs/configuration.md (review #16, #17).
-    w(
-        out,
-        format!(
-            "add keys with opv add, rules and guidance by hand; see \
-             {}/configuration.md#rules-reference",
-            crate::DOCS_URL
-        ),
-    )?;
+    // A new, empty configuration's one useful pointer is how to declare a key; rules and
+    // guidance live in the docs and `opv add --help`.
+    if secrets + configs == 0 {
+        w(
+            out,
+            format!(
+                "add a key: opv add <KEY> --kind secret --env {}",
+                crate::error::shell_word(&args.env)
+            ),
+        )?;
+    }
     w(out, format!("Next: {}", next_command(args, p)))
 }
 

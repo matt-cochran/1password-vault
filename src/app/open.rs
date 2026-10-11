@@ -1,7 +1,7 @@
 //! `open <[product/]KEY> [--env <env>]` use case (H1).
 //!
 //! Prints where a declared key lives in 1Password (its section and field) and the private
-//! link to its item, then opens that link with the desktop's opener (`xdg-open`, `wslview`,
+//! link to its item, then opens that link with the desktop's opener (`xdg-open`, Windows' `rundll32.exe` from WSL (else `wslview`),
 //! `open`, or `rundll32 url.dll,FileProtocolHandler` on Windows) when there is a desktop.
 //! Over SSH, under CI, on a headless machine or with `--print` it only prints the link.
 //!
@@ -51,7 +51,9 @@ pub fn opener(env: &dyn HostEnv) -> Option<Opener> {
                     r.contains("microsoft") || r.contains("wsl")
                 });
             if wsl {
-                o("wslview", &[])
+                // Windows' own opener through WSL interop, present on every Windows; `wslview`
+                // (wslu) is often missing or broken (found live), so it is only the fallback.
+                o("rundll32.exe", &["url.dll,FileProtocolHandler"])
             } else if env.is_set("DISPLAY") || env.is_set("WAYLAND_DISPLAY") {
                 o("xdg-open", &[])
             } else {
@@ -138,11 +140,20 @@ pub fn run_as(
     };
     let mut args: Vec<&str> = o.args.to_vec();
     args.push(&url);
-    let opened = r
+    let mut opened = r
         .probe(&Call::new(o.program, &args), PROBE_TIMEOUT)
         .is_ok_and(|res| res.status == 0);
+    let mut with = o.program;
+    if !opened && o.program == "rundll32.exe" {
+        // WSL without Windows interop on PATH: try wslu's opener.
+        let _ = crate::runner::take_failure_excerpt();
+        opened = r
+            .probe(&Call::new("wslview", &[url.as_str()]), PROBE_TIMEOUT)
+            .is_ok_and(|res| res.status == 0);
+        with = "wslview";
+    }
     if opened {
-        line(format!("opened with {}", o.program))
+        line(format!("opened with {with}"))
     } else {
         // The opener's own stderr is not opv's result (NR-31).
         let _ = crate::runner::take_failure_excerpt();
@@ -235,6 +246,17 @@ mod tests {
         assert!(out.contains("xdg-open could not open it"), "{out}");
     }
 
+    /// Found live: wslview missing in WSL; Windows' opener failing falls back to it.
+    #[test]
+    fn a_failed_windows_opener_in_wsl_falls_back_to_wslview() {
+        let wsl = Some(Opener {
+            program: "rundll32.exe",
+            args: &["url.dll,FileProtocolHandler"],
+        });
+        let (out, _) = open_out(wsl, vec![Output::failure(1), Output::success("")]);
+        assert!(out.contains("opened with wslview"), "{out}");
+    }
+
     #[test]
     fn opener_is_none_over_ssh() {
         let env = FakeEnv::new("macos").var("SSH_CONNECTION");
@@ -259,9 +281,9 @@ mod tests {
     }
 
     #[test]
-    fn opener_is_wslview_under_wsl() {
+    fn opener_is_windows_rundll32_under_wsl() {
         let env = FakeEnv::new("linux").var("WSL_DISTRO_NAME");
-        assert_eq!(opener(&env).map(|o| o.program), Some("wslview"));
+        assert_eq!(opener(&env).map(|o| o.program), Some("rundll32.exe"));
     }
 
     #[test]

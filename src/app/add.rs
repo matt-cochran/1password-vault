@@ -230,10 +230,11 @@ fn run_inner(
     w(
         out,
         format!(
-            "then: {} adds the empty field to the item and links to it ({}); type the value \
-             in 1Password and run it again",
+            "then: {} adds the field to the item ({}); fill it in with opv open {} --env {}",
             check_command(first, product),
-            envs.join(", ")
+            envs.join(", "),
+            args.name,
+            first
         ),
     )?;
     w(out, format!("Next: {}", check_command(first, product)))

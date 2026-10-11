@@ -55,13 +55,11 @@ $ opv status prod
 prod: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
 PRODUCT  KEY             KIND    STATE                                             TARGET
 api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
-    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field LOG_LEVEL)
 api      OPENAI_API_KEY  secret  missing                                           unknown
     guidance: OpenAI platform / API keys
-    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field OPENAI_API_KEY)
 unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
 opv: 2 findings
-Do: fix the keys above in 1Password
+Do: fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)
 Next: opv open api/LOG_LEVEL --env prod
 ```
 

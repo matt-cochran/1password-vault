@@ -135,7 +135,7 @@ pub fn run_scoped(
     }
     let names = KeyNames::new(fleet, env_name)?;
     writeln!(out, "{count}").map_err(write_err)?;
-    print_rows(out, fleet, &plan.rows, word, link.as_deref())?;
+    print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     print_legend(out, &words, t.provider().label())?;

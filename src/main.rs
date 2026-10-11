@@ -1453,7 +1453,7 @@ fn run(
         r.use_account(m.account.clone());
     }
     if let Ok(f) = &found
-        && let Some(line) = f.announce()
+        && let Some(line) = f.announce(cli.verbose)
     {
         let _ = writeln!(io::stderr(), "{line}");
     }

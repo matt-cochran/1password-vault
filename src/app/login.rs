@@ -191,7 +191,8 @@ pub fn choose_account(
     };
     let path = crate::config_store::record_account(start, &uuid)?;
     ui.show(&format!(
-        "This project uses 1Password account {uuid}; recorded in {} (commit it).",
+        "This project uses 1Password account {}; recorded in {} (commit it).",
+        backend.account_label(&uuid),
         path.display()
     ))?;
     Ok(Some(uuid))
