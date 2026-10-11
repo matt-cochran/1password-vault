@@ -564,6 +564,17 @@ pub fn read_whole(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Erro
 /// Windows, where op documents the flag but keeps no cache.
 pub const NO_CACHE: &str = "--cache=false";
 
+/// 1Password's unnamed default section: where its apps put a field added outside any named
+/// section. A field with no section at all is readable by `op` but shown by no 1Password
+/// app, even in edit mode (found live: the empty `API_KEY` opv created could not be filled
+/// in), so every field opv writes outside a named section goes here.
+pub const DEFAULT_SECTION_ID: &str = "add more";
+
+/// The `sections` entry and field `section` reference of [`DEFAULT_SECTION_ID`].
+pub fn default_section() -> Value {
+    json!({"id": DEFAULT_SECTION_ID})
+}
+
 /// [`read_whole`] straight from 1Password, bypassing `op`'s local cache ([`NO_CACHE`]):
 /// every read a 1Password write is built from or checked against (the tidy, `item
 /// skeleton`).
@@ -1266,10 +1277,19 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             Kind::Config => "STRING",
         };
         if section == SIMPLE_PRODUCT {
-            // Simple profile (FR-20): a top-level field, outside any section.
+            // Simple profile (FR-20): outside any named section, in the default one the
+            // 1Password apps show (a field with no section is hidden in them).
+            if !sections.iter().any(|(i, _)| i == DEFAULT_SECTION_ID)
+                && !new_sections
+                    .iter()
+                    .any(|s: &Value| s["id"] == DEFAULT_SECTION_ID)
+            {
+                new_sections.push(default_section());
+            }
             let id = unique(label.to_lowercase(), |c| field_ids.contains(c));
             field_ids.insert(id.clone());
-            new_fields.push(json!({"id": id, "type": ty, "label": label, "value": ""}));
+            new_fields.push(json!({"id": id, "section": default_section(), "type": ty,
+                                   "label": label, "value": ""}));
             continue;
         }
         let section_id = match sections.iter().find(|(_, l)| l == section) {
@@ -2404,7 +2424,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_skeleton_adds_a_top_level_field_without_a_section() {
+    fn simple_skeleton_adds_its_field_to_the_default_section() {
         let item = read_simple(simple_item()).unwrap();
         let r = FakeRunner::new([Output::success("{}")]);
         let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Secret)];
@@ -2416,17 +2436,40 @@ mod tests {
             .iter()
             .find(|f| f["label"] == "DATABASE_URL")
             .expect("new field");
-        assert_eq!(f.get("section"), None);
+        assert_eq!(f["section"], json!({"id": "add more"}));
+    }
+
+    #[test]
+    fn simple_skeleton_adds_a_concealed_empty_field() {
+        let item = read_simple(simple_item()).unwrap();
+        let r = FakeRunner::new([Output::success("{}")]);
+        let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Secret)];
+        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
+        let tpl = edit_stdin(&r);
+        let f = tpl["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["label"] == "DATABASE_URL")
+            .expect("new field")
+            .clone();
         assert_eq!((&f["type"], &f["value"]), (&json!("CONCEALED"), &json!("")));
     }
 
     #[test]
-    fn simple_skeleton_creates_no_section() {
+    fn simple_skeleton_creates_only_the_default_section() {
         let item = read_simple(simple_item()).unwrap();
         let r = FakeRunner::new([Output::success("{}")]);
         let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Config)];
         write_skeleton(&r, &test_env(), &item, &missing).unwrap();
-        assert_eq!(edit_stdin(&r)["sections"].as_array().unwrap().len(), 1);
+        let sections = edit_stdin(&r)["sections"].as_array().unwrap().clone();
+        assert!(
+            sections
+                .iter()
+                .skip(1)
+                .all(|s| s == &json!({"id": "add more"})),
+            "{sections:?}"
+        );
     }
 
     #[test]

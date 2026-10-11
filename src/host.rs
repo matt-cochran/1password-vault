@@ -298,7 +298,11 @@ pub const OP_CLI: Tool = Tool {
     status_page: "https://status.1password.com",
     pinned_env: &[("NO_COLOR", "1")],
     not_found: &["isn't an item", "isn't a vault"],
-    signed_out: &["You are not currently signed in"],
+    signed_out: &[
+        "You are not currently signed in",
+        // `op whoami` and other calls with an account but no session (found live).
+        "could not find session token",
+    ],
     aliases: &[],
 };
 

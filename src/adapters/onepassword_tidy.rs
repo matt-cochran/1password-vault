@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::onepassword::{
-    OP, WipeOnDrop, failed_op_error_as, json_error, op_spawn_error, serialize_exact,
+    DEFAULT_SECTION_ID, OP, WipeOnDrop, default_section, failed_op_error_as, json_error,
+    op_spawn_error, serialize_exact,
 };
 use crate::domain::convention::{
     Found, KEPT_SECTION, Layout, MARKER_SECTION, Op, Section, TidyPlan,
@@ -251,6 +252,8 @@ pub fn apply(raw: &[u8], plan: &TidyPlan) -> Result<Zeroizing<Vec<u8>>, Error> {
     };
 
     let mut new_fields: Vec<Value> = Vec::new();
+    // A field placed or added outside a named section goes in the default one.
+    let mut uses_default = false;
     let count = obj["fields"].as_array().expect("array").len();
     for op in &plan.ops {
         match op {
@@ -280,7 +283,8 @@ pub fn apply(raw: &[u8], plan: &TidyPlan) -> Result<Zeroizing<Vec<u8>>, Error> {
                         f.insert("section".into(), s);
                     }
                     None => {
-                        f.remove("section");
+                        f.insert("section".into(), default_section());
+                        uses_default = true;
                     }
                 }
                 // Derived from the old place; `op` recomputes it.
@@ -317,12 +321,16 @@ pub fn apply(raw: &[u8], plan: &TidyPlan) -> Result<Zeroizing<Vec<u8>>, Error> {
                 let ty = if *concealed { "CONCEALED" } else { "STRING" };
                 let v = value.as_ref().map_or("", SecretValue::expose);
                 let mut f = json!({"id": id, "type": ty, "label": label, "value": v});
-                if let Some(s) = sec {
-                    f["section"] = s;
-                }
+                f["section"] = sec.unwrap_or_else(|| {
+                    uses_default = true;
+                    default_section()
+                });
                 new_fields.push(f);
             }
         }
+    }
+    if uses_default && !section_ids.contains(DEFAULT_SECTION_ID) {
+        new_sections.push(default_section());
     }
     obj["sections"]
         .as_array_mut()
@@ -540,6 +548,23 @@ mod tests {
         };
         let out: Value = serde_json::from_slice(&apply(&raw, &plan).unwrap()).unwrap();
         assert_eq!(out["fields"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn apply_puts_an_unsectioned_new_field_in_the_default_section() {
+        let raw = br#"{"fields": []}"#;
+        let plan = TidyPlan {
+            ops: vec![Op::Add {
+                section: None,
+                label: "API_KEY".into(),
+                concealed: true,
+                value: None,
+            }],
+            changes: vec![],
+            kept: false,
+        };
+        let out: Value = serde_json::from_slice(&apply(raw, &plan).unwrap()).unwrap();
+        assert_eq!(out["fields"][0]["section"], json!({"id": "add more"}));
     }
 
     #[test]

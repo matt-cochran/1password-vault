@@ -553,7 +553,11 @@ pub fn summary(changes: &[Change]) -> String {
 }
 
 fn where_from(f: &Found) -> String {
-    f.section_label().unwrap_or("top level").to_string()
+    match (&f.section, f.section_label()) {
+        (None, _) => "outside every section (hidden in the 1Password app)".to_string(),
+        (Some(_), Some(l)) => l.to_string(),
+        (Some(_), None) => "top level".to_string(),
+    }
 }
 
 /// The tidy plan (pure): see the module docs. `date` is today's UTC date (`YYYY-MM-DD`),
@@ -663,7 +667,9 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
                 continue;
             }
             let at_home = match &home {
-                None => f.section_label().is_none(),
+                // In the default section, never outside every section: no 1Password app
+                // shows a field that has none (found live).
+                None => f.section_label().is_none() && f.section.is_some(),
                 Some(h) => {
                     let sid = f.section.as_ref().map(|s| s.id.clone());
                     sid.is_some() && sid == home_id(h)

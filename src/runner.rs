@@ -101,7 +101,13 @@ impl<'a> Call<'a> {
     /// `<program> <first two argv words>`: the step name used in retry and signal lines.
     pub fn step(&self) -> String {
         std::iter::once(self.program)
-            .chain(self.args.iter().take(2).copied())
+            .chain(
+                self.args
+                    .iter()
+                    .take(2)
+                    .take_while(|a| !a.starts_with('-'))
+                    .copied(),
+            )
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -1989,6 +1995,19 @@ mod tests {
             r.push_with_stderr(
                 Output::failure(1),
                 "[ERROR] 2026/10/11 03:47:46 You are not currently signed in. Please run `op signin --help` for instructions\n",
+            )
+        });
+        let _ = read_fake(&r);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn read_without_a_session_token_is_not_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| {
+            r.push_with_stderr(
+                Output::failure(1),
+                "[ERROR] 2026/10/11 05:14:07 could not find session token for account mcproductlabs\n",
             )
         });
         let _ = read_fake(&r);

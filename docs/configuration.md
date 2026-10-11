@@ -97,7 +97,7 @@ Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A pr
 
 ### Simple profile (one app per environment)
 
-For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item (a field outside any section) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
+For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item: a field in the item's unnamed default section, where the 1Password app puts a field added outside any named section. (A field with no section at all is readable by `op` but hidden in every 1Password app, so opv moves one it finds into the default section.) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
 
 ```text
 vault myapp-prod   item myapp   field DATABASE_URL   (concealed)

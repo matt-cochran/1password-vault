@@ -228,6 +228,16 @@ fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, E
                     section
                 };
                 field["section"] = section;
+            } else {
+                // Outside a named section: the default one the 1Password apps show.
+                let sections = doc["sections"].as_array_mut().expect("sections");
+                if !sections
+                    .iter()
+                    .any(|s| s["id"] == crate::adapters::onepassword::DEFAULT_SECTION_ID)
+                {
+                    sections.push(crate::adapters::onepassword::default_section());
+                }
+                field["section"] = crate::adapters::onepassword::default_section();
             }
             let fields = doc["fields"].as_array_mut().expect("fields");
             indices.push(fields.len());
