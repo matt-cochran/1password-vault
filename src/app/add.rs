@@ -310,10 +310,8 @@ fn environments(
     for e in given {
         // An environment is added with init --add-env first, then the key (M6).
         fleet.environment(e).map_err(|err| {
-            err.with_do(format!(
-                "add environment {e} first: opv init {e} --vault <vault> --item <item> --add-env"
-            ))
-            .with_next("opv add --help")
+            err.with_do(format!("add environment {e} first: opv init {e} --add-env"))
+                .with_next("opv add --help")
         })?;
         if !out.contains(e) {
             out.push(e.clone());

@@ -1341,3 +1341,14 @@ fn add_env_saves_despite_a_stray_field_for_a_shared_key() {
     let run = add_env_with(SHARED, &staging(), &fields);
     assert!(run.res.is_ok(), "{:?}", run.res);
 }
+
+/// Found live: `demo-app` beside `opv · demo-app` gave no hint which note held the values.
+#[test]
+fn the_default_item_reads_apart_from_the_manifest() {
+    assert_eq!(default_item("demo-app", "dev"), "demo-app · dev values");
+}
+
+#[test]
+fn the_default_vault_is_the_project_and_environment() {
+    assert_eq!(default_vault("demo-app", "dev"), "demo-app-dev");
+}

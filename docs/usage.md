@@ -16,7 +16,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv run <env> [--product <p>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)) | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
-| `opv init <env> --vault <title> --item <title> [target options]` | configuration from an existing item ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
+| `opv init <env> [--vault <title>] [--item <title>] [target options]` | configuration from an existing item ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
 | `opv add <[product/]KEY> --kind secret\|config [...]` | declare a key, or add environments to one | the configuration |
 | `opv item skeleton <env> [--json]` | add every missing declared field to the item, empty | the 1Password item |
 | `opv config export [<env>] [--toml\|--json]` | print the configuration, or an environment's config values | nothing |

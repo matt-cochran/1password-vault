@@ -18,17 +18,17 @@ Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`
 
 ## No configuration yet
 
-If the 1Password item exists, let `init` write the configuration from it. Without a target option it declares a run-only environment, which needs no deployment target:
+Let `init` write the configuration. Without `--vault` and `--item` it uses vault `<project>-dev` and item `<project> · dev values`, creating them if missing; pass both to start from an item you already have. Without a target option it declares a run-only environment, which needs no deployment target:
 
 ```sh
-opv init dev --vault myapp-dev --item app    # new project: a manifest in 1Password (--file for secrets.toml)
+opv init dev                                 # new project: a manifest in 1Password (--file for secrets.toml)
 opv check dev --product api
 ```
 
 If the project already has a configuration for its deployed environments, add the local one with `--add-env`; it includes `dev` in every declared key the item has and names the rest:
 
 ```sh
-opv init dev --vault myapp-dev --item app --add-env
+opv init dev --add-env
 ```
 
 A key the item does not have yet: `opv add api/STRIPE_KEY --kind secret --env dev`, then `opv item skeleton dev` adds its empty field, and you type the value in 1Password. A project that ships `opv.setup.toml` has a guided path instead: [guided setup](guided-setup.md).

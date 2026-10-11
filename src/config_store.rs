@@ -892,7 +892,7 @@ pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
     Error::Config(
         format!(
             "{}{} or any parent directory, and {manifest}.\n  \
-             New project?                    opv init <env> --vault <vault title> --item <item title>\n  \
+             New project?                    opv init dev\n  \
              Have a secrets.toml elsewhere?  opv config import --file <path> --vault <vault>\n  \
              Manifest for another project?   OPV_PROJECT=<name> opv <command>\n  \
              Configured elsewhere?           opv --config <path> <command>\n  \
@@ -903,7 +903,7 @@ pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
         .into(),
     )
     .with_code(crate::error::Code::ConfigNotFound)
-    .with_next("opv init <env> --vault <vault title> --item <item title>")
+    .with_next("opv init dev")
 }
 
 /// `git remote get-url origin`, normalized; `None` without git, a repository or a remote

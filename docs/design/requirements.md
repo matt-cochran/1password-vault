@@ -552,10 +552,12 @@ Acceptance:
 The CLI shall provide:
 
 ```bash
-opv init <environment> --vault <name> --item <name> [--target <provider> --<provider>-<field> <value> …] [--profile simple|fleet] [--force]
-opv init <environment> --vault <name> --item <name> --add-env [--target …]
+opv init <environment> [--vault <name>] [--item <name>] [--target <provider> --<provider>-<field> <value> …] [--profile simple|fleet] [--force]
+opv init <environment> [--vault <name>] [--item <name>] --add-env [--target …]
 opv add <[product/]KEY> --kind secret|config [--env <env> …] [--rule <name>[=<value>] …] [--guidance <text>] [--immutable]
 ```
+
+Since 0.5.0: `--vault` defaults to `<project>-<env>` and `--item` to `<project> · <env> values` (project: `--project`, else the repository's name, else the directory's), so `opv init <env>` alone sets up a new project and the values item reads apart from the manifest `opv · <project>` (found in a live onboarding run: two notes, `demo-app` and `opv · demo-app`, with nothing saying which held the values). Every `Next:` that starts a project is the runnable `opv init dev`.
 
 Since 0.5.0 (H2, H3): the target section is written for every provider from its own `init` fields (`Provider::init_fields` and `Provider::init_section`), so a new provider adds its options without core or CLI changes; `--target` may be omitted when the options name one provider, and `--fly-app` is the Fly provider's `app` option. Nothing is looked up. `--add-env` adds one environment to an existing file (found like every other command's), and adds it to every declared key whose field the item has; an existing environment is refused. `add` declares a key (or adds environments to a declared one) without a 1Password call. Both edit the file in place, keeping comments and order, validate the edited text with the same loader before writing (a name colliding on any target is refused), and write atomically (temporary file in the same directory, then a rename).
 

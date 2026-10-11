@@ -58,7 +58,7 @@ const ITEM_CHECK: &str = "item";
 const CONFIG_FIX: &str = "fix secrets.toml (see the config line above), then run opv doctor";
 
 /// The step when there is no configuration yet (P3); the config line lists the others.
-const FIRST_RUN: &str = "opv init <env> --vault <vault title> --item <item title>";
+const FIRST_RUN: &str = "opv init dev";
 
 pub fn run_scoped(
     config: Result<Fleet, Error>,
@@ -2030,14 +2030,10 @@ mod tests {
 
     /// P3: with no configuration at all, the step is the first-run router, not "fix it".
     #[test]
-    fn next_step_without_any_configuration_offers_init_and_setup() {
+    fn next_step_without_any_configuration_is_a_runnable_init() {
         let r = FakeRunner::new(good());
         let missing = crate::config::not_found(std::path::Path::new("/nowhere"));
         let (_, out) = doctor(Err(missing), &r);
-        assert_eq!(
-            do_line(&out),
-            "Do: fill in and run: opv init <env> --vault <vault title> --item <item title>",
-            "{out}"
-        );
+        assert!(out.ends_with("Next: opv init dev\n"), "{out}");
     }
 }

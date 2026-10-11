@@ -19,7 +19,7 @@ mod completions;
 const QUICK_START: &str = "\
 Start here:
   opv setup                        Guided setup for a new project
-  opv init dev --vault V --item I  Use a 1Password item you already set up
+  opv init dev                     Set up 1Password for this project (or --vault V --item I)
   opv login dev                    Sign in to 1Password for an environment
   opv doctor                       Find a setup problem and its next step
   opv guide agent                  Setup guide for AI assistants (this version)
@@ -291,9 +291,9 @@ Prints the op:// reference, kind, target name, rules, immutable and guidance, an
 
 const INIT_QUICK: &str = "\
 Examples:
-  opv init dev --vault myapp-dev --item app                    # run-only environment
-  opv init prod --vault myapp-prod --item app --fly-app myapp  # deploys to Fly
-  opv init staging --vault myapp-staging --item app --add-env  # add to the configuration";
+  opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
+  opv init prod --fly-app myapp         # deploys to Fly
+  opv init dev --vault shared --item app  # an item you already have";
 
 const COMPLETIONS_QUICK: &str = "\
 Examples:
@@ -558,13 +558,13 @@ enum Cmd {
     Init {
         /// Environment name to declare (for example staging or prod).
         env: String,
-        /// Vault title, matched exactly.
+        /// Vault title, matched exactly; defaults to <project>-<env> (created if missing).
         #[arg(long)]
-        vault: String,
+        vault: Option<String>,
         /// Item title in that vault, matched exactly; its field names and types are read
-        /// once, never its values.
+        /// once, never its values. Defaults to "<project> · <env> values".
         #[arg(long)]
-        item: String,
+        item: Option<String>,
         /// Deployment target of the environment; its options follow (--<target>-<field>).
         /// Inferred from those options when omitted; omit both for a run-only environment
         /// used for local development. Nothing is looked up.
@@ -1789,12 +1789,13 @@ fn run_init(
             "--config is not used"
         };
         // The same init without --config (and with OPV_CONFIG unset for this one command).
-        let mut again = format!(
-            "opv init {} --vault {} --item {}",
-            shell_word(env),
-            shell_word(vault),
-            shell_word(item)
-        );
+        let mut again = format!("opv init {}", shell_word(env));
+        if let Some(v) = vault {
+            again.push_str(&format!(" --vault {}", shell_word(v)));
+        }
+        if let Some(i) = item {
+            again.push_str(&format!(" --item {}", shell_word(i)));
+        }
         if let Some(t) = &target {
             again.push_str(&format!(" --target {}", shell_word(t)));
         }
@@ -1855,7 +1856,7 @@ fn run_init(
         }
     }
     let scoped = signin::EnvRunner::with_account(r, chosen);
-    let args = init_args(cli.cmd, init_options)?;
+    let args = init_args(cli.cmd, init_options, &scoped, &dir)?;
     // A project that already has a secrets.toml keeps it; a new one gets a manifest
     // unless --file asks for the file (FR-44).
     if file || config::discover(&dir).is_some() {
@@ -1899,15 +1900,24 @@ fn run_edit(
             out,
         ),
         cmd @ Cmd::Init { json, .. } => {
-            init::add_env_as(&init_args(cmd, init_options)?, store, r, out, json)
+            let dir = std::env::current_dir().map_err(|e| {
+                Error::Config(format!("cannot read the current directory: {e}").into())
+            })?;
+            init::add_env_as(&init_args(cmd, init_options, r, &dir)?, store, r, out, json)
         }
         _ => unreachable!("called for add and init --add-env only"),
     }
 }
 
+/// The init arguments, with the vault and item titles defaulted from the project name
+/// (`--project`, else the repository's, else the directory's) when not given: `opv init
+/// dev` alone is enough (found live: two notes, `demo-app` and `opv · demo-app`, and no
+/// way to tell which held the values).
 fn init_args(
     cmd: Cmd,
     init_options: &std::collections::BTreeMap<String, String>,
+    r: &dyn opv::runner::CommandRunner,
+    dir: &std::path::Path,
 ) -> Result<init::InitArgs, Error> {
     let Cmd::Init {
         env,
@@ -1918,12 +1928,23 @@ fn init_args(
         profile,
         force,
         file: _,
-        project: _,
+        project,
         json: _,
         account: _,
     } = cmd
     else {
         unreachable!("called for init only")
+    };
+    let (vault, item) = match (vault, item) {
+        (Some(v), Some(i)) => (v, i),
+        (vault, item) => {
+            let repo = config_store::git_repo(r);
+            let name = config_store::default_project(project.as_deref(), repo.as_deref(), dir)?;
+            (
+                vault.unwrap_or_else(|| init::default_vault(&name, &env)),
+                item.unwrap_or_else(|| init::default_item(&name, &env)),
+            )
+        }
     };
     Ok(init::InitArgs {
         env,

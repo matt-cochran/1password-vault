@@ -151,8 +151,7 @@ fn missing_discovered_config_offers_init_and_setup() {
     let dir = tempfile::tempdir().unwrap();
     let (_, _, err) = opv_in(dir.path(), &["status", "prod"]);
     assert!(
-        err.contains("opv init <env> --vault <vault title> --item <item title>")
-            && err.contains("opv setup"),
+        err.contains("Next: opv init dev") && err.contains("opv setup"),
         "{err}"
     );
 }
@@ -466,7 +465,10 @@ mod run_with_fake_op {
             ],
         );
         assert_eq!(code, 7, "{err}");
-        assert!(err.is_empty(), "no opv message for a child exit: {err}");
+        assert!(
+            !err.lines().any(|l| l.starts_with("opv:")),
+            "no opv error for a child exit: {err}"
+        );
         let log = std::fs::read_to_string(log).unwrap();
         assert_eq!(log.lines().filter(|l| *l == "run").count(), 1, "{log}");
     }

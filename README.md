@@ -34,9 +34,9 @@ Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, al
 
 ```sh
 opv login --account you@example.com            # adds the account to op if needed, signs in, remembers it for the project
-opv init dev --vault myapp-dev --item myapp    # creates the vault and item if missing; saves the configuration in 1Password
+opv init dev                                   # vault myapp-dev, item "myapp · dev values" (created if missing); configuration saved in 1Password
 opv add API_KEY --kind secret --env dev
-opv check dev                                  # adds the empty field and links to it: type the value in 1Password
+opv check dev                                  # adds the empty field; opv open API_KEY, click Edit, type the value
 opv run dev -- npm run dev
 ```
 

@@ -1,4 +1,4 @@
-//! `init <env> --vault <name> --item <name> [--target <provider> …]` use case (FR-23, H3)
+//! `init <env> [--vault <name>] [--item <name>] [--target <provider> …]` use case (FR-23, H3)
 //! and `init <env> … --add-env` (H2).
 //!
 //! A dev-time helper that writes a starter `secrets.toml` in the given directory:
@@ -620,6 +620,17 @@ fn existing_refusal(args: &InitArgs, target: &Path) -> Error {
         .into(),
     )
     .with_next(add_env_command(args))
+}
+
+/// The vault title `opv init` uses without `--vault`: `<project>-<env>`.
+pub fn default_vault(project: &str, env: &str) -> String {
+    format!("{project}-{env}")
+}
+
+/// The item title `opv init` uses without `--item`: `<project> · <env> values`, so it reads
+/// apart from the project's manifest (`opv · <project>`) in the same vault.
+pub fn default_item(project: &str, env: &str) -> String {
+    format!("{project} · {env} values")
 }
 
 /// `opv init <env> --vault <v> --item <i> [--target t] [--<option> <value>...] --add-env`:
