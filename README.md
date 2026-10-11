@@ -28,7 +28,19 @@ opv login dev                    # sign in to dev's 1Password account (your own 
 opv run dev -- npm run dev       # your app, with dev's settings as environment variables
 ```
 
-opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk. Starting a project instead: `opv init dev --vault <vault> --item <item>` writes the configuration from an existing 1Password item ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
+opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk.
+
+Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, also turn on **Settings > Developer > Integrate with 1Password CLI** in the 1Password app). Then, in your project:
+
+```sh
+opv login --account you@example.com            # adds the account to op if needed, signs in, remembers it for the project
+opv init dev                                   # vault myapp-dev, item "myapp · dev values" (created if missing); configuration saved in 1Password
+opv add API_KEY --kind secret --env dev
+opv check dev                                  # adds the empty field; opv open API_KEY, click Edit, type the value
+opv run dev -- npm run dev
+```
+
+`opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
 
 Then, for a deployed environment:
 
@@ -43,13 +55,11 @@ $ opv status prod
 prod: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
 PRODUCT  KEY             KIND    STATE                                             TARGET
 api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
-    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field LOG_LEVEL)
 api      OPENAI_API_KEY  secret  missing                                           unknown
     guidance: OpenAI platform / API keys
-    open: https://start.1password.com/open/i?a=ACCOUNTID&v=vprd&i=iprd&h=my.1password.com (section api, field OPENAI_API_KEY)
 unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
 opv: 2 findings
-Do: fix the keys above in 1Password
+Do: fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)
 Next: opv open api/LOG_LEVEL --env prod
 ```
 

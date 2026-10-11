@@ -89,6 +89,11 @@ pub fn run(
     let by_id = read.as_ref().map(|r| &r.refs);
     let normalized = read.as_ref().map(|r| &r.normalized);
     let who = read.as_ref().and_then(|r| r.identity);
+    // Found live: an empty key reached the app as "" with no word. A tidy that wrote
+    // already named these keys.
+    if let Some(r) = read.as_ref().filter(|r| r.changes.is_empty()) {
+        super::tidy::note_needing_values(runner, env_name, &r.needing_values);
+    }
     let refs: Vec<(&str, String)> = prod
         .keys
         .iter()

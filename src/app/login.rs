@@ -90,6 +90,7 @@ pub fn run_or(
     backend.use_account(account.as_deref());
     prepare(account.as_deref(), backend, ui)?;
     if command.is_empty() {
+        let account = account.as_deref().map(|a| backend.account_label(a));
         let scope = match (env, &account) {
             (Some(e), Some(a)) => format!(" for {e} ({a})"),
             (Some(e), None) => format!(" for {e}"),
@@ -102,6 +103,142 @@ pub fn run_or(
         ))?;
     }
     backend.child(command)
+}
+
+/// FR-40: the 1Password account this checkout uses, chosen once, in one command. `given`
+/// (`--account`: an email, account ID, user ID or sign-in address) is resolved to an
+/// account ID; without it, and with no account recorded yet (`.opv`, `OP_ACCOUNT`), a
+/// person with several accounts picks one from a list. Where `op` keeps its own accounts
+/// (Linux, WSL), an account it does not know yet is added right here, at op's prompts,
+/// and signed in in the same step (found in a fresh-account run-through: leaving opv for
+/// `op account add` was the worst step). The choice is recorded in `.opv`, so later
+/// commands never fall back to op's default account. `None`: nothing to choose.
+pub fn choose_account(
+    r: &dyn crate::runner::CommandRunner,
+    given: Option<&str>,
+    start: &std::path::Path,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<Option<String>, Error> {
+    use crate::adapters::onepassword_manifest as manifest;
+    use crate::host::{Host, Platform};
+    let own_op = matches!(Host::detect().platform, Platform::Linux | Platform::Wsl);
+    let accounts = manifest::accounts(r);
+    const ADD: &str = "Add another 1Password account";
+    let uuid = match given {
+        Some(who) => match manifest::resolve(&accounts, who) {
+            Ok(u) => u,
+            Err(_) if own_op && who.contains('@') && crate::config::is_account(who) => {
+                let now = add_account(r, backend, ui, Some(who), &accounts)?;
+                manifest::resolve(&now, who)?
+            }
+            Err(e) => return Err(e),
+        },
+        None if crate::config_store::pointer_account(start).is_some()
+            || crate::config_store::account_env().is_some()
+            || accounts.len() == 1 =>
+        {
+            return Ok(None);
+        }
+        None if accounts.is_empty() => {
+            if !own_op {
+                return Ok(None);
+            }
+            let now = add_account(r, backend, ui, None, &accounts)?;
+            match now.as_slice() {
+                [one] => one.account_uuid.clone(),
+                _ => return Ok(None),
+            }
+        }
+        None => {
+            let mut labels: Vec<String> = accounts
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{} ({})",
+                        if a.email.is_empty() {
+                            &a.account_uuid
+                        } else {
+                            &a.email
+                        },
+                        a.url.trim_start_matches("https://").trim_end_matches('/')
+                    )
+                })
+                .collect();
+            if own_op {
+                labels.push(ADD.to_string());
+            }
+            let picked = ui.choose(
+                "Several 1Password accounts are on this machine. Which one holds this \
+                 project's secrets?",
+                &labels,
+            )?;
+            if picked == ADD {
+                let now = add_account(r, backend, ui, None, &accounts)?;
+                // The new one: in the list now, not before.
+                match now
+                    .iter()
+                    .find(|a| !accounts.iter().any(|b| b.account_uuid == a.account_uuid))
+                {
+                    Some(a) => a.account_uuid.clone(),
+                    None => return Ok(None),
+                }
+            } else {
+                let at = labels.iter().position(|l| *l == picked).unwrap_or(0);
+                accounts[at].account_uuid.clone()
+            }
+        }
+    };
+    let path = crate::config_store::record_account(start, &uuid)?;
+    ui.show(&format!(
+        "This project uses 1Password account {}; recorded in {} (commit it).",
+        backend.account_label(&uuid),
+        path.display()
+    ))?;
+    Ok(Some(uuid))
+}
+
+/// Add an account at op's prompts (signed in in the same step); the accounts op knows after.
+fn add_account(
+    r: &dyn crate::runner::CommandRunner,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+    email: Option<&str>,
+    known: &[crate::adapters::onepassword_manifest::Account],
+) -> Result<Vec<crate::adapters::onepassword_manifest::Account>, Error> {
+    ui.show(&format!(
+        "Adding {} to 1Password on this machine. Type the sign-in address, Secret Key and \
+         password only at 1Password's prompts (your Emergency Kit has them).",
+        email.unwrap_or("your account")
+    ))?;
+    backend.add_account(email, &free_shorthand(email, known))?;
+    Ok(crate::adapters::onepassword_manifest::accounts(r))
+}
+
+/// A shorthand for a new account that no account on this machine has: the email's domain
+/// (`me@labs.example` → `labs`), else `account`, with `-2`, `-3`… until it is free.
+fn free_shorthand(
+    email: Option<&str>,
+    taken: &[crate::adapters::onepassword_manifest::Account],
+) -> String {
+    let base: String = email
+        .and_then(|e| e.rsplit_once('@'))
+        .and_then(|(_, domain)| domain.split('.').next())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let base = if base.is_empty() {
+        "account".to_string()
+    } else {
+        base
+    };
+    let used = |s: &str| taken.iter().any(|a| a.shorthand.eq_ignore_ascii_case(s));
+    std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}-{n}")))
+        .find(|s| !used(s))
+        .expect("an unused shorthand")
 }
 
 #[cfg(test)]

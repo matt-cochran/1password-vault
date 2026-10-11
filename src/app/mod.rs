@@ -792,16 +792,14 @@ fn wants_guidance(r: &Row) -> bool {
 
 /// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, problems first (H4): the
 /// blocking rows (missing, wrong kind, failed), then the rest, each group in declared
-/// order. Under each missing or failing row its guidance; under each blocking row, when
-/// `link` is given, `open:` and the 1Password item link with the section and field to fix
-/// (H1). `target` renders the last column. Rows hold names only. Under the simple profile
+/// order. Under each missing or failing row its guidance; the way to the field is the
+/// findings' `Next: opv open …` (H1). `target` renders the last column. Rows hold names only. Under the simple profile
 /// (FR-20) there is no PRODUCT column: the table is `KEY KIND STATE TARGET`.
 pub(crate) fn print_rows(
     out: &mut dyn Write,
     fleet: &Fleet,
     rows: &[Row],
     target: impl Fn(&Row) -> String,
-    link: Option<&str>,
 ) -> Result<(), Error> {
     let skip = usize::from(fleet.is_simple());
     let header: Vec<String> = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"]
@@ -849,9 +847,7 @@ pub(crate) fn print_rows(
         if wants_guidance(r) {
             writeln!(out, "    guidance: {}", r.guidance).map_err(write_err)?;
         }
-        if let Some(url) = link.filter(|_| is_blocking(r)) {
-            writeln!(out, "    open: {url} ({})", field_locator(r)).map_err(write_err)?;
-        }
+        // The item link is left to `Next: opv open …` (found live: it read like a secret).
     }
     Ok(())
 }
@@ -865,17 +861,6 @@ pub(crate) fn problems_first(rows: &[Row]) -> Vec<&Row> {
         .partition(|r| is_blocking(r) || r.state == KeyState::SourceBlocked);
     bad.extend(good);
     bad
-}
-
-/// Where a key lives inside its item: `section api, field KEY`, or `field KEY` under the
-/// simple profile, whose fields are unsectioned (FR-20). 1Password links reach the item;
-/// this names the field to fix in it.
-pub(crate) fn field_locator(r: &Row) -> String {
-    if r.product == SIMPLE_PRODUCT {
-        format!("field {}", r.key)
-    } else {
-        format!("section {}, field {}", r.product, r.key)
-    }
 }
 
 /// The 1Password private link to `env_name`'s item (H1), with the signed-in account from
@@ -897,7 +882,20 @@ pub(crate) fn item_url(
 /// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
 /// and `Next:` opens the first blocking key in 1Password (H1).
 pub(crate) fn findings_error(n: usize, rows: &[Row], env_name: &str) -> Error {
-    Error::findings(n, open_next(rows, env_name)).with_do("fix the keys above in 1Password")
+    // Found live: 1Password shows an empty field only in edit mode, so "fix the keys" sent
+    // the person looking for a field that seemed not to exist.
+    let empty = rows.iter().any(|r| {
+        matches!(
+            r.state,
+            KeyState::Missing | KeyState::RuleFailed("nonempty", _)
+        )
+    });
+    let action = if empty {
+        "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)"
+    } else {
+        "fix the keys above in 1Password"
+    };
+    Error::findings(n, open_next(rows, env_name)).with_do(action)
 }
 
 /// The next step for findings (H1): open the first blocking key's field in 1Password.
@@ -1184,15 +1182,15 @@ pub(crate) fn target<'f>(
     Err(Error::Config(
         format!(
             "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add one target section ({}) to environment {env} in secrets.toml first \
-             ({DOCS}/configuration.md).",
+             deploy, add one target section ({}) to environment {env} in the configuration \
+             first: secrets.toml, or opv config edit for a manifest ({DOCS}/configuration.md).",
             sections.join(", ")
         )
         .into(),
     )
     .with_code(crate::error::Code::NoTarget)
     .with_do(format!(
-        "to deploy, add a {} section to environment {env} in secrets.toml ({DOCS}/configuration.md)",
+        "to deploy, add a {} section to environment {env} in the configuration (secrets.toml, or opv config edit) ({DOCS}/configuration.md)",
         sections.join(", ")
     ))
     .with_next(check_command(

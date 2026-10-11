@@ -43,6 +43,8 @@ A concealed field is a **secret**; a text field is **config**. Each environment 
 
 ## 3. Create the configuration
 
+**Which 1Password account.** If `opv doctor` reports `account_required`, the user has several 1Password accounts and opv will not guess: ask the user which account holds this project (show them the list opv printed) and pass it as `--account <email>` to `opv init`, or have them run `opv login --account <email>` in their own terminal. opv records the account ID in `.opv`; commit that file. Never pick an account for the user.
+
 First check whether the project already has one: `opv doctor` names it on its `config` line (a `secrets.toml`, or a manifest in 1Password found by the git remote). If it has none and the 1Password item already exists, let opv write it. `init` looks the vault and item up by title once and writes their IDs, the field names and kinds, never values. In a new project it saves a manifest in 1Password (ask first; it needs the user's own signed-in session), or with `--file` a `secrets.toml`:
 
 ```sh

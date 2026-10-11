@@ -82,6 +82,7 @@ pub const FLYCTL: Tool = Tool {
     status_page: "https://status.flyio.net",
     pinned_env: &[("FLY_NO_UPDATE_CHECK", "1"), ("NO_COLOR", "1")],
     not_found: &[],
+    signed_out: &[],
     aliases: &["fly"],
 };
 

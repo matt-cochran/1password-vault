@@ -15,6 +15,10 @@ pub struct Runtime {
     account: Option<String>,
 }
 impl Runtime {
+    /// The session variables this runtime's sign-in produced (for [`crate::runner::use_op_session`]).
+    pub fn into_session(self) -> Vec<(String, SecretValue)> {
+        self.session
+    }
     pub fn with_account(account: Option<&str>) -> Self {
         Self {
             account: account.map(str::to_owned),
@@ -127,8 +131,52 @@ pub fn session_vars(
 }
 
 impl Backend for Runtime {
+    fn add_account(&mut self, email: Option<&str>, shorthand: &str) -> Result<(), Error> {
+        let mut command = Command::new("op");
+        command.args(["account", "add", "--signin", "--shorthand", shorthand]);
+        if let Some(e) = email {
+            command.args(["--email", e]);
+        }
+        command.env_remove("OP_SESSION").env("OP_DEBUG", "false");
+        command
+            .stdin(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().map_err(dependency)?;
+        let output =
+            crate::runner::read_to_end_zeroizing(child.stdout.take().expect("piped stdout"))
+                .map_err(dependency)?;
+        let status = child.wait().map_err(dependency)?;
+        if !status.success() {
+            return Err(Error::Auth(
+                "1Password did not add the account; its reason is above. If a sign-in address, \
+                 Secret Key or password was mistyped, run opv login again (your Emergency Kit \
+                 has them). Session output was not printed."
+                    .into(),
+            ));
+        }
+        if let Some((name, value)) = session_assignment(&output)? {
+            self.session = session_vars(None, name, value);
+        }
+        Ok(())
+    }
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
+    }
+    fn account_label(&self, account: &str) -> String {
+        use crate::adapters::onepassword_manifest as manifest;
+        let listed = self
+            .call(&["account", "list", "--format", "json"], None)
+            .ok()
+            .filter(|o| o.status == 0)
+            .and_then(|o| serde_json::from_slice::<Vec<manifest::Account>>(&o.stdout).ok())
+            .unwrap_or_default();
+        manifest::resolve(&listed, account)
+            .ok()
+            .and_then(|uuid| listed.into_iter().find(|a| a.account_uuid == uuid))
+            .map(|a| a.email)
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| account.to_string())
     }
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.spawn_child(command)
@@ -289,9 +337,7 @@ impl Interaction for Console {
             .map_err(|_| Error::Dependency("Cannot read the setup answer.".into()))?
             == 0
         {
-            return Err(Error::Policy(
-                "Setup stopped. No further changes made.".into(),
-            ));
+            return Err(Error::Policy("Stopped. No further changes made.".into()));
         }
         Ok(matches!(
             answer.trim().to_ascii_lowercase().as_str(),
@@ -317,9 +363,7 @@ impl Interaction for Console {
                 .read_line(&mut answer)
                 .map_err(|_| Error::Dependency("Cannot read the choice.".into()))?;
             if size == 0 || answer.trim().is_empty() {
-                return Err(Error::Policy(
-                    "Setup stopped. No further changes made.".into(),
-                ));
+                return Err(Error::Policy("Stopped. No further changes made.".into()));
             }
             if let Ok(number) = answer.trim().parse::<usize>()
                 && let Some(choice) = number.checked_sub(1).and_then(|n| choices.get(n))

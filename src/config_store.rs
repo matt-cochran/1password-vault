@@ -343,8 +343,11 @@ impl Found {
         }
     }
 
-    /// The `using …` line for stderr, or `None` for a path given with `--config`.
-    pub fn announce(&self) -> Option<String> {
+    /// The `using …` line for stderr, or `None` for a path given with `--config`, and for a
+    /// manifest found the usual way (git remote, `.opv`) unless `verbose`: it is the same on
+    /// every run, and a person saw it repeated on every command (found live). An
+    /// environment variable's choice (`OPV_CONFIG`, `OPV_PROJECT`) is always named.
+    pub fn announce(&self, verbose: bool) -> Option<String> {
         match self {
             Found::File {
                 given: Some(Given::Flag),
@@ -355,6 +358,11 @@ impl Found {
                 given: Some(Given::Env),
             } => Some(format!("using {} (from OPV_CONFIG)", store.describe())),
             Found::File { store, given: None } => Some(format!("using {}", store.describe())),
+            Found::Manifest(m)
+                if !verbose && matches!(m.matched, Matched::Repo(_) | Matched::DotFile(_)) =>
+            {
+                None
+            }
             Found::Manifest(m) => Some(format!("using {}", m.describe())),
         }
     }
@@ -366,10 +374,20 @@ impl Found {
     pub fn load(&self, r: &dyn CommandRunner) -> Result<Fleet, Error> {
         let snap = self.store().read(r)?;
         let mut fleet = parse_from(self, &snap.text)?;
-        if let Found::Manifest(ManifestStore {
-            account: Some(a), ..
-        }) = self
-        {
+        // The account the configuration came from (a manifest's), or for a file the
+        // account recorded in the nearest `.opv` (FR-40): environments naming none use it.
+        let account = match self {
+            Found::Manifest(ManifestStore {
+                account: Some(a), ..
+            }) => Some(a.clone()),
+            Found::File { store, .. } => store
+                .path
+                .parent()
+                .and_then(pointer_account)
+                .filter(|_| Host::detect().op_credential.is_none()),
+            _ => None,
+        };
+        if let Some(a) = account {
             for env in fleet.environments.values_mut() {
                 env.account.get_or_insert_with(|| a.clone());
             }
@@ -423,7 +441,10 @@ pub fn project_env() -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DotOpv {
-    pub project: String,
+    /// The project's manifest title; without it, the manifest is found by the git remote
+    /// in `account` (a pointer that only picks the account, as `opv login --account` writes).
+    #[serde(default)]
+    pub project: Option<String>,
     #[serde(default)]
     pub account: Option<String>,
 }
@@ -433,20 +454,21 @@ pub fn parse_dot_opv(text: &str, path: &Path) -> Result<DotOpv, Error> {
     let d: DotOpv = toml::from_str(text).map_err(|e| {
         Error::Config(
             format!(
-                "invalid {}: {}; expected one line: project = \"<name>\" (optionally account = \
-                 \"<account>\")",
+                "invalid {}: {}; expected project = \"<name>\" and/or account = \
+                 \"<account>\"",
                 path.display(),
                 crate::config::toml_error_inline(text, e.span(), e.message())
             )
             .into(),
         )
     })?;
-    if !is_project_name(&d.project) {
+    if let Some(project) = &d.project
+        && !is_project_name(project)
+    {
         return Err(Error::Config(
             format!(
-                "invalid {}: project {:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
-                path.display(),
-                d.project
+                "invalid {}: project {project:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                path.display()
             )
             .into(),
         ));
@@ -476,6 +498,71 @@ pub fn pointer_account(start: &Path) -> Option<String> {
     parse_dot_opv(&text, &path).ok()?.account
 }
 
+/// Record `account` (an account ID) as this checkout's 1Password account: in the nearest
+/// `.opv` up to the repository root, keeping its `project`, or in a new `.opv` at the
+/// repository root (or `start` outside a repository). Returns the file written. It holds an
+/// ID, never a secret, and is meant to be committed so every checkout uses the same account.
+///
+/// A cloned repository is untrusted, so the file is never written through a symlink, an
+/// existing `.opv` that does not parse is refused rather than replaced, and nothing above
+/// the repository root is touched.
+pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
+    let root = start
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(start);
+    let path = start
+        .ancestors()
+        .scan(false, |past_root, d| {
+            (!*past_root).then(|| {
+                *past_root = d == root;
+                d.join(DOT_FILE)
+            })
+        })
+        .find(|p| p.symlink_metadata().is_ok())
+        .unwrap_or_else(|| root.join(DOT_FILE));
+    let refuse =
+        |why: String| Error::Config(format!("cannot write {}: {why}", path.display()).into());
+    let project = match path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(refuse(e.to_string())),
+        Ok(m) if !m.file_type().is_file() => {
+            return Err(refuse(
+                "it is a symlink or not a regular file, and opv only writes a plain .opv; \
+                 replace it with a plain file or remove it"
+                    .into(),
+            ));
+        }
+        Ok(_) => {
+            let text = fs::read_to_string(&path).map_err(|e| refuse(e.to_string()))?;
+            parse_dot_opv(&text, &path)?.project
+        }
+    };
+    let mut text = String::from(
+        "# opv: this project's 1Password account (an ID, not a secret). Commit this file.\n",
+    );
+    if let Some(p) = project {
+        text.push_str(&format!("project = \"{p}\"\n"));
+    }
+    text.push_str(&format!("account = \"{account}\"\n"));
+    write_no_follow(&path, &text).map_err(|e| refuse(e.to_string()))?;
+    Ok(path)
+}
+
+/// Write `text` to `path`, refusing (rather than following) a symlink put there since the
+/// check above.
+fn write_no_follow(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(path)?.write_all(text.as_bytes())
+}
+
 /// The nearest file named `name` in `start` or a parent.
 fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
     start
@@ -493,7 +580,8 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         });
     }
     if let Some(project) = &req.project {
-        return by_project(r, project, req.account.clone(), Matched::ProjectEnv);
+        let account = pick_account(r, req.account.clone())?;
+        return by_project(r, project, account, Matched::ProjectEnv);
     }
     if !req.manifest_only
         && let Some(path) = config::discover(&req.start)
@@ -507,12 +595,52 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         let text = fs::read_to_string(&path)
             .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
         let dot = parse_dot_opv(&text, &path)?;
-        let account = dot.account.or_else(|| req.account.clone());
-        return by_project(r, &dot.project, account, Matched::DotFile(path));
+        let account = pick_account(r, dot.account.or_else(|| req.account.clone()))?;
+        if let Some(project) = &dot.project {
+            return by_project(r, project, account, Matched::DotFile(path));
+        }
+        return match git_repo(r) {
+            Some(repo) => by_repo(r, &repo, &req.start, account.as_deref()),
+            None => Err(not_found(&req.start, None)),
+        };
     }
     match git_repo(r) {
-        Some(repo) => by_repo(r, &repo, &req.start, req.account.as_deref()),
+        Some(repo) => {
+            let account = pick_account(r, req.account.clone())?;
+            by_repo(r, &repo, &req.start, account.as_deref())
+        }
         None => Err(not_found(&req.start, None)),
+    }
+}
+
+/// The 1Password account every manifest call of this run uses (NR-7: never op's default
+/// when it could be the wrong one). A given account (`.opv`, `OP_ACCOUNT`) that is not
+/// already an account ID is resolved to one (`op` takes no email; a sign-in address can be
+/// shared by several accounts). Without one: the only account op knows, or, when there are
+/// several, `account_required` listing them; opv never searches them all (found live: each
+/// search asked the 1Password app about an account this project was never pointed at).
+/// A service-account or Connect credential decides the account itself: `None`.
+pub fn pick_account(r: &dyn CommandRunner, given: Option<String>) -> Result<Option<String>, Error> {
+    if Host::detect().op_credential.is_some() {
+        return Ok(given);
+    }
+    let is_uuid = |a: &str| {
+        a.len() == 26
+            && a.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    };
+    if let Some(a) = &given
+        && is_uuid(a)
+    {
+        return Ok(given);
+    }
+    let accounts = manifest::accounts(r);
+    match (given, accounts.as_slice()) {
+        // op knows no account list here (or it failed): leave the choice to op.
+        (given, []) => Ok(given),
+        (Some(a), all) => manifest::resolve(all, &a).map(Some),
+        (None, [one]) => Ok(Some(one.account_uuid.clone())),
+        (None, all) => Err(manifest::choose_error(all)),
     }
 }
 
@@ -566,24 +694,9 @@ fn by_repo(
     account: Option<&str>,
 ) -> Result<Found, Error> {
     let tag = repo_tag(repo);
-    let mut rows = manifest::list(r, account, &Host::detect)?;
-    let mut account = account.map(str::to_string);
-    // Not in the default account: look in each other signed-in account (FR-40: projects
-    // may live in different accounts), and use the first one that has a match.
-    if account.is_none() && !rows.iter().any(|r| r.tags.contains(&tag)) {
-        let accounts = manifest::accounts(r);
-        let several = accounts.len() > 1;
-        for a in accounts.into_iter().filter(|_| several) {
-            let Ok(more) = manifest::list(r, Some(&a.account_uuid), &Host::detect) else {
-                continue;
-            };
-            if more.iter().any(|r| r.tags.contains(&tag)) {
-                rows = more;
-                account = Some(a.account_uuid);
-                break;
-            }
-        }
-    }
+    // Only the chosen account is searched ([`pick_account`]); never every account.
+    let rows = manifest::list(r, account, &Host::detect)?;
+    let account = account.map(str::to_string);
     let hits: Vec<&Row> = rows.iter().filter(|r| r.tags.contains(&tag)).collect();
     let found = |row: &Row| {
         Ok(Found::Manifest(ManifestStore::from_row(
@@ -787,7 +900,7 @@ pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
     Error::Config(
         format!(
             "{}{} or any parent directory, and {manifest}.\n  \
-             New project?                    opv init <env> --vault <vault title> --item <item title>\n  \
+             New project?                    opv init dev\n  \
              Have a secrets.toml elsewhere?  opv config import --file <path> --vault <vault>\n  \
              Manifest for another project?   OPV_PROJECT=<name> opv <command>\n  \
              Configured elsewhere?           opv --config <path> <command>\n  \
@@ -798,7 +911,7 @@ pub fn not_found(start: &Path, repo: Option<&str>) -> Error {
         .into(),
     )
     .with_code(crate::error::Code::ConfigNotFound)
-    .with_next("opv init <env> --vault <vault title> --item <item title>")
+    .with_next("opv init dev")
 }
 
 /// `git remote get-url origin`, normalized; `None` without git, a repository or a remote

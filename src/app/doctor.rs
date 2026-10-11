@@ -58,7 +58,7 @@ const ITEM_CHECK: &str = "item";
 const CONFIG_FIX: &str = "fix secrets.toml (see the config line above), then run opv doctor";
 
 /// The step when there is no configuration yet (P3); the config line lists the others.
-const FIRST_RUN: &str = "opv init <env> --vault <vault title> --item <item title>";
+const FIRST_RUN: &str = "opv init dev";
 
 pub fn run_scoped(
     config: Result<Fleet, Error>,
@@ -363,6 +363,10 @@ fn run_on_with(
         }
         Err(e) => (None, Err(e)),
     };
+    // No account chosen among several: any sign-in check would ask the 1Password app about
+    // op's default account, which this project was never pointed at (found live).
+    let no_account =
+        matches!(&config_line, Err(e) if e.code() == crate::error::Code::AccountRequired);
     // (one target per provider in use, environments without a target)
     let targets = fleet.as_ref().map(|f| {
         (
@@ -378,7 +382,12 @@ fn run_on_with(
     let op_check = op_version(r, host);
     let op_present = op_check.is_ok();
     report.push("op", op_check);
-    if op_present {
+    if no_account {
+        report.skip(
+            "op auth",
+            "not checked (choose the project's account first, see the config line above)".into(),
+        );
+    } else if op_present {
         report.push("op auth", op_auth(r, host, scope.env).map(Check::Ok));
     } else {
         // One failure per cause: the op line already says why (review #12).
@@ -2021,14 +2030,10 @@ mod tests {
 
     /// P3: with no configuration at all, the step is the first-run router, not "fix it".
     #[test]
-    fn next_step_without_any_configuration_offers_init_and_setup() {
+    fn next_step_without_any_configuration_is_a_runnable_init() {
         let r = FakeRunner::new(good());
         let missing = crate::config::not_found(std::path::Path::new("/nowhere"));
         let (_, out) = doctor(Err(missing), &r);
-        assert_eq!(
-            do_line(&out),
-            "Do: fill in and run: opv init <env> --vault <vault title> --item <item title>",
-            "{out}"
-        );
+        assert!(out.ends_with("Next: opv init dev\n"), "{out}");
     }
 }

@@ -70,7 +70,7 @@ pub fn missing(start: &Path) -> Error {
         )
         .into(),
     )
-    .with_next("opv init <env> --vault <vault title> --item <item title>")
+    .with_next("opv init dev")
 }
 
 impl Recipe {
@@ -226,11 +226,7 @@ mod tests {
     #[test]
     fn missing_recipe_offers_init_for_an_existing_item() {
         let e = missing(Path::new("/project"));
-        assert_eq!(
-            e.next_step(),
-            Some("opv init <env> --vault <vault title> --item <item title>"),
-            "{e}"
-        );
+        assert_eq!(e.next_step(), Some("opv init dev"), "{e}");
     }
 
     /// P3: and the generic recipe with the exact command that uses it.

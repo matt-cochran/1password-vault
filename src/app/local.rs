@@ -133,10 +133,8 @@ pub fn check(
                 if !guidance.is_empty() {
                     writeln!(out, "  guidance: {guidance}").map_err(write_err)?;
                 }
-                if let Some(url) = &link {
-                    writeln!(out, "  open: {url} ({})", super::field_locator(row))
-                        .map_err(write_err)?;
-                }
+                // The item link is left to `Next: opv open …` (found live: the long link
+                // read like a secret and repeated what the next step already says).
             }
         }
         // With findings, the error line counts them (`opv: 1 finding`); not twice (M4).
@@ -178,6 +176,17 @@ mod tests {
         let result = check(&f, "dev", Some("allumata"), &r, &mut out, true);
         assert!(matches!(result, Err(Error::Findings(1, _))));
         assert_no_values(&text_of(&out));
+    }
+
+    /// Found live: 1Password shows an empty field only in edit mode.
+    #[test]
+    fn a_missing_key_tells_the_person_to_click_edit() {
+        let f = fleet_with(
+            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+        );
+        let r = FakeRunner::new([item(&[])]);
+        let e = check(&f, "dev", Some("allumata"), &r, &mut Vec::new(), true).unwrap_err();
+        assert!(e.action().is_some_and(|a| a.contains("click Edit")));
     }
 
     #[test]

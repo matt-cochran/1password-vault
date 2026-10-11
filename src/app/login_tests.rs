@@ -13,6 +13,8 @@ struct Fake {
     replies: RefCell<VecDeque<Output>>,
     account: Option<String>,
     sign_ins: Vec<Option<String>>,
+    added: Vec<Option<String>>,
+    shorthands: Vec<String>,
     child_code: i32,
     children: RefCell<Vec<Vec<String>>>,
 }
@@ -29,6 +31,8 @@ impl Fake {
             ),
             account: None,
             sign_ins: Vec::new(),
+            added: Vec::new(),
+            shorthands: Vec::new(),
             child_code,
             children: RefCell::default(),
         }
@@ -66,6 +70,18 @@ impl Backend for Fake {
     }
     fn use_account(&mut self, account: Option<&str>) {
         self.account = account.map(str::to_owned);
+    }
+    fn account_label(&self, account: &str) -> String {
+        if account == "ALABS000000000000000000001" {
+            "me@labs.example".to_string()
+        } else {
+            account.to_string()
+        }
+    }
+    fn add_account(&mut self, email: Option<&str>, shorthand: &str) -> Result<(), Error> {
+        self.added.push(email.map(str::to_owned));
+        self.shorthands.push(shorthand.to_owned());
+        Ok(())
     }
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.children.borrow_mut().push(command.to_vec());
@@ -203,4 +219,135 @@ fn login_to_an_unknown_environment_is_a_configuration_error() {
     )
     .unwrap_err();
     assert_eq!(e.exit_code(), 2);
+}
+
+// --- choosing the project's account in one command (found in a fresh-account run-through)
+
+const ONE: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001"}]"#;
+const BOTH: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001"},{"url":"my.1password.com","email":"me@labs.example","account_uuid":"ALABS000000000000000000001"}]"#;
+
+fn lists(replies: &[&str]) -> crate::runner::fake::FakeRunner {
+    crate::runner::fake::FakeRunner::new(replies.iter().map(|j| Output::success(j.to_string())))
+}
+
+fn wsl() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("linux").var("WSL_DISTRO_NAME"))
+}
+
+/// An email op does not know yet is added at op's prompts, inside opv login.
+#[test]
+fn an_unknown_email_is_added_by_login_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE, BOTH]),
+            Some("me@labs.example"),
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(b.added, [Some("me@labs.example".to_string())]);
+}
+
+#[test]
+fn the_added_account_is_recorded_for_the_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE, BOTH]),
+            Some("me@labs.example"),
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        crate::config_store::pointer_account(dir.path()).as_deref(),
+        Some("ALABS000000000000000000001")
+    );
+}
+
+/// Several accounts and none chosen: a menu, with "add another" where op keeps its own.
+#[test]
+fn several_accounts_offer_a_menu_with_add_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ui = Ui::default();
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[BOTH]),
+            None,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut ui,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        ui.asked[0],
+        [
+            "me@family.example (my.1password.com)",
+            "me@labs.example (my.1password.com)",
+            "Add another 1Password account"
+        ]
+    );
+}
+
+// --- a second account at the same sign-in address (found live: personal and business
+// accounts are both at my.1password.com, and op names each one `my` unless told otherwise)
+
+const MY: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001","shorthand":"my"}]"#;
+const MY_AND_LABS: &str = r#"[{"url":"my.1password.com","email":"me@family.example","account_uuid":"AFAMILY0000000000000000001","shorthand":"my"},{"url":"my.1password.com","email":"me@labs.example","account_uuid":"ALABS000000000000000000001","shorthand":"labs"}]"#;
+
+#[test]
+fn an_added_account_is_named_after_its_email_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[MY, MY_AND_LABS]),
+            Some("me@labs.example"),
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(b.shorthands, ["labs"]);
+}
+
+#[test]
+fn an_added_accounts_name_never_repeats_one_already_on_the_machine() {
+    let taken: Vec<crate::adapters::onepassword_manifest::Account> =
+        serde_json::from_str(MY_AND_LABS).unwrap();
+    assert_eq!(free_shorthand(Some("you@labs.example"), &taken), "labs-2");
+}
+
+#[test]
+fn an_account_added_without_an_email_is_named_account() {
+    assert_eq!(free_shorthand(None, &[]), "account");
+}
+
+/// Found live: "Signed in to 6AINMAIK…" named the account by an ID no person recognises.
+#[test]
+fn the_signed_in_message_names_the_account_by_its_email() {
+    let mut ui = Ui::default();
+    run_or(
+        None,
+        Some("ALABS000000000000000000001"),
+        None,
+        &[],
+        &mut Fake::signed_in(0),
+        &mut ui,
+    )
+    .unwrap();
+    assert!(
+        ui.shown
+            .iter()
+            .any(|m| m.starts_with("Signed in to me@labs.example."))
+    );
 }

@@ -41,6 +41,7 @@ pub const AZ_CLI: Tool = Tool {
         "ResourceNotFound",
         "ResourceGroupNotFound",
     ],
+    signed_out: &[],
     aliases: &[],
 };
 

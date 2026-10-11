@@ -198,6 +198,10 @@ pub struct Tool {
     /// Stable phrases this CLI prints on stderr for an object that does not exist (S2): a
     /// read failing with one is refused at once, never retried.
     pub not_found: &'static [&'static str],
+    /// Stable phrases this CLI prints on stderr when no one is signed in: not transient,
+    /// so a read failing with one is refused at once, never retried (found live: three
+    /// "retrying op item list" lines before every first sign-in).
+    pub signed_out: &'static [&'static str],
     /// Other names the program is installed under, for runnable `Next:` lines (`fly`).
     pub aliases: &'static [&'static str],
 }
@@ -294,6 +298,18 @@ pub const OP_CLI: Tool = Tool {
     status_page: "https://status.1password.com",
     pinned_env: &[("NO_COLOR", "1")],
     not_found: &["isn't an item", "isn't a vault"],
+    signed_out: &[
+        "You are not currently signed in",
+        // `op whoami` and other calls with an account but no session (found live).
+        "could not find session token",
+        // An expired session still in the environment (found live: a signed-in shell
+        // left idle over 30 minutes), and op's other signed-out wordings.
+        "session expired",
+        "account is not signed in",
+        "Invalid session token",
+        "session token not set in environment",
+        "invalid session:",
+    ],
     aliases: &[],
 };
 

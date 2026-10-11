@@ -732,3 +732,157 @@ fn an_environments_own_account_wins_over_the_manifests() {
     let fleet = in_account(&FakeOp::default(), &text);
     assert_eq!(fleet.environments["dev"].account.as_deref(), Some("home"));
 }
+
+// --- the project's 1Password account (FR-40, NR-7; found in a live run-through) ---
+
+const TWO_ACCOUNTS: &str = r#"[
+  {"url":"my.1password.com","email":"me@family.example","user_uuid":"UFAMILY0000000000000000001","account_uuid":"AFAMILY0000000000000000001"},
+  {"url":"my.1password.com","email":"me@labs.example","user_uuid":"ULABS000000000000000000001","account_uuid":"ALABS000000000000000000001"}
+]"#;
+
+fn accounts_runner(json: &str) -> crate::runner::fake::FakeRunner {
+    crate::runner::fake::FakeRunner::new([crate::runner::Output::success(json.to_string())])
+}
+
+#[test]
+fn several_accounts_and_none_chosen_is_account_required() {
+    let e = pick_account(&accounts_runner(TWO_ACCOUNTS), None).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::AccountRequired);
+}
+
+/// opv never searches every account: the only call is `op account list`.
+#[test]
+fn several_accounts_and_none_chosen_searches_no_account() {
+    let r = accounts_runner(TWO_ACCOUNTS);
+    let _ = pick_account(&r, None);
+    assert_eq!(r.calls.borrow().len(), 1);
+}
+
+#[test]
+fn an_email_resolves_to_its_account_id() {
+    let got = pick_account(
+        &accounts_runner(TWO_ACCOUNTS),
+        Some("me@labs.example".into()),
+    );
+    assert_eq!(got.unwrap().as_deref(), Some("ALABS000000000000000000001"));
+}
+
+/// Two accounts on my.1password.com: the sign-in address alone names neither.
+#[test]
+fn a_shared_sign_in_address_is_ambiguous() {
+    let e = pick_account(
+        &accounts_runner(TWO_ACCOUNTS),
+        Some("my.1password.com".into()),
+    );
+    assert_eq!(e.unwrap_err().code(), crate::error::Code::AccountRequired);
+}
+
+#[test]
+fn the_only_account_is_used() {
+    let one = r#"[{"url":"my.1password.com","email":"me@labs.example","account_uuid":"ALABS000000000000000000001"}]"#;
+    let got = pick_account(&accounts_runner(one), None).unwrap();
+    assert_eq!(got.as_deref(), Some("ALABS000000000000000000001"));
+}
+
+#[test]
+fn a_pointer_may_name_only_the_account() {
+    let d = parse_dot_opv(
+        "account = \"ALABS000000000000000000001\"\n",
+        Path::new(".opv"),
+    )
+    .unwrap();
+    assert_eq!(d.project, None);
+}
+
+#[test]
+fn recording_the_account_keeps_the_pointers_project() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "project = \"myapp\"\n").unwrap();
+    record_account(dir.path(), "ALABS000000000000000000001").unwrap();
+    let text = std::fs::read_to_string(dir.path().join(DOT_FILE)).unwrap();
+    let d = parse_dot_opv(&text, Path::new(".opv")).unwrap();
+    assert_eq!(
+        (d.project.as_deref(), d.account.as_deref()),
+        (Some("myapp"), Some("ALABS000000000000000000001"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recording_the_account_never_writes_through_a_symlinked_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep me\n").unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join(DOT_FILE)).unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn recording_the_account_never_creates_a_dangling_symlinks_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join(DOT_FILE)).unwrap();
+    let _ = record_account(dir.path(), "ALABS000000000000000000001");
+    assert!(!victim.exists());
+}
+
+#[test]
+fn recording_the_account_refuses_a_pointer_that_does_not_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "not = [toml\n").unwrap();
+    assert!(record_account(dir.path(), "ALABS000000000000000000001").is_err());
+}
+
+#[test]
+fn recording_the_account_ignores_a_pointer_above_the_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(DOT_FILE), "project = \"outer\"\n").unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let written = record_account(&repo, "ALABS000000000000000000001").unwrap();
+    assert_eq!(written, repo.join(DOT_FILE));
+}
+
+/// Found live: in WSL, op keeps its own accounts, so the step for an email op does not
+/// know is `op account add` here, not the Windows app.
+#[test]
+fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
+    let wsl = Host::from_env(&crate::host::FakeEnv::new("linux").var("WSL_DISTRO_NAME"));
+    let e = crate::host::with_test_host(wsl, || {
+        pick_account(
+            &accounts_runner(TWO_ACCOUNTS),
+            Some("new@labs.example".into()),
+        )
+        .unwrap_err()
+    });
+    assert_eq!(
+        e.next_step(),
+        Some("op account add --email new@labs.example")
+    );
+}
+
+fn repo_manifest() -> Found {
+    Found::Manifest(ManifestStore {
+        vault_id: "v".into(),
+        vault_name: "app-dev".into(),
+        item_id: "i".into(),
+        title: "opv · app".into(),
+        account: None,
+        matched: Matched::Repo("github.com/o/app".into()),
+    })
+}
+
+/// Found live: the same "using manifest …" line on every command.
+#[test]
+fn a_manifest_found_by_the_git_remote_is_named_only_with_verbose() {
+    assert_eq!(repo_manifest().announce(false), None);
+}
+
+#[test]
+fn verbose_names_the_manifest_found_by_the_git_remote() {
+    assert!(repo_manifest().announce(true).is_some());
+}

@@ -45,7 +45,7 @@ opv item skeleton dev
 opv check dev --product api
 ```
 
-`opv add` edits the configuration where it lives (a `secrets.toml`, or the manifest in 1Password), keeps comments and order, validates the result like a hand-written file and never reads the item. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv init <env> --vault … --item … --add-env` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-add).
+`opv add` edits the configuration where it lives (a `secrets.toml`, or the manifest in 1Password), keeps comments and order, validates the result like a hand-written file and never reads the item. Add the key to the recipe's `[[fields]]` too, so the next person's `opv setup` asks for it. `opv init <env> --add-env` adds another environment the same way. See [configuration.md](configuration.md#declare-a-key-opv-add).
 
 ## Existing local settings
 

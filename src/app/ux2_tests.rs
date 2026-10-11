@@ -54,15 +54,12 @@ fn plan_text(r: &FakeRunner) -> String {
 
 // ---- H1: links to the field in 1Password ---------------------------------------------
 
+/// Found live: the item link under each finding read like a secret; `Next: opv open`
+/// is the way to the field.
 #[test]
-fn status_links_a_missing_key_to_its_item_and_field() {
+fn status_prints_no_item_link_under_a_finding() {
     let (_, out) = status_text(&missing_openai());
-    assert!(
-        out.contains(&format!(
-            "    open: {LINK} (section allumata, field OPENAI_API_KEY)"
-        )),
-        "{out}"
-    );
+    assert!(!out.contains(LINK), "{out}");
 }
 
 #[test]
@@ -110,23 +107,17 @@ fn status_json_never_carries_a_value() {
 }
 
 #[test]
-fn check_links_a_missing_key_to_its_field() {
+fn check_prints_no_item_link_under_a_finding() {
     let r = FakeRunner::new([item_without("allumata", "OPENAI_API_KEY"), whoami()]);
     let mut out = Vec::new();
     let _ = super::local::check(&fleet(), "prod", Some("allumata"), &r, &mut out, false);
-    assert!(
-        text_of(&out).contains(&format!(
-            "  open: {LINK} (section allumata, field OPENAI_API_KEY)"
-        )),
-        "{}",
-        text_of(&out)
-    );
+    assert!(!text_of(&out).contains(LINK), "{}", text_of(&out));
 }
 
 #[test]
-fn plan_links_a_missing_key_to_its_field() {
+fn plan_prints_no_item_link_under_a_finding() {
     let out = plan_text(&missing_openai());
-    assert!(out.contains(&format!("    open: {LINK} (")), "{out}");
+    assert!(!out.contains(LINK), "{out}");
 }
 
 #[test]

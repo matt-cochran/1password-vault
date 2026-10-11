@@ -11,8 +11,10 @@ First match wins:
 1. `--config <file>` or `OPV_CONFIG`;
 2. `OPV_PROJECT=<name>`: the manifest titled `opv · <name>`;
 3. `secrets.toml` in the current directory or a parent (an existing file always wins over a manifest);
-4. a `.opv` file in the current directory or a parent, one line: `project = "<name>"` (optionally `account = "<account>"` for a second 1Password account);
+4. a `.opv` file in the current directory or a parent: `project = "<name>"`, `account = "<account ID>"`, or both. `opv login --account` and `opv init --account` write the account line; commit the file;
 5. the manifest tagged with this checkout's git remote (`git remote get-url origin`, normalized to `host/owner/repo`; https, ssh and `git@host:owner/repo` forms are the same).
+
+**Which 1Password account.** opv uses one account per project and never falls back to op's default when that could be the wrong one: the account recorded in `.opv` (or `OP_ACCOUNT`), else the only account `op` knows on this machine. With several accounts and none recorded, every command stops with `account_required`, lists the accounts (email, sign-in address, account ID) and asks you to run `opv login --account <email>` once; opv never searches your other accounts. An email or sign-in address is resolved to the account ID, which is what gets recorded (op itself takes no email, and several accounts can share `my.1password.com`). Every `op` call then carries `--account <ID>`.
 
 `using …` on stderr names what was used (not when given with `--config`). Steps 2, 4 and 5 make one `op item list --tags opv-manifest` call (names and tags only), and loading a manifest is one `op item get`, so these commands need a 1Password session even for `explain` and `config export`; without one the error says so and ends with `Next: opv login`. No match ends with `Next: opv init …`; several matches are listed, and `OPV_PROJECT` picks one.
 
@@ -20,7 +22,7 @@ First match wins:
 
 ### Configuration in 1Password
 
-The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes hold exactly the TOML of a `secrets.toml` (same schema, same validation). It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value. Every command treats it exactly like a file: `add`, `init --add-env` and `config edit` edit it in place.
+The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes start with an "opv managed configuration" heading and a short explanation, then hold exactly the TOML of a `secrets.toml` (same schema, same validation) in one `toml` code block. opv reads only the code block, and text you add around it is kept. It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value. Every command treats it exactly like a file: `add`, `init --add-env` and `config edit` edit it in place.
 
 #### Moving a file into 1Password
 
@@ -95,7 +97,7 @@ Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A pr
 
 ### Simple profile (one app per environment)
 
-For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item (a field outside any section) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
+For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item: a field in the item's unnamed default section, where the 1Password app puts a field added outside any named section. (A field with no section at all is readable by `op` but hidden in every 1Password app, so opv moves one it finds into the default section.) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
 
 ```text
 vault myapp-prod   item myapp   field DATABASE_URL   (concealed)
@@ -143,12 +145,12 @@ Two optional settings per environment:
 [environments.prod]
 vault_id = "vprd1234example"
 item_id  = "iprd1234example"
-account  = "mycompany.1password.com"            # sign-in address, email or account ID
+account  = "ACCOUNTID0000000000000000"          # account ID (opv login --account records it)
 deploy_credentials = "op://infra-prod/fly-deploy" # the deploy identity's item, by ID or name
 fly.app  = "example-portfolio-production"
 ```
 
-- `account`: every `op` call for this environment uses this 1Password account, and `opv login prod` signs in to it. Set it when your environments live in different accounts. It must look like a sign-in address, an email or an account ID (no spaces, no leading `-`); a bad value is a configuration error pointing at its line and column. Under a service-account token in CI the token decides the account.
+- `account`: every `op` call for this environment uses this 1Password account (passed as `--account`), and `opv login prod` signs in to it. Set it only when your environments live in different accounts; otherwise the project's account (above) applies. Use the account ID (`op account list` shows it): op takes no email, and a sign-in address may be shared by several accounts. A bad value is a configuration error pointing at its line and column. Under a service-account token in CI the token decides the account.
 - `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this environment's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on Kubernetes, or on an environment without a target, is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials.
 
 Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App. Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
@@ -340,6 +342,7 @@ If the 1Password item already exists, `init` writes the configuration from it in
 opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--profile simple|fleet] [--force]
 ```
 
+- Without `--vault` and `--item` it uses vault `<project>-<env>` and item `<project> · <env> values` (the project name is `--project`, else the repository's, else the directory's), so the values item reads apart from the manifest `opv · <project>`. `opv init dev` alone is enough for a new project.
 - It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs. No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
 - It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
 - The profile follows the item's shape: only unsectioned fields gives a simple file, only sectioned fields gives a fleet file (one product per section, `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"`). An item with both is an error naming both shapes; `--profile` then decides, and the fields of the other shape are ignored with a note.

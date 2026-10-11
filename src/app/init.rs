@@ -1,4 +1,4 @@
-//! `init <env> --vault <name> --item <name> [--target <provider> …]` use case (FR-23, H3)
+//! `init <env> [--vault <name>] [--item <name>] [--target <provider> …]` use case (FR-23, H3)
 //! and `init <env> … --add-env` (H2).
 //!
 //! A dev-time helper that writes a starter `secrets.toml` in the given directory:
@@ -158,14 +158,15 @@ pub fn run_manifest(
     if json {
         return write_json(out, args, &p, &place);
     }
-    let note = match &repo {
-        Some(repo) => format!("note: tagged for {repo}; any checkout of it finds this manifest"),
-        None => format!(
+    // Only the case a person must act on: a checkout with a remote finds the manifest by
+    // itself (found live: a note on every new project that asked nothing of anyone).
+    let note = repo.is_none().then(|| {
+        format!(
             "note: no git remote origin; point a checkout at it with OPV_PROJECT={project} or \
              a .opv file holding project = \"{project}\""
-        ),
-    };
-    report(args, &p, &place, Some(note), out)
+        )
+    });
+    report(args, &p, &place, note, out)
 }
 
 /// FR-43: a person's init also tidies the item it just declared (a read; never fails init).
@@ -306,15 +307,17 @@ fn report(
     if let Some(note) = extra {
         w(out, note)?;
     }
-    // A URL: the rules reference moved to docs/configuration.md (review #16, #17).
-    w(
-        out,
-        format!(
-            "add keys with opv add, rules and guidance by hand; see \
-             {}/configuration.md#rules-reference",
-            crate::DOCS_URL
-        ),
-    )?;
+    // A new, empty configuration's one useful pointer is how to declare a key; rules and
+    // guidance live in the docs and `opv add --help`.
+    if secrets + configs == 0 {
+        w(
+            out,
+            format!(
+                "add a key: opv add <KEY> --kind secret --env {}",
+                crate::error::shell_word(&args.env)
+            ),
+        )?;
+    }
     w(out, format!("Next: {}", next_command(args, p)))
 }
 
@@ -620,6 +623,17 @@ fn existing_refusal(args: &InitArgs, target: &Path) -> Error {
         .into(),
     )
     .with_next(add_env_command(args))
+}
+
+/// The vault title `opv init` uses without `--vault`: `<project>-<env>`.
+pub fn default_vault(project: &str, env: &str) -> String {
+    format!("{project}-{env}")
+}
+
+/// The item title `opv init` uses without `--item`: `<project> · <env> values`, so it reads
+/// apart from the project's manifest (`opv · <project>`) in the same vault.
+pub fn default_item(project: &str, env: &str) -> String {
+    format!("{project} · {env} values")
 }
 
 /// `opv init <env> --vault <v> --item <i> [--target t] [--<option> <value>...] --add-env`:

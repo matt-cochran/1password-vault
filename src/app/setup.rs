@@ -16,6 +16,18 @@ pub trait Backend {
     fn native(&self) -> Result<(), Error>;
     fn call(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error>;
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error>;
+    /// Add a 1Password account to this machine's `op` at op's own prompts and sign in to
+    /// it in the same step (`opv login`, found in a fresh-account run-through: the person
+    /// otherwise had to leave opv for `op account add`). `email` pre-fills op's question;
+    /// `shorthand` is a name no account on this machine has yet (op otherwise names every
+    /// account at my.1password.com `my`, so a second one, personal beside business, fails).
+    fn add_account(&mut self, _email: Option<&str>, _shorthand: &str) -> Result<(), Error> {
+        self.sign_in(None, true)
+    }
+    /// How to name `account` (an ID) to the person: the email op knows it by, when it does.
+    fn account_label(&self, account: &str) -> String {
+        account.to_string()
+    }
     /// Use `account` for every later call (`opv login`, FR-40).
     fn use_account(&mut self, _account: Option<&str>) {}
     /// Run `command` signed in (a signed-in shell when empty); its exit code (`opv login`).
@@ -216,6 +228,16 @@ fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, E
                     section
                 };
                 field["section"] = section;
+            } else {
+                // Outside a named section: the default one the 1Password apps show.
+                let sections = doc["sections"].as_array_mut().expect("sections");
+                if !sections
+                    .iter()
+                    .any(|s| s["id"] == crate::adapters::onepassword::DEFAULT_SECTION_ID)
+                {
+                    sections.push(crate::adapters::onepassword::default_section());
+                }
+                field["section"] = crate::adapters::onepassword::default_section();
             }
             let fields = doc["fields"].as_array_mut().expect("fields");
             indices.push(fields.len());

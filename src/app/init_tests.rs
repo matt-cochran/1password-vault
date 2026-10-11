@@ -855,14 +855,11 @@ fn targetless_single_product_init_names_the_product() {
 }
 
 /// Review #16, #17: the rules reference is a URL a binary install can open.
+/// Found live: a docs pointer on every init that asked nothing of the person.
 #[test]
-fn init_points_to_the_rules_reference_url() {
+fn init_with_keys_prints_no_docs_pointer() {
     let (_dir, run) = init_with(&fleet_fields(), &args(None, false));
-    assert!(
-        run.out.contains("configuration.md#rules-reference"),
-        "{}",
-        run.out
-    );
+    assert!(!run.out.contains("https://"), "{}", run.out);
 }
 
 // H3: `init --target <provider>` with the provider's own options, through the plug-in
@@ -1340,4 +1337,27 @@ fn add_env_saves_despite_a_stray_field_for_a_shared_key() {
     fields.push(secret("worker", "LEGACY_TOKEN", &v("stray")));
     let run = add_env_with(SHARED, &staging(), &fields);
     assert!(run.res.is_ok(), "{:?}", run.res);
+}
+
+/// Found live: `demo-app` beside `opv · demo-app` gave no hint which note held the values.
+#[test]
+fn the_default_item_reads_apart_from_the_manifest() {
+    assert_eq!(default_item("demo-app", "dev"), "demo-app · dev values");
+}
+
+#[test]
+fn the_default_vault_is_the_project_and_environment() {
+    assert_eq!(default_vault("demo-app", "dev"), "demo-app-dev");
+}
+
+/// An empty item's one useful pointer: how to declare a key.
+#[test]
+fn init_of_an_empty_item_says_how_to_add_a_key() {
+    let (_dir, run) = init_with(&[], &args(Some(Profile::Simple), false));
+    assert!(
+        run.out
+            .contains("add a key: opv add <KEY> --kind secret --env staging"),
+        "{}",
+        run.out
+    );
 }

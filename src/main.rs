@@ -19,7 +19,7 @@ mod completions;
 const QUICK_START: &str = "\
 Start here:
   opv setup                        Guided setup for a new project
-  opv init dev --vault V --item I  Use a 1Password item you already set up
+  opv init dev                     Set up 1Password for this project (or --vault V --item I)
   opv login dev                    Sign in to 1Password for an environment
   opv doctor                       Find a setup problem and its next step
   opv guide agent                  Setup guide for AI assistants (this version)
@@ -291,9 +291,9 @@ Prints the op:// reference, kind, target name, rules, immutable and guidance, an
 
 const INIT_QUICK: &str = "\
 Examples:
-  opv init dev --vault myapp-dev --item app                    # run-only environment
-  opv init prod --vault myapp-prod --item app --fly-app myapp  # deploys to Fly
-  opv init staging --vault myapp-staging --item app --add-env  # add to the configuration";
+  opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
+  opv init prod --fly-app myapp         # deploys to Fly
+  opv init dev --vault shared --item app  # an item you already have";
 
 const COMPLETIONS_QUICK: &str = "\
 Examples:
@@ -421,6 +421,10 @@ enum Cmd {
     Login {
         /// Environment name from the configuration (for example dev or prod).
         env: Option<String>,
+        /// 1Password account (email or ID) this project uses; kept in .opv. Asked for when
+        /// several accounts are on this machine.
+        #[arg(long)]
+        account: Option<String>,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -549,18 +553,18 @@ enum Cmd {
         #[arg(value_name = "TOPIC")]
         topic: Vec<String>,
     },
-    /// Generate configuration from a 1Password item you have already set up.
+    /// Write the configuration from an environment's 1Password item (created if missing).
     #[command(before_help = INIT_QUICK)]
     Init {
         /// Environment name to declare (for example staging or prod).
         env: String,
-        /// Vault title, matched exactly.
+        /// Vault title, matched exactly; defaults to <project>-<env> (created if missing).
         #[arg(long)]
-        vault: String,
+        vault: Option<String>,
         /// Item title in that vault, matched exactly; its field names and types are read
-        /// once, never its values.
+        /// once, never its values. Defaults to "<project> · <env> values".
         #[arg(long)]
-        item: String,
+        item: Option<String>,
         /// Deployment target of the environment; its options follow (--<target>-<field>).
         /// Inferred from those options when omitted; omit both for a run-only environment
         /// used for local development. Nothing is looked up.
@@ -578,7 +582,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
         /// Print what was written (names and kinds) as one JSON document.
-        #[arg(long)]
+        #[arg(long, hide_long_help = true)]
         json: bool,
         /// Write ./secrets.toml even for a new project (without it, a new project's
         /// configuration is saved as a manifest in the item's vault).
@@ -587,6 +591,9 @@ enum Cmd {
         /// Project name of a new manifest; defaults to the repository's name.
         #[arg(long, conflicts_with = "file")]
         project: Option<String>,
+        /// 1Password account (email or ID) when several are on this machine; kept in .opv.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Declare a key in the configuration, or add environments to a declared key.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
@@ -910,15 +917,38 @@ fn main() -> ExitCode {
         io::IsTerminal::is_terminal(&io::stdout()),
         std::env::var_os("NO_COLOR"),
     ) && cli.cmd.has_state_words();
-    let res = if json.is_some() {
-        run(cli, config_source, &init_options, &mut body)
-    } else if paint {
-        let mut painter = colour::Painter::new(&mut stdout);
-        let res = run(cli, config_source, &init_options, &mut painter);
-        let _ = painter.flush();
-        res
-    } else {
-        run(cli, config_source, &init_options, &mut stdout)
+    // A person at a terminal whose 1Password session is gone is signed in at op's own
+    // prompt and the command runs once more (found live: an idle session stopped `opv
+    // check` with only "run opv login"). Never for --json, scripts, CI or a service
+    // account, and never for login and setup, which sign in themselves.
+    let may_sign_in = json.is_none() && !matches!(cli.cmd, Cmd::Login { .. } | Cmd::Setup { .. });
+    let mut first = Some(cli);
+    let mut signed_in = false;
+    let res = loop {
+        let cli = match first.take() {
+            Some(c) => c,
+            None => match Cli::from_arg_matches(&matches) {
+                Ok(c) => c,
+                Err(e) => return usage_error(e),
+            },
+        };
+        let res = if json.is_some() {
+            run(cli, config_source, &init_options, &mut body)
+        } else if paint {
+            let mut painter = colour::Painter::new(&mut stdout);
+            let res = run(cli, config_source, &init_options, &mut painter);
+            let _ = painter.flush();
+            res
+        } else {
+            run(cli, config_source, &init_options, &mut stdout)
+        };
+        let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
+        if may_sign_in && signed_out && !signed_in && sign_in_here() {
+            // Once: a second failure is reported as it is.
+            signed_in = true;
+            continue;
+        }
+        break res;
     };
     let step = res.as_ref().err().map(|e| e.step(&rerun, &help));
     if let Some(raw) = json {
@@ -1310,9 +1340,28 @@ fn run(
         }
         return Ok(0);
     }
-    if let Cmd::Login { env, command } = &cli.cmd {
+    if let Cmd::Login {
+        env,
+        command,
+        account,
+    } = &cli.cmd
+    {
         use opv::app::{login, setup_runtime};
         setup_runtime::Console::require_terminal("login", &typed_command())?;
+        let here = std::env::current_dir().unwrap_or_default();
+        let probe = ProcessRunner::new(
+            Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
+            cli.verbose,
+        );
+        // One runtime: an account added and signed in here keeps its session for the login.
+        let mut runtime = setup_runtime::Runtime::default();
+        login::choose_account(
+            &probe,
+            account.as_deref(),
+            &here,
+            &mut runtime,
+            &mut setup_runtime::Console,
+        )?;
         let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
             Some(f) => Some(f),
             None => manifest_for_login(&cli, config_source),
@@ -1324,7 +1373,7 @@ fn run(
             fallback.as_deref(),
             env.as_deref(),
             command,
-            &mut setup_runtime::Runtime::default(),
+            &mut runtime,
             &mut setup_runtime::Console,
         );
     }
@@ -1354,6 +1403,12 @@ fn run(
     let r = ProcessRunner::new(
         Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
         cli.verbose,
+    );
+    // FR-40, NR-7: the account recorded for this checkout (.opv) or OP_ACCOUNT; a manifest
+    // found in another account replaces it below. Never op's default when one is known.
+    r.use_account(
+        config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
+            .or_else(config_store::account_env),
     );
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
@@ -1391,8 +1446,14 @@ fn run(
     // A missing config is a configuration error for the command, not an early exit, so
     // `doctor` still runs its other checks on a fresh machine.
     let found = request(&cli, config_source, false).and_then(|req| config_store::locate(&req, &r));
+    // A manifest found in a chosen account: every later op call uses that account.
+    if let Ok(config_store::Found::Manifest(m)) = &found
+        && m.account.is_some()
+    {
+        r.use_account(m.account.clone());
+    }
     if let Ok(f) = &found
-        && let Some(line) = f.announce()
+        && let Some(line) = f.announce(cli.verbose)
     {
         let _ = writeln!(io::stderr(), "{line}");
     }
@@ -1422,6 +1483,15 @@ fn run(
         return run_edit(cli.cmd, &found?, init_options, &r, out).map(|()| 0);
     }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
+    // The project's account (its manifest's, or the one recorded in .opv): `doctor`
+    // without --env checks the sign-in of that account, never op's default (FR-40).
+    let run_account = match &found {
+        Ok(config_store::Found::Manifest(m)) => m.account.clone(),
+        _ => None,
+    }
+    .or_else(|| config_store::pointer_account(&std::env::current_dir().unwrap_or_default()))
+    .or_else(config_store::account_env);
+    r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
     // A file that does not load: re-check it with a read-only command (H10). A manifest
@@ -1449,6 +1519,9 @@ fn run(
             Some(runner)
         }
         (Ok(fleet), Some((env, reach))) => Some(signin::open(fleet, env, &r, reach)?),
+        (_, None) if matches!(cmd, Cmd::Doctor { .. }) && run_account.is_some() => {
+            Some(signin::EnvRunner::with_account(&r, run_account))
+        }
         _ => None,
     };
     let runner: &dyn CommandRunner = match &env_runner {
@@ -1739,12 +1812,13 @@ fn run_init(
             "--config is not used"
         };
         // The same init without --config (and with OPV_CONFIG unset for this one command).
-        let mut again = format!(
-            "opv init {} --vault {} --item {}",
-            shell_word(env),
-            shell_word(vault),
-            shell_word(item)
-        );
+        let mut again = format!("opv init {}", shell_word(env));
+        if let Some(v) = vault {
+            again.push_str(&format!(" --vault {}", shell_word(v)));
+        }
+        if let Some(i) = item {
+            again.push_str(&format!(" --item {}", shell_word(i)));
+        }
         if let Some(t) = &target {
             again.push_str(&format!(" --target {}", shell_word(t)));
         }
@@ -1775,17 +1849,43 @@ fn run_init(
     }
     let dir = std::env::current_dir()
         .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
-    let (file, project) = match &cli.cmd {
-        Cmd::Init { file, project, .. } => (*file, project.clone()),
+    let (file, project, account) = match &cli.cmd {
+        Cmd::Init {
+            file,
+            project,
+            account,
+            ..
+        } => (*file, project.clone(), account.clone()),
         _ => unreachable!("called for init only"),
     };
-    let args = init_args(cli.cmd, init_options)?;
+    // FR-40, NR-7: every op call of init goes to one chosen account, never op's default
+    // when several accounts are on this machine; a choice given here is recorded in .opv.
+    let given = account
+        .clone()
+        .or_else(|| config_store::pointer_account(&dir))
+        .or_else(config_store::account_env);
+    let chosen = config_store::pick_account(r, given)?;
+    if account.is_some()
+        && let Some(a) = &chosen
+    {
+        let path = config_store::record_account(&dir, a)?;
+        if !json {
+            writeln!(
+                out,
+                "using 1Password account {a}; recorded in {} (commit it)",
+                path.display()
+            )
+            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))?;
+        }
+    }
+    let scoped = signin::EnvRunner::with_account(r, chosen);
+    let args = init_args(cli.cmd, init_options, &scoped, &dir)?;
     // A project that already has a secrets.toml keeps it; a new one gets a manifest
     // unless --file asks for the file (FR-44).
     if file || config::discover(&dir).is_some() {
-        init::run_as(&args, &dir, r, out, json)
+        init::run_as(&args, &dir, &scoped, out, json)
     } else {
-        init::run_manifest(&args, project.as_deref(), &dir, r, out, json)
+        init::run_manifest(&args, project.as_deref(), &dir, &scoped, out, json)
     }
 }
 
@@ -1823,15 +1923,24 @@ fn run_edit(
             out,
         ),
         cmd @ Cmd::Init { json, .. } => {
-            init::add_env_as(&init_args(cmd, init_options)?, store, r, out, json)
+            let dir = std::env::current_dir().map_err(|e| {
+                Error::Config(format!("cannot read the current directory: {e}").into())
+            })?;
+            init::add_env_as(&init_args(cmd, init_options, r, &dir)?, store, r, out, json)
         }
         _ => unreachable!("called for add and init --add-env only"),
     }
 }
 
+/// The init arguments, with the vault and item titles defaulted from the project name
+/// (`--project`, else the repository's, else the directory's) when not given: `opv init
+/// dev` alone is enough (found live: two notes, `demo-app` and `opv · demo-app`, and no
+/// way to tell which held the values).
 fn init_args(
     cmd: Cmd,
     init_options: &std::collections::BTreeMap<String, String>,
+    r: &dyn opv::runner::CommandRunner,
+    dir: &std::path::Path,
 ) -> Result<init::InitArgs, Error> {
     let Cmd::Init {
         env,
@@ -1842,11 +1951,23 @@ fn init_args(
         profile,
         force,
         file: _,
-        project: _,
+        project,
         json: _,
+        account: _,
     } = cmd
     else {
         unreachable!("called for init only")
+    };
+    let (vault, item) = match (vault, item) {
+        (Some(v), Some(i)) => (v, i),
+        (vault, item) => {
+            let repo = config_store::git_repo(r);
+            let name = config_store::default_project(project.as_deref(), repo.as_deref(), dir)?;
+            (
+                vault.unwrap_or_else(|| init::default_vault(&name, &env)),
+                item.unwrap_or_else(|| init::default_item(&name, &env)),
+            )
+        }
     };
     Ok(init::InitArgs {
         env,
@@ -1857,6 +1978,31 @@ fn init_args(
         profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
     })
+}
+
+/// Sign in to this checkout's 1Password account (its `.opv`, else `OP_ACCOUNT`, else op's
+/// choice) at op's own prompt, for the rest of this process; `false` when no person is at
+/// a terminal to do it (no TTY, CI, a service account or Connect) or the sign-in failed,
+/// so the original error stands. The password goes only to op; the session stays in this
+/// process ([`opv::runner::use_op_session`]).
+fn sign_in_here() -> bool {
+    use opv::app::setup::Backend as _;
+    use opv::app::setup_runtime::{Console, Runtime};
+    if Console::require_terminal("", "").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
+        return false;
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let account = config_store::pointer_account(&here).or_else(config_store::account_env);
+    eprintln!(
+        "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
+         to go on; your password goes only to 1Password's prompt."
+    );
+    let mut runtime = Runtime::with_account(account.as_deref());
+    if runtime.sign_in(account.as_deref(), false).is_err() {
+        return false;
+    }
+    opv::runner::use_op_session(runtime.into_session());
+    true
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.
@@ -1966,7 +2112,7 @@ mod tests {
     fn login_takes_an_environment_and_a_command_after_dashes() {
         let cli =
             Cli::try_parse_from(["opv", "login", "prod", "--", "opv", "check", "prod"]).unwrap();
-        let Cmd::Login { env, command } = cli.cmd else {
+        let Cmd::Login { env, command, .. } = cli.cmd else {
             panic!("not login")
         };
         assert_eq!(

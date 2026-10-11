@@ -560,7 +560,7 @@ fn skeleton_adds_missing_keys_as_top_level_fields() {
 }
 
 #[test]
-fn skeleton_writes_fields_without_a_section() {
+fn skeleton_writes_fields_in_the_default_section() {
     let r = FakeRunner::new([prod_item_without("DATABASE_URL"), ok()]);
     out_of(|o| skeleton::run(&simple(), "prod", &r, o))
         .0
@@ -573,7 +573,7 @@ fn skeleton_writes_fields_without_a_section() {
         .iter()
         .find(|f| f["label"] == "DATABASE_URL")
         .unwrap();
-    assert!(f.get("section").is_none(), "{f}");
+    assert_eq!(f["section"], serde_json::json!({"id": "add more"}), "{f}");
 }
 
 #[test]

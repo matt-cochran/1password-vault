@@ -46,16 +46,26 @@ fn simple() -> Fleet {
     .unwrap()
 }
 
-/// (section label or "" for top level, label, type, value).
+/// (section label, "" for the default section, or [`NO_SECTION`]; label, type, value).
 type F<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+/// A field outside every section: readable by op, shown by no 1Password app.
+const NO_SECTION: &str = "<none>";
 
 fn layout(fields: &[F<'_>]) -> Layout {
     let mut l = Layout::default();
     for (i, (s, label, ty, v)) in fields.iter().enumerate() {
-        let section = (!s.is_empty()).then(|| Section {
-            id: format!("sec_{s}"),
-            label: (*s).to_string(),
-        });
+        let section = match *s {
+            NO_SECTION => None,
+            "" => Some(Section {
+                id: "add more".into(),
+                label: String::new(),
+            }),
+            s => Some(Section {
+                id: format!("sec_{s}"),
+                label: s.to_string(),
+            }),
+        };
         if let Some(sec) = &section
             && !l.sections.contains(sec)
         {
@@ -451,4 +461,20 @@ fn the_summary_names_keys_never_values() {
     );
     let p = plan_of(&l);
     assert!(!format!("{} {:?}", p.summary(), p.ops).contains(MARK));
+}
+
+/// Found live: a field with no section is hidden in every 1Password app, even in edit mode.
+#[test]
+fn a_simple_profile_key_outside_every_section_is_moved_into_the_default_one() {
+    let l = layout(&[
+        (NO_SECTION, "DB_URL", "CONCEALED", "x"),
+        ("opv", "convention", "STRING", "1"),
+    ]);
+    assert_eq!(
+        plan(&l, &simple(), "dev", DATE).changes,
+        vec![Change::Moved {
+            field: "DB_URL".into(),
+            from: "outside every section (hidden in the 1Password app)".into()
+        }]
+    );
 }

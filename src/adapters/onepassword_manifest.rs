@@ -1,6 +1,12 @@
 //! The project manifest in 1Password (FR-44): one Secure Note per project holding the
 //! same TOML as `secrets.toml` in its notes, never a secret value.
 //!
+//! The notes are Markdown, which 1Password renders: an "opv managed configuration"
+//! heading and a short explanation for whoever opens the item, then the TOML in one fenced
+//! `toml` code block. opv reads only that block ([`config_text`]); notes without one (a
+//! manifest written before the heading) are read whole. An edit replaces only the block's
+//! contents, so text a person adds around it is kept ([`note_with`]).
+//!
 //! Calls, all through the runner (reads retried, writes never retried; NR-2, NR-3):
 //! - [`list`]: `op item list --tags opv-manifest --format json` (item metadata only: IDs,
 //!   titles, tags, versions; no field values).
@@ -168,13 +174,129 @@ pub fn list(
     Ok(rows)
 }
 
-/// An account op knows on this machine: its ID (for `--account`) and sign-in address.
+/// An account op knows on this machine: its ID (for `--account`), sign-in address, and the
+/// person's own email and user ID, used only to match what they type and to list their
+/// accounts back to them when they must choose (never logged or sent anywhere).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Account {
     #[serde(default)]
     pub account_uuid: String,
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub user_uuid: String,
+    #[serde(default)]
+    pub shorthand: String,
+}
+
+/// The account `who` names among `accounts`: an account ID, user ID, email, shorthand or
+/// sign-in address (matched ignoring case). `op` itself takes no email, and a sign-in
+/// address is shared by every account on `my.1password.com`, so opv resolves `who` to the
+/// account ID once and uses that (found live). None, or several, is a configuration error
+/// that lists the accounts.
+pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
+    let w = who.trim().to_ascii_lowercase();
+    let host = |u: &str| {
+        u.trim_start_matches("https://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let hits: Vec<&Account> = accounts
+        .iter()
+        .filter(|a| {
+            [&a.account_uuid, &a.user_uuid, &a.email, &a.shorthand]
+                .iter()
+                .any(|f| !f.is_empty() && f.to_ascii_lowercase() == w)
+                || host(&a.url) == host(&w)
+        })
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok(one.account_uuid.clone()),
+        [] => Err(not_known(accounts, who)),
+        many => Err(Error::Config(
+            format!(
+                "{} 1Password accounts match {who:?}; name one by its email or account ID:\n{}",
+                many.len(),
+                listing(&many.iter().map(|a| (*a).clone()).collect::<Vec<_>>())
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::AccountRequired)),
+    }
+}
+
+/// `who` is not an account this `op` knows. On Linux and in WSL, `op` keeps its own
+/// accounts (in WSL it does not share the Windows app's: found live), so the step is
+/// `op account add` for that email in this terminal; elsewhere, add it in the 1Password app.
+fn not_known(accounts: &[Account], who: &str) -> Error {
+    use crate::host::Platform;
+    let host = Host::detect();
+    let e = Error::Config(
+        format!(
+            "no 1Password account on this machine matches {who:?}; the accounts op knows:\n{}",
+            listing(accounts)
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::AccountRequired);
+    let own_op = matches!(host.platform, Platform::Linux | Platform::Wsl);
+    if own_op && who.contains('@') && crate::config::is_account(who) {
+        let wsl = if host.platform == Platform::Wsl {
+            " (op in WSL does not see the Windows app's accounts)"
+        } else {
+            ""
+        };
+        return e
+            .with_do(format!(
+                "add the account to op here{wsl}: type its sign-in address, Secret Key and \
+                 password only at op's prompts, then re-run opv login"
+            ))
+            .with_next(format!("op account add --email {who}"));
+    }
+    e.with_do(
+        "add the account in the 1Password app and turn on Settings > Developer > Integrate \
+         with 1Password CLI, then re-run",
+    )
+}
+
+/// One line per account: email, sign-in address and account ID (the person's own accounts,
+/// shown so they can choose).
+fn listing(accounts: &[Account]) -> String {
+    if accounts.is_empty() {
+        return "  (none: add one in the 1Password app)".into();
+    }
+    accounts
+        .iter()
+        .map(|a| {
+            format!(
+                "  {}  {}  {}",
+                if a.email.is_empty() { "-" } else { &a.email },
+                a.url.trim_start_matches("https://").trim_end_matches('/'),
+                a.account_uuid
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Several accounts on this machine and none chosen for the project: opv never guesses and
+/// never searches them all (each search asks the 1Password app about that account, and
+/// none of them was granted to this project). The person picks one.
+pub fn choose_error(accounts: &[Account]) -> Error {
+    Error::Config(
+        format!(
+            "{} 1Password accounts are on this machine and this project names none; opv uses \
+             only the account you choose, never op's default:\n{}",
+            accounts.len(),
+            listing(accounts)
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::AccountRequired)
+    .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
+    .with_next("opv login --account <email>")
 }
 
 /// The accounts op knows (`op account list`, a free probe); empty when it fails.
@@ -230,6 +352,7 @@ fn parse(raw: Value, item_id: &str) -> Result<Manifest, Error> {
         .iter()
         .find(|f| f["purpose"] == "NOTES" || f["id"] == "notesPlain")
         .and_then(|f| f["value"].as_str())
+        .map(config_text)
         .ok_or_else(|| {
             Error::Source(
                 format!(
@@ -246,7 +369,7 @@ fn parse(raw: Value, item_id: &str) -> Result<Manifest, Error> {
         .and_then(|f| f["value"].as_str())
         .map(str::to_string);
     Ok(Manifest {
-        text: notes.to_string(),
+        text: notes,
         version: raw["version"].as_u64().unwrap_or(0),
         project,
         raw,
@@ -261,11 +384,75 @@ pub fn template(title: &str, project: &str, tags: &[String], text: &str) -> Valu
         "tags": tags,
         "fields": [
             {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain",
-             "value": text},
+             "value": note_with(text, None, project)},
             {"id": "project", "type": "STRING", "label": "project", "value": project},
             {"id": "convention", "type": "STRING", "label": "convention", "value": CONVENTION},
         ],
     })
+}
+
+/// The configuration in manifest notes: the first fenced `toml` code block's contents, or
+/// the whole notes when there is none (a manifest written before the Markdown layout).
+pub fn config_text(notes: &str) -> String {
+    match fenced(notes) {
+        Some((_, body, _)) => body.to_string(),
+        None => notes.to_string(),
+    }
+}
+
+/// Split `notes` around its first fenced `toml` block: (before, contents, after), the fence
+/// lines excluded from all three. The closing fence is a line of exactly the opening's
+/// backticks (Markdown's rule), so a shorter run inside the TOML never ends the block.
+fn fenced(notes: &str) -> Option<(&str, &str, &str)> {
+    let mut at = 0;
+    let mut open: Option<(usize, usize, &str)> = None; // (start of fence, start of body, ticks)
+    for line in notes.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        match open {
+            None => {
+                let ticks = bare.len() - bare.trim_start_matches('`').len();
+                if ticks >= 3 && bare[ticks..].trim() == "toml" {
+                    open = Some((at, at + line.len(), &bare[..ticks]));
+                }
+            }
+            Some((start, body, ticks)) if bare.trim_end() == ticks => {
+                return Some((&notes[..start], &notes[body..at], &notes[at + line.len()..]));
+            }
+            Some(_) => {}
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// Manifest notes holding `config`: the `previous` notes with only their code block's
+/// contents replaced, or, when they have no block (a new or older manifest), the heading
+/// and explanation followed by the block.
+pub fn note_with(config: &str, previous: Option<&str>, project: &str) -> String {
+    let ticks = "`".repeat(longest_tick_run(config).max(2) + 1);
+    let mut body = config.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    let block = format!("{ticks}toml\n{body}{ticks}\n");
+    if let Some((before, _, after)) = previous.and_then(fenced) {
+        return format!("{before}{block}{after}");
+    }
+    format!(
+        "# opv managed configuration\n\n\
+         opv reads this note to know which keys the project **{project}** needs and where each \
+         environment keeps them. **No secret values are stored here.**\n\n\
+         - Values: in each environment's own item (its `vault_id` and `item_id` below). Open \
+         one with `opv open KEY --env ENV`.\n\
+         - Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the \
+         code block while it stays valid TOML; opv reads only the code block.\n\
+         - About opv: https://github.com/matt-cochran/1password-vault\n\n\
+         {block}"
+    )
+}
+
+fn longest_tick_run(text: &str) -> usize {
+    text.split(|c| c != '`').map(str::len).max().unwrap_or(0)
 }
 
 /// A write that may or may not have happened, or failed for a known reason.
@@ -384,11 +571,18 @@ pub fn edit(
     let fields = item["fields"]
         .as_array_mut()
         .ok_or_else(|| Error::Source(format!("item {item_id} has no fields").into()))?;
+    let project = fields
+        .iter()
+        .find(|f| f["label"] == "project")
+        .and_then(|f| f["value"].as_str())
+        .unwrap_or("this project")
+        .to_string();
     let notes = fields
         .iter_mut()
         .find(|f| f["purpose"] == "NOTES" || f["id"] == "notesPlain")
         .ok_or_else(|| Error::Source(format!("item {item_id} has no notes field").into()))?;
-    notes["value"] = Value::String(text.to_string());
+    let previous = notes["value"].as_str().map(str::to_string);
+    notes["value"] = Value::String(note_with(text, previous.as_deref(), &project));
     let body = serde_json::to_vec(&item)
         .map_err(|_| Error::Config("cannot serialize the manifest".into()))?;
     let args = argv(
@@ -429,6 +623,36 @@ mod tests {
             (m.text.as_str(), m.project.as_deref()),
             ("x = 1\n", Some("app"))
         );
+    }
+
+    #[test]
+    fn a_new_manifest_note_opens_with_the_opv_heading() {
+        assert!(note_with("x = 1\n", None, "app").starts_with("# opv managed configuration\n"));
+    }
+
+    #[test]
+    fn the_configuration_is_read_from_the_code_block_only() {
+        assert_eq!(config_text(&note_with("x = 1\n", None, "app")), "x = 1\n");
+    }
+
+    #[test]
+    fn a_manifest_without_a_code_block_is_read_whole() {
+        assert_eq!(config_text("x = 1\n"), "x = 1\n");
+    }
+
+    #[test]
+    fn an_edit_keeps_what_a_person_wrote_around_the_code_block() {
+        let before = "My notes\n```toml\nx = 1\n```\nMore notes\n";
+        assert_eq!(
+            note_with("x = 2\n", Some(before), "app"),
+            "My notes\n```toml\nx = 2\n```\nMore notes\n"
+        );
+    }
+
+    #[test]
+    fn backticks_inside_the_configuration_never_end_its_code_block() {
+        let config = "guidance = \"\"\"\n```\nnot the end\n```\n\"\"\"\n";
+        assert_eq!(config_text(&note_with(config, None, "app")), config);
     }
 
     #[test]
