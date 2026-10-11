@@ -302,6 +302,13 @@ pub const OP_CLI: Tool = Tool {
         "You are not currently signed in",
         // `op whoami` and other calls with an account but no session (found live).
         "could not find session token",
+        // An expired session still in the environment (found live: a signed-in shell
+        // left idle over 30 minutes), and op's other signed-out wordings.
+        "session expired",
+        "account is not signed in",
+        "Invalid session token",
+        "session token not set in environment",
+        "invalid session:",
     ],
     aliases: &[],
 };

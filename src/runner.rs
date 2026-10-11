@@ -1125,14 +1125,36 @@ impl Default for ProcessRunner {
     }
 }
 
+/// An `op` session opv itself started in this process: an interactive command that found
+/// no session signs the person in at op's own prompt and tries once more (found live: a
+/// session idle over 30 minutes stopped `opv check` with only "run opv login"). Passed to
+/// every `op` call of this process and to nothing else; never printed or written (SR-1,
+/// SR-4), and gone when the process exits.
+static OP_SESSION: Mutex<Vec<(String, crate::domain::SecretValue)>> = Mutex::new(Vec::new());
+
+/// Use `vars` (`OP_SESSION_<account>`, from `op signin`) for every later `op` call.
+pub fn use_op_session(vars: Vec<(String, crate::domain::SecretValue)>) {
+    *lock(&OP_SESSION) = vars;
+}
+
+/// Add the session from [`use_op_session`] to `cmd` when it runs `op`.
+fn add_op_session(cmd: &mut Command, program: &str) {
+    if program == "op" {
+        for (k, v) in lock(&OP_SESSION).iter() {
+            cmd.env(k, v.expose());
+        }
+    }
+}
+
 /// The process for a captured call: argv as given, the program's [`pinned_env`] then the
 /// call's own env on top of the inherited environment, stdin `/dev/null` unless the call
 /// sends some (NR-11), stdout piped, stderr piped into memory (SR-1, NR-31).
 fn command_for(call: &Call) -> Command {
     let mut cmd = Command::new(call.program);
     cmd.args(with_account(call.program, call.args, call.env))
-        .envs(pinned_env(call.program).iter().copied())
-        .envs(call.env.iter().copied())
+        .envs(pinned_env(call.program).iter().copied());
+    add_op_session(&mut cmd, call.program);
+    cmd.envs(call.env.iter().copied())
         .stdin(if call.stdin.is_some() {
             Stdio::piped()
         } else {
@@ -1312,6 +1334,7 @@ impl CommandRunner for ProcessRunner {
         for key in remove {
             cmd.env_remove(key);
         }
+        add_op_session(&mut cmd, program);
         let status = cmd
             .args(with_account(program, args, env))
             .envs(env.iter().copied())
@@ -1325,7 +1348,9 @@ impl CommandRunner for ProcessRunner {
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
         let held = lock(&self.account).clone();
         let env = &self.with_default_account(program, env, &held);
-        let status = Command::new(program)
+        let mut cmd = Command::new(program);
+        add_op_session(&mut cmd, program);
+        let status = cmd
             .args(with_account(program, args, env))
             .envs(env.iter().copied())
             .stdin(Stdio::inherit())
@@ -2008,6 +2033,36 @@ mod tests {
             r.push_with_stderr(
                 Output::failure(1),
                 "[ERROR] 2026/10/11 05:14:07 could not find session token for account mcproductlabs\n",
+            )
+        });
+        let _ = read_fake(&r);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    /// A session opv starts after an idle one expired reaches op, and only op.
+    #[test]
+    fn a_session_opv_started_is_passed_to_op_calls_only() {
+        use_op_session(vec![(
+            "OP_SESSION_ACCT".into(),
+            crate::domain::SecretValue::new("tok".into()),
+        )]);
+        let has = |p: &str| {
+            command_for(&Call::new(p, &[]))
+                .get_envs()
+                .any(|(k, _)| k == "OP_SESSION_ACCT")
+        };
+        let seen = (has("op"), has("flyctl"));
+        use_op_session(Vec::new());
+        assert_eq!(seen, (true, false));
+    }
+
+    #[test]
+    fn read_with_an_expired_session_is_not_retried() {
+        let r = FakeRunner::default();
+        (0..3).for_each(|_| {
+            r.push_with_stderr(
+                Output::failure(1),
+                "[ERROR] 2026/10/11 05:49:13 session expired, sign in to create a new session\n",
             )
         });
         let _ = read_fake(&r);

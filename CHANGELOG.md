@@ -11,6 +11,7 @@ Azure and Kubernetes targets, configuration kept in 1Password, self-healing 1Pas
 
 ### Added
 
+- **An ended 1Password session no longer stops a command.** At an interactive terminal, a command that finds the session gone (op sessions expire after 30 minutes idle) signs you in at op's own prompt and runs once more; scripts, `--json`, CI and service accounts still get the error (FR-40).
 - **Azure Key Vault + Container Apps target**: `[environments.<env>.azure]` writes each secret as a new Key Vault version and binds the Container App to that exact version; the app changes only with `sync --deploy`, which waits for a healthy revision, and `--prune` deletes Key Vault entries only after it ([#39](https://github.com/matt-cochran/1password-vault/issues/39); FR-28 to FR-33). See [usage](docs/usage.md#sync-on-azure-and-kubernetes).
 - **Kubernetes target**: `[environments.<env>.kubernetes]` stores each value as an immutable Secret and repins a Deployment through `kubectl`, keeping the Secrets older ReplicaSets use so `kubectl rollout undo` works (FR-38).
 - **Named stores**: `[stores.<name>]` declares a store once and `secrets_in = "<name>"` on a runtime keeps its secrets there. First pair: Azure Key Vault → Kubernetes Deployment through the External Secrets Operator, one ExternalSecret per pinned Key Vault version, checked before any write and pruned only after a healthy rollout ([configuration](docs/configuration.md#secrets-in-a-named-store-storesname-and-secrets_in); FR-39).

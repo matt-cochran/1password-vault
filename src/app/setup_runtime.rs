@@ -15,6 +15,10 @@ pub struct Runtime {
     account: Option<String>,
 }
 impl Runtime {
+    /// The session variables this runtime's sign-in produced (for [`crate::runner::use_op_session`]).
+    pub fn into_session(self) -> Vec<(String, SecretValue)> {
+        self.session
+    }
     pub fn with_account(account: Option<&str>) -> Self {
         Self {
             account: account.map(str::to_owned),

@@ -917,15 +917,38 @@ fn main() -> ExitCode {
         io::IsTerminal::is_terminal(&io::stdout()),
         std::env::var_os("NO_COLOR"),
     ) && cli.cmd.has_state_words();
-    let res = if json.is_some() {
-        run(cli, config_source, &init_options, &mut body)
-    } else if paint {
-        let mut painter = colour::Painter::new(&mut stdout);
-        let res = run(cli, config_source, &init_options, &mut painter);
-        let _ = painter.flush();
-        res
-    } else {
-        run(cli, config_source, &init_options, &mut stdout)
+    // A person at a terminal whose 1Password session is gone is signed in at op's own
+    // prompt and the command runs once more (found live: an idle session stopped `opv
+    // check` with only "run opv login"). Never for --json, scripts, CI or a service
+    // account, and never for login and setup, which sign in themselves.
+    let may_sign_in = json.is_none() && !matches!(cli.cmd, Cmd::Login { .. } | Cmd::Setup { .. });
+    let mut first = Some(cli);
+    let mut signed_in = false;
+    let res = loop {
+        let cli = match first.take() {
+            Some(c) => c,
+            None => match Cli::from_arg_matches(&matches) {
+                Ok(c) => c,
+                Err(e) => return usage_error(e),
+            },
+        };
+        let res = if json.is_some() {
+            run(cli, config_source, &init_options, &mut body)
+        } else if paint {
+            let mut painter = colour::Painter::new(&mut stdout);
+            let res = run(cli, config_source, &init_options, &mut painter);
+            let _ = painter.flush();
+            res
+        } else {
+            run(cli, config_source, &init_options, &mut stdout)
+        };
+        let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
+        if may_sign_in && signed_out && !signed_in && sign_in_here() {
+            // Once: a second failure is reported as it is.
+            signed_in = true;
+            continue;
+        }
+        break res;
     };
     let step = res.as_ref().err().map(|e| e.step(&rerun, &help));
     if let Some(raw) = json {
@@ -1955,6 +1978,31 @@ fn init_args(
         profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
     })
+}
+
+/// Sign in to this checkout's 1Password account (its `.opv`, else `OP_ACCOUNT`, else op's
+/// choice) at op's own prompt, for the rest of this process; `false` when no person is at
+/// a terminal to do it (no TTY, CI, a service account or Connect) or the sign-in failed,
+/// so the original error stands. The password goes only to op; the session stays in this
+/// process ([`opv::runner::use_op_session`]).
+fn sign_in_here() -> bool {
+    use opv::app::setup::Backend as _;
+    use opv::app::setup_runtime::{Console, Runtime};
+    if Console::require_terminal("", "").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
+        return false;
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let account = config_store::pointer_account(&here).or_else(config_store::account_env);
+    eprintln!(
+        "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
+         to go on; your password goes only to 1Password's prompt."
+    );
+    let mut runtime = Runtime::with_account(account.as_deref());
+    if runtime.sign_in(account.as_deref(), false).is_err() {
+        return false;
+    }
+    opv::runner::use_op_session(runtime.into_session());
+    true
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.
