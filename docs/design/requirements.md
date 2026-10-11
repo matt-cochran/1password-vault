@@ -152,7 +152,7 @@ Requirements are numbered in the order they were adopted: FR-1 to FR-19 in v0.1,
 
 ## FR-1 — Configuration
 
-The CLI shall load its configuration from a repository-local file named `secrets.toml` or, since 0.5.0, from a project manifest in 1Password holding the same TOML (FR-44). The schema is the same in both homes.
+The CLI shall load its configuration from a repository-local file named `secrets.toml` or, since 0.5.0, from a project manifest in 1Password holding the same TOML (FR-44). The schema is the same in both homes. In the manifest the TOML is the one fenced `toml` code block of its Markdown notes, after an "opv managed configuration" heading that tells a person opening the item what it is and that it holds no values; opv reads only the block (notes without one are read whole) and an edit replaces only the block's contents.
 
 The configuration shall support:
 

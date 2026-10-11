@@ -22,7 +22,7 @@ First match wins:
 
 ### Configuration in 1Password
 
-The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes hold exactly the TOML of a `secrets.toml` (same schema, same validation). It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value. Every command treats it exactly like a file: `add`, `init --add-env` and `config edit` edit it in place.
+The configuration can live in 1Password as a **project manifest**: one Secure Note per project, titled `opv · <project>` and tagged `opv-manifest`, whose notes start with an "opv managed configuration" heading and a short explanation, then hold exactly the TOML of a `secrets.toml` (same schema, same validation) in one `toml` code block. opv reads only the code block, and text you add around it is kept. It also has a text field `project`, a field `convention` = `1`, and tags that tie it to a repository. It holds IDs, names and rules, never a value. Every command treats it exactly like a file: `add`, `init --add-env` and `config edit` edit it in place.
 
 #### Moving a file into 1Password
 

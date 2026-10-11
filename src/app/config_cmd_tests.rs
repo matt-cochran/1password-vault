@@ -211,7 +211,14 @@ fn edit_saves_the_new_text_to_the_manifest() {
         on_confirm: Box::new(|| {}),
     };
     edit(&found, &op, &mut ui, &mut Vec::new()).unwrap();
-    assert_eq!(op.item(&id)["fields"][0]["value"], edited().as_str());
+    let notes = op.item(&id)["fields"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        crate::adapters::onepassword_manifest::config_text(&notes),
+        edited()
+    );
 }
 
 #[test]
