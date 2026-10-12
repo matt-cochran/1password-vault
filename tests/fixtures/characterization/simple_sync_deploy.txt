@@ -1,13 +1,15 @@
 $ op item get iprd --vault vprd --format json
 $ flyctl secrets list --app myapp-production --json
+$ flyctl status --app myapp-production --json
+$ flyctl releases --app myapp-production --json
 $ flyctl secrets import --app myapp-production --stage
 <stdin 59 bytes sha256=6e8ccf3fde3e4a81eac7d5a7e3cd29e5460105965ff2bad3bc62685cad5bb4be>
 $ flyctl secrets list --app myapp-production --json
 $ flyctl secrets deploy --app myapp-production
 --- stdout
-1 to stage, 1 held (immutable), 0 to prune
-staged: 1 changed, 0 unchanged
-  changed: DATABASE_URL
-deployed staged secrets
+written: DATABASE_URL
+held (immutable), not rewritten (pass --rotate KEY to replace): JWT_KEY
+deployed: DATABASE_URL
+summary: written 1 · unchanged 0 · held 1 · deployed yes · pending 0 · pruned 0 · kept 0 · skipped 1
 --- result
 Ok(())

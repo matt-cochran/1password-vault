@@ -1,0 +1,12 @@
+{
+  "clientId": "55555555-5555-5555-5555-555555555555",
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourcegroups/opv-fixture-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/opv-fixture-id",
+  "location": "eastus",
+  "name": "opv-fixture-id",
+  "principalId": "33333333-3333-3333-3333-333333333333",
+  "resourceGroup": "opv-fixture-rg",
+  "systemData": null,
+  "tags": {},
+  "tenantId": "11111111-1111-1111-1111-111111111111",
+  "type": "Microsoft.ManagedIdentity/userAssignedIdentities"
+}

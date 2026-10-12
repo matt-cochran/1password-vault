@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "environment": "prod",
+  "added": [
+    {
+      "product": "allumata",
+      "key": "OPENAI_API_KEY",
+      "kind": "secret"
+    },
+    {
+      "product": "allumata",
+      "key": "STRIPE_SECRET_KEY",
+      "kind": "secret"
+    }
+  ],
+  "next": null,
+  "do": null
+}

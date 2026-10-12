@@ -1,5 +1,7 @@
 # P0: Target Ports Implementation Plan
 
+Status: done (shipped in 0.3.0).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move Fly behind `SecretStore` and `Runtime` ports so `app/` and `domain/` stop naming Fly, add `opv plan` / `opv sync`, and change no Fly byte (issue #38).

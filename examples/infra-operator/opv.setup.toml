@@ -1,0 +1,39 @@
+title = "Infrastructure operator setup"
+environment = "operator"
+vault = "infra-breakglass"
+item = "infra-operator"
+output = "operator.secrets.toml"
+legacy_env = "~/.config/platform/r2.env"
+
+[[fields]]
+key = "AWS_ACCESS_KEY_ID"
+title = "Infrastructure state storage login"
+description = "Identifies the existing R2 key used to access infrastructure state."
+source = "Your existing private infrastructure settings file; preserve the current key."
+
+[[fields]]
+key = "AWS_SECRET_ACCESS_KEY"
+title = "Infrastructure state storage password"
+description = "Authenticates the same existing R2 state key."
+source = "Your existing private infrastructure settings file."
+
+[[fields]]
+key = "TF_ENCRYPTION"
+title = "Existing infrastructure encryption settings"
+description = "Keeps existing encrypted state readable. This must be the exact existing complete value."
+source = "Your existing private infrastructure settings file. Never generate a replacement."
+immutable = true
+multiline = true
+
+[[fields]]
+key = "CLOUDFLARE_API_TOKEN"
+title = "Cloudflare infrastructure access"
+description = "Allows the owner to manage the approved Cloudflare infrastructure."
+source = "Your existing platform credential mechanism or Cloudflare dashboard → API Tokens."
+
+[[fields]]
+key = "GITHUB_TOKEN"
+title = "GitHub infrastructure access"
+description = "Allows the owner provisioning command to configure the intended repository settings."
+source = "Your existing platform credential mechanism or GitHub token settings."
+

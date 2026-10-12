@@ -60,3 +60,5 @@ jobs:
         run: shellcheck install.sh
       - name: Test install.sh
         run: bash tests/install/test_install.sh
+      - name: Test npm install/uninstall scripts
+        run: node --test 'packaging/npm/**/*.test.js'

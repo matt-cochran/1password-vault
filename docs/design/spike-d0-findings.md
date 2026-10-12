@@ -1,5 +1,7 @@
 # D0 spike findings: how op and flyctl actually behave
 
+Status: done; the Fly adapter is built on these findings.
+
 This doc answers the four D0 questions, plus two follow-ups: how `fly secrets import` parses stdin, and why the rate-limit deltas came out as zero.
 
 - **Tool versions:** op 2.40.0 (Linux, service account `spike-fleet`) and flyctl v0.4.112 (commit `ca63052e`).
