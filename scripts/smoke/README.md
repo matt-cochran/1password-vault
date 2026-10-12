@@ -15,7 +15,7 @@ scripts/smoke/run.sh --account you@example.com   # signs in at 1Password's promp
 1. Finds the sandbox: the subscription from `az account show`, the one Key Vault in `opv-spike-rg`, and the defaults below.
 2. Creates a vault `opv-smoke-<random>` and an item holding random markers (`OPVSMOKE-…`) in section `smoke`: concealed `DB_URL` and `API_TOKEN`, text `LOG_LEVEL`. The item JSON goes to `op` on stdin, never as an argument or a file.
 3. Per environment (`azure`, `kubernetes`, `eso`): `doctor --env`, `check`, `plan`, `sync`, `sync --deploy`, `status`, then checks the running app sees `API_TOKEN` at its marker's length: on Kubernetes through `kubectl exec`, on Container Apps by following the live revision's variable to the Key Vault secret version it is pinned to.
-4. Rotates `API_TOKEN` to a marker of a different length, then per environment: `plan`, `sync --deploy` (repin), `status`, the length check again, and `sync --deploy --prune` with `LOG_LEVEL` removed from the config, checking the app no longer has it.
+4. Rotates `API_TOKEN` to a marker of a different length, then per environment: `plan`, `sync --deploy` (repin), `status`, the length check again, and `sync --deploy --prune` with `LOG_LEVEL` still declared but set to `environments = []`, checking the app no longer has it. (`--prune` removes only declared keys: a key deleted from the config is never pruned.)
 5. Checks the receipt holds no marker, and on every exit, pass or fail, deletes the test item and vault.
 
 It stops on the first failure. Read the receipt before re-running a prune by hand.
