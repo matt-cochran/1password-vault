@@ -120,11 +120,29 @@ for v in OPV_SMOKE_OP_ACCOUNT OPV_SMOKE_AZ_SUBSCRIPTION OPV_SMOKE_AZ_KEY_VAULT \
 done
 [ -z "$GIVEN_VAULT" ] || safe --vault "$GIVEN_VAULT"
 
-# Every op call below uses this account, never op's default.
-export OP_ACCOUNT="$OPV_SMOKE_OP_ACCOUNT"
+# op takes an account ID, shorthand or sign-in address, not an email: an email is
+# looked up in `op account list` (two accounts can share one sign-in address).
+case $OPV_SMOKE_OP_ACCOUNT in
+*@*)
+    OP_ACCOUNT=$(op account list --format json | awk -v want="$OPV_SMOKE_OP_ACCOUNT" '
+        /"email":/ { e = $0; sub(/.*"email": "/, "", e); sub(/".*/, "", e) }
+        /"account_uuid":/ { a = $0; sub(/.*"account_uuid": "/, "", a); sub(/".*/, "", a) }
+        /}/ { if (e == want && a != "") print a; e = ""; a = "" }' | head -n 1)
+    if [ -z "$OP_ACCOUNT" ]; then
+        echo "no 1Password account on this machine has the email $OPV_SMOKE_OP_ACCOUNT" >&2
+        echo "Next: op account list" >&2
+        exit 7
+    fi
+    safe "the account ID" "$OP_ACCOUNT"
+    ;;
+*) OP_ACCOUNT=$OPV_SMOKE_OP_ACCOUNT ;;
+esac
+# Every op call below, and the rendered config, use this account, never op's default.
+export OP_ACCOUNT
+OPV_SMOKE_OP_ACCOUNT=$OP_ACCOUNT
 if ! op whoami >/dev/null 2>&1; then
-    echo "not signed in to 1Password account $OPV_SMOKE_OP_ACCOUNT" >&2
-    echo "Next: op signin --account $OPV_SMOKE_OP_ACCOUNT" >&2
+    echo "not signed in to 1Password account $OP_ACCOUNT" >&2
+    echo "Next: eval \"\$(op signin --account $OP_ACCOUNT)\"" >&2
     exit 7
 fi
 
