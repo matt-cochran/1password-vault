@@ -1,6 +1,6 @@
 # Teardown
 
-Run after the receipt is saved. Each command acts on the disposable sandbox only; check names before pressing Enter.
+run.sh removes its own 1Password test data. Run this only when the sandbox itself is no longer needed. Each command acts on the disposable sandbox only; check names before pressing Enter.
 
 ```sh
 # 1. Azure sandbox: the resource group holds the Key Vault, Container App and environment
@@ -21,9 +21,6 @@ kubectl --context kind-opv --namespace external-secrets delete secret <credentia
 # 4. kind cluster (removes the namespace opv-spike and the Deployment api with it)
 kind delete cluster --name opv
 
-# 5. Disposable 1Password item (by ID; confirm the title first)
-op item get "$OPV_SMOKE_OP_ITEM_ID" --vault "$OPV_SMOKE_OP_VAULT_ID" --fields label=title
-op item delete "$OPV_SMOKE_OP_ITEM_ID" --vault "$OPV_SMOKE_OP_VAULT_ID"
 ```
 
-Finally remove the rendered scratch directory printed as `receipt: ...` once the receipt is archived (`rm -rf <tmpdir>`), and confirm with `az group exists --name opv-spike-rg` (false) and `kind get clusters`.
+Remove each run's scratch directory (printed as `receipt: ...`) once its receipt is archived, and confirm with `az group exists --name opv-spike-rg` (false) and `kind get clusters`.
