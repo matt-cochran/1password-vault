@@ -138,10 +138,19 @@ case $OPV_SMOKE_OP_ACCOUNT in
 esac
 # Every op call below, and the rendered config, use this account, never op's default.
 export OP_ACCOUNT
+GIVEN_ACCOUNT=$OPV_SMOKE_OP_ACCOUNT
 OPV_SMOKE_OP_ACCOUNT=$OP_ACCOUNT
+# Signed out at a terminal: sign in at op's own prompt. The session stays in this
+# process's environment (inherited by op and opv below) and ends with it.
+if ! op whoami >/dev/null 2>&1 && [ -t 0 ]; then
+    echo "signing in to 1Password account $OP_ACCOUNT" >&2
+    session=$(op signin --account "$OP_ACCOUNT") || session=
+    eval "$session"
+    unset session
+fi
 if ! op whoami >/dev/null 2>&1; then
     echo "not signed in to 1Password account $OP_ACCOUNT" >&2
-    echo "Next: eval \"\$(op signin --account $OP_ACCOUNT)\"" >&2
+    echo "Next: scripts/smoke/run.sh --account $GIVEN_ACCOUNT  (at a terminal; it signs in)" >&2
     exit 7
 fi
 

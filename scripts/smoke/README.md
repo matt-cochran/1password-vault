@@ -5,8 +5,7 @@ One command runs the real CLI against the disposable sandbox and proves the Azur
 ## Run
 
 ```sh
-eval "$(op signin --account you@example.com)"   # the only interactive step
-scripts/smoke/run.sh --account you@example.com
+scripts/smoke/run.sh --account you@example.com   # signs in at 1Password's prompt if needed
 ```
 
 `OPV_SMOKE_TARGETS="kubernetes"` runs one environment; `OPV_BIN=/path/to/opv` tests a build that is not on `PATH`. `--vault <vault ID>` uses an existing vault when the account cannot create one.
