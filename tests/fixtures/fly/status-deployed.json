@@ -1,0 +1,31 @@
+{
+  "AppURL": "FIXTURE",
+  "Deployed": true,
+  "Hostname": "FIXTURE",
+  "ID": "FIXTURE",
+  "Machines": [
+    {
+      "id": "FIXTURE",
+      "name": "FIXTURE",
+      "state": "started",
+      "region": "iad",
+      "image_ref": {
+        "Slug": "fixture-org"
+      },
+      "instance_id": "FIXTURE",
+      "version": "01KY101QCK13ECNCM8CHP9D7FG",
+      "private_ip": "FIXTURE",
+      "created_at": "2026-07-21T00:08:42Z",
+      "updated_at": "2026-07-21T00:08:50Z",
+      "host_status": "FIXTURE",
+      "cordoned": false
+    }
+  ],
+  "Name": "FIXTURE",
+  "Organization": {
+    "Slug": "fixture-org"
+  },
+  "PlatformVersion": "machines",
+  "Status": "deployed",
+  "Version": 1
+}

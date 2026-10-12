@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "environment": "prod",
+  "product": "allumata",
+  "key": "OPENAI_API_KEY",
+  "reference": "op://vprd/iprd/allumata/OPENAI_API_KEY",
+  "kind": "secret",
+  "field": "concealed field",
+  "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+  "target_details": [
+    {
+      "label": "fly name",
+      "value": "FLEET__ALLUMATA__OPENAI_API_KEY"
+    }
+  ],
+  "rules": [
+    "prefix = \"sk-\"",
+    "not_prefix = \"sk-or-\""
+  ],
+  "immutable": false,
+  "guidance": "OpenAI platform / API keys",
+  "required_here": true,
+  "inspect": "op item get iprd --vault vprd",
+  "shared_from": null,
+  "shared_by": [],
+  "next": null,
+  "do": null
+}

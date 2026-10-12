@@ -15,7 +15,7 @@ use crate::domain::Environment;
 use crate::error::Error;
 use crate::host::{FakeEnv, Host, Shell};
 use crate::runner::Output;
-use crate::runner::fake::FakeRunner;
+use crate::runner::fake::{FakeRunner, failed_read};
 
 #[derive(Clone, Copy, Debug)]
 enum P {
@@ -46,13 +46,13 @@ fn host(p: P) -> Host {
     Host::from_env(&env)
 }
 
-/// The exact sign-in command expected per platform; `None` under CI.
-fn expected_signin(p: P) -> Option<&'static str> {
-    match p {
-        P::Linux | P::Wsl | P::MacOs => Some("eval $(op signin)"),
-        P::WindowsPowerShell => Some("Invoke-Expression $(op signin)"),
-        P::Fish => Some("eval (op signin)"),
-        P::Ci => None,
+/// The sign-in command expected for `env` (FR-40): `opv login <env>` on every platform and
+/// shell (an ordinary command, no eval); `None` under CI.
+fn expected_signin(p: P, env: Option<&str>) -> Option<String> {
+    match (p, env) {
+        (P::Ci, _) => None,
+        (_, Some(e)) => Some(format!("opv login {e}")),
+        (_, None) => Some("opv login".into()),
     }
 }
 
@@ -71,7 +71,7 @@ enum S {
     Expired,
     /// whoami fails and `op account list` is empty.
     NoAccount,
-    /// whoami succeeds; the item read failed anyway.
+    /// whoami succeeds; the item read failed anyway and `op vault get` fails too (NR-26).
     NotVisible,
     /// `op` is not on PATH.
     OpMissing,
@@ -85,6 +85,7 @@ fn fake_op(s: S, ci: bool) -> FakeRunner {
         S::NotVisible => {
             q.push_back(Ok(Output::failure(1)));
             q.push_back(Ok(Output::success(WHOAMI_USER)));
+            q.push_back(Ok(Output::failure(1)));
         }
         S::Expired | S::NoAccount => {
             q.push_back(Ok(Output::failure(1)));
@@ -108,17 +109,18 @@ fn read_fails(p: P, s: S) -> (Error, String, FakeRunner) {
     let h = host(p);
     let r = fake_op(s, h.ci);
     let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
-    let t = e.to_string();
+    // What the user sees: the message, then its `Next:` line (NR-19).
+    let t = crate::error::report(&e, "-", None);
     (e, t, r)
 }
 
-/// Shell syntax of the suggested sign-in command, by shell rules and, when the shell is
-/// installed, by the shell's own parser (`-n`: parse only, never execute).
-fn assert_signin_syntax(p: P, text: &str) {
+/// The suggested sign-in command: `opv login <env>` for the environment that failed (or
+/// `opv login` when none is known), a plain command that parses in every shell.
+fn assert_signin_syntax(p: P, text: &str, env: Option<&str>) {
     assert!(!text.contains('!'), "no `!` prefix ever: {text}");
-    let Some(cmd) = expected_signin(p) else {
+    let Some(cmd) = expected_signin(p, env) else {
         assert!(
-            !text.contains("op signin"),
+            !text.contains("op signin") && !text.contains("opv login"),
             "no interactive command under CI: {text}"
         );
         assert!(text.contains("OP_SERVICE_ACCOUNT_TOKEN"), "{text}");
@@ -133,33 +135,11 @@ fn assert_signin_syntax(p: P, text: &str) {
         })
         .unwrap_or_else(|| panic!("no sign-in line: {text}"));
     assert_eq!(line, cmd, "{p:?}");
+    assert!(!line.contains("eval") && !line.contains("$("), "{line}");
     match host(p).shell {
-        Shell::Posix => {
-            assert!(line.starts_with("eval $(") && line.ends_with(')'), "{line}");
-            parses_with("sh", &["-n", "-c", line]);
-            parses_with("bash", &["-n", "-c", line]);
-            parses_with("zsh", &["-n", "-c", line]);
-        }
-        Shell::Fish => {
-            assert!(!line.contains("$("), "fish has no $(: {line}");
-            assert!(line.starts_with("eval (") && line.ends_with(')'), "{line}");
-            parses_with("fish", &["--no-execute", "-c", line]);
-        }
-        Shell::Other => unreachable!("every matrix platform has a known shell"),
-        Shell::PowerShell => {
-            assert!(line.starts_with("Invoke-Expression "), "{line}");
-            assert!(!line.starts_with("eval"), "{line}");
-            parses_with(
-                "pwsh",
-                &[
-                    "-NoProfile",
-                    "-Command",
-                    &format!(
-                        "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput('{line}',[ref]$null,[ref]$e); if ($e.Count) {{ exit 1 }}"
-                    ),
-                ],
-            );
-        }
+        Shell::Posix => parses_with("sh", &["-n", "-c", line]),
+        Shell::Fish => parses_with("fish", &["--no-execute", "-c", line]),
+        Shell::PowerShell | Shell::Other => {}
     }
 }
 
@@ -194,16 +174,17 @@ fn expired(p: P) {
     assert!(matches!(e, Error::Auth(_)), "{t}");
     assert!(t.contains("not signed in to 1Password"), "{t}");
     assert!(!t.contains("to see why"), "{t}");
-    assert_signin_syntax(p, &t);
+    assert_signin_syntax(p, &t, Some("prod"));
     assert_no_values(&t);
-    assert_eq!(op_item_reads(&r), 1, "FR-13");
+    // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
+    assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
 }
 
 fn no_account(p: P) {
     let (e, t, r) = read_fails(p, S::NoAccount);
     assert_eq!(e.exit_code(), 7, "{p:?}: {t}");
     assert!(!t.contains("to see why"), "{t}");
-    assert_signin_syntax(p, &t);
+    assert_signin_syntax(p, &t, Some("prod"));
     // NoAccount is unreachable under CI (no `op account list` there), so no CI case.
     assert!(
         t.contains("\n  add one: op account add --address <sign-in address> --email <email>\n"),
@@ -222,14 +203,15 @@ fn no_account(p: P) {
         assert!(t.contains("WSL"), "{t}");
     }
     assert_no_values(&t);
-    assert_eq!(op_item_reads(&r), 1, "FR-13");
+    // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
+    assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
 }
 
 fn not_visible(p: P) {
     let (e, t, r) = read_fails(p, S::NotVisible);
     assert_eq!(e.exit_code(), 4, "{p:?}: {t}");
     assert!(matches!(e, Error::Source(_)), "{t}");
-    assert!(t.contains("item iprd in vault vprd"), "{t}");
+    assert!(t.contains("cannot access vault vprd"), "{t}");
     assert!(t.contains("signed in to 1Password as USER"), "{t}");
     assert!(t.contains("grant this identity access to the vault"), "{t}");
     assert!(
@@ -237,7 +219,8 @@ fn not_visible(p: P) {
         "{t}"
     );
     assert_no_values(&t);
-    assert_eq!(op_item_reads(&r), 1, "FR-13");
+    // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
+    assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
 }
 
 fn op_missing(p: P) {
@@ -260,6 +243,8 @@ fn doctor_expired(p: P) {
         r.responses
             .borrow_mut()
             .push_back(Ok(Output::success(ONE_ACCOUNT)));
+        // The 1Password app does not approve doctor's vault list.
+        r.responses.borrow_mut().push_back(Ok(Output::failure(1)));
     }
     let no_fly = crate::config::parse(
         "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n",
@@ -273,7 +258,7 @@ fn doctor_expired(p: P) {
         t.contains("FAIL  op auth: authentication error: not signed in"),
         "{t}"
     );
-    assert_signin_syntax(p, &t);
+    assert_signin_syntax(p, &t, None);
     assert_no_values(&t);
     assert!(!r.argv_contains("item"), "doctor never reads an item");
 }
@@ -392,11 +377,19 @@ fn connect_item_not_found_is_source_exit_4() {
             .var("OP_CONNECT_HOST")
             .var("OP_CONNECT_TOKEN"),
     );
-    let r = FakeRunner::new([Output::failure(1), Output::success(WHOAMI_USER)]);
+    let r = FakeRunner::new(
+        std::iter::once(Output::failure(1))
+            .chain([
+                Output::success(WHOAMI_USER),
+                Output::success(b"{}".to_vec()),
+            ])
+            .chain(failed_read(1)),
+    );
     let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
-    let t = e.to_string();
+    // What the user sees: the message, then its `Next:` line (NR-19).
+    let t = crate::error::report(&e, "-", None);
     assert_eq!(e.exit_code(), 4, "{t}");
-    assert!(t.contains("item iprd in vault vprd"), "{t}");
+    assert!(t.contains("item iprd not found in vault vprd"), "{t}");
     assert!(!t.contains("op signin"), "{t}");
 }
 
@@ -424,19 +417,15 @@ fn not_signed_in_mentions_network_access() {
     );
 }
 
-/// An unrecognised `$SHELL` gets the generic `op signin` pointer, never POSIX syntax.
+/// An unrecognised `$SHELL` gets the same `opv login <env>`: it needs no shell syntax.
 #[test]
-fn unknown_shell_gets_generic_signin_hint() {
+fn unknown_shell_gets_the_same_login_command() {
     for sh in ["/usr/bin/nu", "/bin/tcsh", "/bin/csh"] {
         let h = Host::from_env(&FakeEnv::new("linux").shell(sh));
         let r = fake_op(S::Expired, false);
-        let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
-        let t = e.to_string();
-        assert_eq!(e.exit_code(), 7, "{t}");
-        assert!(
-            t.contains("\n  sign in with `op signin` (see `op signin --help` for your shell)\n"),
-            "{sh}: {t}"
-        );
-        assert!(!t.contains("$(") && !t.contains("eval"), "{sh}: {t}");
+        let t = onepassword::read_item_with(&r, &env(), &h)
+            .unwrap_err()
+            .to_string();
+        assert!(t.contains("\n  sign in: opv login prod\n"), "{sh}: {t}");
     }
 }

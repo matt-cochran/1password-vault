@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "exit_code": 2,
+  "next": "opv init staging --json",
+  "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), then re-run",
+  "error": {
+    "code": "config_invalid",
+    "category": "config",
+    "message": "no vault titled \"no-such-vault\" (exact, case-sensitive match); candidates: \"Private\" (othervault), \"myapp-staging\" (vaultid01)",
+    "detail": [],
+    "retry": "after_fix",
+    "human_required": false,
+    "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), then re-run",
+    "next": "opv init staging --json"
+  }
+}

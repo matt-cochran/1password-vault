@@ -1,0 +1,17 @@
+# K1 spike: Kubernetes Secrets + Deployment (local kind)
+
+Status: done; the findings are built into 0.5.0 and the recorded outputs are test fixtures.
+
+Date: 2026-10-08. kind v0.31.0 (checksum-verified), cluster `kind-opv`, namespace `opv-spike`,
+Deployment `api` (agnhost pause image), kubectl v1.36.1. Marker values only. Recorded outputs
+are in `tests/fixtures/kubernetes/` and are the adapter's test inputs.
+
+| # | Question | Finding | Consequence for the adapter (Task K2) |
+|---|---|---|---|
+| K1 | `apply -f - --server-side --field-manager=opv` of an immutable Secret on stdin | Exit 0. Re-applying the identical Secret: exit 0 (no-op). Applying changed `data` to the same immutable name: exit 1. **`-o json` echoes `data` (the base64 value).** | Writes use `-o name` so no value comes back. Each write gets a new random name, so a changed immutable Secret is never re-applied. *Note (2026-10-08): the content-hash names first chosen here were replaced by random ids for privacy (a hash name lets anyone who can list Secrets confirm a guessed value, SR-1); idempotency now comes from comparing the bound value before writing (FR-38). The recorded fixtures' Secret names were rewritten to the random-id form.* |
+| K2 | `get secret -l opv-managed=dev,opv-key=<k> -o json` | `kind: List`, `items[]` with full objects **including `data`**. Empty selection: exit 0, `items: []`. | List with `-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.opv-key}{"\n"}{end}'` (names and keys only; fixture `secret-names.tsv`). Lists never read a value; compare-before-write reads only the one bound Secret's `data.value` by jsonpath (see K1 note). |
+| K3 | `get deployment -o json` then `replace -f -` | Exit 0 and a rollout. Replacing again with the now-stale `resourceVersion`: exit 1. | True optimistic concurrency: exit 1 on `replace` after a fresh read ⇒ re-read once to confirm the `resourceVersion` moved ⇒ Error::Target "deployment changed while opv applied; nothing applied; safe to re-run". |
+| K4 | Rollout whose pod cannot start (env references a missing Secret) | `rollout status --timeout=40s` exits 1 after the timeout. The old ReplicaSet's pod keeps `Running` and serving; the new pod is `Pending` with `CreateContainerConfigError`; the Deployment condition stays `Progressing=True` (deadline 600 s). | `await_healthy` must not wait for the progress deadline: poll pods of the new ReplicaSet and fail fast on a waiting reason in {`CreateContainerConfigError`, `ImagePullBackOff`, `ErrImagePull`, `CrashLoopBackOff`} naming the reason; nothing pruned; Next: `kubectl rollout undo deployment/<d>` or fix and re-run. |
+| K5 | `auth can-i create secrets` | Exit 0 = yes, exit 1 = no (also for `--as` a ServiceAccount). | `doctor` access lines (advisory, R6). |
+| K6 | Missing context; unreachable API server | Both exit 1 within ~1 s (connection refused). A silently dropped network would hang. | Every call passes `--request-timeout=<read/write deadline>` (NR-4). Diagnosis probe on failure: `kubectl config get-contexts <ctx> -o name` (exit 1 ⇒ "context <ctx> not found in your kubeconfig"), else `kubectl --context <ctx> version --request-timeout=5s` (fail ⇒ provider unavailable, exit 9 before writes, NR-28). |
+| K7 | Byte-exact values | A value with Unicode, CRLF, two trailing spaces and a trailing newline round-trips through `data` base64 → `secretKeyRef` env → `printenv` with an identical SHA-256. | NR-15 holds; no value re-encoding beyond base64. |

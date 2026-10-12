@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::domain::model::{Fleet, Kind};
+use crate::domain::model::{Fleet, KeySpec, Kind};
 use crate::domain::rules::{self, Reason};
 use crate::domain::secret::SecretValue;
 
@@ -18,6 +18,9 @@ pub struct ItemField {
     pub label: String,
     pub kind: Kind,
     pub value: SecretValue,
+    /// The 1Password field is concealed (M4): a config key read from a concealed field is
+    /// delivered, but its value is never printed (`config export`) and `status` warns.
+    pub concealed: bool,
 }
 
 impl fmt::Debug for ItemField {
@@ -26,6 +29,7 @@ impl fmt::Debug for ItemField {
             .field("section", &self.section)
             .field("label", &self.label)
             .field("kind", &self.kind)
+            .field("concealed", &self.concealed)
             .field("value", &"<REDACTED>")
             .finish()
     }
@@ -40,16 +44,26 @@ pub struct StoreEntry {
     pub name: String,
     pub version: Option<String>,
     pub pending: bool,
+    /// opv's provenance stamp on the entry (FR-42), when the store records one.
+    pub stamp: Option<crate::domain::provenance::Stamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyState {
     Missing,
+    /// The field's stored kind differs from the declared one. Not produced by any command
+    /// since FR-43/I1: every read goes through the tolerant reader, which hands each
+    /// declared key over with its declared kind (and `concealed` for config kept concealed),
+    /// so this needs a caller passing fields typed as stored (the strict item parser, used
+    /// in tests only). Hence not in `opv schema`'s `row_state`.
     WrongKind,
     /// The failing rule's stable name and why it failed (FR-15, FR-22). Never the value.
     RuleFailed(&'static str, Reason),
     Ready,
     Skipped,
+    /// A shared key (FR-45) whose source has a finding: the finding is reported once, on
+    /// the source's row, which also blocks the sync. Not counted as a finding of its own.
+    SourceBlocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +80,16 @@ pub struct Row {
     pub key: String,
     pub kind: Kind,
     pub state: KeyState,
-    /// Only meaningful for secrets. Secrets absent from Fly are `Absent`; `Present` and
-    /// `WouldChange` need both digests; everything else present on Fly is `Unknown`.
-    /// Config keys are always `Unknown` (they are not Fly secrets).
+    /// Only meaningful for secrets. Secrets absent from the store are `Absent`; `Present`
+    /// and `WouldChange` need both digests, or the store's current value
+    /// ([`PlanOptions::current`]); everything else present is `Unknown`. Config keys are
+    /// always `Unknown` (they are not store secrets).
     pub target: TargetState,
     pub guidance: String,
+    /// A shared key's source `(product, key)` (FR-45): `shared from <product>/<KEY>`.
+    pub source: Option<(String, String)>,
+    /// The keys declared here that share this key's value (FR-45), as `(product, key)`.
+    pub shared_by: Vec<(String, String)>,
 }
 
 pub struct SyncPlan {
@@ -92,6 +111,15 @@ pub struct SyncPlan {
     pub held_from_prune: Vec<(String, String, String)>,
     /// product -> key -> value, config keys only.
     pub config: BTreeMap<String, BTreeMap<String, String>>,
+    /// (product, key): config keys whose 1Password field is concealed (M4, owner ruling).
+    /// Accepted and delivered as plain environment values, but their values are never
+    /// printed, and `status` warns once per key.
+    pub concealed_config: Vec<(String, String)>,
+    /// What this run tidied in 1Password (FR-43), names only; set by the application layer.
+    pub tidy: Vec<crate::domain::convention::Change>,
+    /// The error code of a tidy that did not complete (`tidy_conflict`, ...), set by the
+    /// application layer; the read went on as it is (FR-43).
+    pub tidy_error: Option<&'static str>,
 }
 
 impl fmt::Debug for SyncPlan {
@@ -134,6 +162,20 @@ impl SyncPlan {
 /// refuse and that rule's fixed reason (FR-22), or `None`.
 pub type TargetCheck<'a> = dyn Fn(&str, &SecretValue) -> Option<(&'static str, &'static str)> + 'a;
 
+/// How the store's current value of a name compares with the desired one (FR-31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentState {
+    /// Byte-for-byte equal.
+    Same,
+    Differs,
+    /// Not in the store.
+    Absent,
+}
+
+/// The store's current value check: for (target name, desired value), how the stored value
+/// compares, or `None` when the store cannot say.
+pub type CurrentCheck<'a> = dyn Fn(&str, &SecretValue) -> Option<CurrentState> + 'a;
+
 /// Target-specific inputs to [`build_with`]. The planner stays target-agnostic (FR-12):
 /// the application layer supplies the digest function and the value check.
 pub struct PlanOptions<'a> {
@@ -147,6 +189,9 @@ pub struct PlanOptions<'a> {
     /// reason, e.g. a value the Fly import cannot carry. A refusal makes the row
     /// `RuleFailed(rule, reason)`; not staged.
     pub target_check: &'a TargetCheck<'a>,
+    /// For a store that can read its values back (pinned flow, FR-31): each ready secret
+    /// the store lists is compared exactly. `None` keeps the digest compare alone (Fly).
+    pub current: Option<&'a CurrentCheck<'a>>,
 }
 
 /// Plan a sync of `item` into the Fly app for `env_name`, with no prune overrides and no
@@ -158,7 +203,7 @@ pub fn build(
     fleet: &Fleet,
     env_name: &str,
     item: Vec<ItemField>,
-    fly: &[StoreEntry],
+    on_store: &[StoreEntry],
     rotate: &BTreeSet<(String, String)>,
     digest: &dyn Fn(&SecretValue) -> Option<String>,
 ) -> SyncPlan {
@@ -167,12 +212,13 @@ pub fn build(
         fleet,
         env_name,
         item,
-        fly,
+        on_store,
         &PlanOptions {
             rotate,
             prune_immutable: &none,
             digest,
             target_check: &|_, _| None,
+            current: None,
         },
     )
 }
@@ -185,14 +231,14 @@ pub fn build_with(
     fleet: &Fleet,
     env_name: &str,
     item: Vec<ItemField>,
-    fly: &[StoreEntry],
+    on_store: &[StoreEntry],
     opts: &PlanOptions<'_>,
 ) -> SyncPlan {
     let env = fleet
         .environments
         .get(env_name)
         .unwrap_or_else(|| panic!("undefined environment {env_name}"));
-    let on_fly: BTreeMap<&str, Option<&str>> = fly
+    let on_target: BTreeMap<&str, Option<&str>> = on_store
         .iter()
         .map(|s| (s.name.as_str(), s.version.as_deref()))
         .collect();
@@ -212,45 +258,81 @@ pub fn build_with(
         prune: Vec::new(),
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
+        concealed_config: Vec::new(),
+        tidy: Vec::new(),
+        tidy_error: None,
+    };
+
+    // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
+    // whatever the field's kind: a non-empty field in a refused environment blocks even
+    // though the key is not otherwise desired there (FR-15). `rules::applies` is evaluated
+    // exactly once per key otherwise.
+    let evaluate = |product: &str,
+                    key: &str,
+                    spec: &KeySpec,
+                    field: Option<(Kind, &SecretValue)>|
+     -> Result<Option<SecretValue>, KeyState> {
+        let refused =
+            rules::refused_in(spec, env_name) && field.is_some_and(|(_, v)| !v.expose().is_empty());
+        match field {
+            _ if refused => Err(KeyState::RuleFailed(
+                "refuse_in",
+                Reason::Fixed(rules::REASON_REFUSED),
+            )),
+            Some((kind, value)) if kind == spec.kind => {
+                rules::check(product, key, spec, env_name, env, value)
+                    .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
+            }
+            other => {
+                if rules::applies(spec, env_name, env, product) {
+                    Err(if other.is_some() {
+                        KeyState::WrongKind
+                    } else {
+                        KeyState::Missing
+                    })
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     };
 
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
-            let fly_name = env.target_name(product, key);
-            let fly_entry = fly_name.as_deref().and_then(|n| on_fly.get(n).copied());
+            let target_name = env.target_name(product, key);
+            let target_entry = target_name
+                .as_deref()
+                .and_then(|n| on_target.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
             let declared_here = spec.environments.iter().any(|e| e == env_name);
 
-            // `Ok(None)` means the key is not desired here. `refuse_in` is checked first and
-            // whatever the field's kind: a non-empty field in a refused environment blocks
-            // even though the key is not otherwise desired there (FR-15). `rules::applies`
-            // is evaluated exactly once per key otherwise.
-            let refused = rules::refused_in(spec, env_name)
-                && field.is_some_and(|f| !f.value.expose().is_empty());
-            let outcome: Result<Option<SecretValue>, KeyState> = match field {
-                _ if refused => Err(KeyState::RuleFailed(
-                    "refuse_in",
-                    Reason::Fixed(rules::REASON_REFUSED),
-                )),
-                Some(f) if f.kind == spec.kind => {
-                    rules::check(product, key, spec, env_name, env, &f.value)
-                        .map_err(|e| KeyState::RuleFailed(e.rule, e.reason))
-                }
-                other => {
-                    if rules::applies(spec, env_name, env, product) {
-                        Err(if other.is_some() {
-                            KeyState::WrongKind
-                        } else {
-                            KeyState::Missing
-                        })
-                    } else {
-                        Ok(None)
+            // A shared key (FR-45) reads its source's field: the source's rules first (its
+            // transformed value is the one shared), then the key's own rules on that value.
+            // When the source has a finding, the finding is reported once, on the source
+            // row; this row only says it waits on it.
+            let source = spec.source();
+            let concealed = match source {
+                None => field.is_some_and(|f| f.concealed),
+                Some((sp, sk)) => by_name.get(&(sp, sk)).is_some_and(|f| f.concealed),
+            };
+            let outcome = match source {
+                None => evaluate(product, key, spec, field.map(|f| (f.kind, &f.value))),
+                Some((sp, sk)) => {
+                    let src_spec = &fleet.products[sp].keys[sk];
+                    let src_field = by_name.get(&(sp, sk)).map(|f| (f.kind, &f.value));
+                    match evaluate(sp, sk, src_spec, src_field) {
+                        Ok(Some(v)) => evaluate(product, key, spec, Some((spec.kind, &v))),
+                        Ok(None) => evaluate(product, key, spec, src_field),
+                        Err(_) if rules::applies(spec, env_name, env, product) => {
+                            Err(KeyState::SourceBlocked)
+                        }
+                        Err(_) => Ok(None),
                     }
                 }
             };
             // A ready secret the target cannot carry is a failing rule, in plan and status
             // exactly as in sync.
-            let outcome = match (outcome, spec.kind, fly_name.as_deref()) {
+            let outcome = match (outcome, spec.kind, target_name.as_deref()) {
                 (Ok(Some(v)), Kind::Secret, Some(name)) => match (opts.target_check)(name, &v) {
                     Some((rule, why)) => Err(KeyState::RuleFailed(rule, Reason::Fixed(why))),
                     None => Ok(Some(v)),
@@ -263,18 +345,22 @@ pub fn build_with(
                 key: key.clone(),
                 kind: spec.kind,
                 state: KeyState::Skipped,
-                target: match (spec.kind, fly_entry) {
+                target: match (spec.kind, target_entry) {
                     (Kind::Secret, None) => TargetState::Absent,
                     _ => TargetState::Unknown,
                 },
                 guidance: spec.guidance.clone(),
+                source: source.map(|(p, k)| (p.to_string(), k.to_string())),
+                shared_by: fleet.shared_by(env_name, product, key),
             };
 
             match outcome {
                 Ok(None) => {
                     // Not desired in this environment: prune if it is a managed Fly name,
                     // unless it is immutable and not explicitly released.
-                    if let (Kind::Secret, Some(_), Some(name)) = (spec.kind, fly_entry, fly_name) {
+                    if let (Kind::Secret, Some(_), Some(name)) =
+                        (spec.kind, target_entry, target_name)
+                    {
                         let pair = (product.clone(), key.clone());
                         if spec.immutable && !opts.prune_immutable.contains(&pair) {
                             plan.held_from_prune.push((pair.0, pair.1, name));
@@ -292,25 +378,43 @@ pub fn build_with(
                     row.state = KeyState::Ready;
                     match spec.kind {
                         Kind::Config => {
+                            if concealed {
+                                plan.concealed_config.push((product.clone(), key.clone()));
+                            }
                             plan.config
                                 .entry(product.clone())
                                 .or_default()
                                 .insert(key.clone(), value.expose().to_string());
                         }
                         Kind::Secret => {
-                            if let Some(fly_digest) = fly_entry {
-                                row.target = match ((opts.digest)(&value), fly_digest) {
+                            if let Some(target_digest) = target_entry {
+                                row.target = match ((opts.digest)(&value), target_digest) {
                                     (Some(local), Some(remote)) if local == remote => {
                                         TargetState::Present
                                     }
                                     (Some(_), Some(_)) => TargetState::WouldChange,
                                     _ => TargetState::Unknown,
                                 };
+                                if let (Some(current), Some(name)) =
+                                    (opts.current, target_name.as_deref())
+                                    && let Some(state) = current(name, &value)
+                                {
+                                    row.target = match state {
+                                        CurrentState::Same => TargetState::Present,
+                                        CurrentState::Differs => TargetState::WouldChange,
+                                        CurrentState::Absent => TargetState::Absent,
+                                    };
+                                }
                             }
-                            let rotated = opts.rotate.contains(&(product.clone(), key.clone()));
-                            if spec.immutable && fly_entry.is_some() && !rotated {
+                            // Rotating a source rotates every key sharing it (FR-45).
+                            let rotated = opts.rotate.contains(&(product.clone(), key.clone()))
+                                || source.is_some_and(|(p, k)| {
+                                    opts.rotate.contains(&(p.to_string(), k.to_string()))
+                                });
+                            let on_target = row.target != TargetState::Absent;
+                            if spec.immutable && on_target && !rotated {
                                 plan.held_immutable.push((product.clone(), key.clone()));
-                            } else if let Some(name) = fly_name
+                            } else if let Some(name) = target_name
                                 && (row.target != TargetState::Present || rotated)
                             {
                                 plan.stage.push((name, value));
@@ -331,10 +435,12 @@ pub fn build_with(
         .retain(|(_, _, n)| !staged.contains(n.as_str()));
 
     for field in &item {
+        // A shared key (FR-45) has no field of its own: a leftover copy is an extra.
         let declared = fleet
             .products
             .get(&field.section)
-            .is_some_and(|p| p.keys.contains_key(&field.label));
+            .and_then(|p| p.keys.get(&field.label))
+            .is_some_and(|spec| spec.from.is_none());
         let pair = (field.section.clone(), field.label.clone());
         if !declared && !plan.extras.contains(&pair) {
             plan.extras.push(pair);
@@ -347,7 +453,6 @@ pub fn build_with(
 mod tests {
     use super::*;
     use crate::config;
-    use crate::domain::model::Target;
     use base64::Engine as _;
 
     fn f() -> Fleet {
@@ -359,11 +464,13 @@ mod tests {
             label: label.into(),
             kind: Kind::Secret,
             value: SecretValue::new(v.into()),
+            concealed: true,
         }
     }
     fn config_field(section: &str, label: &str, v: &str) -> ItemField {
         ItemField {
             kind: Kind::Config,
+            concealed: false,
             ..secret(section, label, v)
         }
     }
@@ -378,6 +485,7 @@ mod tests {
             name: name.into(),
             version: version.map(String::from),
             pending: false,
+            stamp: None,
         }
     }
     fn no_rotate() -> BTreeSet<(String, String)> {
@@ -683,6 +791,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
             prune_immutable,
             digest: &none,
             target_check,
+            current: None,
         }
     }
 
@@ -700,9 +809,17 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
         fleet.products.insert("q".into(), q);
         for env in fleet.environments.values_mut() {
             // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
-            match env.target.as_mut().unwrap() {
-                Target::Fly(f) => f.secret_name_template = "FLEET__{KEY}".into(),
-            }
+            let app = env
+                .target()
+                .and_then(|t| t.as_any().downcast_ref::<crate::adapters::fly::FlyTarget>())
+                .expect("fixture is Fly")
+                .app
+                .clone();
+            env.target = Some(Box::new(crate::adapters::fly::FlyTarget {
+                app,
+                secret_name_template: "FLEET__{KEY}".into(),
+                profile: crate::domain::Profile::Fleet,
+            }));
         }
         let fly = [fly_secret("FLEET__BOTH", None)];
         let item = vec![secret("p", "BOTH", "v1")];

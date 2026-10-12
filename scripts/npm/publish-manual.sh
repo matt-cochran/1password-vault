@@ -2,7 +2,7 @@
 # Manual npm publish of one opv release, from the maintainer's machine (npm login + 2FA).
 # Used while trusted publishing is off (the release workflow's npm job needs NPM_PUBLISH=true).
 #
-#   scripts/npm/publish-manual.sh v0.3.0
+#   scripts/npm/publish-manual.sh v0.5.0
 #
 # Downloads the release binaries and SHA256SUMS with `gh`, verifies every checksum, builds
 # the packages with scripts/npm/build.mjs, then publishes the six platform packages before

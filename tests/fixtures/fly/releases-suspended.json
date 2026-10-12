@@ -1,0 +1,274 @@
+[
+  {
+    "ID": "FIXTURE",
+    "Version": 16,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-15T03:09:42Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 15,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-15T03:08:10Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 14,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "failed",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-14T03:35:52Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 13,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "failed",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-13T14:51:12Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 12,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "failed",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-13T00:36:49Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 11,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "failed",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-12T15:07:04Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 10,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-10T21:27:47Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 9,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-10T17:22:28Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 8,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-10T15:44:04Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 7,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-10T14:26:24Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 6,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-09-10T12:37:55Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 5,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-08-03T20:12:34Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 4,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-07-28T15:54:07Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 3,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-07-28T15:51:22Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 2,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "complete",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-07-28T15:50:52Z",
+    "ImageRef": "FIXTURE"
+  },
+  {
+    "ID": "FIXTURE",
+    "Version": 1,
+    "Stable": false,
+    "InProgress": false,
+    "Reason": "",
+    "Description": "Release",
+    "Status": "failed",
+    "DeploymentStrategy": "",
+    "Metadata": null,
+    "User": {
+      "Slug": "fixture-org"
+    },
+    "EvaluationID": "FIXTURE",
+    "CreatedAt": "2026-07-28T12:26:46Z",
+    "ImageRef": "FIXTURE"
+  }
+]

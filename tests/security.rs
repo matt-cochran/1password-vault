@@ -71,6 +71,10 @@ case "$1" in
     e="${FAKE_OP_ITEM_EXIT:-$FAKE_OP_EXIT}"
     [ -n "$e" ] && exit "$e"
     cat "$FAKE_FIX/item.json"; exit 0 ;;
+  vault)
+    # NR-26 probe: its output names the vault and must never be echoed.
+    [ -n "$FAKE_OP_VAULT_EXIT" ] && exit "$FAKE_OP_VAULT_EXIT"
+    printf '{"id":"vprd","name":"S7MARKERVALUEvault"}\n'; exit 0 ;;
 esac
 exit 97
 "#;
@@ -93,10 +97,16 @@ case "$1 $2" in
     [ -f "$FAKE_REC/.lists" ] && read l < "$FAKE_REC/.lists"
     l=$((l + 1))
     echo "$l" > "$FAKE_REC/.lists"
-    [ "$l" = "$FAKE_FLY_LIST_FAIL_AT" ] && exit 1
+    # From list number FAKE_FLY_LIST_FAIL_AT on, every list fails (a read is retried).
+    [ -n "$FAKE_FLY_LIST_FAIL_AT" ] && [ "$l" -ge "$FAKE_FLY_LIST_FAIL_AT" ] && exit 1
     if [ "$l" = 1 ]; then cat "$FAKE_FIX/list_a.json"; else cat "$FAKE_FIX/list_b.json"; fi
     exit 0 ;;
-  "secrets import") exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;
+  # NR-24 preflight (shapes follow the recorded flyctl output in tests/fixtures/fly/).
+  "status --app") printf '{"ID":"app","Status":"deployed","Machines":[{"id":"m1","state":"started"}]}\n'; exit 0 ;;
+  "releases --app") printf '[{"Version":1,"Status":"complete","User":{"Email":"S7MARKERVALUE@example.invalid"}}]\n'; exit 0 ;;
+  "secrets import")
+    [ -n "$FAKE_FLY_IMPORT_SLEEP" ] && /bin/sleep "$FAKE_FLY_IMPORT_SLEEP"
+    exit "${FAKE_FLY_IMPORT_EXIT:-0}" ;;
   "secrets unset") exit 0 ;;
   "secrets deploy") exit 0 ;;
 esac
@@ -202,7 +212,9 @@ struct Call {
 struct Run {
     code: i32,
     stdout: String,
+    /// stderr without the runner's retry notices (NR-3), which are in `retries`.
     stderr: String,
+    retries: Vec<String>,
 }
 
 impl Run {
@@ -321,22 +333,30 @@ impl Harness {
 
     fn run_config(&self, config: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Run {
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .arg("--config")
             .arg(config.as_ref())
             .args(args)
             .env_clear()
             .env("PATH", &self.bin)
             .env("TMPDIR", &self.tmp)
+            // Test builds only: retries (NR-3) without waiting out the backoff.
+            .env("OPV_TEST_BACKOFF_SCALE", "0")
             .env("FAKE_REC", &self.rec)
             .env("FAKE_FIX", &self.fix)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&self.cwd)
             .output()
             .unwrap();
+        let all_err = String::from_utf8(out.stderr).unwrap();
+        let (retries, rest): (Vec<&str>, Vec<&str>) = all_err
+            .split_inclusive('\n')
+            .partition(|l| l.starts_with("retrying "));
         Run {
             code: out.status.code().expect("exited normally"),
             stdout: String::from_utf8(out.stdout).unwrap(),
-            stderr: String::from_utf8(out.stderr).unwrap(),
+            stderr: rest.concat(),
+            retries: retries.iter().map(|l| l.trim_end().to_string()).collect(),
         }
     }
 
@@ -389,9 +409,28 @@ fn assert_no_marker(what: &str, text: &str) {
     }
 }
 
+/// True for a line of a failed call's scrubbed stderr excerpt (NR-31).
+fn is_excerpt_line(l: &str) -> bool {
+    ["  op said: ", "  flyctl said: ", "  az said: "]
+        .iter()
+        .any(|p| l.starts_with(p))
+}
+
+/// No value anywhere. Child stderr (the canary) only on stderr, and only in the labelled,
+/// scrubbed excerpt of a failed call (NR-31); stdout never carries child output.
 fn assert_clean_output(cmd: &[&str], r: &Run) {
     assert_no_marker(&format!("{cmd:?} stdout"), &r.stdout);
-    assert_no_marker(&format!("{cmd:?} stderr"), &r.stderr);
+    assert!(
+        !r.stderr.contains(MARK),
+        "{cmd:?} stderr contains {MARK}:\n{}",
+        r.stderr
+    );
+    for l in r.stderr.lines().filter(|l| l.contains(CHILD_STDERR)) {
+        assert!(
+            is_excerpt_line(l),
+            "{cmd:?} child stderr outside an excerpt: {l}"
+        );
+    }
 }
 
 fn assert_argv_and_env_clean(h: &Harness) {
@@ -437,6 +476,8 @@ fn no_secret_in_any_argv() {
                 vec!["item", "get", "iprd", "--vault", "vprd", "--format", "json"]
             ),
             ("flyctl", vec!["secrets", "list", "--app", APP, "--json"]),
+            ("flyctl", vec!["status", "--app", APP, "--json"]),
+            ("flyctl", vec!["releases", "--app", APP, "--json"]),
             ("flyctl", vec!["secrets", "import", "--app", APP, "--stage"]),
             ("flyctl", vec!["secrets", "list", "--app", APP, "--json"]),
             (
@@ -461,7 +502,13 @@ fn no_secret_in_any_argv() {
         h.run(cmd);
         assert_argv_and_env_clean(&h);
     }
-    let run_env = &h.calls()[0].env;
+    // `run` reads the item first (FR-43); the env is on the `op run` call.
+    let calls = h.calls();
+    let run_env = &calls
+        .iter()
+        .find(|c| c.argv.first().is_some_and(|a| a == "run"))
+        .expect("op run")
+        .env;
     assert!(
         run_env.contains("op://vprd/iprd/allumata/OPENAI_API_KEY"),
         "{run_env}"
@@ -533,18 +580,24 @@ fn no_secret_in_stdout_or_stderr() {
     }
 }
 
-/// Carried from S1-M5: every fake writes a canary plus a value to stderr on every call;
-/// neither appears in opv's stdout or stderr for any command, including failures.
+/// Carried from S1-M5, amended by NR-31: every fake writes a canary plus a value to stderr
+/// on every call. A successful command shows none of it.
 #[test]
-fn drops_child_stderr() {
-    let mut h = Harness::new(&good_item());
+fn successful_commands_drop_child_stderr() {
+    let h = Harness::new(&good_item());
     for cmd in COMMANDS {
         h.reset();
         let r = h.run(cmd);
         assert!(!h.calls().is_empty(), "{cmd:?} spawned nothing");
-        assert_clean_output(cmd, &r);
+        assert_no_marker(&format!("{cmd:?}"), &r.all());
     }
-    // Failing children too: op fails, then flyctl list fails.
+}
+
+/// NR-31: failing children (op fails, then flyctl list fails) show their stderr only as
+/// the labelled excerpt, with the value scrubbed.
+#[test]
+fn failing_commands_show_only_scrubbed_child_stderr() {
+    let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_EXIT", "1");
     for cmd in COMMANDS {
         h.reset();
@@ -575,15 +628,17 @@ fn child_stderr_suppressed() {
         let r = h.run(cmd);
         assert_eq!(r.code, 4, "{cmd:?}: {}", r.all());
         assert!(
+            // P16: a retry note may come first (signed in, vault readable).
             r.stderr
-                .starts_with("opv: source error: op item get failed (exit 1)"),
+                .lines()
+                .any(|l| l.starts_with("opv: source error: op item get failed (exit 1)")),
             "{cmd:?}: {}",
             r.stderr
         );
         for want in [
             "signed in to 1Password as SERVICE_ACCOUNT",
-            "item iprd in vault vprd",
-            "grant this identity access to the vault",
+            "item iprd not found in vault vprd",
+            "op item get iprd --vault vprd",
         ] {
             assert!(r.stderr.contains(want), "{cmd:?}: {want}: {}", r.stderr);
         }
@@ -675,6 +730,24 @@ fn failure_after_partial_plan_stages_nothing() {
     assert_clean_output(&["sync"], &r);
 }
 
+/// NR-3: a read that keeps failing prints one notice per retry, naming the step only.
+#[test]
+fn failing_read_prints_retry_notices() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1");
+    let r = h.run(&["status", "prod"]);
+    assert_eq!(
+        r.retries
+            .iter()
+            .map(|l| l.split(" in ").next().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            "retrying flyctl secrets list (2/3)",
+            "retrying flyctl secrets list (3/3)"
+        ]
+    );
+}
+
 /// Review Focus 4: list B (after import) fails → Target (5); nothing further is mutated
 /// (no unset, no deploy) even with --prune --deploy.
 #[test]
@@ -690,7 +763,11 @@ fn list_b_failure_after_staging() {
         r.stderr
     );
     assert_eq!(h.fly_calls("import"), 1);
-    assert_eq!(h.fly_calls("list"), 2);
+    assert_eq!(
+        h.fly_calls("list"),
+        4,
+        "list A, then list B and its two retries"
+    );
     assert_eq!(h.fly_calls("unset"), 0, "unset after a failed list B");
     assert_eq!(h.fly_calls("deploy"), 0, "deploy after a failed list B");
     assert_clean_output(&["sync"], &r);
@@ -720,8 +797,9 @@ fn import_failure_stops_the_run() {
 #[test]
 fn rule_failure_names_key_not_value() {
     let h = Harness::new(&good_item());
+    // A trailing newline alone is normalized, not refused (FR-43): see
+    // `trailing_newline_is_read_in_its_intended_form`.
     for (value, rule) in [
-        ("sk-proj-S7MARKERVALUEnewline0007\n", "single_line"),
         (" sk-proj-S7MARKERVALUEspace0008", "no_surrounding_space"),
         ("pk-S7MARKERVALUEprefix0009", "prefix"),
         ("sk-or-S7MARKERVALUEopenrouter0010", "not_prefix"),
@@ -757,6 +835,16 @@ fn rule_failure_names_key_not_value() {
             assert_clean_output(cmd, &r);
         }
     }
+}
+
+/// FR-43: a value whose only problem is a trailing newline is read in its intended form,
+/// so sync goes ahead, and opv's output still carries no value.
+#[test]
+fn trailing_newline_is_read_in_its_intended_form() {
+    let h = Harness::new(&item(good_fields("sk-proj-S7MARKERVALUEnewline0007\n")));
+    let r = h.run(&["sync", "prod", "--prune", "--deploy"]);
+    assert_eq!(r.code, 0, "{}", r.all());
+    assert_clean_output(&["sync"], &r);
 }
 
 /// Commands that read the item (every `op item get` failure path).
@@ -798,7 +886,7 @@ fn expired_session_is_auth_with_signin_command() {
             r.stderr
         );
         assert!(
-            r.stderr.contains("\n  sign in: eval $(op signin)\n"),
+            r.stderr.contains("\n  sign in: opv login prod\n"),
             "{}",
             r.stderr
         );
@@ -812,17 +900,21 @@ fn expired_session_is_auth_with_signin_command() {
         );
         assert_eq!(h.fly_calls("import"), 0);
     }
-    // fish users get fish syntax.
+    // fish users get the same command: `opv login` needs no shell syntax (FR-40).
     h.set("SHELL", "/usr/bin/fish");
     h.reset();
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
     assert!(
-        r.stderr.contains("\n  sign in: eval (op signin)\n"),
+        r.stderr.contains("\n  sign in: opv login prod\n"),
         "{}",
         r.stderr
     );
-    assert!(!r.stderr.contains("$("), "{}", r.stderr);
+    assert!(
+        !r.stderr.contains("$(") && !r.stderr.contains("eval"),
+        "{}",
+        r.stderr
+    );
 }
 
 /// FR-26: no account on this machine → `op account add`, then sign in; exit 7.
@@ -840,7 +932,7 @@ fn no_account_is_auth_with_account_add() {
         for want in [
             "no 1Password account is set up for op on this machine",
             "\n  add one: op account add --address <sign-in address> --email <email>\n",
-            "\n  then sign in: eval $(op signin)\n",
+            "\n  then sign in: opv login",
             "type the Secret Key and password only at op's prompts",
         ] {
             assert!(r.all().contains(want), "{cmd:?}: {want}: {}", r.all());
@@ -864,7 +956,11 @@ fn ci_not_signed_in_advises_service_account_token() {
         "{}",
         r.stderr
     );
-    assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+    assert!(
+        !r.stderr.contains("op signin") && !r.stderr.contains("opv login"),
+        "{}",
+        r.stderr
+    );
     assert!(!r.stderr.contains("to see why"), "{}", r.stderr);
     assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
 }
@@ -875,9 +971,9 @@ fn clean_status_prints_summary_line() {
     let h = Harness::new(&good_item());
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 0, "{}", r.all());
-    let last = r.stdout.lines().last().unwrap();
+    let first = r.stdout.lines().next().unwrap();
     assert!(
-        last.ends_with(" not yet on Fly (staged by the next sync), 0 findings"),
+        first.starts_with("prod: ") && first.ends_with(" · 0 findings · 2 not yet on Fly"),
         "{}",
         r.stdout
     );
@@ -957,7 +1053,11 @@ fn rejected_credential_keeps_source_category() {
             "{}",
             r.stderr
         );
-        assert!(!r.stderr.contains("op signin"), "{}", r.stderr);
+        assert!(
+            !r.stderr.contains("op signin") && !r.stderr.contains("opv login"),
+            "{}",
+            r.stderr
+        );
         assert!(!r.stderr.contains("dummy-not-a-token"), "{}", r.stderr);
         assert_eq!(op_subcommands(&h), vec!["item get", "whoami --format"]);
     }
@@ -973,11 +1073,7 @@ fn ci_false_is_not_ci() {
         .set("FAKE_OP_EXIT", "1");
     let r = h.run(&["status", "prod"]);
     assert_eq!(r.code, 7, "{}", r.all());
-    assert!(
-        r.stderr.contains("sign in: eval $(op signin)"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("sign in: opv login prod"), "{}", r.stderr);
 }
 
 /// FR-26 / FR-10: with FLY_API_TOKEN set, a failed flyctl call is a target error (5) naming
@@ -1016,6 +1112,7 @@ fn exit_codes() {
     fs::write(&bad, "[profile]\nkind = 42\n").unwrap();
     h.reset();
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
         .args(["--config", bad.to_str().unwrap(), "sync", "prod"])
         .env_clear()
         .env("PATH", &h.bin)
@@ -1127,6 +1224,7 @@ fn broken_stdout_returns_the_command_result() {
     ] {
         let h = Harness::new(&item_json);
         let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
+            .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
             .arg("--config")
             .arg(CONFIG)
             .args(cmd)
@@ -1278,6 +1376,7 @@ fn status_json_row_carries_the_contract_fields() {
             "rule": null,
             "reason": null,
             "fly_name": N_OPENAI,
+            "target_name": N_OPENAI,
             "target": "absent",
             "action": "would_stage",
         }),
@@ -1397,23 +1496,69 @@ fn fly_plan_json_exit_code_matches_text_on_findings() {
     assert_eq!((text, json), (8, 8));
 }
 
-/// FR-10 / FR-21: an error before the document is produced still exits 4 on stderr with
-/// no partial document on stdout.
+/// FR-10 / A1: an error before the document is produced still exits 4, and stdout is the
+/// one failure document, not a partial one.
 #[test]
-fn status_json_error_prints_no_document_on_stdout() {
+fn status_json_error_prints_the_failure_document_on_stdout() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["status", "prod", "--json"]);
-    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(
+        (r.code, doc["ok"].clone(), doc["exit_code"].clone()),
+        (4, json!(false), json!(4)),
+        "{}",
+        r.all()
+    );
 }
 
-/// FR-10 / FR-21: `fly plan --json` likewise reports errors on stderr only.
+/// FR-10 / A1: `plan --json` likewise.
 #[test]
-fn fly_plan_json_error_prints_no_document_on_stdout() {
+fn plan_json_error_names_its_code() {
     let mut h = Harness::new(&good_item());
     h.set("FAKE_OP_ITEM_EXIT", "1");
     let r = h.run(&["plan", "prod", "--json"]);
-    assert_eq!((r.code, r.stdout.as_str()), (4, ""), "{}", r.all());
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    assert_eq!(doc["error"]["code"], "item_not_found", "{}", r.all());
+}
+
+/// SR-1 / A1: the failure document carries no value, though the failed call's stderr
+/// (masked in the text) carried one.
+#[test]
+fn json_failure_document_carries_no_value() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_OP_ITEM_EXIT", "1");
+    let r = h.run(&["status", "prod", "--json"]);
+    assert!(!r.stdout.contains(MARK), "{}", r.stdout);
+}
+
+/// SR-1 / A6: no `--json` document carries a value or the child's stderr, whatever the
+/// command.
+#[test]
+fn json_documents_carry_no_value() {
+    let h = Harness::new(&good_item());
+    let mut leaked = Vec::new();
+    for args in [
+        &["status", "prod", "--json"][..],
+        &["plan", "prod", "--json"],
+        &["check", "prod", "--product", "allumata", "--json"],
+        &["sync", "prod", "--json"],
+        &["doctor", "--env", "prod", "--json"],
+        &[
+            "explain",
+            "allumata/OPENAI_API_KEY",
+            "--env",
+            "prod",
+            "--json",
+        ],
+    ] {
+        h.reset();
+        let r = h.run(args);
+        if r.stdout.contains(MARK) || r.stdout.contains(CHILD_STDERR) {
+            leaked.push(format!("{args:?}: {}", r.stdout));
+        }
+    }
+    assert!(leaked.is_empty(), "{leaked:?}");
 }
 
 // ------------------------------------------------------------ simple profile (FR-20)
@@ -1751,12 +1896,7 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             "regex",
             "does not match the configured regex",
         ),
-        (
-            "ENUM",
-            format!("{m}enum"),
-            "enum",
-            "not one of the allowed values",
-        ),
+        ("ENUM", format!("{m}enum"), "enum", "expected one of: a, b"),
         (
             "B64_NOT",
             format!("{m}!!"),
@@ -2001,5 +2141,403 @@ fn simple_profile_rule_failure_reason_carries_no_marker() {
     assert_eq!(
         (row["product"].clone(), row["reason"].clone()),
         (Value::Null, json!("expected prefix postgres://"))
+    );
+}
+
+// ------------------------------------------------- NR-31: scrubbed child stderr excerpts
+
+/// An item value with every character class an encoding changes.
+const JSONISH: &str = "S7MARKERVALUEjson\"q\\w/\u{e9}+?&=0007";
+
+fn jsonish_item() -> String {
+    let mut fields = good_fields(OPENAI);
+    fields.push(field(
+        Some("allumata"),
+        "JSONISH_EXTRA",
+        "CONCEALED",
+        Some(JSONISH),
+    ));
+    item(fields)
+}
+
+/// `status prod` after a good item read, with every `flyctl secrets list` failing and
+/// writing `value` to stderr.
+fn list_failure_with_stderr(value: &str) -> Run {
+    let mut h = Harness::new(&jsonish_item());
+    h.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_STDERR_VALUE", value);
+    h.run(&["status", "prod"])
+}
+
+const MASKED_EXCERPT: &str = "\n  flyctl said: S7CHILDSTDERR __SECRET__\n";
+
+#[test]
+fn excerpt_masks_a_raw_item_value() {
+    assert!(
+        list_failure_with_stderr(JSONISH)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_a_json_escaped_item_value() {
+    let escaped = serde_json::to_string(JSONISH).unwrap();
+    let r = list_failure_with_stderr(&escaped[1..escaped.len() - 1]);
+    assert!(r.stderr.contains(MASKED_EXCERPT), "{}", r.stderr);
+}
+
+#[test]
+fn excerpt_masks_a_base64_item_value() {
+    use base64::Engine as _;
+    let enc = base64::engine::general_purpose::STANDARD.encode(JSONISH);
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_a_base64url_item_value() {
+    use base64::Engine as _;
+    let enc = base64::engine::general_purpose::URL_SAFE.encode(JSONISH);
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_an_unpadded_base64url_item_value() {
+    use base64::Engine as _;
+    let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JSONISH);
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+#[test]
+fn excerpt_masks_a_percent_encoded_item_value() {
+    let enc: String = JSONISH
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    assert!(
+        list_failure_with_stderr(&enc)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+/// A token opv never read is masked by its shape.
+#[test]
+fn excerpt_masks_a_jwt_opv_never_read() {
+    let r = list_failure_with_stderr("eyJhbGciOiJIUzI1NiJ9.eyJTN01BUktFUiI6MX0.c2ln");
+    assert!(r.stderr.contains(MASKED_EXCERPT), "{}", r.stderr);
+}
+
+/// A value of the notes field, outside every section, is registered too.
+#[test]
+fn excerpt_masks_an_unsectioned_item_value() {
+    assert!(
+        list_failure_with_stderr(NOTES)
+            .stderr
+            .contains(MASKED_EXCERPT)
+    );
+}
+
+/// At most five lines, the last ones, each labelled with the program, right after the
+/// error line.
+#[test]
+fn excerpt_shows_the_last_five_lines_labelled_with_the_program() {
+    let r = list_failure_with_stderr("l2\nl3\nl4\nl5\nl6\nl7");
+    let excerpt: Vec<&str> = r.stderr.lines().filter(|l| is_excerpt_line(l)).collect();
+    assert_eq!(
+        excerpt,
+        [
+            "  flyctl said: l3",
+            "  flyctl said: l4",
+            "  flyctl said: l5",
+            "  flyctl said: l6",
+            "  flyctl said: l7"
+        ],
+        "{}",
+        r.stderr
+    );
+}
+
+/// `--verbose` shows each call's stderr, scrubbed (the notes value only the registry
+/// knows), under its call line.
+#[test]
+fn verbose_shows_scrubbed_child_stderr() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_STDERR_VALUE", NOTES);
+    let r = h.run(&["--verbose", "status", "prod"]);
+    assert!(
+        r.stderr
+            .contains("\n    stderr: S7CHILDSTDERR __SECRET__\n"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// `--verbose` shows the size and JSON shape of each call's stdout.
+#[test]
+fn verbose_shows_stdout_shape() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["--verbose", "status", "prod"]);
+    assert!(
+        r.stderr
+            .lines()
+            .any(|l| l.starts_with("    stdout: ") && l.contains("JSON object with keys: ")),
+        "{}",
+        r.stderr
+    );
+}
+
+/// SR-1: no stdout content (the fakes print markers in item, whoami and account JSON)
+/// reaches any output with `--verbose`, on success or failure.
+#[test]
+fn verbose_never_shows_stdout_content() {
+    let mut h = Harness::new(&good_item());
+    h.set("FAKE_STDERR_VALUE", "plain");
+    let mut runs = Vec::new();
+    for fail in [
+        None,
+        Some(("FAKE_OP_EXIT", "1")),
+        Some(("FAKE_FLY_LIST_FAIL_AT", "1")),
+    ] {
+        if let Some((k, v)) = fail {
+            h.set(k, v);
+        }
+        for cmd in COMMANDS {
+            h.reset();
+            let args: Vec<&str> = std::iter::once("--verbose")
+                .chain(cmd.iter().copied())
+                .collect();
+            runs.push(h.run(&args).all());
+        }
+    }
+    assert!(
+        runs.iter().all(|t| !t.contains(MARK)),
+        "{}",
+        runs.join("\n----\n")
+    );
+}
+
+// ------------------------------------------------------------- NR-19: the Next line
+
+/// Every kind of non-zero exit the CLI has, as (label, run): a usage error, each error
+/// category (exit 2 to 9), a failing `doctor` and a `confirm_env` refusal.
+/// [`exit_paths_cover_every_category`] checks the exit codes.
+fn exit_paths() -> Vec<(&'static str, Run)> {
+    let mut v = Vec::new();
+    let h = Harness::new(&good_item());
+    v.push(("usage", h.run(&["sync"])));
+    v.push(("config", h.run(&["status", "qa"])));
+    let no_op = Harness::build(&good_item(), false, true);
+    v.push(("dependency", no_op.run(&["status", "prod"])));
+    v.push(("doctor", no_op.run(&["doctor"])));
+    let mut h4 = Harness::new(&good_item());
+    h4.set("FAKE_OP_ITEM_EXIT", "1");
+    v.push(("source", h4.run(&["status", "prod"])));
+    let mut h5 = Harness::new(&good_item());
+    h5.set("FAKE_FLY_LIST_FAIL_AT", "1");
+    v.push(("target", h5.run(&["status", "prod"])));
+    let missing = item(
+        good_fields(OPENAI)
+            .into_iter()
+            .filter(|f| f["label"] != "INTEGRATION_ENC_KEY")
+            .collect(),
+    );
+    let h6 = Harness::new(&missing);
+    v.push(("policy", h6.run(&["sync", "prod"])));
+    v.push(("findings", h6.run(&["status", "prod"])));
+    let mut h7 = Harness::new(&good_item());
+    h7.set("FAKE_FLY_LIST_FAIL_AT", "1")
+        .set("FAKE_FLY_AUTH_EXIT", "1");
+    v.push(("auth", h7.run(&["status", "prod"])));
+    // A write cut off by the run budget: its outcome is unknown (NR-2).
+    let mut h9 = Harness::new(&good_item());
+    h9.set("FAKE_FLY_IMPORT_SLEEP", "5");
+    v.push(("unknown", h9.run(&["--timeout", "2", "sync", "prod"])));
+    let mut guarded = Harness::new(&good_item());
+    let text = fs::read_to_string(CONFIG).unwrap().replace(
+        "modes.allumata.payments = \"off\"",
+        "modes.allumata.payments = \"off\"\nconfirm_env = true",
+    );
+    guarded.use_config(&text);
+    v.push(("confirm_env", guarded.run(&["sync", "prod", "--deploy"])));
+    v
+}
+
+/// NR-19: every non-zero exit ends with exactly one `Next:` line, the last on stderr.
+#[test]
+fn every_error_exit_prints_one_next_line_last() {
+    let bad: Vec<String> = exit_paths()
+        .into_iter()
+        .filter(|(_, r)| {
+            let lines: Vec<&str> = r.stderr.lines().collect();
+            let nexts = lines.iter().filter(|l| l.starts_with("Next: ")).count();
+            r.code == 0 || nexts != 1 || !lines.last().is_some_and(|l| l.starts_with("Next: "))
+        })
+        .map(|(what, r)| format!("{what} (exit {}):\n{}", r.code, r.stderr))
+        .collect();
+    assert!(bad.is_empty(), "{}", bad.join("\n---\n"));
+}
+
+/// The exit paths above reach every error category's exit code (2 to 9).
+#[test]
+fn exit_paths_cover_every_category() {
+    let mut codes: Vec<i32> = exit_paths().iter().map(|(_, r)| r.code).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes, vec![2, 3, 4, 5, 6, 7, 8, 9]);
+}
+
+/// NR-20: a guarded environment's refusal names the exact command to run.
+#[test]
+fn confirm_env_refusal_ends_with_the_exact_command() {
+    let mut h = Harness::new(&good_item());
+    let text = fs::read_to_string(CONFIG).unwrap().replace(
+        "modes.allumata.payments = \"off\"",
+        "modes.allumata.payments = \"off\"\nconfirm_env = true",
+    );
+    h.use_config(&text);
+    let r = h.run(&["sync", "prod", "--deploy"]);
+    assert_eq!(
+        r.stderr.lines().last(),
+        Some("Next: opv sync prod --deploy --confirm prod")
+    );
+}
+
+/// P2: `sync --json` prints one document on stdout and nothing else.
+#[test]
+fn sync_json_stdout_is_one_document() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["sync", "prod", "--json"]);
+    let doc: Value = serde_json::from_str(&r.stdout).expect("one JSON document");
+    let pending: Vec<&Value> = doc["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["target_name"])
+        .collect();
+    assert_eq!(pending, [N_ENC, N_OPENAI], "{}", r.all());
+}
+
+/// P22: `status` without an environment prints one line per environment.
+#[test]
+fn status_without_env_prints_one_line_per_environment() {
+    let h = Harness::new(&good_item());
+    let r = h.run(&["status"]);
+    let envs: Vec<&str> = r
+        .stdout
+        .lines()
+        .map(|l| l.split(':').next().unwrap_or_default())
+        .collect();
+    assert_eq!(envs, ["prod", "staging"], "{}", r.all());
+}
+
+/// H8, SR-1: with `GITHUB_STEP_SUMMARY` set, status, plan and sync (missing keys and
+/// complete ones) append a names-only summary: no value, no identity, no link.
+#[test]
+fn step_summary_never_carries_a_value() {
+    let summary_dir = TempDir::new().unwrap();
+    let path = summary_dir.path().join("summary.md");
+    let mut h = Harness::new(&good_item());
+    h.set("GITHUB_STEP_SUMMARY", path.to_str().unwrap());
+    for item_json in [item(vec![]), good_item()] {
+        h.set_item(&item_json);
+        for cmd in [
+            &["status", "prod"][..],
+            &["plan", "prod"],
+            &["sync", "prod"],
+        ] {
+            h.reset();
+            h.run(cmd);
+        }
+    }
+    let md = fs::read_to_string(&path).unwrap();
+    assert!(
+        md.contains("### opv plan prod") && !md.contains(MARK) && !md.contains("1password.com"),
+        "{md}"
+    );
+}
+
+// --- C1 (SR-1): a `.env` given as the configuration never prints a value ---
+
+const ENV_FILE: &str =
+    "OPENAI_API_KEY=\"sk-live-S7MARKERVALUEenv01\"\nSTRIPE_KEY=sk_live_S7MARKERVALUEenv02\n";
+
+fn env_file(h: &Harness) -> PathBuf {
+    let p = h.fix.join(".env");
+    fs::write(&p, ENV_FILE).unwrap();
+    p
+}
+
+#[test]
+fn env_file_as_config_flag_never_prints_a_value() {
+    let h = Harness::new(&good_item());
+    let r = h.run_config(env_file(&h), &["status", "prod"]);
+    assert_no_marker("--config .env", &format!("{}{}", r.stdout, r.stderr));
+}
+
+#[test]
+fn env_file_as_config_flag_json_never_prints_a_value() {
+    let h = Harness::new(&good_item());
+    let r = h.run_config(env_file(&h), &["status", "prod", "--json"]);
+    assert_no_marker("--config .env --json", &format!("{}{}", r.stdout, r.stderr));
+}
+
+#[test]
+fn env_file_as_opv_config_never_prints_a_value() {
+    let mut h = Harness::new(&good_item());
+    let p = env_file(&h);
+    h.set("OPV_CONFIG", p.to_str().unwrap());
+    let out = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .args(["status", "prod", "--json"])
+        .env_clear()
+        .env("PATH", &h.bin)
+        .env("TMPDIR", &h.tmp)
+        .env("FAKE_REC", &h.rec)
+        .env("FAKE_FIX", &h.fix)
+        .envs(h.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&h.cwd)
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_marker("OPV_CONFIG=.env", &all);
+}
+
+#[test]
+fn env_file_given_to_config_import_never_prints_a_value() {
+    let h = Harness::new(&good_item());
+    let p = env_file(&h);
+    let r = h.run(&[
+        "config",
+        "import",
+        "--file",
+        p.to_str().unwrap(),
+        "--vault",
+        "v",
+    ]);
+    assert_no_marker(
+        "config import --file .env",
+        &format!("{}{}", r.stdout, r.stderr),
     );
 }

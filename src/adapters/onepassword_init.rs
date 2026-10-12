@@ -20,16 +20,14 @@
 //! against 1Password (FR-11, SR-5). A failed call is diagnosed as in every other command
 //! (FR-26, [`super::onepassword::diagnose`]).
 
-use std::collections::BTreeMap;
-
 use serde::Deserialize;
 
-use super::onepassword::{Session, diagnose, failed_op_error, json_error, run_op, session_error};
+use super::onepassword::{Session, diagnose, failed_op_error, json_error, read_op, session_error};
 use crate::config;
 use crate::domain::Environment;
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::{CommandRunner, Output};
+use crate::runner::{CommandRunner, Output, status_text};
 
 /// At most this many candidates are listed in a no-match or several-matches error.
 const MAX_CANDIDATES: usize = 20;
@@ -57,11 +55,22 @@ pub struct FieldShape {
 
 /// The vault whose name is exactly `title` (case-sensitive). One `op vault list` call.
 /// No match or several matches is `Error::Config` listing the candidates by name and ID.
+#[cfg(test)]
 pub fn resolve_vault(
     r: &dyn CommandRunner,
     title: &str,
     host: &dyn Fn() -> Host,
 ) -> Result<Named, Error> {
+    find_vault(r, title, host)?.found()
+}
+
+/// [`resolve_vault`] telling "no such vault" apart from every other failure, so `init`
+/// can create it for a person (FR-43).
+pub fn find_vault(
+    r: &dyn CommandRunner,
+    title: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Lookup, Error> {
     #[derive(Deserialize)]
     struct Row {
         id: String,
@@ -78,17 +87,28 @@ pub fn resolve_vault(
             name: v.name,
         })
         .collect();
-    pick(all, title, "vault", "")
+    lookup(all, title, "vault", "")
 }
 
 /// The item in `vault_id` whose title is exactly `title` (case-sensitive). One `op item
 /// list --vault <vault_id>` call (item metadata only; it carries no field values).
+#[cfg(test)]
 pub fn resolve_item(
     r: &dyn CommandRunner,
     vault_id: &str,
     title: &str,
     host: &dyn Fn() -> Host,
 ) -> Result<Named, Error> {
+    find_item(r, vault_id, title, host)?.found()
+}
+
+/// [`resolve_item`] telling "no such item" apart from every other failure (FR-43).
+pub fn find_item(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    title: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Lookup, Error> {
     #[derive(Deserialize)]
     struct Row {
         id: String,
@@ -106,7 +126,7 @@ pub fn resolve_item(
             name: i.title,
         })
         .collect();
-    pick(all, title, "item", &format!(" in vault {vault_id}"))
+    lookup(all, title, "item", &format!(" in vault {vault_id}"))
 }
 
 /// Read the item once, by IDs, keeping only each field's section, label and type. Built-in
@@ -143,19 +163,19 @@ pub fn read_field_shapes(
     let args = [
         "item", "get", item_id, "--vault", vault_id, "--format", "json",
     ];
-    let Output { status, stdout } = run_op(r, &args, None, host)?;
+    let Output { status, stdout } = read_op(r, &args, host)?;
     if status != 0 {
         let env = Environment {
             vault_id: vault_id.to_string(),
             item_id: item_id.to_string(),
             target: None,
-            modes: BTreeMap::new(),
+            ..Default::default()
         };
         return Err(failed_op_error(
             r,
             &env,
             host,
-            &format!("op item get failed (exit {status})"),
+            &format!("op item get failed ({})", status_text(status)),
             "grant this identity access to the vault",
         ));
     }
@@ -185,21 +205,26 @@ fn list(
     failed: &str,
     what: &str,
 ) -> Result<Output, Error> {
-    let out = run_op(r, args, None, host)?;
+    let out = read_op(r, args, host)?;
     if out.status == 0 {
         return Ok(out);
     }
-    let failed = format!("{failed} failed (exit {})", out.status);
-    Err(match diagnose(r, host) {
+    let failed = format!("{failed} failed ({})", status_text(out.status));
+    Err(match crate::runner::diagnosing(|| diagnose(r, host)) {
         Err(e) => e,
-        Ok(Session::SignedIn(t)) => Error::Source(format!(
-            "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \
+        Ok(Session::SignedIn(t)) => Error::Source(
+            format!(
+                "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \
              see {what}"
-        )),
+            )
+            .into(),
+        ),
         Ok(Session::Unknown) => {
-            Error::Source(format!("{failed}; run `op {}` to see why", args.join(" ")))
+            Error::Source(format!("{failed}; run `op {}` to see why", args.join(" ")).into())
         }
-        Ok(s) => session_error(s, &host(), Some(&failed)).expect("every other session is an error"),
+        Ok(s) => {
+            session_error(s, &host(), Some(&failed), None).expect("every other session is an error")
+        }
     })
 }
 
@@ -211,28 +236,120 @@ fn parse_list<T: for<'de> Deserialize<'de>>(out: &Output) -> Result<Vec<T>, Erro
     serde_json::from_slice(&out.stdout).map_err(|e| json_error(&e))
 }
 
-/// Exactly one entry named `title`, or `Error::Config` listing the candidates.
-fn pick(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Named, Error> {
+/// A title lookup: the one match, or no match with the error that names the candidates.
+#[derive(Debug)]
+pub enum Lookup {
+    Found(Named),
+    Missing(Error),
+}
+
+impl Lookup {
+    /// The match, or the no-match error.
+    pub fn found(self) -> Result<Named, Error> {
+        match self {
+            Lookup::Found(n) => Ok(n),
+            Lookup::Missing(e) => Err(e),
+        }
+    }
+}
+
+/// Exactly one entry named `title`; none is [`Lookup::Missing`] (an `Error::Config` listing
+/// the candidates); several, or an invalid ID, is an error.
+fn lookup(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Lookup, Error> {
     all.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     let matches: Vec<&Named> = all.iter().filter(|n| n.name == title).collect();
     match matches.as_slice() {
         // The ID goes into argv next: check it like a hand-written ID (§10.2, SR-7) and never
         // echo an ID that fails the check.
-        [one] if config::is_id(&one.id) => Ok((*one).clone()),
-        [_] => Err(Error::Source(format!(
-            "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
+        [one] if config::is_id(&one.id) => Ok(Lookup::Found((*one).clone())),
+        [_] => Err(Error::Source(
+            format!(
+                "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
              1Password ID (^[A-Za-z0-9][A-Za-z0-9._-]*$); not used"
+            )
+            .into(),
+        )),
+        [] => Ok(Lookup::Missing(Error::Config(
+            format!(
+                "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
+                candidates(all.iter())
+            )
+            .into(),
         ))),
-        [] => Err(Error::Config(format!(
-            "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
-            candidates(all.iter())
-        ))),
-        many => Err(Error::Config(format!(
-            "{} {what}s are titled {title:?}{scope}; rename all but one in 1Password: {}",
-            many.len(),
-            candidates(many.iter().copied())
-        ))),
+        many => Err(Error::Config(
+            format!(
+                "{} {what}s are titled {title:?}{scope}; rename all but one in 1Password: {}",
+                many.len(),
+                candidates(many.iter().copied())
+            )
+            .into(),
+        )),
     }
+}
+
+/// Create the vault `title` for a person running `init` (FR-43): `op vault create <title>
+/// --format json`, one write, never retried (NR-2). The title is a name, never a value. A
+/// refused create (the account may not allow it) names the manual step.
+pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> {
+    let args = ["vault", "create", title, "--format", "json"];
+    created(
+        r,
+        &args,
+        None,
+        "vault",
+        title,
+        "create the vault in the 1Password app (or ask an admin), then re-run opv init",
+    )
+}
+
+/// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
+/// the same `op item create` call `setup` makes, the template on stdin.
+pub fn create_item(r: &dyn CommandRunner, vault_id: &str, title: &str) -> Result<Named, Error> {
+    let args = [
+        "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
+    ];
+    let template = br#"{"category":"SECURE_NOTE","fields":[],"sections":[]}"#;
+    created(
+        r,
+        &args,
+        Some(template),
+        "item",
+        title,
+        "create the item in the 1Password app, then re-run opv init",
+    )
+}
+
+fn created(
+    r: &dyn CommandRunner,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    what: &str,
+    title: &str,
+    manual: &str,
+) -> Result<Named, Error> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(default)]
+        id: String,
+    }
+    let call = crate::runner::Call::new("op", args).with_stdin(stdin);
+    let failed = || {
+        Error::Source(
+            format!("could not create the {what} {title:?} in 1Password\n  next: {manual}").into(),
+        )
+    };
+    let out = match r.write(&call) {
+        Ok(crate::runner::Outcome::Done(o)) => o,
+        _ => return Err(failed()),
+    };
+    let row: Row = serde_json::from_slice(&out.stdout).map_err(|e| json_error(&e))?;
+    if !config::is_id(&row.id) {
+        return Err(failed());
+    }
+    Ok(Named {
+        id: row.id,
+        name: title.to_string(),
+    })
 }
 
 fn candidates<'a>(it: impl ExactSizeIterator<Item = &'a Named>) -> String {
@@ -263,7 +380,7 @@ mod tests {
 
     use super::*;
     use crate::host::FakeEnv;
-    use crate::runner::fake::FakeRunner;
+    use crate::runner::fake::{FakeRunner, failed_read};
 
     fn linux() -> Host {
         Host::from_env(&FakeEnv::new("linux").shell("/bin/bash"))
@@ -379,10 +496,9 @@ mod tests {
     #[test]
     fn failed_list_is_diagnosed() {
         // Signed in: Source (4) asking to check access.
-        let r = FakeRunner::new([
-            Output::failure(1),
-            Output::success(br#"{"user_type":"USER"}"#.to_vec()),
-        ]);
+        let r = FakeRunner::new(
+            failed_read(1).chain([Output::success(br#"{"user_type":"USER"}"#.to_vec())]),
+        );
         let e = resolve_vault(&r, "x", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 4, "{e}");
         assert!(
@@ -390,11 +506,8 @@ mod tests {
             "{e}"
         );
         // Not signed in: Auth (7) with the sign-in step.
-        let r = FakeRunner::new([
-            Output::failure(1),
-            Output::failure(1),
-            Output::success("[{}]"),
-        ]);
+        let r =
+            FakeRunner::new(failed_read(1).chain([Output::failure(1), Output::success("[{}]")]));
         let e = resolve_item(&r, "v1", "x", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(e.to_string().contains("not signed in to 1Password"), "{e}");
@@ -438,12 +551,15 @@ mod tests {
 
     #[test]
     fn failed_item_read_is_diagnosed_naming_ids() {
-        let r = FakeRunner::new([
-            Output::failure(1),
+        let r = FakeRunner::new(failed_read(1).chain([
             Output::success(br#"{"user_type":"SERVICE_ACCOUNT"}"#.to_vec()),
-        ]);
+            Output::success(b"{}".to_vec()),
+        ]));
         let e = read_field_shapes(&r, "v1", "i1", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 4);
-        assert!(e.to_string().contains("item i1 in vault v1"), "{e}");
+        assert!(
+            e.to_string().contains("item i1 not found in vault v1"),
+            "{e}"
+        );
     }
 }

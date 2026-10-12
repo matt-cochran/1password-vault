@@ -453,6 +453,35 @@ t_off_path_prints_export_line() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared installed-by record
+# ---------------------------------------------------------------------------
+
+t_install_writes_installed_by_record() {
+  new_case
+  install_run "$1" --version v1.2.3
+  printf 'install.sh 1.2.3 %s\n' \
+    "$(hash_file "$(asset_path v1.2.3 opv-x86_64-unknown-linux-musl)")" \
+    > "$CASE/installed-by.expected"
+  check_file_equals "$HOME_DIR/.local/share/opv/installed-by" "$CASE/installed-by.expected"
+}
+
+t_custom_dir_install_leaves_no_installed_by_record() {
+  new_case
+  install_run "$1" --version v1.2.3 --dir "$TARGET"
+  if [ ! -e "$HOME_DIR/.local/share/opv/installed-by" ]; then pass; else fail "record written for --dir install"; fi
+}
+
+t_reinstall_of_same_version_keeps_an_existing_record() {
+  new_case
+  mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.local/share/opv"
+  make_fake_opv "$HOME_DIR/.local/bin" 1.2.3
+  printf 'npm 1.2.3 abc\n' > "$HOME_DIR/.local/share/opv/installed-by"
+  printf 'npm 1.2.3 abc\n' > "$CASE/expected"
+  install_run "$1" --version v1.2.3
+  check_file_equals "$HOME_DIR/.local/share/opv/installed-by" "$CASE/expected"
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
@@ -484,7 +513,10 @@ for test_fn in \
   t_signed_out_gh_reports_skipped_provenance \
   t_malformed_latest_tag_fails \
   t_malformed_pinned_version_fails \
-  t_off_path_prints_export_line
+  t_off_path_prints_export_line \
+  t_install_writes_installed_by_record \
+  t_custom_dir_install_leaves_no_installed_by_record \
+  t_reinstall_of_same_version_keeps_an_existing_record
 do
   run_for_shells "$test_fn"
 done
