@@ -391,6 +391,10 @@ impl Sim {
                 "resources": [{"name": "externalsecrets"}, {"name": "clustersecretstores"}],
             })),
             ["get", "--raw", _] => Output::failure(1),
+            // The operator's events (diagnosis only): none recorded here.
+            ["get", "events", "--field-selector", _, "-o", "json"] => {
+                ok_json(&json!({"items": []}))
+            }
             ["get", r, n, "--ignore-not-found", "-o", "json"] if *r == STORE_RESOURCE => {
                 match &w.cluster_store {
                     Some(s) if s["metadata"]["name"] == *n => ok_json(s),
