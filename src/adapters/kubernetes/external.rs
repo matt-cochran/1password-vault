@@ -24,11 +24,14 @@
 //! | ready | `get externalsecrets.external-secrets.io <n> --ignore-not-found -o json` | read |
 //! | list | `get externalsecrets.external-secrets.io -l <selector> -o json` | read |
 //! | delete | `delete externalsecrets.external-secrets.io <names…> --ignore-not-found` | write |
+//! | events | `get events --field-selector involvedObject.kind=ExternalSecret,involvedObject.name=<n> -o json` (diagnosis only) | read |
 //! | preflight | `get --raw /apis/external-secrets.io/v1`, `get clustersecretstores.external-secrets.io <s> --ignore-not-found -o json`, `auth can-i create externalsecrets.external-secrets.io` | reads |
 //!
 //! Every failure to sync is `Ready=False/SecretSyncedError` with the same message (E3), so
 //! opv diagnoses it itself: does the version exist in the store, is the ClusterSecretStore
-//! Ready and does it name the store.
+//! Ready and does it name the store, and what the operator's newest warning event says of
+//! the store's credential (a store's Ready status is cached and can outlive its credential).
+//! The event text is classified, never printed.
 
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
@@ -349,6 +352,65 @@ fn collect(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
+/// What the operator's newest warning event for an ExternalSecret says of the store's
+/// credential.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Credential {
+    /// Microsoft Entra AADSTS7000222: the client secret has expired.
+    Expired,
+    /// HTTP 401 or `invalid_client`: the identity cannot sign in.
+    Rejected,
+    /// HTTP 403: the identity signs in but may not read the secret.
+    Denied,
+    /// No event, an event about something else, or events that cannot be read.
+    Unknown,
+}
+
+/// The newest `Warning` event's message, classified (E3). Best effort and read-only:
+/// events that cannot be read (RBAC, expired) are [`Credential::Unknown`].
+pub(crate) fn credential(k: &Kubectl<'_>, es: &str) -> Credential {
+    let what = format!("kubectl get events for ExternalSecret {es}");
+    let selector = format!("involvedObject.kind=ExternalSecret,involvedObject.name={es}");
+    let args = ["get", "events", "--field-selector", &selector, "-o", "json"];
+    match k.call(Effect::Read, &what, &args, None, &[]) {
+        Ok(Outcome::Done(out)) => super::parse_json(&out, &what)
+            .map(|doc| classify_events(&doc))
+            .unwrap_or(Credential::Unknown),
+        _ => Credential::Unknown,
+    }
+}
+
+/// [`credential`] over an event list. RFC 3339 times in one zone sort as text.
+pub(crate) fn classify_events(doc: &Value) -> Credential {
+    let when = |e: &&Value| {
+        ["lastTimestamp", "eventTime", "firstTimestamp"]
+            .iter()
+            .find_map(|k| e.get(*k).and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string()
+    };
+    let newest = doc
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("Warning"))
+        .max_by_key(when);
+    let message = newest
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if message.contains("AADSTS7000222") {
+        Credential::Expired
+    } else if message.contains("StatusCode=401") || message.contains("invalid_client") {
+        Credential::Rejected
+    } else if message.contains("StatusCode=403") || message.contains("Forbidden") {
+        Credential::Denied
+    } else {
+        Credential::Unknown
+    }
+}
+
 /// The ExternalSecret could not read version `version` of `env_name`: opv's own diagnosis
 /// (E3) naming the cause and the next step. Read-only.
 pub(crate) fn diagnose_failed(
@@ -408,12 +470,32 @@ pub(crate) fn diagnose_failed(
              secret_store to the ClusterSecretStore that does",
             bridge.locator, bridge.describe
         ).into()),
-        Ok(StoreState::Ready { names_store: true }) => Error::Target(format!(
-            "{head}\n  cause: the version exists and ClusterSecretStore {css} is Ready, so its \
-             identity most likely cannot read this secret (for Key Vault: no \"Key Vault Secrets \
-             User\" role on the vault, or a vault firewall)\n  next: `{describe}`, then grant the \
-             store's identity read access and run the same command again"
-        ).into()),
+        Ok(StoreState::Ready { names_store: true }) => match credential(k, es) {
+            Credential::Expired => Error::Target(format!(
+                "{head}\n  cause: the credential of ClusterSecretStore {css} has expired (the \
+                 operator reports Microsoft Entra AADSTS7000222; the store's Ready status is \
+                 cached from before)\n  next: `{css_cmd}` names the credential Secret \
+                 (authSecretRef); renew it, then run the same command again"
+            ).into()),
+            Credential::Rejected => Error::Target(format!(
+                "{head}\n  cause: the identity of ClusterSecretStore {css} cannot sign in (the \
+                 operator reports HTTP 401: an expired, rotated or wrong credential)\n  next: \
+                 `{css_cmd}` names the credential Secret (authSecretRef); renew it, then run the \
+                 same command again"
+            ).into()),
+            Credential::Denied => Error::Target(format!(
+                "{head}\n  cause: the identity of ClusterSecretStore {css} signs in but may not \
+                 read this secret (the operator reports HTTP 403; for Key Vault: no \"Key Vault \
+                 Secrets User\" role on the vault, or a vault firewall)\n  next: grant the \
+                 store's identity read access, then run the same command again"
+            ).into()),
+            Credential::Unknown => Error::Target(format!(
+                "{head}\n  cause: the version exists and ClusterSecretStore {css} is Ready, so its \
+                 identity most likely cannot read this secret (for Key Vault: no \"Key Vault \
+                 Secrets User\" role on the vault, or a vault firewall)\n  next: `{describe}`, \
+                 then grant the store's identity read access and run the same command again"
+            ).into()),
+        },
         Err(e) => Error::Target(format!(
             "{head}\n  cause not found: could not read ClusterSecretStore {css} ({e})\n  next: \
              `{describe}`"
@@ -1055,13 +1137,81 @@ mod tests {
 
     #[test]
     fn recorded_ready_store_that_names_the_vault_points_at_the_identity() {
-        let out = store_with(|_| {});
-        assert!(diagnosis(Some(true), vec![out]).contains("its identity most likely cannot read"));
+        let events = Output::success(r#"{"items":[]}"#);
+        assert!(
+            diagnosis(Some(true), vec![store_with(|_| {}), events])
+                .contains("its identity most likely cannot read")
+        );
+    }
+
+    const EVENTS_EXPIRED: &str = include_str!(
+        "../../../tests/fixtures/external-secrets/events-store-credential-expired.json"
+    );
+
+    /// The recorded event list with its warning's message rewritten by `f`.
+    fn events_with(f: impl FnOnce(&str) -> String) -> Output {
+        let mut v: Value = serde_json::from_str(EVENTS_EXPIRED).unwrap();
+        let m = v["items"][1]["message"].as_str().unwrap().to_string();
+        v["items"][1]["message"] = json!(f(&m));
+        Output::success(v.to_string().into_bytes())
+    }
+
+    /// Found live: an expired client secret behind a store still cached as Ready.
+    #[test]
+    fn recorded_expired_store_credential_is_named_as_the_cause() {
+        let events = Output::success(EVENTS_EXPIRED);
+        assert!(
+            diagnosis(Some(true), vec![store_with(|_| {}), events])
+                .contains("the credential of ClusterSecretStore prod-vault has expired")
+        );
+    }
+
+    #[test]
+    fn rejected_store_credential_is_named_as_the_cause() {
+        let events = events_with(|m| m.replace("AADSTS7000222", "AADSTS7000215"));
+        assert!(
+            diagnosis(Some(true), vec![store_with(|_| {}), events])
+                .contains("the identity of ClusterSecretStore prod-vault cannot sign in")
+        );
+    }
+
+    #[test]
+    fn forbidden_read_is_named_as_the_cause() {
+        let events = events_with(|_| "StatusCode=403 -- Forbidden".into());
+        assert!(
+            diagnosis(Some(true), vec![store_with(|_| {}), events])
+                .contains("signs in but may not read this secret")
+        );
+    }
+
+    #[test]
+    fn unreadable_events_keep_the_identity_diagnosis() {
+        let mut outputs = vec![store_with(|_| {})];
+        outputs.extend(crate::runner::fake::failed_read(1));
+        assert!(diagnosis(Some(true), outputs).contains("its identity most likely cannot read"));
+    }
+
+    #[test]
+    fn an_older_warning_does_not_decide_the_cause() {
+        let mut v: Value = serde_json::from_str(EVENTS_EXPIRED).unwrap();
+        v["items"][0]["type"] = json!("Warning");
+        v["items"][0]["message"] = json!("StatusCode=403");
+        v["items"][1]["lastTimestamp"] = json!("2026-10-12T04:44:40Z");
+        assert_eq!(classify_events(&v), Credential::Expired);
+    }
+
+    #[test]
+    fn the_event_message_is_never_printed() {
+        let events = Output::success(EVENTS_EXPIRED);
+        assert!(!diagnosis(Some(true), vec![store_with(|_| {}), events]).contains("Trace ID"));
     }
 
     #[test]
     fn store_that_cannot_tell_versions_still_gets_the_cluster_store_checked() {
-        let out = store_with(|_| {});
-        assert!(diagnosis(None, vec![out]).contains("its identity most likely cannot read"));
+        let events = Output::success(r#"{"items":[]}"#);
+        assert!(
+            diagnosis(None, vec![store_with(|_| {}), events])
+                .contains("its identity most likely cannot read")
+        );
     }
 }
