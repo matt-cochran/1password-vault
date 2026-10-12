@@ -237,7 +237,7 @@ log "created test item $ITEM (markers only)"
 # --- Config -------------------------------------------------------------------------------
 
 # Render the template: replace each @@NAME@@ with the (validated) variable.
-# $1 = output file, $2 = "keep" or "drop" for the OPTIONAL block.
+# $1 = output file, $2 = "keep" or "prune": the lines of the other block are left out.
 render() {
     out=$1
     mode=$2
@@ -245,11 +245,15 @@ render() {
     : >"$out"
     while IFS= read -r line || [ -n "$line" ]; do
         case $line in
-        "# BEGIN OPTIONAL")
-            [ "$mode" = drop ] && skip=1
+        "# BEGIN KEEP")
+            [ "$mode" = keep ] || skip=1
             continue
             ;;
-        "# END OPTIONAL")
+        "# BEGIN PRUNE")
+            [ "$mode" = prune ] || skip=1
+            continue
+            ;;
+        "# END KEEP" | "# END PRUNE")
             skip=0
             continue
             ;;
@@ -274,7 +278,7 @@ render() {
 }
 
 render "$WORK/secrets.toml" keep
-render "$WORK/secrets.pruned.toml" drop
+render "$WORK/secrets.pruned.toml" prune
 log "rendered config: $WORK/secrets.toml (IDs and names only)"
 
 # --- Steps --------------------------------------------------------------------------------
@@ -388,8 +392,8 @@ for e in $TARGETS; do
     step "$cfg" "$e sync --deploy (repin)" sync "$e" --deploy
     step "$cfg" "$e status after repin" status "$e"
     seen "$e" API_TOKEN $TOKEN_LEN_AFTER
-    # The pruned config no longer declares LOG_LEVEL, so --prune unsets it on the target.
-    step "$WORK/secrets.pruned.toml" "$e sync --deploy --prune (LOG_LEVEL removed)" \
+    # The pruned config declares LOG_LEVEL for no environment, so --prune unsets it.
+    step "$WORK/secrets.pruned.toml" "$e sync --deploy --prune (LOG_LEVEL wanted nowhere)" \
         sync "$e" --deploy --prune
     seen "$e" LOG_LEVEL 0
 done
