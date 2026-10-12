@@ -61,6 +61,13 @@ need_tool() {
 
 need_tool op "1Password CLI"
 need_tool "$OPV" "opv 0.5.0, or set OPV_BIN"
+case $("$OPV" --version 2>/dev/null) in
+"opv 0."[0-4].*)
+    echo "$OPV is $("$OPV" --version); the smoke test needs 0.5.0 or later" >&2
+    echo "Next: OPV_BIN=/path/to/opv-0.5.0 scripts/smoke/run.sh --account $OPV_SMOKE_OP_ACCOUNT" >&2
+    exit 3
+    ;;
+esac
 need_tool az "Azure CLI"
 has azure && need_tool script "util-linux script, for az containerapp exec"
 { has kubernetes || has eso; } && need_tool kubectl "kubectl"

@@ -5,7 +5,7 @@ One command runs the real CLI against the disposable sandbox and proves the Azur
 ## Run
 
 ```sh
-op signin --account you@example.com          # the only interactive step
+eval "$(op signin --account you@example.com)"   # the only interactive step
 scripts/smoke/run.sh --account you@example.com
 ```
 
