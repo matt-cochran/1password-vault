@@ -69,7 +69,6 @@ case $("$OPV" --version 2>/dev/null) in
     ;;
 esac
 need_tool az "Azure CLI"
-has azure && need_tool script "util-linux script, for az containerapp exec"
 { has kubernetes || has eso; } && need_tool kubectl "kubectl"
 
 # --- Sandbox: defaults and discovery ------------------------------------------------------
@@ -296,15 +295,43 @@ step() {
 # Only the length leaves the pipeline; the value is never stored or printed.
 seen_len() {
     if [ "$1" = azure ]; then
-        # az containerapp exec needs a tty; script(1) supplies one.
-        script -qec "az containerapp exec -g $OPV_SMOKE_AZ_RG -n $OPV_SMOKE_AZ_APP \
-            --command 'printenv $2'" /dev/null 2>/dev/null | tr -d '\r' |
-            grep -v -e '^INFO' -e '^Use ctrl' -e '^Connecting' -e '^$' | tr -d '\n' | wc -c | tr -d ' '
+        az_len "$2"
     else
         kubectl --context "$OPV_SMOKE_K8S_CONTEXT" --namespace "$OPV_SMOKE_K8S_NAMESPACE" \
             exec "deploy/$OPV_SMOKE_K8S_DEPLOYMENT" -- printenv "$2" 2>/dev/null |
             tr -d '\n' | wc -c | tr -d ' '
     fi
+}
+
+# Container Apps: the live revision's variable, followed to the Key Vault secret version
+# it is pinned to. Not `az containerapp exec`, which Azure rate-limits (429, retry after
+# 10 minutes) and which needs a tty.
+az_app() {
+    az containerapp "$@" -g "$OPV_SMOKE_AZ_RG" -n "$OPV_SMOKE_AZ_APP" \
+        --subscription "$OPV_SMOKE_AZ_SUBSCRIPTION" -o tsv
+}
+az_len() {
+    rev=$(az_app show --query properties.latestReadyRevisionName)
+    env_q="properties.template.containers[0].env[?name=='$1']"
+    if [ "$(az_app revision show --revision "$rev" --query "length($env_q)")" = 0 ]; then
+        echo 0
+        return
+    fi
+    ref=$(az_app revision show --revision "$rev" --query "$env_q.secretRef | [0]")
+    if [ -z "$ref" ] || [ "$ref" = None ]; then
+        az_app revision show --revision "$rev" --query "$env_q.value | [0]" |
+            tr -d '\n' | wc -c | tr -d ' '
+        return
+    fi
+    url=$(az_app show --query "properties.configuration.secrets[?name=='$ref'].keyVaultUrl | [0]")
+    case $url in
+    https://*.vault.azure.net/secrets/*/*) ;;
+    *)
+        echo "-1"
+        return
+        ;;
+    esac
+    az keyvault secret show --id "$url" --query value -o tsv | tr -d '\n' | wc -c | tr -d ' '
 }
 
 var_for() {
@@ -315,7 +342,8 @@ var_for() {
 }
 
 # seen <env> <KEY> <expected length>: retried, since a replica that is still terminating can
-# answer first and External Secrets refreshes on its own clock.
+# answer first and External Secrets refreshes on its own clock. -1 means a Container Apps
+# secret is not a versioned Key Vault reference.
 seen() {
     var=$(var_for "$1" "$2")
     tries=1
