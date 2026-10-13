@@ -327,3 +327,74 @@ fn a_created_item_is_tagged_with_its_environment() {
     let item = op.item(&fleet.environments["staging"].item_id);
     assert_eq!(item["tags"], serde_json::json!(["opv-env:myapp/staging"]));
 }
+
+// FR-55: personal keys ----------------------------------------------------------------
+
+const TEAM: &str = r#"[profile]
+kind = "fleet"
+
+[environments.local]
+
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+environments = ["local"]
+
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["local"]
+personal = true
+"#;
+
+fn team() -> (tempfile::TempDir, std::path::PathBuf, FakeOp) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(&path, TEAM).unwrap();
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vprivate0000000000000001".into(), "Private".into()));
+    (dir, path, op)
+}
+
+#[test]
+fn bootstrap_creates_your_personal_item_in_your_private_vault() {
+    let (_dir, path, op) = team();
+    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    assert!(op.items.borrow().iter().any(|i| {
+        i["title"] == "myapp · local (personal)" && i["vault"]["id"] == "vprivate0000000000000001"
+    }));
+}
+
+#[test]
+fn your_personal_item_gets_only_the_personal_fields() {
+    let (_dir, path, op) = team();
+    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    let items = op.items.borrow();
+    let mine = items
+        .iter()
+        .find(|i| i["title"] == "myapp · local (personal)")
+        .unwrap();
+    let labels: Vec<&str> = mine["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["label"].as_str())
+        .filter(|l| *l == "OPENAI_API_KEY" || *l == "DATABASE_URL")
+        .collect();
+    assert_eq!(labels, ["OPENAI_API_KEY"]);
+}
+
+#[test]
+fn the_team_item_never_gets_a_personal_field() {
+    let (_dir, path, op) = team();
+    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    let fleet = crate::config::load(&path).unwrap();
+    let item = op.item(&fleet.environments["local"].item_id);
+    assert!(
+        !item["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["label"] == "OPENAI_API_KEY")
+    );
+}

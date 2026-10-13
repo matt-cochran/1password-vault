@@ -68,24 +68,9 @@ pub fn locate(
         return Ok(None);
     }
     let team = fleet.environment(env_name)?;
-    let vault = match &team.personal_vault {
-        Some(title) => match onepassword_init::find_vault(r, title, &Host::detect)? {
-            Lookup::Found(v) => v,
-            Lookup::Missing(_) => return Err(not_set_up(env_name)),
-        },
-        None => {
-            let mut found = None;
-            for title in PRIVATE_VAULTS {
-                match onepassword_init::find_vault(r, title, &Host::detect)? {
-                    Lookup::Found(v) => {
-                        found = Some(v);
-                        break;
-                    }
-                    Lookup::Missing(_) => continue,
-                }
-            }
-            found.ok_or_else(|| not_set_up(env_name))?
-        }
+    let vault = match private_vault(r, team)? {
+        Some(v) => v,
+        None => return Err(not_set_up(env_name)),
     };
     let item =
         match onepassword_init::find_item(r, &vault.id, &item_title(team, project), &Host::detect)?
@@ -97,6 +82,24 @@ pub fn locate(
     personal.vault_id = vault.id;
     personal.item_id = item.id;
     Ok(Some(personal))
+}
+
+/// The vault holding `team`'s personal items: `personal_vault`, or the person's own
+/// Private/Employee/Personal vault. One `op vault list` per title tried.
+pub(crate) fn private_vault(
+    r: &dyn CommandRunner,
+    team: &Environment,
+) -> Result<Option<onepassword_init::Named>, Error> {
+    let titles: Vec<&str> = match &team.personal_vault {
+        Some(t) => vec![t.as_str()],
+        None => PRIVATE_VAULTS.to_vec(),
+    };
+    for title in titles {
+        if let Lookup::Found(v) = onepassword_init::find_vault(r, title, &Host::detect)? {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
 }
 
 /// FR-55: the person has not created their personal item yet (or the vault is missing).
@@ -191,11 +194,16 @@ fn claimed_fields(fleet: &Fleet, env_name: &str) -> BTreeSet<(String, String)> {
 
 /// `fleet` restricted to the personal keys declared for `env_name`, for a tolerant field
 /// read whose normalization matches the team item's.
-fn personal_fleet(fleet: &Fleet, env_name: &str) -> Fleet {
+pub(crate) fn personal_fleet(fleet: &Fleet, env_name: &str) -> Fleet {
     let mut out = fleet.clone();
     for prod in out.products.values_mut() {
         prod.keys
             .retain(|_, spec| spec.personal && spec.environments.iter().any(|e| e == env_name));
+        // In the person's own item these are its ordinary keys: the convention lays them out
+        // there like any other (it skips personal keys only in the team item).
+        for spec in prod.keys.values_mut() {
+            spec.personal = false;
+        }
     }
     out.products.retain(|_, prod| !prod.keys.is_empty());
     out
