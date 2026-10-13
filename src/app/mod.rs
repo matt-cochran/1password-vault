@@ -30,6 +30,8 @@ pub mod guide;
 pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;
+#[cfg(test)]
+mod ledger_tests;
 pub mod local;
 pub mod login;
 pub mod open;
@@ -102,8 +104,15 @@ pub(crate) fn read_and_plan(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
-    let (mut plan, listed) =
-        plan_item(fleet, env_name, read.fields, ports, rotate, prune_immutable)?;
+    let (mut plan, listed) = plan_item_with(
+        fleet,
+        env_name,
+        read.fields,
+        ports,
+        rotate,
+        prune_immutable,
+        Some(&read.ledger),
+    )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok((plan, listed))
@@ -121,8 +130,15 @@ pub(crate) fn read_and_plan_versioned(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>, Option<u64>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
-    let (mut plan, listed) =
-        plan_item(fleet, env_name, read.fields, ports, rotate, prune_immutable)?;
+    let (mut plan, listed) = plan_item_with(
+        fleet,
+        env_name,
+        read.fields,
+        ports,
+        rotate,
+        prune_immutable,
+        Some(&read.ledger),
+    )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok((plan, listed, read.version))
@@ -205,6 +221,29 @@ pub(crate) fn plan_item(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
+    plan_item_with(
+        fleet,
+        env_name,
+        fields,
+        ports,
+        rotate,
+        prune_immutable,
+        None,
+    )
+}
+
+/// [`plan_item`] with the item's version ledger (FR-54): on a staged store that cannot show
+/// values, a name the store still holds at the version opv recorded is compared exactly
+/// through its fingerprint, and a name at another version is drift.
+pub(crate) fn plan_item_with(
+    fleet: &Fleet,
+    env_name: &str,
+    fields: Vec<plan::ItemField>,
+    ports: Option<&Ports<'_>>,
+    rotate: &BTreeSet<(String, String)>,
+    prune_immutable: &BTreeSet<(String, String)>,
+    ledger: Option<&crate::domain::ledger::Ledger>,
+) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
     let mut on_target = match store {
         Some(s) => s.list()?,
@@ -236,6 +275,17 @@ pub(crate) fn plan_item(
         _ => None,
     };
     let current = pinned.map(|s| move |n: &str, v: &SecretValue| read(s, n, v));
+    // A staged store: the ledger judges a name the store still holds at the recorded version.
+    let listed_versions: BTreeMap<String, String> = on_target
+        .iter()
+        .filter_map(|e| e.version.clone().map(|v| (e.name.clone(), v)))
+        .collect();
+    let by_ledger = match (pinned, ledger) {
+        (None, Some(l)) => Some(move |n: &str, v: &SecretValue| {
+            listed_versions.get(n).and_then(|now| l.check(n, now, v))
+        }),
+        _ => None,
+    };
     let p = plan::build_with(
         fleet,
         env_name,
@@ -246,9 +296,21 @@ pub(crate) fn plan_item(
             prune_immutable,
             digest: &no_digest,
             target_check: &refusal,
-            current: current.as_ref().map(|c| c as &plan::CurrentCheck<'_>),
+            current: current
+                .as_ref()
+                .map(|c| c as &plan::CurrentCheck<'_>)
+                .or(by_ledger.as_ref().map(|c| c as &plan::CurrentCheck<'_>)),
         },
     );
+    let mut p = p;
+    if let (None, Some(l)) = (pinned, ledger) {
+        let managed = managed_names(fleet, env_name).unwrap_or_default();
+        p.drift = l
+            .drift(&on_target)
+            .into_iter()
+            .filter(|n| managed.contains(n))
+            .collect();
+    }
     if let Some(e) = failed.into_inner() {
         return Err(e);
     }
@@ -398,6 +460,7 @@ pub(crate) fn write_json(
             .collect(),
         undelivered: json_names(&plan.undelivered),
         unreferenced_sources: json_names(&plan.unreferenced_sources),
+        drift: plan.drift.clone(),
         tidy: json_tidy(&plan.tidy),
         tidy_error: plan.tidy_error,
         stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
@@ -476,6 +539,10 @@ struct JsonDoc {
     /// `unreferenced-source`); absent when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unreferenced_sources: Vec<JsonName>,
+    /// Target names changed outside opv since its last recorded sync (FR-54); absent when
+    /// none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    drift: Vec<String>,
     /// What this run tidied in 1Password (FR-43), names only; absent when nothing was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tidy: Vec<JsonTidy>,
@@ -991,6 +1058,15 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
             "not delivered here: {} (the target's products list leaves their product out; \
              add it there to deliver them)",
             labels(&plan.undelivered)
+        )
+        .map_err(write_err)?;
+    }
+    if !plan.drift.is_empty() {
+        writeln!(
+            out,
+            "changed outside opv since its last sync: {} (set on the target by another tool \
+             or a person; the next sync writes 1Password's values back)",
+            plan.drift.join(", ")
         )
         .map_err(write_err)?;
     }

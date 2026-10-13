@@ -196,6 +196,8 @@ You don't need to lay out 1Password by hand. opv finds each declared key whereve
 tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"
 ```
 
+A sync you run yourself also keeps a small ledger in the section `opv · state`: one text field per target name it wrote (the target's version of it and a fingerprint of the value, keyed with a random key stored concealed in the same section, so it reveals nothing to anyone who cannot already read the item), which lets `plan` tell exactly whether a Fly or GitHub secret matches 1Password. Leave the section alone; deleting it only makes those names `unknown` until the next sync.
+
 Under a service account, Connect or in CI, opv never writes to 1Password: it reads the item as it is and prints one note that your next local run will tidy it. A value it can fix unambiguously from the key's rules (a trailing newline, a missing `ensure_prefix`) is used in its fixed form, and the tidy writes it back, keeping the original in `opv · kept`. Filling in a missing value is always up to you; opv names the keys that still need one. Design: [self-healing conventions](design/self-healing-conventions.md).
 
 ```text
