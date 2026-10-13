@@ -243,13 +243,14 @@ pub const EFFECTS: &[Effect] = &[
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 9] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 10] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
     ("sync", "rotate", "replaces_immutable"),
     ("sync", "prune-immutable", "deletes_immutable"),
     ("sync", "confirm", "confirms_guarded_environment"),
     ("init", "force", "overwrites_file"),
+    ("init", "apply", "writes_1password"),
     ("adopt", "apply", "writes_1password"),
     ("adopt", "replace", "replaces_value"),
     ("adopt", "rotate", "replaces_immutable"),

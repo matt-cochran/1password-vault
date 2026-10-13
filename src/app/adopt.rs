@@ -128,20 +128,43 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let env = fleet.environment(env_name)?;
     let replace = pairs(fleet, &opts.replace, "--replace")?;
     let rotate = pairs(fleet, &opts.rotate, "--rotate")?;
-    if opts.apply {
+    let plan = plan_and_write(
+        fleet,
+        env_name,
+        &opts.source,
+        &replace,
+        &rotate,
+        opts.apply,
+        r,
+    )?;
+    print(out, env_name, opts, &plan, fleet.is_simple())
+}
+
+/// The adoption plan for `source`, written (one verified item edit) when `apply`. Also the
+/// import step of `opv init --from … --apply` (#90).
+pub fn plan_and_write(
+    fleet: &Fleet,
+    env_name: &str,
+    source: &Source,
+    replace: &BTreeSet<(String, String)>,
+    rotate: &BTreeSet<(String, String)>,
+    apply: bool,
+    r: &dyn CommandRunner,
+) -> Result<AdoptPlan, Error> {
+    let env = fleet.environment(env_name)?;
+    if apply {
         super::tidy::require_person(r, "opv adopt --apply")?;
     }
-    let found = read_source(fleet, env_name, &opts.source, r)?;
+    let found = read_source(fleet, env_name, source, r)?;
     // The item as the commands read it (tidied first when a person runs opv).
     let read = super::tidy::read(fleet, env_name, r)?;
-    let plan = crate::domain::adopt::plan(fleet, env_name, &read.fields, &found, &replace, &rotate);
-    if opts.apply && !plan.writes.is_empty() {
+    let plan = crate::domain::adopt::plan(fleet, env_name, &read.fields, &found, replace, rotate);
+    if apply && !plan.writes.is_empty() {
         write(fleet, env, &plan, r)?;
     }
-    print(out, env_name, opts, &plan, fleet.is_simple())
+    Ok(plan)
 }
 
 /// Write `plan.writes` in one item edit, keeping a replaced value in `opv · kept`, then read

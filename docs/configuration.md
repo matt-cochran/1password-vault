@@ -475,6 +475,22 @@ Next: opv plan prod
 
 Without a target the last line is `Next: opv check <env>`.
 
+### Start from an existing `.env`: `opv init --from`
+
+A project that already runs from a `.env` file gets into opv in one step, without a script:
+
+```sh
+chmod 600 .env
+opv init dev --from .env                 # every key and its kind; nothing written anywhere
+opv init dev --from .env --apply         # create the vault and item, declare, import
+```
+
+- Every `KEY=value` line becomes a declared key for `dev` (the simple profile), next to any field the item already has. A field the item already has keeps its kind and its value: a differing value in the file is reported, never written (`opv adopt dev --from .env --replace KEY --apply` takes it).
+- The kind comes from the name only, never the value, and is secret when unsure: config for names like `*_ENABLED`, `*_MODEL`, `PORT`, `*_ORIGIN`, `*_CLIENT_ID`, `*_REDIRECT_URI`; secret for everything else, including `*_URL` (a database or webhook URL carries credentials) and any name with `SECRET`, `TOKEN`, `PASSWORD`, `PRIVATE` or `CREDENTIAL`. Change one with `--config-key KEY` or `--secret-key KEY` (repeatable); the plan shows every kind before anything is written.
+- `--apply` imports the values the way `opv adopt --apply` does: one item edit, read back and checked. An empty value is declared but not imported, so `opv ready` lists it as missing. Values go to 1Password on stdin only, never in arguments, files or output.
+- The file must be a private regular file (`chmod 600`) under 1 MiB; it is read as literal assignments, never executed, and left as it is. Delete it yourself once `opv run dev -- …` works.
+- One product's keys: an item already in the fleet shape (sections per product) is refused; declare there with `opv add`, then `opv adopt`. `--from` does not combine with `--add-env` or `--profile`.
+
 ### Add an environment: `opv init --add-env`
 
 ```sh

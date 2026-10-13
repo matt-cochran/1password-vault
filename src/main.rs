@@ -293,7 +293,8 @@ Prints the op:// reference, kind, target name, rules, immutable and guidance, an
 const INIT_QUICK: &str = "\
 Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
-  opv init prod --fly-app myapp         # deploys to Fly";
+  opv init prod --fly-app myapp         # deploys to Fly
+  opv init dev --from .env --apply      # start from an existing .env (without --apply: the plan)";
 
 const ADOPT_QUICK: &str = "\
 Examples:
@@ -700,10 +701,17 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["force", "profile"])]
         add_env: bool,
         /// Profile to write, simple or fleet; without it, it follows the item's shape.
-        #[arg(long, value_parser = ["simple", "fleet"], hide_possible_values = true)]
+        /// Hidden from help (one screen, H9): the mixed-shape error names it.
+        #[arg(
+            long,
+            value_parser = ["simple", "fleet"],
+            hide_possible_values = true,
+            hide_short_help = true,
+            hide_long_help = true
+        )]
         profile: Option<String>,
-        /// Overwrite an existing secrets.toml.
-        #[arg(long)]
+        /// Overwrite an existing secrets.toml. Hidden from help (H9): the refusal names it.
+        #[arg(long, hide_short_help = true, hide_long_help = true)]
         force: bool,
         /// Print what was written (names and kinds) as one JSON document.
         #[arg(long, hide_long_help = true)]
@@ -718,6 +726,31 @@ enum Cmd {
         /// 1Password account (email or ID) when several are on this machine; kept in .opv.
         #[arg(long)]
         account: Option<String>,
+        /// Start from a private .env: declare every key (kind by name; --config-key or
+        /// --secret-key KEY to change one) and, with --apply, import the values, verified.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["add_env", "profile"])]
+        from: Option<std::path::PathBuf>,
+        /// With --from: declare this key as config whatever its name (repeatable).
+        #[arg(
+            long,
+            value_name = "KEY",
+            requires = "from",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        config_key: Vec<String>,
+        /// With --from: declare this key as secret whatever its name (repeatable).
+        #[arg(
+            long,
+            value_name = "KEY",
+            requires = "from",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        secret_key: Vec<String>,
+        /// With --from: create, declare and import (without it: the plan only).
+        #[arg(long, requires = "from", hide_short_help = true, hide_long_help = true)]
+        apply: bool,
     },
     /// Declare a key in the configuration, or add environments to a declared key.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
@@ -2263,6 +2296,19 @@ fn run_init(
         } => (*file, project.clone(), account.clone()),
         _ => unreachable!("called for init only"),
     };
+    // --from without --apply: the plan only, before any 1Password call or file (#90).
+    if let Cmd::Init {
+        from: Some(_),
+        apply: false,
+        ..
+    } = &cli.cmd
+    {
+        let args = init_args(cli.cmd, init_options, r, &dir)?;
+        let from = args.from.as_ref().expect("matched --from");
+        let imported = init::read_from(from)?;
+        let again = init_from_again(&args, init_options, file, project.as_deref());
+        return init::plan_from(&args, &imported, &again, out, json);
+    }
     // FR-40, NR-7: every op call of init goes to one chosen account, never op's default
     // when several accounts are on this machine; a choice given here is recorded in .opv.
     let given = account
@@ -2292,6 +2338,46 @@ fn run_init(
     } else {
         init::run_manifest(&args, project.as_deref(), &dir, &scoped, out, json)
     }
+}
+
+/// The `opv init … --from <file> --apply` that carries out a `--from` plan (#90).
+fn init_from_again(
+    args: &init::InitArgs,
+    init_options: &std::collections::BTreeMap<String, String>,
+    file: bool,
+    project: Option<&str>,
+) -> String {
+    let from = args.from.as_ref().expect("called with --from");
+    let mut c = format!(
+        "opv init {} --vault {} --item {}",
+        shell_word(&args.env),
+        shell_word(&args.vault),
+        shell_word(&args.item)
+    );
+    if let Some(t) = &args.target {
+        c.push_str(&format!(" --target {}", shell_word(t)));
+    }
+    for (flag, value) in init_options {
+        c.push_str(&format!(" --{flag} {}", shell_word(value)));
+    }
+    if file {
+        c.push_str(" --file");
+    }
+    if let Some(p) = project {
+        c.push_str(&format!(" --project {}", shell_word(p)));
+    }
+    c.push_str(&format!(
+        " --from {}",
+        shell_word(&from.path.display().to_string())
+    ));
+    for k in &from.config {
+        c.push_str(&format!(" --config-key {k}"));
+    }
+    for k in &from.secret {
+        c.push_str(&format!(" --secret-key {k}"));
+    }
+    c.push_str(" --apply");
+    c
 }
 
 /// `add` and `init --add-env`: edit the configuration where it was found (a file or a
@@ -2359,6 +2445,10 @@ fn init_args(
         project,
         json: _,
         account: _,
+        from,
+        config_key,
+        secret_key,
+        apply,
     } = cmd
     else {
         unreachable!("called for init only")
@@ -2382,6 +2472,12 @@ fn init_args(
         fields: init_options.clone(),
         profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
+        from: from.map(|path| init::FromFile {
+            path,
+            config: config_key,
+            secret: secret_key,
+            apply,
+        }),
     })
 }
 
