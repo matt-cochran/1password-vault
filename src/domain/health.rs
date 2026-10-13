@@ -308,11 +308,22 @@ fn is_placeholder(value: &str) -> bool {
         "none",
         "undefined",
     ];
-    let v = value.trim().to_ascii_lowercase();
-    WORDS.contains(&v.as_str())
-        || (v.len() >= 3 && v.chars().all(|c| c == 'x'))
+    // Compared in place: no copy of the value is made (it would not be zeroized).
+    let v = value.trim();
+    WORDS.iter().any(|w| v.eq_ignore_ascii_case(w))
+        || (v.len() >= 3 && v.bytes().all(|c| c == b'x' || c == b'X'))
         || (v.len() >= 2 && v.starts_with('<') && v.ends_with('>'))
-        || (v.starts_with("your") && v.ends_with("here"))
+        || (v.len() >= 8
+            && v.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("your"))
+            && v.get(v.len() - 4..)
+                .is_some_and(|s| s.eq_ignore_ascii_case("here")))
+}
+
+/// `needle` in `hay`, ASCII case-insensitively, without copying `hay`.
+fn contains_ignore_case(hay: &str, needle: &str) -> bool {
+    hay.as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Leading or trailing whitespace on a single-line value (a multi-line value such as a PEM
@@ -323,7 +334,6 @@ fn has_stray_whitespace(value: &str) -> bool {
 }
 
 fn points_at_local(value: &str) -> bool {
-    let v = value.to_ascii_lowercase();
     [
         "localhost",
         "127.0.0.1",
@@ -332,7 +342,7 @@ fn points_at_local(value: &str) -> bool {
         "[::1]",
     ]
     .iter()
-    .any(|l| v.contains(l))
+    .any(|l| contains_ignore_case(value, l))
 }
 
 /// A production environment by its name or title: `prod`, but not `preprod` or `nonprod`.
