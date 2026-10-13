@@ -1,7 +1,7 @@
 # Delivery receipts: verifiable, value-free proof of what a product was delivered (#106)
 
-Status: design for owner decision, 2026-10-13. No code until the owner picks where delivery
-evidence lives (§5).
+Status: built for 0.6.0, 2026-10-13. Owner decisions: option B, with multiple products considered
+(§5), shipped in 0.6.0.
 
 ## 1. The need
 
@@ -102,7 +102,13 @@ be written by whoever delivers, and read by whoever verifies.
 | **B. A state item** | a separate `opv · state · <env>` item (or vault) the deploy identity may edit, holding only evidence; the fingerprint key stays in the values item | values stay read-only to CI; verify needs only read access to both | one more item and permission to set up (`bootstrap` can create it); evidence is centralized |
 | **C. Sealed evidence in the receipt** | the receipt carries the private evidence encrypted (AES-256-GCM) under a key derived from the ledger key in the values item; whoever keeps the receipt keeps the evidence | no new write access at all; fits a consumer that already keeps accepted records | verify needs the receipt file; a lost receipt means re-deliver; ciphertext travels in CI artifacts (opaque, but still sensitive-adjacent) |
 
-**Recommendation: B.**
+**Decided: B** (owner, 2026-10-13), with multiple products considered:
+
+- 1Password grants access per vault, not per item. So the state lives in a **separate state vault per environment** (`state_vault_id`, created by `opv bootstrap --state <env>`); an item in the values vault would have given CI write access to the values.
+- There is **one item per product** (`opv · delivery · <product>`), so products promoted independently on a shared host never write the same item, and each has its own revision and evidence.
+- The evidence key lives in the state item. That is why only identities that can read the values should read the state vault.
+
+The original recommendation, kept for the record:
 - It keeps CI read-only on values.
 - It gives "verify" one place to look: no artifact to carry, and reuse works across
   pipelines.

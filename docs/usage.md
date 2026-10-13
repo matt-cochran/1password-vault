@@ -11,6 +11,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
 | `opv history <env> [--json]` | what opv last wrote to the target, per key: time, plan id, changed outside opv ([usage](#write-history-opv-history)) | nothing (read-only) |
 | `opv access [<env>] [--json]` | who can read each vault; the owner's command for a read-only CI reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
+| `opv delivery verify <env> [--product <p>] [--receipt <file>] [--json]` | does each product's target still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -422,6 +423,47 @@ Every action is an `opv` command, shown before it runs and run in your terminal,
 
 `--json` gives `{schema_version, environments: [{environment, vault_id, deployed, visible, people, guests, service_accounts: [{name, read_only}]}], findings: [{code, environment, message, next}]}`. In `opv ui` it is the "CI access" entry in the sidebar.
 
+## Delivery receipts: `opv sync --receipt` and `opv delivery verify`
+
+When an environment has a state vault (`state_vault_id`, created by `opv bootstrap --state <env>`), every sync whose writes the target confirmed records, **per product**, a delivery receipt in that vault's item `opv · delivery · <product>`. Products on a shared host are promoted and checked independently.
+
+```sh
+opv sync prod --product api --receipt api.receipt.json   # deliver; keep the receipt (names, ids, times)
+opv delivery verify prod --product api --json            # read-only: is api still exactly what was delivered?
+opv delivery verify prod --receipt api.receipt.json      # is the receipt I kept still the current delivery?
+```
+
+- **When a revision is minted.** Only when every secret in the product's binding set was written by this sync (confirmed by the provider) or proven identical. The revision (`drv-` and 26 random characters) is opaque and derived from nothing.
+  - A failed, partial or interrupted sync mints nothing. Its product stays as it was, and a retry mints once everything is confirmed.
+  - An unchanged re-sync keeps the same revision, so an accepted record stays reusable.
+- **What verify reports**, per product. Exit 0 only when everything checked is `verified`; otherwise exit 8 with `Next: opv sync <env>`.
+  - `verified`: every name holds what was delivered.
+  - `changed`, with each name's state:
+    - `source_changed`: the 1Password value was rotated, or a shared value it reads changed. A shared value invalidates every product that reads it.
+    - `drifted_on_target`: edited outside opv.
+    - `missing_on_target`.
+  - `unverifiable`, with a reason.
+  - `not_delivered`: nothing recorded, or recorded for another account, environment, product or target, or the binding set changed (a key added or removed).
+  - `superseded`: the receipt you passed is no longer the current delivery.
+
+  `deployed` is reported separately: `staged` (Fly secrets waiting for a deploy), `deployed`, or `n/a` (GitHub applies writes at once). It is never folded into `verified`.
+- **Never a value, never a digest.**
+  - The receipt holds names, IDs, times, the plan id and the opv version.
+  - The evidence (each name's store version and a keyed fingerprint of its 1Password value) stays in the state item and is compared in memory. Fly digests included, it is never printed, logged or written to a file.
+  - Give the state vault only to identities that can also read the values.
+- **Least privilege.** The deploy identity reads the values vault and writes only the state vault. `opv bootstrap --state <env>` prints its exact `op service-account create … --vault <values>:read_items --vault <state>:read_items,write_items` command, which you run yourself (1Password shows the token once).
+- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. `opv delivery verify --json` returns `{schema_version, environment, products: [{product, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
+- **Capability check**: an installed opv supports this when `opv schema` lists the command `delivery verify`.
+
+The four kinds of evidence are kept apart:
+
+| Evidence | What it proves |
+|---|---|
+| `opv ready` (`receipt_id`) | what is declared and saved now |
+| `plan_id` | the intent a person reviewed |
+| delivery revision | that a confirmed write put this binding set on the target, and whether it still holds |
+| `deployed` | whether the running release uses it |
+
 ## Readiness: `opv ready`
 
 `opv ready` answers "what is ready, what is not, and who does what next" in one read-only command. It reads the account (as `opv account list`) and every environment (as `opv status`), and prints a product × environment grid (`saved/declared`, `n/a` where the environment's target does not deliver the product), the findings, and the first step:
@@ -713,6 +755,20 @@ jobs:
 CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes either from `deploy_credentials` in that vault (opv reads it and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own) or from the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
 
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions); on Azure or Kubernetes, install `az` or `kubectl` instead of `flyctl` and sign the runner in to it (or use `deploy_credentials`). An environment with `confirm_env = true` also needs `--confirm <env>` in the job.
+
+**One product at a time on a shared Fly app, with delivery receipts.** With a `state_vault_id` and a deploy identity from `opv bootstrap --state prod` (read the values vault, write the state vault):
+
+```yaml
+      - name: Deliver api's secrets and keep the receipt
+        run: opv sync prod --product api --expect-plan "$PLAN_ID" --receipt api.receipt.json
+      - uses: actions/upload-artifact@v4
+        with: { name: api-delivery, path: api.receipt.json }
+      # Later, before reusing an accepted record (read-only; exit 8 unless verified):
+      - name: Is api still exactly what was delivered?
+        run: opv delivery verify prod --product api --receipt api.receipt.json --json
+```
+
+The receipt names `api`'s revision and binding set, never a value or digest. Another product's later sync leaves `api` verified, and a rotation of `api`'s values or of a shared value it reads does not. See [delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
 
 **Job summary.** When `$GITHUB_STEP_SUMMARY` is set (GitHub Actions sets it for every step), `status`, `plan` and `sync` append a Markdown section to the job's summary page: for `status` and `plan`, the count line, `changes` (plan) and one table row per key, problems first, with product, key, kind, state word (`failed <rule>`, without the reason) and target word; for `sync`, its summary line and the written, pruned, pending, held, extra and unchanged names. It holds names and state words only: no value, no rule reason and no 1Password link (the link names your account). Nothing to configure; outside GitHub Actions nothing is written. For a nightly drift check, run `opv plan prod --json` and alert when `changes` is `some`.
 

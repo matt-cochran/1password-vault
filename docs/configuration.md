@@ -433,6 +433,15 @@ guidance = "create your own key (billed to you)"
 
 Example: [examples/team-personal](../examples/team-personal/).
 
+### Delivery receipts: `state_vault_id`
+
+```toml
+[environments.prod]
+state_vault_id = "vstate1234example"   # where delivery receipts are kept (opv bootstrap --state prod creates it)
+```
+
+A separate vault, so the deploy identity can write delivery evidence without write access to the values. Give it only to identities that can also read the values vault. See [delivery receipts](usage.md#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
+
 ### Environment display name, order and audience
 
 ```toml

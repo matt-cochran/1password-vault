@@ -308,6 +308,10 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn provider(&self) -> &'static dyn Provider;
     /// Runtime env var name of `product`/`key`.
     fn env_name(&self, product: &str, key: &str) -> String;
+    /// The target instance, as one stable string (an app, repositories, a vault and app, a
+    /// cluster location): what a delivery receipt is bound to, so it never applies to
+    /// another target (#106). Names only.
+    fn target_locator(&self) -> String;
     /// Name in the store for a runtime env var name.
     fn store_name(&self, env_name: &str) -> String;
     /// Name patterns, case sensitivity and limits, checked generically at load (FR-30).

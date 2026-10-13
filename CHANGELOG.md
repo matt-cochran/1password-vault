@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0] - 2026-10-13
 
-A terminal UI (`opv ui`) over everything opv knows, a one-step start from an existing `.env`, per-developer personal keys, GitHub Actions as a target, settings health checks, and a readiness receipt that people and agents share. No configuration change is required to upgrade.
+A terminal UI (`opv ui`) over everything opv knows, a one-step start from an existing `.env`, per-developer personal keys, GitHub Actions as a target, settings health checks, verifiable delivery receipts per product, and a readiness receipt that people and agents share. No configuration change is required to upgrade.
 
 ### Added
 
@@ -30,6 +30,10 @@ A terminal UI (`opv ui`) over everything opv knows, a one-step start from an exi
 - **Account choice you can see** ([#79](https://github.com/matt-cochran/1password-vault/issues/79); FR-50): `opv login` shows the account menu even with one account added to the CLI, marks signed-in accounts, always offers **Add another 1Password account**, and explains on WSL that the Windows app's accounts are not visible; `opv login --add [--account <email>]` adds one directly.
 - **An installable agent skill** ([#76](https://github.com/matt-cochran/1password-vault/issues/76)): `opv skill install` writes a skill versioned with the binary to `.claude/skills/opv/` and `.agents/skills/opv/` (project or `--user`), keeping a copy you edited unless `--force`; `opv skill status` lists copies and `opv doctor` warns about an older one; `install.sh --skill` installs the CLI and the skill in one step. The agent guide now starts every session from `opv ready --json` and covers accounts, bootstrap and adoption; a test fails when a command has no agent guidance.
 - A tool installed outside `PATH` is named with its location and the `PATH` fix, instead of an install suggestion (#77).
+
+#### Delivery evidence
+
+- **Delivery receipts** ([#106](https://github.com/matt-cochran/1password-vault/issues/106)): with a state vault (`state_vault_id`, `opv bootstrap --state <env>`), each confirmed sync records per product an opaque revision with private evidence. `opv delivery verify` (read-only) answers whether the target still holds exactly that binding set, naming rotation, shared-value changes, drift outside opv, missing names and staged-vs-deployed. `opv sync --receipt FILE` keeps the receipt. No value or value-derived digest is ever emitted.
 
 #### Configuration and values
 

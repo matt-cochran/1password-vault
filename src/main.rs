@@ -581,6 +581,9 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// Delivery receipts: whether a product's target still holds what opv delivered.
+    #[command(subcommand)]
+    Delivery(DeliveryCmd),
     /// Bring values that exist elsewhere into the environment's 1Password item, after review.
     #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
     Adopt {
@@ -662,6 +665,10 @@ enum Cmd {
         /// environment's vault.
         #[arg(long, value_name = "ENV")]
         ci_reader: Option<String>,
+        /// Create this environment's state vault for delivery receipts, record it as
+        /// state_vault_id, and print the deploy identity's command (repeatable).
+        #[arg(long, value_name = "ENV")]
+        state: Vec<String>,
         /// Print one JSON document (one step per environment) instead of lines.
         #[arg(long)]
         json: bool,
@@ -940,6 +947,15 @@ struct SyncArgs {
     /// changed since. Also satisfies confirm_env.
     #[arg(long, value_name = "PLAN_ID")]
     expect_plan: Option<String>,
+    /// Write the delivery receipts this sync mints (names, ids and times) to FILE; needs
+    /// the environment's state_vault_id.
+    #[arg(
+        long,
+        value_name = "FILE",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    receipt: Option<std::path::PathBuf>,
     /// Print the run report as one JSON document (names only) instead of text.
     #[arg(long)]
     json: bool,
@@ -962,9 +978,36 @@ impl From<SyncArgs> for sync::SyncOpts {
             confirm: a.confirm,
             json: a.json,
             expect_plan: a.expect_plan,
+            receipt: a.receipt,
         }
     }
 }
+
+#[derive(Subcommand)]
+enum DeliveryCmd {
+    /// Check, read-only, that each product's target still holds the binding set opv
+    /// delivered, and name its revision (values never shown).
+    #[command(before_help = DELIVERY_VERIFY_QUICK)]
+    Verify {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Only this product.
+        #[arg(long)]
+        product: Option<String>,
+        /// A receipt kept from `opv sync --receipt`: it must be the current delivery.
+        #[arg(long, value_name = "FILE")]
+        receipt: Option<std::path::PathBuf>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+const DELIVERY_VERIFY_QUICK: &str = "\
+Examples:
+  opv sync prod --product api --receipt api.receipt.json       # deliver, and keep the receipt
+  opv delivery verify prod --product api                       # verified, changed, or not delivered
+  opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
 
 #[derive(Subcommand)]
 enum AccountCmd {
@@ -1523,6 +1566,7 @@ impl Cmd {
             | Cmd::Ready { json, .. }
             | Cmd::History { json, .. }
             | Cmd::Access { json, .. }
+            | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
             | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
@@ -1744,6 +1788,7 @@ fn run(
             dry_run,
             rebind,
             ci_reader,
+            state,
             json,
         } => {
             let here = std::env::current_dir().unwrap_or_default();
@@ -1766,6 +1811,7 @@ fn run(
                 dry_run: *dry_run,
                 rebind: rebind.iter().cloned().collect(),
                 ci_reader: ci_reader.clone(),
+                state: state.iter().cloned().collect(),
                 json: *json,
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
@@ -2190,6 +2236,20 @@ fn run_other(
         }
         Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
         Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
+        Cmd::Delivery(DeliveryCmd::Verify {
+            env,
+            product,
+            receipt,
+            json,
+        }) => opv::app::delivery::verify(
+            &loaded?,
+            &env,
+            product.as_deref(),
+            receipt.as_deref(),
+            r,
+            json,
+            out,
+        ),
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
             source,
