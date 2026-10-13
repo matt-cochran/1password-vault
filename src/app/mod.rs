@@ -9,9 +9,12 @@
 //!   verifying read; FR-43, [`tidy`]); a service account or CI never writes.
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
+pub mod account;
 pub mod add;
+pub mod adopt;
 #[cfg(test)]
 mod azure_tests;
+pub mod bootstrap;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;
@@ -33,6 +36,7 @@ pub mod open;
 #[cfg(test)]
 mod pinned_tests;
 pub(crate) mod preflight;
+pub mod ready;
 pub mod run;
 pub mod setup;
 mod setup_import;
@@ -41,6 +45,7 @@ pub mod setup_runtime;
 #[cfg(test)]
 mod shared_tests;
 pub mod signin;
+pub(crate) mod signin_filter;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;

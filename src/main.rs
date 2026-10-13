@@ -295,6 +295,45 @@ Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
   opv init prod --fly-app myapp         # deploys to Fly";
 
+const ADOPT_QUICK: &str = "\
+Examples:
+  opv adopt staging --from .env.staging          # what would come in; nothing written
+  opv adopt staging --from .env.staging --apply  # write the imports, verified";
+
+const ADOPT_MORE: &str = "\
+Each found name maps to a declared key (its target name, else its bare name); each key's
+rules normalise both sides before comparing. A filled 1Password field is never replaced
+unless named with --replace (immutable keys also need --rotate); the old value is kept in
+the section \"opv · kept\". Values are never printed. --from target reads Key Vault,
+Kubernetes and GitHub variables; Fly and GitHub secrets cannot be read back. It never syncs,
+deploys or deletes the source.";
+
+const READY_QUICK: &str = "\
+Examples:
+  opv ready                      # every environment × product, findings, the next step
+  opv ready --json --save r.json # the receipt for an assistant or a handoff";
+
+const BOOTSTRAP_QUICK: &str = "\
+Examples:
+  opv bootstrap --dry-run      # what would be created or checked, per environment
+  opv bootstrap                # create missing vaults and items, record their IDs";
+
+const BOOTSTRAP_MORE: &str = "\
+Environments without vault_id and item_id get a vault <project>-<env> and an item
+\"<project> · <env> values\" in the selected 1Password account (found when they exist),
+and their IDs are recorded in secrets.toml. Recorded IDs the account cannot see stop
+with ids_not_in_account: select the owning account, or pass --rebind <env>. Then every
+declared field is added, empty. Nothing is synced, deployed or given a value. Next: opv ready";
+
+const ACCOUNT_LIST_QUICK: &str = "\
+Examples:
+  opv account list           # accounts, which is selected, what to do next
+  opv account list --json    # the same for scripts and AI assistants";
+
+const ACCOUNT_USE_QUICK: &str = "\
+Examples:
+  opv account use owner@example.com   # record this project's account in .opv";
+
 const COMPLETIONS_QUICK: &str = "\
 Examples:
   opv completions bash > ~/.local/share/bash-completion/completions/opv
@@ -425,6 +464,10 @@ enum Cmd {
         /// several accounts are on this machine.
         #[arg(long)]
         account: Option<String>,
+        /// Add a 1Password account to this CLI first (with --account: that email), at
+        /// 1Password's own prompt.
+        #[arg(long)]
+        add: bool,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -509,6 +552,66 @@ enum Cmd {
     /// Save managed settings on the configured deployment target.
     #[command(before_help = SYNC_QUICK, after_help = SYNC_MORE)]
     Sync(SyncArgs),
+    /// 1Password accounts: which ones this machine's CLI knows, and the project's.
+    #[command(subcommand)]
+    Account(AccountCmd),
+    /// Bring values that exist elsewhere into the environment's 1Password item, after review.
+    #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
+    Adopt {
+        /// Environment whose item receives the values.
+        env: String,
+        /// A private dotenv file, or `target` to read what the environment's target can show.
+        #[arg(long, value_name = "FILE|target")]
+        from: String,
+        /// Take the found value for this key although 1Password holds another (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        replace: Vec<String>,
+        /// Allow --replace on this immutable key (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        rotate: Vec<String>,
+        /// Write the plan to 1Password (without it, nothing is written).
+        #[arg(long)]
+        apply: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is ready, what is not, and who does what next: one receipt (read-only).
+    #[command(before_help = READY_QUICK)]
+    Ready {
+        /// Only this environment.
+        env: Option<String>,
+        /// Print the receipt as one JSON document.
+        #[arg(long)]
+        json: bool,
+        /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
+        #[arg(long, value_name = "FILE")]
+        save: Option<PathBuf>,
+    },
+    /// Create every environment's vault, item and empty fields in the selected account.
+    #[command(before_help = BOOTSTRAP_QUICK, after_help = BOOTSTRAP_MORE)]
+    Bootstrap {
+        /// The configuration file to complete; defaults to the secrets.toml found from here.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Project name for vault and item titles; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Show what would be created or checked; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace this environment's recorded IDs with a vault and item in the selected
+        /// account (repeatable). Values are not moved.
+        #[arg(long, value_name = "ENV")]
+        rebind: Vec<String>,
+        /// Also print the owner's steps for a read-only CI service account for this
+        /// environment's vault.
+        #[arg(long, value_name = "ENV")]
+        ci_reader: Option<String>,
+        /// Print one JSON document (one step per environment) instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Configuration commands.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -710,6 +813,29 @@ impl From<SyncArgs> for sync::SyncOpts {
             expect_plan: a.expect_plan,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// List the 1Password accounts this CLI knows and which one this project uses (read-only).
+    #[command(before_help = ACCOUNT_LIST_QUICK)]
+    List {
+        /// Show which account this value (email, account ID or sign-in address) selects.
+        #[arg(long)]
+        account: Option<String>,
+        /// Print one JSON document (accounts, selection, findings) instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the account this project uses in .opv (no prompt, no sign-in).
+    #[command(before_help = ACCOUNT_USE_QUICK)]
+    Use {
+        /// Email, account ID, shorthand or sign-in address of an account this CLI knows.
+        who: String,
+        /// Print one JSON document instead of a line.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -943,10 +1069,17 @@ fn main() -> ExitCode {
             run(cli, config_source, &init_options, &mut stdout)
         };
         let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
-        if may_sign_in && signed_out && !signed_in && sign_in_here() {
-            // Once: a second failure is reported as it is.
-            signed_in = true;
-            continue;
+        if may_sign_in && signed_out && !signed_in {
+            match sign_in_here() {
+                // Once: a second failure is reported as it is.
+                Ok(true) => {
+                    signed_in = true;
+                    continue;
+                }
+                Ok(false) => {}
+                // Why the sign-in failed, in opv's words (FR-50), instead of the first error.
+                Err(e) => break Err(e),
+            }
         }
         break res;
     };
@@ -1214,6 +1347,8 @@ impl Cmd {
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
+            Cmd::Adopt { env, from, .. } if from == "target" => Some((env, Reach::Target)),
+            Cmd::Adopt { env, .. } => Some((env, Reach::Store)),
             _ => None,
         }
     }
@@ -1230,7 +1365,12 @@ impl Cmd {
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
             | Cmd::Add { json, .. }
-            | Cmd::Item(ItemCmd::Skeleton { json, .. }) => *json,
+            | Cmd::Item(ItemCmd::Skeleton { json, .. })
+            | Cmd::Bootstrap { json, .. }
+            | Cmd::Ready { json, .. }
+            | Cmd::Adopt { json, .. }
+            | Cmd::Account(AccountCmd::List { json, .. })
+            | Cmd::Account(AccountCmd::Use { json, .. }) => *json,
             Cmd::Plan(a) => a.json,
             Cmd::Sync(a) => a.json,
             Cmd::Schema => true,
@@ -1344,6 +1484,7 @@ fn run(
         env,
         command,
         account,
+        add,
     } = &cli.cmd
     {
         use opv::app::{login, setup_runtime};
@@ -1354,10 +1495,11 @@ fn run(
             cli.verbose,
         );
         // One runtime: an account added and signed in here keeps its session for the login.
-        let mut runtime = setup_runtime::Runtime::default();
+        let mut runtime = setup_runtime::Runtime::default().for_command("login");
         login::choose_account(
             &probe,
             account.as_deref(),
+            *add,
             &here,
             &mut runtime,
             &mut setup_runtime::Console,
@@ -1424,6 +1566,44 @@ fn run(
     match &cli.cmd {
         Cmd::Projects { long, json } => {
             return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        }
+        Cmd::Bootstrap {
+            file,
+            project,
+            dry_run,
+            rebind,
+            ci_reader,
+            json,
+        } => {
+            let here = std::env::current_dir().unwrap_or_default();
+            let path = match file.clone().or_else(|| cli.config.clone()) {
+                Some(p) => p,
+                None => config_store::walk_up(&here, "secrets.toml").ok_or_else(|| {
+                    Error::Config("no secrets.toml here or in a parent directory".into())
+                        .with_next("opv init <env> --file")
+                })?,
+            };
+            let project = match project {
+                Some(p) => p.clone(),
+                None => config_store::default_project(
+                    None,
+                    config_store::git_repo(&r).as_deref(),
+                    &here,
+                )?,
+            };
+            let opts = opv::app::bootstrap::Opts {
+                dry_run: *dry_run,
+                rebind: rebind.iter().cloned().collect(),
+                ci_reader: ci_reader.clone(),
+                json: *json,
+            };
+            return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
+        }
+        Cmd::Account(AccountCmd::List { account, json }) => {
+            return opv::app::account::list(&r, account.as_deref(), *json, out).map(|()| 0);
+        }
+        Cmd::Account(AccountCmd::Use { who, json }) => {
+            return opv::app::account::use_command(&r, who, *json, out).map(|()| 0);
         }
         Cmd::Status {
             all: true,
@@ -1704,6 +1884,8 @@ fn run_other(
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
         | Cmd::Projects { .. }
+        | Cmd::Account(_)
+        | Cmd::Bootstrap { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
@@ -1721,6 +1903,37 @@ fn run_other(
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
+        Cmd::Adopt {
+            env,
+            from,
+            replace,
+            rotate,
+            apply,
+            json,
+        } => {
+            let source = if from == "target" {
+                opv::app::adopt::Source::Target
+            } else {
+                opv::app::adopt::Source::Dotenv(PathBuf::from(from))
+            };
+            let opts = opv::app::adopt::Opts {
+                source,
+                replace,
+                rotate,
+                apply,
+                json,
+            };
+            opv::app::adopt::run(&loaded?, &env, &opts, r, out)
+        }
+        Cmd::Ready { env, json, save } => opv::app::ready::run(
+            &loaded?,
+            source,
+            env.as_deref(),
+            r,
+            json,
+            save.as_deref(),
+            out,
+        ),
         Cmd::Status {
             env: None,
             product,
@@ -2000,11 +2213,11 @@ fn init_args(
 /// a terminal to do it (no TTY, CI, a service account or Connect) or the sign-in failed,
 /// so the original error stands. The password goes only to op; the session stays in this
 /// process ([`opv::runner::use_op_session`]).
-fn sign_in_here() -> bool {
+fn sign_in_here() -> Result<bool, Error> {
     use opv::app::setup::Backend as _;
     use opv::app::setup_runtime::{Console, Runtime};
     if Console::require_terminal("", "").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
-        return false;
+        return Ok(false);
     }
     let here = std::env::current_dir().unwrap_or_default();
     let account = config_store::pointer_account(&here).or_else(config_store::account_env);
@@ -2012,12 +2225,11 @@ fn sign_in_here() -> bool {
         "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
          to go on; your password goes only to 1Password's prompt."
     );
-    let mut runtime = Runtime::with_account(account.as_deref());
-    if runtime.sign_in(account.as_deref(), false).is_err() {
-        return false;
-    }
+    let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
+    let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);
+    runtime.sign_in(account.as_deref(), false)?;
     opv::runner::use_op_session(runtime.into_session());
-    true
+    Ok(true)
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

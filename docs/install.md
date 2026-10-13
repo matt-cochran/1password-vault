@@ -132,7 +132,7 @@ Install only what your target needs; `opv doctor` checks exactly that and prints
 | `kubectl` | a version that matches your cluster (opv checks only that it runs) | Kubernetes targets |
 | GitHub CLI `gh` | tested with 2.102.0 | GitHub Actions targets |
 
-`opv doctor` warns (exit code unchanged) when a version differs.
+`opv doctor` warns (exit code unchanged) when a version differs. When a tool is installed but its folder is not on `PATH` (common for `~/.local/bin`, `~/.fly/bin`, `/opt/homebrew/bin`, or the WinGet links folder on Windows), opv says where it is and how to add it to `PATH` instead of suggesting an install.
 
 - **Azure on Windows:** works natively. Values reach `az` through a named pipe only your user can open (Linux, WSL and macOS use stdin).
 - **Kubernetes:** opv uses the cluster context named in `secrets.toml`, not your current one. Your kubeconfig must contain it.

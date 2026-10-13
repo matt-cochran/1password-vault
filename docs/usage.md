@@ -6,7 +6,12 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 
 | Command | What it does | Changes |
 |---|---|---|
-| `opv login [<env>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
+| `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
+| `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
+| `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
+| `opv account use <email or ID>` | record the project's account in `.opv`, without a prompt | `.opv` |
 | `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
 | `opv doctor [--env <env> [--product <p>]] [--json]` | find setup problems and show the next step | nothing |
 | `opv check <env> [--product <p>] [--json]` | are the keys saved and valid? no target is contacted | nothing |
@@ -390,9 +395,54 @@ all clear: nothing pending
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
 - With no configuration at all, the config line lists both ways to start (`opv init` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
 
+## Readiness: `opv ready`
+
+`opv ready` answers "what is ready, what is not, and who does what next" in one read-only command. It reads the account (as `opv account list`) and every environment (as `opv status`), and prints a product × environment grid (`saved/declared`, `n/a` where the environment's target does not deliver the product), the findings, and the first step:
+
+```text
+ready: 1 blocking · 1 findings · receipt rcpt-3f9a1c0d2e7b
+PRODUCT  dev  staging          prod
+api      6/6  5/6 · 1 finding  6/6
+shared   n/a  n/a              n/a
+Needs attention:
+  [owner] key_missing staging api/STRIPE_KEY → opv open api/STRIPE_KEY --env staging
+Next (owner): opv open api/STRIPE_KEY --env staging
+```
+
+`--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
+
+## Moving existing settings in: `opv adopt`
+
+When values already live somewhere else (a project's `.env` file, a Key Vault, a cluster), `opv adopt <env> --from <file>` shows what would come into the environment's 1Password item, without writing anything:
+
+```text
+staging: 4 found · 2 to write · 1 need a decision
+  api/DATABASE_URL                 differs: 1Password is kept (--replace api/DATABASE_URL to take the found value)  (from DATABASE_URL)
+  api/PRIVATE_KEY_PEM              import (to write)  (from PRIVATE_KEY_PEM)
+  api/LOG_LEVEL                    same value after the key's rules; nothing to do  (from LOG_LEVEL)
+  shared/FLY_API_TOKEN             import (to write)  (from FLEET__API__FLY_API_TOKEN, FLEET__WEB__FLY_API_TOKEN)
+Next: opv adopt staging --from .env.staging --apply
+```
+
+- A found name becomes a declared key by its target name, else by its bare key name; a name several keys share is skipped as ambiguous. A key that shares a value (`from`) lands in its source's field once; copies that differ are reported, never merged.
+- Each key's rules and transforms apply to both sides before comparing (`ensure_prefix`, a trailing newline, `pem_private_key`), so a formatting difference is not a change. Values are never printed, not even partly.
+- A filled 1Password field is never replaced unless you name it with `--replace product/KEY` (an immutable key also needs `--rotate product/KEY`); the old value is kept in the section `opv · kept`.
+- `--apply` writes everything in one item edit, reads the item back and checks each field. It needs your own session, and re-running is safe: the plan is recomputed from what is there. It never syncs, deploys, prunes or deletes the source; your apps keep their current secrets until you sync.
+- Sources: a dotenv file (literal `KEY=value` lines, never executed; it must be a private regular file under 1 MiB), or `--from target` for targets that can show values: Azure Key Vault, Kubernetes Secrets, and GitHub variables (config). Fly secrets and GitHub secrets can never be read back: put those values in a private dotenv file from where you keep them today, or type them in 1Password.
+
+## Fresh fleet: `opv bootstrap`
+
+In a `secrets.toml` whose environments leave out `vault_id` and `item_id`, `opv bootstrap` creates, in the selected 1Password account, a vault `<project>-<env>` and an item `<project> · <env> values` for each (using existing ones with those titles), records their IDs in the file (comments and order kept), and adds every declared field, empty. `--dry-run` shows the plan and changes nothing. Recorded IDs the selected account cannot see stop with `ids_not_in_account`: select the account that holds them (`opv account use <ID>`) or pass `--rebind <env>` to record a new vault and item in this account (values are not moved). A file whose first line starts with `# generated` is never rewritten; the IDs are printed for its generator. It needs your own session (it writes 1Password), never syncs or deploys, and ends with `Next: opv ready`. Re-running is safe. `--ci-reader <env>` also prints the owner's commands for a read-only CI service account limited to that environment's vault (`op service-account create … --vault <id>:read_items`), which you run yourself, because 1Password shows the token once. A complete walk-through from a fresh account to the first guarded deploy is in [examples/fleet-fly](../examples/fleet-fly/).
+
 ## Sign-in: `opv login`
 
 `opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`.
+
+**Accounts, without signing in.** `opv account list` shows the accounts this 1Password CLI knows, whether each is signed in, which one the project uses and why (`--account`, `OP_ACCOUNT`, `.opv`, or the only one), and what to do next; it never prompts or signs in. `--json` gives the same as one document (`opv schema` lists its fields): `discovery` (`ok`, `unavailable`, `op_missing`), `selected`, `accounts` and `findings` with stable codes (`no_accounts`, `selected_account_absent`, `account_ambiguous`, `selected_signed_out`, `discovery_unavailable`, `op_missing`), each with one `next` command. Only accounts this CLI knows are listed; on Linux and WSL an account that is only in the 1Password app appears after `opv login --add`. `opv account use <email or ID>` records the project's account in `.opv` with no prompt; a value several accounts match (a shared sign-in address) is refused with the candidates' IDs.
+
+**Choosing the account.** Until the project records one (`.opv`, written by your first choice; commit it), `opv login` asks which 1Password account holds the project's secrets, even when only one is added to this CLI, so you always see which one it is; each entry says whether it is signed in, and the last one is **Add another 1Password account**. `opv login --add [--account <email>]` adds an account right away. You type the sign-in address, Secret Key and password only at 1Password's own prompt (your Emergency Kit has them). On Linux and WSL the CLI keeps its own accounts: in WSL, accounts that are only in the Windows 1Password app are not listed until you add them here. On macOS and Windows the CLI uses the app's accounts, so you add an account in the app.
+
+**When sign-in fails** opv says why in its own words, names the account, and gives one next step: the account is not added to this CLI (`account_not_registered`, `Next: opv login --add --account <email>`), no session (`op_not_signed_in`), the 1Password app is locked or its CLI integration is off (`desktop_app_unavailable`), what was typed was not accepted (`credential_rejected`), the prompt was cancelled (`sign_in_cancelled`), 1Password could not be reached (`provider_unavailable`, exit 9, nothing changed), or a reason opv does not recognise (`op_unexpected`, `Next: opv doctor`). It never guesses that a password was wrong, and 1Password's own CLI directions are not repeated.
 
 `login`, `setup` and `config edit` need your own interactive terminal; without one they refuse (exit 6, `terminal_required`) and name themselves on `Next:`. Automation uses a 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`) instead, which decides the account. Per-environment `account` and `deploy_credentials`: [configuration](configuration.md#account-and-deploy-credentials).
 
@@ -460,6 +510,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument) |
 | `config_not_found` | 2 | after_fix | no | no secrets.toml in this directory or a parent, and no 1Password manifest for this checkout |
 | `account_required` | 2 | after_fix | yes | several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account |
+| `account_ambiguous` | 2 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
 | `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
 | `manifest_ambiguous` | 2 | after_fix | yes | several 1Password manifests match; a person keeps one and archives the others |
 | `manifest_exists` | 2 | never | no | a manifest for this project already exists; change it with opv config edit |
@@ -486,6 +537,12 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
 | `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `ids_not_in_account` | 2 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind) |
+| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add |
+| `desktop_app_unavailable` | 7 | after_fix | yes | the 1Password app is locked, closed, or its CLI integration is off |
+| `credential_rejected` | 7 | after_fix | yes | 1Password did not accept what was typed at its prompt |
+| `sign_in_cancelled` | 7 | after_fix | yes | the 1Password sign-in prompt was cancelled |
+| `op_unexpected` | 7 | after_fix | yes | 1Password's CLI failed for a reason opv does not recognise; opv doctor checks it |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |

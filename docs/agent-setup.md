@@ -168,6 +168,16 @@ More patterns: [local-development.md](local-development.md).
 
 ## Sign-in and accounts
 
+Find the account first, never by parsing `op` output:
+
+```sh
+opv account list --json     # read-only: accounts, which is selected, findings, next
+opv account use <ID>        # record the user's chosen account in .opv (ask the user which)
+```
+
+1. Read `findings`. `no_accounts` or `selected_account_absent`: the user runs `opv login --add --account <email>` in their own terminal (sign-in address, Secret Key and password go only to 1Password's prompt; you never see them). `account_ambiguous`: ask the user which account ID, then `opv account use <ID>`. `selected_signed_out`: the user runs the `next` command (`opv login --account <ID>`).
+2. After the user says they are done, run `opv account list --json` again and continue when `findings` is empty.
+
 - If the environments use different 1Password accounts, add `account = "<sign-in address>"` to each environment (ask the user which account holds which vault). The user then signs in with `opv login <env>`; every opv command uses that environment's account.
 - To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that environment's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Kubernetes uses the user's kubeconfig instead (Azure fields only when its secrets are in a Key Vault through `secrets_in`); Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
 

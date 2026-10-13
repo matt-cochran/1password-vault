@@ -105,27 +105,46 @@ pub fn run_or(
     backend.child(command)
 }
 
-/// FR-40: the 1Password account this checkout uses, chosen once, in one command. `given`
-/// (`--account`: an email, account ID, user ID or sign-in address) is resolved to an
-/// account ID; without it, and with no account recorded yet (`.opv`, `OP_ACCOUNT`), a
-/// person with several accounts picks one from a list. Where `op` keeps its own accounts
-/// (Linux, WSL), an account it does not know yet is added right here, at op's prompts,
-/// and signed in in the same step (found in a fresh-account run-through: leaving opv for
-/// `op account add` was the worst step). The choice is recorded in `.opv`, so later
-/// commands never fall back to op's default account. `None`: nothing to choose.
+/// FR-40, FR-50: the 1Password account this checkout uses, chosen once, in one command.
+/// `given` (`--account`: an email, account ID, user ID or sign-in address) is resolved to an
+/// account ID; without it, and with no account recorded yet (`.opv`, `OP_ACCOUNT`), the person
+/// picks one from a menu, shown even when one account is registered (the one op sees may not
+/// be the one they mean, #79), with "Add another 1Password account" always offered. `add`
+/// (`opv login --add`) adds an account right away. Where `op` keeps its own accounts (Linux,
+/// WSL), an account it does not know yet is added here, at op's prompts, and signed in in the
+/// same step. The choice is recorded in `.opv`, so later commands never fall back to op's
+/// default account. `None`: nothing to choose.
 pub fn choose_account(
     r: &dyn crate::runner::CommandRunner,
     given: Option<&str>,
+    add: bool,
     start: &std::path::Path,
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
     use crate::adapters::onepassword_manifest as manifest;
     use crate::host::{Host, Platform};
-    let own_op = matches!(Host::detect().platform, Platform::Linux | Platform::Wsl);
+    let platform = Host::detect().platform;
+    let own_op = matches!(platform, Platform::Linux | Platform::Wsl);
     let accounts = manifest::accounts(r);
     const ADD: &str = "Add another 1Password account";
+    let added = |now: &[manifest::Account]| {
+        now.iter()
+            .find(|a| !accounts.iter().any(|b| b.account_uuid == a.account_uuid))
+            .map(|a| a.account_uuid.clone())
+    };
     let uuid = match given {
+        _ if add && !own_op => return Err(add_in_app(given)),
+        _ if add => {
+            let now = add_account(r, backend, ui, given, &accounts)?;
+            match given {
+                Some(who) => manifest::resolve(&now, who)?,
+                None => match added(&now) {
+                    Some(u) => u,
+                    None => return Ok(None),
+                },
+            }
+        }
         Some(who) => match manifest::resolve(&accounts, who) {
             Ok(u) => u,
             Err(_) if own_op && who.contains('@') && crate::config::is_account(who) => {
@@ -135,8 +154,7 @@ pub fn choose_account(
             Err(e) => return Err(e),
         },
         None if crate::config_store::pointer_account(start).is_some()
-            || crate::config_store::account_env().is_some()
-            || accounts.len() == 1 =>
+            || crate::config_store::account_env().is_some() =>
         {
             return Ok(None);
         }
@@ -154,33 +172,35 @@ pub fn choose_account(
             let mut labels: Vec<String> = accounts
                 .iter()
                 .map(|a| {
-                    format!(
-                        "{} ({})",
-                        if a.email.is_empty() {
-                            &a.account_uuid
-                        } else {
-                            &a.email
-                        },
-                        a.url.trim_start_matches("https://").trim_end_matches('/')
-                    )
+                    let who = if a.email.is_empty() {
+                        &a.account_uuid
+                    } else {
+                        &a.email
+                    };
+                    let address = a.url.trim_start_matches("https://").trim_end_matches('/');
+                    match manifest::signed_in(r, &a.account_uuid) {
+                        Some(true) => format!("{who} ({address}) · signed in"),
+                        _ => format!("{who} ({address})"),
+                    }
                 })
                 .collect();
-            if own_op {
-                labels.push(ADD.to_string());
-            }
+            labels.push(ADD.to_string());
+            let wsl = if platform == Platform::Wsl {
+                " Accounts in the Windows 1Password app are not listed here until you add them."
+            } else {
+                ""
+            };
             let picked = ui.choose(
-                "Several 1Password accounts are on this machine. Which one holds this \
-                 project's secrets?",
+                &format!("Which 1Password account holds this project's secrets?{wsl}"),
                 &labels,
             )?;
             if picked == ADD {
+                if !own_op {
+                    return Err(add_in_app(None));
+                }
                 let now = add_account(r, backend, ui, None, &accounts)?;
-                // The new one: in the list now, not before.
-                match now
-                    .iter()
-                    .find(|a| !accounts.iter().any(|b| b.account_uuid == a.account_uuid))
-                {
-                    Some(a) => a.account_uuid.clone(),
+                match added(&now) {
+                    Some(u) => u,
                     None => return Ok(None),
                 }
             } else {
@@ -196,6 +216,28 @@ pub fn choose_account(
         path.display()
     ))?;
     Ok(Some(uuid))
+}
+
+/// Where op shares the 1Password app's accounts (macOS, Windows), an account is added in the
+/// app, not here.
+fn add_in_app(who: Option<&str>) -> Error {
+    Error::Config(
+        format!(
+            "on this system the 1Password CLI uses the 1Password app's accounts, so {} is added \
+             in the app",
+            who.unwrap_or("another account")
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::AccountNotRegistered)
+    .with_do(
+        "add the account in the 1Password app and turn on Settings > Developer > Integrate \
+         with 1Password CLI",
+    )
+    .with_next(match who {
+        Some(w) => format!("opv login --account {w}"),
+        None => "opv login".to_string(),
+    })
 }
 
 /// Add an account at op's prompts (signed in in the same step); the accounts op knows after.

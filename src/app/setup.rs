@@ -280,7 +280,7 @@ fn expanded(path: &Path) -> Result<PathBuf, Error> {
     }
 }
 
-fn read_legacy(path: &Path) -> Result<BTreeMap<String, SecretValue>, Error> {
+pub(crate) fn read_legacy(path: &Path) -> Result<BTreeMap<String, SecretValue>, Error> {
     let info = fs::symlink_metadata(path).map_err(|_| settings_error("Cannot read the existing settings file. Leave it intact and fill the missing values privately in 1Password."))?;
     if !info.file_type().is_file() || info.len() > 1024 * 1024 {
         return Err(settings_error(

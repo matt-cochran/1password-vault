@@ -93,6 +93,7 @@ impl Backend for Fake {
 struct Ui {
     shown: Vec<String>,
     asked: Vec<Vec<String>>,
+    prompts: Vec<String>,
     pick: usize,
 }
 
@@ -107,7 +108,8 @@ impl Interaction for Ui {
     fn secret(&mut self, _: &str) -> Result<SecretValue, Error> {
         panic!("login never reads a secret")
     }
-    fn choose(&mut self, _: &str, choices: &[String]) -> Result<String, Error> {
+    fn choose(&mut self, prompt: &str, choices: &[String]) -> Result<String, Error> {
+        self.prompts.push(prompt.to_string());
         self.asked.push(choices.to_vec());
         Ok(choices[self.pick].clone())
     }
@@ -243,6 +245,7 @@ fn an_unknown_email_is_added_by_login_itself() {
         choose_account(
             &lists(&[ONE, BOTH]),
             Some("me@labs.example"),
+            false,
             dir.path(),
             &mut b,
             &mut Ui::default(),
@@ -260,6 +263,7 @@ fn the_added_account_is_recorded_for_the_project() {
         choose_account(
             &lists(&[ONE, BOTH]),
             Some("me@labs.example"),
+            false,
             dir.path(),
             &mut b,
             &mut Ui::default(),
@@ -281,6 +285,7 @@ fn several_accounts_offer_a_menu_with_add_another() {
         choose_account(
             &lists(&[BOTH]),
             None,
+            false,
             dir.path(),
             &mut Fake::signed_in(0),
             &mut ui,
@@ -311,6 +316,7 @@ fn an_added_account_is_named_after_its_email_domain() {
         choose_account(
             &lists(&[MY, MY_AND_LABS]),
             Some("me@labs.example"),
+            false,
             dir.path(),
             &mut b,
             &mut Ui::default(),
@@ -350,4 +356,112 @@ fn the_signed_in_message_names_the_account_by_its_email() {
             .iter()
             .any(|m| m.starts_with("Signed in to me@labs.example."))
     );
+}
+
+// --- #79: the menu even with one account, add another, WSL (FR-50) ----------------------
+
+fn mac() -> crate::host::Host {
+    crate::host::Host::from_env(&crate::host::FakeEnv::new("macos"))
+}
+
+/// One account and no choice recorded: still a menu, so the person sees which account it is.
+#[test]
+fn one_account_still_offers_a_menu_with_add_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ui = Ui::default();
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE]),
+            None,
+            false,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut ui,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        ui.asked[0],
+        [
+            "me@family.example (my.1password.com)",
+            "Add another 1Password account"
+        ]
+    );
+}
+
+#[test]
+fn the_wsl_menu_says_the_windows_apps_accounts_are_not_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ui = Ui::default();
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE]),
+            None,
+            false,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut ui,
+        )
+        .unwrap()
+    });
+    assert!(
+        ui.prompts[0].contains("Windows 1Password app"),
+        "{}",
+        ui.prompts[0]
+    );
+}
+
+#[test]
+fn a_recorded_account_never_shows_a_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::config_store::record_account(dir.path(), "AFAMILY0000000000000000001").unwrap();
+    let mut ui = Ui::default();
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE]),
+            None,
+            false,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut ui,
+        )
+        .unwrap()
+    });
+    assert!(ui.asked.is_empty());
+}
+
+#[test]
+fn login_add_adds_the_named_account_at_ops_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = Fake::signed_in(0);
+    crate::host::with_test_host(wsl(), || {
+        choose_account(
+            &lists(&[ONE, BOTH]),
+            Some("me@labs.example"),
+            true,
+            dir.path(),
+            &mut b,
+            &mut Ui::default(),
+        )
+        .unwrap()
+    });
+    assert_eq!(b.added, [Some("me@labs.example".to_string())]);
+}
+
+/// On macOS op uses the app's accounts: adding one is done in the app, said plainly.
+#[test]
+fn login_add_where_the_app_holds_the_accounts_explains_where_to_add() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = crate::host::with_test_host(mac(), || {
+        choose_account(
+            &lists(&[ONE]),
+            None,
+            true,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut Ui::default(),
+        )
+        .unwrap_err()
+    });
+    assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
 }
