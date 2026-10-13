@@ -52,6 +52,7 @@ pub(crate) mod tidy;
 mod ux2_tests;
 #[cfg(test)]
 mod ux_tests;
+pub(crate) mod variables;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};

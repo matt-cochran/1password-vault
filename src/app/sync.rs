@@ -511,7 +511,16 @@ fn run_staged(
         c.rotate,
         c.prune_immutable,
     )?;
-    let plan = c.scoped(plan);
+    let mut plan = c.scoped(plan);
+    // A target that delivers config itself (FR-46): its rows get their state first, so a
+    // refused or concealed config key blocks like any other finding.
+    let vars = store.variables();
+    let var_plan = match vars {
+        Some(v) => Some(super::variables::plan(fleet, t, &mut plan, v, &|n| {
+            c.in_scope(n)
+        })?),
+        None => None,
+    };
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     let plan_id = c.expect(&plan, &list_a, item_version, ports)?;
     let batch: Vec<(String, &SecretValue)> =
@@ -550,6 +559,20 @@ fn run_staged(
         }
     }
 
+    if let (Some(v), Some(vp)) = (vars, &var_plan) {
+        if !vp.set.is_empty() {
+            let batch: Vec<(String, &str)> = vp
+                .set
+                .iter()
+                .map(|n| (n.clone(), vp.want[n].as_str()))
+                .collect();
+            v.set(&batch).map_err(|e| after_writes(e, &done))?;
+            done.push(format!("set {} variable(s)", batch.len()));
+            report.written.extend(vp.set.iter().cloned());
+        }
+        report.unchanged.extend(vp.unchanged.iter().cloned());
+    }
+
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     print_changes(out, names, &report)?;
 
@@ -566,7 +589,31 @@ fn run_staged(
         p(out, kept_line(names, &plan.prune))?;
         report.kept = plan.prune.clone();
     }
+    if let (Some(v), Some(vp)) = (vars, &var_plan)
+        && !vp.prune.is_empty()
+    {
+        if opts.prune {
+            p(out, format!("will prune: {}", names.join(&vp.prune)))?;
+            v.remove(&vp.prune).map_err(|e| after_writes(e, &done))?;
+            done.push(format!("pruned {} variable(s)", vp.prune.len()));
+            p(out, format!("pruned: {}", names.join(&vp.prune)))?;
+            pruned.extend(vp.prune.iter().cloned());
+        } else {
+            p(out, kept_line(names, &vp.prune))?;
+            report.kept.extend(vp.prune.iter().cloned());
+        }
+    }
     print_held(out, fleet, &plan, names, &report.held)?;
+
+    // Every write above is already live (FR-46): there is no pending state and nothing to
+    // deploy, so `--deploy` only says so.
+    if runtime.live() {
+        report.pruned = pruned;
+        if opts.deploy {
+            p(out, live_line(label))?;
+        }
+        return Ok(report);
+    }
 
     // Managed names still staged from an earlier run (e.g. a sync without --deploy, or a
     // failed deploy). Status is only an extra deploy trigger, never change detection.
@@ -620,6 +667,11 @@ fn run_staged(
         }
     }
     Ok(report)
+}
+
+/// What `sync --deploy` prints on a target whose writes are live at once (FR-46).
+pub(crate) fn live_line(label: &str) -> String {
+    format!("nothing to deploy: {label} applies each write at once")
 }
 
 /// `pending deploy (pass --deploy): …`, the same words on every provider.
@@ -1467,9 +1519,27 @@ pub fn plan_scoped(
     let none = BTreeSet::new();
     let (mut plan, on_target, item_version) =
         read_and_plan_versioned(fleet, env_name, r, Some(&ports), &none, &none)?;
-    if let Some(p) = product {
-        scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
-    }
+    let scope = match product {
+        Some(p) => {
+            let names = product_names(fleet, env_name, p)?;
+            scope_plan(&mut plan, p, &names);
+            Some(names)
+        }
+        None => None,
+    };
+    // The config channel (FR-46): state of each config row, and what sync would set/prune.
+    let (live, var_plan) = match &ports {
+        Ports::Staged { store, runtime } => {
+            let vp = match store.variables() {
+                Some(v) => Some(super::variables::plan(fleet, t, &mut plan, v, &|n| {
+                    scope.as_ref().is_none_or(|s| s.contains(n))
+                })?),
+                None => None,
+            };
+            (runtime.live(), vp.unwrap_or_default())
+        }
+        Ports::Pinned { .. } => (false, super::variables::VarPlan::default()),
+    };
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
     let id = plan_id_of(
@@ -1506,16 +1576,17 @@ pub fn plan_scoped(
     // environment's `--confirm`.
     let clean = n == 0;
     let sync_next = SyncOpts {
-        deploy: true,
-        prune: !plan.prune.is_empty(),
+        // A live target has nothing to deploy (FR-46).
+        deploy: !live,
+        prune: !plan.prune.is_empty() || !var_plan.prune.is_empty(),
         product: product.map(str::to_string),
         expect_plan: clean.then(|| id.clone()),
         ..SyncOpts::default()
     }
     .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
     let verb = match ports {
-        Ports::Staged { .. } => "stage",
-        Ports::Pinned { .. } => "write",
+        Ports::Staged { .. } if !live => "stage",
+        _ => "write",
     };
     let label = t.provider().label();
     let unmanaged = unmanaged_on_target(fleet, env_name, &on_target)?;
@@ -1524,9 +1595,9 @@ pub fn plan_scoped(
          on {label} (never touched)",
         plural(plan.rows.len(), "key", "keys"),
         plural(n, "finding", "findings"),
-        plan.stage.len(),
+        plan.stage.len() + var_plan.set.len(),
         plan.held_immutable.len(),
-        plan.prune.len(),
+        plan.prune.len() + var_plan.prune.len(),
         unmanaged.len(),
     );
     let heading = match product {
@@ -1567,7 +1638,12 @@ pub fn plan_scoped(
     print_legend(out, &words, label)?;
     print_extras(out, &plan)?;
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
-    let staged: Vec<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
+    let staged: Vec<&str> = plan
+        .stage
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .chain(var_plan.set.iter().map(String::as_str))
+        .collect();
     if !staged.is_empty() {
         // Findings block the sync, so nothing is staged until they are fixed (bug 10).
         let when = if n > 0 {
@@ -1577,10 +1653,11 @@ pub fn plan_scoped(
         };
         line(format!("would {verb}{when}: {}", names.join(&staged)))?;
     }
-    if !plan.prune.is_empty() {
+    let prunes: Vec<String> = plan.prune.iter().chain(&var_plan.prune).cloned().collect();
+    if !prunes.is_empty() {
         line(format!(
             "would prune (needs --prune): {}",
-            names.join(&plan.prune)
+            names.join(&prunes)
         ))?;
     }
     let env = fleet.environment(env_name)?;
