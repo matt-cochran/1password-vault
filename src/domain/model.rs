@@ -95,6 +95,10 @@ pub struct KeySpec {
     /// no field of its own. Validated at load: see [`KeySpec::source`].
     #[serde(default)]
     pub from: Option<String>,
+    /// Personal key (FR-55): each person keeps their own value in their own item (a
+    /// developer's own LLM API key); only in environments without a target.
+    #[serde(default)]
+    pub personal: bool,
 }
 
 impl KeySpec {
@@ -140,6 +144,26 @@ pub struct Environment {
     /// The item holding this environment's least-privilege deploy identity (FR-40), read
     /// by `status`, `plan` and `sync` to sign the target CLI in for the run only.
     pub deploy_credentials: Option<ItemRef>,
+    /// Display name for people (`opv ui`, `ready`); the key stays `name` (FR-55).
+    pub title: Option<String>,
+    /// Who the environment is for (free text, e.g. `devops`): a person who cannot open it is
+    /// told so, not shown an error (FR-55).
+    pub audience: Option<String>,
+    /// Display order in grids; `None`: configuration order (FR-55).
+    pub order: Option<i64>,
+    /// Title of the vault holding each person's personal item (FR-55); `None`: the person's
+    /// own Private (Employee) vault.
+    pub personal_vault: Option<String>,
+    /// Title of each person's personal item (FR-55); `None`: the shared item's title plus
+    /// ` (personal)`.
+    pub personal_item: Option<String>,
+}
+
+impl Environment {
+    /// The display name: [`Environment::title`], else the key.
+    pub fn display(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// An `op://<vault>/<item>` reference to a whole item, by IDs or names (FR-40).
