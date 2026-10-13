@@ -54,7 +54,7 @@ opv check dev                                  # adds the empty field; opv open 
 opv run dev -- npm run dev
 ```
 
-`opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
+Already have a `.env`? `opv init dev --from .env --apply` declares every key and imports the values, verified, in one step ([details](docs/configuration.md#start-from-an-existing-env-opv-init---from)). `opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
 
 Then, for a deployed environment:
 

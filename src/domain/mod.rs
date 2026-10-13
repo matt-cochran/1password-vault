@@ -2,6 +2,7 @@
 
 pub mod adopt;
 pub mod convention;
+pub mod kind_guess;
 pub mod ledger;
 pub mod model;
 pub mod secret;

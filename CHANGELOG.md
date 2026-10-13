@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`opv init <env> --from .env`** ([#90](https://github.com/matt-cochran/1password-vault/issues/90)): start a project from an existing `.env` in one step. It declares every key (kind by name, secret when unsure; `--config-key` / `--secret-key` to change one) and shows the plan; `--apply` creates the vault and item, writes the configuration and imports the values, read back and verified. No value is ever printed, and no hand-written import script is needed.
+
 - **`opv ui`** ([#82](https://github.com/matt-cochran/1password-vault/issues/82)): a terminal UI to browse and manage every environment (from the configuration, by title and order), product, key, shared value and account, with secrets never shown; actions run the same `opv` commands in your terminal, a sync only exactly the plan you reviewed, a guarded environment only after you type its name. Falls back to `opv ready` text without an interactive terminal.
 
 - **Exact `plan` on Fly and GitHub** ([#36](https://github.com/matt-cochran/1password-vault/issues/36); FR-54): a sync you run records, in the item's `opv · state` section, each written name's target version and a keyed fingerprint of its value (never the value). `plan` then shows `same` or `changed` exactly instead of `unknown`, reports names changed outside opv (drift), and GitHub secrets that did not change are no longer rewritten each sync.
