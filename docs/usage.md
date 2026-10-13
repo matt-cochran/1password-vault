@@ -7,6 +7,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | Command | What it does | Changes |
 |---|---|---|
 | `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -409,6 +410,25 @@ Next (owner): opv open api/STRIPE_KEY --env staging
 ```
 
 `--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
+
+## Moving existing settings in: `opv adopt`
+
+When values already live somewhere else (a project's `.env` file, a Key Vault, a cluster), `opv adopt <env> --from <file>` shows what would come into the environment's 1Password item, without writing anything:
+
+```text
+staging: 4 found · 2 to write · 1 need a decision
+  api/DATABASE_URL                 differs: 1Password is kept (--replace api/DATABASE_URL to take the found value)  (from DATABASE_URL)
+  api/PRIVATE_KEY_PEM              import (to write)  (from PRIVATE_KEY_PEM)
+  api/LOG_LEVEL                    same value after the key's rules; nothing to do  (from LOG_LEVEL)
+  shared/FLY_API_TOKEN             import (to write)  (from FLEET__API__FLY_API_TOKEN, FLEET__WEB__FLY_API_TOKEN)
+Next: opv adopt staging --from .env.staging --apply
+```
+
+- A found name becomes a declared key by its target name, else by its bare key name; a name several keys share is skipped as ambiguous. A key that shares a value (`from`) lands in its source's field once; copies that differ are reported, never merged.
+- Each key's rules and transforms apply to both sides before comparing (`ensure_prefix`, a trailing newline, `pem_private_key`), so a formatting difference is not a change. Values are never printed, not even partly.
+- A filled 1Password field is never replaced unless you name it with `--replace product/KEY` (an immutable key also needs `--rotate product/KEY`); the old value is kept in the section `opv · kept`.
+- `--apply` writes everything in one item edit, reads the item back and checks each field. It needs your own session, and re-running is safe: the plan is recomputed from what is there. It never syncs, deploys, prunes or deletes the source; your apps keep their current secrets until you sync.
+- Sources: a dotenv file (literal `KEY=value` lines, never executed; it must be a private regular file under 1 MiB), or `--from target` for targets that can show values: Azure Key Vault, Kubernetes Secrets, and GitHub variables (config). Fly secrets and GitHub secrets can never be read back: put those values in a private dotenv file from where you keep them today, or type them in 1Password.
 
 ## Fresh fleet: `opv bootstrap`
 

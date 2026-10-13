@@ -295,6 +295,19 @@ Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
   opv init prod --fly-app myapp         # deploys to Fly";
 
+const ADOPT_QUICK: &str = "\
+Examples:
+  opv adopt staging --from .env.staging          # what would come in; nothing written
+  opv adopt staging --from .env.staging --apply  # write the imports, verified";
+
+const ADOPT_MORE: &str = "\
+Each found name maps to a declared key (its target name, else its bare name); each key's
+rules normalise both sides before comparing. A filled 1Password field is never replaced
+unless named with --replace (immutable keys also need --rotate); the old value is kept in
+the section \"opv · kept\". Values are never printed. --from target reads Key Vault,
+Kubernetes and GitHub variables; Fly and GitHub secrets cannot be read back. It never syncs,
+deploys or deletes the source.";
+
 const READY_QUICK: &str = "\
 Examples:
   opv ready                      # every environment × product, findings, the next step
@@ -542,6 +555,27 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// Bring values that exist elsewhere into the environment's 1Password item, after review.
+    #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
+    Adopt {
+        /// Environment whose item receives the values.
+        env: String,
+        /// A private dotenv file, or `target` to read what the environment's target can show.
+        #[arg(long, value_name = "FILE|target")]
+        from: String,
+        /// Take the found value for this key although 1Password holds another (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        replace: Vec<String>,
+        /// Allow --replace on this immutable key (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        rotate: Vec<String>,
+        /// Write the plan to 1Password (without it, nothing is written).
+        #[arg(long)]
+        apply: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// What is ready, what is not, and who does what next: one receipt (read-only).
     #[command(before_help = READY_QUICK)]
     Ready {
@@ -1309,6 +1343,8 @@ impl Cmd {
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
+            Cmd::Adopt { env, from, .. } if from == "target" => Some((env, Reach::Target)),
+            Cmd::Adopt { env, .. } => Some((env, Reach::Store)),
             _ => None,
         }
     }
@@ -1328,6 +1364,7 @@ impl Cmd {
             | Cmd::Item(ItemCmd::Skeleton { json, .. })
             | Cmd::Bootstrap { json, .. }
             | Cmd::Ready { json, .. }
+            | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. }) => *json,
             Cmd::Plan(a) => a.json,
@@ -1859,6 +1896,28 @@ fn run_other(
         }
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
+        }
+        Cmd::Adopt {
+            env,
+            from,
+            replace,
+            rotate,
+            apply,
+            json,
+        } => {
+            let source = if from == "target" {
+                opv::app::adopt::Source::Target
+            } else {
+                opv::app::adopt::Source::Dotenv(PathBuf::from(from))
+            };
+            let opts = opv::app::adopt::Opts {
+                source,
+                replace,
+                rotate,
+                apply,
+                json,
+            };
+            opv::app::adopt::run(&loaded?, &env, &opts, r, out)
         }
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,

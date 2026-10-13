@@ -11,6 +11,7 @@
 
 pub mod account;
 pub mod add;
+pub mod adopt;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;
