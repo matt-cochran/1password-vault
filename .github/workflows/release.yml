@@ -195,7 +195,9 @@ jobs:
         shell: bash
         run: |
           # Platform packages first, then the main package.
-          for pkg in npm-dist/@matthew-cochran/opv-* npm-dist/opv; do
+          # Paths start with ./ : npm reads a bare two-part path (npm-dist/opv) as a GitHub
+          # owner/repo shorthand and tries to clone it (v0.6.0 failed that way).
+          for pkg in ./npm-dist/@matthew-cochran/opv-* ./npm-dist/opv; do
             name="$(node -p "require('./$pkg/package.json').name")"
             version="$(node -p "require('./$pkg/package.json').version")"
             # `npm view` prints nothing (and succeeds) for a missing version: compare output.
