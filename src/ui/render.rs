@@ -44,6 +44,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Key { product, key } => super::screens::key_detail(f, cols[1], app, product, key),
         Screen::Shared => super::screens::shared(f, cols[1], app),
         Screen::Accounts => super::screens::accounts(f, cols[1], app),
+        Screen::Adopt { env, from } => super::screens::adopt(f, cols[1], app, env, from),
     }
     keybar(f, rows[2], app);
     if let Some(m) = &app.modal {

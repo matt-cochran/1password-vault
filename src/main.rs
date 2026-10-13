@@ -591,6 +591,9 @@ enum Cmd {
         /// Allow --replace on this immutable key (repeatable).
         #[arg(long, value_name = "PRODUCT/KEY")]
         rotate: Vec<String>,
+        /// Leave this key out of the import although it would be imported (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        skip: Vec<String>,
         /// Write the plan to 1Password (without it, nothing is written).
         #[arg(long)]
         apply: bool,
@@ -2129,6 +2132,7 @@ fn run_other(
             from,
             replace,
             rotate,
+            skip,
             apply,
             json,
         } => {
@@ -2141,6 +2145,7 @@ fn run_other(
                 source,
                 replace,
                 rotate,
+                skip,
                 apply,
                 json,
             };

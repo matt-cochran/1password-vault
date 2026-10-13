@@ -82,6 +82,7 @@ fn opts(dir: &tempfile::TempDir, apply: bool, replace: &[&str]) -> Opts {
         source: Source::Dotenv(dir.path().join("dev.env")),
         replace: replace.iter().map(|s| s.to_string()).collect(),
         rotate: Vec::new(),
+        skip: Vec::new(),
         apply,
         json: false,
     }
@@ -196,4 +197,43 @@ fn a_service_account_cannot_apply() {
         || run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap_err(),
     );
     assert_eq!(e.exit_code(), 6);
+}
+
+// #94: --skip ---------------------------------------------------------------------------
+
+#[test]
+fn skip_leaves_an_import_unwritten() {
+    let (op, fleet, dir) = world(true);
+    let mut o = opts(&dir, true, &[]);
+    o.skip = vec!["api/OPENAI_API_KEY".into()];
+    run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap();
+    assert_eq!(value_of(&op, &fleet, "OPENAI_API_KEY"), "");
+}
+
+#[test]
+fn skip_still_imports_the_other_keys() {
+    let (op, fleet, dir) = world(true);
+    let mut o = opts(&dir, true, &[]);
+    o.skip = vec!["api/OPENAI_API_KEY".into()];
+    run(&fleet, "dev", &o, &op, &mut Vec::new()).unwrap();
+    assert_eq!(value_of(&op, &fleet, "LOG_LEVEL"), "info");
+}
+
+#[test]
+fn a_skipped_key_is_reported_as_skipped() {
+    let (op, fleet, dir) = world(true);
+    let mut o = opts(&dir, false, &[]);
+    o.skip = vec!["api/OPENAI_API_KEY".into()];
+    o.json = true;
+    let mut out = Vec::new();
+    run(&fleet, "dev", &o, &op, &mut out).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("\"skipped\""));
+}
+
+#[test]
+fn skip_names_must_be_declared() {
+    let (op, fleet, dir) = world(true);
+    let mut o = opts(&dir, false, &[]);
+    o.skip = vec!["api/NOPE".into()];
+    assert!(run(&fleet, "dev", &o, &op, &mut Vec::new()).is_err());
 }

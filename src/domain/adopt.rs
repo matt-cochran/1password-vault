@@ -38,6 +38,8 @@ pub enum Action {
     NotDeclared,
     /// The key does not apply in this environment.
     NotApplicable,
+    /// `--skip` names the key: it would be imported, and the person left it out (#94).
+    Skipped,
 }
 
 impl Action {
@@ -55,6 +57,7 @@ impl Action {
             Action::Ambiguous => "ambiguous",
             Action::NotDeclared => "not_declared",
             Action::NotApplicable => "not_applicable",
+            Action::Skipped => "skipped",
         }
     }
 }

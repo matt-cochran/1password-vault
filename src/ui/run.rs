@@ -121,6 +121,20 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
                     app.refreshed(Snapshot::gather(&source));
                     app.status = "refreshed".into();
                 }
+                Effect::AdoptPlan { env, from } => {
+                    match source.json(&["adopt", &env, "--from", &from, "--json"]) {
+                        Ok(doc) if doc["rows"].is_array() => app.open_adopt(&env, &from, &doc),
+                        Ok(doc) => {
+                            app.status = format!(
+                                "opv adopt {env} --from {from}: {}",
+                                doc["error"]["message"]
+                                    .as_str()
+                                    .unwrap_or("could not read the file")
+                            )
+                        }
+                        Err(why) => app.status = format!("opv adopt {env}: {why}"),
+                    }
+                }
                 Effect::LoadAccounts => {
                     app.accounts = source.json(&["account", "list", "--json"]).ok();
                 }

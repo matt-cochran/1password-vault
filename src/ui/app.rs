@@ -21,6 +21,11 @@ pub enum Screen {
         key: String,
     },
     Accounts,
+    /// The adoption review (#94): what `opv adopt <env> --from <from>` found, per key.
+    Adopt {
+        env: String,
+        from: String,
+    },
 }
 
 /// One sidebar entry.
@@ -68,6 +73,11 @@ pub enum Effect {
     Run(Vec<String>),
     /// Read `opv account list --json` for the accounts screen.
     LoadAccounts,
+    /// Read `opv adopt <env> --from <from> --json` and open the adoption review (#94).
+    AdoptPlan {
+        env: String,
+        from: String,
+    },
 }
 
 /// A key, independent of the terminal library.
@@ -101,6 +111,8 @@ pub struct App {
     pub status: String,
     /// `opv account list --json`, once loaded.
     pub accounts: Option<serde_json::Value>,
+    /// The adoption review's rows and decisions (#94).
+    pub adopt: Vec<super::adopt_review::ReviewRow>,
 }
 
 impl App {
@@ -116,6 +128,7 @@ impl App {
             modal: None,
             status: String::new(),
             accounts: None,
+            adopt: Vec::new(),
         };
         app.rebuild_nav();
         app
@@ -194,6 +207,12 @@ impl App {
     pub fn handle(&mut self, key: Key) -> Effect {
         if self.modal.is_some() {
             return self.handle_modal(key);
+        }
+        if let Screen::Adopt { env, from } = &self.screen
+            && !self.in_nav
+            && let Some(effect) = self.handle_adopt(key, env.clone(), from.clone())
+        {
+            return effect;
         }
         match key {
             Key::Char('q') => return Effect::Quit,
@@ -284,6 +303,65 @@ impl App {
             _ => {}
         }
         Effect::None
+    }
+
+    /// Open the adoption review from `opv adopt <env> --from <from> --json` (#94).
+    pub fn open_adopt(&mut self, env: &str, from: &str, doc: &serde_json::Value) {
+        let snap = &self.snap;
+        let immutable = |p: &str, k: &str| {
+            snap.products
+                .iter()
+                .find(|x| x.name == p)
+                .and_then(|x| x.keys.iter().find(|y| y.name == k))
+                .is_some_and(|y| y.immutable)
+        };
+        let label = |p: &str, k: &str| self.label(p, k);
+        self.adopt = super::adopt_review::rows_from(doc, &label, &immutable);
+        self.open(Screen::Adopt {
+            env: env.to_string(),
+            from: from.to_string(),
+        });
+        self.in_nav = false;
+    }
+
+    /// Keys of the adoption review: move, change the selected key's decision, apply. `None`
+    /// for a key the review does not use (handled as everywhere else).
+    fn handle_adopt(&mut self, key: Key, env: String, from: String) -> Option<Effect> {
+        use super::adopt_review::{command, toggle, writes};
+        match key {
+            Key::Up => self.row = self.row.saturating_sub(1),
+            Key::Down => self.row = (self.row + 1).min(self.adopt.len().saturating_sub(1)),
+            Key::Enter | Key::Char(' ') => {
+                if let Some(row) = self.adopt.get_mut(self.row) {
+                    row.decision = toggle(row);
+                }
+            }
+            Key::Char('y') => {
+                let n = writes(&self.adopt);
+                if n == 0 {
+                    self.status = "nothing to write: every key is kept or skipped".into();
+                    return Some(Effect::None);
+                }
+                let args = command(&env, &from, &self.adopt);
+                let guarded = self.snap.env(&env).is_some_and(|e| e.guarded);
+                self.modal = Some(Modal::Confirm {
+                    title: format!("Adopt into {env}"),
+                    lines: vec![
+                        format!(
+                            "writes {n} field(s) in 1Password, read back and verified; a replaced value is kept in opv · kept"
+                        ),
+                        "never syncs or deploys; your apps keep their secrets until you sync"
+                            .into(),
+                        format!("runs: opv {}", args.join(" ")),
+                    ],
+                    command: args,
+                    guard: guarded.then(|| env.clone()),
+                    typed: String::new(),
+                });
+            }
+            _ => return None,
+        }
+        Some(Effect::None)
     }
 
     /// `product/KEY`, or `KEY` for the simple profile's product.
@@ -405,17 +483,14 @@ impl App {
                 value.pop();
             }
             (Modal::Input { value, env, .. }, Key::Enter) => {
-                let (file, env) = (value.clone(), env.clone());
-                self.modal = Some(Modal::Confirm {
-                    title: format!("Adopt into {env}"),
-                    lines: vec![
-                        "shows what would come in first; writes only with --apply".into(),
-                        format!("runs: opv adopt {env} --from {file}"),
-                    ],
-                    command: vec!["adopt".into(), env, "--from".into(), file],
-                    guard: None,
-                    typed: String::new(),
-                });
+                let (from, env) = (value.trim().to_string(), env.clone());
+                self.modal = None;
+                if from.is_empty() {
+                    self.status = "no file given; nothing was read".into();
+                    return Effect::None;
+                }
+                // Read-only: the review shows what would come in; nothing is written yet.
+                return Effect::AdoptPlan { env, from };
             }
             _ => {}
         }
