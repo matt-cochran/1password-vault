@@ -152,3 +152,17 @@ fn the_declare_a_key_form_draws_its_fields() {
     a.handle(Key::Char('+'));
     assert!(frame(&a, 140, 40).contains("environments"));
 }
+
+#[test]
+fn the_access_screen_shows_the_owners_command() {
+    let mut a = app();
+    a.screen = Screen::Access;
+    a.access = Some(serde_json::json!({
+        "environments": [{"environment": "ci", "vault_id": "v", "deployed": true, "visible": true,
+                          "people": 2, "guests": 0, "service_accounts": []}],
+        "findings": [{"code": "no_ci_reader", "environment": "ci",
+                      "message": "ci deploys but has no read-only service account for CI",
+                      "next": "op service-account create \"p-ci-ci\" --vault v:read_items --expires-in 90d"}]
+    }));
+    assert!(frame(&a, 160, 30).contains("owner runs: op service-account create"));
+}

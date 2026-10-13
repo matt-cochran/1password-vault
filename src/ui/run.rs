@@ -135,6 +135,9 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
                         Err(why) => app.status = format!("opv adopt {env}: {why}"),
                     }
                 }
+                Effect::LoadAccess => {
+                    app.access = source.json(&["access", "--json"]).ok();
+                }
                 Effect::LoadAccounts => {
                     app.accounts = source.json(&["account", "list", "--json"]).ok();
                 }

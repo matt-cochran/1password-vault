@@ -254,3 +254,78 @@ pub fn adopt(f: &mut Frame, area: Rect, app: &App, env: &str, from: &str) {
         area,
     );
 }
+
+/// Who can read each environment's vault (#96), from `opv access --json`: people counted,
+/// service accounts named with read-only or can-write, then the findings with the owner's
+/// command for a read-only CI reader (shown, never run: 1Password shows its token once).
+pub fn access(f: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    match &app.access {
+        None => lines.push(Line::raw("reading who can use each vault…")),
+        Some(doc) => {
+            for e in doc["environments"].as_array().into_iter().flatten() {
+                let name = e["environment"].as_str().unwrap_or("-");
+                let title = app.snap.env(name).map_or(name, |x| x.title.as_str());
+                let text = if e["visible"].as_bool() == Some(false) {
+                    format!("{title:<24} not visible to you (managing the vault is needed)")
+                } else {
+                    let sas: Vec<String> = e["service_accounts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|s| {
+                            let how = if s["read_only"].as_bool() == Some(true) {
+                                "read-only"
+                            } else {
+                                "can write"
+                            };
+                            format!("{} ({how})", s["name"].as_str().unwrap_or("-"))
+                        })
+                        .collect();
+                    format!(
+                        "{title:<24} {} people, {} guests; {}",
+                        e["people"].as_u64().unwrap_or(0),
+                        e["guests"].as_u64().unwrap_or(0),
+                        if sas.is_empty() {
+                            "no service account".to_string()
+                        } else {
+                            sas.join(", ")
+                        }
+                    )
+                };
+                lines.push(Line::raw(text));
+            }
+            let found: Vec<&serde_json::Value> =
+                doc["findings"].as_array().into_iter().flatten().collect();
+            if !found.is_empty() {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled("Needs attention", BOLD));
+            }
+            for fnd in found {
+                lines.push(Line::raw(format!(
+                    "! {}: {}",
+                    fnd["code"].as_str().unwrap_or(""),
+                    fnd["message"].as_str().unwrap_or("")
+                )));
+                if let Some(n) = fnd["next"].as_str() {
+                    lines.push(Line::styled(format!("  owner runs: {n}"), DIM));
+                }
+            }
+            if doc["findings"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|f| f["next"].is_string()))
+            {
+                lines.push(Line::styled(
+                    "1Password shows the new token once, to you: store it as the CI secret OP_SERVICE_ACCOUNT_TOKEN yourself.",
+                    DIM,
+                ));
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" CI access ")),
+        area,
+    );
+}

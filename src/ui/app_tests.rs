@@ -26,28 +26,34 @@ fn the_sidebar_lists_every_configured_environment() {
 #[test]
 fn enter_on_an_environment_opens_it() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Enter]);
+    press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
     assert_eq!(a.screen, Screen::Env("local".into()));
 }
 
 #[test]
 fn escape_goes_back() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Enter, Key::Esc]);
+    press(
+        &mut a,
+        &[Key::Down, Key::Down, Key::Down, Key::Enter, Key::Esc],
+    );
     assert_eq!(a.screen, Screen::Overview);
 }
 
 #[test]
 fn sync_on_a_deployed_environment_starts_with_its_plan() {
     let mut a = app();
-    let e = press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Char('s')]);
+    let e = press(
+        &mut a,
+        &[Key::Down, Key::Down, Key::Down, Key::Down, Key::Char('s')],
+    );
     assert_eq!(e, Effect::Plan { env: "ci".into() });
 }
 
 #[test]
 fn sync_on_a_local_environment_explains_there_is_nothing_to_sync() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Char('s')]);
+    press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Char('s')]);
     assert!(a.status.contains("local only"), "{}", a.status);
 }
 
@@ -112,7 +118,10 @@ fn escape_cancels_a_confirmation_and_changes_nothing() {
 #[test]
 fn enter_on_a_key_row_opens_its_detail() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Enter, Key::Enter]);
+    press(
+        &mut a,
+        &[Key::Down, Key::Down, Key::Down, Key::Enter, Key::Enter],
+    );
     assert!(matches!(a.screen, Screen::Key { .. }));
 }
 
@@ -282,4 +291,18 @@ fn esc_closes_a_form_without_running_anything() {
     let mut a = app();
     press(&mut a, &[Key::Char('+'), Key::Esc]);
     assert!(a.modal.is_none());
+}
+
+// #96: CI access --------------------------------------------------------------------------------
+
+#[test]
+fn the_sidebar_offers_ci_access() {
+    assert!(app().nav.contains(&Nav::Access));
+}
+
+#[test]
+fn opening_ci_access_loads_it() {
+    let mut a = app();
+    press(&mut a, &[Key::Down, Key::Down]);
+    assert_eq!(a.handle(Key::Enter), Effect::LoadAccess);
 }
