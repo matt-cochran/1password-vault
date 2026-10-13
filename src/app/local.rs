@@ -19,25 +19,26 @@ pub fn select(
         )
         .with_next(super::check_command(fleet, Some(env), None)));
     }
+    // FR-47: a source-only product is never run on its own, so it is not offered by the
+    // "one product needs no choosing" shortcut or the available list.
+    let available: Vec<&str> = fleet
+        .products
+        .iter()
+        .filter(|(_, p)| !p.source_only)
+        .map(|(n, _)| n.as_str())
+        .collect();
     // One product needs no choosing.
-    let only = (fleet.products.len() == 1)
-        .then(|| fleet.products.keys().next().map(String::as_str))
-        .flatten();
+    let only = (available.len() == 1).then(|| available[0]);
     let product = if fleet.is_simple() {
         product
     } else {
         product.or(only)
     };
     if !fleet.is_simple() && required && product.is_none() {
-        let first = fleet.products.keys().next().map(String::as_str);
+        let first = available.first().copied();
         return Err(Error::Config(format!(
             "--product is required because this configuration contains multiple products. Choose --product <name> (available: {}).",
-            fleet
-                .products
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            available.join(", ")
         ).into())
         .with_next(super::check_command(fleet, Some(env), first)));
     }
@@ -45,6 +46,11 @@ pub fn select(
         && !fleet.products.contains_key(p)
     {
         return Err(super::undefined_product(fleet, p, Some(env)));
+    }
+    if let Some(p) = product
+        && fleet.products[p].source_only
+    {
+        return Err(source_only_error(fleet, env, p));
     }
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
@@ -61,6 +67,16 @@ pub fn select(
         }
     }
     Ok(selected)
+}
+
+/// FR-47: `product` holds canonical values for other products' keys and is never run on
+/// its own. The `Next:` step names a product that reads it, when one does.
+fn source_only_error(fleet: &Fleet, env: &str, product: &str) -> Error {
+    let e = super::source_only_message(product);
+    match fleet.referencing_product(product) {
+        Some(q) => e.with_next(format!("opv check {env} --product {q}")),
+        None => e.with_next(super::check_command(fleet, Some(env), None)),
+    }
 }
 
 pub fn check(
@@ -261,5 +277,35 @@ mod tests {
         )]);
         let res = check(&f, "prod", Some("allumata"), &r, &mut Vec::new(), false);
         assert!(res.is_ok(), "{res:?}");
+    }
+
+    /// `shared` is source-only; `api` is the only product that can be chosen (FR-47).
+    #[test]
+    fn select_ignores_a_source_only_product_for_the_single_product_shortcut() {
+        let f = crate::config::parse(
+            r#"
+[profile]
+kind = "fleet"
+[environments.ci]
+vault_id = "vci"
+item_id = "ici"
+fly.app = "app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+[products.shared]
+source_only = true
+[products.shared.keys.TOKEN]
+kind = "secret"
+environments = ["ci"]
+[products.api.keys.TOKEN]
+kind = "secret"
+environments = ["ci"]
+"#,
+        )
+        .unwrap();
+        let selected = select(&f, "ci", None, true).unwrap();
+        assert_eq!(
+            selected.products.keys().cloned().collect::<Vec<_>>(),
+            vec!["api".to_string()]
+        );
     }
 }

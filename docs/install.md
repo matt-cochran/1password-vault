@@ -130,11 +130,12 @@ Install only what your target needs; `opv doctor` checks exactly that and prints
 | `flyctl` | tested with 0.4.112 and later 0.4.x patches | Fly targets |
 | Azure CLI `az` | 2.60 or newer | Azure targets |
 | `kubectl` | a version that matches your cluster (opv checks only that it runs) | Kubernetes targets |
+| GitHub CLI `gh` | tested with 2.102.0 | GitHub Actions targets |
 
 `opv doctor` warns (exit code unchanged) when a version differs.
 
 - **Azure on Windows:** works natively. Values reach `az` through a named pipe only your user can open (Linux, WSL and macOS use stdin).
 - **Kubernetes:** opv uses the cluster context named in `secrets.toml`, not your current one. Your kubeconfig must contain it.
-- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials: a `deploy_credentials` item in that vault (Fly or Azure), the CI provider's OIDC federation (such as `azure/login`), `FLY_API_TOKEN`, or a kubeconfig.
-- **Locally:** `opv login <env>` (or the 1Password desktop app integration), plus `deploy_credentials` or `fly auth login`, `az login` or a working kubeconfig.
+- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials: a `deploy_credentials` item in that vault (Fly, Azure or GitHub), the CI provider's OIDC federation (such as `azure/login`), `FLY_API_TOKEN`, or a kubeconfig.
+- **Locally:** `opv login <env>` (or the 1Password desktop app integration), plus `deploy_credentials` or `fly auth login`, `az login`, `gh auth login` or a working kubeconfig.
 - **Writes to 1Password:** the layout tidy, `setup` and every manifest write (`init` in a new project, `add`, `config import`, `config edit`) need a person signed in with their own session; `item skeleton` needs an identity that may edit the item. A read-only service account is enough for everything else, CI included.

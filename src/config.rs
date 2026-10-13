@@ -605,6 +605,15 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
                 "product {product:?}: name must match ^[a-z][a-z0-9_-]*$"
             )));
         }
+        if p.source_only && p.keys.is_empty() {
+            return Err(doc.at_path(
+                &["products", product],
+                format!(
+                    "product {product:?}: source_only = true needs at least one key; declare a \
+                     key under [products.{product}.keys], or remove source_only"
+                ),
+            ));
+        }
         for (key, spec) in &p.keys {
             validate_key(&format!("{product}/{key}"), key, spec, &environments)?;
         }
@@ -619,7 +628,43 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         origin: Default::default(),
     };
     check_names(&fleet, doc)?;
+    check_scopes(&fleet)?;
     Ok(fleet)
+}
+
+/// FR-48: every product a target is limited to is declared and delivers its own keys (not
+/// source-only), so a misspelt name can never silently deliver nothing.
+fn check_scopes(fleet: &Fleet) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        let Some(t) = env.target() else {
+            continue;
+        };
+        let Some(listed) = t.scoped_products() else {
+            continue;
+        };
+        let section = t.provider().section();
+        for p in listed {
+            match fleet.products.get(p) {
+                None => {
+                    let declared: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
+                    return Err(cfg(format!(
+                        "environment {env_name}: {section}.products names {p:?}, which is not a \
+                         declared product (declared: {})",
+                        declared.join(", ")
+                    )));
+                }
+                Some(prod) if prod.source_only => {
+                    return Err(cfg(format!(
+                        "environment {env_name}: {section}.products names {p:?}, which is \
+                         source-only and never delivered; list the products whose keys point \
+                         at it with from instead"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate a simple-profile file (FR-20) and desugar it into the shared model: one product
@@ -653,7 +698,13 @@ fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> 
         validate_key(key, key, spec, &environments)?;
     }
 
-    let mut products = BTreeMap::from([(SIMPLE_PRODUCT.to_string(), Product { keys: raw.keys })]);
+    let mut products = BTreeMap::from([(
+        SIMPLE_PRODUCT.to_string(),
+        Product {
+            source_only: false,
+            keys: raw.keys,
+        },
+    )]);
     check_shared(&mut products, Profile::Simple, doc)?;
     let fleet = Fleet {
         environments,
@@ -767,6 +818,11 @@ fn validate_key(
     {
         return Err(cfg(format!(
             "{owner}: rule ensure_prefix must be a non-empty string"
+        )));
+    }
+    if spec.rules.pattern.is_some() && spec.rules.regex.is_some() {
+        return Err(cfg(format!(
+            "{owner}: pattern and regex cannot both be set; keep regex (pattern is deprecated)"
         )));
     }
     if spec.rules.pattern.is_some() && spec.rules.ensure_prefix.is_none() {
@@ -963,6 +1019,11 @@ fn check_names(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
         let mut seen_in_store: BTreeMap<String, String> = BTreeMap::new();
         for (product, p) in &fleet.products {
+            // FR-47/FR-48: an undelivered product's keys render no name here, so they are
+            // exempt from the name collision check too.
+            if !fleet.delivers(env_name, product) {
+                continue;
+            }
             for key in p.keys.keys() {
                 let name = t.env_name(product, key);
                 let owner = key_label(product, key);
@@ -1329,6 +1390,71 @@ mod tests {
             signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"([a-z\"")
         ));
         assert!(m.contains("p/K1"), "{m}");
+    }
+
+    #[test]
+    fn rejects_pattern_and_regex_together_naming_the_key() {
+        let m = config_err(&format!(
+            "{}{}",
+            ok(),
+            signoz_like_key(
+                "K1",
+                "ensure_prefix = \"p-\", pattern = \"[a-z]+\", regex = \"p-[a-z]+\""
+            )
+        ));
+        assert_eq!(
+            m,
+            "p/K1: pattern and regex cannot both be set; keep regex (pattern is deprecated)"
+        );
+    }
+
+    #[test]
+    fn pattern_loads_with_a_deprecation_note_naming_the_key_and_equivalent_regex() {
+        let fleet = parse(&format!(
+            "{}{}",
+            ok(),
+            signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"[a-z]+\"")
+        ))
+        .unwrap();
+        assert_eq!(
+            fleet.notes(),
+            vec!["p/K1: pattern is deprecated; use regex = 'p\\-(?:[a-z]+)' instead of pattern"]
+        );
+    }
+
+    #[test]
+    fn pattern_emits_one_deprecation_note_per_key() {
+        let fleet = parse(&format!(
+            "{}{}{}",
+            ok(),
+            signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"[a-z]+\""),
+            signoz_like_key("K2", "ensure_prefix = \"q-\", pattern = \"[0-9]+\"")
+        ))
+        .unwrap();
+        assert_eq!(fleet.notes().len(), 2);
+    }
+
+    #[test]
+    fn regex_emits_no_deprecation_note() {
+        let fleet = parse(&format!(
+            "{}{}",
+            ok(),
+            signoz_like_key("K1", "ensure_prefix = \"p-\", regex = \"p-[a-z]+\"")
+        ))
+        .unwrap();
+        assert!(fleet.notes().is_empty());
+    }
+
+    #[test]
+    fn ensure_prefix_with_regex_is_a_valid_configuration() {
+        assert!(
+            parse(&format!(
+                "{}{}",
+                ok(),
+                signoz_like_key("K1", "ensure_prefix = \"p-\", regex = \"p-[a-z]+\"")
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1803,7 +1929,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         .unwrap();
         assert!(matches!(
             crate::app::target(&f, "dev"),
-            Err(Error::Config(m)) if m.contains("add one target section (fly, azure, kubernetes)")
+            Err(Error::Config(m)) if m.contains("add one target section (fly, azure, kubernetes, github)")
         ));
     }
 
@@ -1820,7 +1946,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
         assert!(config_err(&bad).ends_with(
-            "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly, kubernetes\n"
+            "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly, github, kubernetes\n"
         ));
     }
 
@@ -1848,7 +1974,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
-             confirm_env, account, deploy_credentials or a target section (azure, fly, kubernetes)\n"
+             confirm_env, account, deploy_credentials or a target section (azure, fly, github, kubernetes)\n"
         ));
     }
 
@@ -2133,6 +2259,79 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         assert_eq!(
             parse(&text).unwrap().products[SIMPLE_PRODUCT].keys["PRISMA_URL"].source(),
             Some((SIMPLE_PRODUCT, "DATABASE_URL"))
+        );
+    }
+
+    /// FR-24 (0.6.0): the replacement a `pattern` deprecation note suggests pastes into the
+    /// file as is and loads.
+    #[test]
+    fn the_suggested_regex_replacement_loads() {
+        let head = "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
+                    item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
+                    environments = [\"prod\"]\n";
+        let old = parse(&format!(
+            "{head}rules = {{ ensure_prefix = \"p-\", pattern = \"[a-z]+\" }}\n"
+        ))
+        .unwrap();
+        let note = old.notes().remove(0);
+        let rule = note
+            .split_once("use ")
+            .and_then(|(_, r)| r.strip_suffix(" instead of pattern"))
+            .unwrap()
+            .to_string();
+        let new = format!("{head}rules = {{ ensure_prefix = \"p-\", {rule} }}\n");
+        assert!(parse(&new).is_ok(), "{new}");
+    }
+
+    // ---- source-only products (FR-47) ------------------------------------------------
+
+    /// A source-only product whose one key renders the same Fly name as a delivered key of
+    /// another product: `my-app` and `my_app` both normalize to `MY_APP` (FR-8).
+    fn shared_name_fleet(source_only: bool) -> String {
+        format!(
+            "[profile]\nkind = \"fleet\"\n\
+             [environments.ci]\nvault_id = \"vci\"\nitem_id = \"ici\"\n\
+             fly.app = \"app\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+             [products.my_app]\nsource_only = {source_only}\n\
+             [products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"ci\"]\n\
+             [products.my-app.keys.K]\nkind = \"secret\"\nenvironments = [\"ci\"]\n"
+        )
+    }
+
+    #[test]
+    fn source_only_product_is_exempt_from_the_name_collision_check() {
+        let r = parse(&shared_name_fleet(true));
+        assert!(r.is_ok(), "{:?}", r.err());
+    }
+
+    #[test]
+    fn delivered_products_rendering_one_name_still_collide() {
+        let m = config_err(&shared_name_fleet(false));
+        assert!(m.contains("both render Fly name FLEET__MY_APP__K"), "{m}");
+    }
+
+    #[test]
+    fn source_only_product_without_keys_is_refused_at_its_line() {
+        let text = format!("{}\n[products.shared]\nsource_only = true\n", ok());
+        let m = config_err(&text);
+        assert!(
+            m.contains("source_only = true needs at least one key")
+                && m.contains("TOML parse error at line"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn source_only_with_a_non_boolean_value_is_refused_at_its_line() {
+        let text = format!(
+            "{}\n[products.shared]\nsource_only = \"true\"\n\
+             [products.shared.keys.FLY_API_TOKEN]\nkind = \"secret\"\nenvironments = [\"ci\"]\n",
+            ok()
+        );
+        let m = config_err(&text);
+        assert!(
+            m.contains("invalid type: string") && m.contains("TOML parse error at line"),
+            "{m}"
         );
     }
 }

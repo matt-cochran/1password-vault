@@ -1,0 +1,1 @@
+failed to set secret "GITHUB_FOO": HTTP 422: Secret names must not start with GITHUB_. (https://api.github.com/repos/example-org/example-repo/actions/secrets/GITHUB_FOO)

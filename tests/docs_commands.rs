@@ -187,6 +187,13 @@ fn doc_files(root: &Path) -> Vec<PathBuf> {
         .collect();
     docs.sort();
     files.extend(docs);
+    // Each example's README is a page people copy commands from, too.
+    let mut examples: Vec<PathBuf> = std::fs::read_dir(root.join("examples"))
+        .expect("examples dir")
+        .map(|e| e.expect("entry").path().join("README.md"))
+        .collect();
+    examples.sort();
+    files.extend(examples);
     files.retain(|p| p.exists());
     files
 }

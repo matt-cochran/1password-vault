@@ -68,6 +68,12 @@ pub fn run_scoped(
     if let Some(p) = product {
         scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
     }
+    // Config delivered as variables (FR-46): each config row's state on the target.
+    if let Ports::Staged { store, .. } = &ports
+        && let Some(v) = store.variables()
+    {
+        crate::app::variables::plan(fleet, env_name, t, &mut plan, v, &|_| true)?;
+    }
     let pinned = match &ports {
         Ports::Pinned { store, runtime } => Some(pinned_status(
             fleet,
@@ -138,7 +144,12 @@ pub fn run_scoped(
     print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(out, &words, t.provider().label())?;
+    print_legend(
+        out,
+        &words,
+        t.provider().label(),
+        super::live_writes(&ports),
+    )?;
     print_extras(out, &plan)?;
     print_concealed_config(out, &plan)?;
     if let Some(p) = &pinned {
@@ -410,11 +421,13 @@ fn env_rows(
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, r)?;
     preflight::read(t, r)?;
-    Ok(
-        read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?
-            .0
-            .rows,
-    )
+    let mut plan = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?.0;
+    if let Ports::Staged { store, .. } = &ports
+        && let Some(v) = store.variables()
+    {
+        crate::app::variables::plan(fleet, env_name, t, &mut plan, v, &|_| true)?;
+    }
+    Ok(plan.rows)
 }
 
 /// Bindings of a pinned target (FR-29): per desired name whether its binding is current,

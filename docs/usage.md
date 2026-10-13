@@ -91,14 +91,14 @@ The first line counts the rows. `status`, `plan` and `check` exit 8 when a key i
 | | `skipped` | not required in this environment |
 | | `blocked by source` | shares another key's value and that key has a finding; fixed with it and not counted again ([Shared keys](#shared-keys)) |
 | TARGET | `new` | not on the target yet; the next sync writes it |
-| | `same` | on the target with the same value (Azure, Kubernetes) |
+| | `same` | on the target with the same value (Azure, Kubernetes; GitHub variables) |
 | | `changed` | on the target with another value; the next sync writes it |
-| | `unknown` | on the target, but Fly does not reveal values, so opv cannot compare them; sync stages and compares digests |
+| | `unknown` | on the target, but the target does not reveal values, so opv cannot compare them; on Fly sync stages and compares digests, on GitHub it writes the secret again |
 | | `pending` | written but not yet live; the next `sync --deploy` rolls it out |
 | | `held` | immutable and already set; replace it with `--rotate` |
 | | `extra` | on the target but not wanted in this environment; removed only with `--prune` (sync prints `extra, not pruned`) |
 | | `drift` | the app is bound to something other than what opv last wrote |
-| | `n/a` | not a target secret (config keys, and skipped keys that are not on the target) |
+| | `n/a` | not delivered to the target (config keys, except GitHub variables, and skipped keys that are not on the target) |
 
 `missing` and `failed` are findings. In `status` and `plan` their rows come first, so a 40-key fleet with one problem shows it on the first table line. The JSON `state` and `target` fields keep their own spellings (below).
 
@@ -302,6 +302,12 @@ Next: opv sync prod --deploy --confirm prod
 ```
 
 A `--confirm` that names another environment is refused everywhere, guarded or not. The `Next:` line after a guarded sync includes `--confirm <env>`; `plan`'s carries `--expect-plan <id>` instead, which is enough on its own. `--prune` always lists the names it will remove before it acts.
+
+### Sync on GitHub Actions
+
+Secrets are written with `gh secret set` and config with `gh variable set`, values on stdin, in every listed repository (and GitHub environment). A write is live at once: `sync` prints no pending line, and `--deploy` prints `nothing to deploy: GitHub applies each write at once`. GitHub never shows a secret's value again, so every sync writes each ready secret (`unknown` in `status`); variables are compared and written only when they differ. `--prune` deletes managed secrets and variables that are no longer declared; other names in the repository are never touched. Setup: [configuration](configuration.md#github-actions-repository-and-environment-secrets), [example](../examples/github-ci/).
+
+`plan` and `status` also list keys the environment does not deliver (`not delivered here: …`, JSON `undelivered`), when the target's `products` leaves their product out, and warn about a source-only value nothing points at (`unreferenced shared value …`, JSON `unreferenced_sources`).
 
 ### Pruning on Fly
 

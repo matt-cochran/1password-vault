@@ -1120,7 +1120,7 @@ fn every_text_failure_ends_with_a_runnable_next() {
         &["--config", CFG, "status", "qa"][..],
         &["--config", CFG, "status", "prod"],
         &["--config", CFG, "sync", "prod", "--rotate", "allumata/NOPE"],
-        &["--config", CFG, "explain", "OPENAI_API_KEY"],
+        &["--config", CFG, "explain", "INTEGRATION_ENC_KEY"],
         &["--config", CFG, "status", "prod", "--product", "nope"],
         &["--config", "does-not-exist.toml", "status", "prod"],
     ] {

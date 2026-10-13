@@ -205,13 +205,14 @@ vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY 
 
 ## Targets
 
-Each environment names at most one target: `fly`, `azure` or `kubernetes`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).
+Each environment names at most one target: `fly`, `azure`, `kubernetes` or `github`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).
 
 How the values travel depends on the field kind:
 
 - A **secret** (concealed field) is stored in the target's secret store and bound to the app as a reference to one exact version.
 - **Config** (text field) is set as a plain environment variable on the app. Set `config = "store"` to keep config in the store too. There is no way to put a secret in a plain variable.
 - On Fly, config is not synced; deployment tooling reads it with `opv config export <env> --json`.
+- On GitHub Actions, secrets become Actions **secrets** and config becomes Actions **variables**.
 
 ### Fly
 
@@ -273,6 +274,39 @@ config     = "env"                       # or "store"
 
 opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`; that part is also the `opv-key` label value, so it must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with at most 63 characters, and collisions are an error. A longer name is refused when the configuration loads (`renders Kubernetes name of N characters, which must match …`). A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused the same way, naming the key and its line.
 
+### GitHub Actions: repository and environment secrets
+
+Keep CI secrets in 1Password and let `opv sync ci` set them, instead of running `gh secret set` by hand.
+
+```toml
+[environments.ci]
+vault_id = "vci1234example"
+item_id  = "ici1234example"
+
+[environments.ci.github]
+repo        = "my-org/my-app"       # or repos = ["my-org/api", "my-org/web"]: the same values in each
+environment = "staging"             # optional: that GitHub environment's secrets and variables
+products    = ["api"]               # optional (fleet): only these products' keys go here
+secret_name = "{KEY}"               # optional; default {KEY}, so workflows read secrets.FLY_API_TOKEN
+```
+
+| Field | Meaning |
+|---|---|
+| `repo` / `repos` | Exactly one of them. `owner/name`; each listed repository gets every value. |
+| `environment` | A GitHub environment that must already exist in every listed repository. opv never creates one, because its protection rules and reviewers are your decision; `sync` stops before any write and prints the `gh api -X PUT repos/<repo>/environments/<name>` command. |
+| `products` | Fleet profile. Keys of other products are not delivered here (they are still read, and keys here may point at them with `from`). `plan` lists declared keys it does not deliver. |
+| `secret_name` | Name template with `{KEY}` and optionally `{PRODUCT}`. Names must match `^[A-Z][A-Z0-9_]*$` and may not start with `GITHUB_`. |
+
+What happens on each command:
+
+- **Secrets** (concealed fields) are set with `gh secret set NAME`, the value on stdin. GitHub never shows a secret's value again, so `status` shows an existing one as `unknown` and every `sync` writes it again; an `immutable` key that is already there is held.
+- **Config** (text fields) is set with `gh variable set NAME`, the value on stdin. Variables can be read back, so `status` and `plan` show `new`, `same` or `changed`, and `sync` writes only what differs. A config key kept in a concealed field is refused here (`concealed-config`): a variable is readable by everyone who can read the repository.
+- Writes are live at once: there is nothing to deploy, and `sync --deploy` says so.
+- `--prune` deletes only names opv manages (secrets and variables alike); other secrets in the repository are listed as unmanaged and never touched.
+- Limits, shown by `status` and `plan` before any write: a secret over 47 952 bytes, an empty variable, or a variable over 48 000 bytes.
+
+Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories with **Secrets: write** and **Variables: write** (and **Environments: read** when you use `environment`). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
+
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
 A runtime can keep its secrets in a store from another provider. Declare the store once and point the runtime at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).
@@ -329,6 +363,36 @@ rules = { prefix = "postgres://" }   # optional: checked as well as api's own ru
 - `item skeleton` never adds a field for a sharing key. A leftover field from before the switch (`worker/DATABASE_URL`) is reported as an extra field; delete it in 1Password.
 
 Under the simple profile, `from` names a bare key: `from = "DATABASE_URL"`.
+
+### One home for shared values: `source_only` products
+
+When one value feeds many products (one Fly org token, one Cloudflare account ID for every repository's CI), give it a neutral home instead of making one product its owner. Mark a product `source_only` and point the others at its keys:
+
+```toml
+[products.shared]
+source_only = true                         # holds values; never delivered anywhere itself
+
+[products.shared.keys.FLY_API_TOKEN]
+kind = "secret"
+environments = ["ci"]
+guidance = "Fly org deploy token"
+
+[products.api.keys.FLY_API_TOKEN]
+kind = "secret"
+from = "shared/FLY_API_TOKEN"              # no field of its own: reads section "shared"
+environments = ["ci"]
+
+[products.web.keys.FLY_API_TOKEN]
+kind = "secret"
+from = "shared/FLY_API_TOKEN"
+environments = ["ci"]
+```
+
+- The value lives once, in section `shared` of each environment's item. Change it there and every key pointing at it changes in the next sync; `--rotate shared/FLY_API_TOKEN` rotates them all.
+- A source-only product's keys get fields, rules, `immutable` and the missing-value lines like any key, but they are never written to a target, never pruned, and their names never collide with a delivered key's.
+- `check`, `status` and `plan` warn about a source-only key that nothing points at. `opv run --product shared` is refused: run the product that uses the value.
+- Values never cross environments: `ci` reads the `shared` section of the `ci` item only.
+- The name `shared` is a convention; any product name works. `source_only` is not available under the simple profile, where there is one product.
 
 ## Writing the configuration with commands
 
@@ -412,9 +476,9 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 |---|---|
 | `prefix = "sk-"` | value starts with the prefix |
 | `not_prefix = "sk-or-"` or a list | value starts with none of them |
-| `regex = "..."` | the whole value matches (full match) |
+| `regex = "..."` | the whole value **as staged** matches (full match): after `ensure_prefix` normalisation when the key has one, otherwise the stored value |
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
-| `pattern = "..."` | only with `ensure_prefix`: the text after the prefix fully matches (full match) |
+| `pattern = "..."` | deprecated alias for `regex`: only with `ensure_prefix`, the text after the prefix fully matches (full match). Loading a key that uses it prints one note naming the equivalent `regex = "<regex-escaped prefix>(?:<pattern>)"`; set both and the configuration is refused |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
 | `hex_bytes = N` | valid hex that decodes to N bytes |

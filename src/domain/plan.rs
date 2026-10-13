@@ -72,6 +72,9 @@ pub enum TargetState {
     Present,
     WouldChange,
     Unknown,
+    /// The environment's target does not deliver this key's product (source-only, FR-47,
+    /// or outside the target's products, FR-48): read and checked, never written there.
+    NotDelivered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +118,12 @@ pub struct SyncPlan {
     /// Accepted and delivered as plain environment values, but their values are never
     /// printed, and `status` warns once per key.
     pub concealed_config: Vec<(String, String)>,
+    /// (product, key): keys declared for this environment whose product the target does
+    /// not deliver (FR-48). Source-only products are never listed here (FR-47).
+    pub undelivered: Vec<(String, String)>,
+    /// (product, key): keys of source-only products declared for this environment that no
+    /// `from` references (FR-47, `unreferenced-source`).
+    pub unreferenced_sources: Vec<(String, String)>,
     /// What this run tidied in 1Password (FR-43), names only; set by the application layer.
     pub tidy: Vec<crate::domain::convention::Change>,
     /// The error code of a tidy that did not complete (`tidy_conflict`, ...), set by the
@@ -139,6 +148,8 @@ impl fmt::Debug for SyncPlan {
             .field("prune", &self.prune)
             .field("held_from_prune", &self.held_from_prune)
             .field("config_keys", &config)
+            .field("undelivered", &self.undelivered)
+            .field("unreferenced_sources", &self.unreferenced_sources)
             .finish()
     }
 }
@@ -259,6 +270,8 @@ pub fn build_with(
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
         concealed_config: Vec::new(),
+        undelivered: Vec::new(),
+        unreferenced_sources: Vec::new(),
         tidy: Vec::new(),
         tidy_error: None,
     };
@@ -298,13 +311,23 @@ pub fn build_with(
     };
 
     for (product, p) in &fleet.products {
+        // FR-47/FR-48: a product the target does not deliver renders no name here, so its
+        // keys are never staged, pruned or held; they are still evaluated below.
+        let delivered = fleet.delivers(env_name, product);
         for (key, spec) in &p.keys {
-            let target_name = env.target_name(product, key);
+            let target_name = if delivered {
+                env.target_name(product, key)
+            } else {
+                None
+            };
             let target_entry = target_name
                 .as_deref()
                 .and_then(|n| on_target.get(n).copied());
             let field = by_name.get(&(product.as_str(), key.as_str()));
             let declared_here = spec.environments.iter().any(|e| e == env_name);
+            if declared_here && !delivered && !p.source_only {
+                plan.undelivered.push((product.clone(), key.clone()));
+            }
 
             // A shared key (FR-45) reads its source's field: the source's rules first (its
             // transformed value is the one shared), then the key's own rules on that value.
@@ -346,6 +369,9 @@ pub fn build_with(
                 kind: spec.kind,
                 state: KeyState::Skipped,
                 target: match (spec.kind, target_entry) {
+                    // A run-only environment keeps the old states; only a target that
+                    // leaves this product out marks it (FR-47, FR-48).
+                    _ if !delivered && env.target().is_some() => TargetState::NotDelivered,
                     (Kind::Secret, None) => TargetState::Absent,
                     _ => TargetState::Unknown,
                 },
@@ -424,6 +450,29 @@ pub fn build_with(
                 }
             }
             plan.rows.push(row);
+        }
+    }
+
+    // FR-47: a source-only key no `from` references is dead weight; list it once so
+    // `check`/`status`/`plan` can warn (`unreferenced-source`). Env-scoped: a key not
+    // declared here is not read here.
+    let referenced: BTreeSet<(&str, &str)> = fleet
+        .products
+        .values()
+        .flat_map(|p| p.keys.values())
+        .filter_map(|s| s.source())
+        .collect();
+    for (product, p) in &fleet.products {
+        if !p.source_only {
+            continue;
+        }
+        for (key, spec) in &p.keys {
+            if spec.environments.iter().any(|e| e == env_name)
+                && !referenced.contains(&(product.as_str(), key.as_str()))
+            {
+                plan.unreferenced_sources
+                    .push((product.clone(), key.clone()));
+            }
         }
     }
 
@@ -972,5 +1021,134 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
             assert!(!s.contains("\"invite_only\""), "{s}");
         }
         assert!(format!("{p:?}").contains("FLEET__ALLUMATA__OPENAI_API_KEY"));
+    }
+
+    // ---- product scope (FR-48) and source-only products (FR-47) ----------------------
+
+    /// A GitHub fleet whose `ci` target serves only `api` (FR-48), plus a source-only
+    /// product (FR-47). Built directly: the provider is registered by the GitHub scope.
+    fn scoped_fleet() -> Fleet {
+        use crate::adapters::github::GithubTarget;
+        use crate::domain::{Environment, Origin, Product, Profile};
+
+        fn key() -> KeySpec {
+            KeySpec {
+                kind: Kind::Secret,
+                environments: vec!["ci".to_string()],
+                rules: Default::default(),
+                immutable: false,
+                guidance: String::new(),
+                from: None,
+            }
+        }
+        let target = GithubTarget {
+            repos: vec!["org/r".to_string()],
+            environment: None,
+            products: Some(["api".to_string()].into_iter().collect()),
+            secret_name_template: "{PRODUCT}_{KEY}".to_string(),
+            profile: Profile::Fleet,
+        };
+        let env = Environment {
+            name: "ci".to_string(),
+            vault_id: "vci".to_string(),
+            item_id: "ici".to_string(),
+            target: Some(Box::new(target)),
+            ..Default::default()
+        };
+        let products = BTreeMap::from([
+            (
+                "api".to_string(),
+                Product {
+                    source_only: false,
+                    keys: BTreeMap::from([("TOKEN".to_string(), key())]),
+                },
+            ),
+            (
+                "web".to_string(),
+                Product {
+                    source_only: false,
+                    keys: BTreeMap::from([("TOKEN".to_string(), key())]),
+                },
+            ),
+            (
+                "shared".to_string(),
+                Product {
+                    source_only: true,
+                    keys: BTreeMap::from([("TOKEN".to_string(), key())]),
+                },
+            ),
+        ]);
+        Fleet {
+            environments: BTreeMap::from([("ci".to_string(), env)]),
+            products,
+            profile: Profile::Fleet,
+            origin: Origin::File,
+        }
+    }
+
+    fn scoped_plan() -> SyncPlan {
+        build(&scoped_fleet(), "ci", vec![], &[], &no_rotate(), &none)
+    }
+
+    #[test]
+    fn undelivered_lists_keys_of_products_the_target_does_not_serve() {
+        assert_eq!(
+            scoped_plan().undelivered,
+            vec![("web".to_string(), "TOKEN".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_source_only_key_with_no_reference_is_listed_as_unreferenced() {
+        assert_eq!(
+            scoped_plan().unreferenced_sources,
+            vec![("shared".to_string(), "TOKEN".to_string())]
+        );
+    }
+
+    #[test]
+    fn debug_includes_undelivered_names() {
+        let s = format!("{:?}", scoped_plan());
+        assert!(s.contains("undelivered: [(\"web\", \"TOKEN\")]"), "{s}");
+    }
+
+    #[test]
+    fn debug_includes_unreferenced_source_names() {
+        let s = format!("{:?}", scoped_plan());
+        assert!(
+            s.contains("unreferenced_sources: [(\"shared\", \"TOKEN\")]"),
+            "{s}"
+        );
+    }
+
+    /// FR-48: a key of a product the target does not serve is still read and rule-checked.
+    #[test]
+    fn an_undelivered_key_is_still_rule_checked() {
+        let mut fleet = scoped_fleet();
+        fleet
+            .products
+            .get_mut("web")
+            .unwrap()
+            .keys
+            .get_mut("TOKEN")
+            .unwrap()
+            .rules
+            .prefix = Some("sk_".to_string());
+        let p = build(
+            &fleet,
+            "ci",
+            vec![secret("web", "TOKEN", "nope")],
+            &[],
+            &no_rotate(),
+            &none,
+        );
+        assert!(p.rows.iter().any(|r| {
+            r.product == "web"
+                && r.key == "TOKEN"
+                && matches!(
+                    &r.state,
+                    KeyState::RuleFailed("prefix", Reason::ExpectedPrefix(_))
+                )
+        }));
     }
 }
