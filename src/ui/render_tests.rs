@@ -145,3 +145,10 @@ fn the_adoption_review_shows_each_key_and_decision() {
     );
     assert!(frame(&a, 140, 30).contains("keep 1Password"));
 }
+
+#[test]
+fn the_declare_a_key_form_draws_its_fields() {
+    let mut a = app();
+    a.handle(Key::Char('+'));
+    assert!(frame(&a, 140, 40).contains("environments"));
+}

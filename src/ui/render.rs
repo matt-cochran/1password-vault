@@ -312,7 +312,7 @@ fn env_screen(f: &mut Frame, area: Rect, app: &App, e: &str) {
 }
 
 fn keybar(f: &mut Frame, area: Rect, app: &App) {
-    let keys = "↑↓ move · tab sidebar/main · enter open · esc back · s sync… · i adopt… · o open in 1Password · n next step · a accounts · r refresh · q quit";
+    let keys = "↑↓ move · tab sidebar/main · enter open · esc back · s sync… · i adopt… · o open in 1Password · + key… · E environment… · e edit config · n next step · a accounts · r refresh · q quit";
     let lines = vec![
         Line::styled(app.status.clone(), WARN),
         Line::styled(keys, DIM),
@@ -322,7 +322,10 @@ fn keybar(f: &mut Frame, area: Rect, app: &App) {
 
 fn modal(f: &mut Frame, area: Rect, m: &Modal) {
     let w = area.width.saturating_sub(10).min(90);
-    let h = 12.min(area.height);
+    let h = match m {
+        Modal::Form(form) => (form.rows().len() as u16 + 5).min(area.height),
+        _ => 12.min(area.height),
+    };
     let r = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
@@ -355,6 +358,28 @@ fn modal(f: &mut Frame, area: Rect, m: &Modal) {
                 )),
             }
             (title.clone(), out)
+        }
+        Modal::Form(form) => {
+            let mut out: Vec<Line> = form
+                .lines()
+                .into_iter()
+                .map(|(label, text, on)| {
+                    let line = format!("{label:<14} {text}{}", if on { "▏" } else { "" });
+                    if on {
+                        Line::styled(line, SELECTED)
+                    } else {
+                        Line::raw(line)
+                    }
+                })
+                .collect();
+            if let Some(e) = &form.error {
+                out.push(Line::styled(e.clone(), BAD));
+            }
+            out.push(Line::styled(
+                "↑↓ move · type · space choose · enter: review the command · esc: cancel",
+                DIM,
+            ));
+            (form.title().to_string(), out)
         }
         Modal::Input { prompt, value, .. } => (
             "Adopt".to_string(),

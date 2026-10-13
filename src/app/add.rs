@@ -37,6 +37,12 @@ pub struct AddArgs {
     pub rules: Vec<String>,
     pub guidance: Option<String>,
     pub immutable: bool,
+    /// `--from <product>/<KEY>`: read the value of another key (a shared value, FR-45).
+    pub from: Option<String>,
+    /// `--personal`: each person's own value (FR-55).
+    pub personal: bool,
+    /// `--allow-same-value`: the same value in several environments is intended (#92).
+    pub allow_same_value: bool,
     /// `--json`: print `{key, product, kind, environments, saved_in, changed, next}` (A5).
     pub json: bool,
 }
@@ -125,10 +131,17 @@ fn run_inner(
                  kind: edit {place} by hand (opv config edit)"
             )));
         }
-        if !args.rules.is_empty() || args.guidance.is_some() || args.immutable {
+        if !args.rules.is_empty()
+            || args.guidance.is_some()
+            || args.immutable
+            || args.from.is_some()
+            || args.personal
+            || args.allow_same_value
+        {
             return Err(cfg(format!(
                 "{label} is already declared; opv add only adds environments to it: change \
-                 its rules, guidance or immutable in {place} by hand (opv config edit)"
+                 its rules, guidance, from, personal, allow_same_value or immutable in {place} \
+                 by hand (opv config edit)"
             )));
         }
         let new: Vec<String> = envs.into_iter().filter(|e| !existing.contains(e)).collect();
@@ -188,6 +201,9 @@ fn run_inner(
                 rules: &rules,
                 guidance: args.guidance.as_deref(),
                 immutable: args.immutable,
+                from: args.from.as_deref(),
+                personal: args.personal,
+                allow_same_value: args.allow_same_value,
             },
         )?;
         let mut parts = vec![kind.to_string(), envs.join(", ")];
@@ -198,6 +214,15 @@ fn run_inner(
         );
         if args.immutable {
             parts.push("immutable".into());
+        }
+        if let Some(f) = &args.from {
+            parts.push(format!("from {f}"));
+        }
+        if args.personal {
+            parts.push("personal".into());
+        }
+        if args.allow_same_value {
+            parts.push("allow_same_value".into());
         }
         (
             format!("added {label} to {place} ({})", parts.join("; ")),

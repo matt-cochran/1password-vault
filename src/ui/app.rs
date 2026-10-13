@@ -49,6 +49,8 @@ pub enum Modal {
         guard: Option<String>,
         typed: String,
     },
+    /// A configuration form (#97): declare a key or add an environment.
+    Form(super::forms::FormState),
     /// Ask for one line (an adoption file path), then build the command from it.
     Input {
         prompt: String,
@@ -153,7 +155,7 @@ impl App {
         self.nav = nav;
     }
 
-    fn open(&mut self, screen: Screen) {
+    pub(crate) fn open(&mut self, screen: Screen) {
         if self.screen != screen {
             self.back.push(std::mem::replace(&mut self.screen, screen));
         }
@@ -293,6 +295,44 @@ impl App {
                         None => self.status = format!("next ({actor}): {command}"),
                     }
                 }
+            }
+            Key::Char('+') => {
+                let envs: Vec<String> = self.snap.envs.iter().map(|e| e.key.clone()).collect();
+                let fleet = !self
+                    .snap
+                    .products
+                    .iter()
+                    .any(|p| p.name == crate::domain::SIMPLE_PRODUCT);
+                let product = match &self.screen {
+                    Screen::Product(p) => Some(p.clone()),
+                    Screen::Key { product, .. } => Some(product.clone()),
+                    _ => None,
+                };
+                let env = match &self.screen {
+                    Screen::Env(e) => Some(e.clone()),
+                    _ => None,
+                };
+                self.modal = Some(Modal::Form(super::forms::FormState::add_key(
+                    envs, fleet, product, env,
+                )));
+            }
+            Key::Char('E') => {
+                let envs = self.snap.envs.iter().map(|e| e.key.clone()).collect();
+                self.modal = Some(Modal::Form(super::forms::FormState::add_env(envs)));
+            }
+            Key::Char('e') => {
+                self.modal = Some(Modal::Confirm {
+                    title: "Edit the configuration".into(),
+                    lines: vec![
+                        "opens it in $VISUAL/$EDITOR, validates it and shows the diff before \
+                         saving; refuses when someone changed it meanwhile"
+                            .into(),
+                        "runs: opv config edit".into(),
+                    ],
+                    command: vec!["config".into(), "edit".into()],
+                    guard: None,
+                    typed: String::new(),
+                });
             }
             Key::Char('c') => {
                 self.status = match &self.snap.next {
@@ -448,6 +488,31 @@ impl App {
         let Some(modal) = self.modal.as_mut() else {
             return Effect::None;
         };
+        if let Modal::Form(form) = modal {
+            match form.handle(key) {
+                super::forms::Outcome::Editing => {}
+                super::forms::Outcome::Cancelled => {
+                    self.modal = None;
+                    self.status = "cancelled; nothing was changed".into();
+                }
+                super::forms::Outcome::Command(command) => {
+                    let what = form.title();
+                    self.modal = Some(Modal::Confirm {
+                        title: what.into(),
+                        lines: vec![
+                            "edits the configuration (no value), validated first: a refused \
+                             change writes nothing"
+                                .into(),
+                            format!("runs: opv {}", command.join(" ")),
+                        ],
+                        command,
+                        guard: None,
+                        typed: String::new(),
+                    });
+                }
+            }
+            return Effect::None;
+        }
         match (modal, key) {
             (_, Key::Esc) => {
                 self.modal = None;

@@ -1,0 +1,265 @@
+use super::*;
+
+/// `["a", "b"]` as a `Vec<String>` for command comparisons.
+fn v(parts: &[&str]) -> Vec<String> {
+    parts.iter().copied().map(str::to_string).collect()
+}
+
+/// A fleet key form with everything unset, so a test only states what it exercises.
+fn key_form() -> AddKeyForm {
+    AddKeyForm {
+        product: Some("api".to_string()),
+        key: "TOKEN".to_string(),
+        kind: KindChoice::Secret,
+        environments: Vec::new(),
+        guidance: String::new(),
+        personal: false,
+        allow_same_value: false,
+    }
+}
+
+/// An environment form with everything unset, so a test only states what it exercises.
+fn env_form() -> AddEnvForm {
+    AddEnvForm {
+        name: "dev".to_string(),
+        vault: String::new(),
+        item: String::new(),
+    }
+}
+
+// ---- add_key_command: the command ----
+
+#[test]
+fn add_key_builds_the_full_fleet_command_in_order() {
+    let form = AddKeyForm {
+        product: Some("api".to_string()),
+        key: "TOKEN".to_string(),
+        kind: KindChoice::Secret,
+        environments: vec!["dev".to_string(), "prod".to_string()],
+        guidance: "  fill it at the portal  ".to_string(),
+        personal: true,
+        allow_same_value: false,
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Ok(v(&[
+            "add",
+            "api/TOKEN",
+            "--kind",
+            "secret",
+            "--env",
+            "dev,prod",
+            "--guidance",
+            "fill it at the portal",
+            "--personal",
+        ]))
+    );
+}
+
+#[test]
+fn add_key_builds_the_minimal_simple_command() {
+    let form = AddKeyForm {
+        product: None,
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, false),
+        Ok(v(&["add", "TOKEN", "--kind", "secret"]))
+    );
+}
+
+#[test]
+fn add_key_writes_the_config_kind_choice() {
+    let form = AddKeyForm {
+        kind: KindChoice::Config,
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Ok(v(&["add", "api/TOKEN", "--kind", "config"]))
+    );
+}
+
+#[test]
+fn add_key_adds_allow_same_value_when_set() {
+    let form = AddKeyForm {
+        allow_same_value: true,
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Ok(v(&[
+            "add",
+            "api/TOKEN",
+            "--kind",
+            "secret",
+            "--allow-same-value",
+        ]))
+    );
+}
+
+// ---- add_key_command: the refusals ----
+
+#[test]
+fn add_key_rejects_a_key_that_is_not_uppercase() {
+    let form = AddKeyForm {
+        key: "token".to_string(),
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("key \"token\" must match ^[A-Z][A-Z0-9_]*$.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_an_empty_key() {
+    let form = AddKeyForm {
+        key: String::new(),
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("key \"\" must match ^[A-Z][A-Z0-9_]*$.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_a_product_that_is_not_lowercase() {
+    let form = AddKeyForm {
+        product: Some("API".to_string()),
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("product \"API\" must match ^[a-z][a-z0-9_-]*$.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_an_empty_product() {
+    let form = AddKeyForm {
+        product: Some(String::new()),
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("product \"\" must match ^[a-z][a-z0-9_-]*$.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_a_fleet_profile_without_a_product() {
+    let form = AddKeyForm {
+        product: None,
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("the fleet profile declares keys per product: use PRODUCT/KEY.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_a_simple_profile_with_a_product() {
+    let form = key_form();
+    assert_eq!(
+        add_key_command(&form, false),
+        Err("the simple profile has no products: use KEY.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_personal_with_allow_same_value() {
+    let form = AddKeyForm {
+        personal: true,
+        allow_same_value: true,
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("personal and allow_same_value cannot both be set.".to_string())
+    );
+}
+
+#[test]
+fn add_key_rejects_personal_with_a_config_key() {
+    let form = AddKeyForm {
+        kind: KindChoice::Config,
+        personal: true,
+        ..key_form()
+    };
+    assert_eq!(
+        add_key_command(&form, true),
+        Err("personal keys must be secret, not config.".to_string())
+    );
+}
+
+// ---- add_env_command ----
+
+#[test]
+fn add_env_builds_the_full_command_with_vault_and_item() {
+    let form = AddEnvForm {
+        name: "staging".to_string(),
+        vault: "  myapp-staging  ".to_string(),
+        item: "  myapp · staging values  ".to_string(),
+    };
+    assert_eq!(
+        add_env_command(&form, &[]),
+        Ok(v(&[
+            "init",
+            "staging",
+            "--add-env",
+            "--vault",
+            "myapp-staging",
+            "--item",
+            "myapp · staging values",
+        ]))
+    );
+}
+
+#[test]
+fn add_env_builds_the_minimal_command_without_vault_or_item() {
+    let form = AddEnvForm {
+        vault: "   ".to_string(),
+        item: String::new(),
+        ..env_form()
+    };
+    assert_eq!(
+        add_env_command(&form, &[]),
+        Ok(v(&["init", "dev", "--add-env"]))
+    );
+}
+
+#[test]
+fn add_env_rejects_a_name_with_a_space() {
+    let form = AddEnvForm {
+        name: "bad name".to_string(),
+        ..env_form()
+    };
+    assert_eq!(
+        add_env_command(&form, &[]),
+        Err("environment name \"bad name\" must match ^[A-Za-z0-9][A-Za-z0-9_-]*$.".to_string())
+    );
+}
+
+#[test]
+fn add_env_rejects_an_empty_name() {
+    let form = AddEnvForm {
+        name: String::new(),
+        ..env_form()
+    };
+    assert_eq!(
+        add_env_command(&form, &[]),
+        Err("environment name \"\" must match ^[A-Za-z0-9][A-Za-z0-9_-]*$.".to_string())
+    );
+}
+
+#[test]
+fn add_env_rejects_a_name_already_declared() {
+    let existing = vec!["dev".to_string(), "prod".to_string()];
+    assert_eq!(
+        add_env_command(&env_form(), &existing),
+        Err("environment dev already exists.".to_string())
+    );
+}
