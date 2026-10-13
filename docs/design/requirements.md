@@ -976,6 +976,9 @@ Debug logging shall redact conservatively.
 
 Child output: the stderr of every captured `op`, `flyctl`, `az` and `kubectl` call is held in memory only (never on disk) and shown only after the scrubber of NR-31 has masked secret values: at most 5 lines under the error of the call that failed, or every call's lines with `--verbose`. A child's stdout and anything opv sends on stdin (values, Kubernetes Secret manifests) are never shown; `--verbose` gives only stdout's size and JSON shape (NR-31). Registered values are masked on the raw text first, before control characters are stripped, and each value's stripped form and each line (4+ bytes) of a multi-line value are masked too. Every successful `op item get` registers its values, with or without `--verbose`.
 
+
+**Documented exception (#92, settings health):** a health finding never holds a value, a part of one, its length or a digest, but it states one fact about a value it compares in memory: equality with another value (across environments or keys), membership in a fixed placeholder list, surrounding whitespace, a loopback address, or a `sk_test_`/`sk_live_` prefix. These facts are the point of the warning; `docs/usage.md` (Security model) says so for anyone publishing `ready --json`.
+
 ## SR-2 — Secret-Safe Types
 
 Resolved secret values shall use a dedicated wrapper type whose `Debug` and `Display` implementations are redacted.

@@ -499,3 +499,28 @@ fn no_message_ever_holds_a_value() {
 fn nothing_declared_means_nothing_found() {
     assert!(codes(&[]).is_empty());
 }
+
+#[test]
+fn an_upper_case_placeholder_is_found() {
+    assert_eq!(
+        codes(&[("dev", false, vec![secret("STRIPE_KEY", "CHANGEME")])]),
+        [PLACEHOLDER]
+    );
+}
+
+#[test]
+fn an_upper_case_localhost_is_found() {
+    assert_eq!(
+        codes(&[(
+            "staging",
+            true,
+            vec![field("PUBLIC_URL", Kind::Config, "http://LOCALHOST:3000")]
+        )]),
+        [LOCAL_ADDRESS]
+    );
+}
+
+#[test]
+fn a_multibyte_value_is_never_a_your_here_placeholder() {
+    assert!(codes(&[("dev", false, vec![secret("STRIPE_KEY", "yourééhere-not")])]).is_empty());
+}

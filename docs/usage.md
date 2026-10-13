@@ -711,6 +711,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 - `config export` prints config-kind values by design, never secrets. A config key stored in a concealed field is accepted and delivered as a plain value, but opv never prints it: `config export` shows `<concealed in 1Password>` and `status` warns about it once per key.
 - `run` hands secret values to the child process through `op run`; the child can read them.
 - No multiline values (a `pem_private_key` transform turns a PEM key into one line). `--json` documents hold names, states and counts only, except `config export <env>`, which prints config-kind values by design.
+- Settings health findings (`opv ready`, `opv doctor --settings`, `opv ui`) never contain a value, but by design they state facts about one: that a secret equals another (across environments or keys), is a known placeholder, starts or ends with whitespace, points at `localhost`, or is a Stripe-style test or live key. Treat `ready --json` output like the configuration (fine for CI logs you trust, not for public ones), or skip it there. `opv history` never shows a Fly version, which is a digest of the value.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.

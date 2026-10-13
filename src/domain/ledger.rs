@@ -141,10 +141,11 @@ impl Ledger {
         new_key: &dyn Fn() -> String,
     ) -> Vec<Op> {
         let mut ops = Vec::new();
+        // Zeroized on drop: the HMAC key is as secret as the values it fingerprints.
         let key = match &self.key {
-            Some(k) => k.expose().to_string(),
+            Some(k) => zeroize::Zeroizing::new(k.expose().to_string()),
             None => {
-                let k = new_key();
+                let k = zeroize::Zeroizing::new(new_key());
                 ops.push(set_or_add(layout, KEY_FIELD, true, &k));
                 k
             }
