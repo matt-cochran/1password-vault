@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Settings health** ([#92](https://github.com/matt-cochran/1password-vault/issues/92)): `opv ready`, `opv ui` and `opv doctor --settings` warn about likely-wrong values: the same secret in two environments, one value under two keys, placeholders, stray whitespace, `localhost` in a deployed environment, and test/live keys in the wrong kind of environment. Values are compared in memory and never shown; `allow_same_value = true` on a key marks an intended repeat.
+
 - **`opv init <env> --from .env`** ([#90](https://github.com/matt-cochran/1password-vault/issues/90)): start a project from an existing `.env` in one step. It declares every key (kind by name, secret when unsure; `--config-key` / `--secret-key` to change one) and shows the plan; `--apply` creates the vault and item, writes the configuration and imports the values, read back and verified. No value is ever printed, and no hand-written import script is needed.
 
 - **`opv ui`** ([#82](https://github.com/matt-cochran/1password-vault/issues/82)): a terminal UI to browse and manage every environment (from the configuration, by title and order), product, key, shared value and account, with secrets never shown; actions run the same `opv` commands in your terminal, a sync only exactly the plan you reviewed, a guarded environment only after you type its name. Falls back to `opv ready` text without an interactive terminal.

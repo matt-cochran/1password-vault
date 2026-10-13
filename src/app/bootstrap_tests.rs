@@ -284,6 +284,7 @@ fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
             envs,
             simple: false,
             personal: Default::default(),
+            health: Vec::new(),
         },
         "test",
     );

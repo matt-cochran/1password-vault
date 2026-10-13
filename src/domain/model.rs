@@ -99,6 +99,10 @@ pub struct KeySpec {
     /// developer's own LLM API key); only in environments without a target.
     #[serde(default)]
     pub personal: bool,
+    /// The same value in several environments is intended (#92): silences the
+    /// `same_value_across_environments` health finding for this key.
+    #[serde(default)]
+    pub allow_same_value: bool,
 }
 
 impl KeySpec {

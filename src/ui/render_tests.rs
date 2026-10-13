@@ -111,3 +111,24 @@ fn the_key_bar_lists_the_keys() {
     a.handle(Key::Down);
     assert!(frame(&a, 200, 36).contains("q quit"));
 }
+
+#[test]
+fn the_key_screen_shows_a_settings_finding_with_its_sentence() {
+    let mut a = app();
+    a.snap.findings.push(crate::ui::model::Finding {
+        code: "same_value_across_environments".into(),
+        environment: Some("local".into()),
+        product: Some("api".into()),
+        key: Some("API_TOKEN".into()),
+        blocking: false,
+        actor: "owner".into(),
+        effect: "writes_1password".into(),
+        prerequisite: "opv open api/API_TOKEN --env local".into(),
+        message: Some("api/API_TOKEN has the same value in local and ci".into()),
+    });
+    a.screen = Screen::Key {
+        product: "api".into(),
+        key: "API_TOKEN".into(),
+    };
+    assert!(frame(&a, 160, 40).contains("has the same value in local and ci"));
+}

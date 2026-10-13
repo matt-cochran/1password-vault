@@ -449,6 +449,7 @@ mod tests {
             guidance: String::new(),
             from: None,
             personal: false,
+            allow_same_value: false,
         };
         let env = &f.environments["prod"];
         check(
@@ -689,6 +690,7 @@ mod tests {
             guidance: String::new(),
             from: None,
             personal: false,
+            allow_same_value: false,
         };
         let env = &f.environments["staging"];
         assert!(!applies(&spec, "staging", env, "allumata"));

@@ -408,11 +408,39 @@ pub(crate) fn env_rows(
     t: Option<&dyn TargetConfig>,
     r: &dyn CommandRunner,
 ) -> Result<Vec<Row>, Error> {
+    env_rows_keeping(fleet, env_name, t, r, None)
+}
+
+/// A copy of `f` for the settings health checks (#92), which compare values across
+/// environments after each item's read. The copy is a [`SecretValue`] like the original:
+/// redacted in `Debug`, zeroized on drop, never printed.
+fn copy_field(f: &crate::domain::plan::ItemField) -> crate::domain::plan::ItemField {
+    crate::domain::plan::ItemField {
+        section: f.section.clone(),
+        label: f.label.clone(),
+        kind: f.kind,
+        value: crate::domain::SecretValue::new(f.value.expose().to_string()),
+        concealed: f.concealed,
+    }
+}
+
+/// [`env_rows`], also keeping a copy of the team item's fields in `keep` (#92). Still one
+/// item read. Personal fields (FR-55) are never kept: they are each person's own.
+pub(crate) fn env_rows_keeping(
+    fleet: &Fleet,
+    env_name: &str,
+    t: Option<&dyn TargetConfig>,
+    r: &dyn CommandRunner,
+    keep: Option<&mut Vec<crate::domain::plan::ItemField>>,
+) -> Result<Vec<Row>, Error> {
     use crate::app::signin::{Reach, open};
     let none = BTreeSet::new();
     let Some(t) = t else {
         let signed_in = open(fleet, env_name, r, Reach::Store)?;
         let fields = read_fields(fleet, env_name, &signed_in)?;
+        if let Some(keep) = keep {
+            keep.extend(fields.iter().map(copy_field));
+        }
         // FR-55: a targetless environment's personal keys live in the person's own item;
         // merge its fields (never a team fallback) before planning the rows.
         let fields = if personal::declared(fleet, env_name) {
@@ -430,7 +458,26 @@ pub(crate) fn env_rows(
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, r)?;
     preflight::read(t, r)?;
-    let mut plan = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?.0;
+    let mut plan = match keep {
+        None => read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?.0,
+        Some(keep) => {
+            // read_and_plan, keeping a copy of the fields before planning consumes them.
+            let read = super::tidy::read(fleet, env_name, r)?;
+            keep.extend(read.fields.iter().map(copy_field));
+            let (mut plan, _) = super::plan_item_with(
+                fleet,
+                env_name,
+                read.fields,
+                Some(&ports),
+                &none,
+                &none,
+                Some(&read.ledger),
+            )?;
+            plan.tidy = read.changes;
+            plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+            plan
+        }
+    };
     if let Ports::Staged { store, .. } = &ports
         && let Some(v) = store.variables()
     {

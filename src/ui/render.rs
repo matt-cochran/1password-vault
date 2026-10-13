@@ -205,6 +205,9 @@ fn overview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{} ", fnd.code), style),
             Span::raw(format!("{scope}  [{}]", fnd.actor)),
         ]));
+        if let Some(m) = &fnd.message {
+            lines.push(Line::raw(format!("    {m}")));
+        }
         lines.push(Line::styled(format!("    → {}", fnd.prerequisite), DIM));
     }
     if let Some((actor, cmd)) = &s.next {
