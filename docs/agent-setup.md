@@ -175,6 +175,7 @@ More patterns: [local-development.md](local-development.md).
 
 - CI uses one 1Password service account with **read-only** access to each environment's vault (`OP_SERVICE_ACCOUNT_TOKEN`). The target credential is either a `deploy_credentials` item in that vault (no separate CI secret) or the CI provider's OIDC federation (for example `azure/login` with a federated credential). Without either, the user stores a Fly deploy token as `FLY_API_TOKEN`. The user creates every credential; you never see them.
 - Add `opv sync <env>` (and `--deploy` only if the user wants CI to deploy) to the workflow. A ready-made GitHub Actions job is in [usage.md](usage.md#github-actions-example).
+- To manage the CI secrets themselves (the ones workflows read as `secrets.NAME`), add an environment with a `github` target ([configuration](configuration.md#github-actions-repository-and-environment-secrets)); `opv sync ci` then sets them from 1Password. Shared values (one deploy token for many repositories) go in a `source_only` product that the other keys point at with `from` ([shared values](configuration.md#one-home-for-shared-values-source_only-products)). The user creates the GitHub environment and the fine-grained token; you never create either.
 - `item skeleton` needs a write-capable identity; never give one to CI. Under a service account opv never writes to 1Password; it reads the item as it is and notes that the next local run will tidy it.
 
 ## Exit codes

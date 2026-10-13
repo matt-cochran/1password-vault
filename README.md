@@ -81,6 +81,7 @@ Problems come first, each with its reason and a link to its item in 1Password, t
 | Azure Key Vault + Container Apps | supported |
 | Kubernetes (Secrets + Deployment) | supported |
 | Azure Key Vault → Kubernetes (External Secrets Operator) | supported |
+| GitHub Actions (repository and environment secrets and variables) | supported |
 | Azure App Service | planned ([#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |
