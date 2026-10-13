@@ -61,6 +61,8 @@ fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
         name: name.into(),
         target: target.map(str::to_string),
         rows: Ok(rows),
+        title: None,
+        audience: None,
     }
 }
 
@@ -70,6 +72,7 @@ fn inputs<'a>(report: &'a account::Report, envs: Vec<EnvInput>) -> Inputs<'a> {
         account: report,
         envs,
         simple: false,
+        personal: Default::default(),
     }
 }
 
@@ -106,6 +109,8 @@ fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
         name: name.into(),
         target: target.map(str::to_string),
         rows: Err(error),
+        title: None,
+        audience: None,
     }
 }
 
@@ -662,4 +667,96 @@ fn serialized_receipt_has_no_secret_named_field() {
     all_keys(&v, &mut keys);
     let forbidden = ["value", "token", "password", "session"];
     assert!(keys.iter().all(|k| !forbidden.contains(&k.as_str())));
+}
+
+// FR-55: titles, audience, personal keys ----------------------------------------------
+
+fn titled(name: &str, title: &str) -> EnvInput {
+    EnvInput {
+        name: name.into(),
+        target: None,
+        rows: Ok(vec![]),
+        title: Some(title.into()),
+        audience: None,
+    }
+}
+
+#[test]
+fn the_grid_shows_an_environments_display_name() {
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let mut env = titled("prod-us", "Production (US)");
+    env.rows = Ok(vec![crate::domain::Row {
+        product: "api".into(),
+        key: "K".into(),
+        kind: crate::domain::Kind::Secret,
+        state: KeyState::Ready,
+        target: TargetState::Unknown,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    }]);
+    let r = receipt(
+        &Inputs {
+            config_source: None,
+            account: &account,
+            envs: vec![env],
+            simple: false,
+            personal: Default::default(),
+        },
+        "t",
+    );
+    let mut out = Vec::new();
+    render_text(&r, &mut out).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("Production (US)"));
+}
+
+#[test]
+fn an_environment_for_another_audience_is_not_a_blocking_problem() {
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let mut env = titled("prod", "Production");
+    env.audience = Some("devops".into());
+    env.rows = Err(crate::error::Error::Source("no access".into())
+        .with_code(crate::error::Code::VaultNoAccess));
+    let r = receipt(
+        &Inputs {
+            config_source: None,
+            account: &account,
+            envs: vec![env],
+            simple: false,
+            personal: Default::default(),
+        },
+        "t",
+    );
+    assert!(
+        r.findings
+            .iter()
+            .all(|f| f.code == "not_for_you" && !f.blocking)
+    );
+}
+
+#[test]
+fn a_missing_personal_key_is_named_as_yours() {
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let mut env = titled("dev", "Local");
+    env.rows = Ok(vec![crate::domain::Row {
+        product: "api".into(),
+        key: "OPENAI_API_KEY".into(),
+        kind: crate::domain::Kind::Secret,
+        state: KeyState::Missing,
+        target: TargetState::Unknown,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    }]);
+    let r = receipt(
+        &Inputs {
+            config_source: None,
+            account: &account,
+            envs: vec![env],
+            simple: false,
+            personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
+        },
+        "t",
+    );
+    assert_eq!(r.findings[0].code, "personal_key_missing");
 }

@@ -272,6 +272,8 @@ fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
             name: name.clone(),
             target: None,
             rows: crate::app::status::env_rows(fleet, name, None, op),
+            title: None,
+            audience: None,
         })
         .collect();
     let account = crate::app::account::credential_report(crate::host::Platform::Linux);
@@ -281,6 +283,7 @@ fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
             account: &account,
             envs,
             simple: false,
+            personal: Default::default(),
         },
         "test",
     );
@@ -314,4 +317,13 @@ fn once_the_owner_fills_the_values_nothing_is_left() {
         op.cache.borrow_mut().clear();
     }
     assert!(store_findings(&fleet, &op).is_empty());
+}
+
+#[test]
+fn a_created_item_is_tagged_with_its_environment() {
+    let (_dir, path, op) = workspace();
+    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    let fleet = crate::config::load(&path).unwrap();
+    let item = op.item(&fleet.environments["staging"].item_id);
+    assert_eq!(item["tags"], serde_json::json!(["opv-env:myapp/staging"]));
 }

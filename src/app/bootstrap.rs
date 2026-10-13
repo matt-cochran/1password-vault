@@ -149,16 +149,23 @@ fn ensure_vault(r: &dyn CommandRunner, title: &str) -> Result<init_op::Named, Er
     }
 }
 
-/// The item titled `title` in `vault_id`, created when missing.
+/// The item titled `title` in `vault_id`, created when missing and tagged `tag` (FR-55), so
+/// `ready` can tell an item moved or wired to another environment.
 fn ensure_item(
     r: &dyn CommandRunner,
     vault_id: &str,
     title: &str,
+    tag: &str,
 ) -> Result<init_op::Named, Error> {
     match init_op::find_item(r, vault_id, title, &Host::detect)? {
         Lookup::Found(n) => Ok(n),
-        Lookup::Missing(_) => init_op::create_item(r, vault_id, title),
+        Lookup::Missing(_) => init_op::create_item_tagged(r, vault_id, title, &[tag.to_string()]),
     }
+}
+
+/// The detection tag of an environment's item (FR-55).
+pub fn env_tag(project: &str, env: &str) -> String {
+    format!("opv-env:{project}/{env}")
 }
 
 /// `opv bootstrap` on the configuration file `path`.
@@ -198,7 +205,7 @@ pub fn run(
             continue;
         };
         let v = ensure_vault(r, vault)?;
-        let i = ensure_item(r, &v.id, item)?;
+        let i = ensure_item(r, &v.id, item, &env_tag(project, &p.environment))?;
         let env = &mut doc["environments"][p.environment.as_str()];
         env["vault_id"] = value(v.id.clone());
         env["item_id"] = value(i.id.clone());
