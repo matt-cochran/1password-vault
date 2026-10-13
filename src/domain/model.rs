@@ -161,6 +161,10 @@ pub struct Environment {
     /// Title of each person's personal item (FR-55); `None`: the shared item's title plus
     /// ` (personal)`.
     pub personal_item: Option<String>,
+    /// The vault holding this environment's delivery evidence (#106): one item per product,
+    /// written by the deploy identity after a confirmed sync. The values vault stays
+    /// read-only to CI; only identities that can read the values should read this vault.
+    pub state_vault_id: Option<String>,
 }
 
 impl Environment {

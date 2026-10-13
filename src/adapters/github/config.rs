@@ -300,6 +300,15 @@ impl GithubTarget {
 }
 
 impl TargetConfig for GithubTarget {
+    fn target_locator(&self) -> String {
+        let mut repos: Vec<String> = self.repos.iter().map(|r| r.to_ascii_lowercase()).collect();
+        repos.sort();
+        match &self.environment {
+            Some(e) => format!("repos {} environment {e}", repos.join(",")),
+            None => format!("repos {}", repos.join(",")),
+        }
+    }
+
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
     }

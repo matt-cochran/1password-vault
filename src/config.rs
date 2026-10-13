@@ -362,6 +362,9 @@ struct RawEnvironment<M> {
     personal_vault: Option<String>,
     #[serde(default)]
     personal_item: Option<String>,
+    /// The vault holding delivery evidence (#106): the deploy identity may write it.
+    #[serde(default)]
+    state_vault_id: Option<String>,
     /// Optional: environments used only for `run`, `config export` and `item skeleton`
     /// need no target. At most one entry (FR-28).
     #[serde(flatten)]
@@ -453,7 +456,7 @@ fn target_of(
                 format!(
                     "environment {name}: unknown field {unknown:?}; expected vault_id, item_id, \
                  modes, confirm_env, account, deploy_credentials, title, audience, order, \
-                 personal_vault, personal_item or a target section ({known})"
+                 personal_vault, personal_item, state_vault_id or a target section ({known})"
                 )
             },
         ));
@@ -559,6 +562,7 @@ fn environment<M>(
             order: e.order,
             personal_vault: e.personal_vault,
             personal_item: e.personal_item,
+            state_vault_id: e.state_vault_id,
         },
         e.modes,
     ))
@@ -2039,7 +2043,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
              confirm_env, account, deploy_credentials, title, audience, order, personal_vault, \
-             personal_item or a target section (azure, fly, github, kubernetes)\n"
+             personal_item, state_vault_id or a target section (azure, fly, github, kubernetes)\n"
         ));
     }
 

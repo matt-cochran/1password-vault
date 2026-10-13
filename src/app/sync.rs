@@ -66,6 +66,8 @@ pub struct SyncOpts {
     /// `--expect-plan <id>`: refuse before any write unless the plan re-derives to this id
     /// (FR-41). Also satisfies `confirm_env`: the id is bound to the environment.
     pub expect_plan: Option<String>,
+    /// `--receipt <file>`: write the delivery receipts minted by this sync (#106).
+    pub receipt: Option<std::path::PathBuf>,
 }
 
 impl SyncOpts {
@@ -115,6 +117,7 @@ pub fn run(
     if opts.expect_plan.is_some() && !(opts.rotate.is_empty() && opts.prune_immutable.is_empty()) {
         let without = SyncOpts {
             expect_plan: None,
+            receipt: None,
             ..opts.clone()
         };
         return Err(Error::Config(
@@ -294,6 +297,7 @@ impl Ctx<'_> {
         };
         let apply = SyncOpts {
             expect_plan: Some(id.clone()),
+            receipt: None,
             confirm: None,
             ..self.opts.clone()
         }
@@ -345,6 +349,8 @@ struct Report {
     /// Store names written by an earlier run and still waiting for a deploy when this run
     /// started (S4): why a run that wrote nothing deploys.
     earlier: Vec<String>,
+    /// Delivery receipts minted (or not) after the confirmed writes (#106).
+    delivery: Option<super::delivery::Recorded>,
 }
 
 impl Report {
@@ -432,6 +438,7 @@ impl Report {
             confirm: None,
             json: false,
             expect_plan: None,
+            receipt: None,
         };
         Some(o.command(env_name, guarded))
     }
@@ -468,6 +475,17 @@ impl Report {
             "next": next,
             "plan_id": self.plan_id,
         });
+        // #106: only where a state vault is configured, so other documents are unchanged.
+        let mut doc = doc;
+        if let Some(d) = &self.delivery {
+            doc["delivery"] = serde_json::json!({
+                "minted": d.minted.iter().map(|r| serde_json::json!({
+                    "product": r.scope.product,
+                    "revision": r.revision,
+                })).collect::<Vec<_>>(),
+                "not_minted": d.not_minted,
+            });
+        }
         writeln!(out, "{doc}").map_err(write_err)
     }
 }
@@ -563,6 +581,17 @@ fn run_staged(
     if !batch.is_empty() {
         record_ledger(fleet, env_name, &batch, &list_b, c.r);
     }
+    // #106: what this run wrote (confirmed above) or the plan proved identical.
+    {
+        let written: BTreeSet<String> = batch.iter().map(|(n, _)| n.clone()).collect();
+        let identical: BTreeSet<String> = plan
+            .rows
+            .iter()
+            .filter(|row| row.target == TargetState::Present)
+            .map(|row| t.env_name(&row.product, &row.key))
+            .collect();
+        record_delivery(c, &written, &identical, &list_b, &mut report, out)?;
+    }
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
         // A staged key with no digest after staging is unknown: count it as changed.
@@ -572,7 +601,6 @@ fn run_staged(
             report.unchanged.push(name.clone());
         }
     }
-
     if let (Some(v), Some(vp)) = (vars, &var_plan) {
         if !vp.set.is_empty() {
             let batch: Vec<(String, &str)> = vp
@@ -735,6 +763,66 @@ pub(crate) fn record_ledger(
     }
 }
 
+/// #106: with a state vault, a delivery revision per product in scope whose every name
+/// this run wrote (`written`, confirmed by the provider) or the plan proved identical, at
+/// the versions in `listing`. Never fails the sync: what it could not record is reported.
+fn record_delivery(
+    c: &Ctx<'_>,
+    written: &BTreeSet<String>,
+    identical: &BTreeSet<String>,
+    listing: &[StoreEntry],
+    report: &mut Report,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
+    if fleet.environment(env_name)?.state_vault_id.is_none() {
+        return Ok(());
+    }
+    let recorded = super::delivery::record(
+        fleet,
+        env_name,
+        opts.product.as_deref(),
+        written,
+        identical,
+        listing,
+        &report.plan_id,
+        c.r,
+    );
+    match recorded {
+        Ok(rec) => {
+            if let Some(path) = &opts.receipt {
+                super::delivery::write_receipt_file(path, &rec.minted)?;
+            }
+            if !opts.json {
+                for m in &rec.minted {
+                    p_line(
+                        out,
+                        format!("delivery: {} revision {}", m.scope.product, m.revision),
+                    )?;
+                }
+                for n in &rec.not_minted {
+                    p_line(
+                        out,
+                        format!("delivery: {} not recorded: {}", n.product, n.reason),
+                    )?;
+                }
+            }
+            report.delivery = Some(rec);
+        }
+        Err(e) => c.r.note(&format!(
+            "delivery evidence for {env_name} was not recorded ({}); the target holds what this \
+             sync wrote, and opv delivery verify reports it as not delivered",
+            e.code().as_str()
+        )),
+    }
+    Ok(())
+}
+
+/// One line of output.
+fn p_line(out: &mut dyn Write, s: String) -> Result<(), Error> {
+    writeln!(out, "{s}").map_err(write_err)
+}
+
 /// What `sync --deploy` prints on a target whose writes are live at once (FR-46).
 pub(crate) fn live_line(label: &str) -> String {
     format!("nothing to deploy: {label} applies each write at once")
@@ -871,6 +959,25 @@ fn run_pinned(
         .map(|(n, _)| n.clone())
         .collect();
     print_changes(out, names, &report)?;
+    // #106: each written name at the version its confirmed write returned; the others as
+    // listed, compared exactly by the plan.
+    {
+        let confirmed: BTreeSet<String> = written.keys().cloned().collect();
+        let identical: BTreeSet<String> = report.unchanged.iter().cloned().collect();
+        let mut after: Vec<StoreEntry> = listed.clone();
+        for (name, version) in &written {
+            match after.iter_mut().find(|e| &e.name == name) {
+                Some(e) => e.version = Some(version.clone()),
+                None => after.push(StoreEntry {
+                    name: name.clone(),
+                    version: Some(version.clone()),
+                    pending: false,
+                    stamp: None,
+                }),
+            }
+        }
+        record_delivery(c, &confirmed, &identical, &after, &mut report, out)?;
+    }
 
     // 4–5. What the runtime binds now, and what must change. Under `--product` another
     // product's bindings are never unbound (P20).
@@ -1652,6 +1759,7 @@ pub fn plan_scoped(
         prune: !plan.prune.is_empty() || !var_plan.prune.is_empty(),
         product: product.map(str::to_string),
         expect_plan: clean.then(|| id.clone()),
+        receipt: None,
         ..SyncOpts::default()
     }
     .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);

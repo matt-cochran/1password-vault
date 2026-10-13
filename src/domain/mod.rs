@@ -3,6 +3,7 @@
 pub mod access;
 pub mod adopt;
 pub mod convention;
+pub mod delivery;
 pub mod health;
 pub mod history;
 pub mod kind_guess;

@@ -195,6 +195,10 @@ fn check_app(env: &str, app: &str) -> Result<(), Error> {
 }
 
 impl TargetConfig for FlyTarget {
+    fn target_locator(&self) -> String {
+        format!("app {}", self.app)
+    }
+
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
     }

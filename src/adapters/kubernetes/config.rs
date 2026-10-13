@@ -355,6 +355,13 @@ impl KubernetesTarget {
 }
 
 impl TargetConfig for KubernetesTarget {
+    fn target_locator(&self) -> String {
+        format!(
+            "context {} namespace {} deployment {}",
+            self.target.context, self.target.namespace, self.target.deployment
+        )
+    }
+
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
     }

@@ -21,6 +21,7 @@ mod characterization_tests;
 pub(crate) mod ci_summary;
 pub mod config_cmd;
 pub mod config_export;
+pub mod delivery;
 pub mod doctor;
 pub mod explain;
 #[cfg(test)]

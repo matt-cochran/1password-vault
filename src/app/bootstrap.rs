@@ -50,6 +50,8 @@ pub struct Opts {
     pub rebind: BTreeSet<String>,
     /// Print the owner's steps for a read-only CI service account for this environment.
     pub ci_reader: Option<String>,
+    /// Environments that get a state vault for delivery receipts (#106).
+    pub state: BTreeSet<String>,
     pub json: bool,
 }
 
@@ -211,10 +213,22 @@ pub fn run(
         env["item_id"] = value(i.id.clone());
         recorded.push((p.environment.clone(), v.id, i.id));
     }
+    // #106: each `--state` environment's state vault, recorded as state_vault_id.
+    let mut state_vaults: Vec<(String, String)> = Vec::new();
+    for env_name in &opts.state {
+        if doc["environments"].get(env_name.as_str()).is_none() {
+            return Err(Error::Config(
+                format!("--state {env_name}: no such environment").into(),
+            ));
+        }
+        let v = ensure_vault(r, &format!("{project}-{env_name}-state"))?;
+        doc["environments"][env_name.as_str()]["state_vault_id"] = value(v.id.clone());
+        state_vaults.push((env_name.clone(), v.id));
+    }
     let new_text = doc.to_string();
     // The result loads like any hand-written file before it replaces it.
     let fleet = crate::config::parse(&new_text)?;
-    if !recorded.is_empty() {
+    if !recorded.is_empty() || !state_vaults.is_empty() {
         if is_generated(&text) {
             print_plan(out, &plans, opts.json, false)?;
             let ids: Vec<String> = recorded
@@ -292,6 +306,10 @@ pub fn run(
             let e = fleet.environment(env)?;
             ci_reader_steps(out, project, env, &e.vault_id)?;
         }
+        for (env, state_vault) in &state_vaults {
+            let e = fleet.environment(env)?;
+            deploy_identity_steps(out, project, env, &e.vault_id, state_vault)?;
+        }
         writeln!(out, "Next: opv ready").map_err(write_err)?;
     }
     match stale.first() {
@@ -321,6 +339,34 @@ fn ci_reader_steps(
         "  3. keep a separate, protected deploy identity (deploy_credentials) and your own \
          owner access for recovery; never give CI an owner or break-glass credential"
             .to_string(),
+    ];
+    for l in lines {
+        writeln!(out, "{l}").map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// The owner's steps for `env`'s deploy identity with delivery receipts (#106): read-only on
+/// the values vault, read and write on the state vault. Printed, never run (1Password shows
+/// the token once, to the owner).
+fn deploy_identity_steps(
+    out: &mut dyn Write,
+    project: &str,
+    env: &str,
+    vault_id: &str,
+    state_vault_id: &str,
+) -> Result<(), Error> {
+    let lines = [
+        format!(
+            "{env}: state vault {state_vault_id} recorded as state_vault_id; delivery receipts \
+             are kept there, one item per product"
+        ),
+        format!(
+            "  deploy identity (run it yourself; the token is shown once, by 1Password):\n  op \
+             service-account create \"{project}-{env}-deploy\" --vault {vault_id}:read_items \
+             --vault {state_vault_id}:read_items,write_items --expires-in 90d"
+        ),
+        "  give the state vault only to identities that can also read the values".to_string(),
     ];
     for l in lines {
         writeln!(out, "{l}").map_err(write_err)?;

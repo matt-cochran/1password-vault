@@ -399,3 +399,35 @@ fn the_team_item_never_gets_a_personal_field() {
             .any(|f| f["label"] == "OPENAI_API_KEY")
     );
 }
+
+// #106: --state ---------------------------------------------------------------------------
+
+fn with_state() -> (tempfile::TempDir, std::path::PathBuf, FakeOp, String) {
+    let (dir, path, op) = team();
+    let opts = Opts {
+        state: ["local".to_string()].into(),
+        ..Opts::default()
+    };
+    let mut out = Vec::new();
+    run(&path, "myapp", &opts, &op, &mut out).unwrap();
+    (dir, path, op, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn state_records_the_state_vault() {
+    let (_dir, path, _op, _) = with_state();
+    let fleet = crate::config::load(&path).unwrap();
+    assert!(fleet.environments["local"].state_vault_id.is_some());
+}
+
+#[test]
+fn state_prints_the_least_privilege_deploy_identity() {
+    let (_dir, path, _op, out) = with_state();
+    let fleet = crate::config::load(&path).unwrap();
+    let e = &fleet.environments["local"];
+    assert!(out.contains(&format!(
+        "--vault {}:read_items --vault {}:read_items,write_items",
+        e.vault_id,
+        e.state_vault_id.as_deref().unwrap()
+    )));
+}

@@ -125,6 +125,7 @@ Give `opv init` (or `opv init --add-env`) the target instead of `--fly-app`: `--
 ```sh
 opv ready                  # every environment x product at once
 opv access --json          # who can read each vault; the owner's command for a read-only CI reader
+opv delivery verify prod --product api --json   # does the target still hold what opv delivered? (revision, never a value)
 opv status staging         # one environment's rows
 opv history prod --json    # what opv last wrote to a target: time, plan id, changed outside opv
 ```
