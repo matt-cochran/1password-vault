@@ -289,6 +289,8 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
         for r in rows {
             let code = match &r.state {
                 KeyState::Missing => "key_missing",
+                // A field that exists but holds nothing: the owner fills it (#77).
+                KeyState::RuleFailed("nonempty", _) => "key_empty",
                 KeyState::RuleFailed(..) => "key_failed_rule",
                 KeyState::WrongKind => "key_wrong_kind",
                 _ => continue,

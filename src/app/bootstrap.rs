@@ -48,6 +48,8 @@ pub struct Opts {
     pub dry_run: bool,
     /// Environments whose recorded IDs are replaced by ones in the selected account.
     pub rebind: BTreeSet<String>,
+    /// Print the owner's steps for a read-only CI service account for this environment.
+    pub ci_reader: Option<String>,
     pub json: bool,
 }
 
@@ -178,7 +180,7 @@ pub fn run(
         .collect();
     let creates = plans.iter().any(|p| matches!(p.step, Step::Create { .. }));
     if opts.dry_run || (!stale.is_empty() && !creates) {
-        print_plan(out, &plans, opts.json)?;
+        print_plan(out, &plans, opts.json, false)?;
         return match stale.first() {
             Some(p) => Err(stale_error(&p.environment)),
             None => Ok(()),
@@ -207,7 +209,7 @@ pub fn run(
     let fleet = crate::config::parse(&new_text)?;
     if !recorded.is_empty() {
         if is_generated(&text) {
-            print_plan(out, &plans, opts.json)?;
+            print_plan(out, &plans, opts.json, false)?;
             let ids: Vec<String> = recorded
                 .iter()
                 .map(|(e, v, i)| format!("{e}: vault_id = {v:?}, item_id = {i:?}"))
@@ -233,7 +235,7 @@ pub fn run(
         }
         super::skeleton::run_as(&fleet, &p.environment, r, &mut std::io::sink(), false)?;
     }
-    print_plan(out, &plans, opts.json)?;
+    print_plan(out, &plans, opts.json, true)?;
     if !opts.json {
         writeln!(
             out,
@@ -241,12 +243,44 @@ pub fn run(
              1Password, then check what is left"
         )
         .map_err(write_err)?;
+        if let Some(env) = &opts.ci_reader {
+            let e = fleet.environment(env)?;
+            ci_reader_steps(out, project, env, &e.vault_id)?;
+        }
         writeln!(out, "Next: opv ready").map_err(write_err)?;
     }
     match stale.first() {
         Some(p) => Err(stale_error(&p.environment)),
         None => Ok(()),
     }
+}
+
+/// The owner's steps for a least-privilege CI reader of `env`'s vault (FR-52): opv prints
+/// them and never runs them, because 1Password shows the new token once, to the owner.
+fn ci_reader_steps(
+    out: &mut dyn Write,
+    project: &str,
+    env: &str,
+    vault_id: &str,
+) -> Result<(), Error> {
+    let lines = [
+        format!("CI reader for {env} (run these yourself; the token is shown once, by 1Password):"),
+        format!(
+            "  1. op service-account create \"{project}-{env}-ci\" --vault {vault_id}:read_items \
+             --expires-in 90d"
+        ),
+        "  2. store the token it prints as the CI secret OP_SERVICE_ACCOUNT_TOKEN in your CI \
+         provider (on GitHub: the repository's Settings > Secrets and variables > Actions), \
+         pasting it there yourself"
+            .to_string(),
+        "  3. keep a separate, protected deploy identity (deploy_credentials) and your own \
+         owner access for recovery; never give CI an owner or break-glass credential"
+            .to_string(),
+    ];
+    for l in lines {
+        writeln!(out, "{l}").map_err(write_err)?;
+    }
+    Ok(())
 }
 
 /// `ids_not_in_account`: the recorded IDs belong to an account other than the selected one.
@@ -267,7 +301,7 @@ fn stale_error(env: &str) -> Error {
     .with_next("opv account list")
 }
 
-fn print_plan(out: &mut dyn Write, plans: &[EnvPlan], json: bool) -> Result<(), Error> {
+fn print_plan(out: &mut dyn Write, plans: &[EnvPlan], json: bool, done: bool) -> Result<(), Error> {
     if json {
         let v = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
@@ -280,9 +314,14 @@ fn print_plan(out: &mut dyn Write, plans: &[EnvPlan], json: bool) -> Result<(), 
             Step::Ok { vault_id, item_id } => {
                 format!("{}: ok (vault {vault_id}, item {item_id})", p.environment)
             }
-            Step::Create { vault, item } => {
-                format!("{}: vault {vault:?}, item {item:?}", p.environment)
-            }
+            Step::Create { vault, item } if done => format!(
+                "{}: vault {vault:?} and item {item:?} ready (created or found), IDs recorded",
+                p.environment
+            ),
+            Step::Create { vault, item } => format!(
+                "{}: would create vault {vault:?} and item {item:?} (or use them if they exist)",
+                p.environment
+            ),
             Step::IdsNotInAccount { vault_id } => format!(
                 "{}: vault {vault_id} is not in the selected account (ids_not_in_account)",
                 p.environment

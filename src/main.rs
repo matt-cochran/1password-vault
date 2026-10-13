@@ -604,6 +604,10 @@ enum Cmd {
         /// account (repeatable). Values are not moved.
         #[arg(long, value_name = "ENV")]
         rebind: Vec<String>,
+        /// Also print the owner's steps for a read-only CI service account for this
+        /// environment's vault.
+        #[arg(long, value_name = "ENV")]
+        ci_reader: Option<String>,
         /// Print one JSON document (one step per environment) instead of lines.
         #[arg(long)]
         json: bool,
@@ -1568,6 +1572,7 @@ fn run(
             project,
             dry_run,
             rebind,
+            ci_reader,
             json,
         } => {
             let here = std::env::current_dir().unwrap_or_default();
@@ -1589,6 +1594,7 @@ fn run(
             let opts = opv::app::bootstrap::Opts {
                 dry_run: *dry_run,
                 rebind: rebind.iter().cloned().collect(),
+                ci_reader: ci_reader.clone(),
                 json: *json,
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);

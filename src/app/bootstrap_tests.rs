@@ -223,3 +223,95 @@ fn a_service_account_cannot_bootstrap() {
     );
     assert_eq!(e.exit_code(), 6);
 }
+
+#[test]
+fn ci_reader_steps_scope_the_service_account_to_the_environments_vault_read_only() {
+    let (_dir, path, op) = workspace();
+    let opts = Opts {
+        ci_reader: Some("dev".into()),
+        ..Opts::default()
+    };
+    let mut out = Vec::new();
+    run(&path, "myapp", &opts, &op, &mut out).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains(
+        "op service-account create \"myapp-dev-ci\" --vault vdev0000000000000000000001:read_items"
+    ));
+}
+
+// A fresh account, end to end (#77): nothing exists; bootstrap, then the receipt says what
+// the owner fills; once filled, nothing is left.
+
+const FRESH: &str = r#"[profile]
+kind = "fleet"
+
+[environments.dev]
+
+[environments.prod]
+fly.app = "myapp-prod"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+
+[products.api.keys.API_TOKEN]
+kind = "secret"
+environments = ["dev", "prod"]
+"#;
+
+fn fresh() -> (tempfile::TempDir, std::path::PathBuf, FakeOp) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(&path, FRESH).unwrap();
+    (dir, path, FakeOp::default())
+}
+
+/// The receipt's finding codes for the store side (`check`-like: dev is run-only, so both
+/// environments are read for their item only).
+fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
+    let envs = fleet
+        .environments
+        .keys()
+        .map(|name| crate::app::ready::EnvInput {
+            name: name.clone(),
+            target: None,
+            rows: crate::app::status::env_rows(fleet, name, None, op),
+        })
+        .collect();
+    let account = crate::app::account::credential_report(crate::host::Platform::Linux);
+    let r = crate::app::ready::receipt(
+        &crate::app::ready::Inputs {
+            config_source: None,
+            account: &account,
+            envs,
+            simple: false,
+        },
+        "test",
+    );
+    r.findings.iter().map(|f| f.code.clone()).collect()
+}
+
+#[test]
+fn a_fresh_account_ends_with_every_value_to_fill_named() {
+    let (_dir, path, op) = fresh();
+    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    let fleet = crate::config::load(&path).unwrap();
+    assert_eq!(store_findings(&fleet, &op), ["key_empty", "key_empty"]);
+}
+
+#[test]
+fn once_the_owner_fills_the_values_nothing_is_left() {
+    let (_dir, path, op) = fresh();
+    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    let fleet = crate::config::load(&path).unwrap();
+    for env in fleet.environments.values() {
+        let mut item = op.item(&env.item_id);
+        for f in item["fields"].as_array_mut().unwrap() {
+            if f["label"] == "API_TOKEN" {
+                f["value"] = serde_json::json!("FIXTUREVALUE-token");
+            }
+        }
+        op.items
+            .borrow_mut()
+            .retain(|i| i["id"] != env.item_id.as_str());
+        op.items.borrow_mut().push(item);
+        op.cache.borrow_mut().clear();
+    }
+    assert!(store_findings(&fleet, &op).is_empty());
+}
