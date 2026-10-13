@@ -922,6 +922,27 @@ Design: `docs/design/accounts-and-readiness.md` §4 (#81).
 - `receipt_id` is a digest of the inputs (configuration version, item versions, account, findings); `--save` writes the receipt (names, IDs and codes only) for resuming a handoff; `next` is the first blocking finding's prerequisite.
 - It never tidies or writes; a pending tidy is a finding with `effect: writes_1password`.
 
+## FR-52 — Fleet Bootstrap
+
+Design: `docs/design/fleet-bootstrap-and-adoption.md` §1 (#77).
+
+- `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` (owner terminal) takes the configuration's environments from declared to ready in the selected account (FR-49, FR-50; never op's default): per environment it checks the recorded vault and item in that account, creates a missing vault (`<project>-<env>`) and item (`<project> · <env> values`) as `init` does, records their IDs where the configuration lives, adds every product's section and empty fields (`item skeleton`), and ends with the readiness receipt (FR-51). Every step is idempotent; an interrupted run resumes.
+- IDs the selected account cannot see stop that environment with `ids_not_in_account`, naming the account and environment, with two explicit choices: `--rebind <env>` (new IDs in the selected account; values are not moved) or selecting the owning account. Nothing falls back to another account.
+- A generated declaration (a `# generated` first line, or a manifest marked so) is never rewritten; the IDs to record are printed for the generator instead (`ids_for_generator`).
+- `--ci-reader <env>` prints the owner's command to create a read-only service account for the environment's vault and where to store its token; opv does not create it.
+- It never syncs, deploys or writes a value. `--dry-run` changes nothing.
+
+## FR-53 — Adopting Existing Settings
+
+Design: `docs/design/fleet-bootstrap-and-adoption.md` §2 (#78).
+
+- `opv adopt <env> --from <dotenv file>|target [--replace <product/KEY>]... [--apply] [--json]` plans, and with `--apply` writes, values found elsewhere into the environment's item. Without `--apply` it is read-only.
+- Sources: a dotenv file (literal assignments; the `legacy_env` parser and limits) or the environment's target through its ports where values can be read back (pinned stores; variable channels for config). Fly secrets and GitHub secrets cannot be read and are refused with the manual alternative.
+- Each found name maps to one declared key (target name, else bare key name; ambiguity is a finding). A shared key's value goes to its source's field once; equal copies add nothing, differing copies are a conflict.
+- Each key's rules and transforms normalise both sides before comparing: `match`, `format only`, `import` (1Password empty), `differs` (decision needed), `not declared`. A non-empty field is never replaced, and an immutable key never, unless named with `--replace` (immutable also needs `--rotate`); a replaced value is kept in `opv · kept`.
+- `--apply` writes in one verified item edit (values on stdin only), re-reads and verifies, needs a person's own session, and is resumable. It never syncs, deploys, prunes, revokes or deletes the source.
+- Output holds names, actions and findings only, never a value, a length or a fragment.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
