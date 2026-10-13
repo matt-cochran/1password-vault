@@ -843,7 +843,10 @@ secret_name = "STATIC""#,
         assert_eq!(
             t.explain("api", "TOKEN"),
             [
-                ("github as", "Actions secret: ${{ secrets.CI__TOKEN }}".to_string()),
+                (
+                    "github as",
+                    "Actions secret: ${{ secrets.CI__TOKEN }}".to_string()
+                ),
                 ("github name", "CI__TOKEN".to_string()),
                 ("github repos", "org/r".to_string()),
             ]
@@ -856,7 +859,10 @@ secret_name = "STATIC""#,
         assert_eq!(
             t.explain("api", "TOKEN"),
             [
-                ("github as", "Actions secret: ${{ secrets.TOKEN }}".to_string()),
+                (
+                    "github as",
+                    "Actions secret: ${{ secrets.TOKEN }}".to_string()
+                ),
                 ("github name", "TOKEN".to_string()),
                 ("github repos", "org/r".to_string()),
                 ("github environment", "staging".to_string()),

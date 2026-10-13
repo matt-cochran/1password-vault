@@ -345,10 +345,20 @@ pub fn check(
         }
     }
     if let Some(pat) = &r.regex {
+        // FR-24 (0.6.0): `regex` checks the value as staged, after `ensure_prefix`
+        // normalisation when the key has one. Without `ensure_prefix`, that is `v`
+        // unchanged. A value that is only the prefix still fails as `ensure_prefix` first.
+        let staged = match &r.ensure_prefix {
+            Some(prefix) => {
+                Some(ensure_prefixed(v, prefix, None).map_err(|(rule, why)| fail(rule, why))?)
+            }
+            None => None,
+        };
+        let checked = staged.as_ref().map_or(v, SecretValue::expose);
         // Config validation guarantees the pattern compiles; fail closed otherwise.
         let full =
             Regex::new(&format!("^(?:{pat})$")).map_err(|_| fail("regex", REASON_BAD_PATTERN))?;
-        if !full.is_match(v) {
+        if !full.is_match(checked) {
             return Err(fail("regex", REASON_NO_REGEX_MATCH));
         }
     }
@@ -803,6 +813,95 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             "sk-abc"
+        );
+    }
+
+    /// The `regex` equivalent of `ensure_prefix` + `pattern` (FR-24, 0.6.0): the prefix
+    /// escaped, then the body pattern as a group, exactly as the deprecation note suggests.
+    fn equivalent_regex(prefix: &str, pattern: &str) -> Rules {
+        Rules {
+            ensure_prefix: Some(prefix.into()),
+            regex: Some(format!("{}(?:{pattern})", regex::escape(prefix))),
+            ..Rules::default()
+        }
+    }
+
+    /// Accept/refuse and the staged value, ignoring which rule refused (the rule name is
+    /// deliberately different: `pattern` keeps its own name as a deprecated alias).
+    fn outcome(rules: Rules, v: &str) -> Result<Option<String>, ()> {
+        with(rules, v).map_err(|_| ())
+    }
+
+    fn prefixed_regex(prefix: &str, regex: &str) -> Rules {
+        Rules {
+            ensure_prefix: Some(prefix.into()),
+            regex: Some(regex.into()),
+            ..Rules::default()
+        }
+    }
+
+    #[test]
+    fn regex_after_ensure_prefix_stages_a_missing_prefix_and_passes() {
+        assert_eq!(
+            with(prefixed_regex("p-", "p-[a-z]+"), "abc")
+                .unwrap()
+                .unwrap(),
+            "p-abc"
+        );
+    }
+
+    #[test]
+    fn regex_after_ensure_prefix_stages_an_already_prefixed_value_once() {
+        assert_eq!(
+            with(prefixed_regex("p-", "p-[a-z]+"), "p-abc")
+                .unwrap()
+                .unwrap(),
+            "p-abc"
+        );
+    }
+
+    #[test]
+    fn regex_after_ensure_prefix_rejects_a_staged_value_that_does_not_match() {
+        assert_eq!(rule_of(prefixed_regex("p-", "p-[a-z]+"), "p-ABC"), "regex");
+    }
+
+    #[test]
+    fn regex_after_ensure_prefix_still_fails_a_prefix_only_value_as_ensure_prefix() {
+        assert_eq!(
+            rule_of(prefixed_regex("p-", "p-[a-z]+"), "p-"),
+            "ensure_prefix"
+        );
+    }
+
+    #[test]
+    fn pattern_and_equivalent_regex_agree_when_the_prefix_is_missing() {
+        assert_eq!(
+            outcome(equivalent_regex("p-", "[a-z]+"), "abc"),
+            outcome(prefixed_rules("p-", Some("[a-z]+")), "abc")
+        );
+    }
+
+    #[test]
+    fn pattern_and_equivalent_regex_agree_when_the_prefix_is_present() {
+        assert_eq!(
+            outcome(equivalent_regex("p-", "[a-z]+"), "p-abc"),
+            outcome(prefixed_rules("p-", Some("[a-z]+")), "p-abc")
+        );
+    }
+
+    #[test]
+    fn pattern_and_equivalent_regex_agree_on_a_body_that_does_not_match() {
+        assert_eq!(
+            outcome(equivalent_regex("p-", "[a-z]+"), "p-ABC"),
+            outcome(prefixed_rules("p-", Some("[a-z]+")), "p-ABC")
+        );
+    }
+
+    #[test]
+    fn pattern_and_equivalent_regex_agree_when_the_value_is_only_the_prefix() {
+        assert_eq!(
+            outcome(equivalent_regex("p-", "[a-z]+"), "p-"),
+            outcome(prefixed_rules("p-", Some("[a-z]+")), "p-")
         );
     }
     fn pem(label: &str, eol: &str) -> (String, String) {

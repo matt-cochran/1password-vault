@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`pattern` merges into `regex`** ([#37](https://github.com/matt-cochran/1password-vault/issues/37); FR-24): `regex` now checks the value as it will be staged (after `ensure_prefix`), so the two combine. `pattern` keeps working as a deprecated alias; loading a file that uses it prints the equivalent `regex = '…'` line to paste.
 - `opv init --help` shows two examples instead of three, to fit on one screen with the GitHub options.
 
 ## [0.5.0] - 2026-10-12

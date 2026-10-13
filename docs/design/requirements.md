@@ -596,7 +596,7 @@ Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, 
 
 - `regex` is checked against the value opv would stage: after `ensure_prefix` normalisation when the key has one, the value as stored otherwise. Compatible with every file that worked before: the local tidy (FR-43) already writes the prefixed form back to 1Password, so a `regex` that accepted stored values accepts the staged one.
 - `regex` may now be combined with `ensure_prefix`. A value that is only the prefix still fails as `ensure_prefix` (checked first).
-- `pattern` stays accepted, with its exact behaviour and failure rule name (`pattern`), as a deprecated alias. Loading a configuration that uses it prints one note per key on stderr naming the key and the equivalent rule, `regex = "<regex-escaped prefix>(?:<pattern>)"`, never a value. `opv schema` marks it deprecated. A key that sets both `pattern` and `regex` is a configuration error naming the key.
+- `pattern` stays accepted, with its exact behaviour and failure rule name (`pattern`), as a deprecated alias. Loading a configuration that uses it prints one note per key on stderr naming the key and the equivalent rule, `regex = '<regex-escaped prefix>(?:<pattern>)'` written as a TOML string that pastes as is, never a value. `opv schema` marks it deprecated. A key that sets both `pattern` and `regex` is a configuration error naming the key.
 
 ## FR-25 — Config Discovery
 

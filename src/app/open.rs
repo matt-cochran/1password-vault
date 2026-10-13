@@ -309,9 +309,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.next_step()
-                .is_some_and(|n| n.starts_with("opv open allumata/INTEGRATION_ENC_KEY --env ")
-                    && n.ends_with(" --print")),
+            e.next_step().is_some_and(|n| n
+                .starts_with("opv open allumata/INTEGRATION_ENC_KEY --env ")
+                && n.ends_with(" --print")),
             "{:?}",
             e.next_step()
         );

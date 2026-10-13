@@ -476,9 +476,9 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 |---|---|
 | `prefix = "sk-"` | value starts with the prefix |
 | `not_prefix = "sk-or-"` or a list | value starts with none of them |
-| `regex = "..."` | the whole value matches (full match) |
+| `regex = "..."` | the whole value **as staged** matches (full match): after `ensure_prefix` normalisation when the key has one, otherwise the stored value |
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
-| `pattern = "..."` | only with `ensure_prefix`: the text after the prefix fully matches (full match) |
+| `pattern = "..."` | deprecated alias for `regex`: only with `ensure_prefix`, the text after the prefix fully matches (full match). Loading a key that uses it prints one note naming the equivalent `regex = "<regex-escaped prefix>(?:<pattern>)"`; set both and the configuration is refused |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
 | `hex_bytes = N` | valid hex that decodes to N bytes |

@@ -255,6 +255,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "documents": documents(),
         "deprecated": [
             {"field": "fly_name", "in": ["status", "plan", "check"], "use": "target_name"},
+            {"field": "pattern", "in": ["rules"], "use": "regex"},
         ],
     })
 }

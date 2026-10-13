@@ -809,7 +809,10 @@ mod tests {
     #[test]
     fn env_may_be_omitted_for_a_key_declared_in_one_environment() {
         let out = explain(&fleet(), "allumata/OPENAI_API_KEY", None).unwrap();
-        assert!(out.starts_with("allumata/OPENAI_API_KEY in prod\n"), "{out}");
+        assert!(
+            out.starts_with("allumata/OPENAI_API_KEY in prod\n"),
+            "{out}"
+        );
     }
 
     #[test]
