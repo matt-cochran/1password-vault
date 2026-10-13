@@ -94,3 +94,13 @@ fn an_environment_without_a_target_has_no_history() {
     .unwrap();
     assert!(String::from_utf8(out).unwrap().contains("no write history"));
 }
+
+#[test]
+fn fly_versions_are_never_shown() {
+    assert!(!versions_are_safe("fly"));
+}
+
+#[test]
+fn key_vault_versions_may_be_shown() {
+    assert!(versions_are_safe("azure"));
+}
