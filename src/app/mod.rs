@@ -9,28 +9,40 @@
 //!   verifying read; FR-43, [`tidy`]); a service account or CI never writes.
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
+pub mod access;
+pub mod account;
 pub mod add;
+pub mod adopt;
 #[cfg(test)]
 mod azure_tests;
+pub mod bootstrap;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;
 pub mod config_cmd;
 pub mod config_export;
+pub mod delivery;
 pub mod doctor;
 pub mod explain;
 #[cfg(test)]
+mod github_tests;
+#[cfg(test)]
 mod guidance_tests;
 pub mod guide;
+pub mod history;
 pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;
+#[cfg(test)]
+mod ledger_tests;
 pub mod local;
 pub mod login;
 pub mod open;
+pub mod personal;
 #[cfg(test)]
 mod pinned_tests;
 pub(crate) mod preflight;
+pub mod ready;
 pub mod run;
 pub mod setup;
 mod setup_import;
@@ -39,9 +51,13 @@ pub mod setup_runtime;
 #[cfg(test)]
 mod shared_tests;
 pub mod signin;
+pub(crate) mod signin_filter;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;
+pub mod skill;
+#[cfg(test)]
+mod skill_tests;
 #[cfg(test)]
 mod staged_tests;
 pub mod status;
@@ -52,6 +68,7 @@ pub(crate) mod tidy;
 mod ux2_tests;
 #[cfg(test)]
 mod ux_tests;
+pub(crate) mod variables;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -91,8 +108,15 @@ pub(crate) fn read_and_plan(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
-    let (mut plan, listed) =
-        plan_item(fleet, env_name, read.fields, ports, rotate, prune_immutable)?;
+    let (mut plan, listed) = plan_item_with(
+        fleet,
+        env_name,
+        read.fields,
+        ports,
+        rotate,
+        prune_immutable,
+        Some(&read.ledger),
+    )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok((plan, listed))
@@ -110,8 +134,15 @@ pub(crate) fn read_and_plan_versioned(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>, Option<u64>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
-    let (mut plan, listed) =
-        plan_item(fleet, env_name, read.fields, ports, rotate, prune_immutable)?;
+    let (mut plan, listed) = plan_item_with(
+        fleet,
+        env_name,
+        read.fields,
+        ports,
+        rotate,
+        prune_immutable,
+        Some(&read.ledger),
+    )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok((plan, listed, read.version))
@@ -194,6 +225,29 @@ pub(crate) fn plan_item(
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
+    plan_item_with(
+        fleet,
+        env_name,
+        fields,
+        ports,
+        rotate,
+        prune_immutable,
+        None,
+    )
+}
+
+/// [`plan_item`] with the item's version ledger (FR-54): on a staged store that cannot show
+/// values, a name the store still holds at the version opv recorded is compared exactly
+/// through its fingerprint, and a name at another version is drift.
+pub(crate) fn plan_item_with(
+    fleet: &Fleet,
+    env_name: &str,
+    fields: Vec<plan::ItemField>,
+    ports: Option<&Ports<'_>>,
+    rotate: &BTreeSet<(String, String)>,
+    prune_immutable: &BTreeSet<(String, String)>,
+    ledger: Option<&crate::domain::ledger::Ledger>,
+) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
     let mut on_target = match store {
         Some(s) => s.list()?,
@@ -225,6 +279,17 @@ pub(crate) fn plan_item(
         _ => None,
     };
     let current = pinned.map(|s| move |n: &str, v: &SecretValue| read(s, n, v));
+    // A staged store: the ledger judges a name the store still holds at the recorded version.
+    let listed_versions: BTreeMap<String, String> = on_target
+        .iter()
+        .filter_map(|e| e.version.clone().map(|v| (e.name.clone(), v)))
+        .collect();
+    let by_ledger = match (pinned, ledger) {
+        (None, Some(l)) => Some(move |n: &str, v: &SecretValue| {
+            listed_versions.get(n).and_then(|now| l.check(n, now, v))
+        }),
+        _ => None,
+    };
     let p = plan::build_with(
         fleet,
         env_name,
@@ -235,9 +300,21 @@ pub(crate) fn plan_item(
             prune_immutable,
             digest: &no_digest,
             target_check: &refusal,
-            current: current.as_ref().map(|c| c as &plan::CurrentCheck<'_>),
+            current: current
+                .as_ref()
+                .map(|c| c as &plan::CurrentCheck<'_>)
+                .or(by_ledger.as_ref().map(|c| c as &plan::CurrentCheck<'_>)),
         },
     );
+    let mut p = p;
+    if let (None, Some(l)) = (pinned, ledger) {
+        let managed = managed_names(fleet, env_name).unwrap_or_default();
+        p.drift = l
+            .drift(&on_target)
+            .into_iter()
+            .filter(|n| managed.contains(n))
+            .collect();
+    }
     if let Some(e) = failed.into_inner() {
         return Err(e);
     }
@@ -385,6 +462,9 @@ pub(crate) fn write_json(
                 key: key.clone(),
             })
             .collect(),
+        undelivered: json_names(&plan.undelivered),
+        unreferenced_sources: json_names(&plan.unreferenced_sources),
+        drift: plan.drift.clone(),
         tidy: json_tidy(&plan.tidy),
         tidy_error: plan.tidy_error,
         stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
@@ -455,6 +535,18 @@ struct JsonDoc {
     changes: &'static str,
     rows: Vec<JsonRow>,
     extras: Vec<JsonName>,
+    /// Keys declared for this environment that its target does not deliver (FR-48);
+    /// absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    undelivered: Vec<JsonName>,
+    /// Keys of a source-only product that no `from` points at (FR-47,
+    /// `unreferenced-source`); absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unreferenced_sources: Vec<JsonName>,
+    /// Target names changed outside opv since its last recorded sync (FR-54); absent when
+    /// none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    drift: Vec<String>,
     /// What this run tidied in 1Password (FR-43), names only; absent when nothing was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tidy: Vec<JsonTidy>,
@@ -629,13 +721,16 @@ fn json_reason(s: &KeyState) -> Option<String> {
     }
 }
 
-/// Target presence: secrets are present/absent/would-change; config is not a target secret.
+/// Target presence: secrets are present/absent/would-change; config only where the target
+/// delivers it itself (FR-46), otherwise none.
 fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     match (kind, target) {
-        (Kind::Config, _) => None,
-        (Kind::Secret, TargetState::Absent) => Some("absent"),
-        (Kind::Secret, TargetState::WouldChange) => Some("would_change"),
-        (Kind::Secret, _) => Some("present"),
+        (Kind::Config, TargetState::Unknown) => None,
+        // Read and checked, never written to this target (FR-47, FR-48).
+        (_, TargetState::NotDelivered) => Some("not_delivered"),
+        (_, TargetState::Absent) => Some("absent"),
+        (_, TargetState::WouldChange) => Some("would_change"),
+        (_, _) => Some("present"),
     }
 }
 
@@ -703,7 +798,13 @@ pub(crate) fn row_state_label(r: &Row) -> String {
 /// binding on a pinned target, when known. `opv help states` defines each word.
 pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &'static str {
     match (r.kind, r.target, &r.state) {
-        (Kind::Config, _, _) => "n/a",
+        // Read and checked here, never written to this target (FR-47, FR-48).
+        (_, TargetState::NotDelivered, _) => "n/a",
+        // Config has a target state only where the target delivers it itself (FR-46).
+        (Kind::Config, TargetState::Unknown, _) | (Kind::Config, _, KeyState::Skipped) => "n/a",
+        (Kind::Config, TargetState::Absent, _) => "new",
+        (Kind::Config, TargetState::WouldChange, _) => "changed",
+        (Kind::Config, TargetState::Present, _) => "same",
         (Kind::Secret, TargetState::Absent, KeyState::Skipped) => "n/a",
         (Kind::Secret, _, KeyState::Skipped) => "extra",
         (Kind::Secret, TargetState::Absent, _) => "new",
@@ -735,12 +836,13 @@ TARGET: the key on the deployment target
   same        on the target with the same value; nothing to write
   changed     on the target with another value; the next sync writes it
   unknown     on the target, but the target does not reveal values, so opv cannot compare;
-              sync stages it and compares digests
+              sync writes it again (a staging target stages it and compares digests)
   pending     written, not yet live; the next sync --deploy rolls it out
   held        immutable and already set; kept as it is (replace with --rotate)
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote
-  n/a         not a target secret (config keys, and skipped keys not on the target)
+  n/a         not delivered to the target (config keys, unless the target takes config as
+              variables, and skipped keys not on the target)
 
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
@@ -914,16 +1016,29 @@ pub(crate) fn print_legend(
     out: &mut dyn Write,
     words: &[&str],
     target_label: &str,
+    live: bool,
 ) -> Result<(), Error> {
     if words.contains(&"unknown") {
+        // A target whose writes are live (FR-46) is simply written again; a staging one
+        // stages and compares digests.
+        let then = if live {
+            "every sync writes them again"
+        } else {
+            "sync stages them and compares digests"
+        };
         writeln!(
             out,
             "unknown: {target_label} does not reveal stored values, so opv cannot compare them; \
-             sync stages them and compares digests (opv help states)"
+             {then} (opv help states)"
         )
         .map_err(write_err)?;
     }
     Ok(())
+}
+
+/// Whether `ports`' writes are live at once (FR-46), for the wording of `unknown`.
+pub(crate) fn live_writes(ports: &Ports<'_>) -> bool {
+    matches!(ports, Ports::Staged { runtime, .. } if runtime.live())
 }
 
 /// Print each undeclared item field as a warning; extras are never staged or pruned.
@@ -936,7 +1051,65 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
         )
         .map_err(write_err)?;
     }
+    let labels = |pairs: &[(String, String)]| -> String {
+        pairs
+            .iter()
+            .map(|(p, k)| key_label(p, k))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !plan.undelivered.is_empty() {
+        writeln!(
+            out,
+            "not delivered here: {} (the target's products list leaves their product out; \
+             add it there to deliver them)",
+            labels(&plan.undelivered)
+        )
+        .map_err(write_err)?;
+    }
+    if !plan.drift.is_empty() {
+        writeln!(
+            out,
+            "changed outside opv since its last sync: {} (set on the target by another tool \
+             or a person; the next sync writes 1Password's values back)",
+            plan.drift.join(", ")
+        )
+        .map_err(write_err)?;
+    }
+    if !plan.unreferenced_sources.is_empty() {
+        writeln!(
+            out,
+            "warning: unreferenced shared value {}: no key points at it with from; point a \
+             key at it or remove it",
+            labels(&plan.unreferenced_sources)
+        )
+        .map_err(write_err)?;
+    }
     Ok(())
+}
+
+/// `product/KEY` pairs as JSON names.
+fn json_names(pairs: &[(String, String)]) -> Vec<JsonName> {
+    pairs
+        .iter()
+        .map(|(product, key)| JsonName {
+            product: json_product(product),
+            key: key.clone(),
+        })
+        .collect()
+}
+
+/// FR-47: the one `Error::Config` message for naming a source-only product on its own. It
+/// holds canonical values for other products' keys and is never run, checked or planned on
+/// its own; callers attach a `Next:` step naming a product that reads it.
+pub(crate) fn source_only_message(product: &str) -> Error {
+    Error::Config(
+        format!(
+            "product {product} is source-only (source_only = true): it holds shared values \
+             for other products' keys and is never run on its own"
+        )
+        .into(),
+    )
 }
 
 /// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused under the simple
@@ -976,6 +1149,10 @@ pub(crate) fn check_product(
             .copied()
             .or(all.first().copied());
         return Err(undefined_product(fleet, p, env).with_next(command(pick)));
+    }
+    if fleet.products[p].source_only {
+        let pick = fleet.referencing_product(p);
+        return Err(source_only_message(p).with_next(command(pick)));
     }
     Ok(())
 }
@@ -1041,6 +1218,9 @@ pub(crate) fn product_names(
     product: &str,
 ) -> Result<HashSet<String>, Error> {
     let (_, t) = target(fleet, env_name)?;
+    if !fleet.delivers(env_name, product) {
+        return Ok(HashSet::new());
+    }
     Ok(fleet
         .products
         .get(product)
@@ -1084,6 +1264,7 @@ impl KeyNames {
             fleet
                 .products
                 .iter()
+                .filter(|(p, _)| fleet.delivers(env_name, p))
                 .flat_map(|(p, prod)| {
                     prod.keys
                         .keys()
@@ -1221,6 +1402,7 @@ pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<Str
     Ok(fleet
         .products
         .iter()
+        .filter(|(p, _)| fleet.delivers(env_name, p))
         .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
 }
@@ -1407,13 +1589,20 @@ fn provider_named(src: &str) -> Option<String> {
         "containerapp",
         "kubectl",
         "flyctl",
+        // The GitHub provider by its module and target type; plain "GitHub" stays allowed
+        // (CI detection, documentation links).
+        "githubtarget",
         // Store kinds and bindings (FR-39): core sees only `StoreConfig`.
         "azure_key_vault",
         "external-secrets",
         "externalsecrets?",
         "clustersecretstores?",
     ];
-    let re = regex::Regex::new(&format!(r"(?i)\b({})\b|\baz\s", words.join("|"))).unwrap();
+    let re = regex::Regex::new(&format!(
+        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::",
+        words.join("|")
+    ))
+    .unwrap();
     re.find(&production_code(src))
         .map(|m| m.as_str().to_string())
 }
@@ -1717,5 +1906,55 @@ pub(crate) mod testutil {
 
     pub fn text_of(out: &[u8]) -> String {
         String::from_utf8(out.to_vec()).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod source_only_tests {
+    //! FR-47: a source-only product's keys render no target name anywhere in the app layer.
+
+    use super::*;
+
+    const CFG: &str = r#"
+[profile]
+kind = "fleet"
+[environments.ci]
+vault_id = "vci"
+item_id = "ici"
+fly.app = "app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+[products.shared]
+source_only = true
+[products.shared.keys.SHARED_TOKEN]
+kind = "secret"
+environments = ["ci"]
+[products.api.keys.API_TOKEN]
+kind = "secret"
+environments = ["ci"]
+"#;
+
+    fn fleet() -> Fleet {
+        crate::config::parse(CFG).unwrap()
+    }
+
+    #[test]
+    fn managed_names_skip_a_source_only_product() {
+        let names = managed_names(&fleet(), "ci").unwrap();
+        assert_eq!(names, HashSet::from(["FLEET__API__API_TOKEN".to_string()]));
+    }
+
+    #[test]
+    fn product_names_is_empty_for_a_source_only_product() {
+        let names = product_names(&fleet(), "ci", "shared").unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn key_names_has_no_label_for_a_source_only_name() {
+        let names = KeyNames::new(&fleet(), "ci").unwrap();
+        assert_eq!(
+            names.label("FLEET__SHARED__SHARED_TOKEN"),
+            "FLEET__SHARED__SHARED_TOKEN"
+        );
     }
 }

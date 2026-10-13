@@ -15,10 +15,22 @@ Sync secrets from 1Password into the places your apps run, without ever printing
 
 ## Quick start
 
-Install on Linux or macOS ([other ways](docs/install.md)):
+Install with npm, on macOS, Linux, WSL or Windows ([other ways](docs/install.md)):
+
+```sh
+npm install -g @matthew-cochran/opv
+```
+
+npm picks the prebuilt binary for your system; the command is `opv`. Without Node.js, on Linux or macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
+```
+
+Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, add its agent skill, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json` and never handles a secret value:
+
+```sh
+opv skill install --user          # or, with the script: ... | sh -s -- --skill
 ```
 
 In a checkout of a project whose configuration lives in 1Password, no file is needed:
@@ -30,6 +42,8 @@ opv run dev -- npm run dev       # your app, with dev's settings as environment 
 
 opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk.
 
+A whole fleet from a fresh account (several products and environments, Fly and CI): [examples/fleet-fly](examples/fleet-fly/), driven by `opv bootstrap` and `opv ready`.
+
 Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, also turn on **Settings > Developer > Integrate with 1Password CLI** in the 1Password app). Then, in your project:
 
 ```sh
@@ -40,7 +54,7 @@ opv check dev                                  # adds the empty field; opv open 
 opv run dev -- npm run dev
 ```
 
-`opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
+Already have a `.env`? `opv init dev --from .env --apply` declares every key and imports the values, verified, in one step ([details](docs/configuration.md#start-from-an-existing-env-opv-init---from)). `opv init` can also start from an item you already have ([configuration](docs/configuration.md#start-from-an-existing-item-opv-init)), and `opv setup` walks a person through a project that ships a setup recipe ([guided setup](docs/guided-setup.md)).
 
 Then, for a deployed environment:
 
@@ -81,6 +95,7 @@ Problems come first, each with its reason and a link to its item in 1Password, t
 | Azure Key Vault + Container Apps | supported |
 | Kubernetes (Secrets + Deployment) | supported |
 | Azure Key Vault → Kubernetes (External Secrets Operator) | supported |
+| GitHub Actions (repository and environment secrets and variables) | supported |
 | Azure App Service | planned ([#40](https://github.com/matt-cochran/1password-vault/issues/40)) |
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |

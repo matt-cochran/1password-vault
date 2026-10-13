@@ -114,6 +114,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             TargetState::Present => "present",
             TargetState::WouldChange => "would-change",
             TargetState::Unknown => "unknown",
+            TargetState::NotDelivered => "not-delivered",
         });
     }
     let mut sorted = |label: &str, names: Vec<String>| {
@@ -319,6 +320,9 @@ mod tests {
             held_from_prune: vec![],
             config: BTreeMap::new(),
             concealed_config: Vec::new(),
+            drift: Vec::new(),
+            undelivered: Vec::new(),
+            unreferenced_sources: Vec::new(),
             tidy: Vec::new(),
             tidy_error: None,
         }

@@ -1424,6 +1424,31 @@ pub mod signals {
     }
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
+    /// Run first when opv exits on a signal: `opv ui` puts the terminal back (raw mode off,
+    /// main screen) so the report and the shell after it are readable.
+    static ON_EXIT: Mutex<Option<fn()>> = Mutex::new(None);
+
+    /// While set, a child in the foreground owns the terminal (`opv ui` running an `opv`
+    /// command): the terminal's own keys (Ctrl-C, Ctrl-\) stop that child, not opv.
+    static CHILD_OWNS_TERMINAL: AtomicBool = AtomicBool::new(false);
+
+    /// What to run before opv exits on a signal (`None`: nothing).
+    pub fn set_on_exit(f: Option<fn()>) {
+        *lock(&ON_EXIT) = f;
+    }
+
+    /// Whether a foreground child owns the terminal now (see [`ignored`]).
+    pub fn set_child_owns_terminal(on: bool) {
+        CHILD_OWNS_TERMINAL.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether opv ignores `sig` (true: the terminal sent it to a foreground child, which
+    /// stops on its own while opv carries on).
+    #[cfg(unix)]
+    pub fn ignored(sig: i32) -> bool {
+        CHILD_OWNS_TERMINAL.load(Ordering::SeqCst) && (sig == libc::SIGINT || sig == libc::SIGQUIT)
+    }
+
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -1519,16 +1544,49 @@ pub mod signals {
     /// the running child, remove the private directories, report and exit `128 + sig`.
     fn stop_and_exit(sig: i32) -> ! {
         STOPPING.store(true, Ordering::SeqCst);
+        if let Some(f) = *lock(&ON_EXIT) {
+            f();
+        }
         forward(sig);
         run_cleanups();
         let step = lock(&STEP).clone();
         let rerun = lock(&RERUN).clone();
         let message = interrupted_message(&step);
         if JSON.load(Ordering::SeqCst) {
-            println!("{}", interrupted_json(sig, &message, &rerun));
+            stdout_unlocked(&format!("{}\n", interrupted_json(sig, &message, &rerun)));
         }
         eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
         std::process::exit(128 + sig);
+    }
+
+    /// Write `text` to stdout without taking its lock: `main` holds that lock for the whole
+    /// command, so `println!` from the signal thread would wait forever and opv would never
+    /// exit. Best effort; the handle is borrowed, never closed.
+    fn stdout_unlocked(text: &str) {
+        use std::io::Write;
+        #[cfg(unix)]
+        {
+            use std::os::fd::FromRawFd;
+            // SAFETY: fd 1 stays open for the life of the process; ManuallyDrop never
+            // closes it.
+            let mut out = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(1) });
+            let _ = out.write_all(text.as_bytes());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+            // SAFETY: a plain call; the handle belongs to the process and ManuallyDrop never
+            // closes it.
+            let h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+            if h.is_null() || h == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                return;
+            }
+            let mut out = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(h) });
+            let _ = out.write_all(text.as_bytes());
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = std::io::stdout().write_all(text.as_bytes());
     }
 
     /// Install the handler (once, from `main`).
@@ -1537,7 +1595,7 @@ pub mod signals {
         no_core_dumps();
         let mut signals = signal_hook::iterator::Signals::new(HANDLED)?;
         std::thread::spawn(move || {
-            if let Some(sig) = signals.forever().next() {
+            if let Some(sig) = signals.forever().find(|s| !ignored(*s)) {
                 stop_and_exit(sig);
             }
         });
@@ -1577,8 +1635,16 @@ pub mod signals {
     /// Runs on a thread the system creates for the event. Never returns: returning would
     /// let the default handler end the process before the cleanup.
     #[cfg(windows)]
-    unsafe extern "system" fn on_console_event(_event: u32) -> windows_sys::core::BOOL {
-        // Every event is reported as an interruption (exit 130, like SIGINT).
+    unsafe extern "system" fn on_console_event(event: u32) -> windows_sys::core::BOOL {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+        // Ctrl-C and Ctrl-Break while a foreground child owns the console stop that child
+        // (the console delivers them to it too); opv carries on.
+        if CHILD_OWNS_TERMINAL.load(Ordering::SeqCst)
+            && (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)
+        {
+            return 1;
+        }
+        // Every other event is reported as an interruption (exit 130, like SIGINT).
         stop_and_exit(2)
     }
 
@@ -2337,6 +2403,21 @@ mod tests {
             signals::interrupted_message("flyctl secrets deploy"),
             "interrupted during flyctl secrets deploy; safe to re-run"
         );
+    }
+
+    // Both tests below only ever set the flag (tests run in parallel).
+    #[cfg(unix)]
+    #[test]
+    fn ctrl_c_is_left_to_a_child_that_owns_the_terminal() {
+        signals::set_child_owns_terminal(true);
+        assert!(signals::ignored(libc::SIGINT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_termination_stops_opv_even_while_a_child_owns_the_terminal() {
+        signals::set_child_owns_terminal(true);
+        assert!(!signals::ignored(libc::SIGTERM));
     }
 
     #[test]

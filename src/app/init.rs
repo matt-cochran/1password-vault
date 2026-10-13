@@ -64,6 +64,149 @@ pub struct InitArgs {
     /// `--profile`: overrides detection.
     pub profile: Option<Profile>,
     pub force: bool,
+    /// `--from`: declare every key of a dotenv file, and with `apply` import its values
+    /// (#90).
+    pub from: Option<FromFile>,
+}
+
+/// `opv init <env> --from <file.env> [--config KEY]... [--secret KEY]... [--apply]` (#90).
+#[derive(Debug, Clone, Default)]
+pub struct FromFile {
+    pub path: std::path::PathBuf,
+    /// Keys declared as config whatever their name suggests.
+    pub config: Vec<String>,
+    /// Keys declared as secret whatever their name suggests.
+    pub secret: Vec<String>,
+    /// Create, declare and import; without it nothing is written anywhere.
+    pub apply: bool,
+}
+
+/// The keys of a `--from` file: names and kinds, and which are empty. Never a value.
+#[derive(Debug, Clone, Default)]
+pub struct Imported {
+    /// Name to kind, for every valid key name in the file.
+    pub kinds: BTreeMap<String, Kind>,
+    /// Keys whose value is empty: declared, not imported.
+    pub empty: Vec<String>,
+    /// Names in the file that are not valid key names (^[A-Z][A-Z0-9_]*$): skipped.
+    pub invalid: Vec<String>,
+}
+
+/// Read `from`'s file (private, regular, under 1 MiB; never executed) and decide each
+/// key's kind: `--config` / `--secret` first, else by name only
+/// ([`crate::domain::kind_guess`]), secret by default. Values are read only to tell which
+/// are empty, and dropped (zeroized) here.
+pub fn read_from(from: &FromFile) -> Result<Imported, Error> {
+    let found = super::setup::read_legacy(&from.path)?;
+    if let Some(name) = from.config.iter().find(|n| from.secret.contains(n)) {
+        return Err(Error::Config(
+            format!("{name} is given with both --config-key and --secret-key; pick one").into(),
+        ));
+    }
+    for (flag, names) in [
+        ("--config-key", &from.config),
+        ("--secret-key", &from.secret),
+    ] {
+        if let Some(name) = names.iter().find(|n| !found.contains_key(n.as_str())) {
+            return Err(Error::Config(
+                format!("{flag} {name}: no such key in {}", from.path.display()).into(),
+            ));
+        }
+    }
+    let mut imported = Imported::default();
+    for (name, value) in &found {
+        if !config::is_env_name(name) {
+            imported.invalid.push(name.clone());
+            continue;
+        }
+        let kind = if from.config.contains(name) {
+            Kind::Config
+        } else if from.secret.contains(name) {
+            Kind::Secret
+        } else {
+            crate::domain::kind_guess::kind_for_name(name)
+        };
+        imported.kinds.insert(name.clone(), kind);
+        if value.expose().is_empty() {
+            imported.empty.push(name.clone());
+        }
+    }
+    if imported.kinds.is_empty() {
+        return Err(Error::Config(
+            format!("{} has no KEY=value line to declare", from.path.display()).into(),
+        ));
+    }
+    Ok(imported)
+}
+
+/// `opv init <env> --from <file>` without `--apply`: the keys and kinds it would declare,
+/// and which are empty. No 1Password call, nothing written. `again` is the same command
+/// with `--apply`.
+pub fn plan_from(
+    args: &InitArgs,
+    imported: &Imported,
+    again: &str,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    let from = args.from.as_ref().expect("plan_from is called with --from");
+    if json {
+        let keys: Vec<serde_json::Value> = imported
+            .kinds
+            .iter()
+            .map(|(k, kind)| {
+                serde_json::json!({
+                    "key": k,
+                    "kind": super::kind_label(*kind),
+                    "empty": imported.empty.contains(k),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "applied": false,
+            "environment": args.env,
+            "vault": args.vault,
+            "item": args.item,
+            "keys": keys,
+            "invalid": imported.invalid,
+            "next": again,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let w = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
+    w(
+        out,
+        format!(
+            "{}: {} for {} -> vault {:?}, item {:?}",
+            from.path.display(),
+            super::plural(imported.kinds.len(), "key", "keys"),
+            args.env,
+            args.vault,
+            args.item
+        ),
+    )?;
+    for (k, kind) in &imported.kinds {
+        let empty = if imported.empty.contains(k) {
+            "  (empty: declared, not imported)"
+        } else {
+            ""
+        };
+        w(out, format!("  {:<6} {k}{empty}", kind_word(*kind)))?;
+    }
+    for name in &imported.invalid {
+        w(
+            out,
+            format!("note: skipped {name:?}: not a valid key name (^[A-Z][A-Z0-9_]*$)"),
+        )?;
+    }
+    w(
+        out,
+        "Nothing written. Kinds are by name, secret when unsure; change one with --config-key \
+         KEY or --secret-key KEY. A field the item already has keeps its kind and its value."
+            .into(),
+    )?;
+    w(out, format!("Next: {again}"))
 }
 
 /// `--profile` text to a profile (`simple` or `fleet`).
@@ -115,13 +258,16 @@ fn run_on(
     if !args.force && fs::symlink_metadata(&target).is_ok() {
         return Err(existing_refusal(args, &target));
     }
-    let p = prepare(args, choice, r, host)?;
+    let imported = from_apply(args)?;
+    let p = prepare(args, choice, imported.as_ref(), r, host)?;
     write_atomic(&target, &p.text, args.force)?;
     tidy_declared(args, &p, r);
+    let adopted = import_values(args, &p, r)?;
     let place = Place::File(target.display().to_string());
     if json {
-        return write_json(out, args, &p, &place);
+        return write_json(out, args, &p, &place, adopted.as_ref());
     }
+    print_adopted(out, adopted.as_ref())?;
     let ancestor = ancestor_note(dir);
     report(args, &p, &place, ancestor, out)
 }
@@ -140,7 +286,8 @@ pub fn run_manifest(
     check_args(args)?;
     let choice = choose_target(args).map_err(init_help)?;
     probe_target(args, choice.as_ref(), args.profile).map_err(init_help)?;
-    let p = prepare(args, choice, r, &Host::detect)?;
+    let imported = from_apply(args)?;
+    let p = prepare(args, choice, imported.as_ref(), r, &Host::detect)?;
     let repo = crate::config_store::git_repo(r);
     let project = crate::config_store::default_project(project, repo.as_deref(), dir)?;
     let m = crate::config_store::create_manifest(
@@ -153,11 +300,13 @@ pub fn run_manifest(
         None,
     )?;
     tidy_declared(args, &p, r);
+    let adopted = import_values(args, &p, r)?;
     use crate::config_store::ConfigStore as _;
     let place = Place::Manifest(m.describe());
     if json {
-        return write_json(out, args, &p, &place);
+        return write_json(out, args, &p, &place, adopted.as_ref());
     }
+    print_adopted(out, adopted.as_ref())?;
     // Only the case a person must act on: a checkout with a remote finds the manifest by
     // itself (found live: a note on every new project that asked nothing of anyone).
     let note = repo.is_none().then(|| {
@@ -176,6 +325,120 @@ fn tidy_declared(args: &InitArgs, p: &Prepared, r: &dyn CommandRunner) {
     {
         let _ = super::tidy::read(&fleet, &args.env, r);
     }
+}
+
+/// The keys of `--from … --apply`, read before any 1Password call so a bad file changes
+/// nothing; `None` without `--from`. `--from` without `--apply` never gets here (main runs
+/// [`plan_from`] instead).
+fn from_apply(args: &InitArgs) -> Result<Option<Imported>, Error> {
+    match &args.from {
+        None => Ok(None),
+        Some(from) if from.apply => read_from(from).map(Some),
+        Some(_) => Err(Error::Config(
+            "init --from without --apply only shows its plan".into(),
+        )),
+    }
+}
+
+/// Declare the imported keys in the simple profile, next to the item's own fields; a field
+/// the item already has keeps the kind it has there (#90).
+fn merge_imported(d: &mut Declared, imported: &Imported, args: &InitArgs) -> Result<(), Error> {
+    if d.profile == Profile::Fleet {
+        return Err(Error::Config(
+            format!(
+                "init --from declares one product's keys (the simple profile), and item {:?} \
+                 is in the fleet shape (sections per product); declare these keys with opv \
+                 add, then opv adopt {} --from {}",
+                args.item,
+                args.env,
+                args.from
+                    .as_ref()
+                    .map_or(String::new(), |f| f.path.display().to_string())
+            )
+            .into(),
+        ));
+    }
+    let keys = d.keys.entry(String::new()).or_default();
+    let mut added = 0;
+    for (name, kind) in &imported.kinds {
+        if !keys.contains_key(name) {
+            keys.insert(name.clone(), *kind);
+            added += 1;
+        }
+    }
+    let from = args.from.as_ref().expect("merged only with --from");
+    d.notes.push(format!(
+        "declared {} from {}",
+        super::plural(added, "key", "keys"),
+        from.path.display()
+    ));
+    for name in &imported.invalid {
+        d.notes.push(format!(
+            "skipped {name:?} from the file: not a valid key name (^[A-Z][A-Z0-9_]*$)"
+        ));
+        d.skipped += 1;
+    }
+    Ok(())
+}
+
+/// With `--from … --apply`, after the configuration is written: import the file's values
+/// through `opv adopt` (one item edit, read back and verified; empty values are not
+/// imported; a value 1Password already holds is kept and reported).
+fn import_values(
+    args: &InitArgs,
+    p: &Prepared,
+    r: &dyn CommandRunner,
+) -> Result<Option<crate::domain::adopt::AdoptPlan>, Error> {
+    let Some(from) = args.from.as_ref().filter(|f| f.apply) else {
+        return Ok(None);
+    };
+    let fleet = config::parse(&p.text)?;
+    let source = super::adopt::Source::Dotenv(from.path.clone());
+    super::adopt::plan_and_write(
+        &fleet,
+        &args.env,
+        &source,
+        &Default::default(),
+        &Default::default(),
+        true,
+        r,
+    )
+    .map(Some)
+    .map_err(|e| {
+        // The configuration is already written: only the import is left to redo.
+        e.or_next(|| {
+            format!(
+                "opv adopt {} --from {} --apply",
+                args.env,
+                from.path.display()
+            )
+        })
+    })
+}
+
+/// The import lines after `init --from … --apply`: counts, and every key not imported with
+/// why. Names only.
+fn print_adopted(
+    out: &mut dyn Write,
+    plan: Option<&crate::domain::adopt::AdoptPlan>,
+) -> Result<(), Error> {
+    let Some(plan) = plan else { return Ok(()) };
+    writeln!(
+        out,
+        "imported {} into 1Password (read back and verified)",
+        super::plural(plan.writes.len(), "value", "values")
+    )
+    .map_err(write_err)?;
+    for row in plan
+        .rows
+        .iter()
+        .filter(|r| !matches!(r.action, crate::domain::adopt::Action::Import))
+    {
+        if let Some(key) = &row.key {
+            writeln!(out, "  {key}: {}", row.action.word()).map_err(write_err)?;
+        }
+    }
+    Ok(())
 }
 
 /// Where `init` saved the configuration.
@@ -219,6 +482,7 @@ fn not_created(e: Error, what: &str, title: &str) -> Error {
 fn prepare(
     args: &InitArgs,
     choice: Option<TargetChoice>,
+    imported: Option<&Imported>,
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
 ) -> Result<Prepared, Error> {
@@ -252,7 +516,10 @@ fn prepare(
     };
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
 
-    let decl = declare(&fields, args.profile, &args.item)?;
+    let mut decl = declare(&fields, args.profile, &args.item)?;
+    if let Some(imported) = imported {
+        merge_imported(&mut decl, imported, args)?;
+    }
     let text = render(args, &vault.id, &item.id, choice.as_ref(), &decl);
     // Validated exactly like a hand-written file (§10.2): IDs, target, key and product names.
     config::parse(&text).map_err(|e| would_write(e, "init"))?;
@@ -344,6 +611,7 @@ fn write_json(
     args: &InitArgs,
     p: &Prepared,
     place: &Place,
+    adopted: Option<&crate::domain::adopt::AdoptPlan>,
 ) -> Result<(), Error> {
     let decl = &p.decl;
     let keys: Vec<serde_json::Value> = decl
@@ -377,6 +645,22 @@ fn write_json(
         "skipped": decl.skipped,
         "next": next_command(args, p),
     });
+    // `--from … --apply` (#90) adds what it imported; other runs keep the document as it was.
+    let mut doc = doc;
+    if let Some(a) = adopted {
+        let not_imported: Vec<serde_json::Value> = a
+            .rows
+            .iter()
+            .filter(|r| !matches!(r.action, crate::domain::adopt::Action::Import))
+            .filter_map(|r| {
+                r.key
+                    .as_ref()
+                    .map(|k| serde_json::json!({"key": k, "action": r.action.word()}))
+            })
+            .collect();
+        doc["imported"] = serde_json::json!(a.writes.len());
+        doc["not_imported"] = serde_json::json!(not_imported);
+    }
     writeln!(out, "{doc}").map_err(write_err)
 }
 
@@ -1184,3 +1468,7 @@ fn add_env_on(
 #[cfg(test)]
 #[path = "init_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "init_from_tests.rs"]
+mod from_tests;

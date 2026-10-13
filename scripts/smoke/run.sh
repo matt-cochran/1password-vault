@@ -52,6 +52,12 @@ has() {
     return 1
 }
 
+# The environment-scoped half of the github target: listing github runs both. The GitHub
+# environment it writes must already exist; opv never creates one.
+if has github && ! has githubenv; then
+    TARGETS="$TARGETS githubenv"
+fi
+
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "missing tool: $1 ($2)" >&2
@@ -70,6 +76,14 @@ case $("$OPV" --version 2>/dev/null) in
 esac
 need_tool az "Azure CLI"
 { has kubernetes || has eso; } && need_tool kubectl "kubectl"
+if has github || has githubenv; then
+    need_tool gh "GitHub CLI"
+    if ! gh auth status >/dev/null 2>&1; then
+        echo "not signed in to GitHub (gh auth status failed)" >&2
+        echo "Next: gh auth login" >&2
+        exit 7
+    fi
+fi
 
 # --- Sandbox: defaults and discovery ------------------------------------------------------
 
@@ -79,6 +93,8 @@ OPV_SMOKE_K8S_CONTEXT=${OPV_SMOKE_K8S_CONTEXT:-kind-opv}
 OPV_SMOKE_K8S_NAMESPACE=${OPV_SMOKE_K8S_NAMESPACE:-opv-spike}
 OPV_SMOKE_K8S_DEPLOYMENT=${OPV_SMOKE_K8S_DEPLOYMENT:-api}
 OPV_SMOKE_ESO_STORE=${OPV_SMOKE_ESO_STORE:-prod-vault}
+OPV_SMOKE_GH_REPO=${OPV_SMOKE_GH_REPO:-}
+OPV_SMOKE_GH_ENVIRONMENT=${OPV_SMOKE_GH_ENVIRONMENT:-staging}
 
 # Hard refusals: only the disposable sandbox may be used.
 case $OPV_SMOKE_K8S_CONTEXT in
@@ -98,6 +114,33 @@ for v in "$OPV_SMOKE_AZ_RG" "$OPV_SMOKE_AZ_APP"; do
     esac
 done
 
+# GitHub sandbox: only a repository whose name part starts with opv-spike may be written.
+if has github || has githubenv; then
+    [ -n "$OPV_SMOKE_GH_REPO" ] || {
+        echo "OPV_SMOKE_GH_REPO is required when github is targeted (owner/name)" >&2
+        exit 2
+    }
+    safe OPV_SMOKE_GH_REPO "$OPV_SMOKE_GH_REPO"
+    case $OPV_SMOKE_GH_REPO in
+    */*/*)
+        echo "OPV_SMOKE_GH_REPO must be owner/name, got $OPV_SMOKE_GH_REPO" >&2
+        exit 2
+        ;;
+    */*) ;;
+    *)
+        echo "OPV_SMOKE_GH_REPO must be owner/name, got $OPV_SMOKE_GH_REPO" >&2
+        exit 2
+        ;;
+    esac
+    case ${OPV_SMOKE_GH_REPO#*/} in
+    opv-spike*) ;;
+    *)
+        echo "refusing: GitHub repository $OPV_SMOKE_GH_REPO is not an opv-spike sandbox repository" >&2
+        exit 2
+        ;;
+    esac
+fi
+
 # The Key Vault backs the eso store too, so it is found even when azure is not a target.
 if [ -z "${OPV_SMOKE_AZ_SUBSCRIPTION:-}" ]; then
     OPV_SMOKE_AZ_SUBSCRIPTION=$(az account show --query id -o tsv)
@@ -114,7 +157,7 @@ fi
 
 for v in OPV_SMOKE_OP_ACCOUNT OPV_SMOKE_AZ_SUBSCRIPTION OPV_SMOKE_AZ_KEY_VAULT \
     OPV_SMOKE_AZ_RG OPV_SMOKE_AZ_APP OPV_SMOKE_K8S_CONTEXT OPV_SMOKE_K8S_NAMESPACE \
-    OPV_SMOKE_K8S_DEPLOYMENT OPV_SMOKE_ESO_STORE; do
+    OPV_SMOKE_K8S_DEPLOYMENT OPV_SMOKE_ESO_STORE OPV_SMOKE_GH_ENVIRONMENT; do
     eval "safe $v \"\${$v}\""
 done
 [ -z "$GIVEN_VAULT" ] || safe --vault "$GIVEN_VAULT"
@@ -213,6 +256,20 @@ cleanup() {
             log "WARN  could not remove test vault $OWN_VAULT; delete it in 1Password"
         fi
     fi
+    if has github || has githubenv; then
+        for n in SMOKE_API_TOKEN SMOKE_DB_URL; do
+            gh secret delete "$n" -R "$OPV_SMOKE_GH_REPO" >/dev/null 2>&1
+        done
+        gh variable delete SMOKE_LOG_LEVEL -R "$OPV_SMOKE_GH_REPO" >/dev/null 2>&1
+        gh secret delete OPV_SMOKE_UNMANAGED -R "$OPV_SMOKE_GH_REPO" >/dev/null 2>&1
+        if has githubenv; then
+            for n in SMOKE_API_TOKEN SMOKE_DB_URL; do
+                gh secret delete "$n" -R "$OPV_SMOKE_GH_REPO" -e "$OPV_SMOKE_GH_ENVIRONMENT" >/dev/null 2>&1
+            done
+            gh variable delete SMOKE_LOG_LEVEL -R "$OPV_SMOKE_GH_REPO" -e "$OPV_SMOKE_GH_ENVIRONMENT" >/dev/null 2>&1
+        fi
+        log "removed GitHub smoke secrets and variables (SMOKE_*, OPV_SMOKE_UNMANAGED)"
+    fi
     echo "receipt: $RECEIPT"
     exit "$status"
 }
@@ -253,7 +310,12 @@ render() {
             [ "$mode" = prune ] || skip=1
             continue
             ;;
-        "# END KEEP" | "# END PRUNE")
+        "# BEGIN TARGET "*)
+            target=${line#"# BEGIN TARGET "}
+            has "$target" || skip=1
+            continue
+            ;;
+        "# END KEEP" | "# END PRUNE" | "# END TARGET")
             skip=0
             continue
             ;;
@@ -273,6 +335,27 @@ render() {
             fi
             line=${line%%@@*}$val${rest#*@@}
         done
+        # Drop environment names that are not targeted, as the block directive does.
+        case $line in
+        "environments = ["*)
+            inner=${line#environments = [}
+            inner=${inner%]}
+            kept=
+            while IFS= read -r item; do
+                envname=$(printf '%s' "$item" | tr -d ' "')
+                [ -n "$envname" ] || continue
+                has "$envname" || continue
+                if [ -z "$kept" ]; then
+                    kept="\"$envname\""
+                else
+                    kept="$kept, \"$envname\""
+                fi
+            done <<EOF
+$(printf '%s' "$inner" | tr ',' '\n')
+EOF
+            line="environments = [$kept]"
+            ;;
+        esac
         printf '%s\n' "$line" >>"$out"
     done <"$HERE/secrets.toml.tmpl"
 }
@@ -371,15 +454,107 @@ seen() {
     log "PASS  $1 app sees $var (length $3)"
 }
 
+# --- GitHub verification ----------------------------------------------------------------
+
+# The secret and variable names `gh` lists for a smoke environment: repository values for
+# `github`, or the GitHub environment's values for `githubenv`. Names and config only.
+gh_secret_names() {
+    if [ "$1" = githubenv ]; then
+        gh secret list -R "$OPV_SMOKE_GH_REPO" -e "$OPV_SMOKE_GH_ENVIRONMENT" --json name --jq '.[].name'
+    else
+        gh secret list -R "$OPV_SMOKE_GH_REPO" --json name --jq '.[].name'
+    fi
+}
+gh_variable_names() {
+    if [ "$1" = githubenv ]; then
+        gh variable list -R "$OPV_SMOKE_GH_REPO" -e "$OPV_SMOKE_GH_ENVIRONMENT" --json name --jq '.[].name'
+    else
+        gh variable list -R "$OPV_SMOKE_GH_REPO" --json name --jq '.[].name'
+    fi
+}
+gh_variable_value() {
+    if [ "$1" = githubenv ]; then
+        gh variable get "$2" -R "$OPV_SMOKE_GH_REPO" -e "$OPV_SMOKE_GH_ENVIRONMENT"
+    else
+        gh variable get "$2" -R "$OPV_SMOKE_GH_REPO"
+    fi
+}
+gh_secret_updated_at() {
+    if [ "$1" = githubenv ]; then
+        gh secret list -R "$OPV_SMOKE_GH_REPO" -e "$OPV_SMOKE_GH_ENVIRONMENT" --json name,updatedAt \
+            --jq '.[] | select(.name == "SMOKE_API_TOKEN") | .updatedAt'
+    else
+        gh secret list -R "$OPV_SMOKE_GH_REPO" --json name,updatedAt \
+            --jq '.[] | select(.name == "SMOKE_API_TOKEN") | .updatedAt'
+    fi
+}
+gh_has_secret() { gh_secret_names "$1" | grep -qxF "$2"; }
+gh_has_variable() { gh_variable_names "$1" | grep -qxF "$2"; }
+
+# verify_github <env>: the managed secret names are present and the variable equals the
+# item's marker exactly. GitHub never returns a secret value, so names only.
+verify_github() {
+    gh_has_secret "$1" SMOKE_API_TOKEN || fail "$1 lacks secret SMOKE_API_TOKEN"
+    log "PASS  $1 secret SMOKE_API_TOKEN is present"
+    gh_has_secret "$1" SMOKE_DB_URL || fail "$1 lacks secret SMOKE_DB_URL"
+    log "PASS  $1 secret SMOKE_DB_URL is present"
+    got=$(gh_variable_value "$1" SMOKE_LOG_LEVEL 2>/dev/null) || got=
+    [ "$got" = "$LOG_LEVEL" ] || fail "$1 variable SMOKE_LOG_LEVEL does not match the item"
+    log "PASS  $1 variable SMOKE_LOG_LEVEL matches the item"
+}
+
+# step_out <config> <label> <needle> <opv args...>: exit 0 and output holds the needle.
+step_out() {
+    cfg=$1
+    label=$2
+    needle=$3
+    shift 3
+    out=$WORK/step.out
+    echo "=== $label: opv $*" >>"$RECEIPT"
+    set +e
+    OPV_CONFIG=$cfg "$OPV" "$@" >"$out" 2>&1
+    got=$?
+    set -e
+    cat "$out" >>"$RECEIPT"
+    echo "--- exit $got (expected 0)" >>"$RECEIPT"
+    [ "$got" -eq 0 ] || fail "$label  (exit $got)"
+    grep -q -F -- "$needle" "$out" || fail "$label did not report: $needle"
+    echo "PASS  $label"
+}
+
+# githubenv writes a GitHub environment that must already exist. opv never creates one, so
+# name the owner's command and fail before any write.
+if has githubenv; then
+    if ! gh api "repos/$OPV_SMOKE_GH_REPO/environments" --jq '.environments[].name' 2>/dev/null |
+        grep -qxF "$OPV_SMOKE_GH_ENVIRONMENT"; then
+        echo "GitHub environment $OPV_SMOKE_GH_ENVIRONMENT is missing from $OPV_SMOKE_GH_REPO" >&2
+        echo "Next: gh api -X PUT repos/$OPV_SMOKE_GH_REPO/environments/$OPV_SMOKE_GH_ENVIRONMENT" >&2
+        fail "githubenv: GitHub environment $OPV_SMOKE_GH_ENVIRONMENT is missing"
+    fi
+fi
+
+# A secret opv does not manage: prune must leave it alone. Value on stdin only.
+if has github; then
+    OPV_SMOKE_UNMANAGED=$(marker 24)
+    printf '%s' "$OPV_SMOKE_UNMANAGED" | gh secret set OPV_SMOKE_UNMANAGED -R "$OPV_SMOKE_GH_REPO"
+    log "set unmanaged GitHub secret OPV_SMOKE_UNMANAGED (marker only)"
+fi
+
 for e in $TARGETS; do
     cfg=$WORK/secrets.toml
     step "$cfg" "$e doctor" doctor --env "$e"
     step "$cfg" "$e check" check "$e"
     step "$cfg" "$e plan" plan "$e"
     step "$cfg" "$e sync" sync "$e"
-    step "$cfg" "$e sync --deploy" sync "$e" --deploy
+    case $e in
+    github | githubenv) step_out "$cfg" "$e sync --deploy" "nothing to deploy" sync "$e" --deploy ;;
+    *) step "$cfg" "$e sync --deploy" sync "$e" --deploy ;;
+    esac
     step "$cfg" "$e status" status "$e"
-    seen "$e" API_TOKEN $TOKEN_LEN_BEFORE
+    case $e in
+    github | githubenv) verify_github "$e" ;;
+    *) seen "$e" API_TOKEN $TOKEN_LEN_BEFORE ;;
+    esac
 done
 
 API_TOKEN=$(marker $TOKEN_LEN_AFTER)
@@ -388,15 +563,38 @@ log "rotated smoke/API_TOKEN in 1Password (length $TOKEN_LEN_BEFORE -> $TOKEN_LE
 
 for e in $TARGETS; do
     cfg=$WORK/secrets.toml
+    case $e in
+    github | githubenv) before=$(gh_secret_updated_at "$e") ;;
+    esac
     step "$cfg" "$e plan after rotation" plan "$e"
     step "$cfg" "$e sync --deploy (repin)" sync "$e" --deploy
     step "$cfg" "$e status after repin" status "$e"
-    seen "$e" API_TOKEN $TOKEN_LEN_AFTER
+    case $e in
+    github | githubenv)
+        after=$(gh_secret_updated_at "$e")
+        [ "$before" != "$after" ] || fail "$e secret SMOKE_API_TOKEN updatedAt did not change"
+        log "PASS  $e secret SMOKE_API_TOKEN updatedAt changed"
+        verify_github "$e"
+        ;;
+    *) seen "$e" API_TOKEN $TOKEN_LEN_AFTER ;;
+    esac
     # The pruned config declares LOG_LEVEL for no environment, so --prune unsets it.
     step "$WORK/secrets.pruned.toml" "$e sync --deploy --prune (LOG_LEVEL wanted nowhere)" \
         sync "$e" --deploy --prune
-    seen "$e" LOG_LEVEL 0
+    case $e in
+    github | githubenv)
+        gh_has_variable "$e" SMOKE_LOG_LEVEL && fail "$e variable SMOKE_LOG_LEVEL was not pruned"
+        log "PASS  $e variable SMOKE_LOG_LEVEL is gone"
+        ;;
+    *) seen "$e" LOG_LEVEL 0 ;;
+    esac
 done
+
+# The unmanaged secret was never declared, so --prune must have left it in place.
+if has github; then
+    gh_has_secret github OPV_SMOKE_UNMANAGED || fail "unmanaged secret OPV_SMOKE_UNMANAGED was removed"
+    log "PASS  unmanaged secret OPV_SMOKE_UNMANAGED is still present"
+fi
 
 # Leak guard: the receipt must never contain a marker.
 if grep -q -F -- "$PREFIX" "$RECEIPT"; then

@@ -28,6 +28,12 @@ pub struct NewKey<'a> {
     pub rules: &'a [(String, Value)],
     pub guidance: Option<&'a str>,
     pub immutable: bool,
+    /// `from = "<product>/<KEY>"`: a shared key (FR-45).
+    pub from: Option<&'a str>,
+    /// `personal = true` (FR-55).
+    pub personal: bool,
+    /// `allow_same_value = true` (#92).
+    pub allow_same_value: bool,
 }
 
 /// A parsed `secrets.toml` that keeps its formatting.
@@ -177,6 +183,15 @@ impl ConfigDoc {
         }
         if let Some(g) = k.guidance {
             fields.push(("guidance", Value::from(g)));
+        }
+        if let Some(f) = k.from {
+            fields.push(("from", Value::from(f)));
+        }
+        if k.personal {
+            fields.push(("personal", Value::from(true)));
+        }
+        if k.allow_same_value {
+            fields.push(("allow_same_value", Value::from(true)));
         }
         let item = if inline {
             let mut it: InlineTable = fields.into_iter().collect();
@@ -351,6 +366,9 @@ mod tests {
             rules: &[],
             guidance: None,
             immutable: false,
+            from: None,
+            personal: false,
+            allow_same_value: false,
         }
     }
 

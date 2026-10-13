@@ -6,7 +6,16 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 
 | Command | What it does | Changes |
 |---|---|---|
-| `opv login [<env>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
+| `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
+| `opv history <env> [--json]` | what opv last wrote to the target, per key: time, plan id, changed outside opv ([usage](#write-history-opv-history)) | nothing (read-only) |
+| `opv access [<env>] [--json]` | who can read each vault; the owner's command for a read-only CI reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
+| `opv delivery verify <env> [--product <p>] [--receipt <file>] [--json]` | does each product's target still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
+| `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
+| `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
+| `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
+| `opv account use <email or ID>` | record the project's account in `.opv`, without a prompt | `.opv` |
 | `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
 | `opv doctor [--env <env> [--product <p>]] [--json]` | find setup problems and show the next step | nothing |
 | `opv check <env> [--product <p>] [--json]` | are the keys saved and valid? no target is contacted | nothing |
@@ -17,6 +26,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
 | `opv init <env> [--vault <title>] [--item <title>] [target options]` | configuration from an existing item ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
+| `opv init <env> --from <file.env> [--config-key KEY]... [--secret-key KEY]... [--apply]` | start from an existing `.env`: declare every key, then import the values, verified ([configuration](configuration.md#start-from-an-existing-env-opv-init---from)) | with `--apply`: the configuration and the item's fields |
 | `opv add <[product/]KEY> --kind secret\|config [...]` | declare a key, or add environments to one | the configuration |
 | `opv item skeleton <env> [--json]` | add every missing declared field to the item, empty | the 1Password item |
 | `opv config export [<env>] [--toml\|--json]` | print the configuration, or an environment's config values | nothing |
@@ -28,6 +38,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
 | `opv schema` | the installed binary as one JSON document | nothing |
 | `opv guide agent` | the setup guide for AI assistants, for this version | nothing |
+| `opv skill install [--target claude\|codex\|all] [--user\|--project <dir>] [--force]` | install the agent skill (versioned with this binary) where coding agents look | the skill files |
+| `opv skill status [--json]` | installed skill copies: version, current or older, edited | nothing |
 
 "Nothing" means nothing on your targets and no change to what a value means. Run by a person signed in with their own session, a command that reads an item may also tidy its 1Password layout once (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
@@ -91,14 +103,14 @@ The first line counts the rows. `status`, `plan` and `check` exit 8 when a key i
 | | `skipped` | not required in this environment |
 | | `blocked by source` | shares another key's value and that key has a finding; fixed with it and not counted again ([Shared keys](#shared-keys)) |
 | TARGET | `new` | not on the target yet; the next sync writes it |
-| | `same` | on the target with the same value (Azure, Kubernetes) |
+| | `same` | on the target with the same value (Azure, Kubernetes; GitHub variables) |
 | | `changed` | on the target with another value; the next sync writes it |
-| | `unknown` | on the target, but Fly does not reveal values, so opv cannot compare them; sync stages and compares digests |
+| | `unknown` | on the target, but the target does not reveal values, so opv cannot compare them; on Fly sync stages and compares digests, on GitHub it writes the secret again |
 | | `pending` | written but not yet live; the next `sync --deploy` rolls it out |
 | | `held` | immutable and already set; replace it with `--rotate` |
 | | `extra` | on the target but not wanted in this environment; removed only with `--prune` (sync prints `extra, not pruned`) |
 | | `drift` | the app is bound to something other than what opv last wrote |
-| | `n/a` | not a target secret (config keys, and skipped keys that are not on the target) |
+| | `n/a` | not delivered to the target (config keys, except GitHub variables, and skipped keys that are not on the target) |
 
 `missing` and `failed` are findings. In `status` and `plan` their rows come first, so a 40-key fleet with one problem shows it on the first table line. The JSON `state` and `target` fields keep their own spellings (below).
 
@@ -200,7 +212,7 @@ Next: opv plan prod
 
 ### Change detection on Fly
 
-Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. `plan` therefore shows a desired key that is already on Fly as `unknown`. An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows `same` or `changed` instead.
+Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. Without more, `plan` would show a desired key that is already on Fly as `unknown`; the version ledger closes that gap. After a sync you run yourself, opv records in the environment's item (section `opv · state`) each written name with the digest Fly gave it and a keyed fingerprint of the value (never the value). `plan` then compares exactly: a name Fly still holds at that digest is `same` when the 1Password value has not changed and `changed` when it has; a name whose digest changed since is reported as **changed outside opv** (someone set it on Fly; the next sync writes 1Password's value back). A name no person's sync has recorded yet (a new key, or only CI has synced it) stays `unknown`. The same ledger makes GitHub secrets exact: one that is unchanged is no longer rewritten by every sync. An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows `same` or `changed` instead.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. An app with no machines skips the deploy with a notice ([checks before the first write](how-opv-handles-failures.md#checks-before-the-first-write)).
 
@@ -303,6 +315,12 @@ Next: opv sync prod --deploy --confirm prod
 
 A `--confirm` that names another environment is refused everywhere, guarded or not. The `Next:` line after a guarded sync includes `--confirm <env>`; `plan`'s carries `--expect-plan <id>` instead, which is enough on its own. `--prune` always lists the names it will remove before it acts.
 
+### Sync on GitHub Actions
+
+Secrets are written with `gh secret set` and config with `gh variable set`, values on stdin, in every listed repository (and GitHub environment). A write is live at once: `sync` prints no pending line, and `--deploy` prints `nothing to deploy: GitHub applies each write at once`. GitHub never shows a secret's value again, so every sync writes each ready secret (`unknown` in `status`); variables are compared and written only when they differ. `--prune` deletes managed secrets and variables that are no longer declared; other names in the repository are never touched. Setup: [configuration](configuration.md#github-actions-repository-and-environment-secrets), [example](../examples/github-ci/).
+
+`plan` and `status` also list keys the environment does not deliver (`not delivered here: …`, JSON `undelivered`), when the target's `products` leaves their product out, and warn about a source-only value nothing points at (`unreferenced shared value …`, JSON `unreferenced_sources`).
+
 ### Pruning on Fly
 
 Nothing is deleted by default. `--prune` unsets only names that the template produces for declared keys that are not desired in this environment. Names outside that set are never touched. Immutable keys are never pruned unless named with `--prune-immutable`; they are reported as "held (immutable), not pruned". A name staged by the same run is never pruned. A key you delete from `secrets.toml` is no longer declared, so it is neither reported nor pruned: unset it manually with `flyctl secrets unset`.
@@ -380,13 +398,123 @@ all clear: nothing pending
 
 - A failing check has its fix under it as `  fix: ...`; `doctor` then exits with the first failing check as the error, and its `Do:`/`Next:` lines are that check's fix. An older tool is a `warn` line with the upgrade command (exit code unchanged).
 - `--env <env>` checks only what that environment needs (a run-only environment needs no target CLI) and reads its item once, by IDs, checking the keys as `check` does: a key missing or failing a rule is a `FAIL  item:` line naming it, with `Next: opv check <env> --product <p>` (exit 8). `--product` limits that to one product. Without `--env` no item is read.
+- `--settings` also looks for likely-wrong values across every environment you can read (the same secret in two environments, a placeholder, stray whitespace, `localhost` where it deploys, a test key in production): one `warn  settings:` line listing each, with `fix: opv open <key> --env <env>`. It reads every environment's item; values are compared, never shown. A warning never changes the exit code. `opv ready` reports the same findings. See [settings health](configuration.md#settings-health-likely-wrong-values).
 - With `deploy_credentials`, a failed sign-in is one `FAIL deploy credentials` line; the other checks still run.
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
 - With no configuration at all, the config line lists both ways to start (`opv init` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
 
+## Terminal UI: `opv ui`
+
+`opv ui` shows, in one full-screen view, every environment (by its title, in its configured order) against every product, each product's keys across environments, a key's details and who reads it, the shared values and their consumers, and the 1Password accounts. Secrets are shown as `••••` with their state; no value is ever fetched. Environments you cannot open are dimmed with their `audience`; your personal keys are marked as yours.
+
+Every action is an `opv` command, shown before it runs and run in your terminal, so 1Password's prompts and opv's output look exactly as they do on the command line: `s` syncs the selected environment by first showing `opv plan`, then running exactly that plan with `--expect-plan` after you confirm (for a guarded environment, by typing its name); `i` reviews values from a file before adopting them (what `opv adopt` found per key; you choose import or skip, keep or replace, then it runs exactly the `opv adopt … --apply` it shows); `o` opens a key in 1Password; `n` runs the next step from `opv ready`; `a` lists accounts; `+` declares a key (a form: product, name, kind, environments, guidance, personal, same value intended) and `E` adds an environment, each becoming the exact `opv add …` / `opv init <env> --add-env` it shows before running; `e` hands off to `opv config edit`; `r` re-reads everything. Keys: arrows, `tab` between the sidebar and the main pane, `enter` to open, `esc` to go back, `q` (or Ctrl-C) to quit; Ctrl-C while an action's command runs stops that command and returns to the UI. Without an interactive terminal (or with `OPV_UI_TEXT=1`, for screen readers) it prints `opv ready` instead. It is part of the default build; `cargo build --no-default-features` leaves it out.
+
+## Write history: `opv history`
+
+`opv history <env>` shows, per secret, what opv last wrote to the environment's target, from what is already recorded: on Key Vault and Kubernetes the stamp opv puts on each value it writes (UTC time, plan id, opv version); on Fly and GitHub the version opv's own sync recorded in the item's `opv · state` section (on Fly the version is a digest of the value, so it is compared in memory and never shown: only the state is). Each key is `written by opv` (stamped), `as opv's last sync left it`, `changed outside opv since its last sync` (then `Next: opv plan <env>`), `on the target; opv has no record of writing it`, or `not on the target`. It is read-only, as `opv status` (one item read and one store listing), and shows names, versions, times and plan ids, never a value or a fingerprint. `--json` gives `{schema_version, environment, target, latest: {written, plan, opv_version} | null, rows: [{product, key, name, on_target, version, pending, written, opv_version, plan, recorded_version, state}]}`. An environment without a target has no history. In `opv ui`, `h` on an environment opens the same.
+
+## Who can read each vault: `opv access`
+
+`opv access [<env>]` shows, per environment, who can use its 1Password vault (one read-only `op vault user list` each): people and guests as counts, never names, and each service account by name with whether it can only read. It warns when:
+
+- `no_ci_reader`: an environment that deploys has no read-only service account for CI. The finding carries the owner's exact command, `op service-account create "<project>-<env>-ci" --vault <vault-id>:read_items --expires-in 90d`. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
+- `ci_reader_can_write`: a service account can edit or manage the vault; CI only needs to read.
+- `access_not_visible`: you cannot see who uses the vault, because listing it needs permission to manage the vault.
+
+`--json` gives `{schema_version, environments: [{environment, vault_id, deployed, visible, people, guests, service_accounts: [{name, read_only}]}], findings: [{code, environment, message, next}]}`. In `opv ui` it is the "CI access" entry in the sidebar.
+
+## Delivery receipts: `opv sync --receipt` and `opv delivery verify`
+
+When an environment has a state vault (`state_vault_id`, created by `opv bootstrap --state <env>`), every sync whose writes the target confirmed records, **per product**, a delivery receipt in that vault's item `opv · delivery · <product>`. Products on a shared host are promoted and checked independently.
+
+```sh
+opv sync prod --product api --receipt api.receipt.json   # deliver; keep the receipt (names, ids, times)
+opv delivery verify prod --product api --json            # read-only: is api still exactly what was delivered?
+opv delivery verify prod --receipt api.receipt.json      # is the receipt I kept still the current delivery?
+```
+
+- **When a revision is minted.** Only when every secret in the product's binding set was written by this sync (confirmed by the provider) or proven identical. The revision (`drv-` and 26 random characters) is opaque and derived from nothing.
+  - A failed, partial or interrupted sync mints nothing. Its product stays as it was, and a retry mints once everything is confirmed.
+  - An unchanged re-sync keeps the same revision, so an accepted record stays reusable.
+- **What verify reports**, per product. Exit 0 only when everything checked is `verified`; otherwise exit 8 with `Next: opv sync <env>`.
+  - `verified`: every name holds what was delivered.
+  - `changed`, with each name's state:
+    - `source_changed`: the 1Password value was rotated, or a shared value it reads changed. A shared value invalidates every product that reads it.
+    - `drifted_on_target`: edited outside opv.
+    - `missing_on_target`.
+  - `unverifiable`, with a reason.
+  - `not_delivered`: nothing recorded, or recorded for another account, environment, product or target, or the binding set changed (a key added or removed).
+  - `superseded`: the receipt you passed is no longer the current delivery.
+
+  `deployed` is reported separately: `staged` (Fly secrets waiting for a deploy), `deployed`, or `n/a` (GitHub applies writes at once). It is never folded into `verified`.
+- **Never a value, never a digest.**
+  - The receipt holds names, IDs, times, the plan id and the opv version.
+  - The evidence (each name's store version and a keyed fingerprint of its 1Password value) stays in the state item and is compared in memory. Fly digests included, it is never printed, logged or written to a file.
+  - Give the state vault only to identities that can also read the values.
+- **Least privilege.** The deploy identity reads the values vault and writes only the state vault. `opv bootstrap --state <env>` prints its exact `op service-account create … --vault <values>:read_items --vault <state>:read_items,write_items` command, which you run yourself (1Password shows the token once).
+- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. `opv delivery verify --json` returns `{schema_version, environment, products: [{product, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
+- **Capability check**: an installed opv supports this when `opv schema` lists the command `delivery verify`.
+
+The four kinds of evidence are kept apart:
+
+| Evidence | What it proves |
+|---|---|
+| `opv ready` (`receipt_id`) | what is declared and saved now |
+| `plan_id` | the intent a person reviewed |
+| delivery revision | that a confirmed write put this binding set on the target, and whether it still holds |
+| `deployed` | whether the running release uses it |
+
+## Readiness: `opv ready`
+
+`opv ready` answers "what is ready, what is not, and who does what next" in one read-only command. It reads the account (as `opv account list`) and every environment (as `opv status`), and prints a product × environment grid (`saved/declared`, `n/a` where the environment's target does not deliver the product), the findings, and the first step:
+
+```text
+ready: 1 blocking · 1 findings · receipt rcpt-3f9a1c0d2e7b
+PRODUCT  dev  staging          prod
+api      6/6  5/6 · 1 finding  6/6
+shared   n/a  n/a              n/a
+Needs attention:
+  [owner] key_missing staging api/STRIPE_KEY → opv open api/STRIPE_KEY --env staging
+Next (owner): opv open api/STRIPE_KEY --env staging
+```
+
+`--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose; a [settings health](configuration.md#settings-health-likely-wrong-values) finding (non-blocking) also has a `message`, one sentence naming the keys and environments, never a value. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
+
+## Moving existing settings in: `opv adopt`
+
+Starting a project from a `.env` file? `opv init <env> --from .env --apply` declares every key and imports the values in one step ([configuration](configuration.md#start-from-an-existing-env-opv-init---from)); `adopt` is for keys already declared.
+
+When values already live somewhere else (a project's `.env` file, a Key Vault, a cluster), `opv adopt <env> --from <file>` shows what would come into the environment's 1Password item, without writing anything:
+
+```text
+staging: 4 found · 2 to write · 1 need a decision
+  api/DATABASE_URL                 differs: 1Password is kept (--replace api/DATABASE_URL to take the found value)  (from DATABASE_URL)
+  api/PRIVATE_KEY_PEM              import (to write)  (from PRIVATE_KEY_PEM)
+  api/LOG_LEVEL                    same value after the key's rules; nothing to do  (from LOG_LEVEL)
+  shared/FLY_API_TOKEN             import (to write)  (from FLEET__API__FLY_API_TOKEN, FLEET__WEB__FLY_API_TOKEN)
+Next: opv adopt staging --from .env.staging --apply
+```
+
+- A found name becomes a declared key by its target name, else by its bare key name; a name several keys share is skipped as ambiguous. A key that shares a value (`from`) lands in its source's field once; copies that differ are reported, never merged.
+- Each key's rules and transforms apply to both sides before comparing (`ensure_prefix`, a trailing newline, `pem_private_key`), so a formatting difference is not a change. Values are never printed, not even partly.
+- `--skip product/KEY` (repeatable) leaves a key out of the import although it would come in; it is listed as `skipped`. In `opv ui`, `i` opens the same review per key (import or skip, keep or replace) and runs exactly the `opv adopt … --apply` it shows.
+- A filled 1Password field is never replaced unless you name it with `--replace product/KEY` (an immutable key also needs `--rotate product/KEY`); the old value is kept in the section `opv · kept`.
+- `--apply` writes everything in one item edit, reads the item back and checks each field. It needs your own session, and re-running is safe: the plan is recomputed from what is there. It never syncs, deploys, prunes or deletes the source; your apps keep their current secrets until you sync.
+- Sources: a dotenv file (literal `KEY=value` lines, never executed; it must be a private regular file under 1 MiB), or `--from target` for targets that can show values: Azure Key Vault, Kubernetes Secrets, and GitHub variables (config). Fly secrets and GitHub secrets can never be read back: put those values in a private dotenv file from where you keep them today, or type them in 1Password.
+
+## Fresh fleet: `opv bootstrap`
+
+In a `secrets.toml` whose environments leave out `vault_id` and `item_id`, `opv bootstrap` creates, in the selected 1Password account, a vault `<project>-<env>` and an item `<project> · <env> values` for each (using existing ones with those titles), records their IDs in the file (comments and order kept), and adds every declared field, empty. `--dry-run` shows the plan and changes nothing. Recorded IDs the selected account cannot see stop with `ids_not_in_account`: select the account that holds them (`opv account use <ID>`) or pass `--rebind <env>` to record a new vault and item in this account (values are not moved). A file whose first line starts with `# generated` is never rewritten; the IDs are printed for its generator. It needs your own session (it writes 1Password), never syncs or deploys, and ends with `Next: opv ready`. Re-running is safe. `--ci-reader <env>` also prints the owner's commands for a read-only CI service account limited to that environment's vault (`op service-account create … --vault <id>:read_items`), which you run yourself, because 1Password shows the token once. A complete walk-through from a fresh account to the first guarded deploy is in [examples/fleet-fly](../examples/fleet-fly/).
+
 ## Sign-in: `opv login`
 
 `opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`.
+
+**Accounts, without signing in.** `opv account list` shows the accounts this 1Password CLI knows, whether each is signed in, which one the project uses and why (`--account`, `OP_ACCOUNT`, `.opv`, or the only one), and what to do next; it never prompts or signs in. `--json` gives the same as one document (`opv schema` lists its fields): `discovery` (`ok`, `unavailable`, `op_missing`), `selected`, `accounts` and `findings` with stable codes (`no_accounts`, `selected_account_absent`, `account_ambiguous`, `selected_signed_out`, `discovery_unavailable`, `op_missing`), each with one `next` command. Only accounts this CLI knows are listed; on Linux and WSL an account that is only in the 1Password app appears after `opv login --add`. `opv account use <email or ID>` records the project's account in `.opv` with no prompt; a value several accounts match (a shared sign-in address) is refused with the candidates' IDs.
+
+**Choosing the account.** Until the project records one (`.opv`, written by your first choice; commit it), `opv login` asks which 1Password account holds the project's secrets, even when only one is added to this CLI, so you always see which one it is; each entry says whether it is signed in, and the last one is **Add another 1Password account**. `opv login --add [--account <email>]` adds an account right away. You type the sign-in address, Secret Key and password only at 1Password's own prompt (your Emergency Kit has them). On Linux and WSL the CLI keeps its own accounts: in WSL, accounts that are only in the Windows 1Password app are not listed until you add them here. On macOS and Windows the CLI uses the app's accounts, so you add an account in the app.
+
+**When sign-in fails** opv says why in its own words, names the account, and gives one next step: the account is not added to this CLI (`account_not_registered`, `Next: opv login --add --account <email>`), no session (`op_not_signed_in`), the 1Password app is locked or its CLI integration is off (`desktop_app_unavailable`), what was typed was not accepted (`credential_rejected`), the prompt was cancelled (`sign_in_cancelled`), 1Password could not be reached (`provider_unavailable`, exit 9, nothing changed), or a reason opv does not recognise (`op_unexpected`, `Next: opv doctor`). It never guesses that a password was wrong, and 1Password's own CLI directions are not repeated.
 
 `login`, `setup` and `config edit` need your own interactive terminal; without one they refuse (exit 6, `terminal_required`) and name themselves on `Next:`. Automation uses a 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`) instead, which decides the account. Per-environment `account` and `deploy_credentials`: [configuration](configuration.md#account-and-deploy-credentials).
 
@@ -454,6 +582,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument) |
 | `config_not_found` | 2 | after_fix | no | no secrets.toml in this directory or a parent, and no 1Password manifest for this checkout |
 | `account_required` | 2 | after_fix | yes | several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account |
+| `account_ambiguous` | 2 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
 | `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
 | `manifest_ambiguous` | 2 | after_fix | yes | several 1Password manifests match; a person keeps one and archives the others |
 | `manifest_exists` | 2 | never | no | a manifest for this project already exists; change it with opv config edit |
@@ -480,6 +609,12 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
 | `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `ids_not_in_account` | 2 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind) |
+| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add |
+| `desktop_app_unavailable` | 7 | after_fix | yes | the 1Password app is locked, closed, or its CLI integration is off |
+| `credential_rejected` | 7 | after_fix | yes | 1Password did not accept what was typed at its prompt |
+| `sign_in_cancelled` | 7 | after_fix | yes | the 1Password sign-in prompt was cancelled |
+| `op_unexpected` | 7 | after_fix | yes | 1Password's CLI failed for a reason opv does not recognise; opv doctor checks it |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |
@@ -541,8 +676,10 @@ keeps it, while renaming or removing a field, or changing its meaning, increment
 failing rule when `state` is `failing_rule`, and `reason` says why (see
 [Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
 target for every provider (`fly_name` holds the same value and is kept for older scripts; it
-is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
-a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
+is deprecated); `target` is `present`, `absent` or `would_change` for a secret, `not_delivered`
+for a key the environment's target does not deliver (a source-only value, or a product left out of
+the target's `products`), and `null` for a config key (or `present`/`absent`/`would_change` where
+the target takes config as variables); `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
 in the same key order, is used by `status`, `plan` and `check`. With `--product`,
 the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
 totals. `next` is the sync command for `plan`, `null` for `status`. `plan --json` adds
@@ -597,7 +734,7 @@ jobs:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.5.0   # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.6.0   # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
@@ -619,6 +756,20 @@ CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped
 
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions); on Azure or Kubernetes, install `az` or `kubectl` instead of `flyctl` and sign the runner in to it (or use `deploy_credentials`). An environment with `confirm_env = true` also needs `--confirm <env>` in the job.
 
+**One product at a time on a shared Fly app, with delivery receipts.** With a `state_vault_id` and a deploy identity from `opv bootstrap --state prod` (read the values vault, write the state vault):
+
+```yaml
+      - name: Deliver api's secrets and keep the receipt
+        run: opv sync prod --product api --expect-plan "$PLAN_ID" --receipt api.receipt.json
+      - uses: actions/upload-artifact@v4
+        with: { name: api-delivery, path: api.receipt.json }
+      # Later, before reusing an accepted record (read-only; exit 8 unless verified):
+      - name: Is api still exactly what was delivered?
+        run: opv delivery verify prod --product api --receipt api.receipt.json --json
+```
+
+The receipt names `api`'s revision and binding set, never a value or digest. Another product's later sync leaves `api` verified, and a rotation of `api`'s values or of a shared value it reads does not. See [delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
+
 **Job summary.** When `$GITHUB_STEP_SUMMARY` is set (GitHub Actions sets it for every step), `status`, `plan` and `sync` append a Markdown section to the job's summary page: for `status` and `plan`, the count line, `changes` (plan) and one table row per key, problems first, with product, key, kind, state word (`failed <rule>`, without the reason) and target word; for `sync`, its summary line and the written, pruned, pending, held, extra and unchanged names. It holds names and state words only: no value, no rule reason and no 1Password link (the link names your account). Nothing to configure; outside GitHub Actions nothing is written. For a nightly drift check, run `opv plan prod --json` and alert when `changes` is `some`.
 
 Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync costs a handful per environment. 1Password Families service accounts allow 1,000 requests per hour per token and 1,000 per day for the account. `OP_CACHE=false` makes the cost the worst case, since `op` caches by default on Linux and macOS.
@@ -632,6 +783,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 - `config export` prints config-kind values by design, never secrets. A config key stored in a concealed field is accepted and delivered as a plain value, but opv never prints it: `config export` shows `<concealed in 1Password>` and `status` warns about it once per key.
 - `run` hands secret values to the child process through `op run`; the child can read them.
 - No multiline values (a `pem_private_key` transform turns a PEM key into one line). `--json` documents hold names, states and counts only, except `config export <env>`, which prints config-kind values by design.
+- Settings health findings (`opv ready`, `opv doctor --settings`, `opv ui`) never contain a value, but by design they state facts about one: that a secret equals another (across environments or keys), is a known placeholder, starts or ends with whitespace, points at `localhost`, or is a Stripe-style test or live key. Treat `ready --json` output like the configuration (fine for CI logs you trust, not for public ones), or skip it there. `opv history` never shows a Fly version, which is a digest of the value.
 - In CI a release reads each item once, by vault ID and item ID.
 
 See [SECURITY.md](../SECURITY.md) to report a vulnerability.

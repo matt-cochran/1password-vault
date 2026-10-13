@@ -1,0 +1,1 @@
+failed to set secret "BAD-NAME": HTTP 422: Secret names can only contain alphanumeric characters ([a-z], [A-Z], [0-9]) or underscores (_). Spaces are not allowed. Must start with a letter ([a-z], [A-Z]) or underscores (_). (https://api.github.com/repos/example-org/example-repo/actions/secrets/BAD-NAME)

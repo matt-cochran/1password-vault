@@ -7,7 +7,7 @@
     "type": "git",
     "url": "git+https://github.com/matt-cochran/1password-vault.git"
   },
-  "homepage": "https://github.com/matt-cochran/1password-vault",
+  "homepage": "https://opv.dev",
   "keywords": [
     "1password",
     "secrets",

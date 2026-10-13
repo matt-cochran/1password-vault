@@ -474,6 +474,30 @@ impl Host {
 
     /// One line telling the user how to install `tool` on this platform.
     pub fn install_hint(&self, tool: Tool) -> String {
+        // Installed but not on PATH (#77): say where, not "install it again".
+        if !self.ci
+            && let Some(found) = installed_off_path(tool.program, self.platform)
+        {
+            let dir = found
+                .parent()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            return match self.platform {
+                Platform::Windows => format!(
+                    "{} is installed at {} but its folder is not on PATH: add {dir} to PATH \
+                     (Settings > System > About > Advanced system settings > Environment \
+                     Variables), then open a new terminal",
+                    tool.program,
+                    found.display()
+                ),
+                _ => format!(
+                    "{} is installed at {} but not on PATH: add it, for example with \
+                     export PATH=\"{dir}:$PATH\" in your shell profile, then open a new terminal",
+                    tool.program,
+                    found.display()
+                ),
+            };
+        }
         let line = match (self.ci, self.platform) {
             (true, _) => tool.ci,
             (false, Platform::MacOs) => tool.macos,
@@ -481,6 +505,134 @@ impl Host {
             (false, _) => tool.linux,
         };
         line.into()
+    }
+}
+
+/// The places a CLI is commonly installed outside a default PATH, per platform.
+fn known_locations(
+    program: &str,
+    platform: Platform,
+    home: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    match platform {
+        Platform::Windows => {
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                dirs.push(
+                    PathBuf::from(&local)
+                        .join("Microsoft")
+                        .join("WinGet")
+                        .join("Links"),
+                );
+            }
+            dirs.push(PathBuf::from(r"C:\Program Files\1Password CLI"));
+            dirs.push(PathBuf::from(r"C:\Program Files\GitHub CLI"));
+        }
+        _ => {
+            if let Some(h) = home {
+                dirs.push(h.join(".local").join("bin"));
+                dirs.push(h.join("bin"));
+                dirs.push(h.join(".fly").join("bin"));
+            }
+            dirs.extend(
+                [
+                    "/usr/local/bin",
+                    "/opt/homebrew/bin",
+                    "/usr/bin",
+                    "/snap/bin",
+                ]
+                .map(PathBuf::from),
+            );
+        }
+    }
+    let exe = if platform == Platform::Windows {
+        format!("{program}.exe")
+    } else {
+        program.to_string()
+    };
+    dirs.into_iter().map(|d| d.join(&exe)).collect()
+}
+
+/// Where `program` is installed when it is not on PATH: the first known location holding a
+/// file of that name. `None` when it is on PATH or found nowhere.
+pub fn installed_off_path(program: &str, platform: Platform) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    installed_off_path_in(
+        program,
+        platform,
+        std::env::var_os("PATH").as_deref(),
+        home.as_deref(),
+    )
+}
+
+/// [`installed_off_path`] with `PATH` and the home directory given (testable).
+fn installed_off_path_in(
+    program: &str,
+    platform: Platform,
+    path: Option<&std::ffi::OsStr>,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let on_path = path.is_some_and(|p| {
+        std::env::split_paths(p)
+            .any(|d| d.join(program).is_file() || d.join(format!("{program}.exe")).is_file())
+    });
+    if on_path {
+        return None;
+    }
+    known_locations(program, platform, home)
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+#[cfg(test)]
+mod off_path_tests {
+    use super::*;
+
+    fn home_with_local_op() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("op-opvtest"), b"").unwrap();
+        home
+    }
+
+    #[test]
+    fn a_tool_in_a_known_place_off_path_is_found() {
+        let home = home_with_local_op();
+        let found = installed_off_path_in(
+            "op-opvtest",
+            Platform::Linux,
+            Some(std::ffi::OsStr::new("/nonexistent")),
+            Some(home.path()),
+        );
+        assert_eq!(found, Some(home.path().join(".local/bin/op-opvtest")));
+    }
+
+    #[test]
+    fn a_tool_on_path_is_not_reported() {
+        let home = home_with_local_op();
+        let bin = home.path().join(".local").join("bin");
+        let found = installed_off_path_in(
+            "op-opvtest",
+            Platform::Linux,
+            Some(bin.as_os_str()),
+            Some(home.path()),
+        );
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn a_tool_found_nowhere_is_not_reported() {
+        let home = tempfile::tempdir().unwrap();
+        let found = installed_off_path_in(
+            "op-opvtest",
+            Platform::Linux,
+            Some(std::ffi::OsStr::new("/nonexistent")),
+            Some(home.path()),
+        );
+        assert_eq!(found, None);
     }
 }
 

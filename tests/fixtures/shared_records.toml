@@ -1,0 +1,34 @@
+# FR-47 shared records: one source-only product holds a canonical value that two
+# delivered products read with `from`. Synthetic IDs only; this file never holds a value.
+[profile]
+kind = "fleet"
+
+[environments.ci]
+vault_id = "vci"
+item_id = "ici"
+fly.app = "shared-records-ci"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+
+# Source-only (FR-47): its keys render no Fly name anywhere; they only feed `from`.
+[products.shared]
+source_only = true
+
+[products.shared.keys.FLY_API_TOKEN]
+kind = "secret"
+environments = ["ci"]
+guidance = "One Fly org token shared by api and web"
+
+# A canonical value no `from` references: `check`/`plan` warn `unreferenced-source`.
+[products.shared.keys.UNUSED_TOKEN]
+kind = "secret"
+environments = ["ci"]
+
+[products.api.keys.FLY_API_TOKEN]
+kind = "secret"
+from = "shared/FLY_API_TOKEN"
+environments = ["ci"]
+
+[products.web.keys.FLY_API_TOKEN]
+kind = "secret"
+from = "shared/FLY_API_TOKEN"
+environments = ["ci"]

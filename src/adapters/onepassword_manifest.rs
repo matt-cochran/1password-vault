@@ -299,21 +299,71 @@ pub fn choose_error(accounts: &[Account]) -> Error {
     .with_next("opv login --account <email>")
 }
 
-/// The accounts op knows (`op account list`, a free probe); empty when it fails.
+/// The accounts op knows (`op account list`, a free probe); empty when it fails. Callers
+/// that must tell "none" from "could not list" use [`discover`].
 pub fn accounts(r: &dyn CommandRunner) -> Vec<Account> {
+    match discover(r) {
+        Discovery::Listed(found) => found,
+        Discovery::OpMissing | Discovery::Unavailable => Vec::new(),
+    }
+}
+
+/// What `op account list` found (FR-49): the accounts this `op` knows, or why none could be
+/// listed. Accounts that live only in a desktop app this `op` is not integrated with are
+/// never claimed: `op` cannot see them, so neither can opv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovery {
+    /// The list `op` printed (possibly empty), each with a valid account ID.
+    Listed(Vec<Account>),
+    /// `op` is not installed (or not on PATH).
+    OpMissing,
+    /// `op` failed or printed something that is not an account list; its scrubbed excerpt
+    /// stays with the run (`--verbose`), never in JSON.
+    Unavailable,
+}
+
+/// `op account list --format json`, one read-only probe that never prompts (FR-49).
+pub fn discover(r: &dyn CommandRunner) -> Discovery {
     match r.probe(
         &Call::new(OP, &["account", "list", "--format", "json"]),
         crate::runner::PROBE_TIMEOUT,
     ) {
-        Ok(o) if o.status == 0 => serde_json::from_slice::<Vec<Account>>(&o.stdout)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|a| crate::config::is_id(&a.account_uuid))
-            .collect(),
-        _ => {
+        Ok(o) if o.status == 0 => match serde_json::from_slice::<Vec<Account>>(&o.stdout) {
+            Ok(found) => Discovery::Listed(
+                found
+                    .into_iter()
+                    .filter(|a| crate::config::is_id(&a.account_uuid))
+                    .collect(),
+            ),
+            Err(_) => Discovery::Unavailable,
+        },
+        Ok(_) => {
             let _ = crate::runner::take_failure_excerpt();
-            Vec::new()
+            Discovery::Unavailable
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Discovery::OpMissing,
+        Err(_) => Discovery::Unavailable,
+    }
+}
+
+/// Whether `op` holds a live session for `account_uuid` (FR-49): `op whoami --account <id>`,
+/// exit status only (its output names the person and is dropped unread). It never prompts
+/// and never asks the desktop app. `None` when the probe cannot run.
+pub fn signed_in(r: &dyn CommandRunner, account_uuid: &str) -> Option<bool> {
+    match r.probe(
+        &Call::new(
+            OP,
+            &["whoami", "--account", account_uuid, "--format", "json"],
+        ),
+        crate::runner::PROBE_TIMEOUT,
+    ) {
+        Ok(o) => {
+            if o.status != 0 {
+                let _ = crate::runner::take_failure_excerpt();
+            }
+            Some(o.status == 0)
+        }
+        Err(_) => None,
     }
 }
 
@@ -614,6 +664,54 @@ pub fn edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::Output;
+    use crate::runner::fake::FakeRunner;
+
+    const ONE_ACCOUNT: &str = r#"[{"url":"my-team.1password.com","email":"owner@example.com","user_uuid":"USERUUID0000000000000000AA","account_uuid":"ACCOUNTUUID000000000000AAA","shorthand":"my-team"}]"#;
+
+    #[test]
+    fn discovery_lists_the_accounts_op_prints() {
+        let r = FakeRunner::new([Output::success(ONE_ACCOUNT)]);
+        assert!(matches!(discover(&r), Discovery::Listed(found) if found.len() == 1));
+    }
+
+    #[test]
+    fn discovery_of_an_empty_list_is_listed_and_empty() {
+        let r = FakeRunner::new([Output::success("[]")]);
+        assert_eq!(discover(&r), Discovery::Listed(Vec::new()));
+    }
+
+    #[test]
+    fn a_failing_op_is_unavailable_not_empty() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        assert_eq!(discover(&r), Discovery::Unavailable);
+    }
+
+    #[test]
+    fn unexpected_output_is_unavailable_not_empty() {
+        let r = FakeRunner::new([Output::success("not json")]);
+        assert_eq!(discover(&r), Discovery::Unavailable);
+    }
+
+    #[test]
+    fn a_missing_op_is_reported_as_missing() {
+        let r = FakeRunner::default();
+        r.push_io_error(std::io::ErrorKind::NotFound);
+        assert_eq!(discover(&r), Discovery::OpMissing);
+    }
+
+    #[test]
+    fn signed_in_reads_the_exit_status_of_whoami_for_that_account() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        assert_eq!(signed_in(&r, "ACCOUNTUUID000000000000AAA"), Some(false));
+    }
+
+    #[test]
+    fn signed_in_names_the_account_on_whoami() {
+        let r = FakeRunner::new([Output::success("{}")]);
+        signed_in(&r, "ACCOUNTUUID000000000000AAA");
+        assert!(r.argv_contains("ACCOUNTUUID000000000000AAA"));
+    }
 
     #[test]
     fn template_holds_the_text_project_and_convention() {

@@ -8,10 +8,16 @@
 //!
 //! Both store kinds share [`Store`], which is all `status` and `plan` need. See
 //! `docs/design/multi-cloud-targets.md` §3.
+//!
+//! A staged target may also apply writes at once ([`StagedRuntime::live`]) and deliver config
+//! through a readable channel ([`StagedStore::variables`]): GitHub Actions (FR-46,
+//! `docs/design/github-actions-target.md` §3).
 
 use crate::domain::{
     AccessFinding, Health, Revision, RuntimeChange, RuntimeSnapshot, SecretValue, Stamp, StoreEntry,
 };
+use std::collections::BTreeMap;
+
 use crate::error::Error;
 
 /// Where secret values are written: the operations every flow shares.
@@ -34,6 +40,27 @@ pub trait StagedStore: Store {
     /// Writes the batch as a pending change, values on stdin only (SR-3).
     fn write(&self, batch: &[(String, &SecretValue)]) -> Result<(), Error>;
     /// Removes `names` as a pending change.
+    fn remove(&self, names: &[String]) -> Result<(), Error>;
+    /// The store's config channel (FR-46), when it delivers config keys itself: GitHub
+    /// variables. `None` (the default): config is not delivered by this target.
+    fn variables(&self) -> Option<&dyn VariableStore> {
+        None
+    }
+}
+
+/// Config delivered as named, readable values (FR-46): GitHub Actions variables. Config is
+/// never secret (FR-14), so values may be read back and compared exactly; a secret never
+/// goes here. Names are runtime env names, as for [`Store`].
+pub trait VariableStore {
+    /// Every variable on the target, by name, with its value.
+    fn list(&self) -> Result<BTreeMap<String, String>, Error>;
+    /// The first rule this store would refuse for `(name, value)`, with its fixed reason
+    /// (FR-22), so `status` and `plan` show what `sync` would refuse.
+    fn refusal(&self, name: &str, value: &str) -> Option<(&'static str, &'static str)>;
+    /// Creates or updates each `(name, value)`, values on stdin only (SR-3). Refuses the
+    /// whole batch before any write when one entry has a [`VariableStore::refusal`].
+    fn set(&self, batch: &[(String, &str)]) -> Result<(), Error>;
+    /// Removes `names`; a name already gone counts as removed.
     fn remove(&self, names: &[String]) -> Result<(), Error>;
 }
 
@@ -65,8 +92,14 @@ pub trait PinnedStore: Store {
 
 /// What runs the app in the staged flow: the Fly app.
 pub trait StagedRuntime {
-    /// Makes pending store changes live (FR-7). Called only under `--deploy`.
+    /// Makes pending store changes live (FR-7). Called only under `--deploy`, and never
+    /// when [`StagedRuntime::live`] is true.
     fn deploy(&self) -> Result<(), Error>;
+    /// True when every store write is live at once and there is nothing to deploy (FR-46,
+    /// GitHub Actions): `sync` prints no pending line and `--deploy` only says so.
+    fn live(&self) -> bool {
+        false
+    }
 }
 
 /// What runs the app in the pinned flow: a Container App.

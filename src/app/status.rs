@@ -15,9 +15,9 @@ use std::io::Write;
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
     JsonExtra, KeyNames, PinnedRow, check_product, ci_summary, count_line, findings_error,
-    is_blocking, item_url, open_target, plan_item, plural, preflight, print_extras, print_legend,
-    print_rows, product_names, read_and_plan, read_fields, scope_plan, target_word, write_err,
-    write_json,
+    is_blocking, item_url, open_target, personal, plan_item, plural, preflight, print_extras,
+    print_legend, print_rows, product_names, read_and_plan, read_fields, scope_plan, target_word,
+    write_err, write_json,
 };
 use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
@@ -67,6 +67,12 @@ pub fn run_scoped(
     let (mut plan, listed) = read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?;
     if let Some(p) = product {
         scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
+    }
+    // Config delivered as variables (FR-46): each config row's state on the target.
+    if let Ports::Staged { store, .. } = &ports
+        && let Some(v) = store.variables()
+    {
+        crate::app::variables::plan(fleet, env_name, t, &mut plan, v, &|_| true)?;
     }
     let pinned = match &ports {
         Ports::Pinned { store, runtime } => Some(pinned_status(
@@ -138,7 +144,12 @@ pub fn run_scoped(
     print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(out, &words, t.provider().label())?;
+    print_legend(
+        out,
+        &words,
+        t.provider().label(),
+        super::live_writes(&ports),
+    )?;
     print_extras(out, &plan)?;
     print_concealed_config(out, &plan)?;
     if let Some(p) = &pinned {
@@ -391,17 +402,54 @@ pub(crate) struct OverviewEnv {
 /// (item and store list), without one from the item alone, as `check` does. Each
 /// environment uses its own 1Password account and, with a target, its deploy credentials,
 /// signed out again before the next one (FR-40).
-fn env_rows(
+pub(crate) fn env_rows(
     fleet: &Fleet,
     env_name: &str,
     t: Option<&dyn TargetConfig>,
     r: &dyn CommandRunner,
+) -> Result<Vec<Row>, Error> {
+    env_rows_keeping(fleet, env_name, t, r, None)
+}
+
+/// A copy of `f` for the settings health checks (#92), which compare values across
+/// environments after each item's read. The copy is a [`SecretValue`] like the original:
+/// redacted in `Debug`, zeroized on drop, never printed.
+fn copy_field(f: &crate::domain::plan::ItemField) -> crate::domain::plan::ItemField {
+    crate::domain::plan::ItemField {
+        section: f.section.clone(),
+        label: f.label.clone(),
+        kind: f.kind,
+        value: crate::domain::SecretValue::new(f.value.expose().to_string()),
+        concealed: f.concealed,
+    }
+}
+
+/// [`env_rows`], also keeping a copy of the team item's fields in `keep` (#92). Still one
+/// item read. Personal fields (FR-55) are never kept: they are each person's own.
+pub(crate) fn env_rows_keeping(
+    fleet: &Fleet,
+    env_name: &str,
+    t: Option<&dyn TargetConfig>,
+    r: &dyn CommandRunner,
+    keep: Option<&mut Vec<crate::domain::plan::ItemField>>,
 ) -> Result<Vec<Row>, Error> {
     use crate::app::signin::{Reach, open};
     let none = BTreeSet::new();
     let Some(t) = t else {
         let signed_in = open(fleet, env_name, r, Reach::Store)?;
         let fields = read_fields(fleet, env_name, &signed_in)?;
+        if let Some(keep) = keep {
+            keep.extend(fields.iter().map(copy_field));
+        }
+        // FR-55: a targetless environment's personal keys live in the person's own item;
+        // merge its fields (never a team fallback) before planning the rows.
+        let fields = if personal::declared(fleet, env_name) {
+            let project =
+                personal::project_name(&signed_in, &std::env::current_dir().unwrap_or_default());
+            personal::merged_fields(&signed_in, fleet, env_name, fields, &project)?
+        } else {
+            fields
+        };
         return Ok(plan_item(fleet, env_name, fields, None, &none, &none)?
             .0
             .rows);
@@ -410,11 +458,32 @@ fn env_rows(
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, r)?;
     preflight::read(t, r)?;
-    Ok(
-        read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?
-            .0
-            .rows,
-    )
+    let mut plan = match keep {
+        None => read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?.0,
+        Some(keep) => {
+            // read_and_plan, keeping a copy of the fields before planning consumes them.
+            let read = super::tidy::read(fleet, env_name, r)?;
+            keep.extend(read.fields.iter().map(copy_field));
+            let (mut plan, _) = super::plan_item_with(
+                fleet,
+                env_name,
+                read.fields,
+                Some(&ports),
+                &none,
+                &none,
+                Some(&read.ledger),
+            )?;
+            plan.tidy = read.changes;
+            plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+            plan
+        }
+    };
+    if let Ports::Staged { store, .. } = &ports
+        && let Some(v) = store.variables()
+    {
+        crate::app::variables::plan(fleet, env_name, t, &mut plan, v, &|_| true)?;
+    }
+    Ok(plan.rows)
 }
 
 /// Bindings of a pinned target (FR-29): per desired name whether its binding is current,

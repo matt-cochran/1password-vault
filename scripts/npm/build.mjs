@@ -139,4 +139,17 @@ for (const entry of TARGETS) {
   chmodSync(destination, 0o755);
 }
 
+// The main package must carry its postinstall: without it npm installs only the shim and
+// never puts opv in ~/.local/bin (0.5.0 shipped that way from a stale package template).
+const built = JSON.parse(readFileSync(join(outDir, 'opv', 'package.json'), 'utf8'));
+const missing = [];
+if (built.scripts?.postinstall !== 'node install.js') missing.push('scripts.postinstall');
+for (const file of ['install.js', 'uninstall.js']) {
+  if (!(built.files ?? []).includes(file)) missing.push(`files: ${file}`);
+  if (!existsSync(join(outDir, 'opv', file))) missing.push(file);
+}
+if (missing.length > 0) {
+  fail(`the main package is incomplete (${missing.join(', ')}); build from a checkout of the release tag`);
+}
+
 console.log(`opv npm build: wrote npm-dist for opv ${version} to ${outDir}`);

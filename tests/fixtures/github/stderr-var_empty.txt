@@ -1,0 +1,3 @@
+failed to set variable "OPV_EMPTYVAR": HTTP 422: Invalid request. (https://api.github.com/repos/example-org/example-repo/actions/variables)
+
+Invalid input: object is missing required key: value.

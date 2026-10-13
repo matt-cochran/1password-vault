@@ -53,6 +53,8 @@ const CONFIG_CHECK: &str = "config";
 
 /// Name of the item check (`--env` only, P6).
 const ITEM_CHECK: &str = "item";
+/// Settings health across environments (#92).
+const SETTINGS_CHECK: &str = "settings";
 
 /// The fixed step for an invalid configuration.
 const CONFIG_FIX: &str = "fix secrets.toml (see the config line above), then run opv doctor";
@@ -85,6 +87,7 @@ pub fn run_scoped_as(
         json,
         source: None,
         deploy_failure: None,
+        settings: false,
     };
     run_request(config, request, r, out)
 }
@@ -105,6 +108,9 @@ pub struct Request<'a> {
     /// it as one failing check, runs the other checks and skips the target checks that
     /// need those credentials (owner ruling: doctor never aborts on it).
     pub deploy_failure: Option<super::signin::DeployFailure>,
+    /// `--settings`: also run the settings health check (#92), which reads every
+    /// environment's item. Without it doctor reads at most the `--env` item (P6).
+    pub settings: bool,
 }
 
 /// [`run_scoped_as`] for a whole [`Request`].
@@ -130,6 +136,7 @@ fn run_request_on(
         json,
         source,
         deploy_failure,
+        settings,
     } = request;
     let config =
         match env {
@@ -150,6 +157,7 @@ fn run_request_on(
         local_only,
         json,
         source,
+        settings,
     };
     run_on_with(config, r, host, scope, deploy_failure, out)
 }
@@ -185,6 +193,8 @@ struct Scope<'a> {
     json: bool,
     /// Where the configuration came from (FR-44).
     source: Option<&'a str>,
+    /// `--settings` (#92).
+    settings: bool,
 }
 
 /// The state of one check line.
@@ -309,6 +319,16 @@ impl Report {
         });
     }
 
+    /// A warning with its own next step (the settings check, #92).
+    fn warn(&mut self, name: &str, text: String, fix: String) {
+        self.rows.push(Row {
+            name: name.to_string(),
+            state: State::Warn,
+            text,
+            fix: Some(fix),
+            excerpt: None,
+        });
+    }
     fn skip(&mut self, name: &str, text: String) {
         self.rows.push(Row {
             name: name.to_string(),
@@ -392,6 +412,18 @@ fn run_on_with(
     } else {
         // One failure per cause: the op line already says why (review #12).
         report.skip("op auth", "op not available (see the op line above)".into());
+    }
+    // Settings health (#92): likely-wrong values across every environment the person can
+    // read; warnings, never a failure.
+    if scope.settings {
+        match &fleet {
+            Some(f) if report.passed("op auth") => settings_check(f, scope.env, r, &mut report),
+            Some(_) => report.skip(
+                SETTINGS_CHECK,
+                "not checked (see the op auth line above)".into(),
+            ),
+            None => report.skip(SETTINGS_CHECK, "not checked (configuration invalid)".into()),
+        }
     }
     if let Some(env) = scope.env {
         match &fleet {
@@ -477,6 +509,7 @@ fn run_on_with(
         );
     }
     report.push("opv", opv_on_path(r));
+    report.push("agent skill", Ok(agent_skill()));
     if scope.json {
         print_json(&report, &doctor_command(&scope), scope.source, out)?;
     } else {
@@ -660,6 +693,67 @@ fn item_check(
             blocking.len(),
             format!("fill them in 1Password, then {check}"),
         ),
+    );
+}
+
+/// The settings health check (#92): each environment's team item read once (read-only,
+/// never tidied; an environment that cannot be read is left out and said so), compared in
+/// memory. With `--env`, only the findings that involve that environment. Names only.
+fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, report: &mut Report) {
+    use crate::domain::health::{EnvValues, check};
+    let mut ordered: Vec<(&String, &crate::domain::Environment)> =
+        fleet.environments.iter().collect();
+    ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
+    let mut read = Vec::new();
+    let mut unread = Vec::new();
+    for (name, env) in ordered {
+        match super::read_fields(fleet, name, r) {
+            Ok(fields) => read.push((name.as_str(), env, fields)),
+            Err(_) => unread.push(name.as_str()),
+        }
+    }
+    let values: Vec<EnvValues<'_>> = read
+        .iter()
+        .map(|(name, env, fields)| EnvValues {
+            name,
+            title: env.title.as_deref(),
+            deployed: env.target().is_some(),
+            fields,
+        })
+        .collect();
+    let findings: Vec<_> = check(fleet, &values)
+        .into_iter()
+        .filter(|h| only.is_none_or(|e| h.environments.iter().any(|x| x == e)))
+        .collect();
+    let mut text = match findings.len() {
+        0 => format!(
+            "no likely-wrong values in {}",
+            super::plural(read.len(), "environment", "environments")
+        ),
+        n => format!(
+            "{} to review (values are compared, never shown)",
+            super::plural(n, "setting", "settings")
+        ),
+    };
+    if !unread.is_empty() {
+        text.push_str(&format!("; not read: {}", unread.join(", ")));
+    }
+    let Some(first) = findings.first() else {
+        return report.push(SETTINGS_CHECK, Ok(Check::Ok(text)));
+    };
+    for h in &findings {
+        text.push_str(&format!("\n  {}: {}", h.code, h.message));
+    }
+    let label = if fleet.is_simple() {
+        first.key.clone()
+    } else {
+        key_label(&first.product, &first.key)
+    };
+    let env = first.environments.first().map_or("<env>", String::as_str);
+    report.warn(
+        SETTINGS_CHECK,
+        text,
+        format!("opv open {label} --env {env}"),
     );
 }
 
@@ -869,6 +963,26 @@ fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
     )))
 }
 
+/// The agent skill copies installed where coding agents look (FR-52). The skill is
+/// optional, so no copy is ok; a copy older than this binary or edited by hand warns,
+/// naming its path and the command that refreshes it.
+fn agent_skill() -> Check {
+    let version = env!("CARGO_PKG_VERSION");
+    let copies = super::skill::status(&super::skill::roots(), version);
+    if copies.is_empty() {
+        return Check::Ok("not installed (optional: opv skill install)".into());
+    }
+    let stale: Vec<&super::skill::Copy> = copies.iter().filter(|c| !c.current).collect();
+    if stale.is_empty() {
+        return Check::Ok(format!("current (opv {version})"));
+    }
+    let paths: Vec<String> = stale.iter().map(|c| c.path.display().to_string()).collect();
+    Check::Warn(format!(
+        "older or edited copy: {}; run: opv skill install",
+        paths.join(", ")
+    ))
+}
+
 /// The command that removes one opv copy on this platform.
 fn removal_command(p: &std::path::Path) -> String {
     if cfg!(windows) {
@@ -906,8 +1020,9 @@ mod tests {
         Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
     }
 
-    /// config, op, op auth, flyctl, fly auth, (off Windows) op local run, and opv.
-    const CHECK_LINES: usize = if cfg!(windows) { 6 } else { 7 };
+    /// config, op, op auth, flyctl, fly auth, (off Windows) op local run, opv, and the
+    /// agent skill.
+    const CHECK_LINES: usize = if cfg!(windows) { 7 } else { 8 };
 
     /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
     #[cfg(not(windows))]
@@ -1673,6 +1788,7 @@ mod tests {
                     false,
                 ),
             }),
+            settings: false,
         };
         let res = run_request_on(Ok(fleet()), request, &r, &|| linux(), &mut out);
         (res, text_of(&out))
@@ -2037,3 +2153,7 @@ mod tests {
         assert!(out.ends_with("Next: opv init dev\n"), "{out}");
     }
 }
+
+#[cfg(test)]
+#[path = "doctor_settings_tests.rs"]
+mod settings_tests;

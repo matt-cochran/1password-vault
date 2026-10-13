@@ -1,0 +1,73 @@
+{
+  "environments": {
+    "ci": {
+      "github": {
+        "products": [
+          "api"
+        ],
+        "repo": "example-org/example-repo"
+      },
+      "item_id": "ismoke",
+      "order": 2,
+      "title": "CI (GitHub)",
+      "vault_id": "vsmoke"
+    },
+    "local": {
+      "item_id": "ismoke",
+      "order": 1,
+      "title": "Local development",
+      "vault_id": "vsmoke"
+    }
+  },
+  "products": {
+    "api": {
+      "keys": {
+        "API_TOKEN": {
+          "environments": [
+            "local",
+            "ci"
+          ],
+          "kind": "secret"
+        },
+        "APP_NAME": {
+          "environments": [
+            "local",
+            "ci"
+          ],
+          "kind": "config"
+        },
+        "DEPLOY_TOKEN": {
+          "environments": [
+            "local",
+            "ci"
+          ],
+          "from": "shared/DEPLOY_TOKEN",
+          "kind": "secret"
+        },
+        "OPENAI_API_KEY": {
+          "environments": [
+            "local"
+          ],
+          "guidance": "your own OpenAI key (billed to you)",
+          "kind": "secret",
+          "personal": true
+        }
+      }
+    },
+    "shared": {
+      "keys": {
+        "DEPLOY_TOKEN": {
+          "environments": [
+            "local",
+            "ci"
+          ],
+          "kind": "secret"
+        }
+      },
+      "source_only": true
+    }
+  },
+  "profile": {
+    "kind": "fleet"
+  }
+}

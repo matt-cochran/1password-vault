@@ -592,6 +592,12 @@ Acceptance:
 
 Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, SR-8.
 
+**Since 0.6.0 (#37): `pattern` merges into `regex`.**
+
+- `regex` is checked against the value opv would stage: after `ensure_prefix` normalisation when the key has one, the value as stored otherwise. Compatible with every file that worked before: the local tidy (FR-43) already writes the prefixed form back to 1Password, so a `regex` that accepted stored values accepts the staged one.
+- `regex` may now be combined with `ensure_prefix`. A value that is only the prefix still fails as `ensure_prefix` (checked first).
+- `pattern` stays accepted, with its exact behaviour and failure rule name (`pattern`), as a deprecated alias. Loading a configuration that uses it prints one note per key on stderr naming the key and the equivalent rule, `regex = '<regex-escaped prefix>(?:<pattern>)'` written as a TOML string that pastes as is, never a value. `opv schema` marks it deprecated. A key that sets both `pattern` and `regex` is a configuration error naming the key.
+
 ## FR-25 — Config Discovery
 
 When `--config` is not given, the CLI shall look for `secrets.toml` in the current directory and then in each parent directory, and use the first one found.
@@ -861,6 +867,99 @@ Acceptance: an existing `secrets.toml` still wins (the fleet's infra repo is unc
 - `explain` shows the chain: the source's `op://` reference and `shared from` on a referencing key, `shared by` on a source.
 - `item skeleton`, and any later field creation, never creates a field for a referencing key. A field left under a referencing key is reported as an extra field.
 
+## FR-46 — GitHub Actions Target
+
+Design: `docs/design/github-actions-target.md`; spike: `docs/design/spike-github-findings.md`.
+
+- `[environments.<env>.github]` takes exactly one of `repo = "owner/name"` or `repos = [...]` (each `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`, no duplicates ignoring case), optionally `environment` (a GitHub environment name, `^[A-Za-z0-9._ -]{1,255}$` without leading or trailing space), `products` (FR-48) and `secret_name` (a template containing `{KEY}`, optionally `{PRODUCT}`; default `{KEY}` under both profiles). Rendered names must match `^[A-Z][A-Z0-9_]*$` (FR-30) and never start with `GITHUB_`; both are refused at load.
+- Secret-kind keys are written as Actions secrets with `gh secret set` and config-kind keys as Actions variables with `gh variable set`, values on stdin only (SR-3), one call per name and repository, as repository values or, with `environment`, that GitHub environment's values.
+- Writes are live at once: `sync` never reports a pending deploy, and `--deploy` prints that the target has nothing to deploy (exit 0).
+- Secrets cannot be read back: a listed secret's target state is `unknown`, so every ready secret is written each sync; an `immutable` secret already present by name is held (FR-16). Variables are read back and compared exactly (`present`, `would_change`, `absent`); only differing or absent variables are written.
+- A config key whose field is concealed (M4) is refused on this target (`concealed-config`): a variable is readable by everyone with read access to the repository.
+- With several repositories, a secret or variable counts as present only when every repository has it (variables: with the same value); writes fan out to every repository, and a failure names what was already written (NR-10).
+- `--prune` removes only managed names (FR-8), secrets and variables alike; a name already gone counts as removed.
+- Value limits (spike Q7, Q8) are refusals shown by `status`, `plan` and `check` (FR-22): a secret over 47 952 bytes; a variable that is empty or over 48 000 bytes.
+- Preflight (NR-23) checks, read-only, that each repository exists and, with `environment`, that the GitHub environment exists in each. opv never creates a GitHub environment; the `Next:` line is the `gh api -X PUT repos/<repo>/environments/<name>` command.
+- Sign-in: the person's `gh` session or `GH_TOKEN`/`GITHUB_TOKEN`. `deploy_credentials` holds one concealed field `GH_TOKEN`, handed to `gh` in the child's environment only (FR-40, SR-4).
+
+## FR-47 — Source-Only Products (Shared Records)
+
+- `[products.<name>] source_only = true` declares a product whose keys hold canonical values only. Its keys have fields like any other (tidy, `item skeleton`, missing-value lines, rules, `immutable`, `--rotate`), and other keys point at them with `from` (FR-45).
+- A source-only product's keys render no target name in any environment: they are never written, never part of the managed set, never pruned, and exempt from the name collision check (FR-8, FR-30). `run --product <name>` of a source-only product is refused with a configuration error.
+- `check`, `status` and `plan` warn once (`unreferenced-source`) for a key of a source-only product that no `from` references. A source-only product without keys is a configuration error.
+- `source_only` is a boolean (default `false`); it is not allowed under the simple profile.
+
+## FR-48 — Target Product Scope
+
+- A target may deliver only some products' keys (`products = [...]` on `github`). For a product the target does not serve, the product's keys render no name for that target: never written, never in its managed set, never pruned, and exempt from its collision check. They are still read and checked when declared for the environment, and a key of a served product may point at them with `from`.
+- Each listed product must be declared and not source-only; an empty list is a configuration error.
+- `plan` and `status` list the declared keys that the environment's target does not deliver as `not delivered here` (JSON `undelivered`), so a missing product in `products` never passes silently.
+
+## FR-49 — Account Discovery for Machines
+
+Design: `docs/design/accounts-and-readiness.md` §2 (#80).
+
+- `opv account list [--json]` lists the 1Password accounts the installed `op` knows, read-only: it never prompts, signs in, adds an account, creates a manifest or tidies an item. Per account: account ID, user ID, email, sign-in address, shorthand, `source` (`cli`), `signed_in` (`op whoami --account <id>`, exit status only; `null` when the probe cannot run) and `selected`. Never a credential, session or field value.
+- The document carries `discovery` (`ok`, `unavailable`, `op_missing`), `platform`, `cli_accounts_only` (true on Linux and WSL, where `op` keeps its own accounts; the text output then says that accounts only in a desktop app are not listed until added to this CLI), and `selected` `{account_id, by, source}` with `by` one of `flag`, `env`, `pointer`, `manifest`, `only` (exactly one account: reported, not chosen) or `null`.
+- Findings with stable codes: `no_accounts`, `selected_account_absent`, `selected_signed_out`, `discovery_unavailable`, `op_missing`, each with `human_required` and one runnable next step that names the account when one is known.
+- `opv account use <id|email|address|shorthand> [--json]` records the account in `.opv` deterministically (no prompt, no sign-in). An ambiguous match fails with code `account_ambiguous`, listing each candidate's account ID and address only, with `Next: opv account use <ID>`; an unknown one fails with `selected_account_absent` and the add-account step.
+- `opv schema` lists both commands, their effects and the document.
+
+## FR-50 — Sign-In Experience
+
+Design: `docs/design/accounts-and-readiness.md` §3 (#79).
+
+- At a terminal, with no explicit selection (`--account`, `OP_ACCOUNT`, `.opv`, an environment's `account`), `opv login` shows an account menu even when one account is registered, always with "Add another 1Password account"; on WSL it says that the Windows app's accounts are not visible until added. Explicit selections and non-interactive runs never show a menu and never select another account.
+- `op signin` and `op account add` keep 1Password's own prompts on the terminal; their stderr after the prompt is captured, scrubbed and classified into: `account_not_registered`, `op_not_signed_in`, `desktop_app_unavailable`, `credential_rejected`, `sign_in_cancelled`, `provider_unavailable` (exit 9), `op_unexpected`. Each names the selected account and one recovery step; an unclassified failure is never reported as a wrong password; a bare `opv login` is suggested only when no account is known.
+- Vendor directions (`op signin --help`, `eval $(op signin)`, raw `op account add` lines) never appear in normal output; `--verbose` keeps the scrubbed excerpt. Messages name the command that was running, never a fixed `opv setup`.
+
+## FR-51 — Readiness and Handoff Receipt
+
+Design: `docs/design/accounts-and-readiness.md` §4 (#81).
+
+- `opv ready [<env>] [--json] [--save <file>]` reports, read-only and deterministically, the configuration source, the selected account (FR-49), an environment × product matrix (keys, saved, findings, target, delivered) and a list of findings. Built from the existing sources (doctor checks, `status`, discovery, FR-49); no parallel state.
+- Each finding: stable `code`, `scope` (account, environment, product, key), `blocking`, `actor` (`owner`, `agent`, `ci`), `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command. Layers are distinct: CLI registration, sign-in, vault access, field completeness, target access. A stored value is never claimed to work.
+- `receipt_id` is a digest of the inputs (configuration version, item versions, account, findings); `--save` writes the receipt (names, IDs and codes only) for resuming a handoff; `next` is the first blocking finding's prerequisite.
+- It never tidies or writes; a pending tidy is a finding with `effect: writes_1password`.
+
+## FR-52 — Fleet Bootstrap
+
+Design: `docs/design/fleet-bootstrap-and-adoption.md` §1 (#77).
+
+- `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` (owner terminal) takes the configuration's environments from declared to ready in the selected account (FR-49, FR-50; never op's default): per environment it checks the recorded vault and item in that account, creates a missing vault (`<project>-<env>`) and item (`<project> · <env> values`) as `init` does, records their IDs where the configuration lives, adds every product's section and empty fields (`item skeleton`), and ends with the readiness receipt (FR-51). Every step is idempotent; an interrupted run resumes.
+- IDs the selected account cannot see stop that environment with `ids_not_in_account`, naming the account and environment, with two explicit choices: `--rebind <env>` (new IDs in the selected account; values are not moved) or selecting the owning account. Nothing falls back to another account.
+- A generated declaration (a `# generated` first line, or a manifest marked so) is never rewritten; the IDs to record are printed for the generator instead (`ids_for_generator`).
+- `--ci-reader <env>` prints the owner's command to create a read-only service account for the environment's vault and where to store its token; opv does not create it.
+- It never syncs, deploys or writes a value. `--dry-run` changes nothing.
+
+## FR-53 — Adopting Existing Settings
+
+Design: `docs/design/fleet-bootstrap-and-adoption.md` §2 (#78).
+
+- `opv adopt <env> --from <dotenv file>|target [--replace <product/KEY>]... [--apply] [--json]` plans, and with `--apply` writes, values found elsewhere into the environment's item. Without `--apply` it is read-only.
+- Sources: a dotenv file (literal assignments; the `legacy_env` parser and limits) or the environment's target through its ports where values can be read back (pinned stores; variable channels for config). Fly secrets and GitHub secrets cannot be read and are refused with the manual alternative.
+- Each found name maps to one declared key (target name, else bare key name; ambiguity is a finding). A shared key's value goes to its source's field once; equal copies add nothing, differing copies are a conflict.
+- Each key's rules and transforms normalise both sides before comparing: `match`, `format only`, `import` (1Password empty), `differs` (decision needed), `not declared`. A non-empty field is never replaced, and an immutable key never, unless named with `--replace` (immutable also needs `--rotate`); a replaced value is kept in `opv · kept`.
+- `--apply` writes in one verified item edit (values on stdin only), re-reads and verifies, needs a person's own session, and is resumable. It never syncs, deploys, prunes, revokes or deletes the source.
+- Output holds names, actions and findings only, never a value, a length or a fragment.
+
+## FR-54 — Version Ledger (exact change detection on stores that hide values)
+
+Resolves #36 (TRIZ: separation in time; preliminary action, copying, intermediary).
+
+- After a staged sync writes values and lists the store again, a person's own session records in the environment's item, section `opv · state`, per written name: the store's version of it (Fly digest, GitHub `updatedAt`) and `HMAC-SHA256(key, value)`, as a text field `v1:<version>:<fingerprint>`; the key is 32 random bytes, a concealed field `ledger key` in the same section, created on first use. One fresh item read and one item edit, through the tidy writer and under the tidy's gate (FR-43): never a service account, Connect, CI, deploy credentials or the project manifest. A failure to record is a note, never the sync's result.
+- `plan`, `status` and `sync` (staged flow) judge a listed name by the ledger when the store still holds it at the recorded version: the same fingerprint is `same` (not staged again), another is `would_change`. A name listed at another version is reported as changed outside opv (`drift`, text and JSON). No ledger entry: `unknown`, as before.
+- The section is reserved: never a product, never tidied, never an extra field. Fingerprints are compared in constant time and never printed; the key and entries never appear in output, errors or `Debug`.
+## FR-55 — Personal Keys and Environment Presentation
+
+Issue #86. Owner rulings 2026-10-13: personal keys are per product, and shared personal keys exist.
+
+- A key may set `personal = true`: each person keeps their own value (a developer's own LLM API key, so spend is tracked per person). Personal keys are declared only for environments without a target; a personal key on a deployed environment is a configuration error, and `sync` never reads a personal item.
+- Each person's values live in their own item: vault `personal_vault` (a title) or, by default, the person's own Private vault (titled `Private`, `Employee` or `Personal` by account type); item `personal_item` (a title) or, by default, `<project> · <env> (personal)`. The item mirrors the team layout (one section per product) and follows the convention (FR-43).
+- Shared personal values: a personal key in a source-only product (FR-47) holds one value per person that other personal keys point at with `from`. A personal key's source must be personal and a team key's source must not be: personal and team values never mix (configuration errors).
+- `run`, `check`, `ready` and `opv ui` read the team item for team keys and the signed-in person's own item for personal keys; a personal key never falls back to a team value. No one's personal item is read except the signed-in person's. `opv bootstrap` creates the signed-in person's personal item with empty fields (idempotent).
+- Presentation: each environment may set `title` (display name; default its key), `audience` (free text: a person who cannot open the environment's vault is told it is not available to them, non-blocking, instead of a `vault_no_access` problem) and `order` (display order; default configuration order). The key stays the identifier for commands, IDs and links. `opv bootstrap` tags each item it creates `opv-env:<project>/<env>`.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
@@ -876,6 +975,9 @@ Secret values shall never appear in:
 Debug logging shall redact conservatively.
 
 Child output: the stderr of every captured `op`, `flyctl`, `az` and `kubectl` call is held in memory only (never on disk) and shown only after the scrubber of NR-31 has masked secret values: at most 5 lines under the error of the call that failed, or every call's lines with `--verbose`. A child's stdout and anything opv sends on stdin (values, Kubernetes Secret manifests) are never shown; `--verbose` gives only stdout's size and JSON shape (NR-31). Registered values are masked on the raw text first, before control characters are stripped, and each value's stripped form and each line (4+ bytes) of a multi-line value are masked too. Every successful `op item get` registers its values, with or without `--verbose`.
+
+
+**Documented exception (#92, settings health):** a health finding never holds a value, a part of one, its length or a digest, but it states one fact about a value it compares in memory: equality with another value (across environments or keys), membership in a fixed placeholder list, surrounding whitespace, a loopback address, or a `sk_test_`/`sk_live_` prefix. These facts are the point of the warning; `docs/usage.md` (Security model) says so for anyone publishing `ready --json`.
 
 ## SR-2 — Secret-Safe Types
 
@@ -1325,8 +1427,8 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 - **Pre-declared sync policy** (deploy or prune by configuration): rejected, because it replaces explicit per-run intent (FR-8, FR-9, SR-6).
 - **Rotation epoch** (rotate immutable keys by bumping a counter): rejected, because rotation must stay a per-key explicit act (FR-16, SR-6).
 - **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded. Funded in v0.3 as the `SecretStore` and `Runtime` ports (FR-28).
-- **Exact change detection in `fly plan`**: deferred, because Fly digests cannot be computed locally and `plan` must not stage (FR-5, FR-11, §6.4). Backlog: #36.
-- **Merging `pattern` into `regex`**: deferred. In v0.2 `pattern` is allowed only alongside `ensure_prefix` and applies to the text after the prefix, which `regex` does not do (FR-24). Backlog: #37.
+- **Exact change detection in `fly plan`**: done in 0.6.0 by the version ledger (FR-54, #36): a person's sync records each written name's digest and a keyed fingerprint, so `plan` compares exactly without staging.
+- **Merging `pattern` into `regex`**: done in 0.6.0 (FR-24, #37): `regex` checks the staged value, `pattern` is a deprecated alias.
 
 Version 0.3 is acceptable, per phase, when in addition to 1–26:
 

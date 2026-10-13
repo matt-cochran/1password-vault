@@ -1159,6 +1159,7 @@ fn expecting(id: &str) -> SyncOpts {
     SyncOpts {
         deploy: true,
         expect_plan: Some(id.to_string()),
+        receipt: None,
         ..Default::default()
     }
 }

@@ -368,6 +368,13 @@ thread_local! {
 }
 
 impl TargetConfig for AzureTarget {
+    fn target_locator(&self) -> String {
+        format!(
+            "subscription {} key vault {} container app {}/{}",
+            self.subscription, self.key_vault, self.resource_group, self.container_app
+        )
+    }
+
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
     }

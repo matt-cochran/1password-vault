@@ -36,6 +36,12 @@ pub trait Provider: Sync {
         section: &Section<'_>,
         profile: Profile,
     ) -> Result<Box<dyn TargetConfig>, Error>;
+    /// Whether a stored value's version, as the store lists it, is derived from the value
+    /// (a digest): then opv never shows it, as it is equal for equal values and can be used
+    /// to test a guess (`opv history`, #95). Version ids and timestamps are not.
+    fn versions_reveal_values(&self) -> bool {
+        false
+    }
     /// Environment variables holding this provider's non-interactive credential, by name
     /// (values are never read). [`crate::host::Host::token`] reports which one is set.
     fn credential_vars(&self) -> &'static [&'static str] {
@@ -302,6 +308,10 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn provider(&self) -> &'static dyn Provider;
     /// Runtime env var name of `product`/`key`.
     fn env_name(&self, product: &str, key: &str) -> String;
+    /// The target instance, as one stable string (an app, repositories, a vault and app, a
+    /// cluster location): what a delivery receipt is bound to, so it never applies to
+    /// another target (#106). Names only.
+    fn target_locator(&self) -> String;
     /// Name in the store for a runtime env var name.
     fn store_name(&self, env_name: &str) -> String;
     /// Name patterns, case sensitivity and limits, checked generically at load (FR-30).
@@ -310,6 +320,18 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// it uses its own store. Its name rules are checked too, across every environment
     /// that uses it.
     fn secrets_in(&self) -> Option<&dyn StoreConfig> {
+        None
+    }
+    /// Whether keys of `product` are delivered to this target (FR-48). `false`: the
+    /// product's keys render no name here (never written, managed or pruned, and exempt
+    /// from the name collision check). Default: every product.
+    fn serves(&self, product: &str) -> bool {
+        let _ = product;
+        true
+    }
+    /// The products this target is limited to (FR-48), as configured, for load-time
+    /// validation: each must be declared and not source-only. `None`: every product.
+    fn scoped_products(&self) -> Option<Vec<&str>> {
         None
     }
     /// True when `other` is the same target: two environments on it would manage the same

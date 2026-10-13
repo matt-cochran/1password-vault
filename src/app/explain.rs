@@ -274,8 +274,17 @@ fn environment<'a>(
         }
         None => {
             let mut names = fleet.environments.keys();
+            // The key is declared for one environment only: that one, no question.
+            let sole: Option<&'a str> = match t.spec.environments.as_slice() {
+                [one] => fleet
+                    .environments
+                    .get_key_value(one)
+                    .map(|(k, _)| k.as_str()),
+                _ => None,
+            };
             match (names.next(), names.next()) {
                 (Some(only), None) => only.as_str(),
+                _ if sole.is_some() => sole.unwrap_or_default(),
                 _ => {
                     let known: Vec<&str> = fleet.environments.keys().map(String::as_str).collect();
                     let label = key_label(t.product, t.key);
@@ -324,9 +333,22 @@ fn explain_in(
         Kind::Config => "text field",
     };
     let config_lines = env.target().and_then(|t| t.explain_config(product, key));
+    let delivered = fleet.delivers(env_name, product);
     let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
         // A run-only environment names no provider (P4).
         (_, None) => vec![("target".into(), "none (run-only)".into())],
+        // FR-47, FR-48: read and checked, never written to the target.
+        (_, Some(t)) if !delivered => {
+            let why = if fleet.products.get(product).is_some_and(|p| p.source_only) {
+                "source-only: holds the value the keys sharing it deliver".to_string()
+            } else {
+                format!(
+                    "the {} target's products list leaves {product} out",
+                    t.provider().label()
+                )
+            };
+            vec![("delivered".into(), format!("no ({why})"))]
+        }
         (Kind::Config, Some(_)) if config_lines.is_some() => config_lines
             .into_iter()
             .flatten()
@@ -777,10 +799,20 @@ mod tests {
     }
 
     #[test]
-    fn env_is_required_with_several_environments() {
-        let e = explain(&fleet(), "allumata/OPENAI_API_KEY", None).unwrap_err();
+    fn env_is_required_for_a_key_declared_in_several_environments() {
+        let e = explain(&fleet(), "allumata/INTEGRATION_ENC_KEY", None).unwrap_err();
         assert!(matches!(e, Error::Config(_)), "{e}");
         assert_eq!(e.exit_code(), 2);
+    }
+
+    /// OPENAI_API_KEY is declared for prod only: no question to ask.
+    #[test]
+    fn env_may_be_omitted_for_a_key_declared_in_one_environment() {
+        let out = explain(&fleet(), "allumata/OPENAI_API_KEY", None).unwrap();
+        assert!(
+            out.starts_with("allumata/OPENAI_API_KEY in prod\n"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -66,6 +66,8 @@ pub struct SyncOpts {
     /// `--expect-plan <id>`: refuse before any write unless the plan re-derives to this id
     /// (FR-41). Also satisfies `confirm_env`: the id is bound to the environment.
     pub expect_plan: Option<String>,
+    /// `--receipt <file>`: write the delivery receipts minted by this sync (#106).
+    pub receipt: Option<std::path::PathBuf>,
 }
 
 impl SyncOpts {
@@ -115,6 +117,7 @@ pub fn run(
     if opts.expect_plan.is_some() && !(opts.rotate.is_empty() && opts.prune_immutable.is_empty()) {
         let without = SyncOpts {
             expect_plan: None,
+            receipt: None,
             ..opts.clone()
         };
         return Err(Error::Config(
@@ -294,6 +297,7 @@ impl Ctx<'_> {
         };
         let apply = SyncOpts {
             expect_plan: Some(id.clone()),
+            receipt: None,
             confirm: None,
             ..self.opts.clone()
         }
@@ -319,6 +323,8 @@ impl Ctx<'_> {
 /// provider; printed as the `summary:` line or as the `--json` document.
 #[derive(Debug, Default)]
 struct Report {
+    /// The target applies writes at once (FR-46): nothing to deploy, so no `--deploy` step.
+    live: bool,
     /// New values written (staged on a staged target, new versions on a pinned one).
     written: Vec<String>,
     unchanged: Vec<String>,
@@ -343,6 +349,8 @@ struct Report {
     /// Store names written by an earlier run and still waiting for a deploy when this run
     /// started (S4): why a run that wrote nothing deploys.
     earlier: Vec<String>,
+    /// Delivery receipts minted (or not) after the confirmed writes (#106).
+    delivery: Option<super::delivery::Recorded>,
 }
 
 impl Report {
@@ -422,7 +430,7 @@ impl Report {
             return None;
         }
         let o = SyncOpts {
-            deploy: true,
+            deploy: !self.live,
             prune: opts.prune || !self.kept.is_empty(),
             rotate: Vec::new(),
             prune_immutable: Vec::new(),
@@ -430,6 +438,7 @@ impl Report {
             confirm: None,
             json: false,
             expect_plan: None,
+            receipt: None,
         };
         Some(o.command(env_name, guarded))
     }
@@ -466,6 +475,17 @@ impl Report {
             "next": next,
             "plan_id": self.plan_id,
         });
+        // #106: only where a state vault is configured, so other documents are unchanged.
+        let mut doc = doc;
+        if let Some(d) = &self.delivery {
+            doc["delivery"] = serde_json::json!({
+                "minted": d.minted.iter().map(|r| serde_json::json!({
+                    "product": r.scope.product,
+                    "revision": r.revision,
+                })).collect::<Vec<_>>(),
+                "not_minted": d.not_minted,
+            });
+        }
         writeln!(out, "{doc}").map_err(write_err)
     }
 }
@@ -511,7 +531,21 @@ fn run_staged(
         c.rotate,
         c.prune_immutable,
     )?;
-    let plan = c.scoped(plan);
+    let mut plan = c.scoped(plan);
+    // A target that delivers config itself (FR-46): its rows get their state first, so a
+    // refused or concealed config key blocks like any other finding.
+    let vars = store.variables();
+    let var_plan = match vars {
+        Some(v) => Some(super::variables::plan(
+            fleet,
+            env_name,
+            t,
+            &mut plan,
+            v,
+            &|n| c.in_scope(n),
+        )?),
+        None => None,
+    };
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
     let plan_id = c.expect(&plan, &list_a, item_version, ports)?;
     let batch: Vec<(String, &SecretValue)> =
@@ -525,6 +559,7 @@ fn run_staged(
     let label = t.provider().label();
     let names = &c.names;
     let mut report = Report {
+        live: runtime.live(),
         skipped: skipped_names(c, &plan)?,
         held: held_names(c, &plan)?,
         plan_id,
@@ -540,6 +575,23 @@ fn run_staged(
         done.push(format!("staged {} secret(s)", batch.len()));
         confirm(store, &batch, c.r, label, &done)?
     };
+    // FR-54: remember what was written and the version the store gave it, so `plan` can
+    // judge these names exactly later. Best effort: a run that cannot write 1Password
+    // (service account, CI) leaves the ledger as it is.
+    if !batch.is_empty() {
+        record_ledger(fleet, env_name, &batch, &list_b, c.r);
+    }
+    // #106: what this run wrote (confirmed above) or the plan proved identical.
+    {
+        let written: BTreeSet<String> = batch.iter().map(|(n, _)| n.clone()).collect();
+        let identical: BTreeSet<String> = plan
+            .rows
+            .iter()
+            .filter(|row| row.target == TargetState::Present)
+            .map(|row| t.env_name(&row.product, &row.key))
+            .collect();
+        record_delivery(c, &written, &identical, &list_b, &mut report, out)?;
+    }
     for (name, _) in &batch {
         let (a, b) = (digest(&list_a, name), digest(&list_b, name));
         // A staged key with no digest after staging is unknown: count it as changed.
@@ -549,24 +601,58 @@ fn run_staged(
             report.unchanged.push(name.clone());
         }
     }
+    if let (Some(v), Some(vp)) = (vars, &var_plan) {
+        if !vp.set.is_empty() {
+            let batch: Vec<(String, &str)> = vp
+                .set
+                .iter()
+                .map(|n| (n.clone(), vp.want[n].as_str()))
+                .collect();
+            v.set(&batch).map_err(|e| after_writes(e, &done))?;
+            done.push(format!("set {} variable(s)", batch.len()));
+            report.written.extend(vp.set.iter().cloned());
+        }
+        report.unchanged.extend(vp.unchanged.iter().cloned());
+    }
 
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     print_changes(out, names, &report)?;
 
+    // Secrets and, where the target takes config itself, variables (FR-46): one list.
+    let var_prune: &[String] = var_plan.as_ref().map_or(&[], |vp| vp.prune.as_slice());
+    let all_prune: Vec<String> = plan.prune.iter().chain(var_prune).cloned().collect();
     let mut pruned = Vec::new();
-    if !plan.prune.is_empty() && opts.prune {
-        p(out, format!("will prune: {}", names.join(&plan.prune)))?;
-        store
-            .remove(&plan.prune)
-            .map_err(|e| after_writes(e, &done))?;
-        done.push(format!("pruned {} name(s)", plan.prune.len()));
-        p(out, format!("pruned: {}", names.join(&plan.prune)))?;
-        pruned = plan.prune.clone();
-    } else if !plan.prune.is_empty() {
-        p(out, kept_line(names, &plan.prune))?;
-        report.kept = plan.prune.clone();
+    if !all_prune.is_empty() && opts.prune {
+        p(out, format!("will prune: {}", names.join(&all_prune)))?;
+        if !plan.prune.is_empty() {
+            store
+                .remove(&plan.prune)
+                .map_err(|e| after_writes(e, &done))?;
+            done.push(format!("pruned {} name(s)", plan.prune.len()));
+        }
+        if let Some(v) = vars
+            && !var_prune.is_empty()
+        {
+            v.remove(var_prune).map_err(|e| after_writes(e, &done))?;
+            done.push(format!("pruned {} variable(s)", var_prune.len()));
+        }
+        p(out, format!("pruned: {}", names.join(&all_prune)))?;
+        pruned = all_prune;
+    } else if !all_prune.is_empty() {
+        p(out, kept_line(names, &all_prune))?;
+        report.kept = all_prune;
     }
     print_held(out, fleet, &plan, names, &report.held)?;
+
+    // Every write above is already live (FR-46): there is no pending state and nothing to
+    // deploy, so `--deploy` only says so.
+    if runtime.live() {
+        report.pruned = pruned;
+        if opts.deploy {
+            p(out, live_line(label))?;
+        }
+        return Ok(report);
+    }
 
     // Managed names still staged from an earlier run (e.g. a sync without --deploy, or a
     // failed deploy). Status is only an extra deploy trigger, never change detection.
@@ -620,6 +706,126 @@ fn run_staged(
         }
     }
     Ok(report)
+}
+
+/// Record `batch` (name, value written) with each name's version in `listed` in the
+/// environment's version ledger (FR-54): one item edit, only by a person's own session, never
+/// on the project's manifest. A failure is a note, never the sync's result.
+pub(crate) fn record_ledger(
+    fleet: &Fleet,
+    env_name: &str,
+    batch: &[(String, &SecretValue)],
+    listed: &[StoreEntry],
+    r: &dyn CommandRunner,
+) {
+    use crate::adapters::{onepassword, onepassword_tidy};
+    use crate::domain::convention::TidyPlan;
+    use crate::domain::ledger::{Ledger, random_key};
+    // The same gate as the tidy: opv writes to 1Password during a sync only in a real run
+    // by a person's own session.
+    if !super::tidy::active() || super::tidy::identity(r) != super::tidy::Identity::Person {
+        return;
+    }
+    let attempt = || -> Result<(), Error> {
+        let env = fleet.environment(env_name)?;
+        let item = onepassword::read_whole_fresh(r, env)?;
+        if super::tidy::is_manifest(item.raw())
+            || onepassword_tidy::unprovable(item.raw()).is_some()
+        {
+            return Ok(());
+        }
+        let (layout, _) = onepassword_tidy::parse(item.raw())?;
+        let written: Vec<(String, String, &SecretValue)> = batch
+            .iter()
+            .filter_map(|(n, v)| {
+                let version = listed.iter().find(|e| &e.name == n)?.version.clone()?;
+                Some((n.clone(), version, *v))
+            })
+            .collect();
+        if written.is_empty() {
+            return Ok(());
+        }
+        let ops = Ledger::from_layout(&layout).ops(&layout, &written, &random_key);
+        let plan = TidyPlan {
+            ops,
+            changes: Vec::new(),
+            kept: false,
+        };
+        let template = onepassword_tidy::apply(item.raw(), &plan)?;
+        onepassword_tidy::write(r, env, &template)?;
+        Ok(())
+    };
+    if attempt().is_err() {
+        r.note(&format!(
+            "1Password ({env_name}): could not record what this sync wrote; the next plan \
+             shows those names as unknown until a sync records them"
+        ));
+    }
+}
+
+/// #106: with a state vault, a delivery revision per product in scope whose every name
+/// this run wrote (`written`, confirmed by the provider) or the plan proved identical, at
+/// the versions in `listing`. Never fails the sync: what it could not record is reported.
+fn record_delivery(
+    c: &Ctx<'_>,
+    written: &BTreeSet<String>,
+    identical: &BTreeSet<String>,
+    listing: &[StoreEntry],
+    report: &mut Report,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
+    if fleet.environment(env_name)?.state_vault_id.is_none() {
+        return Ok(());
+    }
+    let recorded = super::delivery::record(
+        fleet,
+        env_name,
+        opts.product.as_deref(),
+        written,
+        identical,
+        listing,
+        &report.plan_id,
+        c.r,
+    );
+    match recorded {
+        Ok(rec) => {
+            if let Some(path) = &opts.receipt {
+                super::delivery::write_receipt_file(path, &rec.minted)?;
+            }
+            if !opts.json {
+                for m in &rec.minted {
+                    p_line(
+                        out,
+                        format!("delivery: {} revision {}", m.scope.product, m.revision),
+                    )?;
+                }
+                for n in &rec.not_minted {
+                    p_line(
+                        out,
+                        format!("delivery: {} not recorded: {}", n.product, n.reason),
+                    )?;
+                }
+            }
+            report.delivery = Some(rec);
+        }
+        Err(e) => c.r.note(&format!(
+            "delivery evidence for {env_name} was not recorded ({}); the target holds what this \
+             sync wrote, and opv delivery verify reports it as not delivered",
+            e.code().as_str()
+        )),
+    }
+    Ok(())
+}
+
+/// One line of output.
+fn p_line(out: &mut dyn Write, s: String) -> Result<(), Error> {
+    writeln!(out, "{s}").map_err(write_err)
+}
+
+/// What `sync --deploy` prints on a target whose writes are live at once (FR-46).
+pub(crate) fn live_line(label: &str) -> String {
+    format!("nothing to deploy: {label} applies each write at once")
 }
 
 /// `pending deploy (pass --deploy): …`, the same words on every provider.
@@ -753,6 +959,25 @@ fn run_pinned(
         .map(|(n, _)| n.clone())
         .collect();
     print_changes(out, names, &report)?;
+    // #106: each written name at the version its confirmed write returned; the others as
+    // listed, compared exactly by the plan.
+    {
+        let confirmed: BTreeSet<String> = written.keys().cloned().collect();
+        let identical: BTreeSet<String> = report.unchanged.iter().cloned().collect();
+        let mut after: Vec<StoreEntry> = listed.clone();
+        for (name, version) in &written {
+            match after.iter_mut().find(|e| &e.name == name) {
+                Some(e) => e.version = Some(version.clone()),
+                None => after.push(StoreEntry {
+                    name: name.clone(),
+                    version: Some(version.clone()),
+                    pending: false,
+                    stamp: None,
+                }),
+            }
+        }
+        record_delivery(c, &confirmed, &identical, &after, &mut report, out)?;
+    }
 
     // 4–5. What the runtime binds now, and what must change. Under `--product` another
     // product's bindings are never unbound (P20).
@@ -1467,9 +1692,32 @@ pub fn plan_scoped(
     let none = BTreeSet::new();
     let (mut plan, on_target, item_version) =
         read_and_plan_versioned(fleet, env_name, r, Some(&ports), &none, &none)?;
-    if let Some(p) = product {
-        scope_plan(&mut plan, p, &product_names(fleet, env_name, p)?);
-    }
+    let scope = match product {
+        Some(p) => {
+            let names = product_names(fleet, env_name, p)?;
+            scope_plan(&mut plan, p, &names);
+            Some(names)
+        }
+        None => None,
+    };
+    // The config channel (FR-46): state of each config row, and what sync would set/prune.
+    let (live, var_plan) = match &ports {
+        Ports::Staged { store, runtime } => {
+            let vp = match store.variables() {
+                Some(v) => Some(super::variables::plan(
+                    fleet,
+                    env_name,
+                    t,
+                    &mut plan,
+                    v,
+                    &|n| scope.as_ref().is_none_or(|s| s.contains(n)),
+                )?),
+                None => None,
+            };
+            (runtime.live(), vp.unwrap_or_default())
+        }
+        Ports::Pinned { .. } => (false, super::variables::VarPlan::default()),
+    };
     let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
     // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
     let id = plan_id_of(
@@ -1506,16 +1754,18 @@ pub fn plan_scoped(
     // environment's `--confirm`.
     let clean = n == 0;
     let sync_next = SyncOpts {
-        deploy: true,
-        prune: !plan.prune.is_empty(),
+        // A live target has nothing to deploy (FR-46).
+        deploy: !live,
+        prune: !plan.prune.is_empty() || !var_plan.prune.is_empty(),
         product: product.map(str::to_string),
         expect_plan: clean.then(|| id.clone()),
+        receipt: None,
         ..SyncOpts::default()
     }
     .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
     let verb = match ports {
-        Ports::Staged { .. } => "stage",
-        Ports::Pinned { .. } => "write",
+        Ports::Staged { .. } if !live => "stage",
+        _ => "write",
     };
     let label = t.provider().label();
     let unmanaged = unmanaged_on_target(fleet, env_name, &on_target)?;
@@ -1524,9 +1774,9 @@ pub fn plan_scoped(
          on {label} (never touched)",
         plural(plan.rows.len(), "key", "keys"),
         plural(n, "finding", "findings"),
-        plan.stage.len(),
+        plan.stage.len() + var_plan.set.len(),
         plan.held_immutable.len(),
-        plan.prune.len(),
+        plan.prune.len() + var_plan.prune.len(),
         unmanaged.len(),
     );
     let heading = match product {
@@ -1564,10 +1814,15 @@ pub fn plan_scoped(
     print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(out, &words, label)?;
+    print_legend(out, &words, label, live)?;
     print_extras(out, &plan)?;
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
-    let staged: Vec<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
+    let staged: Vec<&str> = plan
+        .stage
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .chain(var_plan.set.iter().map(String::as_str))
+        .collect();
     if !staged.is_empty() {
         // Findings block the sync, so nothing is staged until they are fixed (bug 10).
         let when = if n > 0 {
@@ -1577,10 +1832,11 @@ pub fn plan_scoped(
         };
         line(format!("would {verb}{when}: {}", names.join(&staged)))?;
     }
-    if !plan.prune.is_empty() {
+    let prunes: Vec<String> = plan.prune.iter().chain(&var_plan.prune).cloned().collect();
+    if !prunes.is_empty() {
         line(format!(
             "would prune (needs --prune): {}",
-            names.join(&plan.prune)
+            names.join(&prunes)
         ))?;
     }
     let env = fleet.environment(env_name)?;
@@ -1820,6 +2076,21 @@ mod tests {
     }
     fn opts() -> SyncOpts {
         SyncOpts::default()
+    }
+
+    /// FR-46 (live smoke): a target whose writes are live has nothing to deploy, so the
+    /// step after a sync that kept names asks for --prune only.
+    #[test]
+    fn a_live_targets_next_step_has_no_deploy() {
+        let r = Report {
+            live: true,
+            kept: vec!["APP_NAME".into()],
+            ..Report::default()
+        };
+        assert_eq!(
+            r.next("ci", &SyncOpts::default(), false).as_deref(),
+            Some("opv sync ci --prune")
+        );
     }
     fn fake_with(item: crate::runner::Output, fly_a: crate::runner::Output) -> FakeRunner {
         FakeRunner::new([item, fly_a])

@@ -2,11 +2,16 @@
 
 ## Install
 
+The easiest way on every platform is npm: `npm install -g @matthew-cochran/opv` ([details](#npm)). Without Node.js, use the install script (Linux and macOS) or a release binary.
+
 ### Install script (Linux and macOS)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
+
+Add `-s -- --skill` (`... | sh -s -- --skill`) to also install the opv agent skill for AI coding assistants (`opv skill install --user --target all`); `opv skill status` shows installed copies and `opv doctor` warns when one is older than the binary. A copy you edited is kept unless you pass `opv skill install --force`.
+
 
 `install.sh` installs or updates `opv` into `~/.local/bin` without `sudo` and without
 npm, Homebrew or Rust. It picks the release asset for your OS and CPU (including
@@ -16,7 +21,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.5.0   # install exactly this release (default: latest)
+sh install.sh --version v0.6.0   # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -71,7 +76,7 @@ npm i -g @matthew-cochran/opv
 npx @matthew-cochran/opv --version
 ```
 
-The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. Through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU, and a postinstall script copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place `install.sh` uses. It never replaces a file that is not an opv binary, and never writes into a home directory under `sudo`: run `npm i -g` without sudo. With `--ignore-scripts` the `opv` command still works from its bundled copy; run `npm rebuild -g @matthew-cochran/opv` to install the shared copy.
+The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. Through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU. From 0.6.0, a postinstall script also copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place `install.sh` uses. It never replaces a file that is not an opv binary, and never writes into a home directory under `sudo`: run `npm i -g` without sudo. With `--ignore-scripts` the `opv` command still works from its bundled copy; run `npm rebuild -g @matthew-cochran/opv` to install the shared copy. If your shell then says `~/.local/bin/opv: No such file or directory`, it remembers an older copy that is gone: run `hash -r` (or open a new terminal).
 
 ### One install location
 
@@ -130,11 +135,12 @@ Install only what your target needs; `opv doctor` checks exactly that and prints
 | `flyctl` | tested with 0.4.112 and later 0.4.x patches | Fly targets |
 | Azure CLI `az` | 2.60 or newer | Azure targets |
 | `kubectl` | a version that matches your cluster (opv checks only that it runs) | Kubernetes targets |
+| GitHub CLI `gh` | tested with 2.102.0 | GitHub Actions targets |
 
-`opv doctor` warns (exit code unchanged) when a version differs.
+`opv doctor` warns (exit code unchanged) when a version differs. When a tool is installed but its folder is not on `PATH` (common for `~/.local/bin`, `~/.fly/bin`, `/opt/homebrew/bin`, or the WinGet links folder on Windows), opv says where it is and how to add it to `PATH` instead of suggesting an install.
 
 - **Azure on Windows:** works natively. Values reach `az` through a named pipe only your user can open (Linux, WSL and macOS use stdin).
 - **Kubernetes:** opv uses the cluster context named in `secrets.toml`, not your current one. Your kubeconfig must contain it.
-- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials: a `deploy_credentials` item in that vault (Fly or Azure), the CI provider's OIDC federation (such as `azure/login`), `FLY_API_TOKEN`, or a kubeconfig.
-- **Locally:** `opv login <env>` (or the 1Password desktop app integration), plus `deploy_credentials` or `fly auth login`, `az login` or a working kubeconfig.
+- **For CI:** a read-only 1Password service account (`OP_SERVICE_ACCOUNT_TOKEN`) with access to the environment's vault, plus the target's credentials: a `deploy_credentials` item in that vault (Fly, Azure or GitHub), the CI provider's OIDC federation (such as `azure/login`), `FLY_API_TOKEN`, or a kubeconfig.
+- **Locally:** `opv login <env>` (or the 1Password desktop app integration), plus `deploy_credentials` or `fly auth login`, `az login`, `gh auth login` or a working kubeconfig.
 - **Writes to 1Password:** the layout tidy, `setup` and every manifest write (`init` in a new project, `add`, `config import`, `config edit`) need a person signed in with their own session; `item skeleton` needs an identity that may edit the item. A read-only service account is enough for everything else, CI included.
