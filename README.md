@@ -21,6 +21,12 @@ Install on Linux or macOS ([other ways](docs/install.md)):
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
+Working with an AI coding assistant (Claude Code, Codex, Cursor)? Install the CLI and its agent skill in one step, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json` and never handles a secret value:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh -s -- --skill
+```
+
 In a checkout of a project whose configuration lives in 1Password, no file is needed:
 
 ```sh
@@ -29,6 +35,8 @@ opv run dev -- npm run dev       # your app, with dev's settings as environment 
 ```
 
 opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk.
+
+A whole fleet from a fresh account (several products and environments, Fly and CI): [examples/fleet-fly](examples/fleet-fly/), driven by `opv bootstrap` and `opv ready`.
 
 Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, also turn on **Settings > Developer > Integrate with 1Password CLI** in the 1Password app). Then, in your project:
 

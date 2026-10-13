@@ -218,6 +218,20 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    Effect {
+        command: "skill install",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "skill status",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
 ];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
@@ -498,6 +512,8 @@ fn documents() -> Value {
         "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, {KEY: value} (simple profile) or {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
         "schema": "this document",
+        "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
+        "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
     })
 }
 

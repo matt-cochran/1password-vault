@@ -8,6 +8,9 @@
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
+Add `-s -- --skill` (`... | sh -s -- --skill`) to also install the opv agent skill for AI coding assistants (`opv skill install --user --target all`); `opv skill status` shows installed copies and `opv doctor` warns when one is older than the binary. A copy you edited is kept unless you pass `opv skill install --force`.
+
+
 `install.sh` installs or updates `opv` into `~/.local/bin` without `sudo` and without
 npm, Homebrew or Rust. It picks the release asset for your OS and CPU (including
 WSL and macOS under Rosetta), verifies the download against the release's

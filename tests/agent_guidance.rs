@@ -33,7 +33,10 @@ fn the_agent_guide_names_every_command() {
         .filter(|c| !NOT_FOR_ASSISTANTS.contains(&c.as_str()))
         .filter(|c| !guide.contains(&format!("opv {c}")) && !guide.contains(&format!("`{c}`")))
         .collect();
-    assert!(missing.is_empty(), "docs/agent-setup.md does not mention: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "docs/agent-setup.md does not mention: {missing:?}"
+    );
 }
 
 #[test]
