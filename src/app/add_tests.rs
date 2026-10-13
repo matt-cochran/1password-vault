@@ -415,3 +415,51 @@ fn a_file_changed_since_it_was_read_is_refused() {
         "{e}"
     );
 }
+
+// #97: --from, --personal, --allow-same-value -------------------------------------------
+
+#[test]
+fn from_declares_a_shared_key() {
+    let mut args = new_key("web/DATABASE_URL");
+    args.from = Some("api/DATABASE_URL".into());
+    let a = add_to(COMMENTED, args);
+    assert_eq!(
+        a.fleet().products["web"].keys["DATABASE_URL"]
+            .from
+            .as_deref(),
+        Some("api/DATABASE_URL")
+    );
+}
+
+#[test]
+fn personal_declares_a_personal_key() {
+    let mut args = new_key("api/OPENAI_API_KEY");
+    args.envs = vec!["dev".into()];
+    args.personal = true;
+    let a = add_to(COMMENTED, args);
+    assert!(a.fleet().products["api"].keys["OPENAI_API_KEY"].personal);
+}
+
+#[test]
+fn a_personal_key_for_a_deployed_environment_is_refused() {
+    let mut args = new_key("api/OPENAI_API_KEY");
+    args.envs = vec!["prod".into()];
+    args.personal = true;
+    assert!(add_to(COMMENTED, args).res.is_err());
+}
+
+#[test]
+fn allow_same_value_is_written() {
+    let mut args = new_key("api/SHARED_TOKEN");
+    args.allow_same_value = true;
+    let a = add_to(COMMENTED, args);
+    assert!(a.fleet().products["api"].keys["SHARED_TOKEN"].allow_same_value);
+}
+
+#[test]
+fn a_declared_key_cannot_become_personal_through_add() {
+    let mut args = new_key("api/DATABASE_URL");
+    args.kind = None;
+    args.personal = true;
+    assert!(add_to(COMMENTED, args).res.is_err());
+}

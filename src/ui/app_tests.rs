@@ -229,3 +229,57 @@ fn down_stops_at_the_last_found_row() {
     press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Down]);
     assert_eq!(a.row, 2);
 }
+
+// #97: editing the configuration -----------------------------------------------------------
+
+#[test]
+fn plus_opens_the_declare_a_key_form() {
+    let mut a = app();
+    a.handle(Key::Char('+'));
+    assert!(matches!(a.modal, Some(Modal::Form(_))));
+}
+
+#[test]
+fn a_submitted_form_shows_its_command_before_it_runs() {
+    let mut a = app();
+    a.open(Screen::Product("api".into()));
+    a.in_nav = false;
+    press(
+        &mut a,
+        &[
+            Key::Char('+'),
+            Key::Char('N'),
+            Key::Char('E'),
+            Key::Char('W'),
+            Key::Enter,
+        ],
+    );
+    let Some(Modal::Confirm { command, .. }) = &a.modal else {
+        panic!("no confirmation")
+    };
+    assert_eq!(command, &["add", "api/NEW", "--kind", "secret"]);
+}
+
+#[test]
+fn shift_e_opens_the_add_environment_form() {
+    let mut a = app();
+    a.handle(Key::Char('E'));
+    assert!(matches!(a.modal, Some(Modal::Form(_))));
+}
+
+#[test]
+fn e_hands_off_to_config_edit_after_confirmation() {
+    let mut a = app();
+    a.handle(Key::Char('e'));
+    assert_eq!(
+        a.handle(Key::Enter),
+        Effect::Run(vec!["config".into(), "edit".into()])
+    );
+}
+
+#[test]
+fn esc_closes_a_form_without_running_anything() {
+    let mut a = app();
+    press(&mut a, &[Key::Char('+'), Key::Esc]);
+    assert!(a.modal.is_none());
+}

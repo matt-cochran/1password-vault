@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`opv ui` adoption review** ([#94](https://github.com/matt-cochran/1password-vault/issues/94)): `i` reads `opv adopt --json` and lets you decide per key (import or skip; keep, replace or skip), then runs exactly the `opv adopt … --apply` it shows. `opv adopt --skip <product/KEY>` leaves a key out.
+- **`opv ui` configuration editing** ([#97](https://github.com/matt-cochran/1password-vault/issues/97)): `+` declares a key and `E` adds an environment through forms that run the exact `opv add` / `opv init --add-env` they show; `e` opens `opv config edit`. `opv add` takes `--from PRODUCT/KEY`, `--personal` and `--allow-same-value`.
+
 - **Settings health** ([#92](https://github.com/matt-cochran/1password-vault/issues/92)): `opv ready`, `opv ui` and `opv doctor --settings` warn about likely-wrong values: the same secret in two environments, one value under two keys, placeholders, stray whitespace, `localhost` in a deployed environment, and test/live keys in the wrong kind of environment. Values are compared in memory and never shown; `allow_same_value = true` on a key marks an intended repeat.
 
 - **`opv init <env> --from .env`** ([#90](https://github.com/matt-cochran/1password-vault/issues/90)): start a project from an existing `.env` in one step. It declares every key (kind by name, secret when unsure; `--config-key` / `--secret-key` to change one) and shows the plan; `--apply` creates the vault and item, writes the configuration and imports the values, read back and verified. No value is ever printed, and no hand-written import script is needed.
