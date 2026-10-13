@@ -4,6 +4,8 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 
 `opv guide agent` prints this guide as built into the installed binary, so it matches the commands that version has. Prefer it to a copy from the web. `opv skill install` installs a short skill (for Claude Code, Codex and agents that read `.agents/skills`) that sends every new session here first.
 
+`opv ui` shows people the same information in a terminal UI; as an assistant, use the commands and `--json` below instead, and suggest `opv ui` to a user who wants to browse.
+
 **Start every session with one read-only command:** `opv ready --json`. It says, in one document, what is ready, what is not, who acts next (`actor`: owner, agent or CI) and the exact command for each step (`prerequisite`, then `verify`). Act on its findings in order; re-run it to resume after any interruption.
 
 ## Rules

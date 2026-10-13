@@ -18,6 +18,7 @@ opv open shared/OPENAI_API_KEY --env dev
 ```sh
 opv run dev --product api -- npm run dev   # team values plus your own keys
 opv check dev --product api               # your keys and the team's, saved?
+opv ui                                    # browse everything you can see
 ```
 
 Personal keys are never deployed: declaring one for `staging` or `prod` is a configuration error, and deployed environments use `SERVICE_OPENAI_API_KEY`, the service's own key.

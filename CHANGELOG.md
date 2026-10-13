@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`opv ui`** ([#82](https://github.com/matt-cochran/1password-vault/issues/82)): a terminal UI to browse and manage every environment (from the configuration, by title and order), product, key, shared value and account, with secrets never shown; actions run the same `opv` commands in your terminal, a sync only exactly the plan you reviewed, a guarded environment only after you type its name. Falls back to `opv ready` text without an interactive terminal.
+
 - **Exact `plan` on Fly and GitHub** ([#36](https://github.com/matt-cochran/1password-vault/issues/36); FR-54): a sync you run records, in the item's `opv · state` section, each written name's target version and a keyed fingerprint of its value (never the value). `plan` then shows `same` or `changed` exactly instead of `unknown`, reports names changed outside opv (drift), and GitHub secrets that did not change are no longer rewritten each sync.
 - **Personal keys** ([#86](https://github.com/matt-cochran/1password-vault/issues/86); FR-55): `personal = true` keeps each developer's own value (an LLM key billed to them) in their own item in their own vault, per product, with shared personal values through a source-only product; `run`, `check` and `ready` read it, `bootstrap` creates it, and it is never deployed or mixed with team values. Environments take `title`, `order` and `audience` (people outside an environment's audience see it as not theirs instead of an access error). Example: [examples/team-personal](examples/team-personal/).
 
