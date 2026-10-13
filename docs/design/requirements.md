@@ -861,6 +861,34 @@ Acceptance: an existing `secrets.toml` still wins (the fleet's infra repo is unc
 - `explain` shows the chain: the source's `op://` reference and `shared from` on a referencing key, `shared by` on a source.
 - `item skeleton`, and any later field creation, never creates a field for a referencing key. A field left under a referencing key is reported as an extra field.
 
+## FR-46 — GitHub Actions Target
+
+Design: `docs/design/github-actions-target.md`; spike: `docs/design/spike-github-findings.md`.
+
+- `[environments.<env>.github]` takes exactly one of `repo = "owner/name"` or `repos = [...]` (each `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`, no duplicates ignoring case), optionally `environment` (a GitHub environment name, `^[A-Za-z0-9._ -]{1,255}$` without leading or trailing space), `products` (FR-48) and `secret_name` (a template containing `{KEY}`, optionally `{PRODUCT}`; default `{KEY}` under both profiles). Rendered names must match `^[A-Z][A-Z0-9_]*$` (FR-30) and never start with `GITHUB_`; both are refused at load.
+- Secret-kind keys are written as Actions secrets with `gh secret set` and config-kind keys as Actions variables with `gh variable set`, values on stdin only (SR-3), one call per name and repository, as repository values or, with `environment`, that GitHub environment's values.
+- Writes are live at once: `sync` never reports a pending deploy, and `--deploy` prints that the target has nothing to deploy (exit 0).
+- Secrets cannot be read back: a listed secret's target state is `unknown`, so every ready secret is written each sync; an `immutable` secret already present by name is held (FR-16). Variables are read back and compared exactly (`present`, `would_change`, `absent`); only differing or absent variables are written.
+- A config key whose field is concealed (M4) is refused on this target (`concealed-config`): a variable is readable by everyone with read access to the repository.
+- With several repositories, a secret or variable counts as present only when every repository has it (variables: with the same value); writes fan out to every repository, and a failure names what was already written (NR-10).
+- `--prune` removes only managed names (FR-8), secrets and variables alike; a name already gone counts as removed.
+- Value limits (spike Q7, Q8) are refusals shown by `status`, `plan` and `check` (FR-22): a secret over 47 952 bytes; a variable that is empty or over 48 000 bytes.
+- Preflight (NR-23) checks, read-only, that each repository exists and, with `environment`, that the GitHub environment exists in each. opv never creates a GitHub environment; the `Next:` line is the `gh api -X PUT repos/<repo>/environments/<name>` command.
+- Sign-in: the person's `gh` session or `GH_TOKEN`/`GITHUB_TOKEN`. `deploy_credentials` holds one concealed field `GH_TOKEN`, handed to `gh` in the child's environment only (FR-40, SR-4).
+
+## FR-47 — Source-Only Products (Shared Records)
+
+- `[products.<name>] source_only = true` declares a product whose keys hold canonical values only. Its keys have fields like any other (tidy, `item skeleton`, missing-value lines, rules, `immutable`, `--rotate`), and other keys point at them with `from` (FR-45).
+- A source-only product's keys render no target name in any environment: they are never written, never part of the managed set, never pruned, and exempt from the name collision check (FR-8, FR-30). `run --product <name>` of a source-only product is refused with a configuration error.
+- `check`, `status` and `plan` warn once (`unreferenced-source`) for a key of a source-only product that no `from` references. A source-only product without keys is a configuration error.
+- `source_only` is a boolean (default `false`); it is not allowed under the simple profile.
+
+## FR-48 — Target Product Scope
+
+- A target may deliver only some products' keys (`products = [...]` on `github`). For a product the target does not serve, the product's keys render no name for that target: never written, never in its managed set, never pruned, and exempt from its collision check. They are still read and checked when declared for the environment, and a key of a served product may point at them with `from`.
+- Each listed product must be declared and not source-only; an empty list is a configuration error.
+- `plan` and `status` list the declared keys that the environment's target does not deliver as `not delivered here` (JSON `undelivered`), so a missing product in `products` never passes silently.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging

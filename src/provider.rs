@@ -312,6 +312,13 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn secrets_in(&self) -> Option<&dyn StoreConfig> {
         None
     }
+    /// Whether keys of `product` are delivered to this target (FR-48). `false`: the
+    /// product's keys render no name here (never written, managed or pruned, and exempt
+    /// from the name collision check). Default: every product.
+    fn serves(&self, product: &str) -> bool {
+        let _ = product;
+        true
+    }
     /// True when `other` is the same target: two environments on it would manage the same
     /// names, and each would prune what the other stages (FR-8).
     fn same_target(&self, other: &dyn TargetConfig) -> bool;

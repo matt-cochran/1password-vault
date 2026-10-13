@@ -1,0 +1,1 @@
+failed to fetch public key: HTTP 404: Not Found (https://api.github.com/repos/example-org/example-repo/environments/staging/secrets/public-key)

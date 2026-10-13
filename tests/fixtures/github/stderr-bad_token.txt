@@ -1,0 +1,2 @@
+failed to get secrets: HTTP 401: Bad credentials (https://api.github.com/repos/example-org/example-repo/actions/secrets?per_page=100)
+Try authenticating with:  gh auth login -h github.com
