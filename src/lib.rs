@@ -16,6 +16,8 @@ pub mod provider;
 pub mod runner;
 pub mod schema;
 pub mod scrub;
+#[cfg(feature = "ui")]
+pub mod ui;
 
 pub use error::Error;
 

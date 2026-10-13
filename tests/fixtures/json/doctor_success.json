@@ -51,6 +51,13 @@
       "detail": "not found on PATH",
       "next": null,
       "do": null
+    },
+    {
+      "name": "agent skill",
+      "status": "ok",
+      "detail": "not installed (optional: opv skill install)",
+      "next": null,
+      "do": null
     }
   ],
   "next": null,

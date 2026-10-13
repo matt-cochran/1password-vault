@@ -63,7 +63,8 @@ Examples:
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or the target CLI missing:
-  {TARGET_CLIS}), 4 1Password, 5 target ({TARGETS}), 6 refused (policy),
+  {TARGET_CLIS}), 4 1Password,
+  5 target ({TARGETS}), 6 refused (policy),
   7 authentication, 8 findings (status, plan, check),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
@@ -270,14 +271,8 @@ Examples:
   opv add api/STRIPE_KEY --env staging          # include a declared key in staging";
 
 const ADD_MORE: &str = "\
-Edits the configuration where it lives (secrets.toml, or the project's manifest in
-1Password) with comments and order kept, and validates it like a hand-written one first: a
-name colliding on a target or a bad rule is refused and nothing is written. Never reads an
-item or a target. Then opv item skeleton <env> adds the empty field to fill in 1Password.
-
-More examples:
-  opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable \\
-      --guidance \"32 random bytes, base64\"";
+Edits secrets.toml or the project's manifest in place (comments kept), validated like a
+hand-written one; reads no item or target. Then opv item skeleton <env> adds the empty field.";
 
 const EXPLAIN_QUICK: &str = "\
 Examples:
@@ -293,7 +288,62 @@ const INIT_QUICK: &str = "\
 Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
   opv init prod --fly-app myapp         # deploys to Fly
-  opv init dev --vault shared --item app  # an item you already have";
+  opv init dev --from .env --apply      # start from an existing .env (without --apply: the plan)";
+
+const ADOPT_QUICK: &str = "\
+Examples:
+  opv adopt staging --from .env.staging          # what would come in; nothing written
+  opv adopt staging --from .env.staging --apply  # write the imports, verified";
+
+const ADOPT_MORE: &str = "\
+Each found name maps to a declared key (its target name, else its bare name); each key's
+rules normalise both sides before comparing. A filled 1Password field is never replaced
+unless named with --replace (immutable keys also need --rotate); the old value is kept in
+the section \"opv · kept\". Values are never printed. --from target reads Key Vault,
+Kubernetes and GitHub variables; Fly and GitHub secrets cannot be read back. It never syncs,
+deploys or deletes the source.";
+
+#[cfg(feature = "ui")]
+const UI_QUICK: &str = "\
+Examples:
+  opv ui                       # every environment x product; enter to open, s to sync, q to quit
+  OPV_UI_TEXT=1 opv ui         # the same information as text (screen readers, dumb terminals)";
+
+const HISTORY_QUICK: &str = "\
+Examples:
+  opv history prod             # last write per key: time, plan id, opv version
+  opv history prod --json      # the same as one document (names and versions only)";
+
+const ACCESS_QUICK: &str = "\
+Examples:
+  opv access                   # every environment's readers; a CI reader command where missing
+  opv access prod --json       # one environment as a document";
+
+const READY_QUICK: &str = "\
+Examples:
+  opv ready                      # every environment × product, findings, the next step
+  opv ready --json --save r.json # the receipt for an assistant or a handoff";
+
+const BOOTSTRAP_QUICK: &str = "\
+Examples:
+  opv bootstrap --dry-run      # what would be created or checked, per environment
+  opv bootstrap                # create missing vaults and items, record their IDs";
+
+const BOOTSTRAP_MORE: &str = "\
+Environments without vault_id and item_id get a vault <project>-<env> and an item
+\"<project> · <env> values\" in the selected 1Password account (found when they exist),
+and their IDs are recorded in secrets.toml. Recorded IDs the account cannot see stop
+with ids_not_in_account: select the owning account, or pass --rebind <env>. Then every
+declared field is added, empty. Nothing is synced, deployed or given a value. Next: opv ready";
+
+const ACCOUNT_LIST_QUICK: &str = "\
+Examples:
+  opv account list           # accounts, which is selected, what to do next
+  opv account list --json    # the same for scripts and AI assistants";
+
+const ACCOUNT_USE_QUICK: &str = "\
+Examples:
+  opv account use owner@example.com   # record this project's account in .opv";
 
 const COMPLETIONS_QUICK: &str = "\
 Examples:
@@ -332,6 +382,16 @@ Examples:
 const GUIDE_MORE: &str = "\
 Prints a guide embedded in this binary, so it matches the commands this version has. Links
 point at the docs of the same release.";
+
+const SKILL_INSTALL_QUICK: &str = "\
+Examples:
+  opv skill install --user --target all   # this user, for Claude Code and Codex
+  opv skill install --project . --json    # this project's agent folders, as JSON";
+
+const SKILL_STATUS_QUICK: &str = "\
+Examples:
+  opv skill status           # each installed copy, its version and whether it is current
+  opv skill status --json    # the same for scripts and AI assistants";
 
 /// Use 1Password settings in local apps and deployment targets.
 ///
@@ -425,6 +485,10 @@ enum Cmd {
         /// several accounts are on this machine.
         #[arg(long)]
         account: Option<String>,
+        /// Add a 1Password account to this CLI first (with --account: that email), at
+        /// 1Password's own prompt.
+        #[arg(long)]
+        add: bool,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -442,6 +506,11 @@ enum Cmd {
         /// Print one JSON document (check names, states and next steps) instead of lines.
         #[arg(long)]
         json: bool,
+        /// Also look for likely-wrong values: the same secret in two environments, a
+        /// placeholder, stray whitespace, localhost where it deploys. Reads every
+        /// environment's item; values are compared, never shown.
+        #[arg(long)]
+        settings: bool,
     },
     /// Check whether your required settings are ready; contacts no deployment target.
     #[command(before_help = CHECK_QUICK, after_help = CHECK_MORE)]
@@ -509,6 +578,101 @@ enum Cmd {
     /// Save managed settings on the configured deployment target.
     #[command(before_help = SYNC_QUICK, after_help = SYNC_MORE)]
     Sync(SyncArgs),
+    /// 1Password accounts: which ones this machine's CLI knows, and the project's.
+    #[command(subcommand)]
+    Account(AccountCmd),
+    /// Delivery receipts: whether a product's target still holds what opv delivered.
+    #[command(subcommand)]
+    Delivery(DeliveryCmd),
+    /// Bring values that exist elsewhere into the environment's 1Password item, after review.
+    #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
+    Adopt {
+        /// Environment whose item receives the values.
+        env: String,
+        /// A private dotenv file, or `target` to read what the environment's target can show.
+        #[arg(long, value_name = "FILE|target")]
+        from: String,
+        /// Take the found value for this key although 1Password holds another (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        replace: Vec<String>,
+        /// Allow --replace on this immutable key (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        rotate: Vec<String>,
+        /// Leave this key out of the import although it would be imported (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        skip: Vec<String>,
+        /// Write the plan to 1Password (without it, nothing is written).
+        #[arg(long)]
+        apply: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Browse and manage every environment, product and key in a terminal UI (values never
+    /// shown); actions run the same opv commands, behind plan and confirmation.
+    #[cfg(feature = "ui")]
+    #[command(before_help = UI_QUICK)]
+    Ui,
+    /// What opv last wrote to an environment's target, per key: when, by which plan, and
+    /// whether it changed outside opv since (read-only, values never shown).
+    #[command(before_help = HISTORY_QUICK)]
+    History {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Who can read each environment's vault, and the command for a read-only CI reader
+    /// (read-only; people are counted, never named).
+    #[command(before_help = ACCESS_QUICK)]
+    Access {
+        /// Only this environment.
+        env: Option<String>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is ready, what is not, and who does what next: one receipt (read-only).
+    #[command(before_help = READY_QUICK)]
+    Ready {
+        /// Only this environment.
+        env: Option<String>,
+        /// Print the receipt as one JSON document.
+        #[arg(long)]
+        json: bool,
+        /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
+        #[arg(long, value_name = "FILE")]
+        save: Option<PathBuf>,
+    },
+    /// Create every environment's vault, item and empty fields in the selected account.
+    #[command(before_help = BOOTSTRAP_QUICK, after_help = BOOTSTRAP_MORE)]
+    Bootstrap {
+        /// The configuration file to complete; defaults to the secrets.toml found from here.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Project name for vault and item titles; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Show what would be created or checked; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace this environment's recorded IDs with a vault and item in the selected
+        /// account (repeatable). Values are not moved.
+        #[arg(long, value_name = "ENV")]
+        rebind: Vec<String>,
+        /// Also print the owner's steps for a read-only CI service account for this
+        /// environment's vault.
+        #[arg(long, value_name = "ENV")]
+        ci_reader: Option<String>,
+        /// Create this environment's state vault for delivery receipts, record it as
+        /// state_vault_id, and print the deploy identity's command (repeatable).
+        #[arg(long, value_name = "ENV")]
+        state: Vec<String>,
+        /// Print one JSON document (one step per environment) instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Configuration commands.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -576,10 +740,17 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["force", "profile"])]
         add_env: bool,
         /// Profile to write, simple or fleet; without it, it follows the item's shape.
-        #[arg(long, value_parser = ["simple", "fleet"], hide_possible_values = true)]
+        /// Hidden from help (one screen, H9): the mixed-shape error names it.
+        #[arg(
+            long,
+            value_parser = ["simple", "fleet"],
+            hide_possible_values = true,
+            hide_short_help = true,
+            hide_long_help = true
+        )]
         profile: Option<String>,
-        /// Overwrite an existing secrets.toml.
-        #[arg(long)]
+        /// Overwrite an existing secrets.toml. Hidden from help (H9): the refusal names it.
+        #[arg(long, hide_short_help = true, hide_long_help = true)]
         force: bool,
         /// Print what was written (names and kinds) as one JSON document.
         #[arg(long, hide_long_help = true)]
@@ -594,6 +765,31 @@ enum Cmd {
         /// 1Password account (email or ID) when several are on this machine; kept in .opv.
         #[arg(long)]
         account: Option<String>,
+        /// Start from a private .env: declare every key (kind by name; --config-key or
+        /// --secret-key KEY to change one) and, with --apply, import the values, verified.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["add_env", "profile"])]
+        from: Option<std::path::PathBuf>,
+        /// With --from: declare this key as config whatever its name (repeatable).
+        #[arg(
+            long,
+            value_name = "KEY",
+            requires = "from",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        config_key: Vec<String>,
+        /// With --from: declare this key as secret whatever its name (repeatable).
+        #[arg(
+            long,
+            value_name = "KEY",
+            requires = "from",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        secret_key: Vec<String>,
+        /// With --from: create, declare and import (without it: the plan only).
+        #[arg(long, requires = "from", hide_short_help = true, hide_long_help = true)]
+        apply: bool,
     },
     /// Declare a key in the configuration, or add environments to a declared key.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
@@ -618,6 +814,15 @@ enum Cmd {
         /// Staged only when absent on the target unless rotated.
         #[arg(long)]
         immutable: bool,
+        /// Read the value of another key, PRODUCT/KEY (a shared value).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        from: Option<String>,
+        /// Each person's own value, in their own item (local environments only).
+        #[arg(long)]
+        personal: bool,
+        /// The same value in several environments is intended (no settings warning).
+        #[arg(long)]
+        allow_same_value: bool,
         /// Print what was written (the key, its kind and environments) as one JSON document.
         #[arg(long)]
         json: bool,
@@ -639,6 +844,9 @@ enum Cmd {
         #[arg(value_enum)]
         topic: GuideTopic,
     },
+    /// Install the opv agent skill where coding agents look, and report installed copies.
+    #[command(subcommand)]
+    Skill(SkillCmd),
 }
 
 /// Guides embedded in the binary (A10).
@@ -646,6 +854,59 @@ enum Cmd {
 enum GuideTopic {
     /// Setting opv up in a user's project, for AI assistants: rules, steps, exit codes.
     Agent,
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Install the embedded agent skill where coding agents look for it.
+    #[command(before_help = SKILL_INSTALL_QUICK)]
+    Install {
+        /// Which agents' skill folders to write.
+        #[arg(long, value_enum, default_value_t = SkillTarget::All)]
+        target: SkillTarget,
+        /// Install into the user's home (HOME, else USERPROFILE).
+        #[arg(long, conflicts_with = "project")]
+        user: bool,
+        /// Install into this project's root; default: the git top level.
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        /// Replace a copy that was edited by hand.
+        #[arg(long)]
+        force: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report the installed agent skill copies, their version and state.
+    #[command(before_help = SKILL_STATUS_QUICK)]
+    Status {
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `--target` of `opv skill install`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SkillTarget {
+    /// Claude Code (`.claude/skills/opv/SKILL.md`).
+    Claude,
+    /// Codex and other `.agents` clients (`.agents/skills/opv/SKILL.md`).
+    Codex,
+    /// Both, the default.
+    All,
+}
+
+impl SkillTarget {
+    /// The library targets this selection writes.
+    fn targets(self) -> Vec<opv::app::skill::Target> {
+        use opv::app::skill::{self, Target};
+        match self {
+            SkillTarget::Claude => vec![Target::Claude],
+            SkillTarget::Codex => vec![Target::Codex],
+            SkillTarget::All => skill::ALL.to_vec(),
+        }
+    }
 }
 
 /// Arguments of `plan`.
@@ -686,6 +947,15 @@ struct SyncArgs {
     /// changed since. Also satisfies confirm_env.
     #[arg(long, value_name = "PLAN_ID")]
     expect_plan: Option<String>,
+    /// Write the delivery receipts this sync mints (names, ids and times) to FILE; needs
+    /// the environment's state_vault_id.
+    #[arg(
+        long,
+        value_name = "FILE",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
+    receipt: Option<std::path::PathBuf>,
     /// Print the run report as one JSON document (names only) instead of text.
     #[arg(long)]
     json: bool,
@@ -708,8 +978,58 @@ impl From<SyncArgs> for sync::SyncOpts {
             confirm: a.confirm,
             json: a.json,
             expect_plan: a.expect_plan,
+            receipt: a.receipt,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum DeliveryCmd {
+    /// Check, read-only, that each product's target still holds the binding set opv
+    /// delivered, and name its revision (values never shown).
+    #[command(before_help = DELIVERY_VERIFY_QUICK)]
+    Verify {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Only this product.
+        #[arg(long)]
+        product: Option<String>,
+        /// A receipt kept from `opv sync --receipt`: it must be the current delivery.
+        #[arg(long, value_name = "FILE")]
+        receipt: Option<std::path::PathBuf>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+const DELIVERY_VERIFY_QUICK: &str = "\
+Examples:
+  opv sync prod --product api --receipt api.receipt.json       # deliver, and keep the receipt
+  opv delivery verify prod --product api                       # verified, changed, or not delivered
+  opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
+
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// List the 1Password accounts this CLI knows and which one this project uses (read-only).
+    #[command(before_help = ACCOUNT_LIST_QUICK)]
+    List {
+        /// Show which account this value (email, account ID or sign-in address) selects.
+        #[arg(long)]
+        account: Option<String>,
+        /// Print one JSON document (accounts, selection, findings) instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the account this project uses in .opv (no prompt, no sign-in).
+    #[command(before_help = ACCOUNT_USE_QUICK)]
+    Use {
+        /// Email, account ID, shorthand or sign-in address of an account this CLI knows.
+        who: String,
+        /// Print one JSON document instead of a line.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -943,10 +1263,17 @@ fn main() -> ExitCode {
             run(cli, config_source, &init_options, &mut stdout)
         };
         let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
-        if may_sign_in && signed_out && !signed_in && sign_in_here() {
-            // Once: a second failure is reported as it is.
-            signed_in = true;
-            continue;
+        if may_sign_in && signed_out && !signed_in {
+            match sign_in_here() {
+                // Once: a second failure is reported as it is.
+                Ok(true) => {
+                    signed_in = true;
+                    continue;
+                }
+                Ok(false) => {}
+                // Why the sign-in failed, in opv's words (FR-50), instead of the first error.
+                Err(e) => break Err(e),
+            }
         }
         break res;
     };
@@ -1210,10 +1537,14 @@ impl Cmd {
             | Cmd::Run { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
             | Cmd::Item(ItemCmd::Skeleton { env, .. }) => Some((env, Reach::Store)),
-            Cmd::Status { env: Some(env), .. } => Some((env, Reach::Target)),
+            Cmd::Status { env: Some(env), .. } | Cmd::History { env, .. } => {
+                Some((env, Reach::Target))
+            }
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
+            Cmd::Adopt { env, from, .. } if from == "target" => Some((env, Reach::Target)),
+            Cmd::Adopt { env, .. } => Some((env, Reach::Store)),
             _ => None,
         }
     }
@@ -1230,7 +1561,17 @@ impl Cmd {
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
             | Cmd::Add { json, .. }
-            | Cmd::Item(ItemCmd::Skeleton { json, .. }) => *json,
+            | Cmd::Item(ItemCmd::Skeleton { json, .. })
+            | Cmd::Bootstrap { json, .. }
+            | Cmd::Ready { json, .. }
+            | Cmd::History { json, .. }
+            | Cmd::Access { json, .. }
+            | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
+            | Cmd::Adopt { json, .. }
+            | Cmd::Account(AccountCmd::List { json, .. })
+            | Cmd::Account(AccountCmd::Use { json, .. })
+            | Cmd::Skill(SkillCmd::Install { json, .. })
+            | Cmd::Skill(SkillCmd::Status { json, .. }) => *json,
             Cmd::Plan(a) => a.json,
             Cmd::Sync(a) => a.json,
             Cmd::Schema => true,
@@ -1340,10 +1681,14 @@ fn run(
         }
         return Ok(0);
     }
+    if let Cmd::Skill(cmd) = &cli.cmd {
+        return run_skill(cmd, out).map(|()| 0);
+    }
     if let Cmd::Login {
         env,
         command,
         account,
+        add,
     } = &cli.cmd
     {
         use opv::app::{login, setup_runtime};
@@ -1354,10 +1699,11 @@ fn run(
             cli.verbose,
         );
         // One runtime: an account added and signed in here keeps its session for the login.
-        let mut runtime = setup_runtime::Runtime::default();
+        let mut runtime = setup_runtime::Runtime::default().for_command("login");
         login::choose_account(
             &probe,
             account.as_deref(),
+            *add,
             &here,
             &mut runtime,
             &mut setup_runtime::Console,
@@ -1424,6 +1770,57 @@ fn run(
     match &cli.cmd {
         Cmd::Projects { long, json } => {
             return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        }
+        #[cfg(feature = "ui")]
+        Cmd::Ui => {
+            let exe = std::env::current_exe().map_err(|e| {
+                Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
+            })?;
+            let source = opv::ui::run::Exe {
+                exe,
+                config: cli.config.clone(),
+            };
+            return opv::ui::run::run(source, out).map(|()| 0);
+        }
+        Cmd::Bootstrap {
+            file,
+            project,
+            dry_run,
+            rebind,
+            ci_reader,
+            state,
+            json,
+        } => {
+            let here = std::env::current_dir().unwrap_or_default();
+            let path = match file.clone().or_else(|| cli.config.clone()) {
+                Some(p) => p,
+                None => config_store::walk_up(&here, "secrets.toml").ok_or_else(|| {
+                    Error::Config("no secrets.toml here or in a parent directory".into())
+                        .with_next("opv init <env> --file")
+                })?,
+            };
+            let project = match project {
+                Some(p) => p.clone(),
+                None => config_store::default_project(
+                    None,
+                    config_store::git_repo(&r).as_deref(),
+                    &here,
+                )?,
+            };
+            let opts = opv::app::bootstrap::Opts {
+                dry_run: *dry_run,
+                rebind: rebind.iter().cloned().collect(),
+                ci_reader: ci_reader.clone(),
+                state: state.iter().cloned().collect(),
+                json: *json,
+            };
+            return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
+        }
+        Cmd::Account(AccountCmd::List { account, json }) => {
+            return opv::app::account::list(&r, account.as_deref(), *json, out).map(|()| 0);
+        }
+        Cmd::Account(AccountCmd::Use { who, json }) => {
+            return opv::app::account::use_command(&r, who, *json, out).map(|()| 0);
         }
         Cmd::Status {
             all: true,
@@ -1493,6 +1890,9 @@ fn run(
     .or_else(config_store::account_env);
     r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
+    if let Ok(fleet) = &loaded {
+        write_notes(fleet, &mut io::stderr());
+    }
     let mut cmd = cli.cmd;
     // A file that does not load: re-check it with a read-only command (H10). A manifest
     // has no file to fix in place: `opv config edit` opens it (FR-44).
@@ -1539,13 +1939,102 @@ fn run(
     run_other(cmd, loaded, source.as_deref(), runner, deploy_failure, out).map(|()| 0)
 }
 
+/// `opv skill install` / `opv skill status`: the agent skill embedded in this binary
+/// (FR-52). No configuration, no subprocess and no secret value is involved.
+fn run_skill(cmd: &SkillCmd, out: &mut dyn Write) -> Result<(), Error> {
+    use opv::app::skill;
+    let version = env!("CARGO_PKG_VERSION");
+    match cmd {
+        SkillCmd::Install {
+            target,
+            user,
+            project,
+            force,
+            json,
+        } => {
+            let root = skill_root(*user, project.as_deref())?;
+            let installed = skill::install(&root, &target.targets(), version, *force)?;
+            if *json {
+                writeln!(out, "{}", skill::install_document(&installed)?).map_err(write_err)?;
+            } else {
+                for (_, path) in &installed.written {
+                    writeln!(out, "installed {} (opv {version})", path.display())
+                        .map_err(write_err)?;
+                }
+                for (_, path) in &installed.kept {
+                    writeln!(
+                        out,
+                        "kept {}: edited by hand; --force replaces it",
+                        path.display()
+                    )
+                    .map_err(write_err)?;
+                }
+                writeln!(out, "Next: opv guide agent").map_err(write_err)?;
+            }
+        }
+        SkillCmd::Status { json } => {
+            let copies = skill::status(&skill::roots(), version);
+            if *json {
+                writeln!(out, "{}", skill::status_document(&copies)?).map_err(write_err)?;
+            } else {
+                for copy in &copies {
+                    let state = if copy.edited {
+                        "edited"
+                    } else if copy.current {
+                        "current"
+                    } else {
+                        "older"
+                    };
+                    writeln!(
+                        out,
+                        "{} {} {} opv {} {state}",
+                        copy.scope,
+                        copy.target.as_str(),
+                        copy.path.display(),
+                        copy.version.as_deref().unwrap_or("unknown"),
+                    )
+                    .map_err(write_err)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The root `opv skill install` writes under: the home for `--user`, the given project
+/// directory, or this checkout's git top level.
+fn skill_root(user: bool, project: Option<&std::path::Path>) -> Result<PathBuf, Error> {
+    if user {
+        return opv::app::skill::user_root().ok_or_else(|| {
+            Error::Config("cannot find the home directory (HOME or USERPROFILE)".into())
+                .with_next("opv skill install --project .")
+        });
+    }
+    Ok(project
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(opv::app::skill::project_root))
+}
+
+/// A failed write to the output stream (the same wording the library uses).
+fn write_err(e: io::Error) -> Error {
+    Error::Dependency(format!("cannot write output ({})", e.kind()).into())
+}
+
+/// Print each load-time deprecation note (FR-24, 0.6.0) to `out`, one line per note. The
+/// note names the key and the equivalent rule, never a value.
+fn write_notes(fleet: &opv::domain::Fleet, out: &mut dyn Write) {
+    for note in fleet.notes() {
+        let _ = writeln!(out, "{note}");
+    }
+}
+
 /// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
 /// current directory up (printed as `using <path>`). `None` when none was found.
 fn find_config(
     config: Option<&PathBuf>,
     config_source: ConfigSource,
 ) -> Option<Result<opv::domain::Fleet, Error>> {
-    match config {
+    let loaded = match config {
         Some(path) => {
             if config_source == ConfigSource::Env {
                 let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
@@ -1561,7 +2050,11 @@ fn find_config(
                 config::load(&found)
             }),
         },
+    };
+    if let Some(Ok(fleet)) = &loaded {
+        write_notes(fleet, &mut io::stderr());
     }
+    loaded
 }
 
 /// `opv login` in a project whose configuration lives in 1Password (FR-44): the manifest,
@@ -1688,24 +2181,84 @@ fn run_other(
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
+        | Cmd::Skill(_)
         | Cmd::Projects { .. }
+        | Cmd::Account(_)
+        | Cmd::Bootstrap { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
         }
-        Cmd::Doctor { env, product, json } => {
+        #[cfg(feature = "ui")]
+        Cmd::Ui => unreachable!("handled by run"),
+        Cmd::Doctor {
+            env,
+            product,
+            json,
+            settings,
+        } => {
             let scope = doctor::Request {
                 env: env.as_deref(),
                 product: product.as_deref(),
                 json,
                 source,
                 deploy_failure,
+                settings,
             };
             doctor::run_request(loaded, scope, r, out)
         }
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
+        Cmd::Adopt {
+            env,
+            from,
+            replace,
+            rotate,
+            skip,
+            apply,
+            json,
+        } => {
+            let source = if from == "target" {
+                opv::app::adopt::Source::Target
+            } else {
+                opv::app::adopt::Source::Dotenv(PathBuf::from(from))
+            };
+            let opts = opv::app::adopt::Opts {
+                source,
+                replace,
+                rotate,
+                skip,
+                apply,
+                json,
+            };
+            opv::app::adopt::run(&loaded?, &env, &opts, r, out)
+        }
+        Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
+        Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
+        Cmd::Delivery(DeliveryCmd::Verify {
+            env,
+            product,
+            receipt,
+            json,
+        }) => opv::app::delivery::verify(
+            &loaded?,
+            &env,
+            product.as_deref(),
+            receipt.as_deref(),
+            r,
+            json,
+            out,
+        ),
+        Cmd::Ready { env, json, save } => opv::app::ready::run(
+            &loaded?,
+            source,
+            env.as_deref(),
+            r,
+            json,
+            save.as_deref(),
+            out,
+        ),
         Cmd::Status {
             env: None,
             product,
@@ -1858,6 +2411,19 @@ fn run_init(
         } => (*file, project.clone(), account.clone()),
         _ => unreachable!("called for init only"),
     };
+    // --from without --apply: the plan only, before any 1Password call or file (#90).
+    if let Cmd::Init {
+        from: Some(_),
+        apply: false,
+        ..
+    } = &cli.cmd
+    {
+        let args = init_args(cli.cmd, init_options, r, &dir)?;
+        let from = args.from.as_ref().expect("matched --from");
+        let imported = init::read_from(from)?;
+        let again = init_from_again(&args, init_options, file, project.as_deref());
+        return init::plan_from(&args, &imported, &again, out, json);
+    }
     // FR-40, NR-7: every op call of init goes to one chosen account, never op's default
     // when several accounts are on this machine; a choice given here is recorded in .opv.
     let given = account
@@ -1889,6 +2455,46 @@ fn run_init(
     }
 }
 
+/// The `opv init … --from <file> --apply` that carries out a `--from` plan (#90).
+fn init_from_again(
+    args: &init::InitArgs,
+    init_options: &std::collections::BTreeMap<String, String>,
+    file: bool,
+    project: Option<&str>,
+) -> String {
+    let from = args.from.as_ref().expect("called with --from");
+    let mut c = format!(
+        "opv init {} --vault {} --item {}",
+        shell_word(&args.env),
+        shell_word(&args.vault),
+        shell_word(&args.item)
+    );
+    if let Some(t) = &args.target {
+        c.push_str(&format!(" --target {}", shell_word(t)));
+    }
+    for (flag, value) in init_options {
+        c.push_str(&format!(" --{flag} {}", shell_word(value)));
+    }
+    if file {
+        c.push_str(" --file");
+    }
+    if let Some(p) = project {
+        c.push_str(&format!(" --project {}", shell_word(p)));
+    }
+    c.push_str(&format!(
+        " --from {}",
+        shell_word(&from.path.display().to_string())
+    ));
+    for k in &from.config {
+        c.push_str(&format!(" --config-key {k}"));
+    }
+    for k in &from.secret {
+        c.push_str(&format!(" --secret-key {k}"));
+    }
+    c.push_str(" --apply");
+    c
+}
+
 /// `add` and `init --add-env`: edit the configuration where it was found (a file or a
 /// manifest) in place, through its [`config_store::ConfigStore`].
 fn run_edit(
@@ -1907,6 +2513,9 @@ fn run_edit(
             rule,
             guidance,
             immutable,
+            from,
+            personal,
+            allow_same_value,
             json,
         } => add::run(
             &add::AddArgs {
@@ -1916,6 +2525,9 @@ fn run_edit(
                 rules: rule,
                 guidance,
                 immutable,
+                from,
+                personal,
+                allow_same_value,
                 json,
             },
             store,
@@ -1954,6 +2566,10 @@ fn init_args(
         project,
         json: _,
         account: _,
+        from,
+        config_key,
+        secret_key,
+        apply,
     } = cmd
     else {
         unreachable!("called for init only")
@@ -1977,6 +2593,12 @@ fn init_args(
         fields: init_options.clone(),
         profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
+        from: from.map(|path| init::FromFile {
+            path,
+            config: config_key,
+            secret: secret_key,
+            apply,
+        }),
     })
 }
 
@@ -1985,11 +2607,11 @@ fn init_args(
 /// a terminal to do it (no TTY, CI, a service account or Connect) or the sign-in failed,
 /// so the original error stands. The password goes only to op; the session stays in this
 /// process ([`opv::runner::use_op_session`]).
-fn sign_in_here() -> bool {
+fn sign_in_here() -> Result<bool, Error> {
     use opv::app::setup::Backend as _;
     use opv::app::setup_runtime::{Console, Runtime};
     if Console::require_terminal("", "").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
-        return false;
+        return Ok(false);
     }
     let here = std::env::current_dir().unwrap_or_default();
     let account = config_store::pointer_account(&here).or_else(config_store::account_env);
@@ -1997,12 +2619,11 @@ fn sign_in_here() -> bool {
         "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
          to go on; your password goes only to 1Password's prompt."
     );
-    let mut runtime = Runtime::with_account(account.as_deref());
-    if runtime.sign_in(account.as_deref(), false).is_err() {
-        return false;
-    }
+    let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
+    let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);
+    runtime.sign_in(account.as_deref(), false)?;
     opv::runner::use_op_session(runtime.into_session());
-    true
+    Ok(true)
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.
@@ -2057,6 +2678,22 @@ mod tests {
             closed: false,
         };
         assert!(writeln!(w, "a").is_err());
+    }
+
+    #[test]
+    fn load_notes_are_written_one_line_each() {
+        let fleet = opv::config::parse(
+            "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
+             item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
+             environments = [\"prod\"]\nrules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        write_notes(&fleet, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "K1: pattern is deprecated; use regex = 'p\\-(?:[a-z]+)' instead of pattern\n"
+        );
     }
 
     /// Usage reads `opv` whatever argv[0] is (Windows passes `opv.exe`).
@@ -2458,6 +3095,8 @@ mod tests {
             &["opv", "status", "--all", "--json"],
             &["opv", "add", "api/KEY", "--kind", "secret", "--json"],
             &["opv", "config", "export", "--json"],
+            &["opv", "skill", "install", "--json"],
+            &["opv", "skill", "status", "--json"],
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
             if cli.cmd.json_mode().is_none() {

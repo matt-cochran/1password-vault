@@ -27,7 +27,18 @@ gh release download "$tag" --repo "$repo" --dir "$work/dist" --pattern 'opv-*' -
 (cd "$work/dist" && sha256sum -c SHA256SUMS --ignore-missing --quiet)
 echo "Checksums verified."
 
+# Build from the tag's own packaging, never from whatever this checkout holds (0.5.0 was
+# published from a stale template without its postinstall).
+if [ "$(git -C "$root" describe --tags --exact-match 2>/dev/null)" != "$tag" ]; then
+  echo "check out $tag first (git checkout $tag): the packages are built from this checkout" >&2
+  exit 4
+fi
 node "$root/scripts/npm/build.mjs" --version "$version" --assets "$work/dist" --out "$work/npm-dist"
+# What npm would publish for the main package must include its install script.
+packed="$(cd "$work/npm-dist/opv" && npm pack --dry-run --json 2>/dev/null)"
+for file in install.js uninstall.js bin/opv.js; do
+  grep -q "\"path\": *\"$file\"" <<<"$packed" || { echo "the main package would ship without $file" >&2; exit 5; }
+done
 
 if ! npm whoami >/dev/null 2>&1; then
   echo "Signing in to npm (enter your password and 2FA only at npm's prompts)..."

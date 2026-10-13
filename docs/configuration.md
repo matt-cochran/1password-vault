@@ -81,6 +81,7 @@ kind = "secret"
 environments = ["staging", "prod"]
 immutable = true                     # written only when absent on the target; see --rotate
 rules = { base64_bytes = 32 }
+allow_same_value = true              # the same value in staging and prod is intended (see settings health)
 
 [products.allumata.keys.STRIPE_SECRET_KEY]
 kind = "secret"
@@ -196,6 +197,8 @@ You don't need to lay out 1Password by hand. opv finds each declared key whereve
 tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"
 ```
 
+A sync you run yourself also keeps a small ledger in the section `opv · state`: one text field per target name it wrote (the target's version of it and a fingerprint of the value, keyed with a random key stored concealed in the same section, so it reveals nothing to anyone who cannot already read the item), which lets `plan` tell exactly whether a Fly or GitHub secret matches 1Password. Leave the section alone; deleting it only makes those names `unknown` until the next sync.
+
 Under a service account, Connect or in CI, opv never writes to 1Password: it reads the item as it is and prints one note that your next local run will tidy it. A value it can fix unambiguously from the key's rules (a trailing newline, a missing `ensure_prefix`) is used in its fixed form, and the tidy writes it back, keeping the original in `opv · kept`. Filling in a missing value is always up to you; opv names the keys that still need one. Design: [self-healing conventions](design/self-healing-conventions.md).
 
 ```text
@@ -205,13 +208,14 @@ vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY 
 
 ## Targets
 
-Each environment names at most one target: `fly`, `azure` or `kubernetes`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).
+Each environment names at most one target: `fly`, `azure`, `kubernetes` or `github`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).
 
 How the values travel depends on the field kind:
 
 - A **secret** (concealed field) is stored in the target's secret store and bound to the app as a reference to one exact version.
 - **Config** (text field) is set as a plain environment variable on the app. Set `config = "store"` to keep config in the store too. There is no way to put a secret in a plain variable.
 - On Fly, config is not synced; deployment tooling reads it with `opv config export <env> --json`.
+- On GitHub Actions, secrets become Actions **secrets** and config becomes Actions **variables**.
 
 ### Fly
 
@@ -273,6 +277,39 @@ config     = "env"                       # or "store"
 
 opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`; that part is also the `opv-key` label value, so it must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with at most 63 characters, and collisions are an error. A longer name is refused when the configuration loads (`renders Kubernetes name of N characters, which must match …`). A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused the same way, naming the key and its line.
 
+### GitHub Actions: repository and environment secrets
+
+Keep CI secrets in 1Password and let `opv sync ci` set them, instead of running `gh secret set` by hand.
+
+```toml
+[environments.ci]
+vault_id = "vci1234example"
+item_id  = "ici1234example"
+
+[environments.ci.github]
+repo        = "my-org/my-app"       # or repos = ["my-org/api", "my-org/web"]: the same values in each
+environment = "staging"             # optional: that GitHub environment's secrets and variables
+products    = ["api"]               # optional (fleet): only these products' keys go here
+secret_name = "{KEY}"               # optional; default {KEY}, so workflows read secrets.FLY_API_TOKEN
+```
+
+| Field | Meaning |
+|---|---|
+| `repo` / `repos` | Exactly one of them. `owner/name`; each listed repository gets every value. |
+| `environment` | A GitHub environment that must already exist in every listed repository. opv never creates one, because its protection rules and reviewers are your decision; `sync` stops before any write and prints the `gh api -X PUT repos/<repo>/environments/<name>` command. |
+| `products` | Fleet profile. Keys of other products are not delivered here (they are still read, and keys here may point at them with `from`). `plan` lists declared keys it does not deliver. |
+| `secret_name` | Name template with `{KEY}` and optionally `{PRODUCT}`. Names must match `^[A-Z][A-Z0-9_]*$` and may not start with `GITHUB_`. |
+
+What happens on each command:
+
+- **Secrets** (concealed fields) are set with `gh secret set NAME`, the value on stdin. GitHub never shows a secret's value again, so `status` shows an existing one as `unknown` and every `sync` writes it again; an `immutable` key that is already there is held.
+- **Config** (text fields) is set with `gh variable set NAME`, the value on stdin. Variables can be read back, so `status` and `plan` show `new`, `same` or `changed`, and `sync` writes only what differs. A config key kept in a concealed field is refused here (`concealed-config`): a variable is readable by everyone who can read the repository.
+- Writes are live at once: there is nothing to deploy, and `sync --deploy` says so.
+- `--prune` deletes only names opv manages (secrets and variables alike); other secrets in the repository are listed as unmanaged and never touched.
+- Limits, shown by `status` and `plan` before any write: a secret over 47 952 bytes, an empty variable, or a variable over 48 000 bytes.
+
+Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, put a fine-grained token in a `deploy_credentials` item with one concealed field `GH_TOKEN`, scoped to the listed repositories with **Secrets: write** and **Variables: write** (and **Environments: read** when you use `environment`). Never use an owner or classic token. A ready-made setup is in [examples/github-ci](../examples/github-ci/).
+
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
 A runtime can keep its secrets in a store from another provider. Declare the store once and point the runtime at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).
@@ -330,6 +367,92 @@ rules = { prefix = "postgres://" }   # optional: checked as well as api's own ru
 
 Under the simple profile, `from` names a bare key: `from = "DATABASE_URL"`.
 
+### One home for shared values: `source_only` products
+
+When one value feeds many products (one Fly org token, one Cloudflare account ID for every repository's CI), give it a neutral home instead of making one product its owner. Mark a product `source_only` and point the others at its keys:
+
+```toml
+[products.shared]
+source_only = true                         # holds values; never delivered anywhere itself
+
+[products.shared.keys.FLY_API_TOKEN]
+kind = "secret"
+environments = ["ci"]
+guidance = "Fly org deploy token"
+
+[products.api.keys.FLY_API_TOKEN]
+kind = "secret"
+from = "shared/FLY_API_TOKEN"              # no field of its own: reads section "shared"
+environments = ["ci"]
+
+[products.web.keys.FLY_API_TOKEN]
+kind = "secret"
+from = "shared/FLY_API_TOKEN"
+environments = ["ci"]
+```
+
+- The value lives once, in section `shared` of each environment's item. Change it there and every key pointing at it changes in the next sync; `--rotate shared/FLY_API_TOKEN` rotates them all.
+- A source-only product's keys get fields, rules, `immutable` and the missing-value lines like any key, but they are never written to a target, never pruned, and their names never collide with a delivered key's.
+- `check`, `status` and `plan` warn about a source-only key that nothing points at. `opv run --product shared` is refused: run the product that uses the value.
+- Values never cross environments: `ci` reads the `shared` section of the `ci` item only.
+- The name `shared` is a convention; any product name works. `source_only` is not available under the simple profile, where there is one product.
+
+## Settings health: likely-wrong values
+
+A value can be present and pass its rules and still be wrong. `opv ready` (and `opv ui`, and `opv doctor --settings`) compares the values it reads, in memory and never shown, and warns about:
+
+| code | when |
+|---|---|
+| `same_value_across_environments` | a secret has the identical value in two or more environments (production's key copied into development, or the other way round) |
+| `same_value_under_two_keys` | two secrets in one environment hold the identical value without `from` |
+| `placeholder_value` | a secret is `changeme`, `xxx`, `<your key>`, `your_api_key_here` and the like |
+| `whitespace_around_value` | a one-line value starts or ends with a space, tab or newline |
+| `local_address_in_deployed_environment` | a value in an environment with a target points at `localhost`, `127.0.0.1`, `0.0.0.0` or `host.docker.internal` |
+| `test_key_in_production` / `live_key_outside_production` | a `sk_test_`/`pk_test_`/`rk_test_` key where the environment's name or title says production, or a `sk_live_`/`rk_live_` key elsewhere |
+
+- Each is a warning, never blocking: it names the environments and keys and ends with `opv open <key> --env <env>`.
+- Config values may be the same everywhere; only secrets are compared across environments. Personal keys and empty values are never looked at.
+- When one secret really is meant for several environments, say so on the key with `allow_same_value = true`. One value for several keys inside an environment is a [shared value](#shared-keys-from) (`from`), which has one field and is never a duplicate.
+
+## Personal keys: each developer's own values
+
+Some local values should be each person's own: an LLM API key, so every developer's spend is on their own key; a personal access token. Mark the key `personal = true`:
+
+```toml
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["dev"]
+personal = true
+guidance = "create your own key (billed to you)"
+```
+
+- The value lives in each person's own item: in their own Private (or Employee, or Personal) vault, titled `<project> · <env> (personal)`. Set `personal_vault` and `personal_item` on the environment to use other titles. `opv bootstrap` creates your item with an empty field for each personal key; `opv ready` and `opv check` name the ones you still need to fill as yours.
+- `opv run` reads team keys from the team item and your personal keys from your own item, never the other way round: a personal key never falls back to a team value, and nobody else's item is ever read.
+- One personal value for several products: put it in a source-only product (`[products.shared] source_only = true`, the key `personal = true`) and point each product's personal key at it with `from = "shared/OPENAI_API_KEY"`. A personal key may only point at a personal value, and a team key never at one.
+- Personal keys are for local environments only: declaring one for an environment with a target is a configuration error, and `sync` never reads a personal item. Deployed environments use the service's own value.
+
+Example: [examples/team-personal](../examples/team-personal/).
+
+### Delivery receipts: `state_vault_id`
+
+```toml
+[environments.prod]
+state_vault_id = "vstate1234example"   # where delivery receipts are kept (opv bootstrap --state prod creates it)
+```
+
+A separate vault, so the deploy identity can write delivery evidence without write access to the values. Give it only to identities that can also read the values vault. See [delivery receipts](usage.md#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
+
+### Environment display name, order and audience
+
+```toml
+[environments.prod-us]
+title = "Production (US)"     # shown in opv ui, opv ready and status; defaults to the key
+order = 30                    # grid and column order; defaults to the keys' order
+audience = "devops"           # who it is for
+```
+
+The key (`prod-us`) stays the name in every command. Who can open an environment is 1Password's decision (share its vault with a group); `audience` only tells opv what to say to everyone else: someone who cannot open `prod-us` sees "not available to you (audience: devops)" in `opv ready`, as a note, not a problem to fix. `opv bootstrap` tags each item it creates `opv-env:<project>/<env>`.
+
 ## Writing the configuration with commands
 
 `init` and `add` write the configuration for you, where it lives (manifest or file), keeping comments and order, validating the result like a hand-written one and refusing a concurrent change. `opv config edit` covers everything else.
@@ -379,6 +502,22 @@ Next: opv plan prod
 
 Without a target the last line is `Next: opv check <env>`.
 
+### Start from an existing `.env`: `opv init --from`
+
+A project that already runs from a `.env` file gets into opv in one step, without a script:
+
+```sh
+chmod 600 .env
+opv init dev --from .env                 # every key and its kind; nothing written anywhere
+opv init dev --from .env --apply         # create the vault and item, declare, import
+```
+
+- Every `KEY=value` line becomes a declared key for `dev` (the simple profile), next to any field the item already has. A field the item already has keeps its kind and its value: a differing value in the file is reported, never written (`opv adopt dev --from .env --replace KEY --apply` takes it).
+- The kind comes from the name only, never the value, and is secret when unsure: config for names like `*_ENABLED`, `*_MODEL`, `PORT`, `*_ORIGIN`, `*_CLIENT_ID`, `*_REDIRECT_URI`; secret for everything else, including `*_URL` (a database or webhook URL carries credentials) and any name with `SECRET`, `TOKEN`, `PASSWORD`, `PRIVATE` or `CREDENTIAL`. Change one with `--config-key KEY` or `--secret-key KEY` (repeatable); the plan shows every kind before anything is written.
+- `--apply` imports the values the way `opv adopt --apply` does: one item edit, read back and checked. An empty value is declared but not imported, so `opv ready` lists it as missing. Values go to 1Password on stdin only, never in arguments, files or output.
+- The file must be a private regular file (`chmod 600`) under 1 MiB; it is read as literal assignments, never executed, and left as it is. Delete it yourself once `opv run dev -- …` works.
+- One product's keys: an item already in the fleet shape (sections per product) is refused; declare there with `opv add`, then `opv adopt`. `--from` does not combine with `--add-env` or `--profile`.
+
 ### Add an environment: `opv init --add-env`
 
 ```sh
@@ -394,11 +533,13 @@ opv add api/STRIPE_KEY --kind secret --env dev,prod --rule prefix=sk_ --guidance
 opv add LOG_LEVEL --kind config --rule enum=debug,info,warn      # simple profile: no product
 opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable
 opv add api/STRIPE_KEY --env staging                             # a declared key, one more environment
+opv add web/DATABASE_URL --kind secret --from api/DATABASE_URL   # read another key's value
+opv add shared/OPENAI_API_KEY --kind secret --env dev --personal # each developer's own value
 ```
 
 - The name is `PRODUCT/KEY` under the fleet profile and `KEY` under the simple one; `--kind secret|config` is required for a new key. `--env` (repeat it or separate with commas) defaults to every declared environment.
-- `--rule NAME=VALUE` is repeatable and uses the [rules reference](#rules-reference) names. The value is read as a TOML value when the rule takes one (`base64_bytes=32`, `enum=["a","b"]`), else as text (`prefix=sk_`), else as a comma-separated list (`enum=debug,info`). A flag rule is given by name alone (`--rule https_url`). `--guidance` and `--immutable` set those fields.
-- On a key that is already declared, `opv add` only adds the environments it lacks; a different `--kind`, or any rule, guidance or `--immutable`, is refused (change those by hand). When nothing is missing it says so and changes nothing (exit 0).
+- `--rule NAME=VALUE` is repeatable and uses the [rules reference](#rules-reference) names. The value is read as a TOML value when the rule takes one (`base64_bytes=32`, `enum=["a","b"]`), else as text (`prefix=sk_`), else as a comma-separated list (`enum=debug,info`). A flag rule is given by name alone (`--rule https_url`). `--guidance` and `--immutable` set those fields; `--from PRODUCT/KEY` makes a [shared key](#shared-keys-from), `--personal` a [personal key](#personal-keys-each-developers-own-values), and `--allow-same-value` marks a repeat across environments as intended ([settings health](#settings-health-likely-wrong-values)). In `opv ui`, `+` fills in the same through a form.
+- On a key that is already declared, `opv add` only adds the environments it lacks; a different `--kind`, or any rule, guidance, `--immutable`, `--from`, `--personal` or `--allow-same-value`, is refused (change those by hand, or with `opv config edit`). When nothing is missing it says so and changes nothing (exit 0).
 - The configuration is edited where it lives, a `secrets.toml` or the project's [manifest in 1Password](#configuration-in-1password): its comments, blank lines and order are kept, and the new key goes after its product's last key. The edited text is validated like a hand-written one before anything is written, so a name that would collide on any environment's target, an unknown rule, a bad rule value or an unknown environment is refused (exit 2) and nothing changes. The write is atomic (a file: a temporary file in the same directory, then a rename; a manifest: one item edit) and refused when someone changed the configuration since opv read it (run the command again).
 - It reads no item and makes no target call (on a manifest it reads and edits only the manifest). It ends with `Next: opv item skeleton <env>`, which adds the empty field to that environment's item; type the value in 1Password, then run `opv check <env>`.
 
@@ -412,9 +553,9 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 |---|---|
 | `prefix = "sk-"` | value starts with the prefix |
 | `not_prefix = "sk-or-"` or a list | value starts with none of them |
-| `regex = "..."` | the whole value matches (full match) |
+| `regex = "..."` | the whole value **as staged** matches (full match): after `ensure_prefix` normalisation when the key has one, otherwise the stored value |
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
-| `pattern = "..."` | only with `ensure_prefix`: the text after the prefix fully matches (full match) |
+| `pattern = "..."` | deprecated alias for `regex`: only with `ensure_prefix`, the text after the prefix fully matches (full match). Loading a key that uses it prints one note naming the equivalent `regex = "<regex-escaped prefix>(?:<pattern>)"`; set both and the configuration is refused |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
 | `hex_bytes = N` | valid hex that decodes to N bytes |

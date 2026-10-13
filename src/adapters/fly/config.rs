@@ -81,6 +81,12 @@ impl Provider for FlyProvider {
         "Fly"
     }
 
+    /// `fly secrets list` reports a digest of each value (D0 spike: 16 hex characters,
+    /// equal for equal values).
+    fn versions_reveal_values(&self) -> bool {
+        true
+    }
+
     fn tools(&self) -> &'static [&'static crate::host::Tool] {
         &[&FLYCTL]
     }
@@ -189,6 +195,10 @@ fn check_app(env: &str, app: &str) -> Result<(), Error> {
 }
 
 impl TargetConfig for FlyTarget {
+    fn target_locator(&self) -> String {
+        format!("app {}", self.app)
+    }
+
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
     }

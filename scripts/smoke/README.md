@@ -1,6 +1,6 @@
 # Live smoke kit for opv 0.5.0
 
-One command runs the real CLI against the disposable sandbox and proves the Azure (Key Vault + Container Apps), Kubernetes (Secrets + Deployment) and Key Vault → Kubernetes (External Secrets) paths end to end. It is run by hand before a release, not in CI.
+One command runs the real CLI against the disposable sandbox and proves the Azure (Key Vault + Container Apps), Kubernetes (Secrets + Deployment), Key Vault → Kubernetes (External Secrets) and GitHub Actions (repository and environment secrets and variables) paths end to end. It is run by hand before a release, not in CI.
 
 ## Run
 
@@ -8,15 +8,16 @@ One command runs the real CLI against the disposable sandbox and proves the Azur
 scripts/smoke/run.sh --account you@example.com   # signs in at 1Password's prompt if needed
 ```
 
-`OPV_SMOKE_TARGETS="kubernetes"` runs one environment; `OPV_BIN=/path/to/opv` tests a build that is not on `PATH`. `--vault <vault ID>` uses an existing vault when the account cannot create one.
+`OPV_SMOKE_TARGETS="kubernetes"` runs one environment; `OPV_BIN=/path/to/opv` tests a build that is not on `PATH`. `--vault <vault ID>` uses an existing vault when the account cannot create one. `OPV_SMOKE_TARGETS="github"` adds the GitHub Actions target (`OPV_SMOKE_GH_REPO` required, `OPV_SMOKE_GH_ENVIRONMENT` defaults to `staging`); it also runs the environment-scoped `githubenv`.
 
 ## What it does
 
 1. Finds the sandbox: the subscription from `az account show`, the one Key Vault in `opv-spike-rg`, and the defaults below.
 2. Creates a vault `opv-smoke-<random>` and an item holding random markers (`OPVSMOKE-…`) in section `smoke`: concealed `DB_URL` and `API_TOKEN`, text `LOG_LEVEL`. The item JSON goes to `op` on stdin, never as an argument or a file.
 3. Per environment (`azure`, `kubernetes`, `eso`): `doctor --env`, `check`, `plan`, `sync`, `sync --deploy`, `status`, then checks the running app sees `API_TOKEN` at its marker's length: on Kubernetes through `kubectl exec`, on Container Apps by following the live revision's variable to the Key Vault secret version it is pinned to.
-4. Rotates `API_TOKEN` to a marker of a different length, then per environment: `plan`, `sync --deploy` (repin), `status`, the length check again, and `sync --deploy --prune` with `LOG_LEVEL` still declared but set to `environments = []`, checking the app no longer has it. (`--prune` removes only declared keys: a key deleted from the config is never pruned.)
-5. Checks the receipt holds no marker, and on every exit, pass or fail, deletes the test item and vault.
+4. With `github`: the same steps against the private `opv-spike*` repository, plus `githubenv` against `OPV_SMOKE_GH_ENVIRONMENT` (which must already exist). Verification reads names and config only: `gh secret list` must show `SMOKE_API_TOKEN` and `SMOKE_DB_URL`, and `gh variable get SMOKE_LOG_LEVEL` must equal the item's `LOG_LEVEL` marker. A pre-existing unmanaged secret `OPV_SMOKE_UNMANAGED` is set first and must survive `--prune`.
+5. Rotates `API_TOKEN` to a marker of a different length, then per environment: `plan`, `sync --deploy` (repin), `status`, the length check again, and `sync --deploy --prune` with `LOG_LEVEL` still declared but set to `environments = []`, checking the app no longer has it. (`--prune` removes only declared keys: a key deleted from the config is never pruned.) For `github`/`githubenv` the rotate step checks `SMOKE_API_TOKEN`'s `updatedAt` changed, the prune step checks `SMOKE_LOG_LEVEL` is gone and `OPV_SMOKE_UNMANAGED` remains.
+6. Checks the receipt holds no marker, and on every exit, pass or fail, deletes the test item and vault and the `SMOKE_*` and `OPV_SMOKE_UNMANAGED` GitHub values.
 
 It stops on the first failure. Read the receipt before re-running a prune by hand.
 
@@ -29,13 +30,16 @@ It stops on the first failure. Read the receipt before re-running a prune by han
 | Subscription / Key Vault | discovered | `OPV_SMOKE_AZ_SUBSCRIPTION`, `OPV_SMOKE_AZ_KEY_VAULT` |
 | kind context / namespace / Deployment | `kind-opv` / `opv-spike` / `api` | `OPV_SMOKE_K8S_CONTEXT`, `_NAMESPACE`, `_DEPLOYMENT` |
 | ClusterSecretStore | `prod-vault` (External Secrets, backed by the Key Vault) | `OPV_SMOKE_ESO_STORE` |
+| GitHub repository | none; required for `github`, `owner/opv-spike*` | `OPV_SMOKE_GH_REPO` |
+| GitHub environment | `staging`; must already exist, never created | `OPV_SMOKE_GH_ENVIRONMENT` |
 
-Tools: `opv` 0.5.0, `op`, `az` logged in to the sandbox subscription, and `kubectl`.
+Tools: `opv` 0.5.0, `op`, `az` logged in to the sandbox subscription, `kubectl`, and `gh` signed in (needed only for `github`).
 
 ## Safety
 
-- The script refuses a non-`kind-*` context and a resource group or app not named `opv-spike*`.
-- Markers only, generated per run. Nothing prints a value: opv prints names and versions, and the app checks print lengths.
+- The script refuses a non-`kind-*` context, a resource group or app not named `opv-spike*`, and a GitHub repository whose name part does not start with `opv-spike`.
+- It never creates a GitHub environment: a missing one fails that step and prints the owner's `gh api -X PUT repos/<repo>/environments/<name>` command.
+- Markers only, generated per run. Nothing prints a value: opv prints names and versions, and the app checks print lengths. Every value sent to `gh` goes on stdin, never in argv.
 - No Fly writes.
 
 ## Reading the receipt

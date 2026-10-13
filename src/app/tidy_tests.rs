@@ -838,6 +838,7 @@ fn init_creates_a_missing_item_for_a_person() {
         fields: Default::default(),
         profile: Some(crate::domain::Profile::Simple),
         force: false,
+        from: None,
     };
     let _on = activate();
     let mut out = Vec::new();
@@ -857,6 +858,7 @@ fn init_never_creates_an_item_for_a_service_account() {
         fields: Default::default(),
         profile: Some(crate::domain::Profile::Simple),
         force: false,
+        from: None,
     };
     let _on = activate();
     let mut out = Vec::new();

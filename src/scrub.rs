@@ -459,6 +459,24 @@ fn cut(line: &str) -> String {
     }
 }
 
+/// `line` without a CLI's own directions to the person (FR-50): opv's `Do:` and `Next:` say
+/// what to do, so `Please run 'op signin --help' for instructions` and the like are cut,
+/// keeping the reason before them.
+fn without_vendor_directions(line: &str) -> String {
+    const DIRECTIONS: [&str; 4] = [
+        "Please run `op signin --help`",
+        "Please run 'op signin --help'",
+        "Try authenticating with:",
+        "To sign in, run",
+    ];
+    let cut_at = DIRECTIONS
+        .iter()
+        .filter_map(|d| line.find(d))
+        .min()
+        .unwrap_or(line.len());
+    line[..cut_at].trim_end_matches([' ', '.']).to_string()
+}
+
 /// The scrubbed stderr lines of a failed call, shown under opv's error line (NR-31).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Excerpt {
@@ -471,7 +489,11 @@ pub struct Excerpt {
 impl Excerpt {
     /// `None` when the child wrote nothing worth showing.
     pub fn from_stderr(program: &str, stderr: &[u8], truncated: bool) -> Option<Self> {
-        let lines = tail_lines(stderr, truncated, FAILURE_LINES);
+        let lines: Vec<String> = tail_lines(stderr, truncated, FAILURE_LINES)
+            .into_iter()
+            .map(|l| without_vendor_directions(&l))
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         (!lines.is_empty()).then(|| Self {
             program: program.to_string(),
             lines,
@@ -492,6 +514,39 @@ mod tests {
     use super::*;
 
     const MARK: &str = "Zq9-MARKER/value+1é";
+
+    #[test]
+    fn ops_sign_in_direction_is_cut_from_an_excerpt() {
+        let e = Excerpt::from_stderr(
+            "op",
+            b"[ERROR] 2026/10/13 03:21:25 You are not currently signed in. Please run `op signin --help` for instructions\n",
+            false,
+        )
+        .unwrap();
+        assert!(!e.render().contains("--help"), "{}", e.render());
+    }
+
+    #[test]
+    fn the_reason_before_a_direction_is_kept() {
+        assert_eq!(
+            without_vendor_directions(
+                "You are not currently signed in. Please run `op signin --help` for instructions"
+            ),
+            "You are not currently signed in"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_only_a_direction_is_dropped() {
+        assert_eq!(
+            Excerpt::from_stderr(
+                "gh",
+                b"Try authenticating with:  gh auth login -h github.com\n",
+                false
+            ),
+            None
+        );
+    }
 
     fn reg() -> Registry {
         let mut r = Registry::new();

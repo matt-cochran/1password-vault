@@ -72,6 +72,69 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "adopt",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: true,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "ui",
+        effect: "interactive",
+        needs_terminal: true,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "history",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "delivery verify",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "access",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "ready",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "bootstrap",
+        effect: "writes_1password",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "account list",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "account use",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
         command: "run",
         effect: "runs_command",
         needs_terminal: false,
@@ -183,17 +246,35 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    Effect {
+        command: "skill install",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "skill status",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
 ];
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 6] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 10] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
     ("sync", "rotate", "replaces_immutable"),
     ("sync", "prune-immutable", "deletes_immutable"),
     ("sync", "confirm", "confirms_guarded_environment"),
     ("init", "force", "overwrites_file"),
+    ("init", "apply", "writes_1password"),
+    ("adopt", "apply", "writes_1password"),
+    ("adopt", "replace", "replaces_value"),
+    ("adopt", "rotate", "replaces_immutable"),
 ];
 
 /// Commands whose only output is JSON, with or without `--json`.
@@ -255,6 +336,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "documents": documents(),
         "deprecated": [
             {"field": "fly_name", "in": ["status", "plan", "check"], "use": "target_name"},
+            {"field": "pattern", "in": ["rules"], "use": "regex"},
         ],
     })
 }
@@ -405,7 +487,7 @@ fn documents() -> Value {
         "error": ["code", "category", "message", "detail", "retry", "human_required", "do", "next"],
         "tidy": ["action", "name"],
         "status": [
-            "environment", "product", "changes", "rows", "extras", "tidy?", "tidy_error?", "stage",
+            "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
             "held", "prune", "totals",
             "provenance? ({opv_version, written, plan_id}: the latest stamp on a pinned target)"
         ],
@@ -415,7 +497,7 @@ fn documents() -> Value {
             "totals"
         ],
         "plan": [
-            "environment", "product", "changes", "rows", "extras", "tidy?", "tidy_error?", "stage",
+            "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
             "held", "prune", "totals", "plan_id? (a clean plan only)"
         ],
         "check": [
@@ -452,8 +534,15 @@ fn documents() -> Value {
         ],
         "item skeleton": ["environment", "added: [{product, key, kind}]"],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
+        "adopt": "{environment, applied, rows [{found, product, key, action (match|format_only|import|replace|differs|held_immutable|fails_rule|conflict|ambiguous|not_declared|not_applicable), rule}], writes, decisions_needed, next}: names, actions and findings only, never a value",
+        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only",
+        "bootstrap": "{environments [{environment, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}]}",
+        "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
+        "account use": "{account_id, path}: the .opv file written",
         "config export": "with <ENV>: the config-kind values, {KEY: value} (simple profile) or {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
         "schema": "this document",
+        "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
+        "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
     })
 }
 

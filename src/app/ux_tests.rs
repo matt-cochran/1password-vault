@@ -788,6 +788,7 @@ fn fly_plan_id(fleet: &Fleet) -> String {
 fn expect(id: &str) -> SyncOpts {
     SyncOpts {
         expect_plan: Some(id.into()),
+        receipt: None,
         ..SyncOpts::default()
     }
 }

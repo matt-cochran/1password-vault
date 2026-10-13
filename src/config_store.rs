@@ -564,7 +564,7 @@ fn write_no_follow(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// The nearest file named `name` in `start` or a parent.
-fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
+pub fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
     start
         .ancestors()
         .map(|d| d.join(name))

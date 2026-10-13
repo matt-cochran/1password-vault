@@ -95,6 +95,14 @@ pub struct KeySpec {
     /// no field of its own. Validated at load: see [`KeySpec::source`].
     #[serde(default)]
     pub from: Option<String>,
+    /// Personal key (FR-55): each person keeps their own value in their own item (a
+    /// developer's own LLM API key); only in environments without a target.
+    #[serde(default)]
+    pub personal: bool,
+    /// The same value in several environments is intended (#92): silences the
+    /// `same_value_across_environments` health finding for this key.
+    #[serde(default)]
+    pub allow_same_value: bool,
 }
 
 impl KeySpec {
@@ -110,6 +118,13 @@ impl KeySpec {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Product {
+    /// Canonical values only (FR-47): its keys render no target name anywhere, are never
+    /// written, managed or pruned, and `run --product <name>` refuses it. Default `false`.
+    #[serde(default)]
+    pub source_only: bool,
+    /// Declared keys. Defaulted so a source-only product without keys reaches validation's
+    /// own error (FR-47) instead of a bare serde `missing field` message.
+    #[serde(default)]
     pub keys: BTreeMap<String, KeySpec>,
 }
 
@@ -133,6 +148,30 @@ pub struct Environment {
     /// The item holding this environment's least-privilege deploy identity (FR-40), read
     /// by `status`, `plan` and `sync` to sign the target CLI in for the run only.
     pub deploy_credentials: Option<ItemRef>,
+    /// Display name for people (`opv ui`, `ready`); the key stays `name` (FR-55).
+    pub title: Option<String>,
+    /// Who the environment is for (free text, e.g. `devops`): a person who cannot open it is
+    /// told so, not shown an error (FR-55).
+    pub audience: Option<String>,
+    /// Display order in grids; `None`: configuration order (FR-55).
+    pub order: Option<i64>,
+    /// Title of the vault holding each person's personal item (FR-55); `None`: the person's
+    /// own Private (Employee) vault.
+    pub personal_vault: Option<String>,
+    /// Title of each person's personal item (FR-55); `None`: the shared item's title plus
+    /// ` (personal)`.
+    pub personal_item: Option<String>,
+    /// The vault holding this environment's delivery evidence (#106): one item per product,
+    /// written by the deploy identity after a confirmed sync. The values vault stays
+    /// read-only to CI; only identities that can read the values should read this vault.
+    pub state_vault_id: Option<String>,
+}
+
+impl Environment {
+    /// The display name: [`Environment::title`], else the key.
+    pub fn display(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// An `op://<vault>/<item>` reference to a whole item, by IDs or names (FR-40).
@@ -265,6 +304,31 @@ impl Fleet {
         self.profile == Profile::Simple
     }
 
+    /// Load-time deprecation notes, one per affected key (FR-24, 0.6.0): a key that still
+    /// uses `pattern` names the equivalent `regex` rule, built only from configuration
+    /// (the prefix and the pattern), never a value. The CLI prints each on stderr once per
+    /// load. Empty when no key uses a deprecated rule.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        for (product, p) in &self.products {
+            for (key, spec) in &p.keys {
+                let Some(pattern) = &spec.rules.pattern else {
+                    continue;
+                };
+                let prefix = spec.rules.ensure_prefix.as_deref().unwrap_or_default();
+                let regex = format!("{}(?:{pattern})", regex::escape(prefix));
+                // A TOML string the user can paste as is (a regex escape such as `\-` is
+                // not a valid escape in a basic string, so this is usually a literal one).
+                let toml_value = toml::Value::String(regex);
+                notes.push(format!(
+                    "{}: pattern is deprecated; use regex = {toml_value} instead of pattern",
+                    key_label(product, key)
+                ));
+            }
+        }
+        notes
+    }
+
     /// Look up an environment by a (possibly user-supplied) name.
     ///
     /// An unknown name suggests the closest defined one, and the `Next:` step is a read-only
@@ -331,6 +395,34 @@ impl Fleet {
             Some(t) => t.env_name(product, key),
             None => panic!("target_name: environment {env:?} undefined or without a target"),
         }
+    }
+
+    /// Whether `env_name` delivers keys of `product` (FR-47, FR-48): true only when the
+    /// environment has a target, the product is not source-only, and the target serves the
+    /// product. An undelivered product's keys render no target name here: never written,
+    /// never in the managed set, never pruned and exempt from the name collision check.
+    pub fn delivers(&self, env_name: &str, product: &str) -> bool {
+        let Some(env) = self.environments.get(env_name) else {
+            return false;
+        };
+        let Some(t) = env.target() else {
+            return false;
+        };
+        if self.products.get(product).is_some_and(|p| p.source_only) {
+            return false;
+        }
+        t.serves(product)
+    }
+
+    /// The first product (by name) that reads any key of `product` with `from` (FR-45), or
+    /// `None`. Used to point at a runnable product when `product` is source-only (FR-47).
+    pub fn referencing_product(&self, product: &str) -> Option<&str> {
+        self.products.iter().find_map(|(q, p)| {
+            p.keys
+                .values()
+                .any(|k| k.source().is_some_and(|(sp, _)| sp == product))
+                .then_some(q.as_str())
+        })
     }
 }
 

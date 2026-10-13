@@ -1,0 +1,1 @@
+failed to get secrets: HTTP 404: Not Found (https://api.github.com/repos/example-org/example-repo/environments/nope/secrets?per_page=100)

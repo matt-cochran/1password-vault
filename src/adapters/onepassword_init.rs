@@ -90,6 +90,28 @@ pub fn find_vault(
     lookup(all, title, "vault", "")
 }
 
+/// Who can use `vault_id` (#96): the JSON array of `op vault user list <vault_id> --format
+/// json` (type, state, permissions, name; read-only). `Ok(None)` when this person may not
+/// see it (listing a vault's users needs managing it); a sign-in problem is an error.
+pub fn vault_users(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Option<serde_json::Value>, Error> {
+    let args = ["vault", "user", "list", vault_id, "--format", "json"];
+    match list(
+        r,
+        &args,
+        host,
+        "op vault user list",
+        "who can use the vault",
+    ) {
+        Ok(out) => Ok(serde_json::from_slice(&out.stdout).ok()),
+        Err(Error::Source(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// The item in `vault_id` whose title is exactly `title` (case-sensitive). One `op item
 /// list --vault <vault_id>` call (item metadata only; it carries no field values).
 #[cfg(test)]
@@ -305,10 +327,25 @@ pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> 
 /// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
 /// the same `op item create` call `setup` makes, the template on stdin.
 pub fn create_item(r: &dyn CommandRunner, vault_id: &str, title: &str) -> Result<Named, Error> {
+    create_item_tagged(r, vault_id, title, &[])
+}
+
+/// [`create_item`] with `tags` on the new item (names, never values), e.g. `opv bootstrap`'s
+/// `opv-env:<project>/<env>` (FR-55).
+pub fn create_item_tagged(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    title: &str,
+    tags: &[String],
+) -> Result<Named, Error> {
     let args = [
         "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
     ];
-    let template = br#"{"category":"SECURE_NOTE","fields":[],"sections":[]}"#;
+    let template = serde_json::to_vec(&serde_json::json!({
+        "category": "SECURE_NOTE", "fields": [], "sections": [], "tags": tags,
+    }))
+    .expect("a fixed template serializes");
+    let template = template.as_slice();
     created(
         r,
         &args,

@@ -42,6 +42,7 @@ fn args(profile: Option<Profile>, force: bool) -> InitArgs {
         fields: fly("myapp-staging"),
         profile,
         force,
+        from: None,
     }
 }
 

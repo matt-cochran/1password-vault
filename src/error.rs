@@ -462,6 +462,7 @@ codes! {
     Usage => "usage", 2, Never, false, "the command line is not valid (unknown flag, missing argument)";
     ConfigNotFound => "config_not_found", 2, AfterFix, false, "no secrets.toml in this directory or a parent, and no 1Password manifest for this checkout";
     AccountRequired => "account_required", 2, AfterFix, true, "several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account";
+    AccountAmbiguous => "account_ambiguous", 2, AfterFix, true, "an email or sign-in address names several 1Password accounts; a person picks one by its account ID";
     ManifestNotFound => "manifest_not_found", 2, AfterFix, false, "no 1Password manifest has the project's title (OPV_PROJECT or .opv)";
     ManifestAmbiguous => "manifest_ambiguous", 2, AfterFix, true, "several 1Password manifests match; a person keeps one and archives the others";
     ManifestExists => "manifest_exists", 2, Never, false, "a manifest for this project already exists; change it with opv config edit";
@@ -488,6 +489,12 @@ codes! {
     TerminalRequired => "terminal_required", 6, Never, true, "the command needs the user's own interactive terminal";
     AuthRequired => "auth_required", 7, AfterFix, true, "not signed in to 1Password or the target CLI";
     OpNotSignedIn => "op_not_signed_in", 7, AfterFix, true, "not signed in to 1Password";
+    IdsNotInAccount => "ids_not_in_account", 2, AfterFix, true, "an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind)";
+    AccountNotRegistered => "account_not_registered", 7, AfterFix, true, "the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add";
+    DesktopAppUnavailable => "desktop_app_unavailable", 7, AfterFix, true, "the 1Password app is locked, closed, or its CLI integration is off";
+    CredentialRejected => "credential_rejected", 7, AfterFix, true, "1Password did not accept what was typed at its prompt";
+    SignInCancelled => "sign_in_cancelled", 7, AfterFix, true, "the 1Password sign-in prompt was cancelled";
+    OpUnexpected => "op_unexpected", 7, AfterFix, true, "1Password's CLI failed for a reason opv does not recognise; opv doctor checks it";
     DeployCredentialsFailed => "deploy_credentials_failed", 7, AfterFix, true, "the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed";
     Findings => "findings", 8, AfterFix, true, "keys are missing or failing a rule (values are filled in 1Password by a person)";
     OutcomeUnknown => "outcome_unknown", 9, Safe, false, "a change may or may not have been applied; re-running is safe";

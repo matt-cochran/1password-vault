@@ -13,8 +13,9 @@
 
 use std::io;
 
+use super::personal;
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, SIMPLE_PRODUCT, rules};
+use crate::domain::{Fleet, KeySpec, SIMPLE_PRODUCT, rules};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -33,20 +34,24 @@ pub fn run_for(
 ) -> Result<i32, Error> {
     match (fleet.is_simple(), product) {
         (false, Some(p)) => run(fleet, env_name, p, command, runner),
-        (false, None) => Err(Error::Config(format!(
-            "--product is required. Choose one of: {}. Usage: opv run {env_name} --product <name> -- <command>",
-            fleet
+        (false, None) => {
+            // FR-47: a source-only product is never run on its own, so it is not offered.
+            let available: Vec<&str> = fleet
                 .products
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        ).into())
-        .with_next(super::check_command(
-            fleet,
-            Some(env_name),
-            fleet.products.keys().next().map(String::as_str),
-        ))),
+                .iter()
+                .filter(|(_, p)| !p.source_only)
+                .map(|(n, _)| n.as_str())
+                .collect();
+            Err(Error::Config(format!(
+                "--product is required. Choose one of: {}. Usage: opv run {env_name} --product <name> -- <command>",
+                available.join(", ")
+            ).into())
+            .with_next(super::check_command(
+                fleet,
+                Some(env_name),
+                available.first().copied(),
+            )))
+        }
         (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
         (true, Some(_)) => Err(Error::Config(
             "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
@@ -73,12 +78,49 @@ pub fn run(
         .products
         .get(product)
         .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
+    if prod.source_only {
+        return Err(source_only_error(fleet, env_name, product));
+    }
     if command.is_empty() {
         return Err(Error::Config(
             "no command given (usage: run <env> --product <p> -- <cmd>...)".into(),
         )
         .with_next("opv run --help"));
     }
+
+    let selected: Vec<(&String, &KeySpec)> = prod
+        .keys
+        .iter()
+        .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
+        .collect();
+    // FR-55: a personal key's value is in the person's own item. Locate it before the read
+    // and before `op run`, so a missing personal item stops the run and names the keys.
+    let personal_env = if selected
+        .iter()
+        .any(|(_, spec)| personal::is_personal(fleet, spec))
+    {
+        let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
+        match personal::locate(runner, fleet, env_name, &project) {
+            Ok(Some(e)) => Some(e),
+            Ok(None) | Err(_) => {
+                let labels: Vec<String> = selected
+                    .iter()
+                    .filter(|(_, spec)| personal::is_personal(fleet, spec))
+                    .map(|(key, _)| crate::domain::key_label(product, key))
+                    .collect();
+                return Err(Error::Config(
+                    format!(
+                        "your personal item for {env_name} is not set up yet; it holds {}",
+                        labels.join(", ")
+                    )
+                    .into(),
+                )
+                .with_next("opv bootstrap"));
+            }
+        }
+    } else {
+        None
+    };
 
     // FR-43: one tolerant item read first, which tidies the item when a person runs opv.
     // A key whose field is still not where the convention puts it (a read-only run) is
@@ -94,11 +136,14 @@ pub fn run(
     if let Some(r) = read.as_ref().filter(|r| r.changes.is_empty()) {
         super::tidy::note_needing_values(runner, env_name, &r.needing_values);
     }
-    let refs: Vec<(&str, String)> = prod
-        .keys
+    let refs: Vec<(&str, String)> = selected
         .iter()
-        .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
         .map(|(key, spec)| {
+            // FR-55: a personal key references the person's own item, never the team item.
+            if personal::is_personal(fleet, spec) {
+                let pe = personal_env.as_ref().expect("located above");
+                return (key.as_str(), personal::reference(pe, product, key, spec));
+            }
             // A shared key (FR-45) is exported under its own name, referencing its source's
             // field in the same item.
             let (fp, fk) = spec.source().unwrap_or((product, key));
@@ -159,6 +204,16 @@ pub fn run(
             io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
             k => Error::Dependency(format!("cannot run {OP} ({k})").into()),
         })
+}
+
+/// FR-47: `product` holds canonical values for other products' keys and is never run on
+/// its own. The `Next:` step names a product that reads it, when one does.
+fn source_only_error(fleet: &Fleet, env_name: &str, product: &str) -> Error {
+    let e = super::source_only_message(product);
+    match fleet.referencing_product(product) {
+        Some(q) => e.with_next(format!("opv run {env_name} --product {q} -- <command>")),
+        None => e.with_next(super::check_command(fleet, Some(env_name), None)),
+    }
 }
 
 /// Windows op.exe can read metadata from WSL, but cannot execute a Linux child.
@@ -334,5 +389,44 @@ mod tests {
         let result = run(&fleet(), "prod", "allumata", &cmd(&["true"]), &r);
         assert!(result.unwrap_err().to_string().contains("Linux child"));
         assert!(r.calls.borrow().is_empty());
+    }
+
+    /// `shared` is source-only and `api` reads it with `from` (FR-47).
+    fn source_only_fleet() -> Fleet {
+        crate::config::parse(
+            r#"
+[profile]
+kind = "fleet"
+[environments.ci]
+vault_id = "vci"
+item_id = "ici"
+fly.app = "app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+[products.shared]
+source_only = true
+[products.shared.keys.TOKEN]
+kind = "secret"
+environments = ["ci"]
+[products.api.keys.TOKEN]
+kind = "secret"
+from = "shared/TOKEN"
+environments = ["ci"]
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn run_refuses_a_source_only_product() {
+        let r = FakeRunner::new([]);
+        let e = run(&source_only_fleet(), "ci", "shared", &cmd(&["env"]), &r).unwrap_err();
+        assert!(matches!(e, Error::Config(m) if m.contains("is source-only")));
+    }
+
+    #[test]
+    fn run_for_offers_only_non_source_only_products() {
+        let r = FakeRunner::new([]);
+        let e = run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap_err();
+        assert!(matches!(e, Error::Config(m) if m.contains("Choose one of: api.")));
     }
 }

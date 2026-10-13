@@ -143,8 +143,8 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
     };
     Err(Error::Policy(
         format!(
-            "{what} writes the project's manifest in 1Password, which only a person signed in \
-             with their own session may do; {why}; nothing written"
+            "{what} writes to 1Password, which only a person signed in with their own \
+             session may do; {why}; nothing written"
         )
         .into(),
     )
@@ -216,6 +216,8 @@ pub(crate) struct Read {
     /// off): `run` words its warning by it (a person whose tidy failed is not told to sign
     /// in as themselves).
     pub identity: Option<Identity>,
+    /// The version ledger in the item's `opv · state` section (FR-54); empty when none.
+    pub ledger: crate::domain::ledger::Ledger,
 }
 
 /// The environment's item, read tolerantly and tidied when a person runs opv (see the
@@ -469,8 +471,9 @@ fn needing_values(
         .products
         .iter()
         .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
-        // A shared key (FR-45) has no field: its source is named instead.
-        .filter(|(_, _, s)| s.from.is_none())
+        // A shared key (FR-45) has no field: its source is named instead. A personal key
+        // (FR-55) is not the team item's to fill.
+        .filter(|(_, _, s)| s.from.is_none() && !s.personal)
         .filter(|(p, _, s)| rules::applies(s, env_name, env, p))
         .filter(|(p, k, _)| {
             res.chosen
@@ -525,6 +528,7 @@ fn finish(
         }
     }
     Read {
+        ledger: crate::domain::ledger::Ledger::from_layout(&layout),
         needing_values: needing_values(&layout, fleet, env_name, env),
         fields: convention::read_fields(&layout, fleet, env_name),
         changes,
