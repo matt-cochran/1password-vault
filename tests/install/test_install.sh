@@ -173,6 +173,10 @@ make_fake_opv() {
   mkdir -p "$dir"
   cat > "$dir/opv" <<EOF
 #!/bin/sh
+if [ "\${1:-}" = "skill" ]; then
+  printf '%s\n' "\$*" >> "\${HOME:-/tmp}/opv-skill-args"
+  exit 0
+fi
 echo "opv $ver"
 EOF
   chmod 755 "$dir/opv"
@@ -482,6 +486,31 @@ t_reinstall_of_same_version_keeps_an_existing_record() {
 }
 
 # ---------------------------------------------------------------------------
+# --skill
+# ---------------------------------------------------------------------------
+
+t_skill_flag_runs_skill_install() {
+  new_case
+  make_fake_opv "$TARGET" 1.2.3
+  install_run "$1" --version v1.2.3 --dir "$TARGET" --skill
+  check_file_contains "$HOME_DIR/opv-skill-args" "skill install --user --target all"
+}
+
+t_without_skill_flag_does_not_run_skill_install() {
+  new_case
+  make_fake_opv "$TARGET" 1.2.3
+  install_run "$1" --version v1.2.3 --dir "$TARGET"
+  check_not_exists "$HOME_DIR/opv-skill-args"
+}
+
+t_check_with_skill_does_not_run_skill_install() {
+  new_case
+  make_fake_opv "$TARGET" 1.2.3
+  install_run "$1" --check --version v1.2.3 --dir "$TARGET" --skill
+  check_not_exists "$HOME_DIR/opv-skill-args"
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
@@ -516,7 +545,10 @@ for test_fn in \
   t_off_path_prints_export_line \
   t_install_writes_installed_by_record \
   t_custom_dir_install_leaves_no_installed_by_record \
-  t_reinstall_of_same_version_keeps_an_existing_record
+  t_reinstall_of_same_version_keeps_an_existing_record \
+  t_skill_flag_runs_skill_install \
+  t_without_skill_flag_does_not_run_skill_install \
+  t_check_with_skill_does_not_run_skill_install
 do
   run_for_shells "$test_fn"
 done

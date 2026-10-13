@@ -372,6 +372,16 @@ const GUIDE_MORE: &str = "\
 Prints a guide embedded in this binary, so it matches the commands this version has. Links
 point at the docs of the same release.";
 
+const SKILL_INSTALL_QUICK: &str = "\
+Examples:
+  opv skill install --user --target all   # this user, for Claude Code and Codex
+  opv skill install --project . --json    # this project's agent folders, as JSON";
+
+const SKILL_STATUS_QUICK: &str = "\
+Examples:
+  opv skill status           # each installed copy, its version and whether it is current
+  opv skill status --json    # the same for scripts and AI assistants";
+
 /// Use 1Password settings in local apps and deployment targets.
 ///
 /// Values live in 1Password and are consumed by the runtime; opv only connects the
@@ -742,6 +752,9 @@ enum Cmd {
         #[arg(value_enum)]
         topic: GuideTopic,
     },
+    /// Install the opv agent skill where coding agents look, and report installed copies.
+    #[command(subcommand)]
+    Skill(SkillCmd),
 }
 
 /// Guides embedded in the binary (A10).
@@ -749,6 +762,59 @@ enum Cmd {
 enum GuideTopic {
     /// Setting opv up in a user's project, for AI assistants: rules, steps, exit codes.
     Agent,
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Install the embedded agent skill where coding agents look for it.
+    #[command(before_help = SKILL_INSTALL_QUICK)]
+    Install {
+        /// Which agents' skill folders to write.
+        #[arg(long, value_enum, default_value_t = SkillTarget::All)]
+        target: SkillTarget,
+        /// Install into the user's home (HOME, else USERPROFILE).
+        #[arg(long, conflicts_with = "project")]
+        user: bool,
+        /// Install into this project's root; default: the git top level.
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        /// Replace a copy that was edited by hand.
+        #[arg(long)]
+        force: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report the installed agent skill copies, their version and state.
+    #[command(before_help = SKILL_STATUS_QUICK)]
+    Status {
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `--target` of `opv skill install`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SkillTarget {
+    /// Claude Code (`.claude/skills/opv/SKILL.md`).
+    Claude,
+    /// Codex and other `.agents` clients (`.agents/skills/opv/SKILL.md`).
+    Codex,
+    /// Both, the default.
+    All,
+}
+
+impl SkillTarget {
+    /// The library targets this selection writes.
+    fn targets(self) -> Vec<opv::app::skill::Target> {
+        use opv::app::skill::{self, Target};
+        match self {
+            SkillTarget::Claude => vec![Target::Claude],
+            SkillTarget::Codex => vec![Target::Codex],
+            SkillTarget::All => skill::ALL.to_vec(),
+        }
+    }
 }
 
 /// Arguments of `plan`.
@@ -1370,7 +1436,9 @@ impl Cmd {
             | Cmd::Ready { json, .. }
             | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
-            | Cmd::Account(AccountCmd::Use { json, .. }) => *json,
+            | Cmd::Account(AccountCmd::Use { json, .. })
+            | Cmd::Skill(SkillCmd::Install { json, .. })
+            | Cmd::Skill(SkillCmd::Status { json, .. }) => *json,
             Cmd::Plan(a) => a.json,
             Cmd::Sync(a) => a.json,
             Cmd::Schema => true,
@@ -1479,6 +1547,9 @@ fn run(
             GuideTopic::Agent => opv::app::guide::run(out)?,
         }
         return Ok(0);
+    }
+    if let Cmd::Skill(cmd) = &cli.cmd {
+        return run_skill(cmd, out).map(|()| 0);
     }
     if let Cmd::Login {
         env,
@@ -1722,6 +1793,87 @@ fn run(
     run_other(cmd, loaded, source.as_deref(), runner, deploy_failure, out).map(|()| 0)
 }
 
+/// `opv skill install` / `opv skill status`: the agent skill embedded in this binary
+/// (FR-52). No configuration, no subprocess and no secret value is involved.
+fn run_skill(cmd: &SkillCmd, out: &mut dyn Write) -> Result<(), Error> {
+    use opv::app::skill;
+    let version = env!("CARGO_PKG_VERSION");
+    match cmd {
+        SkillCmd::Install {
+            target,
+            user,
+            project,
+            force,
+            json,
+        } => {
+            let root = skill_root(*user, project.as_deref())?;
+            let installed = skill::install(&root, &target.targets(), version, *force)?;
+            if *json {
+                writeln!(out, "{}", skill::install_document(&installed)?).map_err(write_err)?;
+            } else {
+                for (_, path) in &installed.written {
+                    writeln!(out, "installed {} (opv {version})", path.display())
+                        .map_err(write_err)?;
+                }
+                for (_, path) in &installed.kept {
+                    writeln!(
+                        out,
+                        "kept {}: edited by hand; --force replaces it",
+                        path.display()
+                    )
+                    .map_err(write_err)?;
+                }
+                writeln!(out, "Next: opv guide agent").map_err(write_err)?;
+            }
+        }
+        SkillCmd::Status { json } => {
+            let copies = skill::status(&skill::roots(), version);
+            if *json {
+                writeln!(out, "{}", skill::status_document(&copies)?).map_err(write_err)?;
+            } else {
+                for copy in &copies {
+                    let state = if copy.edited {
+                        "edited"
+                    } else if copy.current {
+                        "current"
+                    } else {
+                        "older"
+                    };
+                    writeln!(
+                        out,
+                        "{} {} {} opv {} {state}",
+                        copy.scope,
+                        copy.target.as_str(),
+                        copy.path.display(),
+                        copy.version.as_deref().unwrap_or("unknown"),
+                    )
+                    .map_err(write_err)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The root `opv skill install` writes under: the home for `--user`, the given project
+/// directory, or this checkout's git top level.
+fn skill_root(user: bool, project: Option<&std::path::Path>) -> Result<PathBuf, Error> {
+    if user {
+        return opv::app::skill::user_root().ok_or_else(|| {
+            Error::Config("cannot find the home directory (HOME or USERPROFILE)".into())
+                .with_next("opv skill install --project .")
+        });
+    }
+    Ok(project
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(opv::app::skill::project_root))
+}
+
+/// A failed write to the output stream (the same wording the library uses).
+fn write_err(e: io::Error) -> Error {
+    Error::Dependency(format!("cannot write output ({})", e.kind()).into())
+}
+
 /// Print each load-time deprecation note (FR-24, 0.6.0) to `out`, one line per note. The
 /// note names the key and the equivalent rule, never a value.
 fn write_notes(fleet: &opv::domain::Fleet, out: &mut dyn Write) {
@@ -1883,6 +2035,7 @@ fn run_other(
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
+        | Cmd::Skill(_)
         | Cmd::Projects { .. }
         | Cmd::Account(_)
         | Cmd::Bootstrap { .. }
@@ -2701,6 +2854,8 @@ mod tests {
             &["opv", "status", "--all", "--json"],
             &["opv", "add", "api/KEY", "--kind", "secret", "--json"],
             &["opv", "config", "export", "--json"],
+            &["opv", "skill", "install", "--json"],
+            &["opv", "skill", "status", "--json"],
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
             if cli.cmd.json_mode().is_none() {

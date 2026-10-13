@@ -49,6 +49,9 @@ pub(crate) mod signin_filter;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;
+pub mod skill;
+#[cfg(test)]
+mod skill_tests;
 #[cfg(test)]
 mod staged_tests;
 pub mod status;

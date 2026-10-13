@@ -477,6 +477,7 @@ fn run_on_with(
         );
     }
     report.push("opv", opv_on_path(r));
+    report.push("agent skill", Ok(agent_skill()));
     if scope.json {
         print_json(&report, &doctor_command(&scope), scope.source, out)?;
     } else {
@@ -869,6 +870,26 @@ fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
     )))
 }
 
+/// The agent skill copies installed where coding agents look (FR-52). The skill is
+/// optional, so no copy is ok; a copy older than this binary or edited by hand warns,
+/// naming its path and the command that refreshes it.
+fn agent_skill() -> Check {
+    let version = env!("CARGO_PKG_VERSION");
+    let copies = super::skill::status(&super::skill::roots(), version);
+    if copies.is_empty() {
+        return Check::Ok("not installed (optional: opv skill install)".into());
+    }
+    let stale: Vec<&super::skill::Copy> = copies.iter().filter(|c| !c.current).collect();
+    if stale.is_empty() {
+        return Check::Ok(format!("current (opv {version})"));
+    }
+    let paths: Vec<String> = stale.iter().map(|c| c.path.display().to_string()).collect();
+    Check::Warn(format!(
+        "older or edited copy: {}; run: opv skill install",
+        paths.join(", ")
+    ))
+}
+
 /// The command that removes one opv copy on this platform.
 fn removal_command(p: &std::path::Path) -> String {
     if cfg!(windows) {
@@ -906,8 +927,9 @@ mod tests {
         Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash"))
     }
 
-    /// config, op, op auth, flyctl, fly auth, (off Windows) op local run, and opv.
-    const CHECK_LINES: usize = if cfg!(windows) { 6 } else { 7 };
+    /// config, op, op auth, flyctl, fly auth, (off Windows) op local run, opv, and the
+    /// agent skill.
+    const CHECK_LINES: usize = if cfg!(windows) { 7 } else { 8 };
 
     /// Doctor scoped to environments without a target (`doctor --env dev`), on Linux.
     #[cfg(not(windows))]
