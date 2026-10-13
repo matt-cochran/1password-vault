@@ -20,6 +20,8 @@ pub mod config_export;
 pub mod doctor;
 pub mod explain;
 #[cfg(test)]
+mod github_tests;
+#[cfg(test)]
 mod guidance_tests;
 pub mod guide;
 pub mod init;

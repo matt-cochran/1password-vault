@@ -277,6 +277,28 @@ impl GithubTarget {
     }
 }
 
+impl GithubTarget {
+    /// `explain` lines: the name, how a workflow reads it, and where it is written.
+    fn lines(
+        &self,
+        product: &str,
+        key: &str,
+        kind: &str,
+        context: &str,
+    ) -> Vec<(&'static str, String)> {
+        let name = self.target_name(product, key);
+        let mut lines = vec![
+            ("github as", format!("{kind}: ${{{{ {context}.{name} }}}}")),
+            ("github name", name),
+            ("github repos", self.repos.join(", ")),
+        ];
+        if let Some(environment) = &self.environment {
+            lines.push(("github environment", environment.clone()));
+        }
+        lines
+    }
+}
+
 impl TargetConfig for GithubTarget {
     fn provider(&self) -> &'static dyn Provider {
         &PROVIDER
@@ -374,17 +396,10 @@ impl TargetConfig for GithubTarget {
         ]
     }
     fn explain(&self, product: &str, key: &str) -> Vec<(&'static str, String)> {
-        let mut lines = vec![
-            ("github name", self.target_name(product, key)),
-            ("github repos", self.repos.join(", ")),
-        ];
-        if let Some(environment) = &self.environment {
-            lines.push(("github environment", environment.clone()));
-        }
-        lines
+        self.lines(product, key, "Actions secret", "secrets")
     }
     fn explain_config(&self, product: &str, key: &str) -> Option<Vec<(&'static str, String)>> {
-        Some(self.explain(product, key))
+        Some(self.lines(product, key, "Actions variable", "vars"))
     }
     fn eq_dyn(&self, other: &dyn TargetConfig) -> bool {
         eq_as(self, other)
@@ -828,6 +843,7 @@ secret_name = "STATIC""#,
         assert_eq!(
             t.explain("api", "TOKEN"),
             [
+                ("github as", "Actions secret: ${{ secrets.CI__TOKEN }}".to_string()),
                 ("github name", "CI__TOKEN".to_string()),
                 ("github repos", "org/r".to_string()),
             ]
@@ -840,6 +856,7 @@ secret_name = "STATIC""#,
         assert_eq!(
             t.explain("api", "TOKEN"),
             [
+                ("github as", "Actions secret: ${{ secrets.TOKEN }}".to_string()),
                 ("github name", "TOKEN".to_string()),
                 ("github repos", "org/r".to_string()),
                 ("github environment", "staging".to_string()),
@@ -848,11 +865,11 @@ secret_name = "STATIC""#,
     }
 
     #[test]
-    fn explain_config_uses_the_same_lines_as_explain() {
+    fn explain_config_names_the_variable_expression() {
         let t = target_of("repo = \"org/r\"");
         assert_eq!(
-            t.explain_config("api", "TOKEN"),
-            Some(t.explain("api", "TOKEN"))
+            t.explain_config("api", "TOKEN").map(|l| l[0].1.clone()),
+            Some("Actions variable: ${{ vars.TOKEN }}".to_string())
         );
     }
 

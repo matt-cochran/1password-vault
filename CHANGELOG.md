@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **GitHub Actions target**: `[environments.<env>.github]` with `repo` (or `repos`), an optional GitHub `environment`, `products` and `secret_name` sets Actions secrets (concealed fields) and Actions variables (text fields) with `gh`, values on stdin. Writes are live at once (`--deploy` has nothing to do); variables are compared exactly, secrets are written each sync because GitHub cannot show them; `--prune` deletes only managed names. A missing GitHub environment stops the sync before any write with the `gh api` command that creates it; opv never creates one. `deploy_credentials` takes a fine-grained `GH_TOKEN` ([#75](https://github.com/matt-cochran/1password-vault/issues/75); [configuration](docs/configuration.md#github-actions-repository-and-environment-secrets); FR-46).
+- **One home for shared values**: `[products.<name>] source_only = true` declares a product whose keys hold values other keys point at with `from` (one Fly token for every repository's CI). Its keys are never delivered, pruned or checked for name collisions; `plan` and `status` warn about one nothing points at ([configuration](docs/configuration.md#one-home-for-shared-values-source_only-products); FR-47).
+- **Target product scope**: a target can deliver only some products' keys (`products = [...]` on `github`); `plan` and `status` list the declared keys it leaves out (FR-48).
+- [examples/github-ci](examples/github-ci/): a fleet with two repositories, shared values and a sync workflow.
+
+### Changed
+
+- `opv init --help` shows two examples instead of three, to fit on one screen with the GitHub options.
+
 ## [0.5.0] - 2026-10-12
 
 Azure and Kubernetes targets, configuration kept in 1Password, self-healing 1Password layout, a machine-readable contract for scripts and AI assistants, and a CLI that survives failing networks. Several outputs and exit codes changed: read **Changed** before upgrading scripts or CI.
