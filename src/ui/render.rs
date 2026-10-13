@@ -44,6 +44,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Key { product, key } => super::screens::key_detail(f, cols[1], app, product, key),
         Screen::Shared => super::screens::shared(f, cols[1], app),
         Screen::Accounts => super::screens::accounts(f, cols[1], app),
+        Screen::Access => super::screens::access(f, cols[1], app),
         Screen::Adopt { env, from } => super::screens::adopt(f, cols[1], app, env, from),
         Screen::History(env) => super::screens::history(f, cols[1], app, env),
     }
@@ -73,6 +74,7 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App) {
         let (group, text) = match n {
             Nav::Overview => ("", "Overview".to_string()),
             Nav::Shared => ("", "Shared values".to_string()),
+            Nav::Access => ("", "CI access".to_string()),
             Nav::Env(e) => {
                 let env = app.snap.env(e);
                 let title = env.map_or(e.as_str(), |x| x.title.as_str());

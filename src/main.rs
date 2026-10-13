@@ -314,6 +314,11 @@ Examples:
   opv history prod             # last write per key: time, plan id, opv version
   opv history prod --json      # the same as one document (names and versions only)";
 
+const ACCESS_QUICK: &str = "\
+Examples:
+  opv access                   # every environment's readers; a CI reader command where missing
+  opv access prod --json       # one environment as a document";
+
 const READY_QUICK: &str = "\
 Examples:
   opv ready                      # every environment × product, findings, the next step
@@ -611,6 +616,16 @@ enum Cmd {
     History {
         /// Environment name from the configuration (for example prod).
         env: String,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Who can read each environment's vault, and the command for a read-only CI reader
+    /// (read-only; people are counted, never named).
+    #[command(before_help = ACCESS_QUICK)]
+    Access {
+        /// Only this environment.
+        env: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -1507,6 +1522,7 @@ impl Cmd {
             | Cmd::Bootstrap { json, .. }
             | Cmd::Ready { json, .. }
             | Cmd::History { json, .. }
+            | Cmd::Access { json, .. }
             | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
@@ -2173,6 +2189,7 @@ fn run_other(
             opv::app::adopt::run(&loaded?, &env, &opts, r, out)
         }
         Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
+        Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
             source,

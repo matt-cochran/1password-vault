@@ -23,6 +23,8 @@ pub enum Screen {
     Accounts,
     /// What opv last wrote to an environment's target (#95), from `opv history --json`.
     History(String),
+    /// Who can read each environment's vault (#96), from `opv access --json`.
+    Access,
     /// The adoption review (#94): what `opv adopt <env> --from <from>` found, per key.
     Adopt {
         env: String,
@@ -35,6 +37,8 @@ pub enum Screen {
 pub enum Nav {
     Overview,
     Shared,
+    /// Who can read each environment's vault (#96).
+    Access,
     Env(String),
     Product(String),
 }
@@ -79,6 +83,8 @@ pub enum Effect {
     LoadAccounts,
     /// Read `opv history <env> --json` for the history screen (#95).
     LoadHistory(String),
+    /// Read `opv access --json` for the access screen (#96).
+    LoadAccess,
     /// Read `opv adopt <env> --from <from> --json` and open the adoption review (#94).
     AdoptPlan {
         env: String,
@@ -121,6 +127,8 @@ pub struct App {
     pub adopt: Vec<super::adopt_review::ReviewRow>,
     /// `opv history <env> --json`, once loaded (#95).
     pub history: Option<serde_json::Value>,
+    /// `opv access --json`, once loaded (#96).
+    pub access: Option<serde_json::Value>,
 }
 
 impl App {
@@ -138,6 +146,7 @@ impl App {
             accounts: None,
             adopt: Vec::new(),
             history: None,
+            access: None,
         };
         app.rebuild_nav();
         app
@@ -151,7 +160,7 @@ impl App {
     }
 
     fn rebuild_nav(&mut self) {
-        let mut nav = vec![Nav::Overview, Nav::Shared];
+        let mut nav = vec![Nav::Overview, Nav::Shared, Nav::Access];
         nav.extend(self.snap.envs.iter().map(|e| Nav::Env(e.key.clone())));
         nav.extend(
             self.snap
@@ -237,6 +246,12 @@ impl App {
                 let screen = match self.nav.get(self.nav_at) {
                     Some(Nav::Overview) => Screen::Overview,
                     Some(Nav::Shared) => Screen::Shared,
+                    Some(Nav::Access) => {
+                        self.open(Screen::Access);
+                        self.in_nav = false;
+                        self.access = None;
+                        return Effect::LoadAccess;
+                    }
                     Some(Nav::Env(e)) => Screen::Env(e.clone()),
                     Some(Nav::Product(p)) => Screen::Product(p.clone()),
                     None => return Effect::None,

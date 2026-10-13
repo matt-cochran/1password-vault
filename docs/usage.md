@@ -10,6 +10,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
 | `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
 | `opv history <env> [--json]` | what opv last wrote to the target, per key: time, plan id, changed outside opv ([usage](#write-history-opv-history)) | nothing (read-only) |
+| `opv access [<env>] [--json]` | who can read each vault; the owner's command for a read-only CI reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -410,6 +411,16 @@ Every action is an `opv` command, shown before it runs and run in your terminal,
 ## Write history: `opv history`
 
 `opv history <env>` shows, per secret, what opv last wrote to the environment's target, from what is already recorded: on Key Vault and Kubernetes the stamp opv puts on each value it writes (UTC time, plan id, opv version); on Fly and GitHub the version opv's own sync recorded in the item's `opv · state` section (on Fly the version is a digest of the value, so it is compared in memory and never shown: only the state is). Each key is `written by opv` (stamped), `as opv's last sync left it`, `changed outside opv since its last sync` (then `Next: opv plan <env>`), `on the target; opv has no record of writing it`, or `not on the target`. It is read-only, as `opv status` (one item read and one store listing), and shows names, versions, times and plan ids, never a value or a fingerprint. `--json` gives `{schema_version, environment, target, latest: {written, plan, opv_version} | null, rows: [{product, key, name, on_target, version, pending, written, opv_version, plan, recorded_version, state}]}`. An environment without a target has no history. In `opv ui`, `h` on an environment opens the same.
+
+## Who can read each vault: `opv access`
+
+`opv access [<env>]` shows, per environment, who can use its 1Password vault (one read-only `op vault user list` each): people and guests as counts, never names, and each service account by name with whether it can only read. It warns when:
+
+- `no_ci_reader`: an environment that deploys has no read-only service account for CI. The finding carries the owner's exact command, `op service-account create "<project>-<env>-ci" --vault <vault-id>:read_items --expires-in 90d`. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
+- `ci_reader_can_write`: a service account can edit or manage the vault; CI only needs to read.
+- `access_not_visible`: you cannot see who uses the vault, because listing it needs permission to manage the vault.
+
+`--json` gives `{schema_version, environments: [{environment, vault_id, deployed, visible, people, guests, service_accounts: [{name, read_only}]}], findings: [{code, environment, message, next}]}`. In `opv ui` it is the "CI access" entry in the sidebar.
 
 ## Readiness: `opv ready`
 

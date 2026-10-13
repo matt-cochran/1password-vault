@@ -93,6 +93,13 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "access",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
         command: "ready",
         effect: "reads",
         needs_terminal: false,

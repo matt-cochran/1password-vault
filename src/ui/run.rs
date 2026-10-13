@@ -138,6 +138,9 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
                 Effect::LoadHistory(env) => {
                     app.history = source.json(&["history", &env, "--json"]).ok();
                 }
+                Effect::LoadAccess => {
+                    app.access = source.json(&["access", "--json"]).ok();
+                }
                 Effect::LoadAccounts => {
                     app.accounts = source.json(&["account", "list", "--json"]).ok();
                 }
