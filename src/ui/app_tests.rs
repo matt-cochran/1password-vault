@@ -283,3 +283,21 @@ fn esc_closes_a_form_without_running_anything() {
     press(&mut a, &[Key::Char('+'), Key::Esc]);
     assert!(a.modal.is_none());
 }
+
+// #95: history --------------------------------------------------------------------------------
+
+#[test]
+fn h_on_a_deployed_environment_loads_its_history() {
+    let mut a = app();
+    a.open(Screen::Env("ci".into()));
+    a.in_nav = false;
+    assert_eq!(a.handle(Key::Char('h')), Effect::LoadHistory("ci".into()));
+}
+
+#[test]
+fn h_on_a_local_environment_explains_there_is_none() {
+    let mut a = app();
+    a.open(Screen::Env("local".into()));
+    a.in_nav = false;
+    assert_eq!(a.handle(Key::Char('h')), Effect::None);
+}

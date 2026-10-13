@@ -81,6 +81,12 @@ impl Provider for FlyProvider {
         "Fly"
     }
 
+    /// `fly secrets list` reports a digest of each value (D0 spike: 16 hex characters,
+    /// equal for equal values).
+    fn versions_reveal_values(&self) -> bool {
+        true
+    }
+
     fn tools(&self) -> &'static [&'static crate::host::Tool] {
         &[&FLYCTL]
     }

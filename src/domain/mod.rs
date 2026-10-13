@@ -3,6 +3,7 @@
 pub mod adopt;
 pub mod convention;
 pub mod health;
+pub mod history;
 pub mod kind_guess;
 pub mod ledger;
 pub mod model;

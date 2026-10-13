@@ -21,6 +21,8 @@ pub enum Screen {
         key: String,
     },
     Accounts,
+    /// What opv last wrote to an environment's target (#95), from `opv history --json`.
+    History(String),
     /// The adoption review (#94): what `opv adopt <env> --from <from>` found, per key.
     Adopt {
         env: String,
@@ -75,6 +77,8 @@ pub enum Effect {
     Run(Vec<String>),
     /// Read `opv account list --json` for the accounts screen.
     LoadAccounts,
+    /// Read `opv history <env> --json` for the history screen (#95).
+    LoadHistory(String),
     /// Read `opv adopt <env> --from <from> --json` and open the adoption review (#94).
     AdoptPlan {
         env: String,
@@ -115,6 +119,8 @@ pub struct App {
     pub accounts: Option<serde_json::Value>,
     /// The adoption review's rows and decisions (#94).
     pub adopt: Vec<super::adopt_review::ReviewRow>,
+    /// `opv history <env> --json`, once loaded (#95).
+    pub history: Option<serde_json::Value>,
 }
 
 impl App {
@@ -131,6 +137,7 @@ impl App {
             status: String::new(),
             accounts: None,
             adopt: Vec::new(),
+            history: None,
         };
         app.rebuild_nav();
         app
@@ -315,6 +322,17 @@ impl App {
                 self.modal = Some(Modal::Form(super::forms::FormState::add_key(
                     envs, fleet, product, env,
                 )));
+            }
+            Key::Char('h') => {
+                if let Some(env) = self.current_env() {
+                    if self.snap.env(&env).is_some_and(|e| e.target.is_some()) {
+                        self.history = None;
+                        self.open(Screen::History(env.clone()));
+                        return Effect::LoadHistory(env);
+                    }
+                    self.status =
+                        format!("{env} has no target: opv writes nothing outside 1Password for it");
+                }
             }
             Key::Char('E') => {
                 let envs = self.snap.envs.iter().map(|e| e.key.clone()).collect();

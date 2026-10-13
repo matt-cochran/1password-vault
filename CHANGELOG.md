@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`opv history <env>`** ([#95](https://github.com/matt-cochran/1password-vault/issues/95)): what opv last wrote to an environment's target, per key (time, plan id and opv version from Key Vault and Kubernetes stamps; versions from the Fly/GitHub ledger), and what changed outside opv since. Read-only, values never shown; `--json`; `h` in `opv ui`.
+
 - **`opv ui` adoption review** ([#94](https://github.com/matt-cochran/1password-vault/issues/94)): `i` reads `opv adopt --json` and lets you decide per key (import or skip; keep, replace or skip), then runs exactly the `opv adopt … --apply` it shows. `opv adopt --skip <product/KEY>` leaves a key out.
 - **`opv ui` configuration editing** ([#97](https://github.com/matt-cochran/1password-vault/issues/97)): `+` declares a key and `E` adds an environment through forms that run the exact `opv add` / `opv init --add-env` they show; `e` opens `opv config edit`. `opv add` takes `--from PRODUCT/KEY`, `--personal` and `--allow-same-value`.
 

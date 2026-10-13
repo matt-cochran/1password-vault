@@ -254,3 +254,59 @@ pub fn adopt(f: &mut Frame, area: Rect, app: &App, env: &str, from: &str) {
         area,
     );
 }
+
+/// What opv last wrote to `env`'s target (#95), from `opv history <env> --json`: the
+/// latest write, then each key with its state. Names, versions, times and plan ids only.
+pub fn history(f: &mut Frame, area: Rect, app: &App, env: &str) {
+    let mut lines = Vec::new();
+    match &app.history {
+        None => lines.push(Line::raw("reading history…")),
+        Some(doc) => {
+            match doc["latest"].as_object() {
+                Some(l) => lines.push(Line::styled(
+                    format!(
+                        "last write {} by plan {} (opv {})",
+                        l.get("written").and_then(|v| v.as_str()).unwrap_or("-"),
+                        l.get("plan").and_then(|v| v.as_str()).unwrap_or("-"),
+                        l.get("opv_version").and_then(|v| v.as_str()).unwrap_or("-"),
+                    ),
+                    BOLD,
+                )),
+                None => lines.push(Line::raw(
+                    "this target keeps no write stamps; versions are compared with what opv's own syncs recorded",
+                )),
+            }
+            lines.push(Line::raw(""));
+            for r in doc["rows"].as_array().into_iter().flatten() {
+                let s = |k: &str| r[k].as_str().unwrap_or("-").to_string();
+                let label = app.label(&s("product"), &s("key"));
+                let state = match r["state"].as_str().unwrap_or("") {
+                    "stamped" => "written by opv",
+                    "recorded" => "as opv left it",
+                    "changed_outside_opv" => "changed outside opv",
+                    "not_recorded" => "no record of opv writing it",
+                    "absent" => "not on the target",
+                    other => other,
+                };
+                let when = r["written"].as_str().unwrap_or("");
+                lines.push(Line::raw(format!(
+                    "{label:<30} {:<10} {state:<28} {when}",
+                    s("version")
+                )));
+            }
+            if doc["rows"].as_array().is_none_or(|a| a.is_empty()) {
+                lines.push(Line::raw("no secret is declared here"));
+            }
+        }
+    }
+    let title = format!(
+        " History · {} ",
+        app.snap.env(env).map_or(env, |e| e.title.as_str())
+    );
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
