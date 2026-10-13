@@ -630,13 +630,14 @@ fn json_reason(s: &KeyState) -> Option<String> {
     }
 }
 
-/// Target presence: secrets are present/absent/would-change; config is not a target secret.
+/// Target presence: secrets are present/absent/would-change; config only where the target
+/// delivers it itself (FR-46), otherwise none.
 fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     match (kind, target) {
-        (Kind::Config, _) => None,
-        (Kind::Secret, TargetState::Absent) => Some("absent"),
-        (Kind::Secret, TargetState::WouldChange) => Some("would_change"),
-        (Kind::Secret, _) => Some("present"),
+        (Kind::Config, TargetState::Unknown) => None,
+        (_, TargetState::Absent) => Some("absent"),
+        (_, TargetState::WouldChange) => Some("would_change"),
+        (_, _) => Some("present"),
     }
 }
 
@@ -704,7 +705,11 @@ pub(crate) fn row_state_label(r: &Row) -> String {
 /// binding on a pinned target, when known. `opv help states` defines each word.
 pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &'static str {
     match (r.kind, r.target, &r.state) {
-        (Kind::Config, _, _) => "n/a",
+        // Config has a target state only where the target delivers it itself (FR-46).
+        (Kind::Config, TargetState::Unknown, _) | (Kind::Config, _, KeyState::Skipped) => "n/a",
+        (Kind::Config, TargetState::Absent, _) => "new",
+        (Kind::Config, TargetState::WouldChange, _) => "changed",
+        (Kind::Config, TargetState::Present, _) => "same",
         (Kind::Secret, TargetState::Absent, KeyState::Skipped) => "n/a",
         (Kind::Secret, _, KeyState::Skipped) => "extra",
         (Kind::Secret, TargetState::Absent, _) => "new",
@@ -736,12 +741,13 @@ TARGET: the key on the deployment target
   same        on the target with the same value; nothing to write
   changed     on the target with another value; the next sync writes it
   unknown     on the target, but the target does not reveal values, so opv cannot compare;
-              sync stages it and compares digests
+              sync writes it again (a staging target stages it and compares digests)
   pending     written, not yet live; the next sync --deploy rolls it out
   held        immutable and already set; kept as it is (replace with --rotate)
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote
-  n/a         not a target secret (config keys, and skipped keys not on the target)
+  n/a         not delivered to the target (config keys, unless the target takes config as
+              variables, and skipped keys not on the target)
 
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
@@ -1408,13 +1414,20 @@ fn provider_named(src: &str) -> Option<String> {
         "containerapp",
         "kubectl",
         "flyctl",
+        // The GitHub provider by its module and target type; plain "GitHub" stays allowed
+        // (CI detection, documentation links).
+        "githubtarget",
         // Store kinds and bindings (FR-39): core sees only `StoreConfig`.
         "azure_key_vault",
         "external-secrets",
         "externalsecrets?",
         "clustersecretstores?",
     ];
-    let re = regex::Regex::new(&format!(r"(?i)\b({})\b|\baz\s", words.join("|"))).unwrap();
+    let re = regex::Regex::new(&format!(
+        r"(?i)\b({})\b|\b(az|gh)\s|\bgithub::",
+        words.join("|")
+    ))
+    .unwrap();
     re.find(&production_code(src))
         .map(|m| m.as_str().to_string())
 }

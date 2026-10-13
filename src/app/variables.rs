@@ -1,5 +1,5 @@
-//! The config channel of a staged target that delivers config itself (FR-46): GitHub
-//! Actions variables. Config is never secret (FR-14), so the store reads its values back and
+//! The config channel of a staged target that delivers config itself (FR-46): named
+//! variables next to its secrets. Config is never secret (FR-14), so the store reads its values back and
 //! `status`, `plan` and `sync` compare them exactly.
 //!
 //! [`plan`] runs after the item plan, on the same rows: a ready config key of a delivered
@@ -20,9 +20,9 @@ use crate::provider::TargetConfig;
 pub(crate) const CONCEALED_RULE: &str = "concealed-config";
 
 /// Its fixed reason (FR-22): never the value.
-pub(crate) const CONCEALED_REASON: &str = "its 1Password field is concealed, and a GitHub \
-     variable is readable by everyone with read access to the repository; make the field a \
-     text field, or declare the key kind = \"secret\"";
+pub(crate) const CONCEALED_REASON: &str = "its 1Password field is concealed, but this target \
+     publishes config as plain variables that anyone who can read the target sees; make the \
+     field a text field, or declare the key kind = \"secret\"";
 
 /// What a sync does with the config channel. Names are runtime env names.
 #[derive(Debug, Default, PartialEq, Eq)]
