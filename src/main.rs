@@ -308,6 +308,12 @@ the section \"opv · kept\". Values are never printed. --from target reads Key V
 Kubernetes and GitHub variables; Fly and GitHub secrets cannot be read back. It never syncs,
 deploys or deletes the source.";
 
+#[cfg(feature = "ui")]
+const UI_QUICK: &str = "\
+Examples:
+  opv ui                       # every environment x product; enter to open, s to sync, q to quit
+  OPV_UI_TEXT=1 opv ui         # the same information as text (screen readers, dumb terminals)";
+
 const READY_QUICK: &str = "\
 Examples:
   opv ready                      # every environment × product, findings, the next step
@@ -586,6 +592,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Browse and manage every environment, product and key in a terminal UI (values never
+    /// shown); actions run the same opv commands, behind plan and confirmation.
+    #[cfg(feature = "ui")]
+    #[command(before_help = UI_QUICK)]
+    Ui,
     /// What is ready, what is not, and who does what next: one receipt (read-only).
     #[command(before_help = READY_QUICK)]
     Ready {
@@ -1638,6 +1649,17 @@ fn run(
         Cmd::Projects { long, json } => {
             return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
         }
+        #[cfg(feature = "ui")]
+        Cmd::Ui => {
+            let exe = std::env::current_exe().map_err(|e| {
+                Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
+            })?;
+            let source = opv::ui::run::Exe {
+                exe,
+                config: cli.config.clone(),
+            };
+            return opv::ui::run::run(source, out).map(|()| 0);
+        }
         Cmd::Bootstrap {
             file,
             project,
@@ -2043,6 +2065,8 @@ fn run_other(
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
         }
+        #[cfg(feature = "ui")]
+        Cmd::Ui => unreachable!("handled by run"),
         Cmd::Doctor { env, product, json } => {
             let scope = doctor::Request {
                 env: env.as_deref(),

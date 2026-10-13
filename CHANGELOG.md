@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`opv account list [--json]` and `opv account use`** ([#80](https://github.com/matt-cochran/1password-vault/issues/80); FR-49): the 1Password accounts this CLI knows, which one the project uses and why, whether each is signed in, and findings with stable codes and one next step each, without a prompt, a sign-in or any write; `use` records the project's account in `.opv` deterministically. "No accounts" is now told apart from "op failed".
 - **Account choice you can see** ([#79](https://github.com/matt-cochran/1password-vault/issues/79); FR-50): `opv login` shows the account menu even with one account added to the CLI, marks signed-in accounts, always offers **Add another 1Password account**, and explains on WSL that the Windows app's accounts are not visible; `opv login --add [--account <email>]` adds one directly.
 
+### Fixed
+
+- `status`/`plan --json`: a key the target does not deliver (source-only, or outside `products`) reported `"target": "present"`; it is now `"not_delivered"`.
+
 ### Changed
 
 - **Sign-in failures in opv's words** (#79, FR-50): 1Password's prompts still show as they come, but its error lines are classified (`account_not_registered`, `op_not_signed_in`, `desktop_app_unavailable`, `credential_rejected`, `sign_in_cancelled`, `provider_unavailable`, `op_unexpected`), each naming the account and one next step; op's own directions (`op signin --help`) are no longer shown, and the message names the command that was running. A session that ends mid-command and cannot be renewed now reports why.

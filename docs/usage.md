@@ -606,8 +606,10 @@ keeps it, while renaming or removing a field, or changing its meaning, increment
 failing rule when `state` is `failing_rule`, and `reason` says why (see
 [Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
 target for every provider (`fly_name` holds the same value and is kept for older scripts; it
-is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
-a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
+is deprecated); `target` is `present`, `absent` or `would_change` for a secret, `not_delivered`
+for a key the environment's target does not deliver (a source-only value, or a product left out of
+the target's `products`), and `null` for a config key (or `present`/`absent`/`would_change` where
+the target takes config as variables); `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
 in the same key order, is used by `status`, `plan` and `check`. With `--product`,
 the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
 totals. `next` is the sync command for `plan`, `null` for `status`. `plan --json` adds
