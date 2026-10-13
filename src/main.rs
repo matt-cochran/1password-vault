@@ -425,6 +425,10 @@ enum Cmd {
         /// several accounts are on this machine.
         #[arg(long)]
         account: Option<String>,
+        /// Add a 1Password account to this CLI first (with --account: that email), at
+        /// 1Password's own prompt.
+        #[arg(long)]
+        add: bool,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -943,10 +947,17 @@ fn main() -> ExitCode {
             run(cli, config_source, &init_options, &mut stdout)
         };
         let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
-        if may_sign_in && signed_out && !signed_in && sign_in_here() {
-            // Once: a second failure is reported as it is.
-            signed_in = true;
-            continue;
+        if may_sign_in && signed_out && !signed_in {
+            match sign_in_here() {
+                // Once: a second failure is reported as it is.
+                Ok(true) => {
+                    signed_in = true;
+                    continue;
+                }
+                Ok(false) => {}
+                // Why the sign-in failed, in opv's words (FR-50), instead of the first error.
+                Err(e) => break Err(e),
+            }
         }
         break res;
     };
@@ -1344,6 +1355,7 @@ fn run(
         env,
         command,
         account,
+        add,
     } = &cli.cmd
     {
         use opv::app::{login, setup_runtime};
@@ -1354,10 +1366,11 @@ fn run(
             cli.verbose,
         );
         // One runtime: an account added and signed in here keeps its session for the login.
-        let mut runtime = setup_runtime::Runtime::default();
+        let mut runtime = setup_runtime::Runtime::default().for_command("login");
         login::choose_account(
             &probe,
             account.as_deref(),
+            *add,
             &here,
             &mut runtime,
             &mut setup_runtime::Console,
@@ -2000,11 +2013,11 @@ fn init_args(
 /// a terminal to do it (no TTY, CI, a service account or Connect) or the sign-in failed,
 /// so the original error stands. The password goes only to op; the session stays in this
 /// process ([`opv::runner::use_op_session`]).
-fn sign_in_here() -> bool {
+fn sign_in_here() -> Result<bool, Error> {
     use opv::app::setup::Backend as _;
     use opv::app::setup_runtime::{Console, Runtime};
     if Console::require_terminal("", "").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
-        return false;
+        return Ok(false);
     }
     let here = std::env::current_dir().unwrap_or_default();
     let account = config_store::pointer_account(&here).or_else(config_store::account_env);
@@ -2012,12 +2025,11 @@ fn sign_in_here() -> bool {
         "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
          to go on; your password goes only to 1Password's prompt."
     );
-    let mut runtime = Runtime::with_account(account.as_deref());
-    if runtime.sign_in(account.as_deref(), false).is_err() {
-        return false;
-    }
+    let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
+    let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);
+    runtime.sign_in(account.as_deref(), false)?;
     opv::runner::use_op_session(runtime.into_session());
-    true
+    Ok(true)
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.

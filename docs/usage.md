@@ -394,6 +394,10 @@ all clear: nothing pending
 
 `opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`.
 
+**Choosing the account.** Until the project records one (`.opv`, written by your first choice; commit it), `opv login` asks which 1Password account holds the project's secrets, even when only one is added to this CLI, so you always see which one it is; each entry says whether it is signed in, and the last one is **Add another 1Password account**. `opv login --add [--account <email>]` adds an account right away. You type the sign-in address, Secret Key and password only at 1Password's own prompt (your Emergency Kit has them). On Linux and WSL the CLI keeps its own accounts: in WSL, accounts that are only in the Windows 1Password app are not listed until you add them here. On macOS and Windows the CLI uses the app's accounts, so you add an account in the app.
+
+**When sign-in fails** opv says why in its own words, names the account, and gives one next step: the account is not added to this CLI (`account_not_registered`, `Next: opv login --add --account <email>`), no session (`op_not_signed_in`), the 1Password app is locked or its CLI integration is off (`desktop_app_unavailable`), what was typed was not accepted (`credential_rejected`), the prompt was cancelled (`sign_in_cancelled`), 1Password could not be reached (`provider_unavailable`, exit 9, nothing changed), or a reason opv does not recognise (`op_unexpected`, `Next: opv doctor`). It never guesses that a password was wrong, and 1Password's own CLI directions are not repeated.
+
 `login`, `setup` and `config edit` need your own interactive terminal; without one they refuse (exit 6, `terminal_required`) and name themselves on `Next:`. Automation uses a 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`) instead, which decides the account. Per-environment `account` and `deploy_credentials`: [configuration](configuration.md#account-and-deploy-credentials).
 
 ## Configuration commands
@@ -486,6 +490,11 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
 | `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add |
+| `desktop_app_unavailable` | 7 | after_fix | yes | the 1Password app is locked, closed, or its CLI integration is off |
+| `credential_rejected` | 7 | after_fix | yes | 1Password did not accept what was typed at its prompt |
+| `sign_in_cancelled` | 7 | after_fix | yes | the 1Password sign-in prompt was cancelled |
+| `op_unexpected` | 7 | after_fix | yes | 1Password's CLI failed for a reason opv does not recognise; opv doctor checks it |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |

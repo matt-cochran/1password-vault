@@ -488,6 +488,11 @@ codes! {
     TerminalRequired => "terminal_required", 6, Never, true, "the command needs the user's own interactive terminal";
     AuthRequired => "auth_required", 7, AfterFix, true, "not signed in to 1Password or the target CLI";
     OpNotSignedIn => "op_not_signed_in", 7, AfterFix, true, "not signed in to 1Password";
+    AccountNotRegistered => "account_not_registered", 7, AfterFix, true, "the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add";
+    DesktopAppUnavailable => "desktop_app_unavailable", 7, AfterFix, true, "the 1Password app is locked, closed, or its CLI integration is off";
+    CredentialRejected => "credential_rejected", 7, AfterFix, true, "1Password did not accept what was typed at its prompt";
+    SignInCancelled => "sign_in_cancelled", 7, AfterFix, true, "the 1Password sign-in prompt was cancelled";
+    OpUnexpected => "op_unexpected", 7, AfterFix, true, "1Password's CLI failed for a reason opv does not recognise; opv doctor checks it";
     DeployCredentialsFailed => "deploy_credentials_failed", 7, AfterFix, true, "the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed";
     Findings => "findings", 8, AfterFix, true, "keys are missing or failing a rule (values are filled in 1Password by a person)";
     OutcomeUnknown => "outcome_unknown", 9, Safe, false, "a change may or may not have been applied; re-running is safe";

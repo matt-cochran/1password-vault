@@ -13,8 +13,19 @@ pub struct Runtime {
     runner: ProcessRunner,
     session: Vec<(String, SecretValue)>,
     account: Option<String>,
+    /// The opv command this sign-in serves (`login`, `setup`, or the command that found the
+    /// session ended), named in failures (FR-50). `None`: `setup`.
+    command: Option<String>,
 }
 impl Runtime {
+    /// This runtime, naming `command` in its sign-in failures (FR-50).
+    pub fn for_command(mut self, command: &str) -> Self {
+        self.command = Some(command.to_string());
+        self
+    }
+    fn command_name(&self) -> &str {
+        self.command.as_deref().unwrap_or("setup")
+    }
     /// The session variables this runtime's sign-in produced (for [`crate::runner::use_op_session`]).
     pub fn into_session(self) -> Vec<(String, SecretValue)> {
         self.session
@@ -83,7 +94,14 @@ fn dependency(error: io::Error) -> Error {
 
 pub fn session_assignment(output: &[u8]) -> Result<Option<(String, SecretValue)>, Error> {
     let fail = || {
-        Error::Auth("1Password returned an unexpected sign-in response. Nothing was evaluated or printed. Run op signin --help for this CLI version.".into())
+        Error::Auth(
+            "1Password returned a sign-in response opv does not recognise; nothing was \
+             evaluated or printed"
+                .into(),
+        )
+        .with_code(crate::error::Code::OpUnexpected)
+        .with_do("check the 1Password CLI version opv supports")
+        .with_next("opv doctor")
     };
     let text = std::str::from_utf8(output).map_err(|_| fail())?;
     let pattern = Regex::new(r#"^export[ \t]+(OP_SESSION(?:_[A-Za-z0-9_]+)?)=(?:"([A-Za-z0-9._/+=-]+)"|'([A-Za-z0-9._/+=-]+)'|([A-Za-z0-9._/+=-]+));?[ \t]*$"#).expect("fixed session pattern");
@@ -138,23 +156,8 @@ impl Backend for Runtime {
             command.args(["--email", e]);
         }
         command.env_remove("OP_SESSION").env("OP_DEBUG", "false");
-        command
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .stdout(Stdio::piped());
-        let mut child = command.spawn().map_err(dependency)?;
-        let output =
-            crate::runner::read_to_end_zeroizing(child.stdout.take().expect("piped stdout"))
-                .map_err(dependency)?;
-        let status = child.wait().map_err(dependency)?;
-        if !status.success() {
-            return Err(Error::Auth(
-                "1Password did not add the account; its reason is above. If a sign-in address, \
-                 Secret Key or password was mistyped, run opv login again (your Emergency Kit \
-                 has them). Session output was not printed."
-                    .into(),
-            ));
-        }
+        let output = run_prompted(&mut command)
+            .map_err(|f| f.error("adding the account", email, self.command_name()))?;
         if let Some((name, value)) = session_assignment(&output)? {
             self.session = session_vars(None, name, value);
         }
@@ -232,23 +235,79 @@ impl Backend for Runtime {
         // Generic sessions can be stale. Account-specific sessions are selected by op;
         // --force asks it to emit a fresh assignment, which stays in this process.
         command.env_remove("OP_SESSION").env("OP_DEBUG", "false");
-        command
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .stdout(Stdio::piped());
-        let mut child = command.spawn().map_err(dependency)?;
+        let what = if add_account {
+            "adding the account"
+        } else {
+            "signing in"
+        };
         let output =
-            crate::runner::read_to_end_zeroizing(child.stdout.take().expect("piped stdout"))
-                .map_err(dependency)?;
-        let status = child.wait().map_err(dependency)?;
-        if !status.success() {
-            return Err(Error::Auth("1Password could not sign in. Check the account and password at its prompts, then rerun opv setup. Session output was not printed.".into()));
-        }
+            run_prompted(&mut command).map_err(|f| f.error(what, account, self.command_name()))?;
         if !add_account && let Some((name, value)) = session_assignment(&output)? {
             self.session = session_vars(self.account.as_deref(), name, value);
         }
         Ok(())
     }
+}
+
+/// Why [`run_prompted`] failed: the classified op failure, or an opv-side error (op
+/// missing) already worded.
+pub enum PromptFailure {
+    Op(super::signin_filter::Failure),
+    Spawn(Error),
+}
+
+impl PromptFailure {
+    fn error(self, what: &str, account: Option<&str>, command: &str) -> Error {
+        match self {
+            PromptFailure::Op(f) => f.error(what, account, command),
+            PromptFailure::Spawn(e) => e,
+        }
+    }
+}
+
+/// Run an op command that prompts the owner (`op signin`, `op account add`): stdin stays
+/// the terminal, stderr is shown through [`super::signin_filter::Filter`] (the prompts as
+/// they come, op's error lines kept back and classified, FR-50), stdout (the session
+/// assignment) is captured and never shown.
+fn run_prompted(command: &mut Command) -> Result<Zeroizing<Vec<u8>>, PromptFailure> {
+    command
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| PromptFailure::Spawn(dependency(e)))?;
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let pump = std::thread::spawn(move || {
+        super::signin_filter::Filter::pump(&mut stderr, &mut io::stderr().lock())
+    });
+    let output = crate::runner::read_to_end_zeroizing(child.stdout.take().expect("piped stdout"))
+        .map_err(|e| PromptFailure::Spawn(dependency(e)))?;
+    let status = child
+        .wait()
+        .map_err(|e| PromptFailure::Spawn(dependency(e)))?;
+    let messages = pump.join().ok().and_then(Result::ok).unwrap_or_default();
+    if status.success() {
+        return Ok(output);
+    }
+    // The prompt line op left open ends here, before opv's own message.
+    let _ = writeln!(io::stderr());
+    Err(PromptFailure::Op(super::signin_filter::classify(
+        &messages,
+        exit_code(&status),
+    )))
+}
+
+/// The exit code, or 128 + the signal that ended the child (130 for Ctrl-C).
+fn exit_code(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return Some(128 + sig);
+        }
+    }
+    status.code()
 }
 
 pub struct Console;

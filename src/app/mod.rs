@@ -41,6 +41,7 @@ pub mod setup_runtime;
 #[cfg(test)]
 mod shared_tests;
 pub mod signin;
+pub(crate) mod signin_filter;
 #[cfg(test)]
 mod simple_tests;
 pub mod skeleton;
