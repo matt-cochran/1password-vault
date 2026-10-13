@@ -28,7 +28,7 @@ pub struct Recorded {
 /// The fake. `signed_in` false makes every op call fail as op does without a session.
 pub struct FakeOp {
     pub items: RefCell<Vec<Value>>,
-    pub vaults: Vec<(String, String)>,
+    pub vaults: RefCell<Vec<(String, String)>>,
     pub remote: RefCell<Option<String>>,
     /// `git rev-parse --show-toplevel`.
     pub toplevel: RefCell<Option<String>>,
@@ -47,10 +47,10 @@ impl Default for FakeOp {
     fn default() -> Self {
         Self {
             items: RefCell::default(),
-            vaults: vec![
+            vaults: RefCell::new(vec![
                 ("vdev0000000000000000000001".into(), "myapp-dev".into()),
                 ("vshr0000000000000000000002".into(), "shared".into()),
-            ],
+            ]),
             remote: RefCell::new(None),
             toplevel: RefCell::new(None),
             signed_in: Cell::new(true),
@@ -150,6 +150,7 @@ impl FakeOp {
 
     fn vault(&self, v: &str) -> Option<(String, String)> {
         self.vaults
+            .borrow()
             .iter()
             .find(|(id, name)| id == v || name == v)
             .cloned()
@@ -188,6 +189,7 @@ impl FakeOp {
             ["vault", "list", ..] => {
                 let rows: Vec<Value> = self
                     .vaults
+                    .borrow()
                     .iter()
                     .map(|(id, name)| json!({"id": id, "name": name}))
                     .collect();
@@ -242,6 +244,42 @@ impl FakeOp {
                 };
                 cache.insert((*id).to_string(), answer.clone());
                 Output::success(serde_json::to_vec(&answer).unwrap())
+            }
+            ["vault", "get", v, ..] => match self.vault(v) {
+                Some((id, name)) => {
+                    Output::success(serde_json::to_vec(&json!({"id": id, "name": name})).unwrap())
+                }
+                None => Output::failure(1),
+            },
+            ["vault", "create", title, ..] => {
+                let id = format!("vnew{}", self.new_id());
+                self.vaults
+                    .borrow_mut()
+                    .push((id.clone(), (*title).to_string()));
+                Output::success(serde_json::to_vec(&json!({"id": id, "name": title})).unwrap())
+            }
+            // `init`'s form: the template on stdin, title as a flag.
+            [
+                "item",
+                "create",
+                "-",
+                "--vault",
+                vault,
+                "--title",
+                title,
+                ..,
+            ] => {
+                if self.vault(vault).is_none() {
+                    return Output::failure(1);
+                }
+                let mut item: Value = call
+                    .stdin
+                    .and_then(|s| serde_json::from_slice(s).ok())
+                    .unwrap_or_else(|| json!({}));
+                item["title"] = json!(title);
+                item["version"] = json!(1);
+                let id = self.insert(vault, item);
+                Output::success(serde_json::to_vec(&self.item(&id)).unwrap())
             }
             ["item", "create", "--vault", vault, ..] => {
                 let Some(mut item) = call

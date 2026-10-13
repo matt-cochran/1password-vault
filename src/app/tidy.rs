@@ -143,8 +143,8 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
     };
     Err(Error::Policy(
         format!(
-            "{what} writes the project's manifest in 1Password, which only a person signed in \
-             with their own session may do; {why}; nothing written"
+            "{what} writes to 1Password, which only a person signed in with their own \
+             session may do; {why}; nothing written"
         )
         .into(),
     )

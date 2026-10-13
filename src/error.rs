@@ -489,6 +489,7 @@ codes! {
     TerminalRequired => "terminal_required", 6, Never, true, "the command needs the user's own interactive terminal";
     AuthRequired => "auth_required", 7, AfterFix, true, "not signed in to 1Password or the target CLI";
     OpNotSignedIn => "op_not_signed_in", 7, AfterFix, true, "not signed in to 1Password";
+    IdsNotInAccount => "ids_not_in_account", 2, AfterFix, true, "an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind)";
     AccountNotRegistered => "account_not_registered", 7, AfterFix, true, "the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add";
     DesktopAppUnavailable => "desktop_app_unavailable", 7, AfterFix, true, "the 1Password app is locked, closed, or its CLI integration is off";
     CredentialRejected => "credential_rejected", 7, AfterFix, true, "1Password did not accept what was typed at its prompt";

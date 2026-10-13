@@ -350,6 +350,14 @@ pub fn render_text(report: &Report, out: &mut dyn Write) -> Result<(), Error> {
     for row in &rows {
         write_row(out, row, &widths)?;
     }
+    if report.discovery == "credential" {
+        return writeln!(
+            out,
+            "a 1Password service account or Connect credential is set: it decides the account, \
+             so there is nothing to list or choose"
+        )
+        .map_err(super::write_err);
+    }
     let selected = match &report.selected {
         Some(s) if s.by == "only" => format!(
             "selected: the only account this CLI knows; not recorded for this project yet \
@@ -414,6 +422,46 @@ pub fn use_account(
     }
 }
 
+/// The FR-49 report for this machine and checkout: one `op account list` probe, one
+/// `op whoami --account <id>` probe per listed account, `.opv` and `OP_ACCOUNT`.
+pub fn gather(r: &dyn crate::runner::CommandRunner, flag: Option<&str>) -> Report {
+    use crate::adapters::onepassword_manifest as manifest;
+    let host = crate::host::Host::detect();
+    // A service account or Connect decides the account itself: nothing to list or choose.
+    if host.op_credential.is_some() {
+        return credential_report(host.platform);
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let pointer = crate::config_store::pointer_account(&here);
+    let env = crate::config_store::account_env();
+    let probe = |id: &str| manifest::signed_in(r, id);
+    report(&Inputs {
+        discovery: manifest::discover(r),
+        signed_in: &probe,
+        flag,
+        env: env.as_deref(),
+        pointer: pointer
+            .as_deref()
+            .map(|a| (a, std::path::Path::new(".opv"))),
+        manifest: None,
+        platform: crate::host::Host::detect().platform,
+    })
+}
+
+/// The report when a non-interactive credential (service account, Connect) is set: it
+/// decides the account, so there is no list, selection or finding (`discovery: credential`).
+pub fn credential_report(platform: Platform) -> Report {
+    Report {
+        discovery: "credential".into(),
+        platform: platform_str(platform).into(),
+        cli_accounts_only: false,
+        selected: None,
+        accounts: Vec::new(),
+        findings: Vec::new(),
+        next: None,
+    }
+}
+
 /// `opv account list [--account <who>] [--json]` (FR-49): one `op account list` probe and
 /// one `op whoami --account <id>` probe per listed account; reads `.opv` and `OP_ACCOUNT`.
 /// Nothing prompts, signs in, adds an account or writes. Findings never fail the command:
@@ -424,22 +472,7 @@ pub fn list(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    use crate::adapters::onepassword_manifest as manifest;
-    let here = std::env::current_dir().unwrap_or_default();
-    let pointer = crate::config_store::pointer_account(&here);
-    let env = crate::config_store::account_env();
-    let probe = |id: &str| manifest::signed_in(r, id);
-    let doc = report(&Inputs {
-        discovery: manifest::discover(r),
-        signed_in: &probe,
-        flag,
-        env: env.as_deref(),
-        pointer: pointer
-            .as_deref()
-            .map(|a| (a, std::path::Path::new(".opv"))),
-        manifest: None,
-        platform: crate::host::Host::detect().platform,
-    });
+    let doc = gather(r, flag);
     if json {
         let mut v = serde_json::to_value(&doc)
             .map_err(|_| Error::Config("cannot serialize the account list".into()))?;
@@ -499,3 +532,24 @@ pub fn use_command(
 #[cfg(test)]
 #[path = "account_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn a_credential_report_has_no_findings() {
+        assert!(credential_report(Platform::Linux).findings.is_empty());
+    }
+
+    #[test]
+    fn a_credential_report_says_the_credential_decides() {
+        let mut out = Vec::new();
+        render_text(&credential_report(Platform::Linux), &mut out).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("it decides the account")
+        );
+    }
+}

@@ -13,6 +13,7 @@ pub mod account;
 pub mod add;
 #[cfg(test)]
 mod azure_tests;
+pub mod bootstrap;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;
@@ -34,6 +35,7 @@ pub mod open;
 #[cfg(test)]
 mod pinned_tests;
 pub(crate) mod preflight;
+pub mod ready;
 pub mod run;
 pub mod setup;
 mod setup_import;

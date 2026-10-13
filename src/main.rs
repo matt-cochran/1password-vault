@@ -295,6 +295,23 @@ Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
   opv init prod --fly-app myapp         # deploys to Fly";
 
+const READY_QUICK: &str = "\
+Examples:
+  opv ready                      # every environment × product, findings, the next step
+  opv ready --json --save r.json # the receipt for an assistant or a handoff";
+
+const BOOTSTRAP_QUICK: &str = "\
+Examples:
+  opv bootstrap --dry-run      # what would be created or checked, per environment
+  opv bootstrap                # create missing vaults and items, record their IDs";
+
+const BOOTSTRAP_MORE: &str = "\
+Environments without vault_id and item_id get a vault <project>-<env> and an item
+\"<project> · <env> values\" in the selected 1Password account (found when they exist),
+and their IDs are recorded in secrets.toml. Recorded IDs the account cannot see stop
+with ids_not_in_account: select the owning account, or pass --rebind <env>. Then every
+declared field is added, empty. Nothing is synced, deployed or given a value. Next: opv ready";
+
 const ACCOUNT_LIST_QUICK: &str = "\
 Examples:
   opv account list           # accounts, which is selected, what to do next
@@ -525,6 +542,38 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// What is ready, what is not, and who does what next: one receipt (read-only).
+    #[command(before_help = READY_QUICK)]
+    Ready {
+        /// Only this environment.
+        env: Option<String>,
+        /// Print the receipt as one JSON document.
+        #[arg(long)]
+        json: bool,
+        /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
+        #[arg(long, value_name = "FILE")]
+        save: Option<PathBuf>,
+    },
+    /// Create every environment's vault, item and empty fields in the selected account.
+    #[command(before_help = BOOTSTRAP_QUICK, after_help = BOOTSTRAP_MORE)]
+    Bootstrap {
+        /// The configuration file to complete; defaults to the secrets.toml found from here.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Project name for vault and item titles; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Show what would be created or checked; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace this environment's recorded IDs with a vault and item in the selected
+        /// account (repeatable). Values are not moved.
+        #[arg(long, value_name = "ENV")]
+        rebind: Vec<String>,
+        /// Print one JSON document (one step per environment) instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Configuration commands.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -1277,6 +1326,8 @@ impl Cmd {
             | Cmd::Init { json, .. }
             | Cmd::Add { json, .. }
             | Cmd::Item(ItemCmd::Skeleton { json, .. })
+            | Cmd::Bootstrap { json, .. }
+            | Cmd::Ready { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. }) => *json,
             Cmd::Plan(a) => a.json,
@@ -1474,6 +1525,36 @@ fn run(
     match &cli.cmd {
         Cmd::Projects { long, json } => {
             return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        }
+        Cmd::Bootstrap {
+            file,
+            project,
+            dry_run,
+            rebind,
+            json,
+        } => {
+            let here = std::env::current_dir().unwrap_or_default();
+            let path = match file.clone().or_else(|| cli.config.clone()) {
+                Some(p) => p,
+                None => config_store::walk_up(&here, "secrets.toml").ok_or_else(|| {
+                    Error::Config("no secrets.toml here or in a parent directory".into())
+                        .with_next("opv init <env> --file")
+                })?,
+            };
+            let project = match project {
+                Some(p) => p.clone(),
+                None => config_store::default_project(
+                    None,
+                    config_store::git_repo(&r).as_deref(),
+                    &here,
+                )?,
+            };
+            let opts = opv::app::bootstrap::Opts {
+                dry_run: *dry_run,
+                rebind: rebind.iter().cloned().collect(),
+                json: *json,
+            };
+            return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
         }
         Cmd::Account(AccountCmd::List { account, json }) => {
             return opv::app::account::list(&r, account.as_deref(), *json, out).map(|()| 0);
@@ -1761,6 +1842,7 @@ fn run_other(
         | Cmd::Guide { .. }
         | Cmd::Projects { .. }
         | Cmd::Account(_)
+        | Cmd::Bootstrap { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
@@ -1778,6 +1860,15 @@ fn run_other(
         Cmd::Check { env, product, json } => {
             opv::app::local::check(&loaded?, &env, product.as_deref(), r, out, json)
         }
+        Cmd::Ready { env, json, save } => opv::app::ready::run(
+            &loaded?,
+            source,
+            env.as_deref(),
+            r,
+            json,
+            save.as_deref(),
+            out,
+        ),
         Cmd::Status {
             env: None,
             product,

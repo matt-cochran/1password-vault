@@ -7,6 +7,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | Command | What it does | Changes |
 |---|---|---|
 | `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
+| `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
 | `opv account use <email or ID>` | record the project's account in `.opv`, without a prompt | `.opv` |
 | `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
@@ -392,6 +394,26 @@ all clear: nothing pending
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
 - With no configuration at all, the config line lists both ways to start (`opv init` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
 
+## Readiness: `opv ready`
+
+`opv ready` answers "what is ready, what is not, and who does what next" in one read-only command. It reads the account (as `opv account list`) and every environment (as `opv status`), and prints a product × environment grid (`saved/declared`, `n/a` where the environment's target does not deliver the product), the findings, and the first step:
+
+```text
+ready: 1 blocking · 1 findings · receipt rcpt-3f9a1c0d2e7b
+PRODUCT  dev  staging          prod
+api      6/6  5/6 · 1 finding  6/6
+shared   n/a  n/a              n/a
+Needs attention:
+  [owner] key_missing staging api/STRIPE_KEY → opv open api/STRIPE_KEY --env staging
+Next (owner): opv open api/STRIPE_KEY --env staging
+```
+
+`--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
+
+## Fresh fleet: `opv bootstrap`
+
+In a `secrets.toml` whose environments leave out `vault_id` and `item_id`, `opv bootstrap` creates, in the selected 1Password account, a vault `<project>-<env>` and an item `<project> · <env> values` for each (using existing ones with those titles), records their IDs in the file (comments and order kept), and adds every declared field, empty. `--dry-run` shows the plan and changes nothing. Recorded IDs the selected account cannot see stop with `ids_not_in_account`: select the account that holds them (`opv account use <ID>`) or pass `--rebind <env>` to record a new vault and item in this account (values are not moved). A file whose first line starts with `# generated` is never rewritten; the IDs are printed for its generator. It needs your own session (it writes 1Password), never syncs or deploys, and ends with `Next: opv ready`. Re-running is safe.
+
 ## Sign-in: `opv login`
 
 `opv login <env>` signs in to the 1Password account that environment uses (its `account` setting), at 1Password's own prompts, and opens a signed-in terminal (type `exit` to leave it); `opv login <env> -- <command>` runs one command signed in and exits with its code. No token is printed and nothing needs `eval`. Without an environment it uses the one account every environment uses (or your default account), and asks which environment when they differ. Sessions for environments in different accounts coexist in one terminal (`OP_SESSION_<account>` each), and every command uses the account of the environment it acts on. Every sign-in hint opv prints is `opv login <env>`.
@@ -495,6 +517,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
 | `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `ids_not_in_account` | 2 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind) |
 | `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add |
 | `desktop_app_unavailable` | 7 | after_fix | yes | the 1Password app is locked, closed, or its CLI integration is off |
 | `credential_rejected` | 7 | after_fix | yes | 1Password did not accept what was typed at its prompt |
