@@ -283,3 +283,37 @@ fn esc_closes_a_form_without_running_anything() {
     press(&mut a, &[Key::Char('+'), Key::Esc]);
     assert!(a.modal.is_none());
 }
+
+#[test]
+fn ctrl_c_quits_from_the_overview() {
+    assert_eq!(press(&mut app(), &[Key::Interrupt]), Effect::Quit);
+}
+
+#[test]
+fn ctrl_c_quits_from_inside_a_form() {
+    assert_eq!(
+        press(&mut app(), &[Key::Char('+'), Key::Interrupt]),
+        Effect::Quit
+    );
+}
+
+#[test]
+fn a_word_with_a_space_is_quoted_in_the_shown_command() {
+    let args = ["add", "api/K", "--guidance", "ask the lead"].map(String::from);
+    assert_eq!(
+        command_line(&args),
+        "opv add api/K --guidance 'ask the lead'"
+    );
+}
+
+#[test]
+fn a_quote_inside_a_word_survives_the_shown_command() {
+    let args = ["add", "--guidance", "it's yours"].map(String::from);
+    assert_eq!(command_line(&args), r"opv add --guidance 'it'\''s yours'");
+}
+
+#[test]
+fn a_plain_command_is_shown_as_typed() {
+    let args = ["sync", "ci", "--expect-plan", "abc123"].map(String::from);
+    assert_eq!(command_line(&args), "opv sync ci --expect-plan abc123");
+}

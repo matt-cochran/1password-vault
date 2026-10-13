@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -17,6 +17,7 @@ use serde_json::Value;
 use super::app::{App, Effect, Key};
 use super::model::{Snapshot, Source};
 use crate::error::Error;
+use crate::runner::signals;
 
 /// This opv binary, run as a child with `--json` documents on stdout.
 pub struct Exe {
@@ -49,8 +50,19 @@ impl Source for Exe {
     }
 }
 
-fn key_of(code: KeyCode) -> Option<Key> {
-    Some(match code {
+/// The UI's key for a terminal key event. Ctrl-C (raw mode turns it into a key, not a
+/// signal) is [`Key::Interrupt`]; any other Ctrl or Alt chord means nothing, so Ctrl-S is
+/// never `s` (sync).
+pub(crate) fn key_of(k: KeyEvent) -> Option<Key> {
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        return matches!(k.code, KeyCode::Char('c' | 'C')).then_some(Key::Interrupt);
+    }
+    if k.modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META)
+    {
+        return None;
+    }
+    Some(match k.code {
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
         KeyCode::Left => Key::Left,
@@ -95,12 +107,12 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
             Err(Error::findings(1, "opv ready"))
         };
     }
+    eprintln!("opv ui: reading the configuration and readiness…");
     let mut app = App::new(Snapshot::gather(&source));
     let mut term = enter()?;
     let result = (|| -> Result<(), Error> {
         loop {
-            term.draw(|f| super::render::draw(f, &app))
-                .map_err(|e| io_err(&e))?;
+            paint(&mut term, &app)?;
             if !event::poll(Duration::from_millis(250)).map_err(|e| io_err(&e))? {
                 continue;
             }
@@ -110,18 +122,18 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
             if k.kind != KeyEventKind::Press {
                 continue;
             }
-            let Some(key) = key_of(k.code) else { continue };
+            let Some(key) = key_of(k) else { continue };
             match app.handle(key) {
                 Effect::None => {}
                 Effect::Quit => return Ok(()),
                 Effect::Refresh => {
-                    app.status = "refreshing…".into();
-                    term.draw(|f| super::render::draw(f, &app))
-                        .map_err(|e| io_err(&e))?;
+                    busy(&mut term, &mut app, "refreshing…")?;
                     app.refreshed(Snapshot::gather(&source));
                     app.status = "refreshed".into();
                 }
                 Effect::AdoptPlan { env, from } => {
+                    busy(&mut term, &mut app, &format!("reading {from}…"))?;
+                    app.status.clear();
                     match source.json(&["adopt", &env, "--from", &from, "--json"]) {
                         Ok(doc) if doc["rows"].is_array() => app.open_adopt(&env, &from, &doc),
                         Ok(doc) => {
@@ -136,27 +148,45 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
                     }
                 }
                 Effect::LoadAccounts => {
-                    app.accounts = source.json(&["account", "list", "--json"]).ok();
+                    busy(&mut term, &mut app, "reading accounts…")?;
+                    app.status.clear();
+                    match source.json(&["account", "list", "--json"]) {
+                        Ok(doc) => app.accounts = Some(doc),
+                        Err(why) => app.status = format!("opv account list: {why}"),
+                    }
                 }
-                Effect::Plan { env } => match source.json(&["plan", &env, "--json"]) {
-                    Ok(plan) => app.confirm_sync(&env, &plan),
-                    Err(why) => app.status = format!("opv plan {env}: {why}"),
-                },
+                Effect::Plan { env } => {
+                    busy(&mut term, &mut app, &format!("planning a sync of {env}…"))?;
+                    app.status.clear();
+                    match source.json(&["plan", &env, "--json"]) {
+                        Ok(plan) => app.confirm_sync(&env, &plan),
+                        Err(why) => app.status = format!("opv plan {env}: {why}"),
+                    }
+                }
                 Effect::Run(args) => {
                     leave(&mut term)?;
-                    let line = format!("opv {}", args.join(" "));
+                    let line = super::app::command_line(&args);
                     println!("\n$ {line}");
                     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+                    // The command owns the terminal now: Ctrl-C stops it, not opv ui.
+                    signals::set_child_owns_terminal(true);
                     let status = source.command(&words).status();
                     println!("\nPress Enter to return to opv ui.");
                     let _ = io::stdin().read_line(&mut String::new());
+                    signals::set_child_owns_terminal(false);
                     term = enter()?;
                     app.status = match status {
                         Ok(s) if s.success() => format!("ran: {line}"),
-                        Ok(s) => format!("{line}: exit {}", s.code().unwrap_or(1)),
+                        Ok(s) => match s.code() {
+                            Some(code) => format!("{line}: exit {code}"),
+                            None => format!("{line}: interrupted"),
+                        },
                         Err(e) => format!("{line}: could not run ({})", e.kind()),
                     };
+                    let done = std::mem::take(&mut app.status);
+                    busy(&mut term, &mut app, &format!("{done} · refreshing…"))?;
                     app.refreshed(Snapshot::gather(&source));
+                    app.status = done;
                 }
             }
         }
@@ -167,19 +197,68 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
+/// Draw the UI. Under `NO_COLOR` crossterm writes each colour change as an SGR reset,
+/// which drops the reverse and bold of a selection on the way: draw without colour then.
+fn paint(term: &mut Term, app: &App) -> Result<(), Error> {
+    let mono = crossterm::style::Colored::ansi_color_disabled_memoized();
+    term.draw(|f| {
+        super::render::draw(f, app);
+        if mono {
+            super::render::monochrome(f.buffer_mut());
+        }
+    })
+    .map(|_| ())
+    .map_err(|e| io_err(&e))
+}
+
+/// Show `what` in the status line and draw now, before something slow (opv reading
+/// 1Password), so the screen is never blank or stale while it runs.
+fn busy(term: &mut Term, app: &mut App, what: &str) -> Result<(), Error> {
+    app.status = what.to_string();
+    paint(term, app)
+}
+
 fn io_err(e: &dyn std::fmt::Display) -> Error {
     Error::Dependency(format!("terminal: {e}").into())
 }
 
+/// Put the terminal back as the shell expects it (best effort) when opv ends on a signal or
+/// a panic. It writes to the terminal device, not to stdout: `main` holds stdout's lock for
+/// the whole command, so the signal thread would wait for it forever.
+fn restore() {
+    let _ = terminal::disable_raw_mode();
+    #[cfg(windows)]
+    const TERMINAL: &str = "CONOUT$";
+    #[cfg(not(windows))]
+    const TERMINAL: &str = "/dev/tty";
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open(TERMINAL) {
+        let _ = crossterm::execute!(tty, terminal::LeaveAlternateScreen, crossterm::cursor::Show);
+    }
+}
+
 fn enter() -> Result<Term, Error> {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore();
+            previous(info);
+        }));
+    });
+    signals::set_on_exit(Some(restore));
     terminal::enable_raw_mode().map_err(|e| io_err(&e))?;
     crossterm::execute!(io::stdout(), terminal::EnterAlternateScreen).map_err(|e| io_err(&e))?;
     Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| io_err(&e))
 }
 
 fn leave(term: &mut Term) -> Result<(), Error> {
+    signals::set_on_exit(None);
     terminal::disable_raw_mode().map_err(|e| io_err(&e))?;
     crossterm::execute!(term.backend_mut(), terminal::LeaveAlternateScreen)
         .map_err(|e| io_err(&e))?;
     term.show_cursor().map_err(|e| io_err(&e))
 }
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;

@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `opv ui` in a real terminal: under `NO_COLOR` the selected row lost its highlight (each colour change reset it); Ctrl-C quits instead of acting as `c`, and Ctrl/Alt chords no longer act as their letter (Ctrl-S was `s`, sync); Ctrl-C while an action's command runs stops that command, not the UI; SIGTERM or SIGHUP puts the terminal back (it was left in raw mode on the alternate screen); the screen shows what it is reading instead of going blank or stale while opv reads 1Password; the key bar wraps so `q quit` is visible; shown commands quote a word with spaces, the key screen names the exact `opv open … --env` that `o` runs, a blocked sync names no command, and an empty or failed account list says so.
+- An interrupted `--json` command (Ctrl-C, SIGTERM) hung instead of exiting 130/143: the handler printed its document through stdout's lock, which the command holds.
 - `status`/`plan --json`: a key the target does not deliver (source-only, or outside `products`) reported `"target": "present"`; it is now `"not_delivered"`.
 
 ### Changed
