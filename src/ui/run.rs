@@ -81,8 +81,11 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
         } else {
             "opv ui draws only in an interactive terminal, and this is not one"
         };
-        writeln!(out, "{why}; here is the same information as text (opv ready):")
-            .map_err(crate::app::write_err)?;
+        writeln!(
+            out,
+            "{why}; here is the same information as text (opv ready):"
+        )
+        .map_err(crate::app::write_err)?;
         let status = source.command(&["ready"]).status().map_err(|e| {
             Error::Dependency(format!("cannot run opv ready ({})", e.kind()).into())
         })?;
