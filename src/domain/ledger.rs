@@ -91,6 +91,15 @@ impl Ledger {
         ledger
     }
 
+    /// Each recorded name with the store version opv's own sync left it at (#95). Never a
+    /// fingerprint or the key: history shows names and versions only.
+    pub fn versions(&self) -> BTreeMap<String, String> {
+        self.entries
+            .iter()
+            .map(|(name, (version, _))| (name.clone(), version.clone()))
+            .collect()
+    }
+
     fn fingerprint(&self, value: &SecretValue) -> Option<String> {
         self.key
             .as_ref()
