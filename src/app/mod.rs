@@ -9,6 +9,7 @@
 //!   verifying read; FR-43, [`tidy`]); a service account or CI never writes.
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
+pub mod account;
 pub mod add;
 #[cfg(test)]
 mod azure_tests;

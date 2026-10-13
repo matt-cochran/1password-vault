@@ -295,6 +295,15 @@ Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
   opv init prod --fly-app myapp         # deploys to Fly";
 
+const ACCOUNT_LIST_QUICK: &str = "\
+Examples:
+  opv account list           # accounts, which is selected, what to do next
+  opv account list --json    # the same for scripts and AI assistants";
+
+const ACCOUNT_USE_QUICK: &str = "\
+Examples:
+  opv account use owner@example.com   # record this project's account in .opv";
+
 const COMPLETIONS_QUICK: &str = "\
 Examples:
   opv completions bash > ~/.local/share/bash-completion/completions/opv
@@ -513,6 +522,9 @@ enum Cmd {
     /// Save managed settings on the configured deployment target.
     #[command(before_help = SYNC_QUICK, after_help = SYNC_MORE)]
     Sync(SyncArgs),
+    /// 1Password accounts: which ones this machine's CLI knows, and the project's.
+    #[command(subcommand)]
+    Account(AccountCmd),
     /// Configuration commands.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -714,6 +726,29 @@ impl From<SyncArgs> for sync::SyncOpts {
             expect_plan: a.expect_plan,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// List the 1Password accounts this CLI knows and which one this project uses (read-only).
+    #[command(before_help = ACCOUNT_LIST_QUICK)]
+    List {
+        /// Show which account this value (email, account ID or sign-in address) selects.
+        #[arg(long)]
+        account: Option<String>,
+        /// Print one JSON document (accounts, selection, findings) instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the account this project uses in .opv (no prompt, no sign-in).
+    #[command(before_help = ACCOUNT_USE_QUICK)]
+    Use {
+        /// Email, account ID, shorthand or sign-in address of an account this CLI knows.
+        who: String,
+        /// Print one JSON document instead of a line.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1241,7 +1276,9 @@ impl Cmd {
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
             | Cmd::Add { json, .. }
-            | Cmd::Item(ItemCmd::Skeleton { json, .. }) => *json,
+            | Cmd::Item(ItemCmd::Skeleton { json, .. })
+            | Cmd::Account(AccountCmd::List { json, .. })
+            | Cmd::Account(AccountCmd::Use { json, .. }) => *json,
             Cmd::Plan(a) => a.json,
             Cmd::Sync(a) => a.json,
             Cmd::Schema => true,
@@ -1437,6 +1474,12 @@ fn run(
     match &cli.cmd {
         Cmd::Projects { long, json } => {
             return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        }
+        Cmd::Account(AccountCmd::List { account, json }) => {
+            return opv::app::account::list(&r, account.as_deref(), *json, out).map(|()| 0);
+        }
+        Cmd::Account(AccountCmd::Use { who, json }) => {
+            return opv::app::account::use_command(&r, who, *json, out).map(|()| 0);
         }
         Cmd::Status {
             all: true,
@@ -1717,6 +1760,7 @@ fn run_other(
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
         | Cmd::Projects { .. }
+        | Cmd::Account(_)
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
