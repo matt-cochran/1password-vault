@@ -63,7 +63,8 @@ Examples:
 
 Exit codes:
   0 ok, 2 configuration or usage, 3 dependency (op or the target CLI missing:
-  {TARGET_CLIS}), 4 1Password, 5 target ({TARGETS}), 6 refused (policy),
+  {TARGET_CLIS}), 4 1Password,
+  5 target ({TARGETS}), 6 refused (policy),
   7 authentication, 8 findings (status, plan, check),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
@@ -292,8 +293,7 @@ Prints the op:// reference, kind, target name, rules, immutable and guidance, an
 const INIT_QUICK: &str = "\
 Examples:
   opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
-  opv init prod --fly-app myapp         # deploys to Fly
-  opv init dev --vault shared --item app  # an item you already have";
+  opv init prod --fly-app myapp         # deploys to Fly";
 
 const COMPLETIONS_QUICK: &str = "\
 Examples:

@@ -1803,7 +1803,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         .unwrap();
         assert!(matches!(
             crate::app::target(&f, "dev"),
-            Err(Error::Config(m)) if m.contains("add one target section (fly, azure, kubernetes)")
+            Err(Error::Config(m)) if m.contains("add one target section (fly, azure, kubernetes, github)")
         ));
     }
 
@@ -1820,7 +1820,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             "flyy.app = \"x\"\nfly.app = \"mcproductlabs-portfolio-production\"",
         );
         assert!(config_err(&bad).ends_with(
-            "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly, kubernetes\n"
+            "\nenvironment prod: unknown target section \"flyy\"; known: azure, fly, github, kubernetes\n"
         ));
     }
 
@@ -1848,7 +1848,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
-             confirm_env, account, deploy_credentials or a target section (azure, fly, kubernetes)\n"
+             confirm_env, account, deploy_credentials or a target section (azure, fly, github, kubernetes)\n"
         ));
     }
 
