@@ -895,6 +895,33 @@ Design: `docs/design/github-actions-target.md`; spike: `docs/design/spike-github
 - Each listed product must be declared and not source-only; an empty list is a configuration error.
 - `plan` and `status` list the declared keys that the environment's target does not deliver as `not delivered here` (JSON `undelivered`), so a missing product in `products` never passes silently.
 
+## FR-49 — Account Discovery for Machines
+
+Design: `docs/design/accounts-and-readiness.md` §2 (#80).
+
+- `opv account list [--json]` lists the 1Password accounts the installed `op` knows, read-only: it never prompts, signs in, adds an account, creates a manifest or tidies an item. Per account: account ID, user ID, email, sign-in address, shorthand, `source` (`cli`), `signed_in` (`op whoami --account <id>`, exit status only; `null` when the probe cannot run) and `selected`. Never a credential, session or field value.
+- The document carries `discovery` (`ok`, `unavailable`, `op_missing`), `platform`, `cli_accounts_only` (true on Linux and WSL, where `op` keeps its own accounts; the text output then says that accounts only in a desktop app are not listed until added to this CLI), and `selected` `{account_id, by, source}` with `by` one of `flag`, `env`, `pointer`, `manifest`, `only` (exactly one account: reported, not chosen) or `null`.
+- Findings with stable codes: `no_accounts`, `selected_account_absent`, `selected_signed_out`, `discovery_unavailable`, `op_missing`, each with `human_required` and one runnable next step that names the account when one is known.
+- `opv account use <id|email|address|shorthand> [--json]` records the account in `.opv` deterministically (no prompt, no sign-in). An ambiguous match fails with code `account_ambiguous`, listing each candidate's account ID and address only, with `Next: opv account use <ID>`; an unknown one fails with `selected_account_absent` and the add-account step.
+- `opv schema` lists both commands, their effects and the document.
+
+## FR-50 — Sign-In Experience
+
+Design: `docs/design/accounts-and-readiness.md` §3 (#79).
+
+- At a terminal, with no explicit selection (`--account`, `OP_ACCOUNT`, `.opv`, an environment's `account`), `opv login` shows an account menu even when one account is registered, always with "Add another 1Password account"; on WSL it says that the Windows app's accounts are not visible until added. Explicit selections and non-interactive runs never show a menu and never select another account.
+- `op signin` and `op account add` keep 1Password's own prompts on the terminal; their stderr after the prompt is captured, scrubbed and classified into: `account_not_registered`, `op_not_signed_in`, `desktop_app_unavailable`, `credential_rejected`, `sign_in_cancelled`, `provider_unavailable` (exit 9), `op_unexpected`. Each names the selected account and one recovery step; an unclassified failure is never reported as a wrong password; a bare `opv login` is suggested only when no account is known.
+- Vendor directions (`op signin --help`, `eval $(op signin)`, raw `op account add` lines) never appear in normal output; `--verbose` keeps the scrubbed excerpt. Messages name the command that was running, never a fixed `opv setup`.
+
+## FR-51 — Readiness and Handoff Receipt
+
+Design: `docs/design/accounts-and-readiness.md` §4 (#81).
+
+- `opv ready [<env>] [--json] [--save <file>]` reports, read-only and deterministically, the configuration source, the selected account (FR-49), an environment × product matrix (keys, saved, findings, target, delivered) and a list of findings. Built from the existing sources (doctor checks, `status`, discovery, FR-49); no parallel state.
+- Each finding: stable `code`, `scope` (account, environment, product, key), `blocking`, `actor` (`owner`, `agent`, `ci`), `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command. Layers are distinct: CLI registration, sign-in, vault access, field completeness, target access. A stored value is never claimed to work.
+- `receipt_id` is a digest of the inputs (configuration version, item versions, account, findings); `--save` writes the receipt (names, IDs and codes only) for resuming a handoff; `next` is the first blocking finding's prerequisite.
+- It never tidies or writes; a pending tidy is a finding with `effect: writes_1password`.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
