@@ -402,7 +402,7 @@ pub(crate) struct OverviewEnv {
 /// (item and store list), without one from the item alone, as `check` does. Each
 /// environment uses its own 1Password account and, with a target, its deploy credentials,
 /// signed out again before the next one (FR-40).
-fn env_rows(
+pub(crate) fn env_rows(
     fleet: &Fleet,
     env_name: &str,
     t: Option<&dyn TargetConfig>,
