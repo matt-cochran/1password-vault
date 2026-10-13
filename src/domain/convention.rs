@@ -185,8 +185,9 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
             prod.keys
                 .iter()
                 // A shared key (FR-45) has no field of its own: it reads its source's, so it
-                // never claims one (a stray field under its label stays an extra).
-                .filter(|(_, spec)| spec.from.is_none())
+                // never claims one (a stray field under its label stays an extra). A personal
+                // key (FR-55) never claims one in the team item either.
+                .filter(|(_, spec)| spec.from.is_none() && !spec.personal)
                 .map(move |(k, _)| (p.as_str(), k.as_str()))
         })
         .collect();
@@ -642,7 +643,13 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
     for (product, prod) in &fleet.products {
         let home = (product != SIMPLE_PRODUCT).then(|| product.clone());
         // A shared key (FR-45) never gets a field: its source's field holds the value.
-        for (key, spec) in prod.keys.iter().filter(|(_, s)| s.from.is_none()) {
+        // A personal key (FR-55) never gets a field in the team item: its value is each
+        // person's own.
+        for (key, spec) in prod
+            .keys
+            .iter()
+            .filter(|(_, s)| s.from.is_none() && !s.personal)
+        {
             let name = key_label(product, key);
             let id = (product.clone(), key.clone());
             let here = spec.environments.iter().any(|e| e == env_name);

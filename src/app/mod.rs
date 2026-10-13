@@ -35,6 +35,7 @@ mod ledger_tests;
 pub mod local;
 pub mod login;
 pub mod open;
+pub mod personal;
 #[cfg(test)]
 mod pinned_tests;
 pub(crate) mod preflight;

@@ -305,10 +305,25 @@ pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> 
 /// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
 /// the same `op item create` call `setup` makes, the template on stdin.
 pub fn create_item(r: &dyn CommandRunner, vault_id: &str, title: &str) -> Result<Named, Error> {
+    create_item_tagged(r, vault_id, title, &[])
+}
+
+/// [`create_item`] with `tags` on the new item (names, never values), e.g. `opv bootstrap`'s
+/// `opv-env:<project>/<env>` (FR-55).
+pub fn create_item_tagged(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    title: &str,
+    tags: &[String],
+) -> Result<Named, Error> {
     let args = [
         "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
     ];
-    let template = br#"{"category":"SECURE_NOTE","fields":[],"sections":[]}"#;
+    let template = serde_json::to_vec(&serde_json::json!({
+        "category": "SECURE_NOTE", "fields": [], "sections": [], "tags": tags,
+    }))
+    .expect("a fixed template serializes");
+    let template = template.as_slice();
     created(
         r,
         &args,

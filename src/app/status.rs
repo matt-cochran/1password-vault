@@ -15,9 +15,9 @@ use std::io::Write;
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::{
     JsonExtra, KeyNames, PinnedRow, check_product, ci_summary, count_line, findings_error,
-    is_blocking, item_url, open_target, plan_item, plural, preflight, print_extras, print_legend,
-    print_rows, product_names, read_and_plan, read_fields, scope_plan, target_word, write_err,
-    write_json,
+    is_blocking, item_url, open_target, personal, plan_item, plural, preflight, print_extras,
+    print_legend, print_rows, product_names, read_and_plan, read_fields, scope_plan, target_word,
+    write_err, write_json,
 };
 use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
@@ -413,6 +413,15 @@ pub(crate) fn env_rows(
     let Some(t) = t else {
         let signed_in = open(fleet, env_name, r, Reach::Store)?;
         let fields = read_fields(fleet, env_name, &signed_in)?;
+        // FR-55: a targetless environment's personal keys live in the person's own item;
+        // merge its fields (never a team fallback) before planning the rows.
+        let fields = if personal::declared(fleet, env_name) {
+            let project =
+                personal::project_name(&signed_in, &std::env::current_dir().unwrap_or_default());
+            personal::merged_fields(&signed_in, fleet, env_name, fields, &project)?
+        } else {
+            fields
+        };
         return Ok(plan_item(fleet, env_name, fields, None, &none, &none)?
             .0
             .rows);

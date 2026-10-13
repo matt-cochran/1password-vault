@@ -24,6 +24,11 @@ pub struct EnvInput {
     pub name: String,
     pub target: Option<String>,
     pub rows: Result<Vec<Row>, Error>,
+    /// Display name (FR-55); `None`: the key.
+    pub title: Option<String>,
+    /// Who the environment is for (FR-55): when set, an environment this person cannot open
+    /// is reported as not theirs, non-blocking.
+    pub audience: Option<String>,
 }
 
 /// Everything [`receipt`] needs, already gathered by the caller.
@@ -38,6 +43,8 @@ pub struct Inputs<'a> {
     /// True under the simple profile (FR-20): product names are omitted from scope and
     /// labels.
     pub simple: bool,
+    /// The personal keys (FR-55), as (product, key): their findings say "your".
+    pub personal: std::collections::BTreeSet<(String, String)>,
 }
 
 /// `config` of the receipt: where the configuration was read from.
@@ -57,6 +64,8 @@ pub struct AccountRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixEntry {
     pub environment: String,
+    /// The environment's display name (FR-55).
+    pub title: String,
     pub product: String,
     /// The environment's target provider label; `null` for a run-only environment.
     pub target: Option<String>,
@@ -113,9 +122,10 @@ pub struct Receipt {
     pub matrix: Vec<MatrixEntry>,
     pub findings: Vec<Finding>,
     pub next: Option<Next>,
-    /// The environments in input order, for [`render_text`]'s columns; never serialized.
+    /// The environments in input order, with their display names, for [`render_text`]'s
+    /// columns; never serialized.
     #[serde(skip)]
-    environments: Vec<String>,
+    environments: Vec<(String, String)>,
 }
 
 /// Build the readiness receipt (FR-51). Deterministic: equal inputs give an equal
@@ -140,7 +150,16 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
             command: f.prerequisite.clone(),
         });
     let receipt_id = receipt_id(&config, &account, &matrix, &findings);
-    let environments = inputs.envs.iter().map(|e| e.name.clone()).collect();
+    let environments = inputs
+        .envs
+        .iter()
+        .map(|e| {
+            (
+                e.name.clone(),
+                e.title.clone().unwrap_or_else(|| e.name.clone()),
+            )
+        })
+        .collect();
     Receipt {
         receipt_id,
         opv_version: opv_version.to_string(),
@@ -202,6 +221,7 @@ fn build_matrix(inputs: &Inputs<'_>) -> Vec<MatrixEntry> {
                 || !group.iter().all(|r| r.target == TargetState::NotDelivered);
             out.push(MatrixEntry {
                 environment: env.name.clone(),
+                title: env.title.clone().unwrap_or_else(|| env.name.clone()),
                 product: product.to_string(),
                 target: env.target.clone(),
                 keys: group.len(),
@@ -256,6 +276,27 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
     for env in &inputs.envs {
         let Err(e) = &env.rows else { continue };
         let code = e.code();
+        // FR-55: an environment meant for others (its audience) that this person cannot
+        // open is not a problem to fix.
+        let no_access = matches!(code.as_str(), "vault_no_access" | "item_not_found");
+        if let (Some(audience), true) = (&env.audience, no_access) {
+            out.push(Finding {
+                code: "not_for_you".into(),
+                scope: Scope {
+                    environment: Some(env.name.clone()),
+                    ..Scope::default()
+                },
+                blocking: false,
+                actor: "owner".into(),
+                effect: "none".into(),
+                prerequisite: format!(
+                    "ask the 1Password owner for access to {} if you need it (audience: {audience})",
+                    env.name
+                ),
+                verify: "opv ready --json".into(),
+            });
+            continue;
+        }
         let effect = match code.as_str() {
             "op_not_signed_in"
             | "auth_required"
@@ -288,6 +329,20 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
         let Ok(rows) = &env.rows else { continue };
         for r in rows {
             let code = match &r.state {
+                KeyState::Missing
+                    if inputs
+                        .personal
+                        .contains(&(r.product.clone(), r.key.clone())) =>
+                {
+                    "personal_key_missing"
+                }
+                KeyState::RuleFailed("nonempty", _)
+                    if inputs
+                        .personal
+                        .contains(&(r.product.clone(), r.key.clone())) =>
+                {
+                    "personal_key_empty"
+                }
                 KeyState::Missing => "key_missing",
                 // A field that exists but holds nothing: the owner fills it (#77).
                 KeyState::RuleFailed("nonempty", _) => "key_empty",
@@ -342,12 +397,12 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
     let envs = &r.environments;
     let mut header: Vec<String> = Vec::with_capacity(envs.len() + 1);
     header.push("PRODUCT".into());
-    header.extend(envs.iter().cloned());
+    header.extend(envs.iter().map(|(_, title)| title.clone()));
     let mut body: Vec<Vec<String>> = Vec::new();
     for product in product_order(&r.matrix) {
         let mut cells = Vec::with_capacity(envs.len() + 1);
         cells.push(product.clone());
-        for environment in envs {
+        for (environment, _) in envs {
             let entry = r
                 .matrix
                 .iter()
@@ -480,17 +535,34 @@ pub fn run(
         fleet.environment(e)?;
     }
     let account = super::account::gather(r, None);
-    let envs = fleet
+    // FR-55: the environments' own order, then their keys; never a fixed list.
+    let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
         .environments
         .iter()
         .filter(|(name, _)| only.is_none_or(|o| o == name.as_str()))
+        .collect();
+    ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
+    let envs = ordered
+        .into_iter()
         .map(|(name, env)| {
             let target = env.target();
             EnvInput {
                 name: name.clone(),
                 target: target.map(|t| t.provider().label().to_string()),
                 rows: super::status::env_rows(fleet, name, target, r),
+                title: env.title.clone(),
+                audience: env.audience.clone(),
             }
+        })
+        .collect();
+    let personal = fleet
+        .products
+        .iter()
+        .flat_map(|(p, prod)| {
+            prod.keys
+                .iter()
+                .filter(|(_, spec)| spec.personal)
+                .map(move |(k, _)| (p.clone(), k.clone()))
         })
         .collect();
     let doc = receipt(
@@ -499,6 +571,7 @@ pub fn run(
             account: &account,
             envs,
             simple: fleet.is_simple(),
+            personal,
         },
         env!("CARGO_PKG_VERSION"),
     );

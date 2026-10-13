@@ -149,16 +149,23 @@ fn ensure_vault(r: &dyn CommandRunner, title: &str) -> Result<init_op::Named, Er
     }
 }
 
-/// The item titled `title` in `vault_id`, created when missing.
+/// The item titled `title` in `vault_id`, created when missing and tagged `tag` (FR-55), so
+/// `ready` can tell an item moved or wired to another environment.
 fn ensure_item(
     r: &dyn CommandRunner,
     vault_id: &str,
     title: &str,
+    tag: &str,
 ) -> Result<init_op::Named, Error> {
     match init_op::find_item(r, vault_id, title, &Host::detect)? {
         Lookup::Found(n) => Ok(n),
-        Lookup::Missing(_) => init_op::create_item(r, vault_id, title),
+        Lookup::Missing(_) => init_op::create_item_tagged(r, vault_id, title, &[tag.to_string()]),
     }
+}
+
+/// The detection tag of an environment's item (FR-55).
+pub fn env_tag(project: &str, env: &str) -> String {
+    format!("opv-env:{project}/{env}")
 }
 
 /// `opv bootstrap` on the configuration file `path`.
@@ -198,7 +205,7 @@ pub fn run(
             continue;
         };
         let v = ensure_vault(r, vault)?;
-        let i = ensure_item(r, &v.id, item)?;
+        let i = ensure_item(r, &v.id, item, &env_tag(project, &p.environment))?;
         let env = &mut doc["environments"][p.environment.as_str()];
         env["vault_id"] = value(v.id.clone());
         env["item_id"] = value(i.id.clone());
@@ -235,8 +242,46 @@ pub fn run(
         }
         super::skeleton::run_as(&fleet, &p.environment, r, &mut std::io::sink(), false)?;
     }
+    // FR-55: the signed-in person's own item, with empty fields for the personal keys, in
+    // their own vault; nobody else's.
+    let mut personal_items: Vec<String> = Vec::new();
+    for p in &plans {
+        let env_name = &p.environment;
+        if !super::personal::declared(&fleet, env_name) {
+            continue;
+        }
+        let team = fleet.environment(env_name)?;
+        let Some(vault) = super::personal::private_vault(r, team)? else {
+            return Err(Error::Config(
+                format!(
+                    "environment {env_name}: no personal vault found for your personal keys \
+                     (looked for {}); set personal_vault to the title of a vault only you can \
+                     open",
+                    team.personal_vault
+                        .clone()
+                        .unwrap_or_else(|| "Private, Employee, Personal".into())
+                )
+                .into(),
+            ));
+        };
+        let title = super::personal::item_title(team, project);
+        let item = ensure_item(r, &vault.id, &title, &env_tag(project, env_name))?;
+        let mut mine = super::personal::personal_fleet(&fleet, env_name);
+        if let Some(e) = mine.environments.get_mut(env_name.as_str()) {
+            e.vault_id = vault.id.clone();
+            e.item_id = item.id.clone();
+        }
+        super::skeleton::run_as(&mine, env_name, r, &mut std::io::sink(), false)?;
+        personal_items.push(format!(
+            "{env_name}: your personal item {title:?} in vault {:?}",
+            vault.name
+        ));
+    }
     print_plan(out, &plans, opts.json, true)?;
     if !opts.json {
+        for line in &personal_items {
+            writeln!(out, "{line}").map_err(write_err)?;
+        }
         writeln!(
             out,
             "every ready environment has its vault, item and empty fields; fill the values in \

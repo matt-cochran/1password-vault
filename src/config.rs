@@ -350,6 +350,18 @@ struct RawEnvironment<M> {
     /// `op://<vault>/<item>` holding the environment's deploy identity (FR-40).
     #[serde(default)]
     deploy_credentials: Option<String>,
+    /// Display name, audience and order (FR-55).
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    order: Option<i64>,
+    /// Where each person's personal item lives (FR-55).
+    #[serde(default)]
+    personal_vault: Option<String>,
+    #[serde(default)]
+    personal_item: Option<String>,
     /// Optional: environments used only for `run`, `config export` and `item skeleton`
     /// need no target. At most one entry (FR-28).
     #[serde(flatten)]
@@ -440,7 +452,8 @@ fn target_of(
             } else {
                 format!(
                     "environment {name}: unknown field {unknown:?}; expected vault_id, item_id, \
-                 modes, confirm_env, account, deploy_credentials or a target section ({known})"
+                 modes, confirm_env, account, deploy_credentials, title, audience, order, \
+                 personal_vault, personal_item or a target section ({known})"
                 )
             },
         ));
@@ -541,6 +554,11 @@ fn environment<M>(
             confirm_env: e.confirm_env,
             account: e.account,
             deploy_credentials,
+            title: e.title,
+            audience: e.audience,
+            order: e.order,
+            personal_vault: e.personal_vault,
+            personal_item: e.personal_item,
         },
         e.modes,
     ))
@@ -629,7 +647,52 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     };
     check_names(&fleet, doc)?;
     check_scopes(&fleet)?;
+    check_personal(&fleet)?;
     Ok(fleet)
+}
+
+/// FR-55: a personal key lives only in environments without a target (it is never
+/// deployed), and personal and team values never meet through `from`: a personal key's
+/// source is personal, a team key's source is not.
+fn check_personal(fleet: &Fleet) -> Result<(), Error> {
+    for (product, p) in &fleet.products {
+        for (key, spec) in &p.keys {
+            let owner = key_label(product, key);
+            if spec.personal
+                && let Some(env) = spec.environments.iter().find(|e| {
+                    fleet
+                        .environments
+                        .get(*e)
+                        .is_some_and(|x| x.target().is_some())
+                })
+            {
+                return Err(cfg(format!(
+                    "{owner}: personal = true is for local environments only, and {env} has a \
+                     deployment target (a person's own value is never deployed); declare a \
+                     team key for {env}"
+                )));
+            }
+            if let Some((sp, sk)) = spec.source() {
+                let src_personal = fleet
+                    .products
+                    .get(sp)
+                    .and_then(|x| x.keys.get(sk))
+                    .is_some_and(|x| x.personal);
+                if src_personal != spec.personal {
+                    let (what, why) = if spec.personal {
+                        ("a personal key", "a team value")
+                    } else {
+                        ("a team key", "a personal value")
+                    };
+                    return Err(cfg(format!(
+                        "{owner}: {what} cannot read {why} with from = \"{sp}/{sk}\"; personal and \
+                         team values never mix"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// FR-48: every product a target is limited to is declared and delivers its own keys (not
@@ -713,6 +776,7 @@ fn validate_simple(raw: RawSimpleConfig, doc: &Doc<'_>) -> Result<Fleet, Error> 
         origin: Default::default(),
     };
     check_names(&fleet, doc)?;
+    check_personal(&fleet)?;
     Ok(fleet)
 }
 
@@ -1974,7 +2038,8 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
         assert!(config_err(&bad).ends_with(
             "\nenvironment prod: unknown field \"vault\"; expected vault_id, item_id, modes, \
-             confirm_env, account, deploy_credentials or a target section (azure, fly, github, kubernetes)\n"
+             confirm_env, account, deploy_credentials, title, audience, order, personal_vault, \
+             personal_item or a target section (azure, fly, github, kubernetes)\n"
         ));
     }
 
@@ -2281,6 +2346,67 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
             .to_string();
         let new = format!("{head}rules = {{ ensure_prefix = \"p-\", {rule} }}\n");
         assert!(parse(&new).is_ok(), "{new}");
+    }
+
+    // ---- personal keys and environment display fields (FR-55) ----------------------
+
+    fn team(extra: &str) -> String {
+        format!(
+            "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+             title = \"Local development\"\n\
+             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\naudience = \"devops\"\n\
+             fly.app = \"a\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n{extra}"
+        )
+    }
+
+    #[test]
+    fn a_personal_key_in_a_local_environment_loads() {
+        let text = team(
+            "[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\n",
+        );
+        assert!(parse(&text).is_ok());
+    }
+
+    #[test]
+    fn a_personal_key_is_never_deployed() {
+        let text = team(
+            "[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\npersonal = true\n",
+        );
+        assert!(config_err(&text).contains(
+            "personal = true is for local environments only, and prod has a deployment target"
+        ));
+    }
+
+    #[test]
+    fn products_share_a_personal_value_through_a_personal_source() {
+        let text = team(
+            "[products.shared]\nsource_only = true\n\
+             [products.shared.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\n\
+             [products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\nfrom = \"shared/OPENAI_API_KEY\"\n",
+        );
+        assert!(parse(&text).is_ok());
+    }
+
+    #[test]
+    fn a_team_key_cannot_read_a_personal_value() {
+        let text = team(
+            "[products.shared]\nsource_only = true\n\
+             [products.shared.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\n\
+             [products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfrom = \"shared/OPENAI_API_KEY\"\n",
+        );
+        assert!(config_err(&text).contains("a team key cannot read a personal value"));
+    }
+
+    #[test]
+    fn an_environment_keeps_its_display_name() {
+        let f = parse(&team("")).unwrap();
+        assert_eq!(f.environments["dev"].display(), "Local development");
+    }
+
+    #[test]
+    fn an_environment_keeps_its_audience() {
+        let f = parse(&team("")).unwrap();
+        assert_eq!(f.environments["prod"].audience.as_deref(), Some("devops"));
     }
 
     // ---- source-only products (FR-47) ------------------------------------------------

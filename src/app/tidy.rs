@@ -471,8 +471,9 @@ fn needing_values(
         .products
         .iter()
         .flat_map(|(p, prod)| prod.keys.iter().map(move |(k, s)| (p, k, s)))
-        // A shared key (FR-45) has no field: its source is named instead.
-        .filter(|(_, _, s)| s.from.is_none())
+        // A shared key (FR-45) has no field: its source is named instead. A personal key
+        // (FR-55) is not the team item's to fill.
+        .filter(|(_, _, s)| s.from.is_none() && !s.personal)
         .filter(|(p, _, s)| rules::applies(s, env_name, env, p))
         .filter(|(p, k, _)| {
             res.chosen

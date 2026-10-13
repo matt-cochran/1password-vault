@@ -1,5 +1,5 @@
 //! Local-only validation. One item read, no deployment store, names-only output.
-use super::{read_and_plan_products, write_err};
+use super::{personal, read_and_plan_products, write_err};
 use crate::domain::Fleet;
 use crate::error::Error;
 use crate::runner::CommandRunner;
@@ -93,7 +93,21 @@ pub fn check(
         .get_mut(env)
         .expect("selected env")
         .target = None;
-    let mut plan = read_and_plan_products(&selected, fleet, env, runner)?;
+    // FR-55: a targetless environment's personal keys live in the person's own item. Merge
+    // its fields (never a team fallback) before planning, so they appear as ordinary rows;
+    // environments without personal keys keep the exact read path they had.
+    let mut plan = if personal::declared(fleet, env) {
+        let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
+        let read = super::tidy::read(fleet, env, runner)?;
+        let fields = personal::merged_fields(runner, fleet, env, read.fields, &project)?;
+        let none = std::collections::BTreeSet::new();
+        let mut plan = super::plan_item(&selected, env, fields, None, &none, &none)?.0;
+        plan.tidy = read.changes;
+        plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+        plan
+    } else {
+        read_and_plan_products(&selected, fleet, env, runner)?
+    };
     plan.extras.clear();
     let findings = plan.blocking();
     // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.

@@ -13,8 +13,9 @@
 
 use std::io;
 
+use super::personal;
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, SIMPLE_PRODUCT, rules};
+use crate::domain::{Fleet, KeySpec, SIMPLE_PRODUCT, rules};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -87,6 +88,40 @@ pub fn run(
         .with_next("opv run --help"));
     }
 
+    let selected: Vec<(&String, &KeySpec)> = prod
+        .keys
+        .iter()
+        .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
+        .collect();
+    // FR-55: a personal key's value is in the person's own item. Locate it before the read
+    // and before `op run`, so a missing personal item stops the run and names the keys.
+    let personal_env = if selected
+        .iter()
+        .any(|(_, spec)| personal::is_personal(fleet, spec))
+    {
+        let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
+        match personal::locate(runner, fleet, env_name, &project) {
+            Ok(Some(e)) => Some(e),
+            Ok(None) | Err(_) => {
+                let labels: Vec<String> = selected
+                    .iter()
+                    .filter(|(_, spec)| personal::is_personal(fleet, spec))
+                    .map(|(key, _)| crate::domain::key_label(product, key))
+                    .collect();
+                return Err(Error::Config(
+                    format!(
+                        "your personal item for {env_name} is not set up yet; it holds {}",
+                        labels.join(", ")
+                    )
+                    .into(),
+                )
+                .with_next("opv bootstrap"));
+            }
+        }
+    } else {
+        None
+    };
+
     // FR-43: one tolerant item read first, which tidies the item when a person runs opv.
     // A key whose field is still not where the convention puts it (a read-only run) is
     // referenced by field id. If the read fails, `op run` reports the problem itself.
@@ -101,11 +136,14 @@ pub fn run(
     if let Some(r) = read.as_ref().filter(|r| r.changes.is_empty()) {
         super::tidy::note_needing_values(runner, env_name, &r.needing_values);
     }
-    let refs: Vec<(&str, String)> = prod
-        .keys
+    let refs: Vec<(&str, String)> = selected
         .iter()
-        .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
         .map(|(key, spec)| {
+            // FR-55: a personal key references the person's own item, never the team item.
+            if personal::is_personal(fleet, spec) {
+                let pe = personal_env.as_ref().expect("located above");
+                return (key.as_str(), personal::reference(pe, product, key, spec));
+            }
             // A shared key (FR-45) is exported under its own name, referencing its source's
             // field in the same item.
             let (fp, fk) = spec.source().unwrap_or((product, key));

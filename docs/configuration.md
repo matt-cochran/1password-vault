@@ -396,6 +396,36 @@ environments = ["ci"]
 - Values never cross environments: `ci` reads the `shared` section of the `ci` item only.
 - The name `shared` is a convention; any product name works. `source_only` is not available under the simple profile, where there is one product.
 
+## Personal keys: each developer's own values
+
+Some local values should be each person's own: an LLM API key, so every developer's spend is on their own key; a personal access token. Mark the key `personal = true`:
+
+```toml
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["dev"]
+personal = true
+guidance = "create your own key (billed to you)"
+```
+
+- The value lives in each person's own item: in their own Private (or Employee, or Personal) vault, titled `<project> · <env> (personal)`. Set `personal_vault` and `personal_item` on the environment to use other titles. `opv bootstrap` creates your item with an empty field for each personal key; `opv ready` and `opv check` name the ones you still need to fill as yours.
+- `opv run` reads team keys from the team item and your personal keys from your own item, never the other way round: a personal key never falls back to a team value, and nobody else's item is ever read.
+- One personal value for several products: put it in a source-only product (`[products.shared] source_only = true`, the key `personal = true`) and point each product's personal key at it with `from = "shared/OPENAI_API_KEY"`. A personal key may only point at a personal value, and a team key never at one.
+- Personal keys are for local environments only: declaring one for an environment with a target is a configuration error, and `sync` never reads a personal item. Deployed environments use the service's own value.
+
+Example: [examples/team-personal](../examples/team-personal/).
+
+### Environment display name, order and audience
+
+```toml
+[environments.prod-us]
+title = "Production (US)"     # shown in opv ui, opv ready and status; defaults to the key
+order = 30                    # grid and column order; defaults to the keys' order
+audience = "devops"           # who it is for
+```
+
+The key (`prod-us`) stays the name in every command. Who can open an environment is 1Password's decision (share its vault with a group); `audience` only tells opv what to say to everyone else: someone who cannot open `prod-us` sees "not available to you (audience: devops)" in `opv ready`, as a note, not a problem to fix. `opv bootstrap` tags each item it creates `opv-env:<project>/<env>`.
+
 ## Writing the configuration with commands
 
 `init` and `add` write the configuration for you, where it lives (manifest or file), keeping comments and order, validating the result like a hand-written one and refusing a concurrent change. `opv config edit` covers everything else.
