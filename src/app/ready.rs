@@ -45,6 +45,9 @@ pub struct Inputs<'a> {
     pub simple: bool,
     /// The personal keys (FR-55), as (product, key): their findings say "your".
     pub personal: std::collections::BTreeSet<(String, String)>,
+    /// Settings health (#92), computed by the caller from the values it read: non-blocking
+    /// findings after the readiness ones.
+    pub health: Vec<crate::domain::health::HealthFinding>,
 }
 
 /// `config` of the receipt: where the configuration was read from.
@@ -102,6 +105,10 @@ pub struct Finding {
     pub effect: String,
     pub prerequisite: String,
     pub verify: String,
+    /// One sentence for a person, when the code alone does not say it (settings health,
+    /// #92). Names only, never a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// The first step: the actor and the command of the first blocking finding, else of the
@@ -271,6 +278,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             effect: effect.into(),
             prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),
             verify: "opv account list --json".into(),
+            message: None,
         });
     }
     for env in &inputs.envs {
@@ -294,6 +302,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                     env.name
                 ),
                 verify: "opv ready --json".into(),
+                message: None,
             });
             continue;
         }
@@ -323,6 +332,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("opv status {}", env.name)),
             verify: "opv ready --json".into(),
+            message: None,
         });
     }
     for env in &inputs.envs {
@@ -376,8 +386,36 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 effect: "writes_1password".into(),
                 prerequisite: format!("opv open {label} --env {}", env.name),
                 verify,
+                message: None,
             });
         }
+    }
+    // Settings health (#92): likely-wrong values, never blocking. The scope is the first
+    // environment named (in configured order), where `opv open` takes the person to fix it.
+    for h in &inputs.health {
+        let Some(env) = h.environments.first() else {
+            continue;
+        };
+        let (product, label) = if inputs.simple {
+            (None, h.key.clone())
+        } else {
+            (Some(h.product.clone()), key_label(&h.product, &h.key))
+        };
+        out.push(Finding {
+            code: h.code.into(),
+            scope: Scope {
+                environment: Some(env.clone()),
+                product,
+                key: Some(h.key.clone()),
+                account: None,
+            },
+            blocking: false,
+            actor: "owner".into(),
+            effect: "writes_1password".into(),
+            prerequisite: format!("opv open {label} --env {env}"),
+            verify: "opv ready --json".into(),
+            message: Some(h.message.clone()),
+        });
     }
     out
 }
@@ -445,6 +483,9 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
             f.prerequisite
         )
         .map_err(super::write_err)?;
+        if let Some(m) = &f.message {
+            writeln!(out, "      {m}").map_err(super::write_err)?;
+        }
     }
     if let Some(n) = &r.next {
         writeln!(out, "Next ({}): {}", n.actor, n.command).map_err(super::write_err)?;
@@ -542,19 +583,41 @@ pub fn run(
         .filter(|(name, _)| only.is_none_or(|o| o == name.as_str()))
         .collect();
     ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
+    // Each environment's fields, copied during its one read, for the health checks (#92).
+    let mut kept: Vec<(String, bool, Vec<crate::domain::plan::ItemField>)> = Vec::new();
     let envs = ordered
         .into_iter()
         .map(|(name, env)| {
             let target = env.target();
+            let mut fields = Vec::new();
+            let rows = super::status::env_rows_keeping(fleet, name, target, r, Some(&mut fields));
+            if rows.is_ok() {
+                kept.push((name.clone(), target.is_some(), fields));
+            }
             EnvInput {
                 name: name.clone(),
                 target: target.map(|t| t.provider().label().to_string()),
-                rows: super::status::env_rows(fleet, name, target, r),
+                rows,
                 title: env.title.clone(),
                 audience: env.audience.clone(),
             }
         })
         .collect();
+    let values: Vec<crate::domain::health::EnvValues<'_>> = kept
+        .iter()
+        .map(
+            |(name, deployed, fields)| crate::domain::health::EnvValues {
+                name,
+                title: fleet
+                    .environments
+                    .get(name)
+                    .and_then(|e| e.title.as_deref()),
+                deployed: *deployed,
+                fields,
+            },
+        )
+        .collect();
+    let health = crate::domain::health::check(fleet, &values);
     let personal = fleet
         .products
         .iter()
@@ -572,6 +635,7 @@ pub fn run(
             envs,
             simple: fleet.is_simple(),
             personal,
+            health,
         },
         env!("CARGO_PKG_VERSION"),
     );

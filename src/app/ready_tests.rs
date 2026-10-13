@@ -73,6 +73,7 @@ fn inputs<'a>(report: &'a account::Report, envs: Vec<EnvInput>) -> Inputs<'a> {
         envs,
         simple: false,
         personal: Default::default(),
+        health: Vec::new(),
     }
 }
 
@@ -702,6 +703,7 @@ fn the_grid_shows_an_environments_display_name() {
             envs: vec![env],
             simple: false,
             personal: Default::default(),
+            health: Vec::new(),
         },
         "t",
     );
@@ -724,6 +726,7 @@ fn an_environment_for_another_audience_is_not_a_blocking_problem() {
             envs: vec![env],
             simple: false,
             personal: Default::default(),
+            health: Vec::new(),
         },
         "t",
     );
@@ -755,8 +758,132 @@ fn a_missing_personal_key_is_named_as_yours() {
             envs: vec![env],
             simple: false,
             personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
+            health: Vec::new(),
         },
         "t",
     );
     assert_eq!(r.findings[0].code, "personal_key_missing");
+}
+
+// #92: settings health ---------------------------------------------------------------
+
+fn health_finding() -> crate::domain::health::HealthFinding {
+    crate::domain::health::HealthFinding {
+        code: crate::domain::health::SAME_ACROSS,
+        environments: vec!["dev".into(), "prod".into()],
+        product: "api".into(),
+        key: "DATABASE_URL".into(),
+        other: None,
+        message: "api/DATABASE_URL has the same value in dev and prod".into(),
+    }
+}
+
+fn health_receipt() -> Receipt {
+    let report = account_report();
+    let mut i = inputs(&report, Vec::new());
+    i.health = vec![health_finding()];
+    receipt(&i, "test")
+}
+
+#[test]
+fn a_health_finding_is_in_the_receipt_by_its_code() {
+    assert_eq!(
+        health_receipt().findings[0].code,
+        "same_value_across_environments"
+    );
+}
+
+#[test]
+fn a_health_finding_never_blocks() {
+    assert!(!health_receipt().findings[0].blocking);
+}
+
+#[test]
+fn a_health_finding_carries_its_message() {
+    assert_eq!(
+        health_receipt().findings[0].message.as_deref(),
+        Some("api/DATABASE_URL has the same value in dev and prod")
+    );
+}
+
+#[test]
+fn a_health_finding_opens_the_key_in_its_first_environment() {
+    assert_eq!(
+        health_receipt().findings[0].prerequisite,
+        "opv open api/DATABASE_URL --env dev"
+    );
+}
+
+#[test]
+fn a_readiness_finding_has_no_message_in_its_json() {
+    let report = account_report();
+    let r = receipt(
+        &inputs(
+            &report,
+            vec![env(
+                "dev",
+                None,
+                vec![row("api", "X", KeyState::Missing, TargetState::Absent)],
+            )],
+        ),
+        "test",
+    );
+    assert!(
+        serde_json::to_value(&r).unwrap()["findings"][0]
+            .get("message")
+            .is_none()
+    );
+}
+
+/// `opv ready --json` on two run-only environments whose items hold the same secret.
+fn ready_on_two_items(dev: &str, ci: &str) -> serde_json::Value {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    let item = |value: &str| {
+        serde_json::json!({
+            "title": "t", "category": "SECURE_NOTE",
+            "fields": [{"id": "f1", "type": "CONCEALED", "label": "DATABASE_URL", "value": value}]
+        })
+    };
+    let dev_id = op.insert("vdev0000000000000000000001", item(dev));
+    let ci_id = op.insert("vdev0000000000000000000001", item(ci));
+    let fleet = crate::config::parse(&format!(
+        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\n\
+         item_id = \"{dev_id}\"\n[environments.ci]\nvault_id = \"vdev0000000000000000000001\"\n\
+         item_id = \"{ci_id}\"\n[keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"ci\"]\n"
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    run(&fleet, None, None, &op, true, None, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn ready_reports_one_secret_in_two_environments() {
+    let doc = ready_on_two_items("pw-HEALTHMARK", "pw-HEALTHMARK");
+    assert!(
+        doc["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "same_value_across_environments")
+    );
+}
+
+#[test]
+fn ready_never_prints_the_compared_value() {
+    let doc = ready_on_two_items("pw-HEALTHMARK", "pw-HEALTHMARK");
+    assert!(!doc.to_string().contains("HEALTHMARK"));
+}
+
+#[test]
+fn ready_is_quiet_when_the_environments_differ() {
+    let doc = ready_on_two_items("pw-HEALTHMARK-a", "pw-HEALTHMARK-b");
+    assert!(
+        !doc["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "same_value_across_environments")
+    );
 }

@@ -81,6 +81,7 @@ kind = "secret"
 environments = ["staging", "prod"]
 immutable = true                     # written only when absent on the target; see --rotate
 rules = { base64_bytes = 32 }
+allow_same_value = true              # the same value in staging and prod is intended (see settings health)
 
 [products.allumata.keys.STRIPE_SECRET_KEY]
 kind = "secret"
@@ -395,6 +396,23 @@ environments = ["ci"]
 - `check`, `status` and `plan` warn about a source-only key that nothing points at. `opv run --product shared` is refused: run the product that uses the value.
 - Values never cross environments: `ci` reads the `shared` section of the `ci` item only.
 - The name `shared` is a convention; any product name works. `source_only` is not available under the simple profile, where there is one product.
+
+## Settings health: likely-wrong values
+
+A value can be present and pass its rules and still be wrong. `opv ready` (and `opv ui`, and `opv doctor --settings`) compares the values it reads, in memory and never shown, and warns about:
+
+| code | when |
+|---|---|
+| `same_value_across_environments` | a secret has the identical value in two or more environments (production's key copied into development, or the other way round) |
+| `same_value_under_two_keys` | two secrets in one environment hold the identical value without `from` |
+| `placeholder_value` | a secret is `changeme`, `xxx`, `<your key>`, `your_api_key_here` and the like |
+| `whitespace_around_value` | a one-line value starts or ends with a space, tab or newline |
+| `local_address_in_deployed_environment` | a value in an environment with a target points at `localhost`, `127.0.0.1`, `0.0.0.0` or `host.docker.internal` |
+| `test_key_in_production` / `live_key_outside_production` | a `sk_test_`/`pk_test_`/`rk_test_` key where the environment's name or title says production, or a `sk_live_`/`rk_live_` key elsewhere |
+
+- Each is a warning, never blocking: it names the environments and keys and ends with `opv open <key> --env <env>`.
+- Config values may be the same everywhere; only secrets are compared across environments. Personal keys and empty values are never looked at.
+- When one secret really is meant for several environments, say so on the key with `allow_same_value = true`. One value for several keys inside an environment is a [shared value](#shared-keys-from) (`from`), which has one field and is never a duplicate.
 
 ## Personal keys: each developer's own values
 

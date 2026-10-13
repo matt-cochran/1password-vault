@@ -62,6 +62,20 @@ pub fn key_detail(f: &mut Frame, area: Rect, app: &App, product: &str, key: &str
             ]));
         }
     }
+    let found = s.findings_for(product, key);
+    if !found.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("Needs attention", BOLD));
+        for fnd in found {
+            let mark = if fnd.blocking { "✗" } else { "!" };
+            let env = fnd.environment.as_deref().unwrap_or("-");
+            lines.push(Line::raw(format!("{mark} {} ({env})", fnd.code)));
+            if let Some(m) = &fnd.message {
+                lines.push(Line::raw(format!("  {m}")));
+            }
+            lines.push(Line::styled(format!("  → {}", fnd.prerequisite), DIM));
+        }
+    }
     let readers = s.consumers(product, key);
     if !readers.is_empty() {
         lines.push(Line::raw(""));

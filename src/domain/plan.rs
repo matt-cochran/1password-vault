@@ -1044,6 +1044,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
                 guidance: String::new(),
                 from: None,
                 personal: false,
+                allow_same_value: false,
             }
         }
         let target = GithubTarget {

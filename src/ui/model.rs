@@ -66,6 +66,8 @@ pub struct Finding {
     pub actor: String,
     pub effect: String,
     pub prerequisite: String,
+    /// The finding's sentence (settings health, #92); names only.
+    pub message: Option<String>,
 }
 
 /// One environment × product summary of the receipt.
@@ -231,6 +233,7 @@ impl Snapshot {
                 actor: s(&f["actor"]).unwrap_or_default(),
                 effect: s(&f["effect"]).unwrap_or_default(),
                 prerequisite: s(&f["prerequisite"]).unwrap_or_default(),
+                message: s(&f["message"]),
             });
         }
         if let (Some(a), Some(c)) = (s(&ready["next"]["actor"]), s(&ready["next"]["command"])) {
@@ -257,6 +260,16 @@ impl Snapshot {
                 },
             );
         }
+    }
+
+    /// The findings about `product`/`key` (readiness and settings health), in receipt order.
+    pub fn findings_for(&self, product: &str, key: &str) -> Vec<&Finding> {
+        self.findings
+            .iter()
+            .filter(|f| {
+                f.key.as_deref() == Some(key) && f.product.as_deref().is_none_or(|p| p == product)
+            })
+            .collect()
     }
 
     /// The environment with key `key`.

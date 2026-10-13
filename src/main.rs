@@ -502,6 +502,11 @@ enum Cmd {
         /// Print one JSON document (check names, states and next steps) instead of lines.
         #[arg(long)]
         json: bool,
+        /// Also look for likely-wrong values: the same secret in two environments, a
+        /// placeholder, stray whitespace, localhost where it deploys. Reads every
+        /// environment's item; values are compared, never shown.
+        #[arg(long)]
+        settings: bool,
     },
     /// Check whether your required settings are ready; contacts no deployment target.
     #[command(before_help = CHECK_QUICK, after_help = CHECK_MORE)]
@@ -2100,13 +2105,19 @@ fn run_other(
         }
         #[cfg(feature = "ui")]
         Cmd::Ui => unreachable!("handled by run"),
-        Cmd::Doctor { env, product, json } => {
+        Cmd::Doctor {
+            env,
+            product,
+            json,
+            settings,
+        } => {
             let scope = doctor::Request {
                 env: env.as_deref(),
                 product: product.as_deref(),
                 json,
                 source,
                 deploy_failure,
+                settings,
             };
             doctor::run_request(loaded, scope, r, out)
         }
