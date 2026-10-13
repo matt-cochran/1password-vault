@@ -104,6 +104,8 @@ pub enum Key {
     Tab,
     Backspace,
     Char(char),
+    /// Ctrl-C: leave `opv ui` from anywhere (nothing is written).
+    Interrupt,
 }
 
 /// The whole UI state.
@@ -223,6 +225,9 @@ impl App {
 
     /// Handle one key.
     pub fn handle(&mut self, key: Key) -> Effect {
+        if key == Key::Interrupt {
+            return Effect::Quit;
+        }
         if self.modal.is_some() {
             return self.handle_modal(key);
         }
@@ -293,13 +298,7 @@ impl App {
             }
             Key::Char('o') => {
                 if let Screen::Key { product, key } = &self.screen {
-                    let env = self.key_env(product, key);
-                    let mut cmd = vec!["open".to_string(), self.label(product, key)];
-                    if let Some(e) = env {
-                        cmd.push("--env".into());
-                        cmd.push(e);
-                    }
-                    return Effect::Run(cmd);
+                    return Effect::Run(self.open_command(product, key));
                 }
             }
             Key::Char('n') => {
@@ -425,7 +424,7 @@ impl App {
                         ),
                         "never syncs or deploys; your apps keep their secrets until you sync"
                             .into(),
-                        format!("runs: opv {}", args.join(" ")),
+                        format!("runs: {}", command_line(&args)),
                     ],
                     command: args,
                     guard: guarded.then(|| env.clone()),
@@ -444,6 +443,17 @@ impl App {
         } else {
             format!("{product}/{key}")
         }
+    }
+
+    /// What `o` runs on the key screen of `product/key`: `opv open` in the first
+    /// environment the key is declared for.
+    pub fn open_command(&self, product: &str, key: &str) -> Vec<String> {
+        let mut cmd = vec!["open".to_string(), self.label(product, key)];
+        if let Some(e) = self.key_env(product, key) {
+            cmd.push("--env".into());
+            cmd.push(e);
+        }
+        cmd
     }
 
     /// The first environment `product/key` is declared for.
@@ -498,7 +508,10 @@ impl App {
             None => lines.push("no plan id: the plan has findings".into()),
         }
         let guarded = self.snap.env(env).is_some_and(|e| e.guarded);
-        lines.push(format!("runs: opv {}", command.join(" ")));
+        let blocked = findings > 0 || id.is_none();
+        if !blocked {
+            lines.push(format!("runs: {}", command_line(&command)));
+        }
         self.modal = Some(Modal::Confirm {
             title: format!(
                 "Sync {}",
@@ -509,7 +522,7 @@ impl App {
             guard: guarded.then(|| env.to_string()),
             typed: String::new(),
         });
-        if findings > 0 || id.is_none() {
+        if blocked {
             // Nothing can be applied: the confirmation only explains why.
             if let Some(Modal::Confirm { command, .. }) = &mut self.modal {
                 command.clear();
@@ -536,7 +549,7 @@ impl App {
                             "edits the configuration (no value), validated first: a refused \
                              change writes nothing"
                                 .into(),
-                            format!("runs: opv {}", command.join(" ")),
+                            format!("runs: {}", command_line(&command)),
                         ],
                         command,
                         guard: None,
@@ -594,6 +607,26 @@ impl App {
         }
         Effect::None
     }
+}
+
+/// `opv <args>` as one line a person can paste into a shell: a word with a space, quote or
+/// other shell character is single-quoted.
+pub fn command_line(args: &[String]) -> String {
+    let mut line = String::from("opv");
+    for a in args {
+        line.push(' ');
+        let plain = !a.is_empty()
+            && a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./:,=@%+".contains(c));
+        if plain {
+            line.push_str(a);
+        } else {
+            line.push('\'');
+            line.push_str(&a.replace('\'', "'\\''"));
+            line.push('\'');
+        }
+    }
+    line
 }
 
 /// A command line into words (opv's `next` commands quote nothing that needs a shell).

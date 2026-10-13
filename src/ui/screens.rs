@@ -94,7 +94,10 @@ pub fn key_detail(f: &mut Frame, area: Rect, app: &App, product: &str, key: &str
         DIM,
     ));
     lines.push(Line::styled(
-        format!("   = opv open {label}   ·   opv explain {label}"),
+        format!(
+            "   = {}   ·   opv explain {label}",
+            super::app::command_line(&app.open_command(product, key))
+        ),
         DIM,
     ));
     f.render_widget(
@@ -171,6 +174,13 @@ pub fn accounts(f: &mut Frame, area: Rect, app: &App) {
                     a["account_id"].as_str().unwrap_or("-"),
                     a["address"].as_str().unwrap_or("-"),
                 )));
+            }
+            if let Some(m) = doc["error"]["message"].as_str() {
+                lines.push(Line::raw(format!("could not list the accounts: {m}")));
+            } else if doc["accounts"].as_array().is_none_or(Vec::is_empty) {
+                lines.push(Line::raw(
+                    "No 1Password account is listed: opv signs in with the credential it finds.",
+                ));
             }
             if doc["cli_accounts_only"].as_bool() == Some(true) {
                 lines.push(Line::styled(

@@ -178,3 +178,91 @@ fn the_access_screen_shows_the_owners_command() {
     }));
     assert!(frame(&a, 160, 30).contains("owner runs: op service-account create"));
 }
+
+#[test]
+fn the_key_bar_shows_quit_in_a_common_terminal() {
+    assert!(frame(&app(), 140, 40).contains("q quit"));
+}
+
+#[test]
+fn the_key_bar_shows_quit_in_a_narrow_terminal() {
+    assert!(frame(&app(), 70, 20).contains("q quit"));
+}
+
+#[test]
+fn the_key_bar_wraps_to_list_every_key_in_a_common_terminal() {
+    assert!(frame(&app(), 140, 40).contains("r refresh"));
+}
+
+/// The frame drawn and then made monochrome, as `opv ui` draws under `NO_COLOR`.
+fn mono_buffer(app: &App) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    t.draw(|f| {
+        draw(f, app);
+        monochrome(f.buffer_mut());
+    })
+    .unwrap();
+    t.backend().buffer().clone()
+}
+
+#[test]
+fn monochrome_leaves_no_colour() {
+    let buf = mono_buffer(&app());
+    assert!(
+        buf.content
+            .iter()
+            .all(|c| c.fg == Color::Reset && c.bg == Color::Reset)
+    );
+}
+
+#[test]
+fn monochrome_keeps_the_selection_reversed() {
+    // The sidebar's first entry (Overview) is selected when the UI opens.
+    let buf = mono_buffer(&app());
+    assert!(buf[(1, 1)].modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn monochrome_dims_what_colour_dimmed() {
+    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 1, 1));
+    buf[(0, 0)].fg = Color::DarkGray;
+    monochrome(&mut buf);
+    assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn the_key_screen_names_the_exact_command_o_runs() {
+    let mut a = app();
+    a.screen = Screen::Key {
+        product: "api".into(),
+        key: "API_TOKEN".into(),
+    };
+    assert!(frame(&a, 140, 40).contains("= opv open api/API_TOKEN --env local"));
+}
+
+#[test]
+fn a_blocked_sync_names_no_command_to_run() {
+    let mut a = app();
+    a.confirm_sync(
+        "ci",
+        &serde_json::json!({"stage": ["API_TOKEN"], "prune": [], "totals": {"findings": 1}, "plan_id": null}),
+    );
+    assert!(!frame(&a, 120, 36).contains("runs:"));
+}
+
+#[test]
+fn an_empty_account_list_says_so() {
+    let mut a = app();
+    a.screen = Screen::Accounts;
+    a.accounts = Some(serde_json::json!({"ok": true, "accounts": []}));
+    assert!(frame(&a, 140, 40).contains("No 1Password account is listed"));
+}
+
+#[test]
+fn an_account_list_that_failed_says_why() {
+    let mut a = app();
+    a.screen = Screen::Accounts;
+    a.accounts =
+        Some(serde_json::json!({"ok": false, "error": {"message": "op is not installed"}}));
+    assert!(frame(&a, 140, 40).contains("could not list the accounts: op is not installed"));
+}

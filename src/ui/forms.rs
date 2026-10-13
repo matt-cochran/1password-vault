@@ -184,7 +184,7 @@ impl FormState {
         let rows = self.rows();
         let row = rows.get(self.at).copied();
         match key {
-            Key::Esc => return Outcome::Cancelled,
+            Key::Esc | Key::Interrupt => return Outcome::Cancelled,
             Key::Up => self.at = self.at.saturating_sub(1),
             Key::Down | Key::Tab => self.at = (self.at + 1).min(rows.len().saturating_sub(1)),
             Key::Enter => match self.command() {

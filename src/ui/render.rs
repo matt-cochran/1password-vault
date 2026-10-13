@@ -23,12 +23,13 @@ const SELECTED: Style = Style::new()
 
 /// Draw the whole UI.
 pub fn draw(f: &mut Frame, app: &App) {
+    let keys = keybar_lines(f.area().width);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(5),
-            Constraint::Length(2),
+            Constraint::Length(1 + keys.len() as u16),
         ])
         .split(f.area());
     header(f, rows[0], app);
@@ -48,7 +49,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Adopt { env, from } => super::screens::adopt(f, cols[1], app, env, from),
         Screen::History(env) => super::screens::history(f, cols[1], app, env),
     }
-    keybar(f, rows[2], app);
+    keybar(f, rows[2], app, keys);
     if let Some(m) = &app.modal {
         modal(f, f.area(), m);
     }
@@ -314,13 +315,59 @@ fn env_screen(f: &mut Frame, area: Rect, app: &App, e: &str) {
     f.render_widget(keys_table(app, &rows, &[e], title), area);
 }
 
-fn keybar(f: &mut Frame, area: Rect, app: &App) {
-    let keys = "↑↓ move · tab sidebar/main · enter open · esc back · s sync… · i adopt… · o open in 1Password · + key… · E environment… · e edit config · h history · n next step · a accounts · r refresh · q quit";
-    let lines = vec![
-        Line::styled(app.status.clone(), WARN),
-        Line::styled(keys, DIM),
-    ];
+/// Every key the bar lists, most needed first.
+const KEYS: [&str; 15] = [
+    "q quit",
+    "↑↓ move",
+    "tab sidebar/main",
+    "enter open",
+    "esc back",
+    "s sync…",
+    "i adopt…",
+    "o open in 1Password",
+    "+ key…",
+    "E environment…",
+    "e edit config",
+    "h history",
+    "n next step",
+    "a accounts",
+    "r refresh",
+];
+
+/// The key bar wrapped to `width` (whole entries per line), at most three lines.
+pub fn keybar_lines(width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut lines: Vec<String> = Vec::new();
+    for k in KEYS {
+        match lines.last_mut() {
+            Some(l) if l.chars().count() + 3 + k.chars().count() <= width => {
+                l.push_str(" · ");
+                l.push_str(k);
+            }
+            _ => lines.push(k.to_string()),
+        }
+    }
+    lines.truncate(3);
+    lines
+}
+
+fn keybar(f: &mut Frame, area: Rect, app: &App, keys: Vec<String>) {
+    let mut lines = vec![Line::styled(app.status.clone(), WARN)];
+    lines.extend(keys.into_iter().map(|k| Line::styled(k, DIM)));
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Drop every colour from a drawn frame, for a terminal where colour is off (`NO_COLOR`):
+/// what was dimmed by colour keeps the dim attribute, and reverse and bold (the selection)
+/// stay as they are.
+pub fn monochrome(buf: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buf.content {
+        if cell.fg == Color::DarkGray {
+            cell.modifier |= Modifier::DIM;
+        }
+        cell.fg = Color::Reset;
+        cell.bg = Color::Reset;
+    }
 }
 
 fn modal(f: &mut Frame, area: Rect, m: &Modal) {
