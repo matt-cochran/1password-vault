@@ -76,12 +76,13 @@ pub fn capable() -> bool {
 /// lines, from `opv ready`.
 pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
     if !capable() {
-        writeln!(
-            out,
-            "opv ui needs an interactive terminal; here is the same information as text \
-             (opv ready). Set no OPV_UI_TEXT and use a terminal for the full view."
-        )
-        .map_err(crate::app::write_err)?;
+        let why = if std::env::var_os("OPV_UI_TEXT").is_some() {
+            "OPV_UI_TEXT is set"
+        } else {
+            "opv ui draws only in an interactive terminal, and this is not one"
+        };
+        writeln!(out, "{why}; here is the same information as text (opv ready):")
+            .map_err(crate::app::write_err)?;
         let status = source.command(&["ready"]).status().map_err(|e| {
             Error::Dependency(format!("cannot run opv ready ({})", e.kind()).into())
         })?;
