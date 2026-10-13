@@ -319,6 +319,11 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
         let _ = product;
         true
     }
+    /// The products this target is limited to (FR-48), as configured, for load-time
+    /// validation: each must be declared and not source-only. `None`: every product.
+    fn scoped_products(&self) -> Option<Vec<&str>> {
+        None
+    }
     /// True when `other` is the same target: two environments on it would manage the same
     /// names, and each would prune what the other stages (FR-8).
     fn same_target(&self, other: &dyn TargetConfig) -> bool;

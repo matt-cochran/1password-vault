@@ -110,6 +110,13 @@ impl KeySpec {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Product {
+    /// Canonical values only (FR-47): its keys render no target name anywhere, are never
+    /// written, managed or pruned, and `run --product <name>` refuses it. Default `false`.
+    #[serde(default)]
+    pub source_only: bool,
+    /// Declared keys. Defaulted so a source-only product without keys reaches validation's
+    /// own error (FR-47) instead of a bare serde `missing field` message.
+    #[serde(default)]
     pub keys: BTreeMap<String, KeySpec>,
 }
 
@@ -331,6 +338,34 @@ impl Fleet {
             Some(t) => t.env_name(product, key),
             None => panic!("target_name: environment {env:?} undefined or without a target"),
         }
+    }
+
+    /// Whether `env_name` delivers keys of `product` (FR-47, FR-48): true only when the
+    /// environment has a target, the product is not source-only, and the target serves the
+    /// product. An undelivered product's keys render no target name here: never written,
+    /// never in the managed set, never pruned and exempt from the name collision check.
+    pub fn delivers(&self, env_name: &str, product: &str) -> bool {
+        let Some(env) = self.environments.get(env_name) else {
+            return false;
+        };
+        let Some(t) = env.target() else {
+            return false;
+        };
+        if self.products.get(product).is_some_and(|p| p.source_only) {
+            return false;
+        }
+        t.serves(product)
+    }
+
+    /// The first product (by name) that reads any key of `product` with `from` (FR-45), or
+    /// `None`. Used to point at a runnable product when `product` is source-only (FR-47).
+    pub fn referencing_product(&self, product: &str) -> Option<&str> {
+        self.products.iter().find_map(|(q, p)| {
+            p.keys
+                .values()
+                .any(|k| k.source().is_some_and(|(sp, _)| sp == product))
+                .then_some(q.as_str())
+        })
     }
 }
 

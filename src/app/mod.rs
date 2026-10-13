@@ -386,6 +386,8 @@ pub(crate) fn write_json(
                 key: key.clone(),
             })
             .collect(),
+        undelivered: json_names(&plan.undelivered),
+        unreferenced_sources: json_names(&plan.unreferenced_sources),
         tidy: json_tidy(&plan.tidy),
         tidy_error: plan.tidy_error,
         stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
@@ -456,6 +458,14 @@ struct JsonDoc {
     changes: &'static str,
     rows: Vec<JsonRow>,
     extras: Vec<JsonName>,
+    /// Keys declared for this environment that its target does not deliver (FR-48);
+    /// absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    undelivered: Vec<JsonName>,
+    /// Keys of a source-only product that no `from` points at (FR-47,
+    /// `unreferenced-source`); absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unreferenced_sources: Vec<JsonName>,
     /// What this run tidied in 1Password (FR-43), names only; absent when nothing was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tidy: Vec<JsonTidy>,
@@ -943,7 +953,56 @@ pub(crate) fn print_extras(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), E
         )
         .map_err(write_err)?;
     }
+    let labels = |pairs: &[(String, String)]| -> String {
+        pairs
+            .iter()
+            .map(|(p, k)| key_label(p, k))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !plan.undelivered.is_empty() {
+        writeln!(
+            out,
+            "not delivered here: {} (the target's products list leaves their product out; \
+             add it there to deliver them)",
+            labels(&plan.undelivered)
+        )
+        .map_err(write_err)?;
+    }
+    if !plan.unreferenced_sources.is_empty() {
+        writeln!(
+            out,
+            "warning: unreferenced shared value {}: no key points at it with from; point a \
+             key at it or remove it",
+            labels(&plan.unreferenced_sources)
+        )
+        .map_err(write_err)?;
+    }
     Ok(())
+}
+
+/// `product/KEY` pairs as JSON names.
+fn json_names(pairs: &[(String, String)]) -> Vec<JsonName> {
+    pairs
+        .iter()
+        .map(|(product, key)| JsonName {
+            product: json_product(product),
+            key: key.clone(),
+        })
+        .collect()
+}
+
+/// FR-47: the one `Error::Config` message for naming a source-only product on its own. It
+/// holds canonical values for other products' keys and is never run, checked or planned on
+/// its own; callers attach a `Next:` step naming a product that reads it.
+pub(crate) fn source_only_message(product: &str) -> Error {
+    Error::Config(
+        format!(
+            "product {product} is source-only (source_only = true): it holds shared values \
+             for other products' keys and is never run on its own"
+        )
+        .into(),
+    )
 }
 
 /// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused under the simple
@@ -983,6 +1042,10 @@ pub(crate) fn check_product(
             .copied()
             .or(all.first().copied());
         return Err(undefined_product(fleet, p, env).with_next(command(pick)));
+    }
+    if fleet.products[p].source_only {
+        let pick = fleet.referencing_product(p);
+        return Err(source_only_message(p).with_next(command(pick)));
     }
     Ok(())
 }
@@ -1048,6 +1111,9 @@ pub(crate) fn product_names(
     product: &str,
 ) -> Result<HashSet<String>, Error> {
     let (_, t) = target(fleet, env_name)?;
+    if !fleet.delivers(env_name, product) {
+        return Ok(HashSet::new());
+    }
     Ok(fleet
         .products
         .get(product)
@@ -1091,6 +1157,7 @@ impl KeyNames {
             fleet
                 .products
                 .iter()
+                .filter(|(p, _)| fleet.delivers(env_name, p))
                 .flat_map(|(p, prod)| {
                     prod.keys
                         .keys()
@@ -1228,6 +1295,7 @@ pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<Str
     Ok(fleet
         .products
         .iter()
+        .filter(|(p, _)| fleet.delivers(env_name, p))
         .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
 }
@@ -1731,5 +1799,55 @@ pub(crate) mod testutil {
 
     pub fn text_of(out: &[u8]) -> String {
         String::from_utf8(out.to_vec()).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod source_only_tests {
+    //! FR-47: a source-only product's keys render no target name anywhere in the app layer.
+
+    use super::*;
+
+    const CFG: &str = r#"
+[profile]
+kind = "fleet"
+[environments.ci]
+vault_id = "vci"
+item_id = "ici"
+fly.app = "app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+[products.shared]
+source_only = true
+[products.shared.keys.SHARED_TOKEN]
+kind = "secret"
+environments = ["ci"]
+[products.api.keys.API_TOKEN]
+kind = "secret"
+environments = ["ci"]
+"#;
+
+    fn fleet() -> Fleet {
+        crate::config::parse(CFG).unwrap()
+    }
+
+    #[test]
+    fn managed_names_skip_a_source_only_product() {
+        let names = managed_names(&fleet(), "ci").unwrap();
+        assert_eq!(names, HashSet::from(["FLEET__API__API_TOKEN".to_string()]));
+    }
+
+    #[test]
+    fn product_names_is_empty_for_a_source_only_product() {
+        let names = product_names(&fleet(), "ci", "shared").unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn key_names_has_no_label_for_a_source_only_name() {
+        let names = KeyNames::new(&fleet(), "ci").unwrap();
+        assert_eq!(
+            names.label("FLEET__SHARED__SHARED_TOKEN"),
+            "FLEET__SHARED__SHARED_TOKEN"
+        );
     }
 }

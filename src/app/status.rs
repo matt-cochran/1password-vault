@@ -72,7 +72,7 @@ pub fn run_scoped(
     if let Ports::Staged { store, .. } = &ports
         && let Some(v) = store.variables()
     {
-        crate::app::variables::plan(fleet, t, &mut plan, v, &|_| true)?;
+        crate::app::variables::plan(fleet, env_name, t, &mut plan, v, &|_| true)?;
     }
     let pinned = match &ports {
         Ports::Pinned { store, runtime } => Some(pinned_status(
@@ -420,7 +420,7 @@ fn env_rows(
     if let Ports::Staged { store, .. } = &ports
         && let Some(v) = store.variables()
     {
-        crate::app::variables::plan(fleet, t, &mut plan, v, &|_| true)?;
+        crate::app::variables::plan(fleet, env_name, t, &mut plan, v, &|_| true)?;
     }
     Ok(plan.rows)
 }

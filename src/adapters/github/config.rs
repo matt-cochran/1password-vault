@@ -296,6 +296,11 @@ impl TargetConfig for GithubTarget {
     fn serves(&self, product: &str) -> bool {
         self.products.as_ref().is_none_or(|p| p.contains(product))
     }
+    fn scoped_products(&self) -> Option<Vec<&str>> {
+        self.products
+            .as_ref()
+            .map(|p| p.iter().map(String::as_str).collect())
+    }
     fn same_target(&self, other: &dyn TargetConfig) -> bool {
         other
             .as_any()

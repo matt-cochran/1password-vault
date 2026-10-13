@@ -319,6 +319,8 @@ mod tests {
             held_from_prune: vec![],
             config: BTreeMap::new(),
             concealed_config: Vec::new(),
+            undelivered: Vec::new(),
+            unreferenced_sources: Vec::new(),
             tidy: Vec::new(),
             tidy_error: None,
         }

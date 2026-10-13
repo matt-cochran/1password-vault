@@ -592,6 +592,12 @@ Acceptance:
 
 Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, SR-8.
 
+**Since 0.6.0 (#37): `pattern` merges into `regex`.**
+
+- `regex` is checked against the value opv would stage: after `ensure_prefix` normalisation when the key has one, the value as stored otherwise. Compatible with every file that worked before: the local tidy (FR-43) already writes the prefixed form back to 1Password, so a `regex` that accepted stored values accepts the staged one.
+- `regex` may now be combined with `ensure_prefix`. A value that is only the prefix still fails as `ensure_prefix` (checked first).
+- `pattern` stays accepted, with its exact behaviour and failure rule name (`pattern`), as a deprecated alias. Loading a configuration that uses it prints one note per key on stderr naming the key and the equivalent rule, `regex = "<regex-escaped prefix>(?:<pattern>)"`, never a value. `opv schema` marks it deprecated. A key that sets both `pattern` and `regex` is a configuration error naming the key.
+
 ## FR-25 — Config Discovery
 
 When `--config` is not given, the CLI shall look for `secrets.toml` in the current directory and then in each parent directory, and use the first one found.
@@ -1354,7 +1360,7 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 - **Rotation epoch** (rotate immutable keys by bumping a counter): rejected, because rotation must stay a per-key explicit act (FR-16, SR-6).
 - **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded. Funded in v0.3 as the `SecretStore` and `Runtime` ports (FR-28).
 - **Exact change detection in `fly plan`**: deferred, because Fly digests cannot be computed locally and `plan` must not stage (FR-5, FR-11, §6.4). Backlog: #36.
-- **Merging `pattern` into `regex`**: deferred. In v0.2 `pattern` is allowed only alongside `ensure_prefix` and applies to the text after the prefix, which `regex` does not do (FR-24). Backlog: #37.
+- **Merging `pattern` into `regex`**: done in 0.6.0 (FR-24, #37): `regex` checks the staged value, `pattern` is a deprecated alias.
 
 Version 0.3 is acceptable, per phase, when in addition to 1–26:
 

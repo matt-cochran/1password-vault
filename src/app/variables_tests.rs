@@ -68,7 +68,7 @@ fn planned(field: Option<ItemField>, vars: &FakeVars) -> (SyncPlan, VarPlan) {
         &|_| None,
     );
     let t = f.environments["staging"].target().unwrap();
-    let v = super::plan(&f, t, &mut p, vars, &|_| true).unwrap();
+    let v = super::plan(&f, "staging", t, &mut p, vars, &|_| true).unwrap();
     (p, v)
 }
 
@@ -168,7 +168,7 @@ fn a_store_refusal_fails_the_row() {
         &|_| None,
     );
     let t = f.environments["staging"].target().unwrap();
-    super::plan(&f, t, &mut p, &RefuseAll, &|_| true).unwrap();
+    super::plan(&f, "staging", t, &mut p, &RefuseAll, &|_| true).unwrap();
     assert_eq!(
         row_state(&p),
         &KeyState::RuleFailed("fake-rule", Reason::Fixed("fake reason"))
@@ -199,7 +199,7 @@ fn a_managed_variable_no_key_wants_is_pruned() {
     let mut p = plan::build(&f2, "staging", vec![], &[], &BTreeSet::new(), &|_| None);
     let t = f2.environments["staging"].target().unwrap();
     let vars = FakeVars::with(&[(NAME, "open")]);
-    let v = super::plan(&f2, t, &mut p, &vars, &|_| true).unwrap();
+    let v = super::plan(&f2, "staging", t, &mut p, &vars, &|_| true).unwrap();
     assert_eq!(v.prune, [NAME]);
 }
 
@@ -222,7 +222,7 @@ fn an_out_of_scope_name_is_neither_set_nor_pruned() {
         &|_| None,
     );
     let t = f.environments["staging"].target().unwrap();
-    let v = super::plan(&f, t, &mut p, &FakeVars::with(&[]), &|_| false).unwrap();
+    let v = super::plan(&f, "staging", t, &mut p, &FakeVars::with(&[]), &|_| false).unwrap();
     assert_eq!(v, VarPlan::default());
 }
 

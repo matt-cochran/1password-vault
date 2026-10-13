@@ -516,9 +516,14 @@ fn run_staged(
     // refused or concealed config key blocks like any other finding.
     let vars = store.variables();
     let var_plan = match vars {
-        Some(v) => Some(super::variables::plan(fleet, t, &mut plan, v, &|n| {
-            c.in_scope(n)
-        })?),
+        Some(v) => Some(super::variables::plan(
+            fleet,
+            env_name,
+            t,
+            &mut plan,
+            v,
+            &|n| c.in_scope(n),
+        )?),
         None => None,
     };
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
@@ -1531,9 +1536,14 @@ pub fn plan_scoped(
     let (live, var_plan) = match &ports {
         Ports::Staged { store, runtime } => {
             let vp = match store.variables() {
-                Some(v) => Some(super::variables::plan(fleet, t, &mut plan, v, &|n| {
-                    scope.as_ref().is_none_or(|s| s.contains(n))
-                })?),
+                Some(v) => Some(super::variables::plan(
+                    fleet,
+                    env_name,
+                    t,
+                    &mut plan,
+                    v,
+                    &|n| scope.as_ref().is_none_or(|s| s.contains(n)),
+                )?),
                 None => None,
             };
             (runtime.live(), vp.unwrap_or_default())
