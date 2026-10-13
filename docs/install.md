@@ -2,6 +2,8 @@
 
 ## Install
 
+The easiest way on every platform is npm: `npm install -g @matthew-cochran/opv` ([details](#npm)). Without Node.js, use the install script (Linux and macOS) or a release binary.
+
 ### Install script (Linux and macOS)
 
 ```sh
