@@ -943,6 +943,14 @@ Design: `docs/design/fleet-bootstrap-and-adoption.md` §2 (#78).
 - `--apply` writes in one verified item edit (values on stdin only), re-reads and verifies, needs a person's own session, and is resumable. It never syncs, deploys, prunes, revokes or deletes the source.
 - Output holds names, actions and findings only, never a value, a length or a fragment.
 
+## FR-54 — Version Ledger (exact change detection on stores that hide values)
+
+Resolves #36 (TRIZ: separation in time; preliminary action, copying, intermediary).
+
+- After a staged sync writes values and lists the store again, a person's own session records in the environment's item, section `opv · state`, per written name: the store's version of it (Fly digest, GitHub `updatedAt`) and `HMAC-SHA256(key, value)`, as a text field `v1:<version>:<fingerprint>`; the key is 32 random bytes, a concealed field `ledger key` in the same section, created on first use. One fresh item read and one item edit, through the tidy writer and under the tidy's gate (FR-43): never a service account, Connect, CI, deploy credentials or the project manifest. A failure to record is a note, never the sync's result.
+- `plan`, `status` and `sync` (staged flow) judge a listed name by the ledger when the store still holds it at the recorded version: the same fingerprint is `same` (not staged again), another is `would_change`. A name listed at another version is reported as changed outside opv (`drift`, text and JSON). No ledger entry: `unknown`, as before.
+- The section is reserved: never a product, never tidied, never an extra field. Fingerprints are compared in constant time and never printed; the key and entries never appear in output, errors or `Debug`.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
@@ -1407,7 +1415,7 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 - **Pre-declared sync policy** (deploy or prune by configuration): rejected, because it replaces explicit per-run intent (FR-8, FR-9, SR-6).
 - **Rotation epoch** (rotate immutable keys by bumping a counter): rejected, because rotation must stay a per-key explicit act (FR-16, SR-6).
 - **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded. Funded in v0.3 as the `SecretStore` and `Runtime` ports (FR-28).
-- **Exact change detection in `fly plan`**: deferred, because Fly digests cannot be computed locally and `plan` must not stage (FR-5, FR-11, §6.4). Backlog: #36.
+- **Exact change detection in `fly plan`**: done in 0.6.0 by the version ledger (FR-54, #36): a person's sync records each written name's digest and a keyed fingerprint, so `plan` compares exactly without staging.
 - **Merging `pattern` into `regex`**: done in 0.6.0 (FR-24, #37): `regex` checks the staged value, `pattern` is a deprecated alias.
 
 Version 0.3 is acceptable, per phase, when in addition to 1–26:

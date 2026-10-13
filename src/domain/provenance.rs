@@ -320,6 +320,7 @@ mod tests {
             held_from_prune: vec![],
             config: BTreeMap::new(),
             concealed_config: Vec::new(),
+            drift: Vec::new(),
             undelivered: Vec::new(),
             unreferenced_sources: Vec::new(),
             tidy: Vec::new(),

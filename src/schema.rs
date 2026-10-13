@@ -444,7 +444,7 @@ fn documents() -> Value {
         "error": ["code", "category", "message", "detail", "retry", "human_required", "do", "next"],
         "tidy": ["action", "name"],
         "status": [
-            "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "tidy?", "tidy_error?", "stage",
+            "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
             "held", "prune", "totals",
             "provenance? ({opv_version, written, plan_id}: the latest stamp on a pinned target)"
         ],
@@ -454,7 +454,7 @@ fn documents() -> Value {
             "totals"
         ],
         "plan": [
-            "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "tidy?", "tidy_error?", "stage",
+            "environment", "product", "changes", "rows", "extras", "undelivered?", "unreferenced_sources?", "drift?", "tidy?", "tidy_error?", "stage",
             "held", "prune", "totals", "plan_id? (a clean plan only)"
         ],
         "check": [

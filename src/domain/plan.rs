@@ -118,6 +118,9 @@ pub struct SyncPlan {
     /// Accepted and delivered as plain environment values, but their values are never
     /// printed, and `status` warns once per key.
     pub concealed_config: Vec<(String, String)>,
+    /// Store names whose version changed outside opv since the version ledger recorded it
+    /// (FR-54): someone else set them on the target.
+    pub drift: Vec<String>,
     /// (product, key): keys declared for this environment whose product the target does
     /// not deliver (FR-48). Source-only products are never listed here (FR-47).
     pub undelivered: Vec<(String, String)>,
@@ -270,6 +273,7 @@ pub fn build_with(
         held_from_prune: Vec::new(),
         config: BTreeMap::new(),
         concealed_config: Vec::new(),
+        drift: Vec::new(),
         undelivered: Vec::new(),
         unreferenced_sources: Vec::new(),
         tidy: Vec::new(),
