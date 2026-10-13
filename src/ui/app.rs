@@ -21,6 +21,10 @@ pub enum Screen {
         key: String,
     },
     Accounts,
+    /// What opv last wrote to an environment's target (#95), from `opv history --json`.
+    History(String),
+    /// Who can read each environment's vault (#96), from `opv access --json`.
+    Access,
     /// The adoption review (#94): what `opv adopt <env> --from <from>` found, per key.
     Adopt {
         env: String,
@@ -33,6 +37,8 @@ pub enum Screen {
 pub enum Nav {
     Overview,
     Shared,
+    /// Who can read each environment's vault (#96).
+    Access,
     Env(String),
     Product(String),
 }
@@ -75,6 +81,10 @@ pub enum Effect {
     Run(Vec<String>),
     /// Read `opv account list --json` for the accounts screen.
     LoadAccounts,
+    /// Read `opv history <env> --json` for the history screen (#95).
+    LoadHistory(String),
+    /// Read `opv access --json` for the access screen (#96).
+    LoadAccess,
     /// Read `opv adopt <env> --from <from> --json` and open the adoption review (#94).
     AdoptPlan {
         env: String,
@@ -94,6 +104,8 @@ pub enum Key {
     Tab,
     Backspace,
     Char(char),
+    /// Ctrl-C: leave `opv ui` from anywhere (nothing is written).
+    Interrupt,
 }
 
 /// The whole UI state.
@@ -115,6 +127,10 @@ pub struct App {
     pub accounts: Option<serde_json::Value>,
     /// The adoption review's rows and decisions (#94).
     pub adopt: Vec<super::adopt_review::ReviewRow>,
+    /// `opv history <env> --json`, once loaded (#95).
+    pub history: Option<serde_json::Value>,
+    /// `opv access --json`, once loaded (#96).
+    pub access: Option<serde_json::Value>,
 }
 
 impl App {
@@ -131,6 +147,8 @@ impl App {
             status: String::new(),
             accounts: None,
             adopt: Vec::new(),
+            history: None,
+            access: None,
         };
         app.rebuild_nav();
         app
@@ -144,7 +162,7 @@ impl App {
     }
 
     fn rebuild_nav(&mut self) {
-        let mut nav = vec![Nav::Overview, Nav::Shared];
+        let mut nav = vec![Nav::Overview, Nav::Shared, Nav::Access];
         nav.extend(self.snap.envs.iter().map(|e| Nav::Env(e.key.clone())));
         nav.extend(
             self.snap
@@ -207,6 +225,9 @@ impl App {
 
     /// Handle one key.
     pub fn handle(&mut self, key: Key) -> Effect {
+        if key == Key::Interrupt {
+            return Effect::Quit;
+        }
         if self.modal.is_some() {
             return self.handle_modal(key);
         }
@@ -230,6 +251,12 @@ impl App {
                 let screen = match self.nav.get(self.nav_at) {
                     Some(Nav::Overview) => Screen::Overview,
                     Some(Nav::Shared) => Screen::Shared,
+                    Some(Nav::Access) => {
+                        self.open(Screen::Access);
+                        self.in_nav = false;
+                        self.access = None;
+                        return Effect::LoadAccess;
+                    }
                     Some(Nav::Env(e)) => Screen::Env(e.clone()),
                     Some(Nav::Product(p)) => Screen::Product(p.clone()),
                     None => return Effect::None,
@@ -271,13 +298,7 @@ impl App {
             }
             Key::Char('o') => {
                 if let Screen::Key { product, key } = &self.screen {
-                    let env = self.key_env(product, key);
-                    let mut cmd = vec!["open".to_string(), self.label(product, key)];
-                    if let Some(e) = env {
-                        cmd.push("--env".into());
-                        cmd.push(e);
-                    }
-                    return Effect::Run(cmd);
+                    return Effect::Run(self.open_command(product, key));
                 }
             }
             Key::Char('n') => {
@@ -315,6 +336,17 @@ impl App {
                 self.modal = Some(Modal::Form(super::forms::FormState::add_key(
                     envs, fleet, product, env,
                 )));
+            }
+            Key::Char('h') => {
+                if let Some(env) = self.current_env() {
+                    if self.snap.env(&env).is_some_and(|e| e.target.is_some()) {
+                        self.history = None;
+                        self.open(Screen::History(env.clone()));
+                        return Effect::LoadHistory(env);
+                    }
+                    self.status =
+                        format!("{env} has no target: opv writes nothing outside 1Password for it");
+                }
             }
             Key::Char('E') => {
                 let envs = self.snap.envs.iter().map(|e| e.key.clone()).collect();
@@ -392,7 +424,7 @@ impl App {
                         ),
                         "never syncs or deploys; your apps keep their secrets until you sync"
                             .into(),
-                        format!("runs: opv {}", args.join(" ")),
+                        format!("runs: {}", command_line(&args)),
                     ],
                     command: args,
                     guard: guarded.then(|| env.clone()),
@@ -411,6 +443,17 @@ impl App {
         } else {
             format!("{product}/{key}")
         }
+    }
+
+    /// What `o` runs on the key screen of `product/key`: `opv open` in the first
+    /// environment the key is declared for.
+    pub fn open_command(&self, product: &str, key: &str) -> Vec<String> {
+        let mut cmd = vec!["open".to_string(), self.label(product, key)];
+        if let Some(e) = self.key_env(product, key) {
+            cmd.push("--env".into());
+            cmd.push(e);
+        }
+        cmd
     }
 
     /// The first environment `product/key` is declared for.
@@ -465,7 +508,10 @@ impl App {
             None => lines.push("no plan id: the plan has findings".into()),
         }
         let guarded = self.snap.env(env).is_some_and(|e| e.guarded);
-        lines.push(format!("runs: opv {}", command.join(" ")));
+        let blocked = findings > 0 || id.is_none();
+        if !blocked {
+            lines.push(format!("runs: {}", command_line(&command)));
+        }
         self.modal = Some(Modal::Confirm {
             title: format!(
                 "Sync {}",
@@ -476,7 +522,7 @@ impl App {
             guard: guarded.then(|| env.to_string()),
             typed: String::new(),
         });
-        if findings > 0 || id.is_none() {
+        if blocked {
             // Nothing can be applied: the confirmation only explains why.
             if let Some(Modal::Confirm { command, .. }) = &mut self.modal {
                 command.clear();
@@ -503,7 +549,7 @@ impl App {
                             "edits the configuration (no value), validated first: a refused \
                              change writes nothing"
                                 .into(),
-                            format!("runs: opv {}", command.join(" ")),
+                            format!("runs: {}", command_line(&command)),
                         ],
                         command,
                         guard: None,
@@ -561,6 +607,26 @@ impl App {
         }
         Effect::None
     }
+}
+
+/// `opv <args>` as one line a person can paste into a shell: a word with a space, quote or
+/// other shell character is single-quoted.
+pub fn command_line(args: &[String]) -> String {
+    let mut line = String::from("opv");
+    for a in args {
+        line.push(' ');
+        let plain = !a.is_empty()
+            && a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./:,=@%+".contains(c));
+        if plain {
+            line.push_str(a);
+        } else {
+            line.push('\'');
+            line.push_str(&a.replace('\'', "'\\''"));
+            line.push('\'');
+        }
+    }
+    line
 }
 
 /// A command line into words (opv's `next` commands quote nothing that needs a shell).

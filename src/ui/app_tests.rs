@@ -26,28 +26,34 @@ fn the_sidebar_lists_every_configured_environment() {
 #[test]
 fn enter_on_an_environment_opens_it() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Enter]);
+    press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
     assert_eq!(a.screen, Screen::Env("local".into()));
 }
 
 #[test]
 fn escape_goes_back() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Enter, Key::Esc]);
+    press(
+        &mut a,
+        &[Key::Down, Key::Down, Key::Down, Key::Enter, Key::Esc],
+    );
     assert_eq!(a.screen, Screen::Overview);
 }
 
 #[test]
 fn sync_on_a_deployed_environment_starts_with_its_plan() {
     let mut a = app();
-    let e = press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Char('s')]);
+    let e = press(
+        &mut a,
+        &[Key::Down, Key::Down, Key::Down, Key::Down, Key::Char('s')],
+    );
     assert_eq!(e, Effect::Plan { env: "ci".into() });
 }
 
 #[test]
 fn sync_on_a_local_environment_explains_there_is_nothing_to_sync() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Char('s')]);
+    press(&mut a, &[Key::Down, Key::Down, Key::Down, Key::Char('s')]);
     assert!(a.status.contains("local only"), "{}", a.status);
 }
 
@@ -112,7 +118,10 @@ fn escape_cancels_a_confirmation_and_changes_nothing() {
 #[test]
 fn enter_on_a_key_row_opens_its_detail() {
     let mut a = app();
-    press(&mut a, &[Key::Down, Key::Down, Key::Enter, Key::Enter]);
+    press(
+        &mut a,
+        &[Key::Down, Key::Down, Key::Down, Key::Enter, Key::Enter],
+    );
     assert!(matches!(a.screen, Screen::Key { .. }));
 }
 
@@ -282,4 +291,70 @@ fn esc_closes_a_form_without_running_anything() {
     let mut a = app();
     press(&mut a, &[Key::Char('+'), Key::Esc]);
     assert!(a.modal.is_none());
+}
+
+// #95: history --------------------------------------------------------------------------------
+
+#[test]
+fn h_on_a_deployed_environment_loads_its_history() {
+    let mut a = app();
+    a.open(Screen::Env("ci".into()));
+    a.in_nav = false;
+    assert_eq!(a.handle(Key::Char('h')), Effect::LoadHistory("ci".into()));
+}
+
+#[test]
+fn h_on_a_local_environment_explains_there_is_none() {
+    let mut a = app();
+    a.open(Screen::Env("local".into()));
+    a.in_nav = false;
+    assert_eq!(a.handle(Key::Char('h')), Effect::None);
+}
+
+// #96: CI access --------------------------------------------------------------------------------
+
+#[test]
+fn the_sidebar_offers_ci_access() {
+    assert!(app().nav.contains(&Nav::Access));
+}
+
+#[test]
+fn opening_ci_access_loads_it() {
+    let mut a = app();
+    press(&mut a, &[Key::Down, Key::Down]);
+    assert_eq!(a.handle(Key::Enter), Effect::LoadAccess);
+}
+
+#[test]
+fn ctrl_c_quits_from_the_overview() {
+    assert_eq!(press(&mut app(), &[Key::Interrupt]), Effect::Quit);
+}
+
+#[test]
+fn ctrl_c_quits_from_inside_a_form() {
+    assert_eq!(
+        press(&mut app(), &[Key::Char('+'), Key::Interrupt]),
+        Effect::Quit
+    );
+}
+
+#[test]
+fn a_word_with_a_space_is_quoted_in_the_shown_command() {
+    let args = ["add", "api/K", "--guidance", "ask the lead"].map(String::from);
+    assert_eq!(
+        command_line(&args),
+        "opv add api/K --guidance 'ask the lead'"
+    );
+}
+
+#[test]
+fn a_quote_inside_a_word_survives_the_shown_command() {
+    let args = ["add", "--guidance", "it's yours"].map(String::from);
+    assert_eq!(command_line(&args), r"opv add --guidance 'it'\''s yours'");
+}
+
+#[test]
+fn a_plain_command_is_shown_as_typed() {
+    let args = ["sync", "ci", "--expect-plan", "abc123"].map(String::from);
+    assert_eq!(command_line(&args), "opv sync ci --expect-plan abc123");
 }

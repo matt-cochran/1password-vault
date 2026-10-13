@@ -39,6 +39,9 @@ pub struct FakeOp {
     /// Someone else's edit, applied right after the n-th `item edit` reaches op (1-based),
     /// before op answers: an edit landing together with opv's (I5).
     pub racing_edit: Cell<Option<usize>>,
+    /// `op vault user list <vault>` answers by vault ID (#96); a vault not here fails, as
+    /// for a person who cannot manage it.
+    pub vault_users: RefCell<BTreeMap<String, Value>>,
     edits: Cell<usize>,
     next_id: Cell<u32>,
 }
@@ -57,6 +60,7 @@ impl Default for FakeOp {
             calls: RefCell::default(),
             cache: RefCell::default(),
             racing_edit: Cell::new(None),
+            vault_users: RefCell::default(),
             edits: Cell::new(0),
             next_id: Cell::new(1),
         }
@@ -245,6 +249,10 @@ impl FakeOp {
                 cache.insert((*id).to_string(), answer.clone());
                 Output::success(serde_json::to_vec(&answer).unwrap())
             }
+            ["vault", "user", "list", v, ..] => match self.vault_users.borrow().get(*v) {
+                Some(users) => Output::success(serde_json::to_vec(users).unwrap()),
+                None => Output::failure(1),
+            },
             ["vault", "get", v, ..] => match self.vault(v) {
                 Some((id, name)) => {
                     Output::success(serde_json::to_vec(&json!({"id": id, "name": name})).unwrap())

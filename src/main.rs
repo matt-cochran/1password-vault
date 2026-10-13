@@ -309,6 +309,16 @@ Examples:
   opv ui                       # every environment x product; enter to open, s to sync, q to quit
   OPV_UI_TEXT=1 opv ui         # the same information as text (screen readers, dumb terminals)";
 
+const HISTORY_QUICK: &str = "\
+Examples:
+  opv history prod             # last write per key: time, plan id, opv version
+  opv history prod --json      # the same as one document (names and versions only)";
+
+const ACCESS_QUICK: &str = "\
+Examples:
+  opv access                   # every environment's readers; a CI reader command where missing
+  opv access prod --json       # one environment as a document";
+
 const READY_QUICK: &str = "\
 Examples:
   opv ready                      # every environment × product, findings, the next step
@@ -600,6 +610,26 @@ enum Cmd {
     #[cfg(feature = "ui")]
     #[command(before_help = UI_QUICK)]
     Ui,
+    /// What opv last wrote to an environment's target, per key: when, by which plan, and
+    /// whether it changed outside opv since (read-only, values never shown).
+    #[command(before_help = HISTORY_QUICK)]
+    History {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Who can read each environment's vault, and the command for a read-only CI reader
+    /// (read-only; people are counted, never named).
+    #[command(before_help = ACCESS_QUICK)]
+    Access {
+        /// Only this environment.
+        env: Option<String>,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// What is ready, what is not, and who does what next: one receipt (read-only).
     #[command(before_help = READY_QUICK)]
     Ready {
@@ -1464,7 +1494,9 @@ impl Cmd {
             | Cmd::Run { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
             | Cmd::Item(ItemCmd::Skeleton { env, .. }) => Some((env, Reach::Store)),
-            Cmd::Status { env: Some(env), .. } => Some((env, Reach::Target)),
+            Cmd::Status { env: Some(env), .. } | Cmd::History { env, .. } => {
+                Some((env, Reach::Target))
+            }
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
@@ -1489,6 +1521,8 @@ impl Cmd {
             | Cmd::Item(ItemCmd::Skeleton { json, .. })
             | Cmd::Bootstrap { json, .. }
             | Cmd::Ready { json, .. }
+            | Cmd::History { json, .. }
+            | Cmd::Access { json, .. }
             | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
@@ -2154,6 +2188,8 @@ fn run_other(
             };
             opv::app::adopt::run(&loaded?, &env, &opts, r, out)
         }
+        Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
+        Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
             source,

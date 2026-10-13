@@ -931,6 +931,61 @@ fn sigterm_forwards_and_exits_143() {
     );
 }
 
+/// A1, NR-12: with `--json`, an interruption still exits (the handler printed its document
+/// through stdout's lock, which `main` holds for the whole command: opv hung forever).
+#[cfg(unix)]
+#[test]
+fn sigint_with_json_exits_130() {
+    let dir = fake_op(
+        "echo started > \"$OPV_LOG.start\"\n\
+         /bin/sleep 30",
+    );
+    let log = dir.path().join("log");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .args([
+            "--config",
+            CFG,
+            "check",
+            "prod",
+            "--product",
+            "allumata",
+            "--json",
+        ])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OPV_CONFIG")
+        .env_remove("OPV_PRODUCT")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env("PATH", dir.path())
+        .env("OPV_LOG", &log)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = dir.path().join("log.start");
+    let t = std::time::Instant::now();
+    while !started.exists() && t.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let code = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s.code();
+        }
+        if t.elapsed() > std::time::Duration::from_secs(20) {
+            let _ = child.kill();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(code, Some(130));
+}
+
 /// NR-4: `--timeout` and `--verbose` are global flags.
 #[test]
 fn timeout_and_verbose_are_accepted_globally() {

@@ -90,6 +90,28 @@ pub fn find_vault(
     lookup(all, title, "vault", "")
 }
 
+/// Who can use `vault_id` (#96): the JSON array of `op vault user list <vault_id> --format
+/// json` (type, state, permissions, name; read-only). `Ok(None)` when this person may not
+/// see it (listing a vault's users needs managing it); a sign-in problem is an error.
+pub fn vault_users(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    host: &dyn Fn() -> Host,
+) -> Result<Option<serde_json::Value>, Error> {
+    let args = ["vault", "user", "list", vault_id, "--format", "json"];
+    match list(
+        r,
+        &args,
+        host,
+        "op vault user list",
+        "who can use the vault",
+    ) {
+        Ok(out) => Ok(serde_json::from_slice(&out.stdout).ok()),
+        Err(Error::Source(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// The item in `vault_id` whose title is exactly `title` (case-sensitive). One `op item
 /// list --vault <vault_id>` call (item metadata only; it carries no field values).
 #[cfg(test)]

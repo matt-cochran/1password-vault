@@ -1,6 +1,6 @@
 # `opv ui`: mockups for review
 
-Status: implemented in `src/ui/` (#82), 2026-10-13, following these mockups; the decisions taken are recorded below.
+Status: implemented in `src/ui/` for 0.6.0 (#82, #94, #95, #96, #97), 2026-10-13, following these mockups; every screen below is built, and the decisions taken are recorded at the end.
 Canvas (private to the owner): https://claude.ai/artifact/Nwh6mBbYQW3JihuyeFDwyj
 
 ## Principles the mockups follow
@@ -35,9 +35,14 @@ Canvas (private to the owner): https://claude.ai/artifact/Nwh6mBbYQW3JihuyeFDwyj
 
 ## Decisions, as built
 
-1. Navigation: a persistent left sidebar (Overview, Shared values, each environment, each product) with `tab` between it and the main pane.
+1. Navigation: a persistent left sidebar (Overview, Shared values, CI access, each environment, each product) with `tab` between it and the main pane.
 2. Grid cells: saved/declared counts with a findings count, `not here` where a target does not deliver a product.
-3. Writes: `opv ui` runs sync and adoption itself, but only as the same `opv` command, shown first, run in the person's terminal: sync runs exactly the reviewed plan (`--expect-plan`), and a guarded environment needs its name typed. Sign-in and value entry hand off to 1Password (`o` = `opv open`).
-4. Not built yet: audit history (provenance), a CI-reader access view, editing the configuration, and the per-key keep/replace/skip adoption review (adoption runs `opv adopt`, which reviews in the terminal). Each can follow as its own issue.
+3. Writes: `opv ui` runs sync, adoption and configuration edits itself, but only as the same `opv` command, shown first (paste-safe) and run in the person's terminal: sync runs exactly the reviewed plan (`--expect-plan`), and a guarded environment needs its name typed. Sign-in and value entry hand off to 1Password (`o` = `opv open`).
+4. The views decision 4 left open, each built as its own issue:
+   - **Adoption review** (#94, screen 7): `i` reads `opv adopt --json`; per key import/skip or keep/replace/skip (with `--rotate` for an immutable key); `y` runs exactly the `opv adopt … --apply` it shows.
+   - **Audit history** (#95): `h` on an environment reads `opv history --json`: the last write per key (stamp time, plan id, opv version) and what changed outside opv since; never a digest of a value.
+   - **CI-reader access** (#96): the "CI access" sidebar entry reads `opv access --json`: people counted (never named), service accounts read-only or not, and the owner's exact `op service-account create … :read_items` command where one is missing.
+   - **Editing the configuration** (#97): `+` declares a key and `E` adds an environment through forms that run the exact `opv add` / `opv init --add-env` they show; `e` hands off to `opv config edit`.
+5. Settings health (#92) shows in the overview's "needs attention" and on the key screen.
 
-The screens are frames tested in ratatui's in-memory backend from documents recorded from a real run (`src/ui/render_tests.rs`), including that no screen ever contains a value.
+The screens are frames tested in ratatui's in-memory backend from documents recorded from a real run (`src/ui/render_tests.rs`), including that no screen ever contains a value, and were driven by hand in a real terminal (tmux, three sizes) before 0.6.0, which found and fixed 11 terminal bugs (keys, signals, `NO_COLOR`, redraws).

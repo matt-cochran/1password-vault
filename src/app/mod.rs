@@ -9,6 +9,7 @@
 //!   verifying read; FR-43, [`tidy`]); a service account or CI never writes.
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
+pub mod access;
 pub mod account;
 pub mod add;
 pub mod adopt;
@@ -27,6 +28,7 @@ mod github_tests;
 #[cfg(test)]
 mod guidance_tests;
 pub mod guide;
+pub mod history;
 pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;

@@ -9,6 +9,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
 | `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
 | `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
+| `opv history <env> [--json]` | what opv last wrote to the target, per key: time, plan id, changed outside opv ([usage](#write-history-opv-history)) | nothing (read-only) |
+| `opv access [<env>] [--json]` | who can read each vault; the owner's command for a read-only CI reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -404,7 +406,21 @@ all clear: nothing pending
 
 `opv ui` shows, in one full-screen view, every environment (by its title, in its configured order) against every product, each product's keys across environments, a key's details and who reads it, the shared values and their consumers, and the 1Password accounts. Secrets are shown as `••••` with their state; no value is ever fetched. Environments you cannot open are dimmed with their `audience`; your personal keys are marked as yours.
 
-Every action is an `opv` command, shown before it runs and run in your terminal, so 1Password's prompts and opv's output look exactly as they do on the command line: `s` syncs the selected environment by first showing `opv plan`, then running exactly that plan with `--expect-plan` after you confirm (for a guarded environment, by typing its name); `i` reviews values from a file before adopting them (what `opv adopt` found per key; you choose import or skip, keep or replace, then it runs exactly the `opv adopt … --apply` it shows); `o` opens a key in 1Password; `n` runs the next step from `opv ready`; `a` lists accounts; `+` declares a key (a form: product, name, kind, environments, guidance, personal, same value intended) and `E` adds an environment, each becoming the exact `opv add …` / `opv init <env> --add-env` it shows before running; `e` hands off to `opv config edit`; `r` re-reads everything. Keys: arrows, `tab` between the sidebar and the main pane, `enter` to open, `esc` to go back, `q` to quit. Without an interactive terminal (or with `OPV_UI_TEXT=1`, for screen readers) it prints `opv ready` instead. It is part of the default build; `cargo build --no-default-features` leaves it out.
+Every action is an `opv` command, shown before it runs and run in your terminal, so 1Password's prompts and opv's output look exactly as they do on the command line: `s` syncs the selected environment by first showing `opv plan`, then running exactly that plan with `--expect-plan` after you confirm (for a guarded environment, by typing its name); `i` reviews values from a file before adopting them (what `opv adopt` found per key; you choose import or skip, keep or replace, then it runs exactly the `opv adopt … --apply` it shows); `o` opens a key in 1Password; `n` runs the next step from `opv ready`; `a` lists accounts; `+` declares a key (a form: product, name, kind, environments, guidance, personal, same value intended) and `E` adds an environment, each becoming the exact `opv add …` / `opv init <env> --add-env` it shows before running; `e` hands off to `opv config edit`; `r` re-reads everything. Keys: arrows, `tab` between the sidebar and the main pane, `enter` to open, `esc` to go back, `q` (or Ctrl-C) to quit; Ctrl-C while an action's command runs stops that command and returns to the UI. Without an interactive terminal (or with `OPV_UI_TEXT=1`, for screen readers) it prints `opv ready` instead. It is part of the default build; `cargo build --no-default-features` leaves it out.
+
+## Write history: `opv history`
+
+`opv history <env>` shows, per secret, what opv last wrote to the environment's target, from what is already recorded: on Key Vault and Kubernetes the stamp opv puts on each value it writes (UTC time, plan id, opv version); on Fly and GitHub the version opv's own sync recorded in the item's `opv · state` section (on Fly the version is a digest of the value, so it is compared in memory and never shown: only the state is). Each key is `written by opv` (stamped), `as opv's last sync left it`, `changed outside opv since its last sync` (then `Next: opv plan <env>`), `on the target; opv has no record of writing it`, or `not on the target`. It is read-only, as `opv status` (one item read and one store listing), and shows names, versions, times and plan ids, never a value or a fingerprint. `--json` gives `{schema_version, environment, target, latest: {written, plan, opv_version} | null, rows: [{product, key, name, on_target, version, pending, written, opv_version, plan, recorded_version, state}]}`. An environment without a target has no history. In `opv ui`, `h` on an environment opens the same.
+
+## Who can read each vault: `opv access`
+
+`opv access [<env>]` shows, per environment, who can use its 1Password vault (one read-only `op vault user list` each): people and guests as counts, never names, and each service account by name with whether it can only read. It warns when:
+
+- `no_ci_reader`: an environment that deploys has no read-only service account for CI. The finding carries the owner's exact command, `op service-account create "<project>-<env>-ci" --vault <vault-id>:read_items --expires-in 90d`. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
+- `ci_reader_can_write`: a service account can edit or manage the vault; CI only needs to read.
+- `access_not_visible`: you cannot see who uses the vault, because listing it needs permission to manage the vault.
+
+`--json` gives `{schema_version, environments: [{environment, vault_id, deployed, visible, people, guests, service_accounts: [{name, read_only}]}], findings: [{code, environment, message, next}]}`. In `opv ui` it is the "CI access" entry in the sidebar.
 
 ## Readiness: `opv ready`
 
@@ -676,7 +692,7 @@ jobs:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.5.0   # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.6.0   # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI

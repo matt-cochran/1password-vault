@@ -124,7 +124,9 @@ Give `opv init` (or `opv init --add-env`) the target instead of `--fly-app`: `--
 
 ```sh
 opv ready                  # every environment x product at once
+opv access --json          # who can read each vault; the owner's command for a read-only CI reader
 opv status staging         # one environment's rows
+opv history prod --json    # what opv last wrote to a target: time, plan id, changed outside opv
 ```
 
 Problem rows come first. Each row's STATE is `saved`, `missing`, `failed <rule> (<reason>)`, `skipped` (not wanted in this environment) or `blocked by source` (fixed with the key it shares); `opv help states` defines every word. A config key stored in a concealed field is still `saved`: opv delivers it as a plain value, never prints it, and `status` warns once. For each missing or failed row:

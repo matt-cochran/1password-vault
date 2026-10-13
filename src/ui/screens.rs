@@ -94,7 +94,10 @@ pub fn key_detail(f: &mut Frame, area: Rect, app: &App, product: &str, key: &str
         DIM,
     ));
     lines.push(Line::styled(
-        format!("   = opv open {label}   ·   opv explain {label}"),
+        format!(
+            "   = {}   ·   opv explain {label}",
+            super::app::command_line(&app.open_command(product, key))
+        ),
         DIM,
     ));
     f.render_widget(
@@ -171,6 +174,13 @@ pub fn accounts(f: &mut Frame, area: Rect, app: &App) {
                     a["account_id"].as_str().unwrap_or("-"),
                     a["address"].as_str().unwrap_or("-"),
                 )));
+            }
+            if let Some(m) = doc["error"]["message"].as_str() {
+                lines.push(Line::raw(format!("could not list the accounts: {m}")));
+            } else if doc["accounts"].as_array().is_none_or(Vec::is_empty) {
+                lines.push(Line::raw(
+                    "No 1Password account is listed: opv signs in with the credential it finds.",
+                ));
             }
             if doc["cli_accounts_only"].as_bool() == Some(true) {
                 lines.push(Line::styled(
@@ -251,6 +261,137 @@ pub fn adopt(f: &mut Frame, area: Rect, app: &App, env: &str, from: &str) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title(" Adopt ")),
+        area,
+    );
+}
+
+/// What opv last wrote to `env`'s target (#95), from `opv history <env> --json`: the
+/// latest write, then each key with its state. Names, versions, times and plan ids only.
+pub fn history(f: &mut Frame, area: Rect, app: &App, env: &str) {
+    let mut lines = Vec::new();
+    match &app.history {
+        None => lines.push(Line::raw("reading history…")),
+        Some(doc) => {
+            match doc["latest"].as_object() {
+                Some(l) => lines.push(Line::styled(
+                    format!(
+                        "last write {} by plan {} (opv {})",
+                        l.get("written").and_then(|v| v.as_str()).unwrap_or("-"),
+                        l.get("plan").and_then(|v| v.as_str()).unwrap_or("-"),
+                        l.get("opv_version").and_then(|v| v.as_str()).unwrap_or("-"),
+                    ),
+                    BOLD,
+                )),
+                None => lines.push(Line::raw(
+                    "this target keeps no write stamps; versions are compared with what opv's own syncs recorded",
+                )),
+            }
+            lines.push(Line::raw(""));
+            for r in doc["rows"].as_array().into_iter().flatten() {
+                let s = |k: &str| r[k].as_str().unwrap_or("-").to_string();
+                let label = app.label(&s("product"), &s("key"));
+                let state = match r["state"].as_str().unwrap_or("") {
+                    "stamped" => "written by opv",
+                    "recorded" => "as opv left it",
+                    "changed_outside_opv" => "changed outside opv",
+                    "not_recorded" => "no record of opv writing it",
+                    "absent" => "not on the target",
+                    other => other,
+                };
+                let when = r["written"].as_str().unwrap_or("");
+                lines.push(Line::raw(format!(
+                    "{label:<30} {:<10} {state:<28} {when}",
+                    s("version")
+                )));
+            }
+            if doc["rows"].as_array().is_none_or(|a| a.is_empty()) {
+                lines.push(Line::raw("no secret is declared here"));
+            }
+        }
+    }
+    let title = format!(
+        " History · {} ",
+        app.snap.env(env).map_or(env, |e| e.title.as_str())
+    );
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+/// Who can read each environment's vault (#96), from `opv access --json`: people counted,
+/// service accounts named with read-only or can-write, then the findings with the owner's
+/// command for a read-only CI reader (shown, never run: 1Password shows its token once).
+pub fn access(f: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    match &app.access {
+        None => lines.push(Line::raw("reading who can use each vault…")),
+        Some(doc) => {
+            for e in doc["environments"].as_array().into_iter().flatten() {
+                let name = e["environment"].as_str().unwrap_or("-");
+                let title = app.snap.env(name).map_or(name, |x| x.title.as_str());
+                let text = if e["visible"].as_bool() == Some(false) {
+                    format!("{title:<24} not visible to you (managing the vault is needed)")
+                } else {
+                    let sas: Vec<String> = e["service_accounts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|s| {
+                            let how = if s["read_only"].as_bool() == Some(true) {
+                                "read-only"
+                            } else {
+                                "can write"
+                            };
+                            format!("{} ({how})", s["name"].as_str().unwrap_or("-"))
+                        })
+                        .collect();
+                    format!(
+                        "{title:<24} {} people, {} guests; {}",
+                        e["people"].as_u64().unwrap_or(0),
+                        e["guests"].as_u64().unwrap_or(0),
+                        if sas.is_empty() {
+                            "no service account".to_string()
+                        } else {
+                            sas.join(", ")
+                        }
+                    )
+                };
+                lines.push(Line::raw(text));
+            }
+            let found: Vec<&serde_json::Value> =
+                doc["findings"].as_array().into_iter().flatten().collect();
+            if !found.is_empty() {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled("Needs attention", BOLD));
+            }
+            for fnd in found {
+                lines.push(Line::raw(format!(
+                    "! {}: {}",
+                    fnd["code"].as_str().unwrap_or(""),
+                    fnd["message"].as_str().unwrap_or("")
+                )));
+                if let Some(n) = fnd["next"].as_str() {
+                    lines.push(Line::styled(format!("  owner runs: {n}"), DIM));
+                }
+            }
+            if doc["findings"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|f| f["next"].is_string()))
+            {
+                lines.push(Line::styled(
+                    "1Password shows the new token once, to you: store it as the CI secret OP_SERVICE_ACCOUNT_TOKEN yourself.",
+                    DIM,
+                ));
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" CI access ")),
         area,
     );
 }
