@@ -723,6 +723,8 @@ fn json_reason(s: &KeyState) -> Option<String> {
 fn json_target(kind: Kind, target: TargetState) -> Option<&'static str> {
     match (kind, target) {
         (Kind::Config, TargetState::Unknown) => None,
+        // Read and checked, never written to this target (FR-47, FR-48).
+        (_, TargetState::NotDelivered) => Some("not_delivered"),
         (_, TargetState::Absent) => Some("absent"),
         (_, TargetState::WouldChange) => Some("would_change"),
         (_, _) => Some("present"),

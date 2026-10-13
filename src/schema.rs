@@ -79,6 +79,13 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: true,
     },
     Effect {
+        command: "ui",
+        effect: "interactive",
+        needs_terminal: true,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
         command: "ready",
         effect: "reads",
         needs_terminal: false,

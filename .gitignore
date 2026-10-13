@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # Throwaway spikes (D0); never committed
 spike/
 .superpowers/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

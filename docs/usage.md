@@ -8,6 +8,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 |---|---|---|
 | `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
 | `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
+| `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -397,6 +398,12 @@ all clear: nothing pending
 - `--json` prints `{schema_version, ok, config_source, checks: [{name, status: ok|warn|fail|skip, detail, next, do}], next, do}`; the top-level `next` and `do` are the first failing check's, or `null`.
 - With no configuration at all, the config line lists both ways to start (`opv init` for an existing item, `opv setup` for a project that ships `opv.setup.toml`).
 
+## Terminal UI: `opv ui`
+
+`opv ui` shows, in one full-screen view, every environment (by its title, in its configured order) against every product, each product's keys across environments, a key's details and who reads it, the shared values and their consumers, and the 1Password accounts. Secrets are shown as `••••` with their state; no value is ever fetched. Environments you cannot open are dimmed with their `audience`; your personal keys are marked as yours.
+
+Every action is an `opv` command, shown before it runs and run in your terminal, so 1Password's prompts and opv's output look exactly as they do on the command line: `s` syncs the selected environment by first showing `opv plan`, then running exactly that plan with `--expect-plan` after you confirm (for a guarded environment, by typing its name); `i` adopts values from a file (`opv adopt`); `o` opens a key in 1Password; `n` runs the next step from `opv ready`; `a` lists accounts; `r` re-reads everything. Keys: arrows, `tab` between the sidebar and the main pane, `enter` to open, `esc` to go back, `q` to quit. Without an interactive terminal (or with `OPV_UI_TEXT=1`, for screen readers) it prints `opv ready` instead. It is part of the default build; `cargo build --no-default-features` leaves it out.
+
 ## Readiness: `opv ready`
 
 `opv ready` answers "what is ready, what is not, and who does what next" in one read-only command. It reads the account (as `opv account list`) and every environment (as `opv status`), and prints a product × environment grid (`saved/declared`, `n/a` where the environment's target does not deliver the product), the findings, and the first step:
@@ -606,8 +613,10 @@ keeps it, while renaming or removing a field, or changing its meaning, increment
 failing rule when `state` is `failing_rule`, and `reason` says why (see
 [Failure reasons](configuration.md#failure-reasons)); `target_name` is the key's name on the
 target for every provider (`fly_name` holds the same value and is kept for older scripts; it
-is deprecated); `target` is `present`, `absent` or `would_change` for a secret and `null` for
-a config key; `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
+is deprecated); `target` is `present`, `absent` or `would_change` for a secret, `not_delivered`
+for a key the environment's target does not deliver (a source-only value, or a product left out of
+the target's `products`), and `null` for a config key (or `present`/`absent`/`would_change` where
+the target takes config as variables); `action` is `would_stage`, `would_prune`, `held` or `null`. The same row shape,
 in the same key order, is used by `status`, `plan` and `check`. With `--product`,
 the document carries `"product": "<p>"` (otherwise `null`) and only that product's rows and
 totals. `next` is the sync command for `plan`, `null` for `status`. `plan --json` adds

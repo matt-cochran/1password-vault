@@ -15,16 +15,22 @@ Sync secrets from 1Password into the places your apps run, without ever printing
 
 ## Quick start
 
-Install on Linux or macOS ([other ways](docs/install.md)):
+Install with npm, on macOS, Linux, WSL or Windows ([other ways](docs/install.md)):
+
+```sh
+npm install -g @matthew-cochran/opv
+```
+
+npm picks the prebuilt binary for your system; the command is `opv`. Without Node.js, on Linux or macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
-Working with an AI coding assistant (Claude Code, Codex, Cursor)? Install the CLI and its agent skill in one step, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json` and never handles a secret value:
+Working with an AI coding assistant (Claude Code, Codex, Cursor)? From 0.6.0, add its agent skill, so every new session starts from `opv guide agent`, `opv schema` and `opv ready --json` and never handles a secret value:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh -s -- --skill
+opv skill install --user          # or, with the script: ... | sh -s -- --skill
 ```
 
 In a checkout of a project whose configuration lives in 1Password, no file is needed:

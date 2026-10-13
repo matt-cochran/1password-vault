@@ -1,6 +1,6 @@
 # `opv ui`: mockups for review
 
-Status: mockups for owner review, 2026-10-13 (#82). No code until the owner approves a direction.
+Status: implemented in `src/ui/` (#82), 2026-10-13, following these mockups; the decisions taken are recorded below.
 Canvas (private to the owner): https://claude.ai/artifact/Nwh6mBbYQW3JihuyeFDwyj
 
 ## Principles the mockups follow
@@ -33,11 +33,11 @@ Canvas (private to the owner): https://claude.ai/artifact/Nwh6mBbYQW3JihuyeFDwyj
 7. **Adoption review**: found vs 1Password per key (never values), keep/replace/skip decisions,
    apply with verification, resumable.
 
-## Decisions for the owner
+## Decisions, as built
 
-1. Navigation: persistent left sidebar (as drawn) or full-screen views with tabs?
-2. Grid cells: counts plus the next sync action (as drawn), or a simpler ✓ / ! / ✗?
-3. Writes: may `opv ui` run sync and adoption itself behind the plan-and-confirm step (as drawn),
-   or only open the exact command for the person to run?
-4. Missing views: audit history (provenance), a CI-reader access view, or editing the
-   configuration itself?
+1. Navigation: a persistent left sidebar (Overview, Shared values, each environment, each product) with `tab` between it and the main pane.
+2. Grid cells: saved/declared counts with a findings count, `not here` where a target does not deliver a product.
+3. Writes: `opv ui` runs sync and adoption itself, but only as the same `opv` command, shown first, run in the person's terminal: sync runs exactly the reviewed plan (`--expect-plan`), and a guarded environment needs its name typed. Sign-in and value entry hand off to 1Password (`o` = `opv open`).
+4. Not built yet: audit history (provenance), a CI-reader access view, editing the configuration, and the per-key keep/replace/skip adoption review (adoption runs `opv adopt`, which reviews in the terminal). Each can follow as its own issue.
+
+The screens are frames tested in ratatui's in-memory backend from documents recorded from a real run (`src/ui/render_tests.rs`), including that no screen ever contains a value.
