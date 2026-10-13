@@ -144,7 +144,12 @@ pub fn run_scoped(
     print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(out, &words, t.provider().label())?;
+    print_legend(
+        out,
+        &words,
+        t.provider().label(),
+        super::live_writes(&ports),
+    )?;
     print_extras(out, &plan)?;
     print_concealed_config(out, &plan)?;
     if let Some(p) = &pinned {

@@ -319,6 +319,8 @@ impl Ctx<'_> {
 /// provider; printed as the `summary:` line or as the `--json` document.
 #[derive(Debug, Default)]
 struct Report {
+    /// The target applies writes at once (FR-46): nothing to deploy, so no `--deploy` step.
+    live: bool,
     /// New values written (staged on a staged target, new versions on a pinned one).
     written: Vec<String>,
     unchanged: Vec<String>,
@@ -422,7 +424,7 @@ impl Report {
             return None;
         }
         let o = SyncOpts {
-            deploy: true,
+            deploy: !self.live,
             prune: opts.prune || !self.kept.is_empty(),
             rotate: Vec::new(),
             prune_immutable: Vec::new(),
@@ -539,6 +541,7 @@ fn run_staged(
     let label = t.provider().label();
     let names = &c.names;
     let mut report = Report {
+        live: runtime.live(),
         skipped: skipped_names(c, &plan)?,
         held: held_names(c, &plan)?,
         plan_id,
@@ -581,32 +584,29 @@ fn run_staged(
     let p = |out: &mut dyn Write, s: String| writeln!(out, "{s}").map_err(write_err);
     print_changes(out, names, &report)?;
 
+    // Secrets and, where the target takes config itself, variables (FR-46): one list.
+    let var_prune: &[String] = var_plan.as_ref().map_or(&[], |vp| vp.prune.as_slice());
+    let all_prune: Vec<String> = plan.prune.iter().chain(var_prune).cloned().collect();
     let mut pruned = Vec::new();
-    if !plan.prune.is_empty() && opts.prune {
-        p(out, format!("will prune: {}", names.join(&plan.prune)))?;
-        store
-            .remove(&plan.prune)
-            .map_err(|e| after_writes(e, &done))?;
-        done.push(format!("pruned {} name(s)", plan.prune.len()));
-        p(out, format!("pruned: {}", names.join(&plan.prune)))?;
-        pruned = plan.prune.clone();
-    } else if !plan.prune.is_empty() {
-        p(out, kept_line(names, &plan.prune))?;
-        report.kept = plan.prune.clone();
-    }
-    if let (Some(v), Some(vp)) = (vars, &var_plan)
-        && !vp.prune.is_empty()
-    {
-        if opts.prune {
-            p(out, format!("will prune: {}", names.join(&vp.prune)))?;
-            v.remove(&vp.prune).map_err(|e| after_writes(e, &done))?;
-            done.push(format!("pruned {} variable(s)", vp.prune.len()));
-            p(out, format!("pruned: {}", names.join(&vp.prune)))?;
-            pruned.extend(vp.prune.iter().cloned());
-        } else {
-            p(out, kept_line(names, &vp.prune))?;
-            report.kept.extend(vp.prune.iter().cloned());
+    if !all_prune.is_empty() && opts.prune {
+        p(out, format!("will prune: {}", names.join(&all_prune)))?;
+        if !plan.prune.is_empty() {
+            store
+                .remove(&plan.prune)
+                .map_err(|e| after_writes(e, &done))?;
+            done.push(format!("pruned {} name(s)", plan.prune.len()));
         }
+        if let Some(v) = vars
+            && !var_prune.is_empty()
+        {
+            v.remove(var_prune).map_err(|e| after_writes(e, &done))?;
+            done.push(format!("pruned {} variable(s)", var_prune.len()));
+        }
+        p(out, format!("pruned: {}", names.join(&all_prune)))?;
+        pruned = all_prune;
+    } else if !all_prune.is_empty() {
+        p(out, kept_line(names, &all_prune))?;
+        report.kept = all_prune;
     }
     print_held(out, fleet, &plan, names, &report.held)?;
 
@@ -1645,7 +1645,7 @@ pub fn plan_scoped(
     print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(out, &words, label)?;
+    print_legend(out, &words, label, live)?;
     print_extras(out, &plan)?;
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
     let staged: Vec<&str> = plan
@@ -1907,6 +1907,21 @@ mod tests {
     }
     fn opts() -> SyncOpts {
         SyncOpts::default()
+    }
+
+    /// FR-46 (live smoke): a target whose writes are live has nothing to deploy, so the
+    /// step after a sync that kept names asks for --prune only.
+    #[test]
+    fn a_live_targets_next_step_has_no_deploy() {
+        let r = Report {
+            live: true,
+            kept: vec!["APP_NAME".into()],
+            ..Report::default()
+        };
+        assert_eq!(
+            r.next("ci", &SyncOpts::default(), false).as_deref(),
+            Some("opv sync ci --prune")
+        );
     }
     fn fake_with(item: crate::runner::Output, fly_a: crate::runner::Output) -> FakeRunner {
         FakeRunner::new([item, fly_a])

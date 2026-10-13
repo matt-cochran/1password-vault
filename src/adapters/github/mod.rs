@@ -85,6 +85,20 @@ pub struct Scope<'a> {
     pub environment: Option<&'a str>,
 }
 
+/// The `Error::Target` for a GitHub environment missing from one repository (FR-46): opv
+/// never creates environments, so the next step is the owner's `gh api` call.
+pub(crate) fn missing_environment_error(repo: &str, environment: &str) -> Error {
+    Error::Target(
+        format!(
+            "GitHub environment {environment:?} is missing from repository {repo}; nothing \
+             was changed\n  opv never creates GitHub environments because their protection \
+             rules are the owner's decision\n  next: {PROGRAM} api -X PUT \
+             repos/{repo}/environments/{environment}"
+        )
+        .into(),
+    )
+}
+
 /// GitHub as both staged ports (FR-28, FR-46). Each method is the [`gh`] function of the
 /// same operation.
 pub struct Github<'a> {

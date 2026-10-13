@@ -462,3 +462,39 @@ fn auth_status_is_false_for_exit_one() {
     let r = FakeRunner::new([Output::failure(1)]);
     assert!(!auth_status(&r).unwrap());
 }
+
+// A GitHub environment missing from the repository (found in the live smoke) -------------
+
+const ENV_404: &str = include_str!("../../../tests/fixtures/github/stderr-env_missing_list.txt");
+
+/// The listing fails with gh's bare 404; the environments read shows only `staging`.
+fn listing_in_missing_environment() -> Result<Vec<StoreEntry>, Error> {
+    let r = FakeRunner::default();
+    r.push_with_stderr(Output::failure(1), ENV_404);
+    r.responses
+        .borrow_mut()
+        .push_back(Ok(Output::success(ENVIRONMENTS)));
+    let repos = repos();
+    list_secrets(
+        &r,
+        Scope {
+            repos: &repos,
+            environment: Some("nope"),
+        },
+    )
+}
+
+#[test]
+fn listing_in_a_missing_environment_names_it() {
+    let e = listing_in_missing_environment().unwrap_err();
+    assert!(e.mentions("GitHub environment \"nope\" is missing"), "{e}");
+}
+
+#[test]
+fn listing_in_a_missing_environment_offers_the_create_command() {
+    let e = listing_in_missing_environment().unwrap_err();
+    assert_eq!(
+        e.next_step(),
+        Some("gh api -X PUT repos/example-org/example-repo/environments/nope")
+    );
+}

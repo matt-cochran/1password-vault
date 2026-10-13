@@ -371,7 +371,7 @@ impl TargetConfig for GithubTarget {
                     for repo in &self.repos {
                         let names = super::gh::environments(r, repo)?;
                         if !names.iter().any(|n| n == environment) {
-                            return Err(missing_environment_error(repo, environment));
+                            return Err(super::missing_environment_error(repo, environment));
                         }
                     }
                 }
@@ -410,20 +410,6 @@ impl TargetConfig for GithubTarget {
     fn clone_box(&self) -> Box<dyn TargetConfig> {
         Box::new(self.clone())
     }
-}
-
-/// The `Error::Target` for a GitHub environment missing from one repository (FR-46): opv
-/// never creates environments, so the next step is the owner's `gh api` call.
-fn missing_environment_error(repo: &str, environment: &str) -> Error {
-    Error::Target(
-        format!(
-            "GitHub environment {environment:?} is missing from repository {repo}; nothing \
-             was changed\n  opv never creates GitHub environments because their protection \
-             rules are the owner's decision\n  next: {PROGRAM} api -X PUT \
-             repos/{repo}/environments/{environment}"
-        )
-        .into(),
-    )
 }
 
 /// `gh --version`: present, and which version (only a strict version token is printed).
@@ -761,13 +747,13 @@ secret_name = "STATIC""#,
 
     #[test]
     fn missing_environment_error_names_repository_and_environment() {
-        let e = missing_environment_error("org/r", "staging");
+        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
         assert!(e.mentions("org/r") && e.mentions("staging"), "{e}");
     }
 
     #[test]
     fn missing_environment_error_offers_the_create_command() {
-        let e = missing_environment_error("org/r", "staging");
+        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
         assert_eq!(
             e.next_step(),
             Some("gh api -X PUT repos/org/r/environments/staging")
@@ -776,7 +762,7 @@ secret_name = "STATIC""#,
 
     #[test]
     fn missing_environment_error_says_opv_never_creates_environments() {
-        let e = missing_environment_error("org/r", "staging");
+        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
         assert!(e.mentions("opv never creates GitHub environments"), "{e}");
     }
 

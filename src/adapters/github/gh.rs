@@ -90,7 +90,8 @@ pub fn list_secrets(r: &dyn CommandRunner, scope: Scope<'_>) -> Result<Vec<Store
             WHAT,
             &place(repo, scope.environment),
             &Call::new(PROGRAM, &argv),
-        )?;
+        )
+        .map_err(|e| missing_environment(r, scope, repo, e))?;
         let entries: Vec<SecretEntry> = parse_json(&out, WHAT)?;
         per_repo.push(
             entries
@@ -216,7 +217,8 @@ pub fn list_variables(
             WHAT,
             &place(repo, scope.environment),
             &Call::new(PROGRAM, &argv),
-        )?;
+        )
+        .map_err(|e| missing_environment(r, scope, repo, e))?;
         let entries: Vec<VariableEntry> = parse_json(&out, WHAT)?;
         per_repo.push(entries.into_iter().map(|e| (e.name, e.value)).collect());
     }
@@ -314,6 +316,19 @@ pub fn environments(r: &dyn CommandRunner, repo: &str) -> Result<Vec<String>, Er
     let out = read_out(r, WHAT, repo, &Call::new(PROGRAM, &args))?;
     let envs: Environments = parse_json(&out, WHAT)?;
     Ok(envs.environments.into_iter().map(|e| e.name).collect())
+}
+
+/// A listing that failed in a GitHub environment: when the environment does not exist in
+/// `repo` (gh's 404 says only "Not Found"), the error that names it and the command that
+/// creates it; any other failure unchanged. One read-only call, only on that failure path.
+fn missing_environment(r: &dyn CommandRunner, scope: Scope<'_>, repo: &str, e: Error) -> Error {
+    let (Some(env), Error::Target(_)) = (scope.environment, &e) else {
+        return e;
+    };
+    match environments(r, repo) {
+        Ok(names) if !names.iter().any(|n| n == env) => super::missing_environment_error(repo, env),
+        _ => e,
+    }
 }
 
 /// `gh auth status` exit status only (its output names the account and is dropped unread).

@@ -114,6 +114,7 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
             TargetState::Present => "present",
             TargetState::WouldChange => "would-change",
             TargetState::Unknown => "unknown",
+            TargetState::NotDelivered => "not-delivered",
         });
     }
     let mut sorted = |label: &str, names: Vec<String>| {

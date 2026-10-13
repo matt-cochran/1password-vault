@@ -717,6 +717,8 @@ pub(crate) fn row_state_label(r: &Row) -> String {
 /// binding on a pinned target, when known. `opv help states` defines each word.
 pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &'static str {
     match (r.kind, r.target, &r.state) {
+        // Read and checked here, never written to this target (FR-47, FR-48).
+        (_, TargetState::NotDelivered, _) => "n/a",
         // Config has a target state only where the target delivers it itself (FR-46).
         (Kind::Config, TargetState::Unknown, _) | (Kind::Config, _, KeyState::Skipped) => "n/a",
         (Kind::Config, TargetState::Absent, _) => "new",
@@ -933,16 +935,29 @@ pub(crate) fn print_legend(
     out: &mut dyn Write,
     words: &[&str],
     target_label: &str,
+    live: bool,
 ) -> Result<(), Error> {
     if words.contains(&"unknown") {
+        // A target whose writes are live (FR-46) is simply written again; a staging one
+        // stages and compares digests.
+        let then = if live {
+            "every sync writes them again"
+        } else {
+            "sync stages them and compares digests"
+        };
         writeln!(
             out,
             "unknown: {target_label} does not reveal stored values, so opv cannot compare them; \
-             sync stages them and compares digests (opv help states)"
+             {then} (opv help states)"
         )
         .map_err(write_err)?;
     }
     Ok(())
+}
+
+/// Whether `ports`' writes are live at once (FR-46), for the wording of `unknown`.
+pub(crate) fn live_writes(ports: &Ports<'_>) -> bool {
+    matches!(ports, Ports::Staged { runtime, .. } if runtime.live())
 }
 
 /// Print each undeclared item field as a warning; extras are never staged or pruned.

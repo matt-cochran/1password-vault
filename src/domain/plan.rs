@@ -72,6 +72,9 @@ pub enum TargetState {
     Present,
     WouldChange,
     Unknown,
+    /// The environment's target does not deliver this key's product (source-only, FR-47,
+    /// or outside the target's products, FR-48): read and checked, never written there.
+    NotDelivered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,6 +369,9 @@ pub fn build_with(
                 kind: spec.kind,
                 state: KeyState::Skipped,
                 target: match (spec.kind, target_entry) {
+                    // A run-only environment keeps the old states; only a target that
+                    // leaves this product out marks it (FR-47, FR-48).
+                    _ if !delivered && env.target().is_some() => TargetState::NotDelivered,
                     (Kind::Secret, None) => TargetState::Absent,
                     _ => TargetState::Unknown,
                 },

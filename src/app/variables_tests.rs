@@ -232,3 +232,42 @@ fn planning_lists_the_variables_once() {
     planned(Some(signup("open", false)), &vars);
     assert_eq!(*vars.listed.borrow(), 1);
 }
+
+// Wording found in the live smoke (FR-46, FR-47) ----------------------------------------
+
+#[test]
+fn an_undelivered_row_reads_not_applicable() {
+    let row = crate::domain::Row {
+        product: "shared".into(),
+        key: "DEPLOY_TOKEN".into(),
+        kind: Kind::Secret,
+        state: KeyState::Ready,
+        target: TargetState::NotDelivered,
+        guidance: String::new(),
+        source: None,
+        shared_by: Vec::new(),
+    };
+    assert_eq!(crate::app::target_word(&row, false, None), "n/a");
+}
+
+#[test]
+fn the_unknown_legend_of_a_live_target_says_it_writes_again() {
+    let mut out = Vec::new();
+    crate::app::print_legend(&mut out, &["unknown"], "GitHub", true).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("every sync writes them again"),
+    );
+}
+
+#[test]
+fn the_unknown_legend_of_a_staging_target_keeps_its_digest_wording() {
+    let mut out = Vec::new();
+    crate::app::print_legend(&mut out, &["unknown"], "Fly", false).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("sync stages them and compares digests"),
+    );
+}
