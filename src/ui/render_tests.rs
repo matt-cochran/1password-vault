@@ -152,3 +152,15 @@ fn the_declare_a_key_form_draws_its_fields() {
     a.handle(Key::Char('+'));
     assert!(frame(&a, 140, 40).contains("environments"));
 }
+
+#[test]
+fn the_history_screen_shows_the_latest_write() {
+    let mut a = app();
+    a.screen = Screen::History("ci".into());
+    a.history = Some(serde_json::json!({
+        "latest": {"written": "2026-10-12T09:00:00Z", "plan": "7f3c9a1e", "opv_version": "0.6.0"},
+        "rows": [{"product": "api", "key": "API_TOKEN", "version": "v3", "state": "stamped",
+                  "written": "2026-10-12T09:00:00Z"}]
+    }));
+    assert!(frame(&a, 140, 30).contains("last write 2026-10-12T09:00:00Z by plan 7f3c9a1e"));
+}

@@ -45,6 +45,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Shared => super::screens::shared(f, cols[1], app),
         Screen::Accounts => super::screens::accounts(f, cols[1], app),
         Screen::Adopt { env, from } => super::screens::adopt(f, cols[1], app, env, from),
+        Screen::History(env) => super::screens::history(f, cols[1], app, env),
     }
     keybar(f, rows[2], app);
     if let Some(m) = &app.modal {
@@ -312,7 +313,7 @@ fn env_screen(f: &mut Frame, area: Rect, app: &App, e: &str) {
 }
 
 fn keybar(f: &mut Frame, area: Rect, app: &App) {
-    let keys = "↑↓ move · tab sidebar/main · enter open · esc back · s sync… · i adopt… · o open in 1Password · + key… · E environment… · e edit config · n next step · a accounts · r refresh · q quit";
+    let keys = "↑↓ move · tab sidebar/main · enter open · esc back · s sync… · i adopt… · o open in 1Password · + key… · E environment… · e edit config · h history · n next step · a accounts · r refresh · q quit";
     let lines = vec![
         Line::styled(app.status.clone(), WARN),
         Line::styled(keys, DIM),

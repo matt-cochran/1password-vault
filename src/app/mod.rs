@@ -27,6 +27,7 @@ mod github_tests;
 #[cfg(test)]
 mod guidance_tests;
 pub mod guide;
+pub mod history;
 pub mod init;
 #[cfg(test)]
 pub(crate) mod json_tests;
