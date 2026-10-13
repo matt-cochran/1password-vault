@@ -198,3 +198,59 @@ pub fn accounts(f: &mut Frame, area: Rect, app: &App) {
         area,
     );
 }
+
+/// The adoption review (#94): each found key with what would happen and the person's
+/// decision, the count it would write and the keys. Names and actions only, never a value.
+pub fn adopt(f: &mut Frame, area: Rect, app: &App, env: &str, from: &str) {
+    use super::adopt_review::{Decision, writes};
+    let mut lines = vec![
+        Line::raw(format!(
+            "From {from} into {env}: nothing is written until you confirm"
+        )),
+        Line::raw(""),
+    ];
+    for (i, r) in app.adopt.iter().enumerate() {
+        let decision = match r.decision {
+            Some(Decision::Take) if r.action == "differs" => "replace (take the found value)",
+            Some(Decision::Take) => "import",
+            Some(Decision::Keep) => "keep 1Password",
+            Some(Decision::Skip) => "skip",
+            None => "",
+        };
+        let what = match r.action.as_str() {
+            "import" => "new in 1Password".to_string(),
+            "differs" => "differs from 1Password".to_string(),
+            "match" | "format_only" => "same value".to_string(),
+            "fails_rule" => "fails a rule: not imported".to_string(),
+            "conflict" => "found copies differ: decide in 1Password".to_string(),
+            "ambiguous" => "matches several keys: not imported".to_string(),
+            "not_declared" => "not declared: ignored".to_string(),
+            "not_applicable" => "not in this environment".to_string(),
+            other => other.replace('_', " "),
+        };
+        let lock = if r.immutable { " (immutable)" } else { "" };
+        let text = format!("{:<32} {what:<28} {decision}{lock}", r.label);
+        let style = if i == app.row && !app.in_nav {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else if r.decision.is_none() {
+            DIM
+        } else {
+            Style::new()
+        };
+        lines.push(Line::styled(text, style));
+    }
+    if app.adopt.is_empty() {
+        lines.push(Line::raw("Nothing found in the source."));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(format!(
+        "{} to write · enter: change the selected key · y: review and apply · esc: back",
+        writes(&app.adopt)
+    )));
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" Adopt ")),
+        area,
+    );
+}

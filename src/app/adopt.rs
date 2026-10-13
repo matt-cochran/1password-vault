@@ -35,6 +35,8 @@ pub struct Opts {
     pub replace: Vec<String>,
     /// Immutable keys `--replace` may change.
     pub rotate: Vec<String>,
+    /// `product/KEY` (or `KEY`) left out of the import (#94).
+    pub skip: Vec<String>,
     pub apply: bool,
     pub json: bool,
 }
@@ -130,16 +132,54 @@ pub fn run(
 ) -> Result<(), Error> {
     let replace = pairs(fleet, &opts.replace, "--replace")?;
     let rotate = pairs(fleet, &opts.rotate, "--rotate")?;
-    let plan = plan_and_write(
+    let skip = pairs(fleet, &opts.skip, "--skip")?;
+    let plan = plan_skipping(
         fleet,
         env_name,
         &opts.source,
-        &replace,
-        &rotate,
+        (&replace, &rotate, &skip),
         opts.apply,
         r,
     )?;
     print(out, env_name, opts, &plan, fleet.is_simple())
+}
+
+/// The three key sets of `opv adopt`: `--replace`, `--rotate`, `--skip`.
+type KeySets<'a> = (
+    &'a BTreeSet<(String, String)>,
+    &'a BTreeSet<(String, String)>,
+    &'a BTreeSet<(String, String)>,
+);
+
+/// [`plan_and_write`] with `--skip`: an import of a key it names becomes `Skipped` and is
+/// not written (#94). Only imports are skipped; a replace is already opt-in.
+fn plan_skipping(
+    fleet: &Fleet,
+    env_name: &str,
+    source: &Source,
+    (replace, rotate, skip): KeySets<'_>,
+    apply: bool,
+    r: &dyn CommandRunner,
+) -> Result<AdoptPlan, Error> {
+    let mut plan = plan_and_write(fleet, env_name, source, replace, rotate, false, r)?;
+    let named = |p: &Option<String>, k: &Option<String>| match (p, k) {
+        (Some(p), Some(k)) => skip.contains(&(p.clone(), k.clone())),
+        _ => false,
+    };
+    for row in &mut plan.rows {
+        if row.action == Action::Import && named(&row.product, &row.key) {
+            row.action = Action::Skipped;
+        }
+    }
+    plan.writes
+        .retain(|(p, k, _)| !skip.contains(&(p.clone(), k.clone())));
+    if apply {
+        super::tidy::require_person(r, "opv adopt --apply")?;
+        if !plan.writes.is_empty() {
+            write(fleet, fleet.environment(env_name)?, &plan, r)?;
+        }
+    }
+    Ok(plan)
 }
 
 /// The adoption plan for `source`, written (one verified item edit) when `apply`. Also the
@@ -327,6 +367,7 @@ fn print(
             Action::Ambiguous => "matches several declared keys: not imported".to_string(),
             Action::NotDeclared => "not declared: ignored".to_string(),
             Action::NotApplicable => "not required in this environment: ignored".to_string(),
+            Action::Skipped => "skipped (--skip): not imported".to_string(),
         };
         writeln!(
             out,

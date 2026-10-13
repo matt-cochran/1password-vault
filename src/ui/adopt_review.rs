@@ -1,0 +1,147 @@
+//! The review step of `opv ui`'s adoption flow (#94): turns the rows of
+//! `opv adopt <env> --from <src> --json` and a person's per-key decisions into the exact
+//! `opv adopt ... --apply` argument list. Names, actions and decisions only; a secret value
+//! is never read or kept here.
+
+use serde_json::Value;
+
+/// What a person decided for one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Take the found value (import, or replace a differing one).
+    Take,
+    /// Keep 1Password's value.
+    Keep,
+    /// Leave the key out of this adoption entirely.
+    Skip,
+}
+
+/// One row of the adoption review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRow {
+    pub product: Option<String>,
+    pub key: Option<String>,
+    pub label: String,
+    pub action: String,
+    pub found: Vec<String>,
+    pub immutable: bool,
+    pub decision: Option<Decision>,
+}
+
+/// The found names of one document row.
+fn found_names(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One row per entry of `doc["rows"]` (fields: `found: [string]`, `product: string|null`,
+/// `key: string|null`, `action: string`). `label(product, key)` gives the display/CLI name;
+/// rows without a key get `label = found joined with ", "`. `immutable(product, key)` says
+/// whether the key is immutable. `decision = default_decision(action)`.
+pub fn rows_from(
+    doc: &Value,
+    label: &dyn Fn(&str, &str) -> String,
+    immutable: &dyn Fn(&str, &str) -> bool,
+) -> Vec<ReviewRow> {
+    let Some(rows) = doc["rows"].as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .map(|r| {
+            let product = r["product"].as_str().map(str::to_string);
+            let key = r["key"].as_str().map(str::to_string);
+            let found = found_names(&r["found"]);
+            let action = r["action"].as_str().unwrap_or_default().to_string();
+            let label = match &key {
+                Some(k) => label(product.as_deref().unwrap_or(""), k),
+                None => found.join(", "),
+            };
+            let immutable = match (&product, &key) {
+                (Some(p), Some(k)) => immutable(p, k),
+                _ => false,
+            };
+            let decision = default_decision(&action);
+            ReviewRow {
+                product,
+                key,
+                label,
+                action,
+                found,
+                immutable,
+                decision,
+            }
+        })
+        .collect()
+}
+
+/// `import` -> `Some(Take)`; `differs` -> `Some(Keep)`; every other action -> `None` (not
+/// the person's to decide here).
+pub fn default_decision(action: &str) -> Option<Decision> {
+    match action {
+        "import" => Some(Decision::Take),
+        "differs" => Some(Decision::Keep),
+        _ => None,
+    }
+}
+
+/// The next decision on a key press: `import` cycles Take -> Skip -> Take; `differs` cycles
+/// Keep -> Take -> Skip -> Keep; `None` stays `None`.
+pub fn toggle(row: &ReviewRow) -> Option<Decision> {
+    match (row.action.as_str(), row.decision) {
+        ("import", Some(Decision::Take)) => Some(Decision::Skip),
+        ("import", Some(Decision::Skip)) => Some(Decision::Take),
+        ("differs", Some(Decision::Keep)) => Some(Decision::Take),
+        ("differs", Some(Decision::Take)) => Some(Decision::Skip),
+        ("differs", Some(Decision::Skip)) => Some(Decision::Keep),
+        _ => None,
+    }
+}
+
+/// How many fields applying would write: rows decided Take.
+pub fn writes(rows: &[ReviewRow]) -> usize {
+    rows.iter()
+        .filter(|r| r.decision == Some(Decision::Take))
+        .count()
+}
+
+/// `["adopt", env, "--from", from]` then, in row order, `--skip` label for every import row
+/// decided Skip, `--replace` label for every differs row decided Take, and additionally
+/// `--rotate` label right after that `--replace` when the row is immutable; then `--apply`.
+/// Rows with decision None add nothing.
+pub fn command(env: &str, from: &str, rows: &[ReviewRow]) -> Vec<String> {
+    let mut out = vec![
+        "adopt".to_string(),
+        env.to_string(),
+        "--from".to_string(),
+        from.to_string(),
+    ];
+    for row in rows {
+        match (row.action.as_str(), row.decision) {
+            ("import", Some(Decision::Skip)) => {
+                out.push("--skip".to_string());
+                out.push(row.label.clone());
+            }
+            ("differs", Some(Decision::Take)) => {
+                out.push("--replace".to_string());
+                out.push(row.label.clone());
+                if row.immutable {
+                    out.push("--rotate".to_string());
+                    out.push(row.label.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push("--apply".to_string());
+    out
+}
+
+#[cfg(test)]
+#[path = "adopt_review_tests.rs"]
+mod tests;

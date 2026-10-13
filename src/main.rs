@@ -271,14 +271,8 @@ Examples:
   opv add api/STRIPE_KEY --env staging          # include a declared key in staging";
 
 const ADD_MORE: &str = "\
-Edits the configuration where it lives (secrets.toml, or the project's manifest in
-1Password) with comments and order kept, and validates it like a hand-written one first: a
-name colliding on a target or a bad rule is refused and nothing is written. Never reads an
-item or a target. Then opv item skeleton <env> adds the empty field to fill in 1Password.
-
-More examples:
-  opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable \\
-      --guidance \"32 random bytes, base64\"";
+Edits secrets.toml or the project's manifest in place (comments kept), validated like a
+hand-written one; reads no item or target. Then opv item skeleton <env> adds the empty field.";
 
 const EXPLAIN_QUICK: &str = "\
 Examples:
@@ -591,6 +585,9 @@ enum Cmd {
         /// Allow --replace on this immutable key (repeatable).
         #[arg(long, value_name = "PRODUCT/KEY")]
         rotate: Vec<String>,
+        /// Leave this key out of the import although it would be imported (repeatable).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        skip: Vec<String>,
         /// Write the plan to 1Password (without it, nothing is written).
         #[arg(long)]
         apply: bool,
@@ -780,6 +777,15 @@ enum Cmd {
         /// Staged only when absent on the target unless rotated.
         #[arg(long)]
         immutable: bool,
+        /// Read the value of another key, PRODUCT/KEY (a shared value).
+        #[arg(long, value_name = "PRODUCT/KEY")]
+        from: Option<String>,
+        /// Each person's own value, in their own item (local environments only).
+        #[arg(long)]
+        personal: bool,
+        /// The same value in several environments is intended (no settings warning).
+        #[arg(long)]
+        allow_same_value: bool,
         /// Print what was written (the key, its kind and environments) as one JSON document.
         #[arg(long)]
         json: bool,
@@ -2129,6 +2135,7 @@ fn run_other(
             from,
             replace,
             rotate,
+            skip,
             apply,
             json,
         } => {
@@ -2141,6 +2148,7 @@ fn run_other(
                 source,
                 replace,
                 rotate,
+                skip,
                 apply,
                 json,
             };
@@ -2409,6 +2417,9 @@ fn run_edit(
             rule,
             guidance,
             immutable,
+            from,
+            personal,
+            allow_same_value,
             json,
         } => add::run(
             &add::AddArgs {
@@ -2418,6 +2429,9 @@ fn run_edit(
                 rules: rule,
                 guidance,
                 immutable,
+                from,
+                personal,
+                allow_same_value,
                 json,
             },
             store,

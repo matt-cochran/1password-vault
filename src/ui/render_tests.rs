@@ -132,3 +132,23 @@ fn the_key_screen_shows_a_settings_finding_with_its_sentence() {
     };
     assert!(frame(&a, 160, 40).contains("has the same value in local and ci"));
 }
+
+#[test]
+fn the_adoption_review_shows_each_key_and_decision() {
+    let mut a = app();
+    a.open_adopt(
+        "local",
+        "dev.env",
+        &serde_json::json!({"rows": [
+            {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "differs"}
+        ]}),
+    );
+    assert!(frame(&a, 140, 30).contains("keep 1Password"));
+}
+
+#[test]
+fn the_declare_a_key_form_draws_its_fields() {
+    let mut a = app();
+    a.handle(Key::Char('+'));
+    assert!(frame(&a, 140, 40).contains("environments"));
+}
