@@ -83,9 +83,9 @@ pub fn run(
         .map(|(product, key, name)| KeyRef { product, key, name })
         .collect();
     let mut rows = build(&keys, &listed, &recorded);
-    // A Fly "version" is a digest of the value: equal for equal values and usable to test
-    // a guess, so history shows the state only (opv's comparison stays in memory, FR-54).
-    if !versions_are_safe(target.provider().section()) {
+    // A store whose versions are digests of the value (equal for equal values, usable to
+    // test a guess) shows the state only; opv's comparison stays in memory (FR-54).
+    if target.provider().versions_reveal_values() {
         for row in &mut rows {
             row.version = None;
             row.recorded_version = None;
@@ -128,12 +128,6 @@ fn report(
         return writeln!(out, "{doc}").map_err(write_err);
     }
     print_text(out, env_name, label, simple, rows, latest)
-}
-
-/// Whether a provider's store versions may be shown: version ids and timestamps say nothing
-/// about a value; a value digest (Fly) does.
-fn versions_are_safe(section: &str) -> bool {
-    section != "fly"
 }
 
 /// The row holding the most recent stamp.

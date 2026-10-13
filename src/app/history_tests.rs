@@ -96,11 +96,13 @@ fn an_environment_without_a_target_has_no_history() {
 }
 
 #[test]
-fn fly_versions_are_never_shown() {
-    assert!(!versions_are_safe("fly"));
+fn a_provider_whose_versions_are_digests_says_so() {
+    let fly = crate::adapters::registry::find("fly").unwrap();
+    assert!(fly.versions_reveal_values());
 }
 
 #[test]
-fn key_vault_versions_may_be_shown() {
-    assert!(versions_are_safe("azure"));
+fn version_ids_are_not_value_digests_by_default() {
+    let azure = crate::adapters::registry::find("azure").unwrap();
+    assert!(!azure.versions_reveal_values());
 }

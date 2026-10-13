@@ -36,6 +36,12 @@ pub trait Provider: Sync {
         section: &Section<'_>,
         profile: Profile,
     ) -> Result<Box<dyn TargetConfig>, Error>;
+    /// Whether a stored value's version, as the store lists it, is derived from the value
+    /// (a digest): then opv never shows it, as it is equal for equal values and can be used
+    /// to test a guess (`opv history`, #95). Version ids and timestamps are not.
+    fn versions_reveal_values(&self) -> bool {
+        false
+    }
     /// Environment variables holding this provider's non-interactive credential, by name
     /// (values are never read). [`crate::host::Host::token`] reports which one is set.
     fn credential_vars(&self) -> &'static [&'static str] {
