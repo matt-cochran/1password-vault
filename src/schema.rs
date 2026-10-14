@@ -530,7 +530,8 @@ fn documents() -> Value {
         "sync": [
             "environment", "provider", "product", "written", "unchanged", "held", "deployed",
             "revision", "deploy_reason", "deployed_names", "pruned", "kept", "pending",
-            "skipped", "written_names", "plan_id"
+            "skipped", "written_names", "plan_id",
+            "delivery? ({minted: [receipt], not_minted: [{product, reason}]}: placements this sync recorded or could not)"
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
