@@ -39,6 +39,8 @@ Named deployment targets and one vault per access boundary, with **no backward c
 - **GitHub's provider-level `products`**: use the target's `products`.
 - **Deprecated forms**: the `pattern` rule (use `regex`), the `fly_name` JSON field (use `target_name`) and `opv schema`'s `deprecated` list.
 - **Retired ledger and flags**: the values item's `opv · state` ledger section, `opv bootstrap --state` (bootstrap records every missing ID), and `opv init --profile`.
+- **`opv init --target`, `--target-name` and the provider options**: `opv init` writes products and boundaries, and `opv target add` is the one way to add a target. Passing a removed option fails with the exact `opv target add` command.
+- **The `required_with_target` schema field**: it is now `required_for_provider`.
 
 ### Fixed
 

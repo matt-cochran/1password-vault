@@ -14,7 +14,7 @@ fn type_in(f: &mut FormState, text: &str) {
 
 /// The add-key form on api with the key typed.
 fn key_form(key: &str) -> FormState {
-    let mut f = FormState::add_key(envs(), true, Some("api".into()), None);
+    let mut f = FormState::add_key(envs(), Some("api".into()), None);
     type_in(&mut f, key);
     f
 }
@@ -56,7 +56,7 @@ fn space_on_an_environment_selects_it() {
 
 #[test]
 fn an_environment_preset_from_the_screen_is_selected() {
-    let mut f = FormState::add_key(envs(), true, Some("api".into()), Some("prod".into()));
+    let mut f = FormState::add_key(envs(), Some("api".into()), Some("prod".into()));
     type_in(&mut f, "X");
     assert!(f.command().unwrap().contains(&"prod".to_string()));
 }
@@ -87,9 +87,9 @@ fn backspace_removes_a_typed_character() {
 }
 
 #[test]
-fn the_simple_profile_has_no_product_row() {
-    let f = FormState::add_key(envs(), false, None, None);
-    assert!(!f.rows().contains(&Row::Product));
+fn the_add_key_form_always_asks_for_the_product() {
+    let f = FormState::add_key(envs(), None, None);
+    assert!(f.rows().contains(&Row::Product));
 }
 
 #[test]

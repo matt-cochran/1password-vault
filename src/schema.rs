@@ -422,7 +422,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
             let long = a.get_long().unwrap_or_default();
             if let Some((provider, required)) = provider_option(long) {
                 f["provider"] = Value::from(provider);
-                f["required_with_target"] = Value::from(required);
+                f["required_for_provider"] = Value::from(required);
             }
             f["effect"] = FLAG_EFFECTS
                 .iter()

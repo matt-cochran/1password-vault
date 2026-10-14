@@ -319,7 +319,6 @@ impl App {
             }
             Key::Char('+') => {
                 let envs: Vec<String> = self.snap.envs.iter().map(|e| e.key.clone()).collect();
-                let fleet = true;
                 let product = match &self.screen {
                     Screen::Product(p) => Some(p.clone()),
                     Screen::Key { product, .. } => Some(product.clone()),
@@ -330,7 +329,7 @@ impl App {
                     _ => None,
                 };
                 self.modal = Some(Modal::Form(super::forms::FormState::add_key(
-                    envs, fleet, product, env,
+                    envs, product, env,
                 )));
             }
             Key::Char('h') => {
