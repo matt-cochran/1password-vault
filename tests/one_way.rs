@@ -1,8 +1,9 @@
 //! FR-60 (one way only): no removed form of opv's own survives in production code. Each
 //! identifier below belonged to a form 0.7.0 removed: the simple profile, the values item's
-//! ledger section, the deprecated `fly_name` field, the single-target helper and the
-//! environment-level item. A removed form is refused with its replacement at load (src/
-//! config.rs) and never read; this test keeps the code paths from coming back.
+//! ledger section, the deprecated `fly_name` field, the single-target helper, the
+//! environment-level item and `opv init`'s target options. A removed form is refused with
+//! its replacement at load (src/config.rs) or on the command line (src/main.rs) and never
+//! read; this test keeps the code paths from coming back.
 use std::path::{Path, PathBuf};
 
 /// Identifiers that only a removed form needed.
@@ -19,6 +20,9 @@ const REMOVED: &[&str] = &[
     "json_product",
     "RawSimpleConfig",
     "validate_simple",
+    "TargetNameRequired",
+    "TargetChoice",
+    "choose_target",
 ];
 
 /// Every `.rs` file under `dir`.

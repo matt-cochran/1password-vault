@@ -649,18 +649,7 @@ fn explain_undeclared_bare_key_under_fleet_exits_2() {
 
 // --- init (FR-23) ---
 
-const INIT: [&str; 10] = [
-    "init",
-    "staging",
-    "--vault",
-    "v",
-    "--item",
-    "i",
-    "--fly-app",
-    "app",
-    "--target-name",
-    "web",
-];
+const INIT: [&str; 6] = ["init", "staging", "--vault", "v", "--item", "i"];
 
 #[test]
 fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
@@ -816,32 +805,72 @@ fn init_accepts_a_run_only_environment() {
     assert_eq!(code, 3, "{err}");
 }
 
-/// H3: every provider's `init` options reach the command line from the plug-in contract.
+/// H3: every provider's options reach `opv target add` from the plug-in contract.
 #[test]
-fn init_help_lists_each_providers_options() {
-    let (_, out, _) = opv(&["init", "--help"]);
+fn target_add_help_lists_each_providers_options() {
+    let (_, out, _) = opv(&["target", "add", "--help"]);
     let flags = ["--fly-app", "--azure-key-vault", "--kubernetes-namespace"];
     assert!(flags.iter().all(|f| out.contains(f)), "{out}");
 }
 
-/// H3: a provider option is parsed and checked before any call (no op on PATH needed).
+/// FR-56, FR-60: `opv init` writes no target, so its help lists no provider option.
 #[test]
-fn init_with_a_missing_required_option_exits_2() {
+fn init_help_lists_no_provider_option() {
+    let (_, out, _) = opv(&["init", "--help"]);
+    assert!(!out.contains("--azure-key-vault"), "{out}");
+}
+
+/// FR-56, FR-60: `opv init` takes no target name.
+#[test]
+fn init_help_lists_no_target_name() {
+    let (_, out, _) = opv(&["init", "--help"]);
+    assert!(!out.contains("--target-name"), "{out}");
+}
+
+/// The target options removed from `opv init` (FR-60), as a person might still type them.
+const INIT_WITH_TARGET: [&str; 10] = [
+    "init",
+    "prod",
+    "--vault",
+    "v",
+    "--item",
+    "i",
+    "--fly-app",
+    "app",
+    "--target-name",
+    "web",
+];
+
+/// FR-60: a removed form fails fast as a usage error, before any call.
+#[test]
+fn init_with_a_target_option_exits_2() {
     let dir = tempfile::tempdir().unwrap();
-    let (code, _, err) = opv_in(
-        dir.path(),
-        &[
-            "init",
-            "prod",
-            "--vault",
-            "v",
-            "--item",
-            "i",
-            "--azure-key-vault",
-            "kv",
-        ],
-    );
+    let (code, _, err) = opv_in(dir.path(), &INIT_WITH_TARGET);
     assert_eq!(code, 2, "{err}");
+}
+
+/// FR-60: the refusal names the replacement exactly, with the same name and options.
+#[test]
+fn init_with_a_target_option_names_target_add() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, err) = opv_in(dir.path(), &INIT_WITH_TARGET);
+    assert_eq!(
+        err.lines().last(),
+        Some("Next: opv target add prod web --fly-app app"),
+        "{err}"
+    );
+}
+
+/// FR-60: without a target name the replacement is target add's help, never a placeholder.
+#[test]
+fn init_with_a_provider_option_alone_names_target_add_help() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, err) = opv_in(dir.path(), &["init", "prod", "--azure-key-vault", "kv"]);
+    assert_eq!(
+        err.lines().last(),
+        Some("Next: opv target add --help"),
+        "{err}"
+    );
 }
 
 /// H2: `opv add` edits the discovered file end to end.

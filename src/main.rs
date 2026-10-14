@@ -1468,18 +1468,32 @@ fn usage_error(e: clap::Error) -> ExitCode {
     if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
         e.exit();
     }
-    let _ = e.print();
-    let help = help_command();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // FR-60: a removed form names its replacement exactly.
+    let removed = removed_init_target(&args);
+    let help = match &removed {
+        Some((message, next)) => {
+            let _ = writeln!(io::stderr(), "error: {message}");
+            next.clone()
+        }
+        None => {
+            let _ = e.print();
+            help_command()
+        }
+    };
     let _ = write!(io::stderr(), "{}", opv::error::next_line(&help));
     // `--json` asked for one document on stdout even when the command line is wrong (A1).
-    if std::env::args().skip(1).any(|a| a == "--json") {
+    if args.iter().any(|a| a == "--json") {
         let text = e.render().to_string();
-        let message = text
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim_start_matches("error: ")
-            .to_string();
+        let message = match removed {
+            Some((message, _)) => message,
+            None => text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches("error: ")
+                .to_string(),
+        };
         let code = opv::error::Code::Usage;
         let step = opv::error::Step {
             action: None,
@@ -1504,6 +1518,72 @@ fn usage_error(e: clap::Error) -> ExitCode {
         let _ = writeln!(io::stdout(), "{doc}");
     }
     ExitCode::from(exit_byte(e.exit_code()))
+}
+
+/// `opv init` given a target option removed in 0.7.0 (`--target`, `--target-name`, a
+/// provider option; FR-56, FR-60): the refusal and its replacement, `opv target add` with
+/// the same environment, name and options (its help when the name is not given).
+fn removed_init_target(args: &[String]) -> Option<(String, String)> {
+    use opv::adapters::registry;
+    use opv::provider::init_flag;
+    let at = args.iter().position(|a| a == "init")?;
+    let root = cli_command();
+    let init = root.find_subcommand("init")?;
+    let takes_value = |flag: &str| {
+        init.get_arguments()
+            .any(|a| a.get_long() == Some(flag) && a.get_action().takes_values())
+    };
+    let options: Vec<String> = registry::PROVIDERS
+        .iter()
+        .flat_map(|p| p.init_fields().iter().map(move |f| init_flag(*p, f)))
+        .collect();
+    let (mut env, mut name, mut provider) = (None, None, None);
+    let mut given = Vec::new();
+    let mut rest = args[at + 1..].iter();
+    while let Some(a) = rest.next() {
+        let Some(flag) = a.strip_prefix("--") else {
+            env.get_or_insert_with(|| a.clone());
+            continue;
+        };
+        let (flag, inline) = match flag.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (flag, None),
+        };
+        let removed =
+            flag == "target" || flag == "target-name" || options.iter().any(|o| o == flag);
+        if !removed {
+            if inline.is_none() && takes_value(flag) {
+                rest.next();
+            }
+            continue;
+        }
+        let value = inline.or_else(|| rest.next().cloned()).unwrap_or_default();
+        match flag {
+            "target" => provider = Some(value),
+            "target-name" => name = Some(value),
+            _ => given.push(format!(" --{flag} {}", shell_word(&value))),
+        }
+    }
+    if name.is_none() && provider.is_none() && given.is_empty() {
+        return None;
+    }
+    let next = match (env, name) {
+        (Some(env), Some(name)) => {
+            let mut c = format!("opv target add {} {}", shell_word(&env), shell_word(&name));
+            if let Some(p) = provider {
+                c.push_str(&format!(" --provider {}", shell_word(&p)));
+            }
+            c.extend(given);
+            c
+        }
+        _ => "opv target add --help".to_string(),
+    };
+    Some((
+        "opv init writes no target since 0.7.0 (FR-56, FR-60): --target, --target-name and \
+         the provider options were removed; add the target with opv target add"
+            .to_string(),
+        next,
+    ))
 }
 
 /// `opv <command> --help` for the subcommand on the command line, else `opv --help`.
