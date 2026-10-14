@@ -39,9 +39,9 @@
   "inspect": "op item get iprd --vault vprd",
   "readers": {
     "deploy": [
-      "1password-vault-prod-portfolio-deploy"
+      "myapp-prod-portfolio-deploy"
     ],
-    "ci": "1password-vault-prod-ci"
+    "ci": "myapp-prod-ci"
   },
   "next": null,
   "do": null

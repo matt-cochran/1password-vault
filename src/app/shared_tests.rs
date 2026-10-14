@@ -201,11 +201,12 @@ fn product_check_reports_the_missing_source_of_its_shared_key() {
 #[test]
 fn explain_shows_the_shared_chain() {
     let mut out = Vec::new();
-    super::explain::run(
+    crate::app::testutil::explain(
         &fleet_shared(),
         "worker/DATABASE_URL",
         Some("prod"),
         &mut out,
+        false,
     )
     .unwrap();
     assert!(
@@ -218,7 +219,14 @@ fn explain_shows_the_shared_chain() {
 #[test]
 fn explain_of_a_source_names_the_keys_sharing_it() {
     let mut out = Vec::new();
-    super::explain::run(&fleet_shared(), "api/DATABASE_URL", Some("prod"), &mut out).unwrap();
+    crate::app::testutil::explain(
+        &fleet_shared(),
+        "api/DATABASE_URL",
+        Some("prod"),
+        &mut out,
+        false,
+    )
+    .unwrap();
     assert!(
         text_of(&out).contains("shared by:") && text_of(&out).contains("worker/DATABASE_URL"),
         "{}",

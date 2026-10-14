@@ -40,33 +40,6 @@ struct Target<'a> {
     spec: &'a KeySpec,
 }
 
-pub fn run(
-    fleet: &Fleet,
-    target: &str,
-    env: Option<&str>,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    run_as(fleet, target, env, out, false)
-}
-
-/// [`run`], printing one JSON document instead of lines when `json` (A5): `{environment,
-/// product, key, kind, field, source, boundary, personal, targets: [{name, provider,
-/// rendered_name, details}], readers: {deploy, ci}, rules, immutable, guidance,
-/// required_here, inspect, shared_from, shared_by}`. Configuration only, never a value.
-///
-/// The project the account names use is the directory's name here; `opv explain` resolves
-/// `--project` (or the repository's name) and calls [`run_request`].
-pub fn run_as(
-    fleet: &Fleet,
-    target: &str,
-    env: Option<&str>,
-    out: &mut dyn Write,
-    json: bool,
-) -> Result<(), Error> {
-    let project = default_project_name();
-    run_request(fleet, &Asked::Key(target), env, &project, out, json)
-}
-
 /// What `opv explain` was asked about (FR-56): a declared key, or a declared target.
 pub enum Asked<'a> {
     /// `[PRODUCT/]KEY`: the key form.
@@ -97,13 +70,6 @@ pub fn run_request(
             explain_target_in(fleet, name, env_name, project, out, json)
         }
     }
-}
-
-/// The project a caller names when it has no runner to resolve the repository: the current
-/// directory's own name, or the literal `project` when that is not a valid name.
-fn default_project_name() -> String {
-    let dir = std::env::current_dir().unwrap_or_default();
-    crate::config_store::default_project(None, None, &dir).unwrap_or_else(|_| "project".into())
 }
 
 /// The declared key and environment `opv open` names (H1), resolved exactly as `explain`
@@ -807,7 +773,7 @@ mod tests {
 
     fn explain(fleet: &Fleet, target: &str, env: Option<&str>) -> Result<String, Error> {
         let mut out = Vec::new();
-        run(fleet, target, env, &mut out).map(|()| text_of(&out))
+        crate::app::testutil::explain(fleet, target, env, &mut out, false).map(|()| text_of(&out))
     }
 
     fn openai_prod() -> String {

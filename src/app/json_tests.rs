@@ -5,7 +5,7 @@
 
 use super::sync::{self, SyncOpts};
 use super::testutil::*;
-use super::{explain, local, skeleton, status};
+use super::{local, skeleton, status};
 use crate::error::Error;
 use crate::runner::fake::FakeRunner;
 
@@ -222,7 +222,7 @@ fn sync_confirm_required() {
 
 fn explain_json(key: &str) -> String {
     let mut out = Vec::new();
-    let res = explain::run_as(&fleet(), key, Some("prod"), &mut out, true);
+    let res = crate::app::testutil::explain(&fleet(), key, Some("prod"), &mut out, true);
     framed(&out, &res, "opv explain --json")
 }
 

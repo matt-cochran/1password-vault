@@ -9,7 +9,7 @@ $ op whoami --format json
 $ op item get iprd --vault vprd --format json --cache=false
 $ flyctl secrets deploy --app myapp-production
 --- stdout
-prod/app: delivery: app not recorded: not confirmed by this sync: JWT_KEY, STRIPE_SECRET_KEY; the target lists no version for: STRIPE_SECRET_KEY
+prod/app: delivery: app not recorded: not confirmed by this sync: JWT_KEY; no delivery item is recorded for app on prod/app; opv bootstrap creates it
 prod/app: written: app/DATABASE_URL (DATABASE_URL)
 prod/app: held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): app/JWT_KEY (JWT_KEY)
 prod/app: deployed: app/DATABASE_URL (DATABASE_URL)

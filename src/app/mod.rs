@@ -2025,6 +2025,19 @@ pub(crate) mod testutil {
     pub const ENC_FLY: &str = "FLEET__ALLUMATA__INTEGRATION_ENC_KEY";
     pub const STRIPE_FLY: &str = "FLEET__ALLUMATA__STRIPE_SECRET_KEY";
 
+    /// `opv explain <key>` as the CLI runs it, with a fixed project, so the service
+    /// account names in the output never depend on the checkout's directory.
+    pub fn explain(
+        fleet: &Fleet,
+        key: &str,
+        env: Option<&str>,
+        out: &mut dyn std::io::Write,
+        json: bool,
+    ) -> Result<(), crate::error::Error> {
+        let asked = crate::app::explain::Asked::Key(key);
+        crate::app::explain::run_request(fleet, &asked, env, "myapp", out, json)
+    }
+
     pub fn fleet() -> Fleet {
         config::load("tests/fixtures/secrets.toml").unwrap()
     }

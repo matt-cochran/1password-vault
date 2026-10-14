@@ -296,8 +296,14 @@ fn prune_immutable_without_prune_next_is_plan() {
 
 #[test]
 fn explain_of_an_unknown_key_next_carries_the_env() {
-    let e =
-        super::explain::run(&fleet(), "allumata/OPENAI_KEY", None, &mut Vec::new()).unwrap_err();
+    let e = crate::app::testutil::explain(
+        &fleet(),
+        "allumata/OPENAI_KEY",
+        None,
+        &mut Vec::new(),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(
         e.next_step(),
         Some("opv explain allumata/OPENAI_API_KEY --env prod")
@@ -306,8 +312,14 @@ fn explain_of_an_unknown_key_next_carries_the_env() {
 
 #[test]
 fn explain_with_several_environments_next_names_one() {
-    let e =
-        super::explain::run(&fleet(), "allumata/SIGNUP_POLICY", None, &mut Vec::new()).unwrap_err();
+    let e = crate::app::testutil::explain(
+        &fleet(),
+        "allumata/SIGNUP_POLICY",
+        None,
+        &mut Vec::new(),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(
         e.next_step(),
         Some("opv explain allumata/SIGNUP_POLICY --env staging")
