@@ -1,7 +1,7 @@
 //! Self-healing 1Password conventions (FR-43). Pure: no `op`, no I/O, no clock.
 //!
-//! The convention: vault → item → section `<product>` → field `<KEY>` (the simple profile:
-//! unsectioned fields); concealed = secret, text = config. Users never have to lay the item
+//! The convention: vault → item → section `<product>` → field `<KEY>`; concealed = secret,
+//! text = config. Each boundary item (FR-57) holds its products' sections. Users never have to lay the item
 //! out by hand, and a layout that differs never blocks a command:
 //!
 //! - [`resolve`] finds each declared key wherever its field actually is (tolerant reads,
@@ -21,13 +21,13 @@
 //! case, spaces, `-` and `_`), unsectioned fields, and fields in sections whose label is not
 //! product-shaped (`^[a-z][a-z0-9_-]*$`, e.g. "Secrets" or "API keys"). A product-shaped
 //! section belongs to some product, possibly one another configuration manages in the same
-//! item, so its fields are never moved out of it. Under the simple profile any section is
-//! fair game. A field two declared keys could both claim is left alone.
+//! item, so its fields are never moved out of it. A field two declared keys could both claim
+//! is left alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::domain::model::{Fleet, KeySpec, Kind, SIMPLE_PRODUCT, key_label};
+use crate::domain::model::{Fleet, KeySpec, Kind, key_label};
 use crate::domain::plan::ItemField;
 use crate::domain::rules;
 use crate::domain::secret::SecretValue;
@@ -140,10 +140,9 @@ pub struct Resolution {
     pub chosen: BTreeMap<KeyId, usize>,
     /// The other fields claimed by each key, in item order.
     pub duplicates: BTreeMap<KeyId, Vec<usize>>,
-    /// Keys left without a field because the only field that matches sits where the
-    /// other profile's convention keeps it (M1: a simple and a fleet configuration may
-    /// share one item). That field is never claimed, moved or kept, so two configurations
-    /// never move it back and forth; the tidy names these keys in one note.
+    /// Keys read from an unsectioned field (M1): unsectioned fields are not keys' homes
+    /// (FR-20 removed), so that field is read but never moved, relabelled or kept; the tidy
+    /// names these keys in one note.
     pub foreign: BTreeSet<KeyId>,
 }
 
@@ -157,23 +156,15 @@ impl Resolution {
     }
 }
 
-/// Whether `f` sits in `product`'s section, by label (the simple profile: top level).
+/// Whether `f` sits in `product`'s section, by label.
 fn in_home(f: &Found, product: &str) -> bool {
-    if product == SIMPLE_PRODUCT {
-        f.section_label().is_none()
-    } else {
-        f.section_label().is_some_and(|l| norm(l) == norm(product))
-    }
+    f.section_label().is_some_and(|l| norm(l) == norm(product))
 }
 
-/// True when `f` sits where the other profile's convention keeps a key (M1), so a fleet
-/// and a simple configuration sharing one item never move it back and forth: for the fleet
-/// profile, a key-shaped label at the top level (the simple profile's home). The fleet
-/// profile still reads such a field, but its plan never moves, relabels, conceals,
-/// normalizes or keeps it. (The simple profile never claims a field in a product-shaped
-/// section at all, see [`resolve`].)
-fn foreign_home(f: &Found, fleet: &Fleet) -> bool {
-    !fleet.is_simple() && f.section_label().is_none() && key_shaped(&f.label)
+/// True when `f` is a key-shaped label at the top level (M1): such a field is still read,
+/// but the plan never moves, relabels, conceals, normalizes or keeps it.
+fn foreign_home(f: &Found) -> bool {
+    f.section_label().is_none() && key_shaped(&f.label)
 }
 
 /// Find each declared key's field (see the module docs). Pure and deterministic.
@@ -224,19 +215,14 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
             .copied()
             .filter(|(p, _)| in_home(f, p))
             .collect();
-        // M1: a product-shaped section belongs to some product, so the simple profile
-        // never claims a field in one either (a fleet configuration may share the item).
+        // M1: a product-shaped section belongs to some product.
         let raidable = f.section_label().is_none_or(|l| !product_shaped(l));
         let claim = one(&home).or_else(|| if raidable { one(&cands) } else { None });
-        match claim {
-            Some(id) => {
-                if foreign_home(f, fleet) {
-                    foreign.insert(id.clone());
-                }
-                claims.entry(id).or_default().push(i);
+        if let Some(id) = claim {
+            if foreign_home(f) {
+                foreign.insert(id.clone());
             }
-            None if fleet.is_simple() && !raidable => foreign.extend(one(&cands)),
-            None => {}
+            claims.entry(id).or_default().push(i);
         }
     }
     let mut res = Resolution::default();
@@ -254,12 +240,11 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
         }
         res.chosen.insert(id, best);
     }
-    // The simple profile's unclaimed keys, and the fleet profile's keys read from a field
-    // the plan leaves where it is.
+    // Keys read from a field the plan leaves where it is.
     foreign.retain(|id| {
-        let left = |i: &usize| foreign_home(&layout.fields[*i], fleet);
+        let left = |i: &usize| foreign_home(&layout.fields[*i]);
         match res.chosen.get(id) {
-            None => fleet.is_simple(),
+            None => false,
             Some(c) => left(c) || res.duplicates.get(id).into_iter().flatten().any(left),
         }
     });
@@ -326,7 +311,7 @@ pub fn normalized(
 /// The declared keys' fields as the planner reads them (tolerant reads, FR-43): each
 /// resolved key under its own section and label, with its declared kind (a secret stored as
 /// text and config stored as concealed are read, not refused) and its normalized value;
-/// then every unclaimed field the profile's reader would see, once per (section, label), so
+/// then every unclaimed field in a section, once per (section, label), so
 /// extras are still reported. opv's own sections are never read.
 pub fn read_fields(layout: &Layout, fleet: &Fleet, env_name: &str) -> Vec<ItemField> {
     let res = resolve(layout, fleet);
@@ -359,9 +344,8 @@ pub fn read_fields(layout: &Layout, fleet: &Fleet, env_name: &str) -> Vec<ItemFi
         {
             continue;
         }
-        let section = match (fleet.is_simple(), f.section_label()) {
-            (false, Some(l)) if l != MARKER_SECTION => l.to_string(),
-            (true, None) if key_shaped(&f.label) => SIMPLE_PRODUCT.to_string(),
+        let section = match f.section_label() {
+            Some(l) if l != MARKER_SECTION => l.to_string(),
             _ => continue,
         };
         if !seen.insert((section.clone(), f.label.clone())) {
@@ -594,7 +578,7 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
     // A product section spelled differently ("API" for `api`) is relabelled, when it holds
     // a field of that product and no section has the exact label.
     for product in fleet.products.keys() {
-        if product == SIMPLE_PRODUCT || labels.contains(product) {
+        if labels.contains(product) {
             continue;
         }
         let holds = |s: &Section| {
@@ -641,7 +625,7 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
     };
 
     for (product, prod) in &fleet.products {
-        let home = (product != SIMPLE_PRODUCT).then(|| product.clone());
+        let home = Some(product.clone());
         // A shared key (FR-45) never gets a field: its source's field holds the value.
         // A personal key (FR-55) never gets a field in the team item: its value is each
         // person's own.
@@ -669,7 +653,7 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
                 continue;
             };
             let f = &layout.fields[c];
-            let left = |i: usize| foreign_home(&layout.fields[i], fleet);
+            let left = |i: usize| foreign_home(&layout.fields[i]);
             if left(c) {
                 // M1: read where it is; another configuration may keep it there.
                 continue;

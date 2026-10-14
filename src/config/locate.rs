@@ -195,18 +195,11 @@ fn owner_path(msg: &str) -> Option<Vec<String>> {
         ["environments", _, "and", b, ..] => Some(vec!["environments".into(), unquote(b)]),
         ["product", p, ..] => Some(vec!["products".into(), unquote(p)]),
         ["store", s, ..] => Some(vec!["stores".into(), unquote(s)]),
-        ["profile.kind", ..] => Some(own(&["profile", "kind"])),
-        ["simple", "profile:", ..] => Some(own(&["products"])),
         ["no", "environments", ..] => Some(own(&["environments"])),
         [owner, ..] if owner.ends_with(':') => {
             let owner = owner.trim_end_matches(':');
-            let mut path = match owner.split_once('/') {
-                Some((p, k)) => own(&["products", p, "keys", k]),
-                None if owner.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {
-                    own(&["keys", owner])
-                }
-                None => return None,
-            };
+            let (p, k) = owner.split_once('/')?;
+            let mut path = own(&["products", p, "keys", k]);
             if msg.contains("undefined environment") && !msg.contains("refuse_in") {
                 path.push("environments".into());
             } else if msg.contains(" rule ") || msg.contains("transform") {
@@ -370,18 +363,18 @@ mod tests {
     #[test]
     fn unknown_field_names_file_line_and_field() {
         let (e, file) = load_err(
-            "item_id = \"iprd\"",
-            "item_id = \"iprd\"\nconfrm_env = true",
+            "modes.allumata.payments = \"off\"",
+            "modes.allumata.payments = \"off\"\nconfrm_env = true",
         );
-        let want = format!("{file}:14: environments.prod.confrm_env: unknown field");
+        let want = format!("{file}:13: environments.prod.confrm_env: unknown field");
         assert!(e.text().starts_with(&want), "{e}");
     }
 
     #[test]
     fn unknown_field_fix_names_the_closest_field() {
         let (e, _) = load_err(
-            "item_id = \"iprd\"",
-            "item_id = \"iprd\"\nconfrm_env = true",
+            "modes.allumata.payments = \"off\"",
+            "modes.allumata.payments = \"off\"\nconfrm_env = true",
         );
         assert_eq!(e.action(), Some("rename confrm_env to confirm_env"), "{e}");
     }
@@ -396,7 +389,7 @@ mod tests {
     fn undefined_environment_is_located_at_the_key() {
         let (e, file) = load_err("environments = [\"prod\"]", "environments = [\"prd\"]");
         let want = format!(
-            "{file}:20: products.allumata.keys.OPENAI_API_KEY.environments: undefined environment"
+            "{file}:21: products.allumata.keys.OPENAI_API_KEY.environments: undefined environment"
         );
         assert!(e.text().starts_with(&want), "{e}");
     }
@@ -409,10 +402,10 @@ mod tests {
 
     #[test]
     fn missing_field_fix_names_the_table() {
-        let (e, _) = load_err("vault_id = \"vprd\"", "");
+        let (e, _) = load_err("kind = \"secret\"\n", "");
         assert_eq!(
             e.action(),
-            Some("add vault_id = ... under [environments.prod]"),
+            Some("add kind = ... under [products.allumata.keys.OPENAI_API_KEY]"),
             "{e}"
         );
     }
@@ -425,7 +418,7 @@ mod tests {
         );
         assert!(
             e.text().starts_with(&format!(
-                "{file}:18: products.allumata.keys.openai: key name"
+                "{file}:19: products.allumata.keys.openai: key name"
             )),
             "{e}"
         );
@@ -476,7 +469,11 @@ mod tests {
     #[test]
     fn mistyped_string_error_never_shows_the_value() {
         let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
-        let bad = text.replacen("[profile]", &format!("profile = \"{MARKER}\"\n[x]"), 1);
+        let bad = text.replacen(
+            "[environments.staging]",
+            &format!("stores = \"{MARKER}\"\n[environments.staging]"),
+            1,
+        );
         let e = crate::config::parse(&bad).unwrap_err();
         assert!(!e.text().contains("C1MARKER"), "{e}");
     }

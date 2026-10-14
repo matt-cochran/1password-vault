@@ -1,4 +1,4 @@
-//! `[environments.<env>.azure]` parsing, Key Vault name rules and the Azure
+//! A target's `azure` section parsing, Key Vault name rules and the Azure
 //! `TargetConfig` (FR-28, FR-30, FR-37).
 
 use std::any::Any;
@@ -11,7 +11,6 @@ use super::containerapp::ContainerApp;
 use super::keyvault::KeyVault;
 use super::preflight;
 use crate::config::{check_ident, is_id};
-use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -50,7 +49,7 @@ pub struct AzureTarget {
     pub container: Option<String>,
     /// "system" or a user-assigned identity resource id (R6).
     pub identity: String,
-    /// Env-name template; `{KEY}` under the simple profile.
+    /// Env-name template with `{KEY}` and optionally `{PRODUCT}`.
     pub env_name_template: String,
     pub config: ConfigRoute,
     /// The vault's `properties.vaultUri`, read once per run (NR-6); not configuration.
@@ -122,13 +121,12 @@ struct RawAzure {
     #[serde(default)]
     container: Option<String>,
     identity: String,
-    #[serde(default)]
-    env_name: Option<String>,
+    env_name: String,
     #[serde(default)]
     config: Option<String>,
 }
 
-/// The env-name template `opv init` writes under the fleet profile.
+/// The env-name template `opv init` writes when none is given.
 const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
 /// `opv init --target azure` options (H3), in the order they are written.
@@ -165,7 +163,7 @@ static INIT_FIELDS: [InitField; 8] = [
     },
     InitField {
         field: "env_name",
-        help: "Env-name template (fleet profile; default FLEET__{PRODUCT}__{KEY})",
+        help: "Env-name template (default FLEET__{PRODUCT}__{KEY}; {KEY} for bare names)",
         required: false,
     },
     InitField {
@@ -192,33 +190,15 @@ impl Provider for AzureProvider {
         &[&super::az::AZ_CLI]
     }
 
-    fn parse(
-        &self,
-        section: &Section<'_>,
-        profile: Profile,
-    ) -> Result<Box<dyn TargetConfig>, Error> {
+    fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
         let a: RawAzure = section.deserialize()?;
-        let template = match (profile, a.env_name.clone()) {
-            (Profile::Fleet, Some(t)) if t.contains("{PRODUCT}") && t.contains("{KEY}") => t,
-            (Profile::Fleet, Some(t)) => {
-                return Err(cfg(format!(
-                    "environment {env}: azure.env_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
-                )));
-            }
-            (Profile::Fleet, None) => {
-                return Err(cfg(format!(
-                    "environment {env}: azure.env_name is required under the fleet profile"
-                )));
-            }
-            (Profile::Simple, Some(_)) => {
-                return Err(cfg(format!(
-                    "environment {env}: azure.env_name is not allowed under the simple \
-                     profile (the env name is the key name)"
-                )));
-            }
-            (Profile::Simple, None) => SIMPLE_TEMPLATE.into(),
-        };
+        let template = a.env_name.clone();
+        if !template.contains("{KEY}") {
+            return Err(cfg(format!(
+                "environment {env}: azure.env_name {template:?} must contain {{KEY}}"
+            )));
+        }
         Ok(Box::new(azure_target(env, a, template)?))
     }
 
@@ -236,9 +216,9 @@ impl Provider for AzureProvider {
         Ok(Box::new(super::login::start()?))
     }
 
-    fn setup_hint(&self, _profile: Profile) -> String {
+    fn setup_hint(&self) -> String {
         "configure azure.subscription, azure.key_vault, azure.resource_group, \
-         azure.container_app and azure.identity"
+         azure.container_app, azure.identity and azure.env_name"
             .into()
     }
 
@@ -246,14 +226,14 @@ impl Provider for AzureProvider {
         &INIT_FIELDS
     }
 
-    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
+    fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
         let mut lines: Vec<(&str, &str)> = Vec::new();
         for f in &INIT_FIELDS {
-            let v = match (values.get(f.field), f.field, profile) {
-                (Some(v), _, _) => v.as_str(),
-                (None, "identity", _) => "system",
-                (None, "env_name", Profile::Fleet) => INIT_FLEET_TEMPLATE,
-                (None, _, _) => continue,
+            let v = match (values.get(f.field), f.field) {
+                (Some(v), _) => v.as_str(),
+                (None, "identity") => "system",
+                (None, "env_name") => INIT_FLEET_TEMPLATE,
+                (None, _) => continue,
             };
             lines.push((f.field, v));
         }
@@ -509,21 +489,21 @@ impl TargetConfig for AzureTarget {
 mod tests {
     use super::*;
     use crate::config::parse;
-    use crate::domain::SIMPLE_PRODUCT;
 
     /// The Azure target of `env`; panics when it is not one.
     fn azure_of<'f>(f: &'f crate::domain::Fleet, env: &str) -> &'f AzureTarget {
         f.environments[env]
-            .target()
-            .and_then(|t| t.as_any().downcast_ref::<AzureTarget>())
+            .targets
+            .values()
+            .find_map(|t| t.config.as_any().downcast_ref::<AzureTarget>())
             .expect("not azure")
     }
 
     const AZURE_ENV: &str = r#"
 [environments.prod]
-vault_id = "v"
-item_id = "i"
-[environments.prod.azure]
+[environments.prod.targets.app]
+state_vault_id = "s"
+[environments.prod.targets.app.azure]
 subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "kv-myapp-prod"
 resource_group = "rg-myapp"
@@ -539,7 +519,7 @@ environments = ["prod"]
 "#;
 
     fn azure_doc(env: &str, keys: &str) -> String {
-        format!("[profile]\nkind = \"fleet\"\n{env}{keys}")
+        crate::config::testing::bounded(&format!("{env}{keys}"))
     }
 
     fn azure_env_with(from: &str, to: &str) -> String {
@@ -554,7 +534,7 @@ environments = ["prod"]
         let bad = azure_env_with("identity = \"system\"", "identity = 5");
         assert_eq!(
             parse(&bad).unwrap_err().to_string(),
-            "configuration error: invalid secrets.toml: TOML parse error at line 12, column 12\n\
+            "configuration error: invalid secrets.toml: TOML parse error at line 11, column 12\n\
              invalid type: integer, expected a string"
         );
     }
@@ -583,7 +563,7 @@ environments = ["prod"]
             "subscription = \"my-sub\"",
         ));
         assert!(
-            e.contains("line 8, column 16") && e.contains("must be a subscription id"),
+            e.contains("line 7, column 16") && e.contains("must be a subscription id"),
             "{e}"
         );
     }
@@ -678,7 +658,14 @@ environments = ["prod"]
     fn loads_azure_target() {
         let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
         assert_eq!(
-            f.environments["prod"].target().unwrap().provider().label(),
+            f.environments["prod"]
+                .targets
+                .values()
+                .next()
+                .unwrap()
+                .config
+                .provider()
+                .label(),
             "Azure"
         );
     }
@@ -704,7 +691,10 @@ environments = ["prod"]
     #[test]
     fn azure_renders_env_name_from_template() {
         let f = parse(&azure_doc(AZURE_ENV, KEYS)).unwrap();
-        assert_eq!(f.target_name("prod", "api", "DB_URL"), "FLEET__API__DB_URL");
+        assert_eq!(
+            f.target_name("prod", "app", "api", "DB_URL"),
+            "FLEET__API__DB_URL"
+        );
     }
 
     #[test]
@@ -784,44 +774,12 @@ environments = ["prod"]
     }
 
     #[test]
-    fn rejects_missing_env_name_under_fleet_profile() {
+    fn rejects_a_missing_env_name() {
         let e = azure_err(&azure_env_with(
             "env_name = \"FLEET__{PRODUCT}__{KEY}\"\n",
             "",
         ));
-        assert!(e.contains("azure.env_name is required"), "{e}");
-    }
-
-    const SIMPLE_AZURE: &str = r#"
-[profile]
-kind = "simple"
-[environments.prod]
-vault_id = "v"
-item_id = "i"
-[environments.prod.azure]
-subscription = "00000000-0000-0000-0000-000000000000"
-key_vault = "kv-myapp-prod"
-resource_group = "rg-myapp"
-container_app = "ca-myapp"
-identity = "system"
-[keys.JWT_KEY]
-kind = "secret"
-environments = ["prod"]
-"#;
-
-    #[test]
-    fn simple_profile_azure_uses_the_key_name_as_env_name() {
-        let f = parse(SIMPLE_AZURE).unwrap();
-        assert_eq!(f.target_name("prod", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
-    }
-
-    #[test]
-    fn rejects_env_name_under_simple_profile_azure() {
-        let e = azure_err(&SIMPLE_AZURE.replace(
-            "identity = \"system\"",
-            "identity = \"system\"\nenv_name = \"{KEY}\"",
-        ));
-        assert!(e.contains("azure.env_name is not allowed"), "{e}");
+        assert!(e.contains("missing field `env_name`"), "{e}");
     }
 
     #[test]

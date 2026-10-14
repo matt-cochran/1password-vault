@@ -12,8 +12,8 @@ pub mod model;
 pub mod secret;
 
 pub use model::{
-    Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product, Profile,
-    Rules, SIMPLE_PRODUCT, SIMPLE_TEMPLATE, key_label,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product,
+    Rules, Target, boundary_missing, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;
