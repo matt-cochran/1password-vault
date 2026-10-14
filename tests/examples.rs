@@ -16,8 +16,14 @@ fn example_configs() -> Vec<PathBuf> {
 }
 
 /// The example with placeholder IDs wherever `opv bootstrap` records them: a boundary's
-/// `vault_id`/`item_id` and a target's `state_vault_id`, left empty in the file.
+/// `vault_id`/`item_id` and a target's `state_vault_id`, left empty in the file. Each
+/// placeholder is distinct, as bootstrap's real IDs are, so two vaults never look shared.
 fn with_ids(text: &str) -> String {
+    let mut next = 0;
+    let mut id = |prefix: &str| {
+        next += 1;
+        format!("{prefix}example{next:016}")
+    };
     let mut doc: toml_edit::DocumentMut = text.parse().expect("example parses as TOML");
     let Some(envs) = doc
         .get_mut("environments")
@@ -35,10 +41,10 @@ fn with_ids(text: &str) -> String {
                     continue;
                 };
                 if b.get("vault_id").and_then(|v| v.as_str()) == Some("") {
-                    b.insert("vault_id", toml_edit::value("vexample00000000000000001"));
+                    b.insert("vault_id", toml_edit::value(id("v")));
                 }
                 if b.get("item_id").and_then(|v| v.as_str()) == Some("") {
-                    b.insert("item_id", toml_edit::value("iexample00000000000000001"));
+                    b.insert("item_id", toml_edit::value(id("i")));
                 }
             }
         }
@@ -48,10 +54,7 @@ fn with_ids(text: &str) -> String {
                     continue;
                 };
                 if t.get("state_vault_id").and_then(|v| v.as_str()) == Some("") {
-                    t.insert(
-                        "state_vault_id",
-                        toml_edit::value("vstateexample00000000000001"),
-                    );
+                    t.insert("state_vault_id", toml_edit::value(id("vstate")));
                 }
             }
         }
@@ -62,6 +65,18 @@ fn with_ids(text: &str) -> String {
 #[test]
 fn there_is_at_least_one_example_configuration() {
     assert!(!example_configs().is_empty());
+}
+
+#[test]
+fn the_overflow_example_places_p_on_two_targets() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/shared-overflow/secrets.toml");
+    let text = std::fs::read_to_string(&path).expect("the overflow example exists");
+    let fleet = opv::config::parse(&with_ids(&text)).expect("the overflow example loads");
+    let placed = ["shared", "p-overflow"]
+        .iter()
+        .filter(|target| fleet.delivers("prod", target, "p"))
+        .count();
+    assert_eq!(placed, 2);
 }
 
 #[test]

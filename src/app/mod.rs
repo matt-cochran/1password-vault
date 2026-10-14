@@ -1600,26 +1600,6 @@ pub(crate) fn resolve_targets(
         .collect())
 }
 
-/// The one target of `env` for `verb`, a command that reads a single target and takes no
-/// `--target` (`adopt`, `history`): a usage error listing the targets
-/// when the environment has several.
-pub(crate) fn sole_target(fleet: &Fleet, env: &str, verb: &str) -> Result<String, Error> {
-    let names = resolve_targets(fleet, env, &[], verb)?;
-    match names.as_slice() {
-        [one] => Ok(one.clone()),
-        _ => Err(Error::Config(
-            format!(
-                "opv {verb} reads one target, and environment {env} has {} ({})",
-                names.len(),
-                names.join(", ")
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::Usage)
-        .with_next(format!("opv status {env}"))),
-    }
-}
-
 /// The runner for each of `names`, the targets of one run (FR-40, FR-56). A run over one
 /// target uses `r`, which the CLI signed in with that target's deploy credentials; a run
 /// over several signs in here, once per target, so each target's calls carry its own

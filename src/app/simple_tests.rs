@@ -164,7 +164,11 @@ fn status_table_has_a_product_column() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = status_of(&r, false);
     let header = out.lines().nth(1).unwrap();
-    assert!(header.starts_with("PRODUCT "), "{out}");
+    assert_eq!(
+        header.split_whitespace().take(2).collect::<Vec<_>>(),
+        ["TARGET", "PRODUCT"],
+        "{out}"
+    );
 }
 
 #[test]
@@ -303,7 +307,16 @@ fn plan_reads_the_item_once() {
 fn plan_table_has_a_product_column() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = plan_of(&r, false);
-    assert!(out.lines().nth(1).unwrap().starts_with("PRODUCT "), "{out}");
+    assert_eq!(
+        out.lines()
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>(),
+        ["TARGET", "PRODUCT"],
+        "{out}"
+    );
 }
 
 #[test]

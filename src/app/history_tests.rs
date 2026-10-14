@@ -1,6 +1,9 @@
 //! `opv history` (#95): the report of what opv last wrote, and the no-target case.
 
 use super::*;
+use crate::app::testutil::*;
+use crate::runner::Output;
+use crate::runner::fake::FakeRunner;
 
 fn row(name: &str, state: &'static str, written: Option<&str>) -> HistoryRow {
     HistoryRow {
@@ -20,13 +23,13 @@ fn row(name: &str, state: &'static str, written: Option<&str>) -> HistoryRow {
 
 fn text(rows: &[HistoryRow]) -> String {
     let mut out = Vec::new();
-    report(&mut out, "prod", "Key Vault", "azure", rows, false).unwrap();
+    report(&mut out, "prod", "web", "Key Vault", "azure", rows, false).unwrap();
     String::from_utf8(out).unwrap()
 }
 
 fn doc(rows: &[HistoryRow]) -> serde_json::Value {
     let mut out = Vec::new();
-    report(&mut out, "prod", "Key Vault", "azure", rows, true).unwrap();
+    report(&mut out, "prod", "web", "Key Vault", "azure", rows, true).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -38,7 +41,7 @@ fn the_head_names_the_latest_write() {
     ];
     assert!(
         text(&rows)
-            .starts_with("prod (Key Vault): last write 2026-10-12T09:00:00Z by plan 7f3c9a1e")
+            .starts_with("prod/web (Key Vault): last write 2026-10-12T09:00:00Z by plan 7f3c9a1e")
     );
 }
 
@@ -87,12 +90,82 @@ fn an_environment_without_a_target_has_no_history() {
     run(
         &fleet,
         "dev",
+        None,
         &crate::runner::fake::FakeRunner::new(Vec::<crate::runner::Output>::new()),
         false,
         &mut out,
     )
     .unwrap();
     assert!(String::from_utf8(out).unwrap().contains("no write history"));
+}
+
+// Every target of the environment, or only the `--target` named one (FR-56) ---------------
+
+const TWO_TARGETS: &str = r#"
+[environments.multi]
+boundaries.allumata = { vault_id = "v", item_id = "i" }
+
+[environments.multi.targets.api]
+fly.app = "api-app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "s1"
+
+[environments.multi.targets.web]
+fly.app = "web-app"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "s2"
+
+[products.allumata.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["multi"]
+"#;
+
+fn multi_item() -> Output {
+    item(&[secret("allumata", "OPENAI_API_KEY", "sk-proj-FIXTUREVALUE")])
+}
+
+fn multi_run(target: Option<&str>, json: bool) -> (Result<(), Error>, String, FakeRunner) {
+    let fleet = crate::config::parse(TWO_TARGETS).unwrap();
+    let r = FakeRunner::new([multi_item(), fly_empty(), multi_item(), fly_empty()]);
+    let mut out = Vec::new();
+    let res = run(&fleet, "multi", target, &r, json, &mut out);
+    (res, text_of(&out), r)
+}
+
+/// The `env/target` of every report head line.
+fn heads(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|l| l.contains("(Fly):"))
+        .map(|l| l.split(' ').next().unwrap())
+        .collect()
+}
+
+#[test]
+fn every_target_of_the_environment_is_listed_by_name() {
+    let (res, out, _) = multi_run(None, false);
+    res.unwrap();
+    assert_eq!(heads(&out), ["multi/api", "multi/web"]);
+}
+
+#[test]
+fn only_the_named_target_is_listed() {
+    let (res, out, _) = multi_run(Some("api"), false);
+    res.unwrap();
+    assert_eq!(heads(&out), ["multi/api"]);
+}
+
+#[test]
+fn the_json_lists_each_target_by_name() {
+    let (res, out, _) = multi_run(None, true);
+    res.unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let names: Vec<&str> = doc["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["api", "web"]);
 }
 
 #[test]

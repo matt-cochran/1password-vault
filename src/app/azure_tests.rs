@@ -638,7 +638,7 @@ fn changed_secret_writes_new_version_and_reports_pending_without_deploy() {
     let (_, out) = sync_on(&sim, &fleet_a(), &SyncOpts::default());
     assert!(
         out.lines()
-            .any(|l| l == "pending deploy (pass --deploy): app/API_KEY (API_KEY)"),
+            .any(|l| l == "prod/app: pending deploy (pass --deploy): app/API_KEY (API_KEY)"),
         "{out}"
     );
 }
@@ -707,9 +707,11 @@ fn drift_is_reported_by_status() {
     let mut out = Vec::new();
     super::status::run(&fleet_a(), "prod", &sim, &mut out).unwrap();
     assert!(
-        text_of(&out)
-            .lines()
-            .any(|l| l == sync::drift_line("prod", "app/API_KEY (API_KEY)")),
+        text_of(&out).lines().any(|l| l
+            == format!(
+                "prod/app: {}",
+                sync::drift_line("prod", "app/API_KEY (API_KEY)")
+            )),
         "{}",
         text_of(&out)
     );
@@ -808,7 +810,7 @@ fn will_prune_lists_each_key_once() {
     let (_, out) = sync_on(&sim, &fleet_b(), &deploy_prune());
     assert!(
         out.lines()
-            .any(|l| l == "will prune: app/OLD_KEY (OLD_KEY)"),
+            .any(|l| l == "prod/app: will prune: app/OLD_KEY (OLD_KEY)"),
         "{out}"
     );
 }
@@ -826,7 +828,7 @@ fn prune_without_deploy_only_reports() {
     );
     assert!(
         out.lines()
-            .any(|l| l == "not pruned without --deploy: app/OLD_KEY (OLD_KEY)"),
+            .any(|l| l == "prod/app: not pruned without --deploy: app/OLD_KEY (OLD_KEY)"),
         "{out}"
     );
 }
@@ -837,7 +839,8 @@ fn not_desired_without_prune_is_extra_not_pruned() {
     let (_, out) = sync_on(&sim, &fleet_b(), &deploy());
     assert!(
         out.lines()
-            .any(|l| l == "extra, not pruned (pass --prune to remove): app/OLD_KEY (OLD_KEY)"),
+            .any(|l| l
+                == "prod/app: extra, not pruned (pass --prune to remove): app/OLD_KEY (OLD_KEY)"),
         "{out}"
     );
 }
@@ -1048,7 +1051,7 @@ fn env_routed_config_is_named_with_its_reader() {
     assert!(
         out.lines().any(|l| l
             == format!(
-                "env-routed (visible to readers of container app {APP}): app/LOG_LEVEL (LOG_LEVEL)"
+                "prod/app: env-routed (visible to readers of container app {APP}): app/LOG_LEVEL (LOG_LEVEL)"
             )),
         "{out}"
     );
@@ -1146,9 +1149,9 @@ fn azure_sync_summary_names_the_deployed_revision() {
     let sim = api_changed();
     let (_, out) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        out.lines().any(|l| l
-            .starts_with("summary: written 1 · unchanged 2 · held 0 · deployed opv-fixture-app--")
-            && l.ends_with(" · pending 0 · pruned 0 · kept 0 · skipped 0")),
+        out.lines().any(|l| l.starts_with(
+            "prod/app: summary: written 1 · unchanged 2 · held 0 · deployed opv-fixture-app--"
+        ) && l.ends_with(" · pending 0 · pruned 0 · kept 0 · skipped 0")),
         "{out}"
     );
 }

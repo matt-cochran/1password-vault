@@ -17,12 +17,35 @@ use crate::app::account::Report;
 use crate::domain::{KeyState, Row, TargetState, key_label};
 use crate::error::Error;
 
-/// One environment's contribution to the receipt: its name, its target's provider label
-/// (`Some("Fly")`, or `None` for a run-only environment) and its rows, or the error that
+/// One named target of an environment, as `ready` reads it (FR-56): its identity and the
+/// outcome of the probes that decide `ready` or `grants_missing`. The caller has already
+/// read the rows and (one vault visibility check per needed vault) the state vault;
+/// nothing here calls `op`.
+pub struct TargetInput {
+    pub name: String,
+    /// The provider's label (`Fly`, `GitHub`, ...).
+    pub provider: String,
+    /// The target instance (an app, repositories, a vault and app, a cluster location);
+    /// names only (SR-1).
+    pub locator: String,
+    /// `None`: every vault and item this target needs could be opened (`ready`).
+    /// `Some(reason)`: `grants_missing`, naming what could not be opened.
+    pub grants_missing: Option<String>,
+    /// The target's rows when it could be read; `Err` when its deploy credentials item or a
+    /// boundary it reads could not be opened.
+    pub rows: Result<Vec<Row>, Error>,
+}
+
+/// One environment's contribution to the receipt: its name, its targets (FR-56; empty for
+/// a run-only environment) and, for a run-only environment, its rows, or the error that
 /// stopped reading it. The caller has already read them; nothing here calls `op`.
 pub struct EnvInput {
     pub name: String,
-    pub target: Option<String>,
+    /// The environment's targets (FR-56); `None` for a run-only environment. A deployed
+    /// environment's rows live on each [`TargetInput`].
+    pub target: Option<Vec<TargetInput>>,
+    /// A run-only environment's rows, or the error that stopped reading it. Unused when
+    /// `target` is `Some`.
     pub rows: Result<Vec<Row>, Error>,
     /// Display name (FR-55); `None`: the key.
     pub title: Option<String>,
@@ -69,6 +92,8 @@ pub struct MatrixEntry {
     pub product: String,
     /// The environment's target provider label; `null` for a run-only environment.
     pub target: Option<String>,
+    /// The target's name (FR-56); `null` for a run-only environment.
+    pub target_name: Option<String>,
     pub keys: usize,
     pub saved: usize,
     pub findings: usize,
@@ -77,18 +102,36 @@ pub struct MatrixEntry {
     pub delivered: bool,
 }
 
-/// What a finding is about: any of the account, environment, product or key, each omitted
-/// when absent (FR-51).
+/// What a finding is about: any of the account, environment, target, product or key, each
+/// omitted when absent (FR-51).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Scope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// The target's name (FR-56), when the finding is about one target of an environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+/// One target of an environment as the receipt lists it (FR-56): its identity and whether
+/// it is `ready` or `grants_missing`, with the reason when it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TargetReport {
+    pub environment: String,
+    pub name: String,
+    pub provider: String,
+    pub locator: String,
+    /// `ready` or `grants_missing`.
+    pub state: String,
+    /// Why the target is `grants_missing`; omitted when it is `ready`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// One thing a person or agent must act on, with one runnable prerequisite and one verify
@@ -124,6 +167,8 @@ pub struct Receipt {
     pub config: ConfigRef,
     pub account: Option<AccountRef>,
     pub matrix: Vec<MatrixEntry>,
+    /// Every target of every environment, in environment then name order (FR-56).
+    pub targets: Vec<TargetReport>,
     pub findings: Vec<Finding>,
     pub next: Option<Next>,
     /// The environments in input order, with their display names, for [`render_text`]'s
@@ -144,6 +189,7 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
         by: s.by.clone(),
     });
     let matrix = build_matrix(inputs);
+    let targets = build_targets(inputs);
     let findings = build_findings(inputs);
     let next = findings
         .iter()
@@ -170,6 +216,7 @@ pub fn receipt(inputs: &Inputs<'_>, opv_version: &str) -> Receipt {
         config,
         account,
         matrix,
+        targets,
         findings,
         next,
         environments,
@@ -204,38 +251,90 @@ fn receipt_id(
     format!("rcpt-{}", &hex[..12])
 }
 
-/// The matrix: one entry per environment × product present in that environment's rows,
-/// grouped by product in row order of first appearance. An environment whose rows are
-/// `Err` contributes nothing.
-fn build_matrix(inputs: &Inputs<'_>) -> Vec<MatrixEntry> {
+/// The targets the receipt lists (FR-56): one per environment and name, in environment
+/// order, with the state the caller's probes found.
+fn build_targets(inputs: &Inputs<'_>) -> Vec<TargetReport> {
     let mut out = Vec::new();
     for env in &inputs.envs {
-        let Ok(rows) = &env.rows else { continue };
-        let mut products: Vec<&str> = Vec::new();
-        for r in rows {
-            if !products.contains(&r.product.as_str()) {
-                products.push(&r.product);
-            }
-        }
-        for product in products {
-            let group: Vec<&Row> = rows.iter().filter(|r| r.product == product).collect();
-            let saved = group.iter().filter(|r| r.state == KeyState::Ready).count();
-            let findings = group.iter().filter(|r| is_finding_state(&r.state)).count();
-            let delivered = env.target.is_none()
-                || !group.iter().all(|r| r.target == TargetState::NotDelivered);
-            out.push(MatrixEntry {
+        let Some(targets) = &env.target else { continue };
+        for t in targets {
+            let reason = target_missing(t);
+            out.push(TargetReport {
                 environment: env.name.clone(),
-                title: env.title.clone().unwrap_or_else(|| env.name.clone()),
-                product: product.to_string(),
-                target: env.target.clone(),
-                keys: group.len(),
-                saved,
-                findings,
-                delivered,
+                name: t.name.clone(),
+                provider: t.provider.clone(),
+                locator: t.locator.clone(),
+                state: match &reason {
+                    None => "ready".into(),
+                    Some(_) => "grants_missing".into(),
+                },
+                reason,
             });
         }
     }
     out
+}
+
+/// The matrix: one entry per environment × target × product present in that target's rows,
+/// grouped by product in row order of first appearance; a run-only environment contributes
+/// one entry per product from its own rows. An environment or target whose rows are `Err`
+/// contributes nothing.
+fn build_matrix(inputs: &Inputs<'_>) -> Vec<MatrixEntry> {
+    let mut out = Vec::new();
+    for env in &inputs.envs {
+        if let Some(targets) = &env.target {
+            // One group per target; each target's rows stand on their own (FR-56).
+            for t in targets {
+                let Ok(rows) = &t.rows else { continue };
+                out.extend(matrix_for(
+                    env,
+                    Some(t.name.as_str()),
+                    Some(t.provider.as_str()),
+                    rows,
+                ));
+            }
+            continue;
+        }
+        let Ok(rows) = &env.rows else { continue };
+        out.extend(matrix_for(env, None, None, rows));
+    }
+    out
+}
+
+/// The matrix entries of one environment (or one target of it) from its rows.
+fn matrix_for(
+    env: &EnvInput,
+    target_name: Option<&str>,
+    provider: Option<&str>,
+    rows: &[Row],
+) -> Vec<MatrixEntry> {
+    let mut products: Vec<&str> = Vec::new();
+    for r in rows {
+        if !products.contains(&r.product.as_str()) {
+            products.push(&r.product);
+        }
+    }
+    products
+        .into_iter()
+        .map(|product| {
+            let group: Vec<&Row> = rows.iter().filter(|r| r.product == product).collect();
+            let saved = group.iter().filter(|r| r.state == KeyState::Ready).count();
+            let findings = group.iter().filter(|r| is_finding_state(&r.state)).count();
+            let delivered =
+                provider.is_none() || !group.iter().all(|r| r.target == TargetState::NotDelivered);
+            MatrixEntry {
+                environment: env.name.clone(),
+                title: env.title.clone().unwrap_or_else(|| env.name.clone()),
+                product: product.to_string(),
+                target: provider.map(str::to_string),
+                target_name: target_name.map(str::to_string),
+                keys: group.len(),
+                saved,
+                findings,
+                delivered,
+            }
+        })
+        .collect()
 }
 
 /// The row states counted as findings in the matrix (FR-51): a key blocked by its source
@@ -248,6 +347,89 @@ fn is_finding_state(state: &KeyState) -> bool {
             | KeyState::RuleFailed(..)
             | KeyState::SourceBlocked
     )
+}
+
+/// Why a target is `grants_missing`: the explicit reason the caller found, else the error
+/// that stopped reading its rows (a deploy credentials item, a boundary, a sign-in).
+fn target_missing(t: &TargetInput) -> Option<String> {
+    t.grants_missing
+        .clone()
+        .or_else(|| t.rows.as_ref().err().map(|e| e.text().to_string()))
+}
+
+/// The FR-56 `grants_missing` finding for one target: what an owner must grant, and the
+/// command that names it (`opv access <env> --target <name>`). No value appears.
+fn grants_missing(env: &str, target: &str, reason: &str) -> Finding {
+    Finding {
+        code: "grants_missing".into(),
+        scope: Scope {
+            environment: Some(env.to_string()),
+            target: Some(target.to_string()),
+            ..Scope::default()
+        },
+        blocking: true,
+        actor: "owner".into(),
+        effect: "none".into(),
+        prerequisite: format!("opv access {env} --target {target}"),
+        verify: format!("opv access {env} --target {target} --json"),
+        message: Some(reason.to_string()),
+    }
+}
+
+/// Each row's own finding (FR-51), scoped to its environment and, for a deployed
+/// environment, the target that delivered it.
+fn row_findings(
+    out: &mut Vec<Finding>,
+    inputs: &Inputs<'_>,
+    env: &EnvInput,
+    target: Option<&str>,
+    rows: &[Row],
+) {
+    for r in rows {
+        let code = match &r.state {
+            KeyState::Missing
+                if inputs
+                    .personal
+                    .contains(&(r.product.clone(), r.key.clone())) =>
+            {
+                "personal_key_missing"
+            }
+            KeyState::RuleFailed("nonempty", _)
+                if inputs
+                    .personal
+                    .contains(&(r.product.clone(), r.key.clone())) =>
+            {
+                "personal_key_empty"
+            }
+            KeyState::Missing => "key_missing",
+            // A field that exists but holds nothing: the owner fills it (#77).
+            KeyState::RuleFailed("nonempty", _) => "key_empty",
+            KeyState::RuleFailed(..) => "key_failed_rule",
+            KeyState::WrongKind => "key_wrong_kind",
+            _ => continue,
+        };
+        let label = key_label(&r.product, &r.key);
+        let (product, verify) = (
+            Some(r.product.clone()),
+            format!("opv status {} --product {}", env.name, r.product),
+        );
+        out.push(Finding {
+            code: code.into(),
+            scope: Scope {
+                environment: Some(env.name.clone()),
+                target: target.map(str::to_string),
+                product,
+                key: Some(r.key.clone()),
+                account: None,
+            },
+            blocking: true,
+            actor: "owner".into(),
+            effect: "writes_1password".into(),
+            prerequisite: format!("opv open {label} --env {}", env.name),
+            verify,
+            message: None,
+        });
+    }
 }
 
 /// The findings, in order (FR-51): every account finding, then each environment's error,
@@ -279,6 +461,40 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
         });
     }
     for env in &inputs.envs {
+        if let Some(targets) = &env.target {
+            for t in targets {
+                let Some(reason) = target_missing(t) else {
+                    continue;
+                };
+                // FR-55: an environment meant for others (its audience) and an access
+                // error is not a problem to fix.
+                let no_access = t.rows.as_ref().err().is_some_and(|e| {
+                    matches!(e.code().as_str(), "vault_no_access" | "item_not_found")
+                });
+                if let (Some(audience), true) = (&env.audience, no_access) {
+                    out.push(Finding {
+                        code: "not_for_you".into(),
+                        scope: Scope {
+                            environment: Some(env.name.clone()),
+                            target: Some(t.name.clone()),
+                            ..Scope::default()
+                        },
+                        blocking: false,
+                        actor: "owner".into(),
+                        effect: "none".into(),
+                        prerequisite: format!(
+                            "ask the 1Password owner for access to {} if you need it (audience: {audience})",
+                            env.name
+                        ),
+                        verify: "opv ready --json".into(),
+                        message: None,
+                    });
+                    continue;
+                }
+                out.push(grants_missing(&env.name, &t.name, &reason));
+            }
+            continue;
+        }
         let Err(e) = &env.rows else { continue };
         let code = e.code();
         // FR-55: an environment meant for others (its audience) that this person cannot
@@ -333,51 +549,18 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
         });
     }
     for env in &inputs.envs {
-        let Ok(rows) = &env.rows else { continue };
-        for r in rows {
-            let code = match &r.state {
-                KeyState::Missing
-                    if inputs
-                        .personal
-                        .contains(&(r.product.clone(), r.key.clone())) =>
-                {
-                    "personal_key_missing"
+        if let Some(targets) = &env.target {
+            for t in targets {
+                if t.grants_missing.is_some() {
+                    continue;
                 }
-                KeyState::RuleFailed("nonempty", _)
-                    if inputs
-                        .personal
-                        .contains(&(r.product.clone(), r.key.clone())) =>
-                {
-                    "personal_key_empty"
-                }
-                KeyState::Missing => "key_missing",
-                // A field that exists but holds nothing: the owner fills it (#77).
-                KeyState::RuleFailed("nonempty", _) => "key_empty",
-                KeyState::RuleFailed(..) => "key_failed_rule",
-                KeyState::WrongKind => "key_wrong_kind",
-                _ => continue,
-            };
-            let label = key_label(&r.product, &r.key);
-            let (product, verify) = (
-                Some(r.product.clone()),
-                format!("opv status {} --product {}", env.name, r.product),
-            );
-            out.push(Finding {
-                code: code.into(),
-                scope: Scope {
-                    environment: Some(env.name.clone()),
-                    product,
-                    key: Some(r.key.clone()),
-                    account: None,
-                },
-                blocking: true,
-                actor: "owner".into(),
-                effect: "writes_1password".into(),
-                prerequisite: format!("opv open {label} --env {}", env.name),
-                verify,
-                message: None,
-            });
+                let Ok(rows) = &t.rows else { continue };
+                row_findings(&mut out, inputs, env, Some(&t.name), rows);
+            }
+            continue;
         }
+        let Ok(rows) = &env.rows else { continue };
+        row_findings(&mut out, inputs, env, None, rows);
     }
     // Settings health (#92): likely-wrong values, never blocking. The scope is the first
     // environment named (in configured order), where `opv open` takes the person to fix it.
@@ -390,6 +573,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
             code: h.code.into(),
             scope: Scope {
                 environment: Some(env.clone()),
+                target: None,
                 product,
                 key: Some(h.key.clone()),
                 account: None,
@@ -449,6 +633,25 @@ pub fn render_text(r: &Receipt, out: &mut dyn Write) -> Result<(), Error> {
     }
     write_grid(out, &header, &body)?;
 
+    if !r.targets.is_empty() {
+        writeln!(out, "Targets:").map_err(super::write_err)?;
+        for t in &r.targets {
+            match &t.reason {
+                None => writeln!(
+                    out,
+                    "  {} {} {} · {} ready",
+                    t.environment, t.name, t.provider, t.locator
+                ),
+                Some(reason) => writeln!(
+                    out,
+                    "  {} {} {} · {} grants_missing: {reason}",
+                    t.environment, t.name, t.provider, t.locator
+                ),
+            }
+            .map_err(super::write_err)?;
+        }
+    }
+
     if r.findings.is_empty() {
         writeln!(
             out,
@@ -495,6 +698,9 @@ fn scope_text(scope: &Scope) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(e) = &scope.environment {
         parts.push(e.clone());
+    }
+    if let Some(t) = &scope.target {
+        parts.push(t.clone());
     }
     match (&scope.product, &scope.key) {
         (Some(p), Some(k)) => parts.push(format!("{p}/{k}")),
@@ -544,6 +750,16 @@ fn write_grid(out: &mut dyn Write, header: &[String], body: &[Vec<String>]) -> R
 #[path = "ready_tests.rs"]
 mod tests;
 
+/// One `op vault user list` for `vault_id` (FR-56): `None` when this person can see the
+/// vault, else the `grants_missing` reason naming it. The vault ID is never a value.
+fn state_vault_grants(r: &dyn crate::runner::CommandRunner, vault_id: &str) -> Option<String> {
+    match crate::adapters::onepassword_init::vault_users(r, vault_id, &crate::host::Host::detect) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(format!("state vault {vault_id} cannot be opened")),
+        Err(e) => Some(format!("state vault {vault_id}: {e}")),
+    }
+}
+
 /// `opv ready [<env>] [--json] [--save <file>]` (FR-51): read-only. The account report
 /// (FR-49), then each environment (or `only` that one) read as `status` reads it, joined into
 /// the receipt. Findings never fail the command: the receipt reports them, and `next` is the
@@ -570,44 +786,80 @@ pub fn run(
     ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
     // Each environment's fields, copied during its one read, for the health checks (#92).
     let mut kept: Vec<(String, bool, Vec<crate::domain::plan::ItemField>)> = Vec::new();
-    let envs = ordered
-        .into_iter()
-        .map(|(name, env)| {
-            // The environment's only target; several are reported per target in a later
-            // deliverable (FR-56), so they are not read here.
-            let target = match env.targets.len() {
-                1 => env
-                    .targets
-                    .iter()
-                    .next()
-                    .map(|(n, t)| (n.as_str(), t.config.as_ref())),
-                _ => None,
-            };
+    let mut envs: Vec<EnvInput> = Vec::new();
+    for (name, env) in ordered {
+        if env.targets.is_empty() {
+            // A run-only environment: one read, and its rows stand on their own (FR-56).
             let mut fields = Vec::new();
             let rows = super::status::env_rows_keeping(
                 fleet,
                 name,
-                target,
+                None,
                 r,
                 Some(&mut fields),
                 super::tidy::Mode::Inspect,
             );
             if rows.is_ok() {
-                kept.push((name.clone(), target.is_some(), fields));
+                kept.push((name.clone(), false, fields));
             }
-            EnvInput {
+            envs.push(EnvInput {
                 name: name.clone(),
-                target: env
-                    .targets
-                    .values()
-                    .next()
-                    .map(|t| t.config.provider().label().to_string()),
+                target: None,
                 rows,
                 title: env.title.clone(),
                 audience: env.audience.clone(),
+            });
+            continue;
+        }
+        // Every named target is read and reported (FR-56): one probe of its deploy
+        // credentials, the boundaries it reads and its provider's preflight.
+        let mut fields = Vec::new();
+        let mut reading = true;
+        let mut targets: Vec<TargetInput> = Vec::new();
+        // One visibility check per state vault the targets need (FR-56), not per target.
+        let mut vault_checks: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for (tname, t) in &env.targets {
+            let keep = if reading { Some(&mut fields) } else { None };
+            let rows = super::status::env_rows_keeping(
+                fleet,
+                name,
+                Some((tname.as_str(), t.config.as_ref())),
+                r,
+                keep,
+                super::tidy::Mode::Inspect,
+            );
+            let readable = rows.is_ok();
+            if readable {
+                reading = false;
             }
-        })
-        .collect();
+            let grants_missing = if readable {
+                vault_checks
+                    .entry(t.state_vault_id.clone())
+                    .or_insert_with(|| state_vault_grants(r, &t.state_vault_id))
+                    .clone()
+            } else {
+                None
+            };
+            targets.push(TargetInput {
+                name: tname.clone(),
+                provider: t.config.provider().label().to_string(),
+                locator: t.config.target_locator(),
+                grants_missing,
+                rows,
+            });
+        }
+        if !reading {
+            kept.push((name.clone(), true, std::mem::take(&mut fields)));
+        }
+        envs.push(EnvInput {
+            name: name.clone(),
+            target: Some(targets),
+            rows: Ok(Vec::new()),
+            title: env.title.clone(),
+            audience: env.audience.clone(),
+        });
+    }
     let values: Vec<crate::domain::health::EnvValues<'_>> = kept
         .iter()
         .map(

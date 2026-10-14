@@ -350,14 +350,9 @@ fn run_help_shows_usage() {
 }
 
 #[test]
-fn run_requires_product_and_command() {
-    for args in [
-        vec!["--config", CFG, "run", "staging", "--", "true"],
-        vec!["--config", CFG, "run", "staging", "--product", "allumata"],
-    ] {
-        let (code, _, err) = opv(&args);
-        assert_eq!(code, 2, "{args:?}: {err}");
-    }
+fn run_requires_a_command() {
+    let (code, _, err) = opv(&["--config", CFG, "run", "staging", "--product", "allumata"]);
+    assert_eq!(code, 2, "{err}");
 }
 
 const SIMPLE: &str = "tests/fixtures/simple.toml";
@@ -370,14 +365,6 @@ fn doctor_reports_a_simple_profile_file_as_valid() {
         out.contains("ok    config: valid (2 environments, 1 product)"),
         "{out}{err}"
     );
-}
-
-/// FR-20: with one product `run` still requires `--product`.
-#[test]
-fn run_without_product_under_simple_exits_2() {
-    let (code, _, err) = opv(&["--config", SIMPLE, "run", "prod", "--", "true"]);
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("--product"), "{err}");
 }
 
 /// FR-20: a simple file with an unknown environment is still exit 2 before any call.

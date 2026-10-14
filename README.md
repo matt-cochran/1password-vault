@@ -48,9 +48,9 @@ Starting from nothing: [install `op`](docs/install.md) (on macOS and Windows, al
 
 ```sh
 opv login --account you@example.com            # adds the account to op if needed, signs in, remembers it for the project
-opv init dev                                   # vault myapp-dev, item "myapp · dev values" (created if missing); configuration saved in 1Password
-opv add API_KEY --kind secret --env dev
-opv check dev                                  # adds the empty field; opv open API_KEY, click Edit, type the value
+opv init dev --product api                     # run-only: vault myapp-api-dev, item "myapp · api · dev values" (created if missing); configuration saved in 1Password
+opv add api/API_KEY --kind secret --env dev
+opv check dev                                  # adds the empty field; opv open api/API_KEY, click Edit, type the value
 opv run dev -- npm run dev
 ```
 
@@ -66,10 +66,10 @@ opv sync prod --deploy --expect-plan 412a5b23   # exactly that plan, then deploy
 
 ```console
 $ opv status prod
-prod: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
-PRODUCT  KEY             KIND    STATE                                             TARGET
-api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
-api      OPENAI_API_KEY  secret  missing                                           unknown
+prod/web: 2 keys · 0 saved · 0 skipped · 2 findings · 0 not yet on Fly
+TARGET  PRODUCT  KEY             KIND    STATE                                             ON TARGET
+web     api      LOG_LEVEL       config  failed enum (expected one of: debug, info, warn)  n/a
+web     api      OPENAI_API_KEY  secret  missing                                           unknown
     guidance: OpenAI platform / API keys
 unknown: Fly does not reveal stored values, so opv cannot compare them; sync stages them and compares digests (opv help states)
 opv: 2 findings
@@ -100,7 +100,7 @@ Problems come first, each with its reason and a link to its item in 1Password, t
 | AWS (Secrets Manager + ECS) | planned ([#41](https://github.com/matt-cochran/1password-vault/issues/41)) |
 | GCP (Secret Manager + Cloud Run) | planned ([#42](https://github.com/matt-cochran/1password-vault/issues/42)) |
 
-Each environment names one target, and every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until `sync --deploy`. Local development needs no target at all.
+Each environment has one or more named targets, and every command is the same for all of them ([configuration](docs/configuration.md#targets)). On Azure and Kubernetes a secret is written as a new version and the app keeps the old one until `sync --deploy`. Local development needs no target at all.
 
 ## Documentation
 

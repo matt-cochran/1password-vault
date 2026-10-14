@@ -280,11 +280,15 @@ const EXPLAIN_QUICK: &str = "\
 Examples:
   opv explain OPENAI_API_KEY                 # the one product that declares it
   opv explain api/OPENAI_API_KEY             # pick a product when several declare it
-  opv explain api/OPENAI_API_KEY --env prod  # when several environments exist";
+  opv explain api/OPENAI_API_KEY --env prod  # when several environments exist
+  opv explain --target web --env prod        # a target's provider, products and identity";
 
 const EXPLAIN_MORE: &str = "\
-Prints the op:// reference, kind, target name, rules, immutable and guidance, and the
-`op item get` command to inspect the item yourself. Makes no 1Password or target call.";
+Prints the op:// reference, kind, source, boundary (vault and item), every delivering
+named target, the deploy and CI service accounts, rules, immutable and guidance, and the
+`op item get` command to inspect the item yourself. `--target` prints a target's provider
+and locator, products, deploy credentials, state vault and deploy account. Makes no
+1Password or target call.";
 
 const INIT_QUICK: &str = "\
 Examples:
@@ -301,7 +305,7 @@ const ADOPT_MORE: &str = "\
 Each found name maps to a declared key (its target name, else its bare name); each key's
 rules normalise both sides before comparing. A filled 1Password field is never replaced
 unless named with --replace (immutable keys also need --rotate); the old value is kept in
-the section \"opv · kept\". Values are never printed. --from target reads Key Vault,
+the section \"opv · kept\". Values are never printed. --from target:<name> reads that target's Key Vault,
 Kubernetes and GitHub variables; Fly and GitHub secrets cannot be read back. It never syncs,
 deploys or deletes the source.";
 
@@ -313,7 +317,8 @@ Examples:
 
 const HISTORY_QUICK: &str = "\
 Examples:
-  opv history prod             # last write per key: time, plan id, opv version
+  opv history prod             # last write per key of every target: time, plan id, opv version
+  opv history prod --target web  # only that target
   opv history prod --json      # the same as one document (names and versions only)";
 
 const TIDY_QUICK: &str = "\
@@ -623,8 +628,8 @@ enum Cmd {
     Adopt {
         /// Environment whose item receives the values.
         env: String,
-        /// A private dotenv file, or `target` to read what the environment's target can show.
-        #[arg(long, value_name = "FILE|target")]
+        /// A private dotenv file, or `target:<name>` to read what that target can show.
+        #[arg(long, value_name = "FILE|target:NAME")]
         from: String,
         /// Take the found value for this key although 1Password holds another (repeatable).
         #[arg(long, value_name = "PRODUCT/KEY")]
@@ -653,6 +658,9 @@ enum Cmd {
     History {
         /// Environment name from the configuration (for example prod).
         env: String,
+        /// Only this target of the environment (omit: every target, each labelled).
+        #[arg(long, value_name = "NAME")]
+        target: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -733,11 +741,18 @@ enum Cmd {
         /// The key. A bare KEY resolves to the one product that declares it (to
         /// OPV_PRODUCT/KEY when OPV_PRODUCT is set); when several do, they are listed.
         /// An unknown name suggests the closest declared ones.
-        #[arg(value_name = "[PRODUCT/]KEY")]
-        target: String,
+        #[arg(value_name = "[PRODUCT/]KEY", required_unless_present = "target_name")]
+        target: Option<String>,
+        /// Explain this named target (FR-56) instead of a key: its provider and locator,
+        /// products, deploy credentials, state vault and deploy service account.
+        #[arg(long = "target", value_name = "NAME", conflicts_with = "target")]
+        target_name: Option<String>,
         /// Environment name; may be omitted when only one environment is declared.
         #[arg(long)]
         env: Option<String>,
+        /// Project name for the service account names; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
         /// Print the explanation as one JSON document.
         #[arg(long)]
         json: bool,
@@ -1669,10 +1684,22 @@ fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
             product,
             ..
         } => with_product("status", env, product),
-        Cmd::Explain { target, env, .. } => match env {
-            Some(e) => format!("explain {} --env {}", shell_word(target), shell_word(e)),
-            None => format!("explain {}", shell_word(target)),
-        },
+        Cmd::Explain {
+            target,
+            target_name,
+            env,
+            ..
+        } => {
+            let mut c = match (target, target_name) {
+                (Some(t), _) => format!("explain {}", shell_word(t)),
+                (None, Some(n)) => format!("explain --target {}", shell_word(n)),
+                _ => "explain".to_string(),
+            };
+            if let Some(e) = env {
+                c.push_str(&format!(" --env {}", shell_word(e)));
+            }
+            c
+        }
         Cmd::Item(ItemCmd::Skeleton { env, .. })
         | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             format!("doctor --env {}", shell_word(env))
@@ -1701,7 +1728,9 @@ impl Cmd {
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
-            Cmd::Adopt { env, from, .. } if from == "target" => Some((env, Reach::Target)),
+            Cmd::Adopt { env, from, .. } if from == "target" || from.starts_with("target:") => {
+                Some((env, Reach::Target))
+            }
             Cmd::Adopt { env, .. } => Some((env, Reach::Store)),
             _ => None,
         }
@@ -1711,6 +1740,13 @@ impl Cmd {
     /// with; `None`: the environment's only target, when it has one. A run over several
     /// targets signs in per target itself (`app::target_runners`).
     fn target(&self) -> Option<&str> {
+        match self {
+            Cmd::History { target, .. } => return target.as_deref(),
+            Cmd::Adopt { from, .. } => {
+                return from.strip_prefix("target:").filter(|n| !n.is_empty());
+            }
+            _ => {}
+        }
         let targets = match self {
             Cmd::Status { target, .. } => target,
             Cmd::Plan(a) => &a.target,
@@ -1811,7 +1847,16 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
             *product = p;
             used.then(|| product.clone()).flatten()
         }
-        Cmd::Explain { target, .. } | Cmd::Open { target, .. } if !target.contains('/') => {
+        Cmd::Explain {
+            target: Some(t), ..
+        } if !t.contains('/') => match product_or_env(None, env, fleet_profile) {
+            (Some(p), true) => {
+                *t = format!("{p}/{t}");
+                Some(p)
+            }
+            _ => None,
+        },
+        Cmd::Open { target, .. } if !target.contains('/') => {
             match product_or_env(None, env, fleet_profile) {
                 (Some(p), true) => {
                     *target = format!("{p}/{target}");
@@ -2385,11 +2430,8 @@ fn run_other(
             apply,
             json,
         } => {
-            let source = if from == "target" {
-                opv::app::adopt::Source::Target
-            } else {
-                opv::app::adopt::Source::Dotenv(PathBuf::from(from))
-            };
+            let fleet = loaded?;
+            let source = opv::app::adopt::source_from(&fleet, &env, &from)?;
             let opts = opv::app::adopt::Opts {
                 source,
                 replace,
@@ -2398,9 +2440,11 @@ fn run_other(
                 apply,
                 json,
             };
-            opv::app::adopt::run(&loaded?, &env, &opts, r, out)
+            opv::app::adopt::run(&fleet, &env, &opts, r, out)
         }
-        Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
+        Cmd::History { env, target, json } => {
+            opv::app::history::run(&loaded?, &env, target.as_deref(), r, json, out)
+        }
         Cmd::Target(TargetCmd::List { env, json }) => {
             target_cmd::list(&loaded?, &target_cmd::ListArgs { env, json }, out)
         }
@@ -2478,8 +2522,25 @@ fn run_other(
         Cmd::Item(ItemCmd::Skeleton { env, json }) => {
             skeleton::run_as(&loaded?, &env, r, out, json)
         }
-        Cmd::Explain { target, env, json } => {
-            explain::run_as(&loaded?, &target, env.as_deref(), out, json)
+        Cmd::Explain {
+            target,
+            target_name,
+            env,
+            project,
+            json,
+        } => {
+            let asked = match &target_name {
+                Some(name) => explain::Asked::Target(name),
+                None => explain::Asked::Key(target.as_deref().unwrap_or_default()),
+            };
+            let project = match project {
+                Some(p) => p.clone(),
+                None => {
+                    let here = std::env::current_dir().unwrap_or_default();
+                    opv::app::personal::project_name(r, &here)
+                }
+            };
+            explain::run_request(&loaded?, &asked, env.as_deref(), &project, out, json)
         }
         Cmd::Open {
             target,

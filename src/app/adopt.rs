@@ -1,9 +1,10 @@
-//! `opv adopt <env> --from <dotenv>|target [--replace <product/KEY>]... [--apply] [--json]`
-//! (FR-53, #78): bring values that already exist elsewhere into the environment's 1Password
-//! item, after a review. The plan is [`crate::domain::adopt::plan`]; this module reads the
-//! source, prints the plan (names, actions and findings only) and, with `--apply`, writes
-//! it in one verified item edit. It never syncs, deploys, prunes, revokes or deletes the
-//! source.
+//! `opv adopt <env> --from <dotenv>|target:<name> [--replace <product/KEY>]... [--apply]
+//! [--json]` (FR-53, #78): bring values that already exist elsewhere into the environment's
+//! 1Password item, after a review. The plan is [`crate::domain::adopt::plan`]; this module
+//! reads the source, prints the plan (names, actions and findings only) and, with `--apply`,
+//! writes it into each key's boundary item, one verified edit per item. It never syncs,
+//! deploys, prunes, revokes or deletes the source. The bare `--from target` form was
+//! removed (FR-60): `--from target:<name>` names the target one way only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -23,8 +24,43 @@ use crate::runner::CommandRunner;
 pub enum Source {
     /// A dotenv file the owner points at (literal assignments, never executed).
     Dotenv(PathBuf),
-    /// The environment's own target, where it can read values back.
-    Target,
+    /// The named target of the environment, where it can read values back.
+    Target(String),
+}
+
+/// The [`Source`] named by `--from <value>` (FR-53, FR-56, FR-60): a dotenv file path, or
+/// `target:<name>` for the named target of `env_name`. The bare `target` form was removed
+/// and is a usage error that names the environment's targets and the `target:<name>` form.
+pub fn source_from(fleet: &Fleet, env_name: &str, from: &str) -> Result<Source, Error> {
+    if let Some(name) = from.strip_prefix("target:") {
+        if name.is_empty() {
+            return Err(bare_target(fleet, env_name));
+        }
+        super::target(fleet, env_name, name)?;
+        return Ok(Source::Target(name.to_string()));
+    }
+    if from == "target" {
+        return Err(bare_target(fleet, env_name));
+    }
+    Ok(Source::Dotenv(PathBuf::from(from)))
+}
+
+/// The usage error for the removed bare `--from target` (FR-60): it names the environment's
+/// targets and the one form that works, `--from target:<name>`.
+fn bare_target(fleet: &Fleet, env_name: &str) -> Error {
+    match super::resolve_targets(fleet, env_name, &[], "adopt") {
+        Ok(names) => Error::Config(
+            format!(
+                "--from target needs a target's name; write --from target:<name> \
+                 (targets: {})",
+                names.join(", ")
+            )
+            .into(),
+        )
+        .with_code(Code::Usage)
+        .with_next(format!("opv adopt {env_name} --from target:{}", names[0])),
+        Err(e) => e,
+    }
 }
 
 /// Options of `opv adopt`.
@@ -82,17 +118,15 @@ fn read_source(
 ) -> Result<BTreeMap<String, SecretValue>, Error> {
     match source {
         Source::Dotenv(path) => super::setup::read_legacy(path),
-        Source::Target => {
-            // The one target this command reads ([`super::sole_target`]).
-            let target = super::sole_target(fleet, env_name, "adopt")?;
-            let (t, ports) = super::open_target(fleet, env_name, &target, r)?;
+        Source::Target(name) => {
+            let (t, ports) = super::open_target(fleet, env_name, name, r)?;
             let label = t.provider().label();
             match &ports {
                 Ports::Pinned { store, .. } => {
                     let mut found = BTreeMap::new();
-                    for name in super::managed_names(fleet, env_name, &target)? {
-                        if let Some((value, _)) = store.read(&name)? {
-                            found.insert(name, value);
+                    for managed in super::managed_names(fleet, env_name, name)? {
+                        if let Some((value, _)) = store.read(&managed)? {
+                            found.insert(managed, value);
                         }
                     }
                     Ok(found)
@@ -327,7 +361,7 @@ fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> 
         let mut c = format!("opv adopt {env_name}");
         match &opts.source {
             Source::Dotenv(p) => c.push_str(&format!(" --from {}", p.display())),
-            Source::Target => c.push_str(" --from target"),
+            Source::Target(name) => c.push_str(&format!(" --from target:{name}")),
         }
         for e in &opts.replace {
             c.push_str(&format!(" --replace {e}"));

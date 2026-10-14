@@ -987,7 +987,8 @@ fn clean_status_prints_summary_line() {
     assert_eq!(r.code, 0, "{}", r.all());
     let first = r.stdout.lines().next().unwrap();
     assert!(
-        first.starts_with("prod: ") && first.ends_with(" · 0 findings · 2 not yet on Fly"),
+        first.starts_with("prod/portfolio: ")
+            && first.ends_with(" · 0 findings · 2 not yet on Fly"),
         "{}",
         r.stdout
     );
@@ -1367,8 +1368,8 @@ fn status_json_totals_are_names_and_counts() {
     );
 }
 
-/// FR-21: each row object carries product, key, kind, state, failing rule, target name
-/// and target presence.
+/// FR-21, FR-56: each row object carries its target, product, key, kind, state, failing
+/// rule, target name and target presence.
 #[test]
 fn status_json_row_carries_the_contract_fields() {
     let h = Harness::new(&good_item());
@@ -1383,6 +1384,7 @@ fn status_json_row_carries_the_contract_fields() {
     assert_eq!(
         row,
         &json!({
+            "target": "portfolio",
             "product": "allumata",
             "key": "OPENAI_API_KEY",
             "kind": "secret",
@@ -1390,7 +1392,7 @@ fn status_json_row_carries_the_contract_fields() {
             "rule": null,
             "reason": null,
             "target_name": N_OPENAI,
-            "target": "absent",
+            "target_state": "absent",
             "action": "would_stage",
         }),
         "{}",
@@ -2445,7 +2447,8 @@ fn sync_json_stdout_is_one_document() {
     assert_eq!(pending, [N_ENC, N_OPENAI], "{}", r.all());
 }
 
-/// P22: `status` without an environment prints one line per environment.
+/// P22, FR-56: `status` without an environment prints one line per target of each
+/// environment.
 #[test]
 fn status_without_env_prints_one_line_per_environment() {
     let h = Harness::new(&good_item());
@@ -2455,7 +2458,7 @@ fn status_without_env_prints_one_line_per_environment() {
         .lines()
         .map(|l| l.split(':').next().unwrap_or_default())
         .collect();
-    assert_eq!(envs, ["prod", "staging"], "{}", r.all());
+    assert_eq!(envs, ["prod/portfolio", "staging/portfolio"], "{}", r.all());
 }
 
 /// H8, SR-1: with `GITHUB_STEP_SUMMARY` set, status, plan and sync (missing keys and

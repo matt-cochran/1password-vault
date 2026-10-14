@@ -680,7 +680,7 @@ fn status_without_env_scopes_to_a_product() {
     let mut out = Vec::new();
     let _ = status::overview(&two_products(), Some("web"), &r, &mut out, false);
     assert!(
-        text_of(&out).starts_with("prod: 1 key · "),
+        text_of(&out).starts_with("prod/portfolio: 1 key · "),
         "{}",
         text_of(&out)
     );
