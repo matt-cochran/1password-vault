@@ -9,9 +9,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV 1.88](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](Cargo.toml)
 
-Sync secrets from 1Password into the places your apps run, without ever printing, logging or writing a value.
+Deliver 1Password-managed secrets to application runtimes and CI, with validation and explicit deployment controls.
 
-1Password owns the values. Your runtime consumes them. `opv` connects the two and nothing else: no server, no state, no encryption of its own, and no command that prints a secret. What to sync is a small configuration of IDs, key names and validation rules, never values, kept in 1Password next to the secrets or in a committed `secrets.toml`.
+1Password owns the values. Your runtime consumes them. `opv` connects the two and nothing else: no server, no independent secrets store, no encryption of its own, and no command intended to print secret-kind values. Non-secret account selection and configuration may be recorded locally. What to sync is a small configuration of IDs, key names and validation rules, never values, kept in 1Password next to the secrets or in a committed `secrets.toml`.
 
 ## Quick start
 
@@ -40,7 +40,7 @@ opv login dev                    # sign in to dev's 1Password account (your own 
 opv run dev -- npm run dev       # your app, with dev's settings as environment variables
 ```
 
-opv finds the configuration by the repository's git remote, and `op run` resolves the values, so nothing lands on disk.
+opv finds the configuration by the repository's git remote, and `op run` resolves the values without creating a local secret-value file for this workflow.
 
 A whole fleet from a fresh account (several products and environments, Fly and CI): [examples/fleet-fly](examples/fleet-fly/), driven by `opv bootstrap` and `opv ready`.
 
@@ -81,7 +81,7 @@ Problems come first, each with its reason and a link to its item in 1Password, t
 
 ## Why
 
-- **Values stay out of your tooling.** They travel only on stdin to the official `op` and target CLIs, or in your app's environment: never in argv, files, logs, errors or CI output.
+- **Reduce secret exposure.** Secret values are delivered through stdin, a protected Windows pipe, or a child process environment rather than command arguments or reporting output. Azure deploy credentials have a documented private credential-cache exception; see [security boundaries](docs/usage.md#security-model-and-limits).
 - **Typed and checked before they ship.** Each key declares its kind (secret or config) and rules (`prefix`, `base64_bytes`, `enum`, `https_url`, ...). A bad value fails `status` with the key, the rule and a reason, never the value.
 - **Explicit, never surprising.** No prompts in automation. Nothing is deployed without `--deploy`, nothing is deleted without `--prune`, and prune only touches names opv manages.
 - **Safe to re-run.** Reads are retried, writes are checked, and an interrupted run converges when you run it again ([how opv handles failures](docs/how-opv-handles-failures.md)).
@@ -104,6 +104,9 @@ Each environment names one target, and every command is the same for all of them
 
 ## Documentation
 
+For a quick technical review, start with the [architecture and review map](docs/review-map.md).
+
+- [Read-only MCP server](docs/mcp.md): readiness, configuration metadata, and deployment previews; human-approved changes remain outside MCP.
 - [Installing](docs/install.md): install script, binaries, npm, source, verifying downloads, prerequisites.
 - [Configuration](docs/configuration.md): where the configuration lives, the schema, store layout, every target, shared keys, `init` and `add`, rules.
 - [Local development](docs/local-development.md): `opv run`, `opv check`, several products, WSL.
@@ -114,6 +117,8 @@ Each environment names one target, and every command is the same for all of them
 - [Design](docs/design/) for contributors, and the [changelog](CHANGELOG.md).
 
 ## Security
+
+The application you start can access its credentials; opv does not sandbox it. Redaction and zeroizing types reduce accidental exposure but do not protect a compromised host or erase every transient parsing copy. The [security model](docs/usage.md#security-model-and-limits) documents the Azure credential-cache exception and what reporting can disclose.
 
 Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. When a CLI fails, its last few stderr lines are shown with every known value and secret-shaped token masked as `__SECRET__`. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [usage](docs/usage.md#security-model-and-limits).
 

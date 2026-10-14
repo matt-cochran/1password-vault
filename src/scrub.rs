@@ -356,6 +356,20 @@ fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     REGISTRY.with(|r| f(&mut r.borrow_mut()))
 }
 
+/// Clear only the current unit-test thread's synthetic values between independent
+/// corpus cases. Production and integration-test registries are unchanged.
+#[cfg(test)]
+pub(crate) fn reset_test_registry() {
+    with_registry(|registry| *registry = Registry::new());
+}
+
+/// End the serialized MCP inspection's redaction lifetime. This must only be used
+/// by the MCP server while it holds its operation gate; CLI behavior is unchanged.
+#[cfg(feature = "mcp")]
+pub(crate) fn clear_mcp_registry() {
+    with_registry(|registry| *registry = Registry::new());
+}
+
 /// Register one value for scrubbing.
 pub fn register(value: &str) {
     with_registry(|r| r.register(value));

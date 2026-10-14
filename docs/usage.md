@@ -778,7 +778,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 
 ## Security model and limits
 
-- Values travel only on stdin (on native Windows, a user-only named pipe for `az`) or in the environment of a child process. They never appear in argv, files, logs, errors, `Debug` or `Display` output.
+- Values travel only on stdin (on native Windows, a user-only named pipe for `az`) or in the environment of a child process. opv is designed to keep secret-kind values out of argv and reporting output; the private Azure credential-cache exception and other limits are described below.
 - One documented exception to "no files" (SR-4): with Azure `deploy_credentials`, the Azure CLI stores the service principal's secret in opv's private per-run `AZURE_CONFIG_DIR`, which is RAM-only on Linux/WSL, DPAPI-encrypted on Windows, and removed when the run ends. macOS is not supported for Azure deploy credentials.
 - The stderr of `op`, `flyctl`, `az` and `kubectl` is shown only scrubbed, at most 5 lines on failure (more with `--verbose`); their stdout and what opv sends on stdin are never shown ([details](how-opv-handles-failures.md#what-a-cli-said-without-the-secrets)).
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
