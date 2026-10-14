@@ -132,8 +132,9 @@ Examples:
 const DOCTOR_MORE: &str = "\
 Checks configuration, CLI installation and sign-in. --env limits the checks to what that
 environment needs, including whether op can start local commands, and reads its item once
-to check the keys as `check` does (names only, never values). Changes nothing on your
-targets; may tidy the 1Password layout when you're signed in.
+to check the keys as `check` does (names only, never values). Never writes anything,
+whoever is signed in: an item not in opv's layout is read as it is, and doctor names
+opv tidy <ENV>, the explicit repair.
 
 More examples:
   opv doctor --env prod --product api   # one product's keys";
@@ -146,7 +147,8 @@ Examples:
 
 const CHECK_MORE: &str = "\
 Reads the environment's item once (names, kinds and rule results, never values) and contacts
-no deployment target. Exits 8 when a key needs fixing.";
+no deployment target; may tidy the 1Password layout when you're signed in (opv doctor --env
+<ENV> never does). Exits 8 when a key needs fixing.";
 
 const STATUS_QUICK: &str = "\
 Examples:
@@ -313,6 +315,11 @@ const HISTORY_QUICK: &str = "\
 Examples:
   opv history prod             # last write per key: time, plan id, opv version
   opv history prod --json      # the same as one document (names and versions only)";
+
+const TIDY_QUICK: &str = "\
+Examples:
+  opv tidy dev                 # put dev's 1Password item in opv's layout (one verified edit)
+  opv tidy dev --json          # the same; what changed as one document (names only)";
 
 const ACCESS_QUICK: &str = "\
 Examples:
@@ -617,6 +624,16 @@ enum Cmd {
     /// whether it changed outside opv since (read-only, values never shown).
     #[command(before_help = HISTORY_QUICK)]
     History {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put an environment's 1Password item in opv's layout: one verified edit, nothing
+    /// deleted (a signed-in person only; `doctor` never writes and names this command).
+    #[command(before_help = TIDY_QUICK)]
+    Tidy {
         /// Environment name from the configuration (for example prod).
         env: String,
         /// Print one JSON document instead of lines.
@@ -1536,7 +1553,8 @@ impl Cmd {
             Cmd::Check { env, .. }
             | Cmd::Run { env, .. }
             | Cmd::Config(ConfigCmd::Export { env: Some(env), .. })
-            | Cmd::Item(ItemCmd::Skeleton { env, .. }) => Some((env, Reach::Store)),
+            | Cmd::Item(ItemCmd::Skeleton { env, .. })
+            | Cmd::Tidy { env, .. } => Some((env, Reach::Store)),
             Cmd::Status { env: Some(env), .. } | Cmd::History { env, .. } => {
                 Some((env, Reach::Target))
             }
@@ -1565,6 +1583,7 @@ impl Cmd {
             | Cmd::Bootstrap { json, .. }
             | Cmd::Ready { json, .. }
             | Cmd::History { json, .. }
+            | Cmd::Tidy { json, .. }
             | Cmd::Access { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
             | Cmd::Adopt { json, .. }
@@ -2235,6 +2254,7 @@ fn run_other(
             opv::app::adopt::run(&loaded?, &env, &opts, r, out)
         }
         Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
+        Cmd::Tidy { env, json } => opv::app::repair::run(&loaded?, &env, r, json, out),
         Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
         Cmd::Delivery(DeliveryCmd::Verify {
             env,

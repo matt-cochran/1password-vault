@@ -21,7 +21,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.6.0   # install exactly this release (default: latest)
+sh install.sh --version v0.6.1   # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -76,7 +76,7 @@ npm i -g @matthew-cochran/opv
 npx @matthew-cochran/opv --version
 ```
 
-The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. Through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU. From 0.6.0, a postinstall script also copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place `install.sh` uses. It never replaces a file that is not an opv binary, and never writes into a home directory under `sudo`: run `npm i -g` without sudo. With `--ignore-scripts` the `opv` command still works from its bundled copy; run `npm rebuild -g @matthew-cochran/opv` to install the shared copy. If your shell then says `~/.local/bin/opv: No such file or directory`, it remembers an older copy that is gone: run `hash -r` (or open a new terminal).
+The npm package is `@matthew-cochran/opv` (npm does not allow the unscoped name `opv`), published from v0.2.1; the installed command is `opv`. Through per-platform optional dependencies, npm picks the right prebuilt binary for your OS and CPU. From 0.6.0, a postinstall script also copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place `install.sh` uses. It never replaces a file that is not an opv binary, and never writes into a home directory under `sudo`: run `npm i -g` without sudo. npm 12 and newer run a package's install scripts only when you allow them: `npm i -g --allow-scripts=@matthew-cochran/opv @matthew-cochran/opv`, or once for all global installs `npm config set allow-scripts=@matthew-cochran/opv --location=user`. Without that (or with `--ignore-scripts`) the `opv` command still works from its bundled copy; run `npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv` to install the shared copy. If your shell then says `~/.local/bin/opv: No such file or directory`, it remembers an older copy that is gone: run `hash -r` (or open a new terminal).
 
 ### One install location
 
@@ -87,7 +87,7 @@ The install script and npm put `opv` in the same place, so either one can instal
 | Linux, macOS, WSL | `~/.local/bin/opv` |
 | Windows | `%LOCALAPPDATA%\Programs\opv\opv.exe` |
 
-`npm i -g @matthew-cochran/opv` copies the binary there when it installs, and `npm uninstall -g` removes it only if opv put it there. It never overwrites a file that is not an opv binary. If you installed with `--ignore-scripts`, opv still runs and tells you once: `opv is not installed at ~/.local/bin; run: npm rebuild @matthew-cochran/opv`. If `~/.local/bin` is not on `PATH`, the installer prints the line to add.
+`npm i -g @matthew-cochran/opv` copies the binary there when it installs, and `npm uninstall -g` removes it only if opv put it there. It never overwrites a file that is not an opv binary. If you installed with `--ignore-scripts`, opv still runs and tells you once: `opv is not installed at ~/.local/bin; run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv`. If `~/.local/bin` is not on `PATH`, the installer prints the line to add.
 
 `opv doctor` lists every `opv` it finds on `PATH` with its version. More than one different file is a warning with the command that removes the extra one. `cargo install` uses `~/.cargo/bin`, which is a different location: use it only if you do not use the others, then remove the extras:
 

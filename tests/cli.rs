@@ -1137,6 +1137,38 @@ fn schema_is_one_json_document_listing_sync() {
     assert!(code == 0 && sync, "{out}");
 }
 
+fn schema_command(name: &str) -> serde_json::Value {
+    let (_, out, _) = opv(&["schema"]);
+    json_of(&out)["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// #113: doctor is the safe readiness check, never writing 1Password.
+#[test]
+fn schema_says_doctor_never_tidies_1password() {
+    assert_eq!(schema_command("doctor")["tidies_1password"], false);
+}
+
+#[test]
+fn schema_says_check_may_tidy_1password() {
+    assert_eq!(schema_command("check")["tidies_1password"], true);
+}
+
+#[test]
+fn schema_says_tidy_writes_1password() {
+    assert_eq!(schema_command("tidy")["effect"], "writes_1password");
+}
+
+#[test]
+fn schema_says_an_agent_asks_before_tidy() {
+    assert_eq!(schema_command("tidy")["ask_user_first"], true);
+}
+
 #[test]
 fn schema_lists_every_error_code_with_its_retry() {
     let (_, out, _) = opv(&["schema"]);

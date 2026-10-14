@@ -50,7 +50,7 @@ test('wrapper prints the install hint once when scripts were ignored', unix, () 
   const h = setup();
   const first = wrapper(h, ['one']);
   const second = wrapper(h, ['two']);
-  const hits = `${first.stderr}${second.stderr}`.split('npm rebuild @matthew-cochran/opv').length - 1;
+  const hits = `${first.stderr}${second.stderr}`.split('npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv').length - 1;
   assert.equal(hits, 1);
 });
 

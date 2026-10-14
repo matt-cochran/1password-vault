@@ -57,6 +57,13 @@ Who runs opv decides whether 1Password may change:
 | CI | `CI` set (truthy) | read-only, one note |
 | Unknown | `whoami` fails or cannot be parsed | read-only, silent |
 
+The identity decides only for commands that tidy. `doctor` and `ready` read through
+`app::tidy::inspect`, which never writes and never asks `whoami`, whoever runs them (#113): an
+agent holding a person's session can rely on their `reads` effect. When the layout needs a
+tidy, `inspect` gives one note naming `opv tidy <env>`, the explicit repair, which runs the
+same guarded tidy and refuses unless a person signed in with their own session runs it. `opv
+schema` marks every command that may tidy with `tidies_1password`.
+
 A token or CI decides without a call. `whoami` is the existing diagnosis probe (free under rate
 limits, D0); only `user_type` is parsed. It runs only when the item actually needs a tidy, so a
 conventional item still costs exactly one read.
@@ -115,7 +122,8 @@ no conditional write. The window is the duration of one local `op` call.
 ## Where it hooks in
 
 - `app::tidy::read` replaces the strict item read in `status`, `plan`, `sync`, `check`,
-  `config export` and `doctor --env`; `run` calls it first and references a field that is
+  `config export`, `history`, `adopt` and `opv tidy`; `doctor` and `ready` use
+  `app::tidy::inspect`, the same tolerant read without the tidy; `run` calls it first and references a field that is
   still misplaced (a read-only run) by field ID, `op://<vault>/<item>/<field id>`.
 - `setup` applies the plan to the item it is about to save (saved only after the owner
   confirms); `init` creates a missing vault or item for a person and tidies the item it
