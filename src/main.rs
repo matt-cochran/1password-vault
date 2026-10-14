@@ -323,8 +323,9 @@ Examples:
 
 const ACCESS_QUICK: &str = "\
 Examples:
-  opv access                   # every environment's readers; a CI reader command where missing
-  opv access prod --json       # one environment as a document";
+  opv access                     # every target's needs and who can read each vault
+  opv access prod --target web    # one target's deploy identity and its missing grants
+  opv access prod --json          # the same as one document";
 
 const READY_QUICK: &str = "\
 Examples:
@@ -672,6 +673,12 @@ enum Cmd {
     Access {
         /// Only this environment.
         env: Option<String>,
+        /// Only this target's deploy identity (omits the CI reader).
+        #[arg(long, value_name = "NAME")]
+        target: Option<String>,
+        /// Project name for the service accounts; defaults to the repository's name.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -2394,7 +2401,20 @@ fn run_other(
             target_cmd::list(&loaded?, &target_cmd::ListArgs { env, json }, out)
         }
         Cmd::Tidy { env, json } => opv::app::repair::run(&loaded?, &env, r, json, out),
-        Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
+        Cmd::Access {
+            env,
+            target,
+            project,
+            json,
+        } => opv::app::access::run(
+            &loaded?,
+            env.as_deref(),
+            target.as_deref(),
+            project.as_deref(),
+            r,
+            json,
+            out,
+        ),
         Cmd::Delivery(DeliveryCmd::Verify {
             env,
             product,

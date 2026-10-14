@@ -1,23 +1,54 @@
-//! `opv access [<env>] [--json]` (#96, FR-52): who can read each environment's vault, for a
-//! least-privilege CI reader. One read-only `op vault user list <vault>` per environment:
-//! people and guests are counted, never named; service accounts are named with whether they
-//! can only read. A deployed environment without a read-only service account gets the
-//! owner's exact `op service-account create … :read_items` command, which opv prints and
-//! never runs (1Password shows the new token once, to the owner).
+//! `opv access [<env>] [--target <name>] [--project <p>] [--json]` (FR-52, FR-59): who
+//! needs which vault, per boundary and per target, and who can read it today. Read-only: it
+//! makes one `op vault user list <vault>` call per needed vault, compares the readers with
+//! the configuration's needs, and prints the owner's exact commands for the missing grants
+//! (1Password fixes a service account's vaults at creation, so one command creates one
+//! principal with all its vaults). It never runs a create or grant command.
+//!
+//! Results state what was checked and what could not be classified, and never say "clean"
+//! (S7, FR-59). Only service-account names appear; no person's name, and no value, digest
+//! or fingerprint, is built here (SR-1).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::write_err;
 use crate::adapters::onepassword_init;
-use crate::domain::access::{AccessFinding, EnvAccess, analyse, findings};
+use crate::domain::access::{AccessFinding, Reader, analyse, findings};
+use crate::domain::access_plan::{
+    AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
+    TargetNeeds, compare, create_command, required,
+};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
+
+/// The raw `op vault user list` JSON per vault id; `None` when the vault is not visible.
+type Observations = BTreeMap<String, Option<serde_json::Value>>;
+/// The service-account readers per vault id; `None` when the vault is not visible.
+type Readers = BTreeMap<String, Option<Vec<Reader>>>;
+
+/// What one environment needs: one entry per target and one CI reader (FR-59).
+struct Needs<'a> {
+    name: &'a str,
+    targets: Vec<TargetNeeds<'a>>,
+    ci: Vec<CiNeeds<'a>>,
+}
+
+/// One environment's comparison and the owner commands for its missing grants (FR-59).
+struct EnvReport {
+    name: String,
+    report: AccessReport,
+    commands: Vec<String>,
+    findings: Vec<AccessFinding>,
+}
 
 /// Run `opv access`.
 pub fn run(
     fleet: &crate::domain::Fleet,
     only: Option<&str>,
+    target: Option<&str>,
+    project: Option<&str>,
     r: &dyn CommandRunner,
     json: bool,
     out: &mut dyn Write,
@@ -25,100 +56,313 @@ pub fn run(
     if let Some(e) = only {
         fleet.environment(e)?;
     }
+    let dir = std::env::current_dir().unwrap_or_default();
+    let project = match project {
+        Some(name) => crate::config_store::default_project(Some(name), None, &dir)?,
+        None => super::personal::project_name(r, &dir),
+    };
     let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet
         .environments
         .iter()
         .filter(|(name, _)| only.is_none_or(|o| o == name.as_str()))
         .collect();
     ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
-    let mut envs = Vec::new();
-    for (name, env) in ordered {
-        // One entry per boundary vault (FR-57); per-boundary access is FR-59's deliverable.
-        for b in env.boundaries.values() {
-            let users = onepassword_init::vault_users(r, &b.vault_id, &Host::detect)?;
-            envs.push(analyse(
-                name,
-                &b.vault_id,
-                !env.targets.is_empty(),
-                users.as_ref(),
-            ));
-        }
+    if let Some(t) = target
+        && !ordered.iter().any(|(_, env)| env.targets.contains_key(t))
+    {
+        let known: Vec<&str> = ordered
+            .iter()
+            .flat_map(|(_, env)| env.targets.keys().map(String::as_str))
+            .collect();
+        return Err(Error::Config(
+            format!(
+                "no target {t:?} in the selected environments (targets: {})",
+                known.join(", ")
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::Usage)
+        .with_next("opv access"));
     }
-    let project = super::personal::project_name(r, &std::env::current_dir().unwrap_or_default());
-    let found = findings(&project, &envs);
-    report(out, &envs, &found, json)
+    if let Some(t) = target {
+        ordered.retain(|(_, env)| env.targets.contains_key(t));
+    }
+    let needs = plan_needs(fleet, &ordered, target)?;
+    let (observations, readers) = observe(r, &needs)?;
+    let mut envs = Vec::with_capacity(needs.len());
+    for need in &needs {
+        envs.push(build(need, &project, &observations, &readers));
+    }
+    report(out, &envs, json)
 }
 
-/// Print the access view: one line per environment, then the findings with their commands.
-fn report(
-    out: &mut dyn Write,
-    envs: &[EnvAccess],
-    found: &[AccessFinding],
-    json: bool,
-) -> Result<(), Error> {
-    if json {
-        let doc = serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "environments": envs,
-            "findings": found,
+/// Build each environment's needs from the configuration (FR-59): a target reads exactly
+/// the boundaries of the products it delivers and of the `from` sources its keys name,
+/// plus its own state vault; the CI reader reads every boundary of the environment.
+/// `--target` keeps only that target and omits the CI reader.
+fn plan_needs<'a>(
+    fleet: &'a crate::domain::Fleet,
+    ordered: &[(&'a String, &'a crate::domain::Environment)],
+    target: Option<&str>,
+) -> Result<Vec<Needs<'a>>, Error> {
+    let mut needs = Vec::with_capacity(ordered.len());
+    for (name, env) in ordered {
+        let env_name = name.as_str();
+        let mut targets = Vec::new();
+        for (target_name, spec) in &env.targets {
+            if target.is_some_and(|only| only != target_name) {
+                continue;
+            }
+            let mut boundary_vaults: BTreeSet<&str> = BTreeSet::new();
+            for (product, p) in &fleet.products {
+                if !fleet.delivers(env_name, target_name, product) {
+                    continue;
+                }
+                let desired = p
+                    .keys
+                    .values()
+                    .filter(|k| k.environments.iter().any(|e| e == env_name));
+                for key in desired {
+                    let needer = key.source().map_or(product.as_str(), |(source, _)| source);
+                    boundary_vaults.insert(fleet.boundary(env_name, needer)?.vault_id.as_str());
+                }
+            }
+            targets.push(TargetNeeds {
+                environment: env_name,
+                target: target_name.as_str(),
+                boundary_vaults,
+                state_vault: spec.state_vault_id.as_str(),
+            });
+        }
+        let ci = if target.is_some() {
+            Vec::new()
+        } else {
+            vec![CiNeeds {
+                environment: env_name,
+                boundary_vaults: env
+                    .boundaries
+                    .values()
+                    .map(|b| b.vault_id.as_str())
+                    .collect(),
+            }]
+        };
+        needs.push(Needs {
+            name: env_name,
+            targets,
+            ci,
         });
+    }
+    Ok(needs)
+}
+
+/// Observe each distinct needed vault once with `op vault user list <vault> --format json`
+/// (FR-59). A vault whose user list cannot be read has no readers (not visible).
+fn observe(r: &dyn CommandRunner, needs: &[Needs<'_>]) -> Result<(Observations, Readers), Error> {
+    let mut wanted: BTreeSet<&str> = BTreeSet::new();
+    for need in needs {
+        for target in &need.targets {
+            wanted.extend(target.boundary_vaults.iter().copied());
+            wanted.insert(target.state_vault);
+        }
+        for ci in &need.ci {
+            wanted.extend(ci.boundary_vaults.iter().copied());
+        }
+    }
+    let mut observations = BTreeMap::new();
+    let mut readers = BTreeMap::new();
+    for vault in wanted {
+        let users = onepassword_init::vault_users(r, vault, &Host::detect)?;
+        let access = analyse("", vault, false, users.as_ref());
+        readers.insert(
+            vault.to_string(),
+            access.visible.then_some(access.service_accounts),
+        );
+        observations.insert(vault.to_string(), users);
+    }
+    Ok((observations, readers))
+}
+
+/// Compare one environment's needs with what was observed, and collect the owner commands
+/// for the missing grants and the findings that still apply (FR-59).
+fn build(
+    need: &Needs<'_>,
+    project: &str,
+    observations: &Observations,
+    readers: &Readers,
+) -> EnvReport {
+    let grants = required(project, &need.targets, &need.ci);
+    let boundary: BTreeSet<&str> = need
+        .targets
+        .iter()
+        .flat_map(|t| t.boundary_vaults.iter().copied())
+        .chain(
+            need.ci
+                .iter()
+                .flat_map(|c| c.boundary_vaults.iter().copied()),
+        )
+        .collect();
+    let mut needed: BTreeSet<&str> = boundary.clone();
+    needed.extend(need.targets.iter().map(|t| t.state_vault));
+    let observed: Vec<ObservedVault> = needed
+        .iter()
+        .map(|vault| ObservedVault {
+            vault_id: vault,
+            readers: readers.get(*vault).and_then(|r| r.as_deref()),
+        })
+        .collect();
+    let report = compare(&grants, &observed);
+    let commands = owner_commands(&report.checks);
+    let mut env_findings = Vec::new();
+    for vault in &needed {
+        let access = analyse(
+            vault,
+            vault,
+            false,
+            observations.get(*vault).and_then(|o| o.as_ref()),
+        );
+        for finding in findings(project, &[access]) {
+            // A deploy identity writes its own state vault by design (FR-59); the CI-reader
+            // warning is about writing values, so it applies to the boundary vaults only.
+            if finding.code == "ci_reader_can_write" && !boundary.contains(*vault) {
+                continue;
+            }
+            env_findings.push(finding);
+        }
+    }
+    EnvReport {
+        name: need.name.to_string(),
+        report,
+        commands,
+        findings: env_findings,
+    }
+}
+
+/// One command per principal with at least one missing grant, over all of that principal's
+/// grants (FR-59): 1Password fixes a service account's vaults at creation.
+fn owner_commands(checks: &[GrantCheck]) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    while start < checks.len() {
+        let principal = &checks[start].grant.principal;
+        let mut end = start;
+        while end < checks.len() && &checks[end].grant.principal == principal {
+            end += 1;
+        }
+        let group = &checks[start..end];
+        // 1Password fixes a service account's vaults and permissions at creation, so a
+        // missing grant and a reader that can write where it should only read are both fixed
+        // by recreating the account with its full grant list (FR-59).
+        if group.iter().any(|check| {
+            matches!(
+                check.state,
+                GrantState::Missing | GrantState::ReadOnlyNeeded
+            )
+        }) {
+            let grants: Vec<Grant> = group.iter().map(|check| check.grant.clone()).collect();
+            if let Some(command) = create_command(&grants) {
+                commands.push(command);
+            }
+        }
+        start = end;
+    }
+    commands
+}
+
+/// Print the per-principal grants, then the extra readers, then what was checked and what
+/// could not be classified, then the owner commands. `--json` prints the documented
+/// document (FR-59); it never says "clean".
+fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Error> {
+    if json {
+        let environments: Vec<serde_json::Value> = envs
+            .iter()
+            .map(|env| {
+                serde_json::json!({
+                    "environment": env.name,
+                    "report": env.report,
+                    "commands": env.commands,
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({ "environments": environments });
         return writeln!(out, "{doc}").map_err(write_err);
     }
-    for e in envs {
-        let line = if !e.visible {
-            format!(
-                "{}: vault {}: not visible to you",
-                e.environment, e.vault_id
-            )
-        } else {
-            let readers: Vec<String> = e
-                .service_accounts
-                .iter()
-                .map(|s| {
-                    let how = if s.read_only {
-                        "read-only"
-                    } else {
-                        "can write"
-                    };
-                    format!("{} ({how})", s.name)
-                })
-                .collect();
-            let ci = if readers.is_empty() {
-                "no service account".to_string()
-            } else {
-                readers.join(", ")
-            };
-            format!(
-                "{}: vault {}: {} {}, {} {}; {ci}",
-                e.environment,
-                e.vault_id,
-                e.people,
-                if e.people == 1 { "person" } else { "people" },
-                e.guests,
-                if e.guests == 1 { "guest" } else { "guests" }
-            )
-        };
-        writeln!(out, "{line}").map_err(write_err)?;
-    }
-    for f in found {
-        writeln!(out, "  {}: {}", f.code, f.message).map_err(write_err)?;
-        if let Some(n) = &f.next {
+    for env in envs {
+        writeln!(out, "{}:", env.name).map_err(write_err)?;
+        let mut start = 0;
+        while start < env.report.checks.len() {
+            let principal = &env.report.checks[start].grant.principal;
+            writeln!(out, "  {}:", principal_label(principal)).map_err(write_err)?;
+            let mut end = start;
+            while end < env.report.checks.len()
+                && &env.report.checks[end].grant.principal == principal
+            {
+                let check = &env.report.checks[end];
+                writeln!(
+                    out,
+                    "    {}: {}: {}",
+                    check.grant.vault_id,
+                    permission_label(check.grant.permission),
+                    state_label(&check.state)
+                )
+                .map_err(write_err)?;
+                end += 1;
+            }
+            start = end;
+        }
+        for extra in &env.report.extra {
             writeln!(
                 out,
-                "    owner runs (the token is shown once, by 1Password): {n}"
+                "  extra reader {} on {}",
+                extra.service_account, extra.vault_id
             )
             .map_err(write_err)?;
         }
-    }
-    if found.iter().any(|f| f.next.is_some()) {
+        for finding in &env.findings {
+            writeln!(out, "  {}: {}", finding.code, finding.message).map_err(write_err)?;
+            if let Some(next) = &finding.next {
+                writeln!(out, "    {next}").map_err(write_err)?;
+            }
+        }
         writeln!(
             out,
-            "Then store the token as the CI secret OP_SERVICE_ACCOUNT_TOKEN yourself; opv never \
-             sees it."
+            "  checked: {}, unclassified: {}",
+            env.report.checked, env.report.unclassified
         )
         .map_err(write_err)?;
+        for command in &env.commands {
+            writeln!(out, "Owner runs: {command}").map_err(write_err)?;
+        }
     }
     Ok(())
+}
+
+/// How a principal is named in text output (FR-59).
+fn principal_label(principal: &Principal) -> String {
+    match principal {
+        Principal::Deploy {
+            environment,
+            target,
+        } => format!("deploy {environment}/{target}"),
+        Principal::CiReader { environment } => format!("ci reader {environment}"),
+    }
+}
+
+/// How a permission is named in text output (FR-59).
+fn permission_label(permission: Permission) -> &'static str {
+    match permission {
+        Permission::Read => "read",
+        Permission::ReadWrite => "read-write",
+    }
+}
+
+/// How a grant state is named in text output (FR-59).
+fn state_label(state: &GrantState) -> &'static str {
+    match state {
+        GrantState::Present => "present",
+        GrantState::Missing => "missing",
+        GrantState::ReadOnlyNeeded => "read-only needed",
+        GrantState::NotVisible => "not visible",
+    }
 }
 
 #[cfg(test)]
