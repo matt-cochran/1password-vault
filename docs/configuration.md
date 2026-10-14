@@ -223,6 +223,16 @@ Every value has exactly one source: a key's own field, or the field named by `fr
 
 Every target needs a state vault for its delivery evidence. `state_vault_id` records it; `opv target add` creates it, and `opv bootstrap` creates and records any that is missing. A target without one fails at load with `state_vault_missing`.
 
+Each placement (a product the target delivers) keeps its evidence in one item of that vault, `opv · delivery · <product> · <target>`. `opv bootstrap` creates it and records its ID under the target, so no command ever looks a state item up by title:
+
+```toml
+[environments.prod.targets.shared]
+state_vault_id = "vprd-state-shared"
+delivery_items = { api = "dapi0000000000000000000001", p = "dp00000000000000000000001" }   # recorded by opv bootstrap
+```
+
+A placement without a recorded item gets no evidence (its sync says `opv bootstrap creates it`), and an entry for a product the target does not deliver fails at load. The item's evidence lines (store version and keyed fingerprint per name) are also the version ledger `plan` and `status` judge Fly and GitHub secrets by.
+
 The state item holds the evidence key, the keyed fingerprints and, for Fly, digests, so its reader can test guesses against values. A state vault must therefore never be readable more widely than the values it covers. Several targets may share one state vault only when they deliver products from the same set of boundaries. Otherwise the configuration fails at load with `state_vault_wider_than_values`, naming the vault, the targets as `<env>/<target>` and a boundary one of them cannot read. One state vault per target is the safe choice.
 
 ### Account and deploy credentials
@@ -301,7 +311,7 @@ You don't need to lay out 1Password by hand. opv finds each declared key whereve
 tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"
 ```
 
-A sync you run yourself records its delivery evidence in the target's state vault, not in the values item: one evidence line per written name, with the store's version and a keyed fingerprint. That lets `plan` tell exactly whether a Fly or GitHub secret matches 1Password. See [delivery evidence](#delivery-evidence-state_vault_id).
+A sync records its delivery evidence in the target's state vault, not in the values item: one evidence line per written name, with the store's version and a keyed fingerprint. That lets `plan` tell exactly whether a Fly or GitHub secret matches 1Password. See [delivery evidence](#delivery-evidence-state_vault_id).
 
 Under a service account, Connect or in CI, opv never writes to 1Password: it reads the item as it is and prints one note that your next local run will tidy it. A value it can fix unambiguously from the key's rules (a trailing newline, a missing `ensure_prefix`) is used in its fixed form, and the tidy writes it back, keeping the original in `opv · kept`. Filling in a missing value is always up to you; opv names the keys that still need one. Design: [self-healing conventions](design/self-healing-conventions.md).
 

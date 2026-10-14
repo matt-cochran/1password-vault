@@ -158,6 +158,10 @@ pub struct Target {
     /// The vault holding this target's delivery evidence (FR-58, D12): one item per
     /// placement, written by the deploy identity after a confirmed sync. Required.
     pub state_vault_id: String,
+    /// product → the ID of its placement's delivery item in the state vault
+    /// (`delivery_items`, FR-58), recorded by `opv bootstrap` when it creates the item, so
+    /// nothing looks a state item up by title (FR-13). A product with none has no evidence.
+    pub delivery_items: BTreeMap<String, String>,
 }
 
 // By hand: a derive compares and clones `Box<dyn TargetConfig>` through the box's
@@ -169,6 +173,7 @@ impl PartialEq for Target {
             && self.products == other.products
             && self.deploy_credentials == other.deploy_credentials
             && self.state_vault_id == other.state_vault_id
+            && self.delivery_items == other.delivery_items
     }
 }
 
@@ -182,6 +187,7 @@ impl Clone for Target {
             products: self.products.clone(),
             deploy_credentials: self.deploy_credentials.clone(),
             state_vault_id: self.state_vault_id.clone(),
+            delivery_items: self.delivery_items.clone(),
         }
     }
 }

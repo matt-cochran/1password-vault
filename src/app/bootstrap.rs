@@ -1,8 +1,10 @@
 //! `opv bootstrap` (FR-52, #77): take a configuration from declared to ready in the selected
 //! 1Password account. It records every missing ID, and nothing else: per environment, each
 //! needed boundary (FR-57) without `boundaries.<b>` gets its vault and item found or created
-//! by their conventional titles, and each target without `state_vault_id` gets its state
-//! vault (FR-58). Then every declared field is added, empty (`item skeleton`). Nothing is
+//! by their conventional titles, each target without `state_vault_id` gets its state
+//! vault, and each placement (a product a target delivers) without `delivery_items.<p>`
+//! gets its delivery item in that vault (FR-58), so nothing else ever looks a state item up
+//! by title (FR-13). Then every declared field is added, empty (`item skeleton`). Nothing is
 //! synced or deployed, and no value is read or written.
 //!
 //! It works on the raw document (comments and order kept), so it can complete a file the
@@ -389,6 +391,12 @@ enum Recorded {
         target: String,
         vault_id: String,
     },
+    DeliveryItem {
+        env: String,
+        target: String,
+        product: String,
+        item_id: String,
+    },
 }
 
 impl Recorded {
@@ -408,6 +416,14 @@ impl Recorded {
                 target,
                 vault_id,
             } => format!("[environments.{env}.targets.{target}] state_vault_id = {vault_id:?}"),
+            Recorded::DeliveryItem {
+                env,
+                target,
+                product,
+                item_id,
+            } => format!(
+                "[environments.{env}.targets.{target}] delivery_items.{product} = {item_id:?}"
+            ),
         }
     }
 
@@ -450,8 +466,65 @@ impl Recorded {
                     t.insert("state_vault_id", value(vault_id.as_str()));
                 }
             }
+            Recorded::DeliveryItem {
+                env,
+                target,
+                product,
+                item_id,
+            } => {
+                let Some(t) = doc["environments"][env.as_str()]["targets"][target.as_str()]
+                    .as_table_like_mut()
+                else {
+                    return;
+                };
+                if t.get("delivery_items").is_none() {
+                    t.insert("delivery_items", Item::Value(InlineTable::new().into()));
+                }
+                if let Some(items) = t
+                    .get_mut("delivery_items")
+                    .and_then(Item::as_table_like_mut)
+                {
+                    items.insert(product, value(item_id.as_str()));
+                }
+            }
         }
     }
+}
+
+/// FR-58: the delivery item of every placement of `fleet` (a product with a binding on a
+/// target) that has none recorded, found or created in the target's state vault with its
+/// notes, by its conventional title (bootstrap, like init, may look titles up; FR-13).
+fn delivery_items(
+    fleet: &crate::domain::Fleet,
+    project: &str,
+    r: &dyn CommandRunner,
+) -> Result<Vec<Recorded>, Error> {
+    let mut out = Vec::new();
+    for (env, e) in &fleet.environments {
+        for (target, t) in &e.targets {
+            for product in fleet.products.keys() {
+                if t.delivery_items.contains_key(product)
+                    || super::delivery::bindings(fleet, env, target, product)?.is_empty()
+                {
+                    continue;
+                }
+                let item = ensure_item(
+                    r,
+                    &t.state_vault_id,
+                    &naming::delivery_item(product, target),
+                    &format!("opv-delivery:{project}/{env}/{target}/{product}"),
+                    &naming::delivery_item_notes(product, target, env),
+                )?;
+                out.push(Recorded::DeliveryItem {
+                    env: env.clone(),
+                    target: target.clone(),
+                    product: product.clone(),
+                    item_id: item.id,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A placeholder ID for each ID bootstrap would record, so the loader can judge the result
@@ -552,6 +625,12 @@ pub fn run(
     for id in &recorded {
         id.write(&mut doc);
     }
+    // Every state vault exists now: each placement's delivery item goes in its target's.
+    let items = delivery_items(&crate::config::parse(&doc.to_string())?, project, r)?;
+    for id in &items {
+        id.write(&mut doc);
+    }
+    recorded.extend(items);
     let new_text = doc.to_string();
     // The result loads like any hand-written file before it replaces it.
     let fleet = crate::config::parse(&new_text)?;
@@ -587,8 +666,8 @@ pub fn run(
     }
     writeln!(
         out,
-        "every environment has its boundary vaults, items, state vaults and empty fields; fill \
-         the values in 1Password, then check what is left"
+        "every environment has its boundary vaults, items, state vaults, delivery items and \
+         empty fields; fill the values in 1Password, then check what is left"
     )
     .map_err(write_err)?;
     if let Some(env) = &opts.ci_reader {
