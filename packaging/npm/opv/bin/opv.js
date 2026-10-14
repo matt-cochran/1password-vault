@@ -45,7 +45,7 @@ function printInstallHintOnce(stale) {
   const what = stale
     ? `opv at ${where} is ${stale}, not ${version}`
     : `opv is not installed at ${where}`;
-  process.stderr.write(`${what}; run: npm rebuild @matthew-cochran/opv\n`);
+  process.stderr.write(`${what}; run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv\n`);
 }
 
 function bundledBinary() {

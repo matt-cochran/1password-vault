@@ -54,7 +54,20 @@ for dir in "$work"/npm-dist/@matthew-cochran/opv-* "$work/npm-dist/opv"; do
     continue
   fi
   echo "publish  $name@$version"
-  npm publish "$dir" --access public
+  # The registry can lag `npm view`: a version published moments ago (by CI) is refused
+  # here as "cannot publish over"; that is the state we want, so carry on.
+  # npm's prompts (2FA, browser sign-in) still reach the terminal through tee.
+  set +e
+  npm publish "$dir" --access public 2>&1 | tee "$work/publish.log"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -ne 0 ]; then
+    if grep -q "cannot publish over the previously published version" "$work/publish.log"; then
+      echo "skip     $name@$version (already published)"
+      continue
+    fi
+    exit "$status"
+  fi
 done
 
 echo

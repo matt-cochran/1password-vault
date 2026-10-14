@@ -115,7 +115,7 @@ function sudoProblem(env = process.env, uid = process.getuid ? process.getuid() 
     return (
       `npm is running as root for ${env.SUDO_USER}, so opv was not copied to their ` +
       'home (it would become root-owned). The npm command still works. ' +
-      'To install the shared copy, run without sudo: npm rebuild -g @matthew-cochran/opv'
+      'To install the shared copy, run without sudo: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv'
     );
   }
   return null;
@@ -139,7 +139,7 @@ function install() {
     if (!ours && !isOpvBinary(target)) {
       throw new Error(
         `${target} is not an opv binary, so it was left untouched. The npm command still ` +
-          'works. Move that file, then run: npm rebuild -g @matthew-cochran/opv',
+          'works. Move that file, then run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv',
       );
     }
     oldVersion = versionOf(target);
@@ -180,7 +180,7 @@ if (require.main === module) {
     // Never fail `npm install`: the wrapper falls back to its bundled binary.
     process.stderr.write(
       `opv: could not install to the shared location (${e.message}). ` +
-        'The npm command still works; fix the cause, then run: npm rebuild -g @matthew-cochran/opv\n',
+        'The npm command still works; fix the cause, then run: npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv\n',
     );
   }
 }
