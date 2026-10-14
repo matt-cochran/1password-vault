@@ -4,8 +4,8 @@
 use super::*;
 use crate::adapters::onepassword_manifest::{Account, Discovery};
 use crate::app::account;
+use crate::domain::Kind;
 use crate::domain::rules::Reason;
-use crate::domain::{Kind, SIMPLE_PRODUCT};
 use crate::error::Code;
 use crate::host::Platform;
 
@@ -71,7 +71,6 @@ fn inputs<'a>(report: &'a account::Report, envs: Vec<EnvInput>) -> Inputs<'a> {
         config_source: Some("secrets.toml".into()),
         account: report,
         envs,
-        simple: false,
         personal: Default::default(),
         health: Vec::new(),
     }
@@ -317,47 +316,6 @@ fn row_finding_effect_writes_1password() {
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(r.findings[0].effect, "writes_1password");
-}
-
-#[test]
-fn simple_profile_finding_label_omits_product() {
-    let report = account_report();
-    let envs = vec![env(
-        "staging",
-        None,
-        vec![row(
-            SIMPLE_PRODUCT,
-            "STRIPE_KEY",
-            KeyState::Missing,
-            TargetState::Absent,
-        )],
-    )];
-    let mut i = inputs(&report, envs);
-    i.simple = true;
-    let r = receipt(&i, "0.6.0");
-    assert_eq!(
-        r.findings[0].prerequisite,
-        "opv open STRIPE_KEY --env staging"
-    );
-}
-
-#[test]
-fn simple_profile_finding_scope_omits_product() {
-    let report = account_report();
-    let envs = vec![env(
-        "staging",
-        None,
-        vec![row(
-            SIMPLE_PRODUCT,
-            "STRIPE_KEY",
-            KeyState::Missing,
-            TargetState::Absent,
-        )],
-    )];
-    let mut i = inputs(&report, envs);
-    i.simple = true;
-    let r = receipt(&i, "0.6.0");
-    assert_eq!(r.findings[0].scope.product, None);
 }
 
 #[test]
@@ -701,7 +659,6 @@ fn the_grid_shows_an_environments_display_name() {
             config_source: None,
             account: &account,
             envs: vec![env],
-            simple: false,
             personal: Default::default(),
             health: Vec::new(),
         },
@@ -724,7 +681,6 @@ fn an_environment_for_another_audience_is_not_a_blocking_problem() {
             config_source: None,
             account: &account,
             envs: vec![env],
-            simple: false,
             personal: Default::default(),
             health: Vec::new(),
         },
@@ -756,7 +712,6 @@ fn a_missing_personal_key_is_named_as_yours() {
             config_source: None,
             account: &account,
             envs: vec![env],
-            simple: false,
             personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
             health: Vec::new(),
         },

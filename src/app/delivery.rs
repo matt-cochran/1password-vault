@@ -1,6 +1,6 @@
 //! Delivery receipts (#106, `docs/design/delivery-receipts.md`): value-free, verifiable proof
 //! that a product's binding set was delivered to a target, kept per product in the
-//! environment's state vault (`state_vault_id`).
+//! target's state vault (`state_vault_id`, FR-58).
 //!
 //! - After a sync whose writes the provider confirmed, [`record`] mints a revision for each
 //!   product in scope whose every name was written now or proven identical, and keeps in
@@ -30,7 +30,7 @@ use crate::domain::delivery::{
 };
 use crate::domain::ledger::{hmac_hex, random_key};
 use crate::domain::plan::StoreEntry;
-use crate::domain::{Fleet, Kind, SIMPLE_PRODUCT, SecretValue};
+use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -42,21 +42,18 @@ pub fn item_title(product: &str) -> String {
 const RECEIPT_FIELD: &str = "receipt";
 const KEY_FIELD: &str = "evidence key";
 
-/// `product/KEY`, or `KEY` under the simple profile: the field a value comes from.
-fn field_label(product: &str, key: &str) -> String {
-    if product == SIMPLE_PRODUCT {
-        key.to_string()
-    } else {
-        format!("{product}/{key}")
-    }
-}
-
-/// The binding set of `product` in `env_name`: each secret it delivers, by target name,
-/// with the 1Password field its value comes from (a shared key names its source, FR-45).
-/// Personal keys are never delivered (FR-55). Sorted by name.
-pub fn bindings(fleet: &Fleet, env_name: &str, product: &str) -> Result<Vec<BindingRef>, Error> {
-    let (env, t) = super::target(fleet, env_name)?;
-    if !fleet.delivers(env_name, product) {
+/// The binding set of `product` on target `target` of `env_name`: each secret it delivers,
+/// by target name, with the 1Password field its value comes from (a shared key names its
+/// source, FR-45), in the source's boundary item (FR-57). Personal keys are never delivered
+/// (FR-55). Sorted by name.
+pub fn bindings(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    product: &str,
+) -> Result<Vec<BindingRef>, Error> {
+    let (_, t) = super::target(fleet, env_name, target)?;
+    if !fleet.delivers(env_name, target, product) {
         return Ok(Vec::new());
     }
     let Some(prod) = fleet.products.get(product) else {
@@ -69,23 +66,25 @@ pub fn bindings(fleet: &Fleet, env_name: &str, product: &str) -> Result<Vec<Bind
         .filter(|(_, s)| s.environments.iter().any(|e| e == env_name))
         .map(|(k, s)| {
             let (sp, sk) = s.source().unwrap_or((product, k));
-            BindingRef {
+            Ok(BindingRef {
                 name: t.env_name(product, k),
                 source: Source {
-                    item_id: env.item_id.clone(),
-                    field: field_label(sp, sk),
+                    item_id: fleet.boundary(env_name, sp)?.item_id.clone(),
+                    field: key_label(sp, sk),
                 },
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     out.sort();
     Ok(out)
 }
 
-/// The products `env_name` delivers that have at least one binding, or `only`.
+/// The products target `target` of `env_name` delivers that have at least one binding, or
+/// `only`.
 fn products_in_scope(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     only: Option<&str>,
 ) -> Result<Vec<String>, Error> {
     let mut out = Vec::new();
@@ -93,7 +92,7 @@ fn products_in_scope(
         if only.is_some_and(|o| o != p) {
             continue;
         }
-        if !bindings(fleet, env_name, p)?.is_empty() {
+        if !bindings(fleet, env_name, target, p)?.is_empty() {
             out.push(p.clone());
         }
     }
@@ -114,8 +113,14 @@ fn account_id(r: &dyn CommandRunner) -> String {
 }
 
 /// The scope a receipt is bound to.
-fn scope(fleet: &Fleet, env_name: &str, product: &str, account: &str) -> Result<Scope, Error> {
-    let (_, t) = super::target(fleet, env_name)?;
+fn scope(
+    fleet: &Fleet,
+    env_name: &str,
+    target: &str,
+    product: &str,
+    account: &str,
+) -> Result<Scope, Error> {
+    let (_, t) = super::target(fleet, env_name, target)?;
     Ok(Scope {
         account_id: account.to_string(),
         environment: env_name.to_string(),
@@ -125,53 +130,61 @@ fn scope(fleet: &Fleet, env_name: &str, product: &str, account: &str) -> Result<
     })
 }
 
-/// The values of the values item's declared fields, by `product/KEY` (or `KEY`), read
-/// once by IDs and **fresh** (never `op`'s local cache): a receipt must never vouch for a
-/// value that changed since. Zeroized on drop.
+/// The values of the boundary items' declared fields (FR-57), by `product/KEY`, each item
+/// read once by IDs and **fresh** (never `op`'s local cache): a receipt must never vouch for
+/// a value that changed since. Zeroized on drop.
 fn values_by_field(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
 ) -> Result<BTreeMap<String, SecretValue>, Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_whole_fresh(r, env)?;
-    let (layout, _) = onepassword_tidy::parse(item.raw())?;
-    Ok(
-        crate::domain::convention::read_fields(&layout, fleet, env_name)
-            .into_iter()
-            .map(|f| (field_label(&f.section, &f.label), f.value))
-            .collect(),
-    )
+    let mut out = BTreeMap::new();
+    for (name, b) in super::tidy::boundaries_needed(fleet, env_name)? {
+        let item = onepassword::read_whole_fresh(r, env, b)?;
+        let (layout, _) = onepassword_tidy::parse(item.raw())?;
+        let part = super::tidy::in_boundary(fleet, &name);
+        out.extend(
+            crate::domain::convention::read_fields(&layout, &part, env_name)
+                .into_iter()
+                .map(|f| (key_label(&f.section, &f.label), f.value)),
+        );
+    }
+    Ok(out)
 }
 
 /// A product's state item as read: the receipt, the key and the evidence by name.
 struct StateItem {
-    environment: crate::domain::Environment,
+    /// The state item's vault and item, as an item read addresses them.
+    at: Boundary,
     receipt: Option<Receipt>,
     key: Option<Zeroizing<String>>,
     evidence: Vec<Evidence>,
     raw: Option<Zeroizing<Vec<u8>>>,
 }
 
-/// Read `product`'s state item in the state vault, if it exists. Values stay in memory.
+/// Read `product`'s state item in the state vault of target `target`, if it exists. Values
+/// stay in memory.
 fn read_state(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     product: &str,
     r: &dyn CommandRunner,
 ) -> Result<Option<StateItem>, Error> {
     let env = fleet.environment(env_name)?;
-    let Some(vault) = env.state_vault_id.as_deref() else {
+    let Some(vault) = env.targets.get(target).map(|t| t.state_vault_id.as_str()) else {
         return Ok(None);
     };
     let item = match onepassword_init::find_item(r, vault, &item_title(product), &Host::detect)? {
         onepassword_init::Lookup::Found(i) => i,
         onepassword_init::Lookup::Missing(_) => return Ok(None),
     };
-    let mut state_env = env.clone();
-    state_env.vault_id = vault.to_string();
-    state_env.item_id = item.id;
-    let read = onepassword::read_whole_fresh(r, &state_env)?;
+    let at = Boundary {
+        vault_id: vault.to_string(),
+        item_id: item.id,
+    };
+    let read = onepassword::read_whole_fresh(r, env, &at)?;
     let raw = Zeroizing::new(read.raw().to_vec());
     let doc: Value = serde_json::from_slice(&raw)
         .map_err(|_| Error::Source("the delivery state item is not valid JSON".into()))?;
@@ -193,7 +206,7 @@ fn read_state(
         }
     }
     Ok(Some(StateItem {
-        environment: state_env,
+        at,
         receipt,
         key,
         evidence,
@@ -215,7 +228,8 @@ pub struct Recorded {
     pub not_minted: Vec<NotMinted>,
 }
 
-/// After a confirmed sync of `env_name`: for each product in scope, mint a revision when
+/// After a confirmed sync of target `target` of `env_name`: for each product in scope, mint
+/// a revision when
 /// every binding was written by this run (`written`) or proven identical (`identical`),
 /// with its store version in `listed`, and keep the receipt and evidence in the product's
 /// state item. A product whose binding set and evidence are unchanged keeps its revision.
@@ -223,6 +237,7 @@ pub struct Recorded {
 pub fn record(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     only: Option<&str>,
     written: &BTreeSet<String>,
     identical: &BTreeSet<String>,
@@ -231,14 +246,14 @@ pub fn record(
     r: &dyn CommandRunner,
 ) -> Result<Recorded, Error> {
     let env = fleet.environment(env_name)?;
-    let Some(vault) = env.state_vault_id.clone() else {
+    let Some(vault) = env.targets.get(target).map(|t| t.state_vault_id.clone()) else {
         return Ok(Recorded::default());
     };
     let account = account_id(r);
     let values = values_by_field(fleet, env_name, r)?;
     let mut out = Recorded::default();
-    for product in products_in_scope(fleet, env_name, only)? {
-        let set = bindings(fleet, env_name, &product)?;
+    for product in products_in_scope(fleet, env_name, target, only)? {
+        let set = bindings(fleet, env_name, target, &product)?;
         let unconfirmed: Vec<&str> = set
             .iter()
             .filter(|b| !written.contains(&b.name) && !identical.contains(&b.name))
@@ -273,7 +288,7 @@ pub fn record(
             });
             continue;
         }
-        let state = read_state(fleet, env_name, &product, r)?;
+        let state = read_state(fleet, env_name, target, &product, r)?;
         let key = state
             .as_ref()
             .and_then(|s| s.key.clone())
@@ -302,7 +317,7 @@ pub fn record(
             });
             continue;
         }
-        let this_scope = scope(fleet, env_name, &product, &account)?;
+        let this_scope = scope(fleet, env_name, target, &product, &account)?;
         // Unchanged binding set and evidence: the same delivery, the same revision.
         let unchanged = state.as_ref().and_then(|s| {
             let rec = s.receipt.as_ref()?;
@@ -359,17 +374,18 @@ fn write_state(
     key: &str,
     evidence: &[Evidence],
 ) -> Result<(), Error> {
-    let (state_env, raw) = match state {
-        Some(s) => (s.environment.clone(), s.raw.clone()),
+    let (at, raw) = match state {
+        Some(s) => (s.at.clone(), s.raw.clone()),
         None => {
             let tag = format!("opv-delivery:{}/{product}", env.name);
             let item =
                 onepassword_init::create_item_tagged(r, vault, &item_title(product), &[tag])?;
-            let mut e = env.clone();
-            e.vault_id = vault.to_string();
-            e.item_id = item.id;
-            let read = onepassword::read_whole_fresh(r, &e)?;
-            (e, Some(Zeroizing::new(read.raw().to_vec())))
+            let at = Boundary {
+                vault_id: vault.to_string(),
+                item_id: item.id,
+            };
+            let read = onepassword::read_whole_fresh(r, env, &at)?;
+            (at, Some(Zeroizing::new(read.raw().to_vec())))
         }
     };
     let mut doc: Value = raw
@@ -394,7 +410,7 @@ fn write_state(
         serde_json::to_vec(&doc)
             .map_err(|_| Error::Config("cannot serialize the delivery state item".into()))?,
     );
-    onepassword_tidy::write(r, &state_env, &template)?;
+    onepassword_tidy::write(r, env, &at, &template)?;
     Ok(())
 }
 
@@ -422,24 +438,21 @@ pub fn verify(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let env = fleet.environment(env_name)?;
-    if env.state_vault_id.is_none() {
-        return Err(Error::Config(
-            format!(
-                "environment {env_name} has no state_vault_id: delivery receipts are kept in a \
-                 state vault the deploy identity may write"
-            )
-            .into(),
-        )
-        .with_next(format!("opv bootstrap --state {env_name}")));
-    }
+    // The environment's only target for now (`--target` is a later deliverable, FR-58).
+    let target = super::resolve_target(fleet, env_name, &[], "delivery verify")?;
     let from_file: Vec<Receipt> = match receipt_file {
         Some(p) => read_receipt_file(p)?,
         None => Vec::new(),
     };
-    let signed_in = super::signin::open(fleet, env_name, r, super::signin::Reach::Target)?;
+    let signed_in = super::signin::open_targeted(
+        fleet,
+        env_name,
+        Some(&target),
+        r,
+        super::signin::Reach::Target,
+    )?;
     let r: &dyn CommandRunner = &signed_in;
-    let (_, ports) = super::open_target(fleet, env_name, r)?;
+    let (_, ports) = super::open_target(fleet, env_name, &target, r)?;
     let listed: Vec<StoreEntry> = match &ports {
         crate::ports::Ports::Staged { store, .. } => store.list()?,
         crate::ports::Ports::Pinned { store, .. } => store.list()?,
@@ -447,10 +460,10 @@ pub fn verify(
     let values = values_by_field(fleet, env_name, r)?;
     let account = account_id(r);
     let mut checks = Vec::new();
-    for product in products_in_scope(fleet, env_name, only)? {
-        let expected = bindings(fleet, env_name, &product)?;
-        let this_scope = scope(fleet, env_name, &product, &account)?;
-        let state = read_state(fleet, env_name, &product, r)?;
+    for product in products_in_scope(fleet, env_name, &target, only)? {
+        let expected = bindings(fleet, env_name, &target, &product)?;
+        let this_scope = scope(fleet, env_name, &target, &product, &account)?;
+        let state = read_state(fleet, env_name, &target, &product, r)?;
         let fingerprints: BTreeMap<String, String> =
             match state.as_ref().and_then(|s| s.key.clone()) {
                 Some(key) => expected

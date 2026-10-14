@@ -836,7 +836,7 @@ fn init_creates_a_missing_item_for_a_person() {
         item: "app".into(),
         target: None,
         fields: Default::default(),
-        profile: Some(crate::domain::Profile::Simple),
+        profile: Some(crate::app::init::Profile::Simple),
         force: false,
         from: None,
     };
@@ -856,7 +856,7 @@ fn init_never_creates_an_item_for_a_service_account() {
         item: "app".into(),
         target: None,
         fields: Default::default(),
-        profile: Some(crate::domain::Profile::Simple),
+        profile: Some(crate::app::init::Profile::Simple),
         force: false,
         from: None,
     };
@@ -982,14 +982,7 @@ fn a_persons_tidy_writes_the_normalized_value() {
 
 fn token_in_child_env(op: &FakeOp) -> String {
     let _on = activate();
-    crate::app::run::run(
-        &prefixed_fleet(),
-        "dev",
-        crate::domain::SIMPLE_PRODUCT,
-        &["true".into()],
-        op,
-    )
-    .unwrap();
+    crate::app::run::run(&prefixed_fleet(), "dev", "", &["true".into()], op).unwrap();
     op.child_env
         .borrow()
         .iter()

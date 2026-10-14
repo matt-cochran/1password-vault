@@ -551,6 +551,10 @@ enum Cmd {
         /// retried); a project that cannot be read is one line with its reason.
         #[arg(long, conflicts_with = "env")]
         all: bool,
+        /// Only this named target of the environment (repeatable; one per run for now).
+        /// Without it, the environment's only target.
+        #[arg(long = "target", value_name = "NAME", requires = "env")]
+        target: Vec<String>,
     },
     /// List the projects whose configuration lives in 1Password (names only).
     ///
@@ -938,6 +942,10 @@ struct PlanArgs {
     /// Print one machine-readable JSON document instead of the table.
     #[arg(long)]
     json: bool,
+    /// Only this named target of the environment (repeatable; one per run for now).
+    /// Without it, the environment's only target.
+    #[arg(long = "target", value_name = "NAME")]
+    target: Vec<String>,
 }
 
 /// Arguments of `sync`.
@@ -982,6 +990,10 @@ struct SyncArgs {
     /// Let --prune unset this immutable key (repeatable).
     #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
     prune_immutable: Vec<String>,
+    /// Only this named target of the environment (repeatable; one per run for now).
+    /// Without it, the environment's only target.
+    #[arg(long = "target", value_name = "NAME")]
+    target: Vec<String>,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -996,6 +1008,7 @@ impl From<SyncArgs> for sync::SyncOpts {
             json: a.json,
             expect_plan: a.expect_plan,
             receipt: a.receipt,
+            targets: a.target,
         }
     }
 }
@@ -1567,6 +1580,18 @@ impl Cmd {
         }
     }
 
+    /// The `--target` the command names (FR-56), whose deploy credentials it signs in
+    /// with; `None`: the environment's only target.
+    fn target(&self) -> Option<&str> {
+        let targets = match self {
+            Cmd::Status { target, .. } => target,
+            Cmd::Plan(a) => &a.target,
+            Cmd::Sync(a) => &a.target,
+            _ => return None,
+        };
+        targets.first().map(String::as_str)
+    }
+
     /// `Some(raw)` when stdout is one JSON document (A1): `--json`, or a command that only
     /// prints JSON. `raw` keeps a successful document unframed (`config export`).
     fn json_mode(&self) -> Option<bool> {
@@ -1633,7 +1658,7 @@ fn product_or_env(
 /// Apply `OPV_PRODUCT` to the commands that take a product (never `sync`), and say so on
 /// stderr.
 fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) {
-    let fleet_profile = matches!(loaded, Ok(f) if !f.is_simple());
+    let fleet_profile = loaded.is_ok();
     let env = std::env::var("OPV_PRODUCT").ok();
     let used = match cmd {
         Cmd::Check { product, .. }
@@ -1937,7 +1962,9 @@ fn run(
             deploy_failure = failed;
             Some(runner)
         }
-        (Ok(fleet), Some((env, reach))) => Some(signin::open(fleet, env, &r, reach)?),
+        (Ok(fleet), Some((env, reach))) => {
+            Some(signin::open_targeted(fleet, env, cmd.target(), &r, reach)?)
+        }
         (_, None) if matches!(cmd, Cmd::Doctor { .. }) && run_account.is_some() => {
             Some(signin::EnvRunner::with_account(&r, run_account))
         }
@@ -2289,9 +2316,18 @@ fn run_other(
             env: Some(env),
             product,
             json,
+            target,
             ..
-        } => status::run_scoped(&loaded?, &env, product.as_deref(), r, out, json),
-        Cmd::Plan(a) => sync::plan_scoped(&loaded?, &a.env, a.product.as_deref(), r, out, a.json),
+        } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json),
+        Cmd::Plan(a) => sync::plan_targeted(
+            &loaded?,
+            &a.env,
+            &a.target,
+            a.product.as_deref(),
+            r,
+            out,
+            a.json,
+        ),
         Cmd::Sync(a) => {
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())

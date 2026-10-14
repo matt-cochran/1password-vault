@@ -164,9 +164,8 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
     );
 
     let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
-    assert!(fleet.is_simple());
     assert_eq!(
-        fleet.target_name("staging", crate::domain::SIMPLE_PRODUCT, "JWT_KEY"),
+        fleet.target_name("staging", "staging", "", "JWT_KEY"),
         "JWT_KEY"
     );
 
@@ -204,9 +203,8 @@ fn sectioned_item_writes_a_fleet_file_that_the_loader_accepts() {
     assert!(f.contains("[products.web-app.keys.SESSION_KEY]"), "{f}");
 
     let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
-    assert!(!fleet.is_simple());
     assert_eq!(
-        fleet.target_name("staging", "web-app", "SESSION_KEY"),
+        fleet.target_name("staging", "staging", "web-app", "SESSION_KEY"),
         "FLEET__WEB_APP__SESSION_KEY"
     );
     assert_eq!(
@@ -899,9 +897,10 @@ fn kubernetes_opts() -> Vec<(&'static str, &'static str)> {
 fn loaded_target(dir: &Path) -> &'static str {
     let fleet = config::load(dir.join(FILE_NAME)).unwrap();
     fleet.environments["staging"]
-        .target
-        .as_ref()
-        .map_or("none", |t| t.provider().section())
+        .targets
+        .values()
+        .next()
+        .map_or("none", |t| t.config.provider().section())
 }
 
 #[test]
@@ -1101,7 +1100,10 @@ fn add_env_writes_the_environment_with_its_ids() {
     let run = add_env_with(EXISTING, &staging(), &fleet_fields());
     let env = &run.fleet().environments["staging"];
     assert_eq!(
-        (env.vault_id.as_str(), env.item_id.as_str()),
+        (
+            env.boundaries.values().next().unwrap().vault_id.as_str(),
+            env.boundaries.values().next().unwrap().item_id.as_str()
+        ),
         (VAULT_ID, ITEM_ID)
     );
 }
@@ -1140,7 +1142,7 @@ fn add_env_writes_the_target_options() {
     let mut a = staging();
     a.fields = fly("myapp-staging");
     let run = add_env_with(EXISTING, &a, &fleet_fields());
-    assert!(run.fleet().environments["staging"].target.is_some());
+    assert!(!run.fleet().environments["staging"].targets.is_empty());
 }
 
 #[test]

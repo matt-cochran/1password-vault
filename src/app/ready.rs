@@ -40,9 +40,6 @@ pub struct Inputs<'a> {
     pub account: &'a Report,
     /// One entry per environment, in the order the receipt shows them.
     pub envs: Vec<EnvInput>,
-    /// True under the simple profile (FR-20): product names are omitted from scope and
-    /// labels.
-    pub simple: bool,
     /// The personal keys (FR-55), as (product, key): their findings say "your".
     pub personal: std::collections::BTreeSet<(String, String)>,
     /// Settings health (#92), computed by the caller from the values it read: non-blocking
@@ -360,19 +357,11 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 KeyState::WrongKind => "key_wrong_kind",
                 _ => continue,
             };
-            let label = if inputs.simple {
-                r.key.clone()
-            } else {
-                key_label(&r.product, &r.key)
-            };
-            let (product, verify) = if inputs.simple {
-                (None, format!("opv status {}", env.name))
-            } else {
-                (
-                    Some(r.product.clone()),
-                    format!("opv status {} --product {}", env.name, r.product),
-                )
-            };
+            let label = key_label(&r.product, &r.key);
+            let (product, verify) = (
+                Some(r.product.clone()),
+                format!("opv status {} --product {}", env.name, r.product),
+            );
             out.push(Finding {
                 code: code.into(),
                 scope: Scope {
@@ -396,11 +385,7 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
         let Some(env) = h.environments.first() else {
             continue;
         };
-        let (product, label) = if inputs.simple {
-            (None, h.key.clone())
-        } else {
-            (Some(h.product.clone()), key_label(&h.product, &h.key))
-        };
+        let (product, label) = (Some(h.product.clone()), key_label(&h.product, &h.key));
         out.push(Finding {
             code: h.code.into(),
             scope: Scope {
@@ -588,7 +573,16 @@ pub fn run(
     let envs = ordered
         .into_iter()
         .map(|(name, env)| {
-            let target = env.target();
+            // The environment's only target; several are reported per target in a later
+            // deliverable (FR-56), so they are not read here.
+            let target = match env.targets.len() {
+                1 => env
+                    .targets
+                    .iter()
+                    .next()
+                    .map(|(n, t)| (n.as_str(), t.config.as_ref())),
+                _ => None,
+            };
             let mut fields = Vec::new();
             let rows = super::status::env_rows_keeping(
                 fleet,
@@ -603,7 +597,11 @@ pub fn run(
             }
             EnvInput {
                 name: name.clone(),
-                target: target.map(|t| t.provider().label().to_string()),
+                target: env
+                    .targets
+                    .values()
+                    .next()
+                    .map(|t| t.config.provider().label().to_string()),
                 rows,
                 title: env.title.clone(),
                 audience: env.audience.clone(),
@@ -640,7 +638,6 @@ pub fn run(
             config_source: config_source.map(str::to_string),
             account: &account,
             envs,
-            simple: fleet.is_simple(),
             personal,
             health,
         },

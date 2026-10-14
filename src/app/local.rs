@@ -13,12 +13,6 @@ pub fn select(
     required: bool,
 ) -> Result<Fleet, Error> {
     fleet.environment(env)?;
-    if fleet.is_simple() && product.is_some() {
-        return Err(Error::Config(
-            "--product is not used under the simple profile; run the command without it".into(),
-        )
-        .with_next(super::check_command(fleet, Some(env), None)));
-    }
     // FR-47: a source-only product is never run on its own, so it is not offered by the
     // "one product needs no choosing" shortcut or the available list.
     let available: Vec<&str> = fleet
@@ -29,12 +23,8 @@ pub fn select(
         .collect();
     // One product needs no choosing.
     let only = (available.len() == 1).then(|| available[0]);
-    let product = if fleet.is_simple() {
-        product
-    } else {
-        product.or(only)
-    };
-    if !fleet.is_simple() && required && product.is_none() {
+    let product = product.or(only);
+    if required && product.is_none() {
         let first = available.first().copied();
         return Err(Error::Config(format!(
             "--product is required because this configuration contains multiple products. Choose --product <name> (available: {}).",
@@ -87,21 +77,17 @@ pub fn check(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    let mut selected = select(fleet, env, product, true)?;
-    selected
-        .environments
-        .get_mut(env)
-        .expect("selected env")
-        .target = None;
+    let selected = select(fleet, env, product, true)?;
     // FR-55: a targetless environment's personal keys live in the person's own item. Merge
     // its fields (never a team fallback) before planning, so they appear as ordinary rows;
     // environments without personal keys keep the exact read path they had.
     let mut plan = if personal::declared(fleet, env) {
         let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
-        let read = super::tidy::read(fleet, env, runner)?;
+        let read = super::tidy::read_for(&selected, fleet, env, runner)?;
         let fields = personal::merged_fields(runner, fleet, env, read.fields, &project)?;
         let none = std::collections::BTreeSet::new();
-        let mut plan = super::plan_item(&selected, env, fields, None, &none, &none)?.0;
+        // Planned without a target: check never reaches one.
+        let mut plan = super::plan_item(&selected, env, None, fields, None, &none, &none)?.0;
         plan.tidy = read.changes;
         plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
         plan
@@ -112,7 +98,7 @@ pub fn check(
     let findings = plan.blocking();
     // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
     let link = if findings > 0 {
-        Some(super::item_url(&selected, env, runner)?)
+        super::rows_item_url(&selected, env, &plan.rows, runner)?
     } else {
         None
     };
@@ -123,7 +109,12 @@ pub fn check(
             .rows
             .iter()
             .map(|row| {
-                let name = declared.target_name(&row.product, &row.key);
+                // The environment's first target by name renders the row's name.
+                let name = declared
+                    .targets
+                    .values()
+                    .next()
+                    .map(|t| t.config.env_name(&row.product, &row.key));
                 super::JsonRow {
                     // H1: the item link to fix a blocking row in; IDs only.
                     open_url: link.as_ref().filter(|_| super::is_blocking(row)).cloned(),

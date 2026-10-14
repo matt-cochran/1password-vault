@@ -64,6 +64,11 @@ fn env() -> Environment {
     fleet().environment("prod").unwrap().clone()
 }
 
+/// The prod boundary item the reads address.
+fn at() -> crate::domain::Boundary {
+    env().boundaries.values().next().unwrap().clone()
+}
+
 /// Situations: what the fake `op` answers after the failed item read.
 #[derive(Clone, Copy, Debug)]
 enum S {
@@ -108,7 +113,7 @@ fn fake_op(s: S, ci: bool) -> FakeRunner {
 fn read_fails(p: P, s: S) -> (Error, String, FakeRunner) {
     let h = host(p);
     let r = fake_op(s, h.ci);
-    let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+    let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
     // What the user sees: the message, then its `Next:` line (NR-19).
     let t = crate::error::report(&e, "-", None);
     (e, t, r)
@@ -349,7 +354,7 @@ fn rejected_or_unreachable_credential_is_source_exit_4() {
     ] {
         let h = Host::from_env(&fake);
         let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
-        let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+        let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
         let t = e.to_string();
         assert_eq!(e.exit_code(), 4, "{t}");
         assert!(
@@ -385,7 +390,7 @@ fn connect_item_not_found_is_source_exit_4() {
             ])
             .chain(failed_read(1)),
     );
-    let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+    let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
     // What the user sees: the message, then its `Next:` line (NR-19).
     let t = crate::error::report(&e, "-", None);
     assert_eq!(e.exit_code(), 4, "{t}");
@@ -399,7 +404,7 @@ fn connect_whoami_failing_is_not_auth_with_interactive_command() {
     for shell in ["/bin/bash", "/usr/bin/fish"] {
         let h = Host::from_env(&FakeEnv::new("linux").shell(shell).var("OP_CONNECT_HOST"));
         let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
-        let e = onepassword::read_item_with(&r, &env(), &h).unwrap_err();
+        let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
         let t = e.to_string();
         assert_ne!(e.exit_code(), 7, "{t}");
         assert!(!t.contains("op signin") && !t.contains("eval"), "{t}");
@@ -423,7 +428,7 @@ fn unknown_shell_gets_the_same_login_command() {
     for sh in ["/usr/bin/nu", "/bin/tcsh", "/bin/csh"] {
         let h = Host::from_env(&FakeEnv::new("linux").shell(sh));
         let r = fake_op(S::Expired, false);
-        let t = onepassword::read_item_with(&r, &env(), &h)
+        let t = onepassword::read_item_with(&r, &env(), &at(), &h)
             .unwrap_err()
             .to_string();
         assert!(t.contains("\n  sign in: opv login prod\n"), "{sh}: {t}");

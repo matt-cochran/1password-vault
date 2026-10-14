@@ -20,13 +20,13 @@ fn row(name: &str, state: &'static str, written: Option<&str>) -> HistoryRow {
 
 fn text(rows: &[HistoryRow]) -> String {
     let mut out = Vec::new();
-    report(&mut out, "prod", "Key Vault", "azure", false, rows, false).unwrap();
+    report(&mut out, "prod", "Key Vault", "azure", rows, false).unwrap();
     String::from_utf8(out).unwrap()
 }
 
 fn doc(rows: &[HistoryRow]) -> serde_json::Value {
     let mut out = Vec::new();
-    report(&mut out, "prod", "Key Vault", "azure", false, rows, true).unwrap();
+    report(&mut out, "prod", "Key Vault", "azure", rows, true).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 

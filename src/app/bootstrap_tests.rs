@@ -145,7 +145,15 @@ fn bootstrap_records_the_created_ids_in_the_file() {
     let (_dir, path, op) = workspace();
     run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
     let fleet = crate::config::load(&path).unwrap();
-    assert!(fleet.environments["staging"].vault_id.starts_with("vnew"));
+    assert!(
+        fleet.environments["staging"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .vault_id
+            .starts_with("vnew")
+    );
 }
 
 #[test]
@@ -164,7 +172,14 @@ fn bootstrap_adds_the_declared_fields_to_every_item() {
     let (_dir, path, op) = workspace();
     run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
     let fleet = crate::config::load(&path).unwrap();
-    let item = op.item(&fleet.environments["staging"].item_id);
+    let item = op.item(
+        &fleet.environments["staging"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     assert!(
         item["fields"]
             .as_array()
@@ -282,7 +297,6 @@ fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
             config_source: None,
             account: &account,
             envs,
-            simple: false,
             personal: Default::default(),
             health: Vec::new(),
         },
@@ -305,7 +319,7 @@ fn once_the_owner_fills_the_values_nothing_is_left() {
     run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
     let fleet = crate::config::load(&path).unwrap();
     for env in fleet.environments.values() {
-        let mut item = op.item(&env.item_id);
+        let mut item = op.item(&env.boundaries.values().next().unwrap().item_id);
         for f in item["fields"].as_array_mut().unwrap() {
             if f["label"] == "API_TOKEN" {
                 f["value"] = serde_json::json!("FIXTUREVALUE-token");
@@ -313,7 +327,7 @@ fn once_the_owner_fills_the_values_nothing_is_left() {
         }
         op.items
             .borrow_mut()
-            .retain(|i| i["id"] != env.item_id.as_str());
+            .retain(|i| i["id"] != env.boundaries.values().next().unwrap().item_id.as_str());
         op.items.borrow_mut().push(item);
         op.cache.borrow_mut().clear();
     }
@@ -325,7 +339,14 @@ fn a_created_item_is_tagged_with_its_environment() {
     let (_dir, path, op) = workspace();
     run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
     let fleet = crate::config::load(&path).unwrap();
-    let item = op.item(&fleet.environments["staging"].item_id);
+    let item = op.item(
+        &fleet.environments["staging"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     assert_eq!(item["tags"], serde_json::json!(["opv-env:myapp/staging"]));
 }
 
@@ -390,7 +411,14 @@ fn the_team_item_never_gets_a_personal_field() {
     let (_dir, path, op) = team();
     run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
     let fleet = crate::config::load(&path).unwrap();
-    let item = op.item(&fleet.environments["local"].item_id);
+    let item = op.item(
+        &fleet.environments["local"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     assert!(
         !item["fields"]
             .as_array()
@@ -417,7 +445,13 @@ fn with_state() -> (tempfile::TempDir, std::path::PathBuf, FakeOp, String) {
 fn state_records_the_state_vault() {
     let (_dir, path, _op, _) = with_state();
     let fleet = crate::config::load(&path).unwrap();
-    assert!(fleet.environments["local"].state_vault_id.is_some());
+    assert!(
+        fleet.environments["local"]
+            .targets
+            .values()
+            .next()
+            .is_some()
+    );
 }
 
 #[test]
@@ -427,7 +461,7 @@ fn state_prints_the_least_privilege_deploy_identity() {
     let e = &fleet.environments["local"];
     assert!(out.contains(&format!(
         "--vault {}:read_items --vault {}:read_items,write_items",
-        e.vault_id,
-        e.state_vault_id.as_deref().unwrap()
+        e.boundaries.values().next().unwrap().vault_id,
+        e.targets.values().next().unwrap().state_vault_id.as_str()
     )));
 }

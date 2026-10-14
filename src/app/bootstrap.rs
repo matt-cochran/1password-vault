@@ -281,9 +281,23 @@ pub fn run(
         let title = super::personal::item_title(team, project);
         let item = ensure_item(r, &vault.id, &title, &env_tag(project, env_name))?;
         let mut mine = super::personal::personal_fleet(&fleet, env_name);
+        // Every product's boundary is the personal item here (FR-55).
+        let names: Vec<String> = mine
+            .products
+            .keys()
+            .map(|p| mine.boundary_of(p).to_string())
+            .collect();
         if let Some(e) = mine.environments.get_mut(env_name.as_str()) {
-            e.vault_id = vault.id.clone();
-            e.item_id = item.id.clone();
+            e.boundaries = names
+                .into_iter()
+                .map(|b| {
+                    let at = crate::domain::Boundary {
+                        vault_id: vault.id.clone(),
+                        item_id: item.id.clone(),
+                    };
+                    (b, at)
+                })
+                .collect();
         }
         super::skeleton::run_as(&mine, env_name, r, &mut std::io::sink(), false)?;
         personal_items.push(format!(
@@ -304,11 +318,16 @@ pub fn run(
         .map_err(write_err)?;
         if let Some(env) = &opts.ci_reader {
             let e = fleet.environment(env)?;
-            ci_reader_steps(out, project, env, &e.vault_id)?;
+            // One reader per boundary vault for now (FR-59 computes the exact set later).
+            for b in e.boundaries.values() {
+                ci_reader_steps(out, project, env, &b.vault_id)?;
+            }
         }
         for (env, state_vault) in &state_vaults {
             let e = fleet.environment(env)?;
-            deploy_identity_steps(out, project, env, &e.vault_id, state_vault)?;
+            for b in e.boundaries.values() {
+                deploy_identity_steps(out, project, env, &b.vault_id, state_vault)?;
+            }
         }
         writeln!(out, "Next: opv ready").map_err(write_err)?;
     }

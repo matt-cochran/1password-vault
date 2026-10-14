@@ -5,11 +5,11 @@
 //! or when a secret key is stored as text: the kind check is S5's `WrongKind`. One `op`
 //! call; Fly is not contacted.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::{is_blocking, read_and_plan, row_names, write_err};
-use crate::domain::{Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT};
+use crate::domain::{Fleet, KeyState, Kind, Row};
 use crate::error::Error;
 use crate::runner::CommandRunner;
 
@@ -21,7 +21,7 @@ pub fn run(
 ) -> Result<(), Error> {
     fleet.environment(env_name)?;
     let none = BTreeSet::new();
-    let (plan, _) = read_and_plan(fleet, env_name, r, None, &none, &none)?;
+    let (plan, _) = read_and_plan(fleet, env_name, None, r, None, &none, &none)?;
     let refused = row_names(&plan.rows, refuses);
     if !refused.is_empty() {
         return Err(Error::Policy(
@@ -29,8 +29,6 @@ pub fn run(
         ));
     }
     // Config values are not secret (FR-18); `plan.config` never holds a secret-kind value.
-    // Under the simple profile (FR-20) the export is a flat `KEY -> value` object, with no
-    // product level.
     // M4 (owner ruling): config kept concealed in 1Password is accepted, but its value is
     // never printed.
     let mut config = plan.config.clone();
@@ -40,13 +38,8 @@ pub fn run(
         }
     }
     let plan_config = &config;
-    let empty = BTreeMap::new();
-    let json = if fleet.is_simple() {
-        serde_json::to_string_pretty(plan_config.get(SIMPLE_PRODUCT).unwrap_or(&empty))
-    } else {
-        serde_json::to_string_pretty(plan_config)
-    }
-    .map_err(|_| Error::Config("cannot serialize config export".into()))?;
+    let json = serde_json::to_string_pretty(plan_config)
+        .map_err(|_| Error::Config("cannot serialize config export".into()))?;
     writeln!(out, "{json}").map_err(write_err)
 }
 

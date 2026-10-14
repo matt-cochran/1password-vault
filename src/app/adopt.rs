@@ -13,7 +13,7 @@ use super::write_err;
 use crate::adapters::{onepassword, onepassword_tidy};
 use crate::domain::adopt::{Action, AdoptPlan};
 use crate::domain::convention::{self, KEPT_SECTION, Op, TidyPlan};
-use crate::domain::{Fleet, Kind, SIMPLE_PRODUCT, SecretValue, key_label};
+use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label};
 use crate::error::{Code, Error};
 use crate::ports::Ports;
 use crate::runner::CommandRunner;
@@ -31,7 +31,7 @@ pub enum Source {
 #[derive(Debug, Clone)]
 pub struct Opts {
     pub source: Source,
-    /// `product/KEY` (or `KEY` under the simple profile) to replace a differing value.
+    /// `product/KEY` to replace a differing value.
     pub replace: Vec<String>,
     /// Immutable keys `--replace` may change.
     pub rotate: Vec<String>,
@@ -41,7 +41,7 @@ pub struct Opts {
     pub json: bool,
 }
 
-/// `product/KEY` (or `KEY`) entries as `(product, key)` pairs, each declared.
+/// `product/KEY` entries as `(product, key)` pairs, each declared.
 fn pairs(
     fleet: &Fleet,
     entries: &[String],
@@ -52,7 +52,6 @@ fn pairs(
         .map(|e| {
             let (p, k) = match e.split_once('/') {
                 Some((p, k)) => (p.to_string(), k.to_string()),
-                None if fleet.is_simple() => (SIMPLE_PRODUCT.to_string(), e.clone()),
                 None => {
                     return Err(Error::Config(
                         format!("{flag} {e:?}: write product/KEY").into(),
@@ -84,12 +83,14 @@ fn read_source(
     match source {
         Source::Dotenv(path) => super::setup::read_legacy(path),
         Source::Target => {
-            let (t, ports) = super::open_target(fleet, env_name, r)?;
+            // The environment's only target (several need --target, a later deliverable).
+            let target = super::resolve_target(fleet, env_name, &[], "adopt")?;
+            let (t, ports) = super::open_target(fleet, env_name, &target, r)?;
             let label = t.provider().label();
             match &ports {
                 Ports::Pinned { store, .. } => {
                     let mut found = BTreeMap::new();
-                    for name in super::managed_names(fleet, env_name)? {
+                    for name in super::managed_names(fleet, env_name, &target)? {
                         if let Some((value, _)) = store.read(&name)? {
                             found.insert(name, value);
                         }
@@ -141,7 +142,7 @@ pub fn run(
         opts.apply,
         r,
     )?;
-    print(out, env_name, opts, &plan, fleet.is_simple())
+    print(out, env_name, opts, &plan)
 }
 
 /// The three key sets of `opv adopt`: `--replace`, `--rotate`, `--skip`.
@@ -207,21 +208,45 @@ pub fn plan_and_write(
     Ok(plan)
 }
 
-/// Write `plan.writes` in one item edit, keeping a replaced value in `opv · kept`, then read
-/// the item back and verify every written field holds what was written.
+/// Write `plan.writes` in one item edit per boundary item (FR-57), each value into its
+/// key's boundary, keeping a replaced value in `opv · kept`, then read each item back and
+/// verify every written field holds what was written.
 fn write(
     fleet: &Fleet,
     env: &crate::domain::Environment,
     plan: &AdoptPlan,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
-    let item = onepassword::read_whole_fresh(r, env)?;
+    let mut by_boundary: BTreeMap<&str, Vec<&(String, String, SecretValue)>> = BTreeMap::new();
+    for w in &plan.writes {
+        by_boundary
+            .entry(fleet.boundary_of(&w.0))
+            .or_default()
+            .push(w);
+    }
+    for (name, writes) in by_boundary {
+        let b = fleet.boundary(&env.name, &writes[0].0)?;
+        let part = super::tidy::in_boundary(fleet, name);
+        write_item(&part, env, b, &writes, r)?;
+    }
+    Ok(())
+}
+
+/// [`write`] into one boundary item `b`, holding `fleet`'s products.
+fn write_item(
+    fleet: &Fleet,
+    env: &crate::domain::Environment,
+    b: &Boundary,
+    writes: &[&(String, String, SecretValue)],
+    r: &dyn CommandRunner,
+) -> Result<(), Error> {
+    let item = onepassword::read_whole_fresh(r, env, b)?;
     let (layout, _) = onepassword_tidy::parse(item.raw())?;
     let res = convention::resolve(&layout, fleet);
     let date = super::tidy::today();
     let mut ops = Vec::new();
     let mut kept = false;
-    for (product, key, value) in &plan.writes {
+    for (product, key, value) in writes.iter().copied() {
         let id = (product.clone(), key.clone());
         let kind = fleet.products[product].keys[key].kind;
         match res.chosen.get(&id) {
@@ -245,7 +270,7 @@ fn write(
                 });
             }
             None => ops.push(Op::Add {
-                section: (product != SIMPLE_PRODUCT).then(|| product.clone()),
+                section: Some(product.clone()),
                 label: key.clone(),
                 concealed: kind == Kind::Secret,
                 value: Some(SecretValue::new(value.expose().to_string())),
@@ -258,14 +283,14 @@ fn write(
         kept,
     };
     let template = onepassword_tidy::apply(item.raw(), &tidy)?;
-    onepassword_tidy::write(r, env, &template)?;
+    onepassword_tidy::write(r, env, b, &template)?;
     // Verify by reading back: every written field holds exactly what was written.
-    let after = onepassword::read_whole_fresh(r, env)?;
+    let after = onepassword::read_whole_fresh(r, env, b)?;
     let (layout, _) = onepassword_tidy::parse(after.raw())?;
     let res = convention::resolve(&layout, fleet);
-    let missing: Vec<String> = plan
-        .writes
+    let missing: Vec<String> = writes
         .iter()
+        .copied()
         .filter(|(p, k, v)| {
             res.chosen
                 .get(&(p.clone(), k.clone()))
@@ -288,15 +313,8 @@ fn write(
 
 /// Text: a count line, one line per row (names and the action word), the next step.
 /// JSON: `{environment, applied, rows: [{found, product, key, action, rule}], counts, next}`.
-fn print(
-    out: &mut dyn Write,
-    env_name: &str,
-    opts: &Opts,
-    plan: &AdoptPlan,
-    simple: bool,
-) -> Result<(), Error> {
+fn print(out: &mut dyn Write, env_name: &str, opts: &Opts, plan: &AdoptPlan) -> Result<(), Error> {
     let label = |p: &Option<String>, k: &Option<String>| match (p, k) {
-        (Some(p), Some(k)) if simple || p == SIMPLE_PRODUCT => k.clone(),
         (Some(p), Some(k)) => key_label(p, k),
         _ => "-".into(),
     };

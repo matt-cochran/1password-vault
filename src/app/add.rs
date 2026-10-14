@@ -106,7 +106,7 @@ fn run_inner(
             .or_next(|| "opv config edit".into()),
         other => other,
     })?;
-    let fleet_profile = !fleet.is_simple();
+    let fleet_profile = true;
     let (product, key) = split_name(&args.name, fleet_profile, &fleet)?;
     let mut doc = ConfigDoc::parse(original)?;
     let envs = environments(&args.envs, &doc, &fleet)?;
@@ -119,7 +119,7 @@ fn run_inner(
         let existing = doc.key_environments(product, key);
         let declared = fleet
             .products
-            .get(product.unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .get(product.unwrap_or_default())
             .and_then(|p| p.keys.get(key))
             .map(|k| kind_word(k.kind))
             .unwrap_or("secret");

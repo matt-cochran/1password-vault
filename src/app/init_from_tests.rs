@@ -67,7 +67,14 @@ fn written(dir: &Path) -> crate::domain::Fleet {
 /// The value of the unsectioned field `label` in the item the configuration names.
 fn value_of(op: &FakeOp, dir: &Path, label: &str) -> Option<String> {
     let fleet = written(dir);
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     item["fields"]
         .as_array()?
         .iter()
@@ -192,12 +199,7 @@ fn apply_succeeds_on_a_new_project() {
 fn apply_declares_the_keys_in_the_configuration() {
     let (d, path) = standard();
     let _ = apply(d.path(), &path);
-    assert_eq!(
-        written(d.path()).products[crate::domain::SIMPLE_PRODUCT]
-            .keys
-            .len(),
-        3
-    );
+    assert_eq!(written(d.path()).products[""].keys.len(), 3);
 }
 
 #[test]
@@ -205,10 +207,7 @@ fn apply_declares_the_override_kind() {
     let (d, path) = standard();
     let _ = apply(d.path(), &path);
     let fleet = written(d.path());
-    assert_eq!(
-        fleet.products[crate::domain::SIMPLE_PRODUCT].keys["SIGNUP_POLICY"].kind,
-        Kind::Config
-    );
+    assert_eq!(fleet.products[""].keys["SIGNUP_POLICY"].kind, Kind::Config);
 }
 
 #[test]

@@ -203,7 +203,7 @@ mod tests {
     fn recipe_creates_valid_targetless_manifest_with_guidance() {
         let recipe = Recipe::parse(&text()).unwrap();
         let config = config::parse(&recipe.manifest("vault-id", "item-id").unwrap()).unwrap();
-        assert!(config.environment("dev").unwrap().target().is_none());
+        assert!(config.environment("dev").unwrap().targets.is_empty());
         assert!(
             config.products[""].keys["API_KEY"]
                 .guidance

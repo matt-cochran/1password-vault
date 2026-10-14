@@ -150,7 +150,7 @@ fn run_request_on(
     let local_only = env.is_some()
         && config
             .as_ref()
-            .is_ok_and(|f| f.environments.values().all(|e| e.target().is_none()));
+            .is_ok_and(|f| f.environments.values().all(|e| e.targets.is_empty()));
     let scope = Scope {
         env,
         product,
@@ -393,7 +393,7 @@ fn run_on_with(
             providers_in_use(f),
             f.environments
                 .iter()
-                .filter(|(_, e)| e.target().is_none())
+                .filter(|(_, e)| e.targets.is_empty())
                 .map(|(n, _)| n.clone())
                 .collect::<Vec<_>>(),
         )
@@ -447,8 +447,8 @@ fn run_on_with(
             row.excerpt = failure.excerpt.map(|x| x.render());
         }
         if let Some(f) = &fleet {
-            for t in f.environments.values().filter_map(|e| e.target()) {
-                let checks = crate::provider::deploy_provider(t).doctor_checks();
+            for t in f.environments.values().flat_map(|e| e.targets.values()) {
+                let checks = crate::provider::deploy_provider(t.config.as_ref()).doctor_checks();
                 needs_deploy.extend(checks.iter().skip(1));
             }
         }
@@ -620,9 +620,9 @@ fn item_check(
     r: &dyn CommandRunner,
     report: &mut Report,
 ) {
-    let Ok(env) = fleet.environment(env_name) else {
+    if fleet.environment(env_name).is_err() {
         return report.skip(ITEM_CHECK, "not checked (undefined environment)".into());
-    };
+    }
     let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
     // Tolerant and never written, whoever runs doctor (#113): a layout a person's run would
     // tidy is noted with the explicit `opv tidy <env>`.
@@ -630,9 +630,7 @@ fn item_check(
         Ok(i) => i,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
-    let where_ = if fleet.is_simple() {
-        String::new()
-    } else if sections.len() == 1 {
+    let where_ = if sections.len() == 1 {
         format!(" in section {}", sections.iter().next().expect("one"))
     } else {
         format!(
@@ -640,18 +638,22 @@ fn item_check(
             sections.iter().cloned().collect::<Vec<_>>().join(", ")
         )
     };
+    // Every boundary item the environment's products need (FR-57), `vault/item` each.
+    let items: Vec<String> = match super::tidy::boundaries_needed(fleet, env_name) {
+        Ok(b) => b
+            .values()
+            .map(|b| format!("{}/{}", b.vault_id, b.item_id))
+            .collect(),
+        Err(e) => return report.push(ITEM_CHECK, Err(e)),
+    };
     let readable = format!(
-        "{}/{} readable ({}{where_})",
-        env.vault_id,
-        env.item_id,
+        "{} readable ({}{where_})",
+        items.join(", "),
         super::plural(item.fields.len(), "field", "fields")
     );
-    let mut selected = fleet.clone();
-    for e in selected.environments.values_mut() {
-        e.target = None;
-    }
     let none = BTreeSet::new();
-    let plan = match super::plan_item(&selected, env_name, item.fields, None, &none, &none) {
+    // Planned without a target: the item check never reaches one.
+    let plan = match super::plan_item(fleet, env_name, None, item.fields, None, &none, &none) {
         Ok((plan, _)) => plan,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
@@ -673,7 +675,6 @@ fn item_check(
     }
     let check = match product {
         Some(p) => format!("opv check {env_name} --product {p}"),
-        None if fleet.is_simple() => format!("opv check {env_name}"),
         None => {
             let first = plan
                 .rows
@@ -718,7 +719,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
         .map(|(name, env, fields)| EnvValues {
             name,
             title: env.title.as_deref(),
-            deployed: env.target().is_some(),
+            deployed: !env.targets.is_empty(),
             fields,
         })
         .collect();
@@ -745,11 +746,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
     for h in &findings {
         text.push_str(&format!("\n  {}: {}", h.code, h.message));
     }
-    let label = if fleet.is_simple() {
-        first.key.clone()
-    } else {
-        key_label(&first.product, &first.key)
-    };
+    let label = key_label(&first.product, &first.key);
     let env = first.environments.first().map_or("<env>", String::as_str);
     report.warn(
         SETTINGS_CHECK,
@@ -764,7 +761,12 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
 fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     let mut used: Vec<&dyn TargetConfig> = Vec::new();
     let store_of = |t: &dyn TargetConfig| t.secrets_in().map(|s| s.name().to_string());
-    for t in f.environments.values().filter_map(|e| e.target()) {
+    for t in f
+        .environments
+        .values()
+        .flat_map(|e| e.targets.values())
+        .map(|t| t.config.as_ref())
+    {
         if !used.iter().any(|u| {
             u.provider().section() == t.provider().section() && store_of(*u) == store_of(t)
         }) {
@@ -779,19 +781,13 @@ fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     used
 }
 
-/// `valid (N environments, M products)`, or under the simple profile, whose one product
-/// is hidden (FR-20), `valid (N environments, M keys)`.
+/// `valid (N environments, M products)`.
 fn config_summary(f: &Fleet) -> String {
     let envs = super::plural(f.environments.len(), "environment", "environments");
-    if f.is_simple() {
-        let keys: usize = f.products.values().map(|p| p.keys.len()).sum();
-        format!("valid ({envs}, {})", super::plural(keys, "key", "keys"))
-    } else {
-        format!(
-            "valid ({envs}, {})",
-            super::plural(f.products.len(), "product", "products")
-        )
-    }
+    format!(
+        "valid ({envs}, {})",
+        super::plural(f.products.len(), "product", "products")
+    )
 }
 
 /// The fix-and-re-run step for a failing check without a remediation of its own.
@@ -1609,7 +1605,7 @@ mod tests {
     fn scoped_development_doctor_never_queries_fly_in_mixed_file() {
         let mut f = fleet();
         let mut env = f.environments["staging"].clone();
-        env.target = None;
+        env.targets.clear();
         f.environments.insert("dev".into(), env);
         let r = FakeRunner::new(good().into_iter().take(2).chain([item(&complete_fields())]));
         let mut out = Vec::new();

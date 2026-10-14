@@ -361,7 +361,7 @@ fn another_target_cannot_reuse_the_revision() {
          fly.app = \"another-app\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n[products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
     ))
     .unwrap();
-    env.target = other.environments["prod"].target.clone();
+    env.targets = other.environments["prod"].targets.clone();
     let doc = verify_doc(&w, &moved);
     assert_eq!(state_of(&doc, "api"), "not_delivered");
 }
@@ -429,12 +429,4 @@ fn nothing_shown_holds_a_value_or_a_digest() {
         !all.contains(MARK) && digests.iter().all(|d| !all.contains(d.as_str())),
         "{all}"
     );
-}
-
-#[test]
-fn verify_without_a_state_vault_names_bootstrap() {
-    let (w, mut fleet) = world();
-    fleet.environments.get_mut("prod").unwrap().state_vault_id = None;
-    let err = verify(&fleet, "prod", None, None, &w, true, &mut Vec::new()).unwrap_err();
-    assert_eq!(err.next_step(), Some("opv bootstrap --state prod"));
 }

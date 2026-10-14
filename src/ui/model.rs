@@ -195,12 +195,6 @@ impl Snapshot {
                     keys: keys_of(&p["keys"]),
                 });
             }
-        } else if config.get("keys").is_some() {
-            products.push(ProductView {
-                name: crate::domain::SIMPLE_PRODUCT.to_string(),
-                source_only: false,
-                keys: keys_of(&config["keys"]),
-            });
         }
         self.products = products;
     }
@@ -245,11 +239,6 @@ impl Snapshot {
         for r in doc["rows"].as_array().into_iter().flatten() {
             let (Some(product), Some(key)) = (s(&r["product"]), s(&r["key"])) else {
                 continue;
-            };
-            let product = if product.is_empty() {
-                crate::domain::SIMPLE_PRODUCT.to_string()
-            } else {
-                product
             };
             self.cells.insert(
                 (env.to_string(), product, key),

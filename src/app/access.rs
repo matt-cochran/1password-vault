@@ -33,13 +33,16 @@ pub fn run(
     ordered.sort_by_key(|(name, env)| (env.order.unwrap_or(i64::MAX), (*name).clone()));
     let mut envs = Vec::new();
     for (name, env) in ordered {
-        let users = onepassword_init::vault_users(r, &env.vault_id, &Host::detect)?;
-        envs.push(analyse(
-            name,
-            &env.vault_id,
-            env.target().is_some(),
-            users.as_ref(),
-        ));
+        // One entry per boundary vault (FR-57); per-boundary access is FR-59's deliverable.
+        for b in env.boundaries.values() {
+            let users = onepassword_init::vault_users(r, &b.vault_id, &Host::detect)?;
+            envs.push(analyse(
+                name,
+                &b.vault_id,
+                !env.targets.is_empty(),
+                users.as_ref(),
+            ));
+        }
     }
     let project = super::personal::project_name(r, &std::env::current_dir().unwrap_or_default());
     let found = findings(&project, &envs);

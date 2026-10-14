@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use super::onepassword::{Session, diagnose, failed_op_error, json_error, read_op, session_error};
 use crate::config;
-use crate::domain::Environment;
+use crate::domain::{Boundary, Environment};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::{CommandRunner, Output, status_text};
@@ -187,15 +187,14 @@ pub fn read_field_shapes(
     ];
     let Output { status, stdout } = read_op(r, &args, host)?;
     if status != 0 {
-        let env = Environment {
+        let b = Boundary {
             vault_id: vault_id.to_string(),
             item_id: item_id.to_string(),
-            target: None,
-            ..Default::default()
         };
         return Err(failed_op_error(
             r,
-            &env,
+            &Environment::default(),
+            &b,
             host,
             &format!("op item get failed ({})", status_text(status)),
             "grant this identity access to the vault",

@@ -185,10 +185,9 @@ fn run_names_the_personal_key_and_bootstrap_when_the_personal_item_is_missing() 
 #[test]
 fn reference_points_at_the_personal_item() {
     let f = personal_fleet();
-    let env = Environment {
+    let env = crate::domain::Boundary {
         vault_id: "vpriv0000000000000000000001".into(),
         item_id: "ipriv0000000000000000000001".into(),
-        ..f.environments["dev"].clone()
     };
     let spec = &f.products["api"].keys["OPENAI_API_KEY"];
     assert_eq!(

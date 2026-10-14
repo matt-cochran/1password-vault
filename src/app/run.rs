@@ -15,16 +15,15 @@ use std::io;
 
 use super::personal;
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, KeySpec, SIMPLE_PRODUCT, rules};
+use crate::domain::{Fleet, KeySpec, rules};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
 const OP: &str = "op";
 
-/// `run <env> [--product <p>] -- <cmd>`: the fleet profile needs `--product`; the simple
-/// profile (FR-20) takes none and passes every declared key, referenced as an unsectioned
-/// field (`KEY=op://<vault_id>/<item_id>/<KEY>`). Both errors happen before any call.
+/// `run <env> --product <p> -- <cmd>`: `--product` is required; without it the error lists
+/// the runnable products, before any call.
 pub fn run_for(
     fleet: &Fleet,
     env_name: &str,
@@ -32,9 +31,9 @@ pub fn run_for(
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
-    match (fleet.is_simple(), product) {
-        (false, Some(p)) => run(fleet, env_name, p, command, runner),
-        (false, None) => {
+    match product {
+        Some(p) => run(fleet, env_name, p, command, runner),
+        None => {
             // FR-47: a source-only product is never run on its own, so it is not offered.
             let available: Vec<&str> = fleet
                 .products
@@ -52,11 +51,6 @@ pub fn run_for(
                 available.first().copied(),
             )))
         }
-        (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
-        (true, Some(_)) => Err(Error::Config(
-            "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
-        )
-        .with_next(super::check_command(fleet, Some(env_name), None))),
     }
 }
 
@@ -138,20 +132,17 @@ pub fn run(
     }
     let refs: Vec<(&str, String)> = selected
         .iter()
-        .map(|(key, spec)| {
+        .map(|(key, spec)| -> Result<(&str, String), Error> {
             // FR-55: a personal key references the person's own item, never the team item.
             if personal::is_personal(fleet, spec) {
                 let pe = personal_env.as_ref().expect("located above");
-                return (key.as_str(), personal::reference(pe, product, key, spec));
+                return Ok((key.as_str(), personal::reference(pe, product, key, spec)));
             }
             // A shared key (FR-45) is exported under its own name, referencing its source's
-            // field in the same item.
+            // field in the source's boundary item (FR-57).
             let (fp, fk) = spec.source().unwrap_or((product, key));
-            let field = if fp == SIMPLE_PRODUCT {
-                fk.to_string()
-            } else {
-                format!("{fp}/{fk}")
-            };
+            let field = format!("{fp}/{fk}");
+            let b = fleet.boundary(env_name, fp)?;
             // The field's key: the source's for a shared key (FR-45).
             let id = (fp.to_string(), fk.to_string());
             // Read-only and not yet normalized in 1Password (FR-43): still the reference, so
@@ -179,10 +170,10 @@ pub fn run(
             let reference = by_id
                 .and_then(|m| m.get(&id))
                 .cloned()
-                .unwrap_or_else(|| format!("op://{}/{}/{field}", env.vault_id, env.item_id));
-            (key.as_str(), reference)
+                .unwrap_or_else(|| format!("op://{}/{}/{field}", b.vault_id, b.item_id));
+            Ok((key.as_str(), reference))
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
     let mut args: Vec<&str> = vec!["run", "--"];

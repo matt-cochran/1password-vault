@@ -15,7 +15,7 @@
 use std::io::Write;
 
 use super::{kind_label, suggest, write_err};
-use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
+use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, key_label};
 use crate::domain::{Fleet, rules};
 use crate::error::{Code, Error};
 
@@ -74,38 +74,10 @@ pub(crate) fn locate<'a>(
     Ok((t.product.to_string(), t.key.to_string(), env_name))
 }
 
-/// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
-/// under the simple profile (FR-20). P8: a bare `<KEY>` under the fleet profile resolves to
-/// the one product that declares it, or lists every product that does; a `<product>/<KEY>`
-/// under the simple profile names the bare key; an unknown name suggests close declared
-/// names. Configuration only: names, never values.
+/// Resolve the target to a declared key: `<product>/<key>`. P8: a bare `<KEY>` resolves to
+/// the one product that declares it, or lists every product that does; an unknown name
+/// suggests close declared names. Configuration only: names, never values.
 fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
-    if fleet.is_simple() {
-        let keys = fleet.products.get(SIMPLE_PRODUCT).map(|p| &p.keys);
-        let names = || keys.into_iter().flat_map(|k| k.keys().map(String::as_str));
-        if let Some((_, key)) = target.split_once('/') {
-            let close: Vec<&str> = if keys.is_some_and(|k| k.contains_key(key)) {
-                vec![key]
-            } else {
-                suggest::close(key, names())
-            };
-            return Err(did_you_mean(
-                format!("explain expects <KEY> under the simple profile, got {target:?}"),
-                &close,
-            ));
-        }
-        let Some((key, spec)) = keys.and_then(|k| k.get_key_value(target)) else {
-            return Err(did_you_mean(
-                format!("undeclared key {target:?}"),
-                &suggest::close(target, names()),
-            ));
-        };
-        return Ok(Target {
-            product: SIMPLE_PRODUCT,
-            key,
-            spec,
-        });
-    }
     let Some((product, key)) = target.split_once('/') else {
         return resolve_bare(fleet, target);
     };
@@ -245,14 +217,9 @@ fn explain_command(fleet: &Fleet, label: &str, env: Option<&str>) -> String {
     if fleet.environments.len() <= 1 {
         return format!("opv explain {label}");
     }
-    let (product, key) = match label.split_once('/') {
-        Some((p, k)) => (p, k),
-        None => (SIMPLE_PRODUCT, label),
-    };
-    let declared = fleet
-        .products
-        .get(product)
-        .and_then(|p| p.keys.get(key))
+    let declared = label
+        .split_once('/')
+        .and_then(|(product, key)| fleet.products.get(product)?.keys.get(key))
         .and_then(|spec| spec.environments.first());
     match declared.or_else(|| fleet.environments.keys().next()) {
         Some(e) => format!("opv explain {label} --env {e}"),
@@ -332,9 +299,13 @@ fn explain_in(
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
-    let config_lines = env.target().and_then(|t| t.explain_config(product, key));
-    let delivered = fleet.delivers(env_name, product);
-    let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
+    // The environment's first target by name (`explain` answers per target in a later
+    // deliverable, FR-56).
+    let on = env.targets.iter().next();
+    let config_lines = on.and_then(|(_, t)| t.config.explain_config(product, key));
+    let delivered = on.is_some_and(|(n, _)| fleet.delivers(env_name, n, product));
+    let target_lines: Vec<(String, String)> = match (spec.kind, on.map(|(_, t)| t.config.as_ref()))
+    {
         // A run-only environment names no provider (P4).
         (_, None) => vec![("target".into(), "none (run-only)".into())],
         // FR-47, FR-48: read and checked, never written to the target.
@@ -373,7 +344,6 @@ fn explain_in(
     } else {
         spec.guidance.as_str()
     };
-    // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
     let required_here = rules::applies(spec, env_name, env, product);
     // A shared key (FR-45) has no field: its reference is its source's field.
@@ -381,6 +351,8 @@ fn explain_in(
         .source()
         .map(|(p, k)| (p, k, &fleet.products[p].keys[k]));
     let field_label = source.map_or_else(|| label.clone(), |(p, k, _)| key_label(p, k));
+    // The boundary item holding the field (FR-57): the source's, for a shared key.
+    let item = fleet.boundary(env_name, source.map_or(product, |(p, _, _)| p))?;
     let shared_by: Vec<String> = fleet
         .shared_by(env_name, product, key)
         .iter()
@@ -392,12 +364,12 @@ fn explain_in(
             "environment": env_name,
             "product": super::json_product(product),
             "key": key,
-            "reference": format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
+            "reference": format!("op://{}/{}/{field_label}", item.vault_id, item.item_id),
             "kind": kind_label(spec.kind),
             "field": field,
             // The same `target_name` as a status/plan/check row; the provider's lines are
             // `target_details`, since a row's `target` is a state word (A6).
-            "target_name": env.target_name(product, key),
+            "target_name": on.map(|(_, t)| t.config.env_name(product, key)),
             "target_details": target_lines
                 .iter()
                 .map(|(l, v)| serde_json::json!({"label": l, "value": v}))
@@ -406,7 +378,7 @@ fn explain_in(
             "immutable": spec.immutable,
             "guidance": (!spec.guidance.is_empty()).then_some(spec.guidance.as_str()),
             "required_here": required_here,
-            "inspect": inspect_command(&env.item_id, &env.vault_id),
+            "inspect": inspect_command(&item.item_id, &item.vault_id),
             // FR-45: the key whose field holds this one's value, and the keys reading this one.
             "shared_from": source.map(|_| field_label.clone()),
             "shared_by": shared_by,
@@ -416,7 +388,7 @@ fn explain_in(
     let mut rows: Vec<(String, String)> = vec![
         (
             "reference".into(),
-            format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
+            format!("op://{}/{}/{field_label}", item.vault_id, item.item_id),
         ),
         (
             "kind".into(),
@@ -465,7 +437,7 @@ fn explain_in(
     }
     rows.push((
         "inspect".into(),
-        inspect_command(&env.item_id, &env.vault_id),
+        inspect_command(&item.item_id, &item.vault_id),
     ));
     // H1: the command that opens the item in 1Password, where the value is typed.
     rows.push(("open".into(), format!("opv open {label} --env {env_name}")));

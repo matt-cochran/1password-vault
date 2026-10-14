@@ -69,7 +69,13 @@ fn account_is_not_added_under_a_service_account() {
     let r = FakeRunner::new([complete_item()]);
     let ci = Host::from_env(&FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"));
     let env_runner = open_on(&fl, "prod", &r, Reach::Store, &|| ci).unwrap();
-    crate::adapters::onepassword::read_item(&env_runner, fl.environment("prod").unwrap()).unwrap();
+    let prod = fl.environment("prod").unwrap();
+    crate::adapters::onepassword::read_item(
+        &env_runner,
+        prod,
+        prod.boundaries.values().next().unwrap(),
+    )
+    .unwrap();
     assert_eq!(env_of(&r.calls.borrow()[0], "OP_ACCOUNT"), None);
 }
 
@@ -179,7 +185,13 @@ fn doctor_runner_keeps_the_account_after_a_failed_deploy_sign_in() {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)]), complete_item()]);
     let (runner, _) = open_for_doctor_on(&fl, "prod", &r, &linux);
-    crate::adapters::onepassword::read_item(&runner, fl.environment("prod").unwrap()).unwrap();
+    let prod = fl.environment("prod").unwrap();
+    crate::adapters::onepassword::read_item(
+        &runner,
+        prod,
+        prod.boundaries.values().next().unwrap(),
+    )
+    .unwrap();
     assert_eq!(env_of(&r.calls.borrow()[1], "OP_ACCOUNT"), Some(ACCOUNT));
 }
 
@@ -209,7 +221,15 @@ environments = ["dev"]
 "#,
     )
     .unwrap();
-    let target = fl.environment("dev").unwrap().target().unwrap();
+    let target = fl
+        .environment("dev")
+        .unwrap()
+        .targets
+        .values()
+        .next()
+        .unwrap()
+        .config
+        .as_ref();
     assert_eq!(crate::provider::deploy_provider(target).section(), "azure");
 }
 

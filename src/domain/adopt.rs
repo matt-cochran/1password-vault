@@ -115,12 +115,17 @@ fn declared_for(fleet: &Fleet, env_name: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Map a found name to a declared key (FR-53): the rendered target name first, else the
-/// bare key name; several bare matches are ambiguous, none is not-declared.
+/// Map a found name to a declared key (FR-53): a name one of the environment's targets
+/// renders first, else the bare key name; several bare matches are ambiguous, none is
+/// not-declared.
 fn map_name(env: &Environment, declared: &[(String, String)], name: &str) -> Mapped {
     let target: Vec<&(String, String)> = declared
         .iter()
-        .filter(|(p, k)| env.target_name(p, k).as_deref() == Some(name))
+        .filter(|(p, k)| {
+            env.targets
+                .values()
+                .any(|t| t.config.env_name(p, k) == name)
+        })
         .collect();
     match target.as_slice() {
         [one] => return Mapped::Key(one.0.clone(), one.1.clone()),

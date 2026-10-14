@@ -359,7 +359,18 @@ pub fn run(
     if output.exists() {
         let existing = config::load(&output)?;
         let env = existing.environment(&recipe.environment)?;
-        config_compatible(&output, &recipe.manifest(&env.vault_id, &env.item_id)?)?;
+        // The recipe writes one item (its one boundary); compare against the first recorded.
+        let at = env.boundaries.values().next().ok_or_else(|| {
+            Error::Config(
+                format!(
+                    "environment {} in {} records no boundary; next: opv bootstrap",
+                    recipe.environment,
+                    output.display()
+                )
+                .into(),
+            )
+        })?;
+        config_compatible(&output, &recipe.manifest(&at.vault_id, &at.item_id)?)?;
     }
     ui.show(&format!("\n{}\nWe will save your existing settings in 1Password and prepare local commands.\nNo infrastructure will be applied or deployed.\n", recipe.title))?;
     let vaults = prepare(account, backend, ui)?;

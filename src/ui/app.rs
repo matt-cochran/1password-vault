@@ -319,11 +319,7 @@ impl App {
             }
             Key::Char('+') => {
                 let envs: Vec<String> = self.snap.envs.iter().map(|e| e.key.clone()).collect();
-                let fleet = !self
-                    .snap
-                    .products
-                    .iter()
-                    .any(|p| p.name == crate::domain::SIMPLE_PRODUCT);
+                let fleet = true;
                 let product = match &self.screen {
                     Screen::Product(p) => Some(p.clone()),
                     Screen::Key { product, .. } => Some(product.clone()),
@@ -436,13 +432,9 @@ impl App {
         Some(Effect::None)
     }
 
-    /// `product/KEY`, or `KEY` for the simple profile's product.
+    /// `product/KEY`.
     pub fn label(&self, product: &str, key: &str) -> String {
-        if product == crate::domain::SIMPLE_PRODUCT {
-            key.to_string()
-        } else {
-            format!("{product}/{key}")
-        }
+        crate::domain::key_label(product, key)
     }
 
     /// What `o` runs on the key screen of `product/key`: `opv open` in the first

@@ -32,12 +32,30 @@ pub fn run_as(
     json: bool,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
+    // One write per boundary item the environment's products need (FR-57), each with only
+    // the products whose values it holds.
+    let mut missing = Vec::new();
+    for (name, b) in super::tidy::boundaries_needed(fleet, env_name)? {
+        let part = super::tidy::in_boundary(fleet, &name);
+        missing.extend(skeleton_item(&part, env, b, env_name, r)?);
+    }
+    print_added(out, env_name, &missing, json)
+}
+
+/// [`run_as`] on one boundary item `b`, holding `fleet`'s products: the fields it added.
+fn skeleton_item(
+    fleet: &Fleet,
+    env: &crate::domain::Environment,
+    b: &crate::domain::Boundary,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<Vec<(String, String, Kind)>, Error> {
     // The tolerant reader (FR-43): a field opv would read for a key (another label
     // spelling, a wrong section, another type, a duplicate) counts as present, so no
     // second field is added beside it, and an item the strict reader refuses still works.
     // The read the write is built from bypasses op's cache (C1): a cached copy would put
     // stale values over a newer edit.
-    let item = onepassword::read_whole_fresh(r, env)?;
+    let item = onepassword::read_whole_fresh(r, env, b)?;
     // M2: the project manifest (FR-44) holds the configuration; it never gets key fields.
     if super::tidy::is_manifest(item.raw()) {
         return Err(Error::Policy(
@@ -68,7 +86,7 @@ pub fn run_as(
         .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
         .collect();
     if !missing.is_empty() {
-        let written = onepassword::write_skeleton(r, env, &item, &missing)?;
+        let written = onepassword::write_skeleton(r, env, b, &item, &missing)?;
         // I5: one version after the read it was built from, or another edit landed with it.
         if let (Some(v), Some(w)) = (item.version, written)
             && w != v + 1
@@ -81,6 +99,16 @@ pub fn run_as(
             ));
         }
     }
+    Ok(missing)
+}
+
+/// The fields `run_as` added, as lines or (`json`) one document.
+fn print_added(
+    out: &mut dyn Write,
+    env_name: &str,
+    missing: &[(String, String, Kind)],
+    json: bool,
+) -> Result<(), Error> {
     if json {
         let added: Vec<serde_json::Value> = missing
             .iter()
@@ -103,7 +131,7 @@ pub fn run_as(
         writeln!(out, "nothing to add: every declared field exists").map_err(write_err)?;
         return Ok(());
     }
-    for (product, key, kind) in &missing {
+    for (product, key, kind) in missing {
         writeln!(
             out,
             "added {} ({}, empty)",

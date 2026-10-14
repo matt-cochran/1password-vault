@@ -41,7 +41,16 @@ use crate::adapters::registry;
 use crate::config;
 use crate::config_edit::{self, ConfigDoc};
 use crate::config_store::ConfigStore;
-use crate::domain::{Kind, Profile};
+use crate::domain::Kind;
+
+/// The item shape `init` detects (FR-23): unsectioned fields (`Simple`) or one section per
+/// product (`Fleet`). Local to `init` since `[profile]` was removed (FR-20, FR-60); the
+/// `init` rewrite to the one configuration form is a later 0.7.0 deliverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Fleet,
+    Simple,
+}
 use crate::error::Error;
 use crate::host::Host;
 use crate::provider::{InitField, Provider, init_flag};
@@ -786,9 +795,10 @@ fn choose_target(args: &InitArgs) -> Result<Option<TargetChoice>, Error> {
 
 /// The provider section for `profile`.
 fn target_section(choice: &TargetChoice, profile: Profile) -> String {
+    let _ = profile;
     choice
         .provider
-        .init_section(&choice.values, profile)
+        .init_section(&choice.values)
         .unwrap_or_default()
 }
 
@@ -1258,7 +1268,7 @@ fn add_env_on(
         ))
         .with_next("opv config edit"));
     }
-    let profile = fleet.profile;
+    let profile = Profile::Fleet;
     let choice = choose_target(args).map_err(init_help)?;
     probe_target(args, choice.as_ref(), Some(profile)).map_err(init_help)?;
 
@@ -1291,7 +1301,7 @@ fn add_env_on(
     for (product, key) in doc.keys(fleet_profile) {
         let spec = fleet
             .products
-            .get(product.as_deref().unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .get(product.as_deref().unwrap_or_default())
             .and_then(|p| p.keys.get(&key));
         // M6: a shared key has no field of its own; it joins the environment exactly when
         // its source does (below), whatever stray field sits under its own label.
@@ -1312,7 +1322,7 @@ fn add_env_on(
         };
         let spec_kind = fleet
             .products
-            .get(product.as_deref().unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .get(product.as_deref().unwrap_or_default())
             .and_then(|p| p.keys.get(&key))
             .map(|k| k.kind);
         if spec_kind.is_some_and(|k| k != *kind) {
@@ -1324,12 +1334,7 @@ fn add_env_on(
             ));
         }
         doc.add_key_env(product.as_deref(), &key, &args.env)?;
-        added_ids.insert((
-            product
-                .clone()
-                .unwrap_or_else(|| crate::domain::SIMPLE_PRODUCT.to_string()),
-            key.clone(),
-        ));
+        added_ids.insert((product.clone().unwrap_or_default(), key.clone()));
         if let Some(p) = &product
             && !products.contains(p)
         {

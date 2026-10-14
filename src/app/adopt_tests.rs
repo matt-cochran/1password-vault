@@ -89,7 +89,14 @@ fn opts(dir: &tempfile::TempDir, apply: bool, replace: &[&str]) -> Opts {
 }
 
 fn value_of(op: &FakeOp, fleet: &Fleet, label: &str) -> String {
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     item["fields"]
         .as_array()
         .unwrap()
@@ -153,7 +160,14 @@ fn replace_keeps_the_old_value_in_the_kept_section() {
         &mut Vec::new(),
     )
     .unwrap();
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     assert!(
         item["fields"]
             .as_array()

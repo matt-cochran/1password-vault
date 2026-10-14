@@ -35,7 +35,7 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
-    let Some(target) = env.target() else {
+    if env.targets.is_empty() {
         if json {
             let doc = serde_json::json!({
                 "schema_version": crate::json::SCHEMA_VERSION,
@@ -52,16 +52,25 @@ pub fn run(
              is no write history (opv run {env_name} reads 1Password directly)"
         )
         .map_err(write_err);
-    };
-    let signed_in = super::signin::open(fleet, env_name, r, super::signin::Reach::Target)?;
+    }
+    // The environment's only target (several need --target, a later deliverable).
+    let name = super::resolve_target(fleet, env_name, &[], "history")?;
+    let signed_in = super::signin::open_targeted(
+        fleet,
+        env_name,
+        Some(&name),
+        r,
+        super::signin::Reach::Target,
+    )?;
     let r: &dyn CommandRunner = &signed_in;
-    let (_, ports) = super::open_target(fleet, env_name, r)?;
+    let (target, ports) = super::open_target(fleet, env_name, &name, r)?;
     let read = super::tidy::read(fleet, env_name, r)?;
     let recorded = read.ledger.versions();
     let none = BTreeSet::new();
     let (plan, listed) = super::plan_item_with(
         fleet,
         env_name,
+        Some(&name),
         read.fields,
         Some(&ports),
         &none,
@@ -96,7 +105,6 @@ pub fn run(
         env_name,
         target.provider().label(),
         target.provider().section(),
-        fleet.is_simple(),
         &rows,
         json,
     )
@@ -108,7 +116,6 @@ fn report(
     env_name: &str,
     label: &str,
     section: &str,
-    simple: bool,
     rows: &[HistoryRow],
     json: bool,
 ) -> Result<(), Error> {
@@ -127,7 +134,7 @@ fn report(
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }
-    print_text(out, env_name, label, simple, rows, latest)
+    print_text(out, env_name, label, rows, latest)
 }
 
 /// The row holding the most recent stamp.
@@ -140,7 +147,6 @@ fn print_text(
     out: &mut dyn Write,
     env_name: &str,
     label: &str,
-    simple: bool,
     rows: &[HistoryRow],
     latest: Option<&HistoryRow>,
 ) -> Result<(), Error> {
@@ -158,11 +164,7 @@ fn print_text(
     };
     writeln!(out, "{head}").map_err(write_err)?;
     for r in rows {
-        let key = if simple {
-            r.key.clone()
-        } else {
-            format!("{}/{}", r.product, r.key)
-        };
+        let key = format!("{}/{}", r.product, r.key);
         let mut detail = state_words(r.state).to_string();
         if let Some(w) = &r.written {
             detail.push_str(&format!(" {w}"));

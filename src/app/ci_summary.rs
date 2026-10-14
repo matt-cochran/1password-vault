@@ -17,7 +17,6 @@ pub(crate) fn table(
     count_line: &str,
     changes: Option<&str>,
     rows: &[Row],
-    simple: bool,
     target: impl Fn(&Row) -> String,
 ) -> String {
     let mut md = format!("### {}\n\n{}\n", cell(heading), cell(count_line));
@@ -25,23 +24,17 @@ pub(crate) fn table(
         md.push_str(&format!("\nchanges: **{c}**\n"));
     }
     md.push('\n');
-    let mut head = vec!["Product", "Key", "Kind", "State", "Target"];
-    if simple {
-        head.remove(0);
-    }
+    let head = ["Product", "Key", "Kind", "State", "Target"];
     md.push_str(&format!("| {} |\n", head.join(" | ")));
     md.push_str(&format!("|{}\n", "---|".repeat(head.len())));
     for r in problems_first(rows) {
-        let mut cells = vec![
+        let cells = [
             r.product.clone(),
             r.key.clone(),
             kind_label(r.kind).to_string(),
             state_word(r),
             target(r),
         ];
-        if simple {
-            cells.remove(0);
-        }
         let cells: Vec<String> = cells.iter().map(|c| cell(c)).collect();
         md.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
@@ -106,14 +99,9 @@ mod tests {
     }
 
     fn md(rows: &[Row]) -> String {
-        table(
-            "opv plan prod",
-            "prod: 2 keys",
-            Some("some"),
-            rows,
-            false,
-            |_| "new".into(),
-        )
+        table("opv plan prod", "prod: 2 keys", Some("some"), rows, |_| {
+            "new".into()
+        })
     }
 
     #[test]

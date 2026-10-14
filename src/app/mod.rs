@@ -64,6 +64,7 @@ mod staged_tests;
 pub mod status;
 pub(crate) mod suggest;
 pub mod sync;
+pub mod target_cmd;
 pub(crate) mod tidy;
 #[cfg(test)]
 mod ux2_tests;
@@ -78,8 +79,8 @@ use std::io::{self, Write};
 use crate::adapters::{onepassword, registry};
 use crate::domain::plan;
 use crate::domain::{
-    Environment, Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan,
-    TargetState, key_label,
+    Environment, Fleet, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan, TargetState,
+    key_label,
 };
 use crate::error::Error;
 use crate::ports::{PinnedStore, Ports, Store};
@@ -92,17 +93,20 @@ fn no_digest(_: &SecretValue) -> Option<String> {
     None
 }
 
-/// Read the environment's item once (FR-13), list the target's store once when `ports` are
-/// given, and build the plan. `env_name` must already be resolved, and the target opened,
-/// by the caller (so a missing target is `Error::Config` before any call).
+/// Read the environment's boundary items once each (FR-13, FR-57), list the store of target
+/// `target` once when `ports` are given, and build the plan for that target (`None`: no
+/// target). `env_name` must already be resolved, and the target opened, by the caller (so a
+/// missing target is `Error::Config` before any call).
 ///
 /// With a store, every ready secret is also checked against the store's own rules
 /// ([`Store::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
 /// failing rule naming product/KEY. A pinned store is also read once per ready secret it
 /// lists, and the value compared exactly (FR-31); a staged store (Fly) is never read.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_and_plan(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     r: &dyn CommandRunner,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
@@ -112,6 +116,7 @@ pub(crate) fn read_and_plan(
     let (mut plan, listed) = plan_item_with(
         fleet,
         env_name,
+        target,
         read.fields,
         ports,
         rotate,
@@ -126,9 +131,11 @@ pub(crate) fn read_and_plan(
 /// [`read_and_plan`] that also returns the item's `version` integer, for the plan id
 /// (FR-41). Still one item read (FR-13), plus a person's tidy (FR-43): the version is the
 /// tidied item's, so a plan that tidied and the sync after it agree.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_and_plan_versioned(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     r: &dyn CommandRunner,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
@@ -138,6 +145,7 @@ pub(crate) fn read_and_plan_versioned(
     let (mut plan, listed) = plan_item_with(
         fleet,
         env_name,
+        target,
         read.fields,
         ports,
         rotate,
@@ -160,13 +168,14 @@ pub(crate) fn read_item_fields(
     Ok((read.fields, read.version))
 }
 
-/// The plan id (FR-41) of `plan`, built against `listed` on the target behind `ports`
+/// The plan id (FR-41) of `plan`, built against `listed` on target `target` behind `ports`
 /// from item version `item_version`. A staged store's versions are value digests (Fly), so
 /// only a pinned store's version ids go in (SR-1).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_id_of(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     product: Option<&str>,
     item_version: Option<u64>,
     plan: &SyncPlan,
@@ -174,8 +183,10 @@ pub(crate) fn plan_id_of(
     ports: &Ports<'_>,
     own_plan: Option<&str>,
 ) -> String {
-    let env = fleet.environments.get(env_name);
-    let name_of = |p: &str, k: &str| env.and_then(|e| e.target_name(p, k));
+    let name_of = |p: &str, k: &str| {
+        let t = fleet.environments.get(env_name)?.targets.get(target)?;
+        Some(t.config.env_name(p, k))
+    };
     crate::domain::provenance::plan_id(
         &crate::domain::provenance::PlanIdInput {
             env: env_name,
@@ -201,17 +212,20 @@ pub(crate) fn read_and_plan_products(
     r: &dyn CommandRunner,
 ) -> Result<SyncPlan, Error> {
     fleet.environment(env_name)?;
-    let read = tidy::read(full, env_name, r)?;
+    let read = tidy::read_for(fleet, full, env_name, r)?;
     let none = BTreeSet::new();
-    let mut plan = plan_item(fleet, env_name, read.fields, None, &none, &none)?.0;
+    let mut plan = plan_item(fleet, env_name, None, read.fields, None, &none, &none)?.0;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok(plan)
 }
 
+/// The plan of `fields` for target `target` of `env_name` (`None`: no target).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_item(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     fields: Vec<plan::ItemField>,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
@@ -220,6 +234,7 @@ pub(crate) fn plan_item(
     plan_item_with(
         fleet,
         env_name,
+        target,
         fields,
         ports,
         rotate,
@@ -231,9 +246,11 @@ pub(crate) fn plan_item(
 /// [`plan_item`] with the item's version ledger (FR-54): on a staged store that cannot show
 /// values, a name the store still holds at the version opv recorded is compared exactly
 /// through its fingerprint, and a name at another version is drift.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_item_with(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     fields: Vec<plan::ItemField>,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
@@ -288,6 +305,7 @@ pub(crate) fn plan_item_with(
         fields,
         &on_target,
         &plan::PlanOptions {
+            target,
             rotate,
             prune_immutable,
             digest: &no_digest,
@@ -299,8 +317,8 @@ pub(crate) fn plan_item_with(
         },
     );
     let mut p = p;
-    if let (None, Some(l)) = (pinned, ledger) {
-        let managed = managed_names(fleet, env_name).unwrap_or_default();
+    if let (None, Some(l), Some(t)) = (pinned, ledger, target) {
+        let managed = managed_names(fleet, env_name, t).unwrap_or_default();
         p.drift = l
             .drift(&on_target)
             .into_iter()
@@ -352,7 +370,7 @@ pub(crate) fn write_err(e: io::Error) -> Error {
 /// The `product` of a JSON row: `None` (JSON `null`) for the simple profile's implicit
 /// product, which is never shown (FR-20).
 pub(crate) fn json_product(product: &str) -> Option<String> {
-    (product != SIMPLE_PRODUCT).then(|| product.to_string())
+    Some(product.to_string())
 }
 
 /// Additive fields of the FR-21 document.
@@ -389,16 +407,20 @@ pub(crate) struct JsonExtra<'a> {
 /// it in (`extra.link`, IDs only); `changes` (`none`, `some` or `unknown`) says whether a
 /// sync would change the target. `unknown` means only keys whose values the target hides
 /// (Fly) would be staged, so a nightly drift check can tell "certainly in sync" apart.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     plan: &SyncPlan,
     pinned: Option<&BTreeMap<String, PinnedRow>>,
     product: Option<&str>,
     extra: &JsonExtra<'_>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
+    let on = target.and_then(|t| env.targets.get(t));
+    let name_of = |p: &str, k: &str| on.map(|t| t.config.env_name(p, k));
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
     let pruned: HashSet<&str> = plan.prune.iter().map(String::as_str).collect();
     let held_keys: HashSet<(&str, &str)> = plan
@@ -416,7 +438,7 @@ pub(crate) fn write_json(
         .rows
         .iter()
         .map(|r| {
-            let target_name = env.target_name(&r.product, &r.key);
+            let target_name = name_of(&r.product, &r.key);
             let action = row_action(
                 r,
                 target_name.as_deref(),
@@ -466,8 +488,8 @@ pub(crate) fn write_json(
             .map(|(product, key)| JsonHeld {
                 product: json_product(product),
                 key: key.clone(),
-                target_name: env.target_name(product, key),
-                fly_name: env.target_name(product, key),
+                target_name: name_of(product, key),
+                fly_name: name_of(product, key),
             })
             .collect(),
         prune: plan.prune.clone(),
@@ -887,18 +909,16 @@ fn wants_guidance(r: &Row) -> bool {
 /// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, problems first (H4): the
 /// blocking rows (missing, wrong kind, failed), then the rest, each group in declared
 /// order. Under each missing or failing row its guidance; the way to the field is the
-/// findings' `Next: opv open …` (H1). `target` renders the last column. Rows hold names only. Under the simple profile
-/// (FR-20) there is no PRODUCT column: the table is `KEY KIND STATE TARGET`.
+/// findings' `Next: opv open …` (H1). `target` renders the last column. Rows hold names
+/// only.
 pub(crate) fn print_rows(
     out: &mut dyn Write,
-    fleet: &Fleet,
+    _fleet: &Fleet,
     rows: &[Row],
     target: impl Fn(&Row) -> String,
 ) -> Result<(), Error> {
-    let skip = usize::from(fleet.is_simple());
     let header: Vec<String> = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"]
         .iter()
-        .skip(skip)
         .map(|s| s.to_string())
         .collect();
     let ordered = problems_first(rows);
@@ -913,7 +933,6 @@ pub(crate) fn print_rows(
                 target(r),
             ]
             .into_iter()
-            .skip(skip)
             .collect()
         })
         .collect();
@@ -957,20 +976,36 @@ pub(crate) fn problems_first(rows: &[Row]) -> Vec<&Row> {
     bad
 }
 
-/// The 1Password private link to `env_name`'s item (H1), with the signed-in account from
-/// one free `op whoami` probe when it answers. IDs only, never a value.
+/// The 1Password private link to the boundary item holding `product`'s values in
+/// `env_name` (H1, FR-57), with the signed-in account from one free `op whoami` probe when
+/// it answers. IDs only, never a value.
 pub(crate) fn item_url(
     fleet: &Fleet,
     env_name: &str,
+    product: &str,
     r: &dyn CommandRunner,
 ) -> Result<String, Error> {
-    let env = fleet.environment(env_name)?;
+    let b = fleet.boundary(env_name, product)?;
     let account = onepassword::account(r);
     Ok(onepassword::item_link(
         account.as_ref(),
-        &env.vault_id,
-        &env.item_id,
+        &b.vault_id,
+        &b.item_id,
     ))
+}
+
+/// [`item_url`] of the first blocking row's product (else the first row's), for the plan
+/// and status link (H1); `None` when there are no rows.
+pub(crate) fn rows_item_url(
+    fleet: &Fleet,
+    env_name: &str,
+    rows: &[Row],
+    r: &dyn CommandRunner,
+) -> Result<Option<String>, Error> {
+    let Some(row) = rows.iter().find(|r| is_blocking(r)).or(rows.first()) else {
+        return Ok(None);
+    };
+    item_url(fleet, env_name, &row.product, r).map(Some)
 }
 
 /// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
@@ -1127,13 +1162,6 @@ pub(crate) fn check_product(
         }
         c
     };
-    if fleet.is_simple() {
-        return Err(Error::Config(
-            "--product is not used under the simple profile; run the command without it".into(),
-        )
-        .with_code(crate::error::Code::UnknownProduct)
-        .with_next(command(None)));
-    }
     if !fleet.products.contains_key(p) {
         let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
         let pick = suggest::close(p, all.iter().copied())
@@ -1181,7 +1209,7 @@ pub(crate) fn list_keys_command(fleet: &Fleet) -> String {
     if let Some((name, _)) = fleet
         .environments
         .iter()
-        .find(|(_, e)| e.target().is_some())
+        .find(|(_, e)| !e.targets.is_empty())
     {
         return format!("opv status {name}");
     }
@@ -1196,21 +1224,22 @@ pub(crate) fn check_command(fleet: &Fleet, env: Option<&str>, product: Option<&s
         .filter(|e| fleet.environments.contains_key(*e))
         .or_else(|| fleet.environments.keys().next().map(String::as_str))
         .unwrap_or("<env>");
-    match product.filter(|_| !fleet.is_simple()) {
+    match product {
         Some(p) => format!("opv check {env} --product {p}"),
         None => format!("opv check {env}"),
     }
 }
 
-/// The target names `product`'s declared keys render in `env_name` (its share of the managed
-/// set, FR-8).
+/// The target names `product`'s declared keys render on target `target_name` of `env_name`
+/// (its share of the managed set, FR-8).
 pub(crate) fn product_names(
     fleet: &Fleet,
     env_name: &str,
+    target_name: &str,
     product: &str,
 ) -> Result<HashSet<String>, Error> {
-    let (_, t) = target(fleet, env_name)?;
-    if !fleet.delivers(env_name, product) {
+    let (_, t) = target(fleet, env_name, target_name)?;
+    if !fleet.delivers(env_name, target_name, product) {
         return Ok(HashSet::new());
     }
     Ok(fleet
@@ -1250,13 +1279,13 @@ pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<Str
 pub(crate) struct KeyNames(BTreeMap<String, String>);
 
 impl KeyNames {
-    pub(crate) fn new(fleet: &Fleet, env_name: &str) -> Result<KeyNames, Error> {
-        let (_, t) = target(fleet, env_name)?;
+    pub(crate) fn new(fleet: &Fleet, env_name: &str, target_name: &str) -> Result<KeyNames, Error> {
+        let (_, t) = target(fleet, env_name, target_name)?;
         Ok(KeyNames(
             fleet
                 .products
                 .iter()
-                .filter(|(p, _)| fleet.delivers(env_name, p))
+                .filter(|(p, _)| fleet.delivers(env_name, target_name, p))
                 .flat_map(|(p, prod)| {
                     prod.keys
                         .keys()
@@ -1335,66 +1364,133 @@ pub(crate) fn count_line(env_name: &str, rows: &[Row], target_label: &str) -> St
     )
 }
 
-/// The environment and its target; `Error::Config` naming the environment when it is
-/// undefined or has no target section (status, plan and sync need one). The hint names
-/// what the default provider needs (FR-37).
+/// The target `--target` names in `env` (FR-56), or the environment's only target when
+/// none is named. An environment with several targets needs `--target` for now (one target
+/// per run; covering every target in one run is a later deliverable): a usage error lists
+/// them. `verb` is the command, for the `Next:` step.
+pub(crate) fn resolve_target(
+    fleet: &Fleet,
+    env: &str,
+    requested: &[String],
+    verb: &str,
+) -> Result<String, Error> {
+    let e = fleet.environment(env)?;
+    let names: Vec<&str> = e.targets.keys().map(String::as_str).collect();
+    let usage = |msg: String, pick: &str| {
+        Error::Config(msg.into())
+            .with_code(crate::error::Code::Usage)
+            .with_next(format!("opv {verb} {env} --target {pick}"))
+    };
+    match requested {
+        [] => match names.as_slice() {
+            [] => Err(no_target(fleet, env)),
+            [one] => Ok((*one).to_string()),
+            [first, ..] => Err(usage(
+                format!(
+                    "environment {env} has {} targets ({}); name one with --target <name>",
+                    names.len(),
+                    names.join(", ")
+                ),
+                first,
+            )),
+        },
+        [one] => target(fleet, env, one).map(|_| one.clone()),
+        [first, ..] => Err(usage(
+            format!(
+                "--target names {} targets; one target per run for now, so run once per \
+                 target",
+                requested.len()
+            ),
+            first,
+        )),
+    }
+}
+
+/// The environment and its target `name` (FR-56); `Error::Config` naming the environment
+/// when it is undefined or has no target (status, plan and sync need one), and a usage
+/// error listing the targets when it has none of that name. The hint names what the
+/// default provider needs (FR-37).
 pub(crate) fn target<'f>(
     fleet: &'f Fleet,
     env: &str,
+    name: &str,
 ) -> Result<(&'f Environment, &'f dyn TargetConfig), Error> {
     let e = fleet.environment(env)?;
-    if let Some(t) = e.target() {
-        return Ok((e, t));
+    if e.targets.is_empty() {
+        return Err(no_target(fleet, env));
     }
-    let local = if fleet.is_simple() {
-        format!("opv check {env} and opv run {env} -- <command>")
-    } else {
-        format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>")
-    };
+    match e.targets.get(name) {
+        Some(t) => Ok((e, t.config.as_ref())),
+        None => {
+            let names: Vec<&str> = e.targets.keys().map(String::as_str).collect();
+            Err(Error::Config(
+                format!(
+                    "environment {env} has no target {name:?} (targets: {})",
+                    names.join(", ")
+                )
+                .into(),
+            )
+            .with_code(crate::error::Code::Usage)
+            .with_next(format!("opv status {env} --target {}", names[0])))
+        }
+    }
+}
+
+/// The error for an environment without a target (run-only, FR-56).
+fn no_target(fleet: &Fleet, env: &str) -> Error {
+    let local =
+        format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>");
     let sections: Vec<&str> = registry::PROVIDERS.iter().map(|p| p.section()).collect();
-    Err(Error::Config(
+    Error::Config(
         format!(
             "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add one target section ({}) to environment {env} in the configuration \
-             first: secrets.toml, or opv config edit for a manifest ({DOCS}/configuration.md).",
+             deploy, add a named target [environments.{env}.targets.<name>] with one provider \
+             section ({}) to the configuration first: secrets.toml, or opv config edit for a \
+             manifest ({DOCS}/configuration.md).",
             sections.join(", ")
         )
         .into(),
     )
     .with_code(crate::error::Code::NoTarget)
     .with_do(format!(
-        "to deploy, add a {} section to environment {env} in the configuration (secrets.toml, or opv config edit) ({DOCS}/configuration.md)",
+        "to deploy, add [environments.{env}.targets.<name>] with a {} section to the configuration (secrets.toml, or opv config edit) ({DOCS}/configuration.md)",
         sections.join(", ")
     ))
     .with_next(check_command(
         fleet,
         Some(env),
         fleet.products.keys().next().map(String::as_str),
-    )))
+    ))
 }
 
 /// Where the user documentation lives (for next steps that are a page to read).
 pub(crate) const DOCS: &str = "https://github.com/matt-cochran/1password-vault/blob/main/docs";
 
-/// Resolve the environment's target and open its ports, before any call. Mutating
-/// commands run [`preflight`] before their first write.
+/// Resolve target `name` of the environment and open its ports, before any call.
+/// Mutating commands run [`preflight`] before their first write.
 pub(crate) fn open_target<'a>(
     fleet: &'a Fleet,
     env_name: &'a str,
+    name: &str,
     r: &'a dyn CommandRunner,
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
-    let (_, t) = target(fleet, env_name)?;
-    let managed = managed_names(fleet, env_name)?.into_iter().collect();
+    let (_, t) = target(fleet, env_name, name)?;
+    let managed = managed_names(fleet, env_name, name)?.into_iter().collect();
     Ok((t, t.open(env_name, managed, r)?))
 }
 
-/// Every name the target renders for a declared key: the managed set (FR-8, §10).
-pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<String>, Error> {
-    let (_, t) = target(fleet, env_name)?;
+/// Every name target `name` renders for a declared key of a product it delivers: its
+/// managed set (FR-8, §10).
+pub(crate) fn managed_names(
+    fleet: &Fleet,
+    env_name: &str,
+    name: &str,
+) -> Result<HashSet<String>, Error> {
+    let (_, t) = target(fleet, env_name, name)?;
     Ok(fleet
         .products
         .iter()
-        .filter(|(p, _)| fleet.delivers(env_name, p))
+        .filter(|(p, _)| fleet.delivers(env_name, name, p))
         .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
 }
@@ -1404,9 +1500,10 @@ pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<Str
 pub(crate) fn unmanaged_on_target<'a>(
     fleet: &Fleet,
     env_name: &str,
+    name: &str,
     on_target: &'a [StoreEntry],
 ) -> Result<Vec<&'a str>, Error> {
-    let managed = managed_names(fleet, env_name)?;
+    let managed = managed_names(fleet, env_name, name)?;
     Ok(on_target
         .iter()
         .map(|s| s.name.as_str())
@@ -1908,13 +2005,13 @@ mod source_only_tests {
     use super::*;
 
     const CFG: &str = r#"
-[profile]
-kind = "fleet"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.shared = { vault_id = "vci", item_id = "ici" }
+boundaries.api = { vault_id = "vci", item_id = "ici" }
+[environments.ci.targets.app]
 fly.app = "app"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sci"
 [products.shared]
 source_only = true
 [products.shared.keys.SHARED_TOKEN]
@@ -1931,19 +2028,19 @@ environments = ["ci"]
 
     #[test]
     fn managed_names_skip_a_source_only_product() {
-        let names = managed_names(&fleet(), "ci").unwrap();
+        let names = managed_names(&fleet(), "ci", "app").unwrap();
         assert_eq!(names, HashSet::from(["FLEET__API__API_TOKEN".to_string()]));
     }
 
     #[test]
     fn product_names_is_empty_for_a_source_only_product() {
-        let names = product_names(&fleet(), "ci", "shared").unwrap();
+        let names = product_names(&fleet(), "ci", "app", "shared").unwrap();
         assert!(names.is_empty());
     }
 
     #[test]
     fn key_names_has_no_label_for_a_source_only_name() {
-        let names = KeyNames::new(&fleet(), "ci").unwrap();
+        let names = KeyNames::new(&fleet(), "ci", "app").unwrap();
         assert_eq!(
             names.label("FLEET__SHARED__SHARED_TOKEN"),
             "FLEET__SHARED__SHARED_TOKEN"

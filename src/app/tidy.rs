@@ -22,7 +22,7 @@
 //! A tidy that fails (no write access, a lost edit, an item edited twice meanwhile) never
 //! fails the command: it prints one note and the command goes on with the tolerant read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapters::onepassword::{self, IdentityType, Item, Session};
@@ -31,7 +31,7 @@ use crate::config;
 use crate::domain::SecretValue;
 use crate::domain::convention::{self, Change, KeyId, Layout, TidyPlan};
 use crate::domain::plan::ItemField;
-use crate::domain::{Environment, Fleet, key_label, rules};
+use crate::domain::{Boundary, Environment, Fleet, key_label, rules};
 use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -220,10 +220,23 @@ pub(crate) struct Read {
     pub ledger: crate::domain::ledger::Ledger,
 }
 
-/// The environment's item, read tolerantly and tidied when a person runs opv (see the
-/// module docs). Errors only when the item cannot be read at all.
+/// The environment's boundary items (FR-57) `fleet` needs, each read once, tolerantly, and
+/// tidied when a person runs opv (see the module docs), with their fields merged. Errors
+/// only when an item cannot be read at all.
 pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Result<Read, Error> {
     read_as(fleet, env_name, r, Mode::Tidy)
+}
+
+/// [`read`] of only the boundary items `scope`'s products need (FR-57: a product-scoped
+/// command never reads another product's boundary), each tidied against `full`, the whole
+/// configuration, so fields of products outside `scope` are never mistaken for strays.
+pub(crate) fn read_for(
+    scope: &Fleet,
+    full: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<Read, Error> {
+    read_in(scope, full, env_name, r, Mode::Tidy)
 }
 
 /// The environment's item, read tolerantly and never written, whoever runs opv (#113):
@@ -252,15 +265,111 @@ pub(crate) fn inspect_note(env_name: &str) -> String {
     )
 }
 
-/// [`read`] or [`inspect`], by `mode`.
+/// The boundary items (FR-57) a read of `fleet` in `env_name` needs, by boundary name: the
+/// boundary of each product with a key desired there, and of each source such a key reads
+/// with `from` (FR-45). Only those are read (FR-57: a reader of one product's boundary is
+/// never required to read another's).
+pub(crate) fn boundaries_needed<'f>(
+    fleet: &'f Fleet,
+    env_name: &str,
+) -> Result<BTreeMap<String, &'f Boundary>, Error> {
+    let mut out = BTreeMap::new();
+    for (product, p) in &fleet.products {
+        let desired: Vec<_> = p
+            .keys
+            .values()
+            .filter(|k| k.environments.iter().any(|e| e == env_name))
+            .collect();
+        if desired.is_empty() {
+            continue;
+        }
+        let sources = desired.iter().filter_map(|k| k.source()).map(|(sp, _)| sp);
+        for needer in std::iter::once(product.as_str()).chain(sources) {
+            let b = fleet.boundary(env_name, needer)?;
+            out.insert(fleet.boundary_of(needer).to_string(), b);
+        }
+    }
+    Ok(out)
+}
+
+/// `fleet` limited to the products whose values live in boundary `b` (FR-57): the
+/// convention (FR-43) runs on each item with exactly the sections that item holds.
+pub(crate) fn in_boundary(fleet: &Fleet, b: &str) -> Fleet {
+    let mut part = fleet.clone();
+    let keep: BTreeSet<String> = fleet
+        .products
+        .keys()
+        .filter(|p| fleet.boundary_of(p) == b)
+        .cloned()
+        .collect();
+    part.products.retain(|p, _| keep.contains(p));
+    part
+}
+
+/// [`read`] or [`inspect`], by `mode`: one read per boundary item needed, merged. The
+/// merged `version` is the sum of the items' versions (each only grows, so the sum changes
+/// whenever any item does: the plan id input, FR-41); the ledger is the first item's.
 pub(crate) fn read_as(
     fleet: &Fleet,
     env_name: &str,
     r: &dyn CommandRunner,
     mode: Mode,
 ) -> Result<Read, Error> {
+    read_in(fleet, fleet, env_name, r, mode)
+}
+
+/// [`read_as`] of the boundary items `scope` needs, each read for `fleet`'s products in it.
+fn read_in(
+    scope: &Fleet,
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    mode: Mode,
+) -> Result<Read, Error> {
     let env = fleet.environment(env_name)?;
-    let item = onepassword::read_whole(r, env)?;
+    let mut out: Option<Read> = None;
+    for (name, b) in boundaries_needed(scope, env_name)? {
+        let part = read_item_as(&in_boundary(fleet, &name), env_name, env, b, r, mode)?;
+        match &mut out {
+            None => out = Some(part),
+            Some(read) => merge(read, part),
+        }
+    }
+    Ok(out.unwrap_or_else(|| Read {
+        fields: Vec::new(),
+        changes: Vec::new(),
+        refs: BTreeMap::new(),
+        normalized: BTreeMap::new(),
+        tidy_error: None,
+        version: None,
+        needing_values: Vec::new(),
+        identity: None,
+        ledger: crate::domain::ledger::Ledger::default(),
+    }))
+}
+
+/// `part` (another boundary item's read) merged into `read`.
+fn merge(read: &mut Read, part: Read) {
+    read.fields.extend(part.fields);
+    read.changes.extend(part.changes);
+    read.refs.extend(part.refs);
+    read.normalized.extend(part.normalized);
+    read.tidy_error = read.tidy_error.or(part.tidy_error);
+    read.version = read.version.zip(part.version).map(|(a, b)| a + b);
+    read.needing_values.extend(part.needing_values);
+    read.identity = read.identity.or(part.identity);
+}
+
+/// One boundary item `b` of `env`, read for `fleet` (the products it holds).
+fn read_item_as(
+    fleet: &Fleet,
+    env_name: &str,
+    env: &Environment,
+    b: &Boundary,
+    r: &dyn CommandRunner,
+    mode: Mode,
+) -> Result<Read, Error> {
+    let item = onepassword::read_whole(r, env, b)?;
     let (layout, stamp) = onepassword_tidy::parse(item.raw())?;
     let date = today();
     let plan = convention::plan(&layout, fleet, env_name, &date);
@@ -269,7 +378,7 @@ pub(crate) fn read_as(
                 error: Option<Code>,
                 version: Option<u64>,
                 who: Option<Identity>| {
-        let mut res = finish(layout, fleet, env_name, env, changes, error);
+        let mut res = finish(layout, fleet, env_name, env, b, changes, error);
         res.version = version;
         res.identity = who;
         res
@@ -330,7 +439,7 @@ pub(crate) fn read_as(
         }
         Identity::Unknown => return Ok(done(layout, Vec::new(), None, first, Some(who))),
     }
-    match tidy(r, fleet, env_name, env, &date, stamp, plan) {
+    match tidy(r, fleet, env_name, env, b, &date, stamp, plan) {
         Ok(Some(t)) => {
             if !t.changes.is_empty() {
                 r.note(&format!(
@@ -367,27 +476,18 @@ fn unprovable_note(env_name: &str, what: &str) -> String {
     )
 }
 
-/// One note naming the keys whose only matching field sits where the other profile's
-/// convention keeps it (M1): opv leaves it there for that configuration.
+/// One note naming the keys read from a field at the top level of the item, outside any
+/// product section (M1): opv reads it there and never moves it.
 fn foreign_note(r: &dyn CommandRunner, layout: &Layout, fleet: &Fleet, env_name: &str) {
     let res = convention::resolve(layout, fleet);
     if res.foreign.is_empty() {
         return;
     }
     let names: Vec<String> = res.foreign.iter().map(|(p, k)| key_label(p, k)).collect();
-    let (place, other, read) = if fleet.is_simple() {
-        (
-            "in a product section",
-            "a fleet-profile",
-            "does not read it",
-        )
-    } else {
-        ("at the top level", "a simple-profile", "reads it there")
-    };
     r.note(&format!(
-        "1Password ({env_name}): a field for {} is {place}, where {other} configuration \
-         keeps it; opv {read} and never moves it. If it belongs to this configuration, move \
-         it in 1Password.",
+        "1Password ({env_name}): a field for {} is at the top level, outside its product's \
+         section; opv reads it there and never moves it. Move it into the product's section \
+         in 1Password.",
         names.join(", ")
     ));
 }
@@ -407,11 +507,13 @@ struct Tidied {
 
 /// Check, write, verify (module docs). Every read here bypasses `op`'s cache (C1), and
 /// the template is always built from the latest such read. `None`: keep the first read.
+#[allow(clippy::too_many_arguments)]
 fn tidy(
     r: &dyn CommandRunner,
     fleet: &Fleet,
     env_name: &str,
     env: &Environment,
+    b: &Boundary,
     date: &str,
     mut stamp: Stamp,
     mut plan: TidyPlan,
@@ -425,7 +527,7 @@ fn tidy(
         }))
     };
     for attempt in 0..2 {
-        let fresh = onepassword::read_whole_fresh(r, env)?;
+        let fresh = onepassword::read_whole_fresh(r, env, b)?;
         let (seen, seen_stamp) = onepassword_tidy::parse(fresh.raw())?;
         if seen_stamp != stamp {
             if attempt == 1 {
@@ -447,13 +549,13 @@ fn tidy(
             return tidied(seen, Vec::new(), None, fresh.version);
         }
         let template = onepassword_tidy::apply(fresh.raw(), &plan)?;
-        let echoed = onepassword_tidy::write(r, env, &template)?;
+        let echoed = onepassword_tidy::write(r, env, b, &template)?;
         // I5: the edit echoes the item it wrote; without a version in it, read it back
         // (fresh). Exactly one version later than the read it was built from means no
         // other edit landed in between.
         let after = match onepassword::item_version(&echoed) {
             Some(_) => Item::from_raw(echoed),
-            None => onepassword::read_whole_fresh(r, env)?,
+            None => onepassword::read_whole_fresh(r, env, b)?,
         };
         let (layout, _) = onepassword_tidy::parse(after.raw())?;
         let expected = fresh.version.map(|v| v + 1);
@@ -544,6 +646,7 @@ fn finish(
     fleet: &Fleet,
     env_name: &str,
     env: &Environment,
+    b: &Boundary,
     changes: Vec<Change>,
     tidy_error: Option<Code>,
 ) -> Read {
@@ -557,7 +660,7 @@ fn finish(
         {
             normalized.insert(id.clone(), v);
         }
-        let section = (!fleet.is_simple()).then_some(id.0.as_str());
+        let section = Some(id.0.as_str());
         let same_place = |g: &convention::Found| g.section_label() == section && g.label == id.1;
         let conventional = same_place(f)
             && !res.duplicates.contains_key(id)
@@ -565,7 +668,7 @@ fn finish(
         if !conventional && config::is_id(&f.id) {
             refs.insert(
                 id.clone(),
-                format!("op://{}/{}/{}", env.vault_id, env.item_id, f.id),
+                format!("op://{}/{}/{}", b.vault_id, b.item_id, f.id),
             );
         }
     }

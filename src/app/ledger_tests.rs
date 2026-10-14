@@ -48,7 +48,14 @@ fn record(op: &FakeOp, fleet: &Fleet, value: &str, version: &str) {
 }
 
 fn ledger_of(op: &FakeOp, fleet: &Fleet) -> Ledger {
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     let raw = serde_json::to_vec(&item).unwrap();
     let (layout, _) = crate::adapters::onepassword_tidy::parse(&raw).unwrap();
     Ledger::from_layout(&layout)
@@ -71,7 +78,14 @@ fn the_ledger_holds_no_value() {
     let _on = crate::app::tidy::activate();
     let (op, fleet) = world();
     record(&op, &fleet, "tok-FIXTUREVALUE-1", "d1");
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     let state: Vec<&serde_json::Value> = item["fields"]
         .as_array()
         .unwrap()
@@ -109,6 +123,7 @@ fn planned_target(op: &FakeOp, fleet: &Fleet, version: &str) -> TargetState {
         read.fields,
         &listed(version),
         &crate::domain::plan::PlanOptions {
+            target: None,
             rotate: &none,
             prune_immutable: &none,
             digest: &|_| None,

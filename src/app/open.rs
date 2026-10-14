@@ -111,24 +111,20 @@ pub fn run_as(
         Some((p, k)) => (p.to_string(), k.to_string()),
         None => (product, key),
     };
-    let url = item_url(fleet, env_name, r)?;
+    let url = item_url(fleet, env_name, &product, r)?;
     if json {
         let doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
             "product": super::json_product(&product),
             "key": key,
-            "section": (!fleet.is_simple()).then_some(product.as_str()),
+            "section": product.as_str(),
             "field": key,
             "open_url": url,
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }
-    let place = if fleet.is_simple() {
-        format!("field {key}")
-    } else {
-        format!("section {product}, field {key}")
-    };
+    let place = format!("section {product}, field {key}");
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
     line(format!(
         "{} in {env_name}: {place}",

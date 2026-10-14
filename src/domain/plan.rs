@@ -193,6 +193,9 @@ pub type CurrentCheck<'a> = dyn Fn(&str, &SecretValue) -> Option<CurrentState> +
 /// Target-specific inputs to [`build_with`]. The planner stays target-agnostic (FR-12):
 /// the application layer supplies the digest function and the value check.
 pub struct PlanOptions<'a> {
+    /// The target of the environment the plan is for (FR-56); `None`: no target (a
+    /// run-only environment, a local check or an export): nothing is staged or pruned.
+    pub target: Option<&'a str>,
     /// Immutable keys to stage even though present on the target (FR-16).
     pub rotate: &'a BTreeSet<(String, String)>,
     /// Immutable keys that may be pruned (otherwise immutable keys are never pruned).
@@ -208,8 +211,8 @@ pub struct PlanOptions<'a> {
     pub current: Option<&'a CurrentCheck<'a>>,
 }
 
-/// Plan a sync of `item` into the Fly app for `env_name`, with no prune overrides and no
-/// target value check. See [`build_with`].
+/// Plan a sync of `item` into the first target of `env_name` (by name), with no prune
+/// overrides and no target value check. See [`build_with`].
 ///
 /// `digest` computes Fly's digest of a value locally (`None` = not computable).
 /// Panics if `env_name` is not a defined environment.
@@ -222,12 +225,18 @@ pub fn build(
     digest: &dyn Fn(&SecretValue) -> Option<String>,
 ) -> SyncPlan {
     let none = BTreeSet::new();
+    let target = fleet
+        .environments
+        .get(env_name)
+        .and_then(|e| e.targets.keys().next())
+        .map(String::as_str);
     build_with(
         fleet,
         env_name,
         item,
         on_store,
         &PlanOptions {
+            target,
             rotate,
             prune_immutable: &none,
             digest,
@@ -317,12 +326,13 @@ pub fn build_with(
     for (product, p) in &fleet.products {
         // FR-47/FR-48: a product the target does not deliver renders no name here, so its
         // keys are never staged, pruned or held; they are still evaluated below.
-        let delivered = fleet.delivers(env_name, product);
+        let delivered = opts
+            .target
+            .is_some_and(|t| fleet.delivers(env_name, t, product));
         for (key, spec) in &p.keys {
-            let target_name = if delivered {
-                env.target_name(product, key)
-            } else {
-                None
+            let target_name = match opts.target {
+                Some(t) if delivered => Some(fleet.target_name(env_name, t, product, key)),
+                _ => None,
             };
             let target_entry = target_name
                 .as_deref()
@@ -375,7 +385,7 @@ pub fn build_with(
                 target: match (spec.kind, target_entry) {
                     // A run-only environment keeps the old states; only a target that
                     // leaves this product out marks it (FR-47, FR-48).
-                    _ if !delivered && env.target().is_some() => TargetState::NotDelivered,
+                    _ if !delivered && opts.target.is_some() => TargetState::NotDelivered,
                     (Kind::Secret, None) => TargetState::Absent,
                     _ => TargetState::Unknown,
                 },
@@ -745,18 +755,18 @@ mod tests {
     }
 
     const TWO_KEYS: &str = r#"
-[profile]
-kind = "fleet"
 [environments.staging]
-vault_id = "v1"
-item_id = "i1"
+boundaries.p = { vault_id = "v1", item_id = "i1" }
+[environments.staging.targets.portfolio]
 fly.app = "a-stg"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "s1"
 [environments.prod]
-vault_id = "v2"
-item_id = "i2"
+boundaries.p = { vault_id = "v2", item_id = "i2" }
+[environments.prod.targets.portfolio]
 fly.app = "a-prd"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "s2"
 [products.p.keys.STAGING_ONLY]
 kind = "secret"
 environments = ["staging"]
@@ -840,6 +850,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
         target_check: &'a TargetCheck<'a>,
     ) -> PlanOptions<'a> {
         PlanOptions {
+            target: Some("portfolio"),
             rotate,
             prune_immutable,
             digest: &none,
@@ -860,19 +871,23 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
         q.keys.clear();
         q.keys.insert("BOTH".into(), spec);
         fleet.products.insert("q".into(), q);
-        for env in fleet.environments.values_mut() {
+        for t in fleet
+            .environments
+            .values_mut()
+            .flat_map(|e| e.targets.values_mut())
+        {
             // A template without {PRODUCT}: p/BOTH and q/BOTH both render FLEET__BOTH.
-            let app = env
-                .target()
-                .and_then(|t| t.as_any().downcast_ref::<crate::adapters::fly::FlyTarget>())
+            let app = t
+                .config
+                .as_any()
+                .downcast_ref::<crate::adapters::fly::FlyTarget>()
                 .expect("fixture is Fly")
                 .app
                 .clone();
-            env.target = Some(Box::new(crate::adapters::fly::FlyTarget {
+            t.config = Box::new(crate::adapters::fly::FlyTarget {
                 app,
                 secret_name_template: "FLEET__{KEY}".into(),
-                profile: crate::domain::Profile::Fleet,
-            }));
+            });
         }
         let fly = [fly_secret("FLEET__BOTH", None)];
         let item = vec![secret("p", "BOTH", "v1")];
@@ -1001,7 +1016,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
     #[test]
     fn env_without_fly_plans_rows_and_config_only() {
         let mut fleet = f();
-        fleet.environments.get_mut("prod").unwrap().target = None;
+        fleet.environments.get_mut("prod").unwrap().targets.clear();
         let item = vec![
             secret("allumata", "OPENAI_API_KEY", "sk-proj-1"),
             config_field("allumata", "SIGNUP_POLICY", "invite_only"),
@@ -1033,7 +1048,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
     /// product (FR-47). Built directly: the provider is registered by the GitHub scope.
     fn scoped_fleet() -> Fleet {
         use crate::adapters::github::GithubTarget;
-        use crate::domain::{Environment, Origin, Product, Profile};
+        use crate::domain::{Boundary, Environment, Origin, Product, Target};
 
         fn key() -> KeySpec {
             KeySpec {
@@ -1050,15 +1065,28 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
         let target = GithubTarget {
             repos: vec!["org/r".to_string()],
             environment: None,
-            products: Some(["api".to_string()].into_iter().collect()),
             secret_name_template: "{PRODUCT}_{KEY}".to_string(),
-            profile: Profile::Fleet,
+        };
+        let at = Boundary {
+            vault_id: "vci".to_string(),
+            item_id: "ici".to_string(),
         };
         let env = Environment {
             name: "ci".to_string(),
-            vault_id: "vci".to_string(),
-            item_id: "ici".to_string(),
-            target: Some(Box::new(target)),
+            boundaries: ["api", "web", "shared"]
+                .map(|b| (b.to_string(), at.clone()))
+                .into_iter()
+                .collect(),
+            targets: BTreeMap::from([(
+                "ci".to_string(),
+                Target {
+                    name: "ci".to_string(),
+                    config: Box::new(target),
+                    products: Some(vec!["api".to_string()]),
+                    deploy_credentials: None,
+                    state_vault_id: "sci".to_string(),
+                },
+            )]),
             ..Default::default()
         };
         let products = BTreeMap::from([
@@ -1066,6 +1094,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
                 "api".to_string(),
                 Product {
                     source_only: false,
+                    boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                 },
             ),
@@ -1073,6 +1102,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
                 "web".to_string(),
                 Product {
                     source_only: false,
+                    boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                 },
             ),
@@ -1080,6 +1110,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
                 "shared".to_string(),
                 Product {
                     source_only: true,
+                    boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                 },
             ),
@@ -1087,7 +1118,6 @@ rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+
         Fleet {
             environments: BTreeMap::from([("ci".to_string(), env)]),
             products,
-            profile: Profile::Fleet,
             origin: Origin::File,
         }
     }

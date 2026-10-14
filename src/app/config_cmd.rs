@@ -523,7 +523,7 @@ pub fn status_all(
             .to_string();
         match store_of(l).load(r) {
             Ok(fleet) => {
-                if product.is_some_and(|p| fleet.is_simple() || !fleet.products.contains_key(p)) {
+                if product.is_some_and(|p| !fleet.products.contains_key(p)) {
                     continue;
                 }
                 let o = status::overview_of(&fleet, product, r);

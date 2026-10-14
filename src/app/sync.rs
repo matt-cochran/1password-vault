@@ -26,17 +26,16 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use super::{
-    KeyNames, check_product, ci_summary, compare, findings_error, is_blocking, item_url,
-    managed_names, open_target, plan_id_of, plan_item, plural, preflight, print_extras,
-    print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields, row_names,
-    scope_plan, target_word, unmanaged_on_target, write_err, write_json,
+    KeyNames, check_product, ci_summary, compare, findings_error, is_blocking, managed_names,
+    open_target, plan_id_of, plan_item, plural, preflight, print_extras, print_legend, print_rows,
+    product_names, read_and_plan_versioned, read_item_fields, resolve_target, row_names,
+    rows_item_url, scope_plan, target_word, unmanaged_on_target, write_err, write_json,
 };
 use crate::domain::plan::CurrentState::Same;
 use crate::domain::rules;
 use crate::domain::{
     Binding, Fleet, Health, ItemField, KeyState, Kind, Revision, Row, RuntimeChange,
-    RuntimeSnapshot, SIMPLE_PRODUCT, SecretValue, Stamp, StoreEntry, SyncPlan, TargetState,
-    key_label,
+    RuntimeSnapshot, SecretValue, Stamp, StoreEntry, SyncPlan, TargetState, key_label,
 };
 use crate::error::{Code, Error, next_line};
 use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
@@ -68,12 +67,18 @@ pub struct SyncOpts {
     pub expect_plan: Option<String>,
     /// `--receipt <file>`: write the delivery receipts minted by this sync (#106).
     pub receipt: Option<std::path::PathBuf>,
+    /// `--target <name>` (repeatable, FR-56): the targets to sync. Empty: the environment's
+    /// only target (one target per run for now).
+    pub targets: Vec<String>,
 }
 
 impl SyncOpts {
     /// The `opv sync` command line these options spell, with `--confirm` when `confirm`.
     fn command(&self, env_name: &str, confirm: bool) -> String {
         let mut c = format!("opv sync {env_name}");
+        for t in &self.targets {
+            c.push_str(&format!(" --target {t}"));
+        }
         if self.deploy {
             c.push_str(" --deploy");
         }
@@ -129,23 +134,25 @@ pub fn run(
     }
     // A write is never suggested on a guessed product: the step is its plan.
     check_product(fleet, opts.product.as_deref(), "plan", Some(env_name))?;
-    let (t, ports) = open_target(fleet, env_name, r)?;
+    let target = resolve_target(fleet, env_name, &opts.targets, "sync")?;
+    let (t, ports) = open_target(fleet, env_name, &target, r)?;
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
     let scope = match &opts.product {
-        Some(p) => Some(product_names(fleet, env_name, p)?),
+        Some(p) => Some(product_names(fleet, env_name, &target, p)?),
         None => None,
     };
     let c = Ctx {
         fleet,
         env_name,
+        target: &target,
         t,
         r,
         opts,
         rotate: &rotate,
         prune_immutable: &prune_immutable,
         scope: scope.as_ref(),
-        names: KeyNames::new(fleet, env_name)?,
+        names: KeyNames::new(fleet, env_name, &target)?,
         confirm_missing: guard.missing,
     };
     let mut sink = std::io::sink();
@@ -206,6 +213,8 @@ fn confirm_env(fleet: &Fleet, env_name: &str, opts: &SyncOpts) -> Result<Guard, 
 struct Ctx<'a> {
     fleet: &'a Fleet,
     env_name: &'a str,
+    /// The target's name (FR-56).
+    target: &'a str,
     t: &'a dyn TargetConfig,
     r: &'a dyn CommandRunner,
     opts: &'a SyncOpts,
@@ -278,6 +287,7 @@ impl Ctx<'_> {
         let id = plan_id_of(
             self.fleet,
             self.env_name,
+            self.target,
             product,
             item_version,
             plan,
@@ -439,6 +449,7 @@ impl Report {
             json: false,
             expect_plan: None,
             receipt: None,
+            targets: opts.targets.clone(),
         };
         Some(o.command(env_name, guarded))
     }
@@ -495,22 +506,20 @@ const DEPLOYED: &str = "yes";
 
 /// Target names of the plan's rows that are not desired here (P2 `skipped`).
 fn skipped_names(c: &Ctx<'_>, plan: &SyncPlan) -> Result<Vec<String>, Error> {
-    let env = c.fleet.environment(c.env_name)?;
     Ok(plan
         .rows
         .iter()
         .filter(|r| r.state == KeyState::Skipped)
-        .filter_map(|r| env.target_name(&r.product, &r.key))
+        .map(|r| c.t.env_name(&r.product, &r.key))
         .collect())
 }
 
 /// Target names of the immutable keys held (present, not rotated).
 fn held_names(c: &Ctx<'_>, plan: &SyncPlan) -> Result<Vec<String>, Error> {
-    let env = c.fleet.environment(c.env_name)?;
     Ok(plan
         .held_immutable
         .iter()
-        .filter_map(|(p, k)| env.target_name(p, k))
+        .map(|(p, k)| c.t.env_name(p, k))
         .collect())
 }
 
@@ -526,6 +535,7 @@ fn run_staged(
     let (plan, list_a, item_version) = read_and_plan_versioned(
         fleet,
         env_name,
+        Some(c.target),
         c.r,
         Some(ports),
         c.rotate,
@@ -539,6 +549,7 @@ fn run_staged(
         Some(v) => Some(super::variables::plan(
             fleet,
             env_name,
+            c.target,
             t,
             &mut plan,
             v,
@@ -642,7 +653,7 @@ fn run_staged(
         p(out, kept_line(names, &all_prune))?;
         report.kept = all_prune;
     }
-    print_held(out, fleet, &plan, names, &report.held)?;
+    print_held(out, &plan, names, &report.held)?;
 
     // Every write above is already live (FR-46): there is no pending state and nothing to
     // deploy, so `--deploy` only says so.
@@ -656,7 +667,7 @@ fn run_staged(
 
     // Managed names still staged from an earlier run (e.g. a sync without --deploy, or a
     // failed deploy). Status is only an extra deploy trigger, never change detection.
-    let managed = managed_names(fleet, env_name)?;
+    let managed = managed_names(fleet, env_name, c.target)?;
     let (pending, others): (Vec<&str>, Vec<&str>) = list_b
         .iter()
         .filter(|s| managed.contains(&s.name) && s.pending)
@@ -728,7 +739,15 @@ pub(crate) fn record_ledger(
     }
     let attempt = || -> Result<(), Error> {
         let env = fleet.environment(env_name)?;
-        let item = onepassword::read_whole_fresh(r, env)?;
+        // The ledger lives in the first boundary item a read of the environment opens, the
+        // one `tidy::read` takes it from (FR-54; per-placement evidence replaces it, FR-58).
+        let Some((_, b)) = super::tidy::boundaries_needed(fleet, env_name)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(());
+        };
+        let item = onepassword::read_whole_fresh(r, env, b)?;
         if super::tidy::is_manifest(item.raw())
             || onepassword_tidy::unprovable(item.raw()).is_some()
         {
@@ -752,7 +771,7 @@ pub(crate) fn record_ledger(
             kept: false,
         };
         let template = onepassword_tidy::apply(item.raw(), &plan)?;
-        onepassword_tidy::write(r, env, &template)?;
+        onepassword_tidy::write(r, env, b, &template)?;
         Ok(())
     };
     if attempt().is_err() {
@@ -775,12 +794,10 @@ fn record_delivery(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
-    if fleet.environment(env_name)?.state_vault_id.is_none() {
-        return Ok(());
-    }
     let recorded = super::delivery::record(
         fleet,
         env_name,
+        c.target,
         opts.product.as_deref(),
         written,
         identical,
@@ -845,12 +862,11 @@ fn kept_line(names: &KeyNames, kept: &[String]) -> String {
 /// ones held back from a prune (`--prune-immutable` releases them).
 fn print_held(
     out: &mut dyn Write,
-    fleet: &Fleet,
     plan: &SyncPlan,
     names: &KeyNames,
     held: &[String],
 ) -> Result<(), Error> {
-    let hint = key_ref_hint(fleet);
+    let hint = KEY_REF_HINT;
     if !held.is_empty() {
         writeln!(
             out,
@@ -891,8 +907,20 @@ fn run_pinned(
     let (fields, item_version) = read_item_fields(fleet, env_name, c.r)?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
+    let target = Some(c.target);
     refuse_blocking(
-        &c.scoped(plan_item(fleet, env_name, copy, None, c.rotate, c.prune_immutable)?.0),
+        &c.scoped(
+            plan_item(
+                fleet,
+                env_name,
+                target,
+                copy,
+                None,
+                c.rotate,
+                c.prune_immutable,
+            )?
+            .0,
+        ),
         env_name,
     )
     .map_err(|e| c.refusal(e))?;
@@ -901,6 +929,7 @@ fn run_pinned(
     let (plan, listed) = plan_item(
         fleet,
         env_name,
+        target,
         fields,
         Some(ports),
         c.rotate,
@@ -914,6 +943,7 @@ fn run_pinned(
     let want = pinned_want(
         fleet,
         env_name,
+        c.t,
         &plan,
         &listed,
         store,
@@ -993,7 +1023,7 @@ fn run_pinned(
     }
     // Pruned like secrets: opv-managed names no longer desired, including config routed to
     // the store (the planner names only secrets).
-    let mut prune_set = prune_names(fleet, env_name, &plan, &listed, &want)?;
+    let mut prune_set = prune_names(fleet, c.t, &plan, &listed, &want)?;
     prune_set.retain(|n| c.in_scope(n));
     let stray: BTreeSet<&str> = d
         .not_desired
@@ -1013,7 +1043,7 @@ fn run_pinned(
         )?;
         report.kept = stray.clone();
     }
-    print_held(out, fleet, &plan, names, &report.held)?;
+    print_held(out, &plan, names, &report.held)?;
 
     // 6. Deploy only with --deploy (FR-7, FR-9).
     let mut change = d.change(c.t, &written);
@@ -1234,12 +1264,11 @@ pub(crate) fn drift_line(env_name: &str, names: &str) -> String {
 /// opv-managed for this environment; immutable keys are held as for secrets.
 fn prune_names(
     fleet: &Fleet,
-    env_name: &str,
+    t: &dyn TargetConfig,
     plan: &SyncPlan,
     listed: &[StoreEntry],
     want: &PinnedWant,
 ) -> Result<Vec<String>, Error> {
-    let env = fleet.environment(env_name)?;
     let mut names = plan.prune.clone();
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
@@ -1247,9 +1276,7 @@ fn prune_names(
                 .config
                 .get(product)
                 .is_some_and(|k| k.contains_key(key));
-            let Some(name) = env.target_name(product, key) else {
-                continue;
-            };
+            let name = t.env_name(product, key);
             if spec.kind == Kind::Config
                 && !spec.immutable
                 && !desired
@@ -1382,16 +1409,18 @@ fn change_names(c: &RuntimeChange) -> Vec<String> {
 /// The desired store and env state of `plan` (FR-14, FR-31). Secrets are always
 /// store-routed; config is store-routed when `config_in_store`, and then read and compared
 /// like a secret. `listed` carries the versions the plan's reads found.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pinned_want(
     fleet: &Fleet,
     env_name: &str,
+    t: &dyn TargetConfig,
     plan: &SyncPlan,
     listed: &[StoreEntry],
     store: &dyn PinnedStore,
     config_in_store: bool,
 ) -> Result<PinnedWant, Error> {
-    let env = fleet.environment(env_name)?;
-    let name_of = |p: &str, k: &str| env.target_name(p, k).unwrap_or_default();
+    fleet.environment(env_name)?;
+    let name_of = |p: &str, k: &str| t.env_name(p, k);
     let version = |n: &str| {
         listed
             .iter()
@@ -1684,17 +1713,39 @@ pub fn plan_scoped(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
+    plan_targeted(fleet, env_name, &[], product, r, out, json)
+}
+
+/// [`plan_scoped`] on the target `--target` names (FR-56); without one, the environment's
+/// only target (several need `--target` for now, [`resolve_target`]).
+pub fn plan_targeted(
+    fleet: &Fleet,
+    env_name: &str,
+    targets: &[String],
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     check_product(fleet, product, "plan", Some(env_name))?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
-    let (t, ports) = open_target(fleet, env_name, r)?;
+    let target = resolve_target(fleet, env_name, targets, "plan")?;
+    let (t, ports) = open_target(fleet, env_name, &target, r)?;
     // The target's state, read-only and never waiting (NR-23, NR-25).
     preflight::read(t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version) =
-        read_and_plan_versioned(fleet, env_name, r, Some(&ports), &none, &none)?;
+    let (mut plan, on_target, item_version) = read_and_plan_versioned(
+        fleet,
+        env_name,
+        Some(&target),
+        r,
+        Some(&ports),
+        &none,
+        &none,
+    )?;
     let scope = match product {
         Some(p) => {
-            let names = product_names(fleet, env_name, p)?;
+            let names = product_names(fleet, env_name, &target, p)?;
             scope_plan(&mut plan, p, &names);
             Some(names)
         }
@@ -1707,6 +1758,7 @@ pub fn plan_scoped(
                 Some(v) => Some(super::variables::plan(
                     fleet,
                     env_name,
+                    &target,
                     t,
                     &mut plan,
                     v,
@@ -1723,6 +1775,7 @@ pub fn plan_scoped(
     let id = plan_id_of(
         fleet,
         env_name,
+        &target,
         product,
         item_version,
         &plan,
@@ -1732,7 +1785,7 @@ pub fn plan_scoped(
     );
     // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
     let link = if n > 0 {
-        Some(item_url(fleet, env_name, r)?)
+        rows_item_url(fleet, env_name, &plan.rows, r)?
     } else {
         None
     };
@@ -1760,6 +1813,7 @@ pub fn plan_scoped(
         product: product.map(str::to_string),
         expect_plan: clean.then(|| id.clone()),
         receipt: None,
+        targets: targets.to_vec(),
         ..SyncOpts::default()
     }
     .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
@@ -1768,7 +1822,7 @@ pub fn plan_scoped(
         _ => "write",
     };
     let label = t.provider().label();
-    let unmanaged = unmanaged_on_target(fleet, env_name, &on_target)?;
+    let unmanaged = unmanaged_on_target(fleet, env_name, &target, &on_target)?;
     let count = format!(
         "{env_name}: {} · {} · {} to {verb} · {} held (immutable) · {} to prune · {} unmanaged \
          on {label} (never touched)",
@@ -1789,7 +1843,6 @@ pub fn plan_scoped(
         &count,
         Some(changes),
         &plan.rows,
-        fleet.is_simple(),
         word,
     ));
     if json {
@@ -1797,6 +1850,7 @@ pub fn plan_scoped(
             out,
             fleet,
             env_name,
+            Some(&target),
             &plan,
             None,
             product,
@@ -1809,7 +1863,7 @@ pub fn plan_scoped(
         )?;
         return if n > 0 { Err(findings()) } else { Ok(()) };
     }
-    let names = KeyNames::new(fleet, env_name)?;
+    let names = KeyNames::new(fleet, env_name, &target)?;
     writeln!(out, "{count}").map_err(write_err)?;
     print_rows(out, fleet, &plan.rows, word)?;
     let words: Vec<String> = plan.rows.iter().map(&word).collect();
@@ -1839,12 +1893,11 @@ pub fn plan_scoped(
             names.join(&prunes)
         ))?;
     }
-    let env = fleet.environment(env_name)?;
-    let hint = key_ref_hint(fleet);
+    let hint = KEY_REF_HINT;
     let held_names: Vec<String> = plan
         .held_immutable
         .iter()
-        .filter_map(|(p, k)| env.target_name(p, k))
+        .map(|(p, k)| t.env_name(p, k))
         .collect();
     if !held_names.is_empty() {
         line(format!(
@@ -1913,19 +1966,14 @@ fn digest<'a>(list: &'a [StoreEntry], name: &str) -> Option<&'a str> {
         .and_then(|s| s.version.as_deref())
 }
 
-/// `PRODUCT/KEY` under the fleet profile; `KEY` alone under the simple profile (FR-20),
-/// whose implicit product is [`SIMPLE_PRODUCT`]. `None` when the entry has the wrong shape.
-fn split_key_ref<'a>(fleet: &Fleet, entry: &'a str) -> Option<(&'a str, &'a str)> {
-    if fleet.is_simple() {
-        return (!entry.is_empty() && !entry.contains('/')).then_some((SIMPLE_PRODUCT, entry));
-    }
+/// `PRODUCT/KEY`. `None` when the entry has the wrong shape.
+fn split_key_ref(entry: &str) -> Option<(&str, &str)> {
     entry
         .split_once('/')
         .filter(|(p, k)| !p.is_empty() && !k.is_empty())
 }
 
-/// Every declared key as `--rotate` takes it: `product/KEY`, or `KEY` under the simple
-/// profile.
+/// Every declared key as `--rotate` takes it: `product/KEY`.
 fn declared_refs(fleet: &Fleet) -> Vec<String> {
     fleet
         .products
@@ -1967,22 +2015,10 @@ fn key_next(fleet: &Fleet, env_name: &str, entry: &str) -> String {
 }
 
 /// The expected shape of a `--rotate` / `--prune-immutable` entry, for errors.
-fn expected(fleet: &Fleet) -> String {
-    if fleet.is_simple() {
-        "expected KEY (the simple profile has no products)".into()
-    } else {
-        "expected PRODUCT/KEY".into()
-    }
-}
+const EXPECTED: &str = "expected PRODUCT/KEY";
 
 /// The argument placeholder for `--prune-immutable` in hints.
-fn key_ref_hint(fleet: &Fleet) -> &'static str {
-    if fleet.is_simple() {
-        "KEY"
-    } else {
-        "PRODUCT/KEY"
-    }
-}
+const KEY_REF_HINT: &str = "PRODUCT/KEY";
 
 /// Validate every `--rotate PRODUCT/KEY` before any call (FR-16): it must name a declared,
 /// immutable key desired in `env_name`. An unmatched entry is never a silent no-op.
@@ -1999,7 +2035,7 @@ fn parse_rotate(
                 .with_next(key_next(fleet, env_name, e))
         };
         let (product, key) =
-            split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)).with_code(Code::Usage))?;
+            split_key_ref(e).ok_or_else(|| bad(EXPECTED.into()).with_code(Code::Usage))?;
         let spec = fleet
             .products
             .get(product)
@@ -2044,7 +2080,7 @@ fn parse_prune_immutable(
                 .with_next(key_next(fleet, env_name, e))
         };
         let (product, key) =
-            split_key_ref(fleet, e).ok_or_else(|| bad(expected(fleet)).with_code(Code::Usage))?;
+            split_key_ref(e).ok_or_else(|| bad(EXPECTED.into()).with_code(Code::Usage))?;
         let spec = fleet
             .products
             .get(product)
