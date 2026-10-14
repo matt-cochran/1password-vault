@@ -13,11 +13,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::sync::{drift_line, pinned_diff, pinned_want};
+use super::tidy::Mode;
 use super::{
     JsonExtra, KeyNames, PinnedRow, check_product, ci_summary, count_line, findings_error,
     is_blocking, item_url, open_target, personal, plan_item, plural, preflight, print_extras,
-    print_legend, print_rows, product_names, read_and_plan, read_fields, scope_plan, target_word,
-    write_err, write_json,
+    print_legend, print_rows, product_names, read_and_plan, scope_plan, target_word, write_err,
+    write_json,
 };
 use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
@@ -408,7 +409,7 @@ pub(crate) fn env_rows(
     t: Option<&dyn TargetConfig>,
     r: &dyn CommandRunner,
 ) -> Result<Vec<Row>, Error> {
-    env_rows_keeping(fleet, env_name, t, r, None)
+    env_rows_keeping(fleet, env_name, t, r, None, Mode::Tidy)
 }
 
 /// A copy of `f` for the settings health checks (#92), which compare values across
@@ -424,20 +425,22 @@ fn copy_field(f: &crate::domain::plan::ItemField) -> crate::domain::plan::ItemFi
     }
 }
 
-/// [`env_rows`], also keeping a copy of the team item's fields in `keep` (#92). Still one
-/// item read. Personal fields (FR-55) are never kept: they are each person's own.
+/// [`env_rows`], also keeping a copy of the team item's fields in `keep` (#92), and
+/// reading the item by `mode` (`ready` never tidies, #113). Still one item read. Personal
+/// fields (FR-55) are never kept: they are each person's own.
 pub(crate) fn env_rows_keeping(
     fleet: &Fleet,
     env_name: &str,
     t: Option<&dyn TargetConfig>,
     r: &dyn CommandRunner,
     keep: Option<&mut Vec<crate::domain::plan::ItemField>>,
+    mode: Mode,
 ) -> Result<Vec<Row>, Error> {
     use crate::app::signin::{Reach, open};
     let none = BTreeSet::new();
     let Some(t) = t else {
         let signed_in = open(fleet, env_name, r, Reach::Store)?;
-        let fields = read_fields(fleet, env_name, &signed_in)?;
+        let fields = super::tidy::read_as(fleet, env_name, &signed_in, mode)?.fields;
         if let Some(keep) = keep {
             keep.extend(fields.iter().map(copy_field));
         }
@@ -458,26 +461,22 @@ pub(crate) fn env_rows_keeping(
     let r: &dyn CommandRunner = &signed_in;
     let (_, ports) = open_target(fleet, env_name, r)?;
     preflight::read(t, r)?;
-    let mut plan = match keep {
-        None => read_and_plan(fleet, env_name, r, Some(&ports), &none, &none)?.0,
-        Some(keep) => {
-            // read_and_plan, keeping a copy of the fields before planning consumes them.
-            let read = super::tidy::read(fleet, env_name, r)?;
-            keep.extend(read.fields.iter().map(copy_field));
-            let (mut plan, _) = super::plan_item_with(
-                fleet,
-                env_name,
-                read.fields,
-                Some(&ports),
-                &none,
-                &none,
-                Some(&read.ledger),
-            )?;
-            plan.tidy = read.changes;
-            plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
-            plan
-        }
-    };
+    // read_and_plan by `mode`, keeping a copy of the fields before planning consumes them.
+    let read = super::tidy::read_as(fleet, env_name, r, mode)?;
+    if let Some(keep) = keep {
+        keep.extend(read.fields.iter().map(copy_field));
+    }
+    let (mut plan, _) = super::plan_item_with(
+        fleet,
+        env_name,
+        read.fields,
+        Some(&ports),
+        &none,
+        &none,
+        Some(&read.ledger),
+    )?;
+    plan.tidy = read.changes;
+    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     if let Ports::Staged { store, .. } = &ports
         && let Some(v) = store.variables()
     {

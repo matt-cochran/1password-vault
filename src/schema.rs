@@ -93,6 +93,13 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "tidy",
+        effect: "writes_1password",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
         command: "delivery verify",
         effect: "reads",
         needs_terminal: false,
@@ -262,6 +269,26 @@ pub const EFFECTS: &[Effect] = &[
     },
 ];
 
+/// The commands whose item read tidies the 1Password layout when a signed-in person runs
+/// them (FR-43, [`crate::app`]'s `tidy::read`): one verified, non-destructive edit, never
+/// under a service account, Connect, CI or deploy credentials. Their effect stays `reads`
+/// (no value changes); `tidies_1password` says so. `doctor` and `ready` are not here: they
+/// never write (#113); `tidy` is the explicit repair and says `writes_1password`.
+pub const TIDIES_1PASSWORD: [&str; 12] = [
+    "setup",
+    "check",
+    "status",
+    "projects",
+    "adopt",
+    "ui",
+    "history",
+    "run",
+    "plan",
+    "sync",
+    "config export",
+    "init",
+];
+
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
 pub const FLAG_EFFECTS: [(&str, &str, &str); 10] = [
@@ -303,7 +330,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "human_required": "true when an agent must hand `do` and `next` to the user instead of acting",
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
             "values": "no document ever contains a secret value; config export prints config-kind values only",
-            "tidy": "any command that reads the 1Password item, run by a signed-in person (opv login), may tidy its layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written",
+            "tidy": "a command with tidies_1password true, run by a signed-in person (opv login), may tidy the item's layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written. doctor and ready never write 1Password, whoever runs them: they are the safe readiness checks (doctor --env <env> --json, ready --json). opv tidy <env> is the explicit repair (writes_1password, a signed-in person only)",
             "plan_id": "plan --json prints plan_id when the plan is clean; sync --expect-plan <plan_id> applies exactly that plan or fails with stale_plan (exit 6) and changes nothing",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
             "schema_version": "stays 1 while fields are only added; changes when a field changes meaning",
@@ -403,6 +430,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
         "needs_terminal": effect.map(|e| e.needs_terminal),
         "handles_values": effect.map(|e| e.handles_values),
         "ask_user_first": effect.map(|e| e.ask_user_first),
+        "tidies_1password": effect.map(|_| TIDIES_1PASSWORD.contains(&path.as_str())),
     }));
 }
 

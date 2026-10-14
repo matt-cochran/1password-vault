@@ -590,7 +590,14 @@ pub fn run(
         .map(|(name, env)| {
             let target = env.target();
             let mut fields = Vec::new();
-            let rows = super::status::env_rows_keeping(fleet, name, target, r, Some(&mut fields));
+            let rows = super::status::env_rows_keeping(
+                fleet,
+                name,
+                target,
+                r,
+                Some(&mut fields),
+                super::tidy::Mode::Inspect,
+            );
             if rows.is_ok() {
                 kept.push((name.clone(), target.is_some(), fields));
             }
