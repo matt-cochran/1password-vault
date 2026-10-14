@@ -5,6 +5,7 @@
   "checks": [
     {
       "name": "config",
+      "target": null,
       "status": "ok",
       "detail": "valid (1 environment, 1 product)",
       "next": null,
@@ -12,6 +13,7 @@
     },
     {
       "name": "op",
+      "target": null,
       "status": "ok",
       "detail": "version 2.40.0",
       "next": null,
@@ -19,6 +21,7 @@
     },
     {
       "name": "op auth",
+      "target": null,
       "status": "ok",
       "detail": "signed in (SERVICE_ACCOUNT)",
       "next": null,
@@ -26,6 +29,7 @@
     },
     {
       "name": "item",
+      "target": null,
       "status": "ok",
       "detail": "vprd/iprd readable (3 fields in section allumata)",
       "next": null,
@@ -33,6 +37,7 @@
     },
     {
       "name": "flyctl",
+      "target": "portfolio",
       "status": "ok",
       "detail": "version v0.4.112",
       "next": null,
@@ -40,13 +45,23 @@
     },
     {
       "name": "fly auth",
+      "target": "portfolio",
       "status": "ok",
       "detail": "signed in",
       "next": null,
       "do": null
     },
     {
+      "name": "state vault",
+      "target": "portfolio",
+      "status": "ok",
+      "detail": "vault sprd visible",
+      "next": null,
+      "do": null
+    },
+    {
       "name": "opv",
+      "target": null,
       "status": "ok",
       "detail": "not found on PATH",
       "next": null,
@@ -54,6 +69,7 @@
     },
     {
       "name": "agent skill",
+      "target": null,
       "status": "ok",
       "detail": "not installed (optional: opv skill install)",
       "next": null,
