@@ -57,9 +57,15 @@ fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
     let path = dir.path().join("secrets.toml");
     std::fs::write(
         &path,
-        "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
-         item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
-         environments = [\"prod\"]\nrules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
+        "[environments.prod]\n\
+         boundaries.app = { vault_id = \"v\", item_id = \"i\" }\n\
+         [environments.prod.targets.app]\n\
+         fly.app = \"app\"\n\
+         state_vault_id = \"s\"\n\
+         [products.app.keys.K1]\n\
+         kind = \"secret\"\n\
+         environments = [\"prod\"]\n\
+         rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
     )
     .unwrap();
     let (code, out, err) = opv(&["--config", path.to_str().unwrap(), "status", "prod"]);
@@ -67,7 +73,7 @@ fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
     assert!(
         out.is_empty()
             && err.contains(
-                ":10: keys.K1.rules: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead"
+                ":9: products.app.keys.K1.rules: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead"
             ),
         "{err}"
     );
@@ -268,7 +274,11 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
     let text = std::fs::read_to_string(CFG).unwrap();
     std::fs::write(
         &cfg,
-        format!("{text}\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n"),
+        format!(
+            "{text}\n[environments.dev]\nboundaries.allumata = {{ vault_id = \"vdev\", \
+             item_id = \"idev\" }}\n\n[products.allumata.keys.DEV_ONLY]\nkind = \"secret\"\n\
+             environments = [\"dev\"]\n"
+        ),
     )
     .unwrap();
     let cfg = cfg.to_str().unwrap();
@@ -357,24 +367,15 @@ const SIMPLE: &str = "tests/fixtures/simple.toml";
 fn doctor_reports_a_simple_profile_file_as_valid() {
     let (_, out, err) = opv(&["--config", SIMPLE, "doctor"]);
     assert!(
-        out.contains("ok    config: valid (2 environments, 5 keys)"),
+        out.contains("ok    config: valid (2 environments, 1 product)"),
         "{out}{err}"
     );
 }
 
-/// FR-20: `run` takes no --product under the simple profile.
+/// FR-20: with one product `run` still requires `--product`.
 #[test]
-fn run_with_product_under_simple_exits_2() {
-    let (code, _, err) = opv(&[
-        "--config",
-        SIMPLE,
-        "run",
-        "prod",
-        "--product",
-        "api",
-        "--",
-        "true",
-    ]);
+fn run_without_product_under_simple_exits_2() {
+    let (code, _, err) = opv(&["--config", SIMPLE, "run", "prod", "--", "true"]);
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("--product"), "{err}");
 }
@@ -517,13 +518,14 @@ mod run_with_fake_op {
         assert_eq!(out, "op://vstg/istg/allumata/INTEGRATION_ENC_KEY");
     }
 
-    /// FR-20: under the simple profile the child sees unsectioned field references.
+    /// FR-20: with one product `run` needs `--product`; the child sees the product-sectioned
+    /// field reference.
     #[test]
-    fn simple_child_sees_unsectioned_op_references() {
+    fn single_product_child_sees_sectioned_op_references() {
         let (dir, _) = fake_op_dir("simple-env");
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-            .args(["--config", super::SIMPLE, "run", "prod", "--"])
+            .args(["--config", super::SIMPLE, "run", "prod", "--product", "app", "--"])
             .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
             .env_remove("OPV_CONFIG")
@@ -534,7 +536,7 @@ mod run_with_fake_op {
         assert_eq!(out.status.code(), Some(0));
         assert_eq!(
             String::from_utf8(out.stdout).unwrap(),
-            "op://vprd/iprd/JWT_KEY"
+            "op://vprd/iprd/app/JWT_KEY"
         );
     }
 
@@ -611,13 +613,13 @@ fn explain_simple_form_takes_the_bare_key() {
         "prod",
     ]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.starts_with("DATABASE_URL in prod\n"), "{out}");
+    assert!(out.starts_with("app/DATABASE_URL in prod\n"), "{out}");
 }
 
-/// FR-22, FR-20: `<product>/<key>` under the simple profile is a configuration error.
+/// FR-22, FR-20: `<product>/<key>` is accepted under the single-product form too.
 #[test]
-fn explain_product_form_under_simple_exits_2() {
-    let (code, _, err) = opv(&[
+fn explain_product_form_under_simple_exits_0() {
+    let (code, out, err) = opv(&[
         "--config",
         SIMPLE,
         "explain",
@@ -625,7 +627,8 @@ fn explain_product_form_under_simple_exits_2() {
         "--env",
         "prod",
     ]);
-    assert_eq!(code, 2, "{err}");
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("app/DATABASE_URL in prod\n"), "{out}");
 }
 
 /// P8: a bare key declared by one product resolves to it under the fleet profile.
@@ -850,7 +853,7 @@ fn add_declares_a_key_in_the_discovered_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
     std::fs::copy("tests/fixtures/simple.toml", &path).unwrap();
-    let (code, _, err) = opv_in(dir.path(), &["add", "SENTRY_DSN", "--kind", "secret"]);
+    let (code, _, err) = opv_in(dir.path(), &["add", "app/SENTRY_DSN", "--kind", "secret"]);
     assert_eq!(code, 0, "{err}");
 }
 
@@ -1336,12 +1339,18 @@ JSON"#,
     let cfg = bin.path().join("secrets.toml");
     std::fs::write(
         &cfg,
-        "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"vprd\"\n\
-         item_id = \"iprd\"\ndeploy_credentials = \"op://deploy/azure\"\n\
-         [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
-         key_vault = \"kv-myapp-prod\"\nresource_group = \"rg-myapp\"\n\
-         container_app = \"ca-myapp\"\nidentity = \"system\"\n\
-         [keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+        "[environments.prod]\n\
+         boundaries.app = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+         [environments.prod.targets.api]\n\
+         azure.subscription = \"00000000-0000-0000-0000-000000000000\"\n\
+         azure.key_vault = \"kv-myapp-prod\"\n\
+         azure.resource_group = \"rg-myapp\"\n\
+         azure.container_app = \"ca-myapp\"\n\
+         azure.identity = \"system\"\n\
+         azure.env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
+         deploy_credentials = \"op://deploy/azure\"\n\
+         state_vault_id = \"sprd\"\n\
+         [products.app.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
     )
     .unwrap();
     let log = bin.path().join("log");

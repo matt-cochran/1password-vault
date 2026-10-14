@@ -480,6 +480,20 @@ fn no_secret_in_any_argv() {
             ("flyctl", vec!["releases", "--app", APP, "--json"]),
             ("flyctl", vec!["secrets", "import", "--app", APP, "--stage"]),
             ("flyctl", vec!["secrets", "list", "--app", APP, "--json"]),
+            ("op", vec!["whoami", "--format", "json"]),
+            (
+                "op",
+                vec![
+                    "item",
+                    "get",
+                    "iprd",
+                    "--vault",
+                    "vprd",
+                    "--format",
+                    "json",
+                    "--cache=false",
+                ],
+            ),
             (
                 "flyctl",
                 vec!["secrets", "unset", N_STRIPE, "--app", APP, "--stage"]
@@ -1614,18 +1628,24 @@ fn simple_profile_commands_never_leak_values() {
     }
 }
 
-/// FR-13, §8 item 15: a simple `fly sync --prune --deploy` reads the item exactly once.
+/// FR-13, §8 item 15, D12: a simple `fly sync --prune --deploy` reads the values item
+/// once cached and once fresh (the fresh read feeds the delivery evidence).
 #[test]
-fn simple_profile_sync_reads_one_item() {
+fn simple_profile_sync_reads_the_item_fresh_once() {
     let h = simple_harness();
     let r = h.run_config(SIMPLE_CONFIG, &["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 0, "{}", r.all());
-    let gets = h
+    let item_gets: Vec<Vec<String>> = h
         .calls()
-        .iter()
+        .into_iter()
         .filter(|c| c.prog == "op" && c.argv.first().map(String::as_str) == Some("item"))
+        .map(|c| c.argv)
+        .collect();
+    let fresh = item_gets
+        .iter()
+        .filter(|a| a.iter().any(|x| x == "--cache=false"))
         .count();
-    assert_eq!(gets, 1);
+    assert_eq!(fresh, 1, "{item_gets:?}");
 }
 
 /// FR-8, SR-6, §8 item 15: `--prune` under the simple profile unsets the declared key not
@@ -1662,22 +1682,23 @@ const HEX_MARK: &str = "f22dec0de5";
 /// One key per rule failure path (FR-15, FR-22), every rule in its own key so each row
 /// fails exactly one way. Config text holds no marker.
 const REASONS_CONFIG: &str = r#"
-[profile]
-kind = "fleet"
-
 [environments.staging]
-vault_id = "vstg"
-item_id = "istg"
+boundaries.allumata = { vault_id = "vstg", item_id = "istg" }
+
+[environments.staging.targets.app]
 fly.app = "reasons-staging"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sstg"
 
 [environments.prod]
-vault_id = "vprd"
-item_id = "iprd"
-fly.app = "mcproductlabs-portfolio-production"
-fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+boundaries.allumata = { vault_id = "vprd", item_id = "iprd" }
 modes.allumata.payments = "test"
 modes.allumata.region = "weird"
+
+[environments.prod.targets.app]
+fly.app = "mcproductlabs-portfolio-production"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sprd"
 
 [products.allumata.keys.REFUSED]
 kind = "secret"
@@ -2093,8 +2114,8 @@ fn explain_makes_no_op_or_flyctl_call() {
     assert!(h.calls().is_empty(), "{:?}", h.calls());
 }
 
-/// FR-22, FR-20, SR-1: under the simple profile a failing row's reason carries no marker,
-/// in text or JSON, and the JSON row keeps `product: null`.
+/// FR-22, FR-20, SR-1: a failing row's reason carries no marker, in text or JSON, and the
+/// JSON row names its product.
 #[test]
 fn simple_profile_rule_failure_reason_carries_no_marker() {
     let h = Harness::new(&item(vec![
@@ -2128,7 +2149,7 @@ fn simple_profile_rule_failure_reason_carries_no_marker() {
         .clone();
     assert_eq!(
         (row["product"].clone(), row["reason"].clone()),
-        (Value::Null, json!("expected prefix postgres://"))
+        (json!("app"), json!("expected prefix postgres://"))
     );
 }
 
