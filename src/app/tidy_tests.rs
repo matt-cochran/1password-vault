@@ -887,9 +887,6 @@ fn init_never_creates_an_item_for_a_service_account() {
         vault: "myapp-dev".into(),
         item: "app".into(),
         product: Some("app".into()),
-        target: None,
-        target_name: None,
-        fields: Default::default(),
         force: false,
         from: None,
     };

@@ -472,7 +472,6 @@ codes! {
     StateVaultMissing => "state_vault_missing", 2, AfterFix, false, "a target has no state vault recorded for its delivery evidence";
     StateVaultWiderThanValues => "state_vault_wider_than_values", 2, AfterFix, true, "a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own";
     DuplicateScope => "duplicate_scope", 2, Never, false, "a receipt file holds more than one entry for the same environment, product and target";
-    TargetNameRequired => "target_name_required", 2, AfterFix, false, "--target needs --target-name <name>, the target's name, chosen by a person";
     UnknownEnv => "unknown_env", 2, Never, false, "the environment is not defined in secrets.toml";
     UnknownProduct => "unknown_product", 2, Never, false, "the product is not declared";
     UndeclaredKey => "undeclared_key", 2, Never, false, "the key is not declared (for this environment)";

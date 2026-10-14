@@ -293,7 +293,7 @@ and locator, products, deploy credentials, state vault and deploy account. Makes
 const INIT_QUICK: &str = "\
 Examples:
   opv init dev --product api            # run-only; vault myapp-api-dev, item \"myapp · api · dev values\"
-  opv init prod --product api --fly-app myapp --target-name web   # deploys to Fly
+  opv init prod --product api           # then: opv target add prod web --fly-app myapp
   opv init dev --product api --from .env --apply   # start from an existing .env (without --apply: the plan)";
 
 const ADOPT_QUICK: &str = "\
@@ -800,19 +800,10 @@ enum Cmd {
         /// required when it has any. Each named section is a product of its own.
         #[arg(long)]
         product: Option<String>,
-        /// Deployment target of the environment; its options follow (--<target>-<field>).
-        /// Inferred from those options when omitted; omit both for a run-only environment
-        /// used for local development. Nothing is looked up.
-        #[arg(long, value_name = "PROVIDER")]
-        target: Option<String>,
-        /// Name of the target, chosen by you (^[a-z][a-z0-9-]*$); required with --target.
-        #[arg(long, value_name = "NAME")]
-        target_name: Option<String>,
         /// Add this environment to the existing configuration (a secrets.toml or the
         /// project's manifest, found like other commands) instead of writing a new one;
         /// comments are kept, and every declared key the item has includes the environment.
-        /// It writes no target: add one with opv target add.
-        #[arg(long, conflicts_with_all = ["force", "target", "target_name"])]
+        #[arg(long, conflicts_with = "force")]
         add_env: bool,
         /// Overwrite an existing secrets.toml. Hidden from help (H9): the refusal names it.
         #[arg(long, hide_short_help = true, hide_long_help = true)]
@@ -1254,40 +1245,19 @@ impl<W: Write> Write for PipeSafe<W> {
     }
 }
 
-/// The command line: the derived [`Cli`] plus each provider's `init` options
+/// The command line: the derived [`Cli`] plus each provider's `opv target add` options
 /// (`--<provider>-<field>`), taken from the plug-in contract so a new provider adds its
-/// options without a change here (H3). `opv target add` takes the same options.
+/// options without a change here (H3).
 fn command_line() -> clap::Command {
-    use opv::adapters::registry;
-    Cli::command()
-        .mut_subcommand("init", |c| {
-            provider_options(c, "Target options (* required with that --target):").mut_arg(
-                "target",
-                |a| {
-                    a.hide_possible_values(true).value_parser(
-                        clap::builder::PossibleValuesParser::new(
-                            registry::PROVIDERS
-                                .iter()
-                                .filter(|p| !p.init_fields().is_empty())
-                                .map(|p| p.section()),
-                        ),
-                    )
-                },
-            )
-        })
-        .mut_subcommand("target", |t| {
-            t.mut_subcommand("add", |c| {
-                provider_options(c, "Provider options (* required for that --provider):")
-            })
-        })
+    Cli::command().mut_subcommand("target", |t| t.mut_subcommand("add", provider_options))
 }
 
-/// Every provider's `init` options as hidden arguments plus one summary line per provider
-/// in the command's help (H3, I6), shared by `opv init` and `opv target add`.
-fn provider_options(mut c: clap::Command, header: &str) -> clap::Command {
+/// Every provider's options as hidden arguments plus one summary line per provider in
+/// `opv target add`'s help (H3, I6).
+fn provider_options(mut c: clap::Command) -> clap::Command {
     use opv::adapters::registry;
     use opv::provider::init_flag;
-    let mut summary = String::from(header);
+    let mut summary = String::from("Provider options (* required for that --provider):");
     for p in registry::PROVIDERS
         .iter()
         .filter(|p| !p.init_fields().is_empty())
@@ -1318,29 +1288,16 @@ fn provider_options(mut c: clap::Command, header: &str) -> clap::Command {
     }
 }
 
-/// The provider options given to `init` or `target add`, by option name.
-fn init_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
-    let Some(m) = matches.subcommand_matches("init") else {
-        return Default::default();
-    };
-    provider_fields(m)
-}
-
 /// The provider options given to `target add`, by option name.
 fn target_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
+    use opv::adapters::registry;
+    use opv::provider::init_flag;
     let Some(m) = matches
         .subcommand_matches("target")
         .and_then(|t| t.subcommand_matches("add"))
     else {
         return Default::default();
     };
-    provider_fields(m)
-}
-
-/// Every provider option present in `m`, by option name.
-fn provider_fields(m: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
-    use opv::adapters::registry;
-    use opv::provider::init_flag;
     registry::PROVIDERS
         .iter()
         .flat_map(|p| p.init_fields().iter().map(move |f| init_flag(*p, f)))
@@ -1375,7 +1332,6 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage_error(e),
     };
-    let init_options = init_fields(&matches);
     let target_options = target_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
     let help = help_command();
@@ -1410,32 +1366,14 @@ fn main() -> ExitCode {
             },
         };
         let res = if json.is_some() {
-            run(
-                cli,
-                config_source,
-                &init_options,
-                &target_options,
-                &mut body,
-            )
+            run(cli, config_source, &target_options, &mut body)
         } else if paint {
             let mut painter = colour::Painter::new(&mut stdout);
-            let res = run(
-                cli,
-                config_source,
-                &init_options,
-                &target_options,
-                &mut painter,
-            );
+            let res = run(cli, config_source, &target_options, &mut painter);
             let _ = painter.flush();
             res
         } else {
-            run(
-                cli,
-                config_source,
-                &init_options,
-                &target_options,
-                &mut stdout,
-            )
+            run(cli, config_source, &target_options, &mut stdout)
         };
         let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
         if may_sign_in && signed_out && !signed_in {
@@ -1874,7 +1812,6 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
 fn run(
     cli: Cli,
     config_source: ConfigSource,
-    init_options: &std::collections::BTreeMap<String, String>,
     target_options: &std::collections::BTreeMap<String, String>,
     out: &mut dyn Write,
 ) -> Result<i32, Error> {
@@ -1987,7 +1924,7 @@ fn run(
         })?;
     }
     if let Cmd::Init { add_env: false, .. } = &cli.cmd {
-        return run_init(cli, config_source, init_options, &r, out).map(|()| 0);
+        return run_init(cli, config_source, &r, out).map(|()| 0);
     }
     match &cli.cmd {
         Cmd::Projects { long, json } => {
@@ -2099,7 +2036,7 @@ fn run(
     if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } | Cmd::Target(TargetCmd::Add { .. }) =
         &cli.cmd
     {
-        return run_edit(cli.cmd, &found?, init_options, target_options, &r, out).map(|()| 0);
+        return run_edit(cli.cmd, &found?, target_options, &r, out).map(|()| 0);
     }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
     // The project's account (its manifest's, or the one recorded in .opv): `doctor`
@@ -2593,7 +2530,6 @@ fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
 fn run_init(
     cli: Cli,
     config_source: ConfigSource,
-    init_options: &std::collections::BTreeMap<String, String>,
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -2604,8 +2540,6 @@ fn run_init(
             vault,
             item,
             product,
-            target,
-            target_name,
             force,
             ..
         } = &cli.cmd
@@ -2627,15 +2561,6 @@ fn run_init(
         }
         if let Some(p) = product {
             again.push_str(&format!(" --product {}", shell_word(p)));
-        }
-        if let Some(t) = &target {
-            again.push_str(&format!(" --target {}", shell_word(t)));
-        }
-        for (flag, value) in init_options {
-            again.push_str(&format!(" --{flag} {}", shell_word(value)));
-        }
-        if let Some(n) = target_name {
-            again.push_str(&format!(" --target-name {}", shell_word(n)));
         }
         if *force {
             again.push_str(" --force");
@@ -2674,10 +2599,10 @@ fn run_init(
         ..
     } = &cli.cmd
     {
-        let args = init_args(cli.cmd, init_options, r, &dir)?;
+        let args = init_args(cli.cmd, r, &dir)?;
         let from = args.from.as_ref().expect("matched --from");
         let imported = init::read_from(from)?;
-        let again = init_from_again(&args, init_options, file, project.as_deref());
+        let again = init_from_again(&args, file, project.as_deref());
         return init::plan_from(&args, &imported, &again, out, json);
     }
     // FR-40, NR-7: every op call of init goes to one chosen account, never op's default
@@ -2701,7 +2626,7 @@ fn run_init(
         }
     }
     let scoped = signin::EnvRunner::with_account(r, chosen);
-    let args = init_args(cli.cmd, init_options, &scoped, &dir)?;
+    let args = init_args(cli.cmd, &scoped, &dir)?;
     // A project that already has a secrets.toml keeps it; a new one gets a manifest
     // unless --file asks for the file (FR-44).
     if file || config::discover(&dir).is_some() {
@@ -2712,12 +2637,7 @@ fn run_init(
 }
 
 /// The `opv init … --from <file> --apply` that carries out a `--from` plan (#90).
-fn init_from_again(
-    args: &init::InitArgs,
-    init_options: &std::collections::BTreeMap<String, String>,
-    file: bool,
-    project: Option<&str>,
-) -> String {
+fn init_from_again(args: &init::InitArgs, file: bool, project: Option<&str>) -> String {
     let from = args.from.as_ref().expect("called with --from");
     let mut c = format!(
         "opv init {} --vault {} --item {}",
@@ -2727,15 +2647,6 @@ fn init_from_again(
     );
     if let Some(p) = &args.product {
         c.push_str(&format!(" --product {}", shell_word(p)));
-    }
-    if let Some(t) = &args.target {
-        c.push_str(&format!(" --target {}", shell_word(t)));
-    }
-    for (flag, value) in init_options {
-        c.push_str(&format!(" --{flag} {}", shell_word(value)));
-    }
-    if let Some(n) = &args.target_name {
-        c.push_str(&format!(" --target-name {}", shell_word(n)));
     }
     if file {
         c.push_str(" --file");
@@ -2762,7 +2673,6 @@ fn init_from_again(
 fn run_edit(
     cmd: Cmd,
     found: &config_store::Found,
-    init_options: &std::collections::BTreeMap<String, String>,
     target_options: &std::collections::BTreeMap<String, String>,
     r: &ProcessRunner,
     out: &mut dyn Write,
@@ -2801,7 +2711,7 @@ fn run_edit(
             let dir = std::env::current_dir().map_err(|e| {
                 Error::Config(format!("cannot read the current directory: {e}").into())
             })?;
-            init::add_env_as(&init_args(cmd, init_options, r, &dir)?, store, r, out, json)
+            init::add_env_as(&init_args(cmd, r, &dir)?, store, r, out, json)
         }
         Cmd::Target(TargetCmd::Add {
             env,
@@ -2838,7 +2748,6 @@ fn run_edit(
 /// is enough.
 fn init_args(
     cmd: Cmd,
-    init_options: &std::collections::BTreeMap<String, String>,
     r: &dyn opv::runner::CommandRunner,
     dir: &std::path::Path,
 ) -> Result<init::InitArgs, Error> {
@@ -2847,8 +2756,6 @@ fn init_args(
         vault,
         item,
         product,
-        target,
-        target_name,
         add_env: _,
         force,
         file: _,
@@ -2880,9 +2787,6 @@ fn init_args(
         vault,
         item,
         product,
-        target,
-        target_name,
-        fields: init_options.clone(),
         force,
         from: from.map(|path| init::FromFile {
             path,
@@ -3304,16 +3208,16 @@ mod tests {
 
     /// I6: the provider options come from the registry, so a new provider is listed too.
     #[test]
-    fn schema_lists_each_provider_init_option_with_its_provider() {
+    fn schema_lists_each_provider_option_of_target_add_with_its_provider() {
         use opv::adapters::registry::PROVIDERS;
         let doc = opv::schema::describe(&cli_command(), "test");
-        let init = doc["commands"]
+        let add = doc["commands"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|c| c["name"] == "init")
+            .find(|c| c["name"] == "target add")
             .unwrap();
-        let listed = init["flags"]
+        let listed = add["flags"]
             .as_array()
             .unwrap()
             .iter()

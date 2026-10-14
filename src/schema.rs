@@ -447,7 +447,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
     }));
 }
 
-/// `(provider section, required)` when `long` is a provider's `init` option
+/// `(provider section, required)` when `long` is a provider's `opv target add` option
 /// (`azure-key-vault`).
 fn provider_option(long: &str) -> Option<(&'static str, bool)> {
     crate::adapters::registry::PROVIDERS.iter().find_map(|p| {
@@ -561,12 +561,11 @@ fn documents() -> Value {
             "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
         ],
         "init": [
-            "path", "manifest", "environment", "boundary", "target", "provider", "vault_id",
-            "item_id",
-            "created", "keys: [{product, key, kind}]", "skipped"
+            "path", "manifest", "environment", "boundary", "vault_id", "item_id", "created",
+            "keys: [{product, key, kind}]", "skipped"
         ],
         "init --add-env": [
-            "environment", "target", "saved_in", "vault_id", "item_id", "added", "absent",
+            "environment", "saved_in", "boundary", "vault_id", "item_id", "added", "absent",
             "undeclared"
         ],
         "add": ["product", "key", "kind", "environments", "saved_in", "changed"],

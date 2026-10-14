@@ -1,8 +1,9 @@
-//! `init <env> [--vault <name>] [--item <name>] [--product <name>] [--target <provider> …
-//! --target-name <name>]` use case (FR-23, H3) and `init <env> … --add-env` (H2).
+//! `init <env> [--vault <name>] [--item <name>] [--product <name>]` use case (FR-23) and
+//! `init <env> … --add-env` (H2).
 //!
-//! A dev-time helper that writes a starter configuration in the one form (FR-56, FR-57,
-//! FR-60):
+//! A dev-time helper that writes a starter configuration in the one form (FR-57, FR-60):
+//! boundaries and products. It writes no target: `opv target add` is the one way to add
+//! one (FR-56).
 //!
 //! 1. Refuse before any call when the file exists and `--force` is not given (exit 2).
 //! 2. Resolve the vault and item titles to IDs, once, through
@@ -14,22 +15,15 @@
 //!    both. Concealed fields become `secret`, text fields `config` (FR-14); other types and
 //!    labels that are not valid key names are skipped with a note naming the field.
 //! 5. The item is one boundary (FR-57): `boundaries.<product>` for one product, else
-//!    `boundary = "core"` on each product and `boundaries.core`. A target is written as
-//!    `[environments.<env>.targets.<name>]` without `state_vault_id`: `opv bootstrap`
-//!    records it (FR-58).
+//!    `boundary = "core"` on each product and `boundaries.core`.
 //! 6. Render the file, validate it with the same loader as a hand-written one (§10.2), and
 //!    write it atomically (a temporary file in the same directory, then a rename). The file
 //!    holds IDs, names and kinds only, never a value (SR-4).
 //!
-//! The target section comes from the provider through the plug-in contract
-//! ([`Provider::init_fields`], [`Provider::init_section`]): `--target <section>` and the
-//! options `--<section>-<field>`. Nothing is looked up; the section is validated by the
-//! loader before any 1Password call. `--fly-app` is the Fly provider's `app` option.
-//!
 //! `--add-env` adds one `[environments.<env>]` with its boundary to an existing
 //! configuration instead (edited in place, comments kept, [`crate::config_edit`]), and adds
-//! the environment to every declared key whose field the item has. It writes no target and
-//! refuses an environment that already exists.
+//! the environment to every declared key whose field the item has, and refuses an
+//! environment that already exists.
 //!
 //! Read-only against 1Password (FR-11, SR-5) except for a signed-in person (FR-43): a
 //! missing vault or item is created, and the declared item is tidied after the file is
@@ -43,14 +37,12 @@ use std::path::Path;
 
 use super::write_err;
 use crate::adapters::onepassword_init::{self, FieldShape};
-use crate::adapters::registry;
 use crate::config;
 use crate::config_edit::{self, ConfigDoc};
 use crate::config_store::ConfigStore;
 use crate::domain::{Fleet, Kind};
 use crate::error::Error;
 use crate::host::Host;
-use crate::provider::{InitField, Provider, init_flag};
 use crate::runner::CommandRunner;
 
 /// The file `init` writes, in the directory it is given (the current directory).
@@ -68,13 +60,6 @@ pub struct InitArgs {
     /// `--product`: the product the item's unsectioned fields (and `--from`'s keys) belong
     /// to.
     pub product: Option<String>,
-    /// `--target`: the provider section. Without it, the provider whose options were given
-    /// (none: a run-only environment).
-    pub target: Option<String>,
-    /// `--target-name`: the target's name, chosen by a person (FR-56).
-    pub target_name: Option<String>,
-    /// Provider options given, by option name without dashes (`fly-app` → value).
-    pub fields: BTreeMap<String, String>,
     pub force: bool,
     /// `--from`: declare every key of a dotenv file, and with `apply` import its values
     /// (#90).
@@ -244,7 +229,7 @@ pub fn run(
 }
 
 /// [`run`], printing what was written as one JSON document when `json` (A5): `{path,
-/// manifest, environment, boundary, target, provider, vault_id, item_id, created, keys:
+/// manifest, environment, boundary, vault_id, item_id, created, keys:
 /// [{product, key, kind}], skipped, next}`. Names, IDs and kinds only.
 pub fn run_as(
     args: &InitArgs,
@@ -265,14 +250,12 @@ fn run_on(
     json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
-    let choice = choose_target(args).map_err(init_help)?;
-    probe_target(args, choice.as_ref()).map_err(init_help)?;
     let target = dir.join(FILE_NAME);
     if !args.force && fs::symlink_metadata(&target).is_ok() {
         return Err(existing_refusal(args, &target));
     }
     let imported = from_apply(args)?;
-    let p = prepare(args, choice, imported.as_ref(), r, host)?;
+    let p = prepare(args, imported.as_ref(), r, host)?;
     write_atomic(&target, &p.text, args.force)?;
     tidy_declared(args, &p, r);
     let adopted = import_values(args, &p, r)?;
@@ -297,10 +280,8 @@ pub fn run_manifest(
     json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
-    let choice = choose_target(args).map_err(init_help)?;
-    probe_target(args, choice.as_ref()).map_err(init_help)?;
     let imported = from_apply(args)?;
-    let p = prepare(args, choice, imported.as_ref(), r, &Host::detect)?;
+    let p = prepare(args, imported.as_ref(), r, &Host::detect)?;
     let repo = crate::config_store::git_repo(r);
     let project = crate::config_store::default_project(project, repo.as_deref(), dir)?;
     let m = crate::config_store::create_manifest(
@@ -473,11 +454,9 @@ struct Prepared {
     item: onepassword_init::Named,
     decl: Declared,
     text: String,
-    /// The written text as the loader reads it once `opv bootstrap` has recorded the
-    /// target's state vault: what the tidy and `--from`'s import work from.
+    /// The written text as the loader reads it: what the tidy and `--from`'s import work
+    /// from.
     fleet: Fleet,
-    /// The target written, if any.
-    choice: Option<TargetChoice>,
     /// What was created in 1Password for a signed-in person (FR-43), e.g. `vault "x"`.
     created: Vec<String>,
 }
@@ -496,7 +475,6 @@ fn not_created(e: Error, what: &str, title: &str) -> Error {
 /// shapes, declare, render and validate (steps 2 to 6).
 fn prepare(
     args: &InitArgs,
-    choice: Option<TargetChoice>,
     imported: Option<&Imported>,
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
@@ -536,25 +514,18 @@ fn prepare(
         merge_imported(&mut decl, imported, args)?;
     }
     let ids = (vault.id.as_str(), item.id.as_str());
-    let text = render(args, ids, choice.as_ref(), &decl, None);
-    // Validated exactly like a hand-written file (§10.2): IDs, target, key and product
-    // names. The state vault is `opv bootstrap`'s to record, so the check holds a
-    // placeholder for it.
-    let probe = render(args, ids, choice.as_ref(), &decl, Some(PROBE_STATE_VAULT));
-    let fleet = config::parse(&probe).map_err(|e| would_write(e, "init"))?;
+    let text = render(args, ids, &decl);
+    // Validated exactly like a hand-written file (§10.2): IDs, key and product names.
+    let fleet = config::parse(&text).map_err(|e| would_write(e, "init"))?;
     Ok(Prepared {
         vault,
         item,
         decl,
         text,
         fleet,
-        choice,
         created,
     })
 }
-
-/// The `state_vault_id` the written text is validated with; never written.
-const PROBE_STATE_VAULT: &str = "state-vault-recorded-by-bootstrap";
 
 /// The lines after a successful `init`: IDs, notes, counts, where it was written, then
 /// the next step.
@@ -587,10 +558,9 @@ fn report(
     w(
         out,
         format!(
-            "wrote {} ({}{}): {secrets} secret, {configs} config, skipped {}",
+            "wrote {} ({}): {secrets} secret, {configs} config, skipped {}",
             place.describe(),
             decl.describe(),
-            target_word(p.choice.as_ref()),
             decl.skipped
         ),
     )?;
@@ -609,11 +579,22 @@ fn report(
             ),
         )?;
     }
+    // A deployed environment's target is added by `opv target add` (FR-56), whose options
+    // only the person knows; a run-only environment needs none.
+    w(
+        out,
+        format!(
+            "add a deploy target: opv target add {} <name> --<provider options> (opv target \
+             add --help); a run-only environment needs none",
+            crate::error::shell_word(&args.env)
+        ),
+    )?;
     w(out, format!("Next: {NEXT}"))
 }
 
-/// The command after `init`: it records every boundary the configuration declares and the
-/// target's state vault (FR-52, FR-58).
+/// The command after `init`, runnable as printed whatever the environment: it records every
+/// boundary the configuration declares and adds each declared key's empty field (FR-52),
+/// then points at `opv ready`.
 const NEXT: &str = "opv bootstrap";
 
 /// `init --json` (A5).
@@ -648,8 +629,6 @@ fn write_json(
         "manifest": manifest,
         "environment": args.env,
         "boundary": decl.boundary(),
-        "target": p.choice.as_ref().map(|c| c.name.as_str()),
-        "provider": p.choice.as_ref().map(|c| c.provider.section()),
         "vault_id": p.vault.id,
         "item_id": p.item.id,
         "created": p.created,
@@ -685,179 +664,6 @@ fn would_write(e: Error, command: &str) -> Error {
     }
 }
 
-/// A refusal of the target options names `opv init --help` unless it names its own step.
-fn init_help(e: Error) -> Error {
-    e.or_next(|| "opv init --help".into())
-}
-
-/// The named target `init` writes: its name, provider and option values.
-struct TargetChoice {
-    name: String,
-    provider: &'static dyn Provider,
-    values: BTreeMap<&'static str, String>,
-}
-
-impl TargetChoice {
-    /// The target's table: a one-line comment, then the provider's section.
-    fn table(&self, env: &str, state_vault_id: Option<&str>) -> String {
-        let mut s = format!(
-            "\n[environments.{env}.targets.{}]\n# deploy target; written by opv init (opv \
-             bootstrap records its state vault)\n{}",
-            self.name,
-            self.provider.init_section(&self.values).unwrap_or_default()
-        );
-        if let Some(id) = state_vault_id {
-            let _ = writeln!(s, "state_vault_id = {}", quoted(id));
-        }
-        s
-    }
-}
-
-fn target_word(choice: Option<&TargetChoice>) -> String {
-    choice.map_or_else(String::new, |c| {
-        format!(", target {} ({})", c.name, c.provider.section())
-    })
-}
-
-/// The provider option `flag` (without dashes) names, if any.
-fn find_field(flag: &str) -> Option<(&'static dyn Provider, &'static InitField)> {
-    registry::PROVIDERS.iter().copied().find_map(|p| {
-        p.init_fields()
-            .iter()
-            .find(|f| init_flag(p, f) == flag)
-            .map(|f| (p, f))
-    })
-}
-
-/// `--target`, `--target-name` and the provider options to one named target (H3, FR-56),
-/// before any call: an unknown target, options of two providers, an option of another
-/// provider than `--target`, a missing required option and a missing or invalid
-/// `--target-name` are each refused naming the flag.
-fn choose_target(args: &InitArgs) -> Result<Option<TargetChoice>, Error> {
-    let mut given = Vec::new();
-    for (flag, value) in &args.fields {
-        let (p, f) = find_field(flag)
-            .ok_or_else(|| Error::Config(format!("unknown init option --{flag}").into()))?;
-        given.push((p, f, flag.as_str(), value));
-    }
-    let section = match &args.target {
-        Some(t) => t.clone(),
-        None => {
-            let mut sections: Vec<&str> = given.iter().map(|(p, ..)| p.section()).collect();
-            sections.dedup();
-            match sections.as_slice() {
-                [] if args.target_name.is_some() => {
-                    return Err(Error::Config(
-                        "--target-name names the target init writes; pass --target <provider> \
-                         and its options too"
-                            .into(),
-                    ));
-                }
-                [] => return Ok(None),
-                [one] => (*one).to_string(),
-                many => {
-                    return Err(Error::Config(
-                        format!(
-                            "init options for {} given; init writes one target: pass --target \
-                             with one of them",
-                            many.join(" and ")
-                        )
-                        .into(),
-                    ));
-                }
-            }
-        }
-    };
-    let provider = registry::find(&section).ok_or_else(|| {
-        Error::Config(
-            format!(
-                "--target {section:?} is not a provider; known: {}",
-                registry::sections().join(", ")
-            )
-            .into(),
-        )
-    })?;
-    if provider.init_fields().is_empty() {
-        return Err(Error::Config(
-            format!(
-                "init cannot write a {} target yet; add [environments.{}.targets.<name>] with \
-                 its {section} section by hand (see {}/configuration.md)",
-                provider.label(),
-                args.env,
-                crate::DOCS_URL
-            )
-            .into(),
-        ));
-    }
-    let name = args.target_name.clone().ok_or_else(|| {
-        Error::Config(
-            format!(
-                "--target {section} needs --target-name <name>: the target's name, chosen by \
-                 you (^[a-z][a-z0-9-]*$, for example web)"
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::TargetNameRequired)
-    })?;
-    if !config::is_target_name(&name) {
-        return Err(Error::Config(
-            format!("--target-name {name:?} must match ^[a-z][a-z0-9-]*$").into(),
-        ));
-    }
-    let mut values = BTreeMap::new();
-    for (p, f, flag, value) in given {
-        if p.section() != section {
-            return Err(Error::Config(
-                format!(
-                    "--{flag} is an option of --target {}, not {section}",
-                    p.section()
-                )
-                .into(),
-            ));
-        }
-        values.insert(f.field, value.clone());
-    }
-    let missing: Vec<String> = provider
-        .init_fields()
-        .iter()
-        .filter(|f| f.required && !values.contains_key(f.field))
-        .map(|f| format!("--{}", init_flag(provider, f)))
-        .collect();
-    if !missing.is_empty() {
-        return Err(Error::Config(
-            format!(
-                "--target {section} needs {} (opv init --help lists every option)",
-                missing.join(", ")
-            )
-            .into(),
-        ));
-    }
-    Ok(Some(TargetChoice {
-        name,
-        provider,
-        values,
-    }))
-}
-
-/// Validate the target before any 1Password call, with the loader: a configuration holding
-/// only this environment and its target.
-fn probe_target(args: &InitArgs, choice: Option<&TargetChoice>) -> Result<(), Error> {
-    let Some(choice) = choice else {
-        return Ok(());
-    };
-    let text = format!(
-        "[environments.{}]\n{}",
-        args.env,
-        choice.table(&args.env, Some(PROBE_STATE_VAULT))
-    );
-    config::parse(&text).map(|_| ()).map_err(|e| match e {
-        e @ Error::Config(_) => {
-            e.map_text(|m| format!("{m} (from the --target options; nothing written)"))
-        }
-        other => other,
-    })
-}
-
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
 /// `dir`'s parent), a one-line note naming it: the new file takes precedence below `dir`.
 /// Never a refusal.
@@ -872,7 +678,7 @@ pub fn ancestor_note(dir: &Path) -> Option<String> {
 }
 
 /// Arguments that need no 1Password call: the environment name (a bare TOML key), vault,
-/// item and product. The target options are checked by [`choose_target`].
+/// item and product.
 fn check_args(args: &InitArgs) -> Result<(), Error> {
     let env_ok = args
         .env
@@ -959,7 +765,7 @@ pub fn default_item(project: &str, env: &str) -> String {
 }
 
 /// `opv init <env> --vault <v> --item <i> [--product <p>] --add-env`: this run's own
-/// arguments, as `--add-env` (which writes no target).
+/// arguments, as `--add-env`.
 pub(crate) fn add_env_command(args: &InitArgs) -> String {
     use crate::error::shell_word;
     let mut c = format!(
@@ -1174,17 +980,10 @@ fn env_table(env: &str, boundary: Option<&str>, (vault_id, item_id): (&str, &str
     s
 }
 
-/// The file text: one environment with the item's boundary and the target, then each
-/// product (with `boundary = "core"` when several share the item) and one table per key
-/// with its kind and `environments = [<env>]`. Keys and products are validated names (bare
-/// TOML keys). `state_vault_id` is only given for validation.
-fn render(
-    args: &InitArgs,
-    ids: (&str, &str),
-    choice: Option<&TargetChoice>,
-    d: &Declared,
-    state_vault_id: Option<&str>,
-) -> String {
+/// The file text: one environment with the item's boundary, then each product (with
+/// `boundary = "core"` when several share the item) and one table per key with its kind
+/// and `environments = [<env>]`. Keys and products are validated names (bare TOML keys).
+fn render(args: &InitArgs, ids: (&str, &str), d: &Declared) -> String {
     let env = &args.env;
     let mut s = String::new();
     s.push_str(
@@ -1193,9 +992,6 @@ fn render(
          opv target add; rules and guidance by hand.\n\n",
     );
     s.push_str(&env_table(env, d.boundary(), ids));
-    if let Some(c) = choice {
-        s.push_str(&c.table(env, state_vault_id));
-    }
     let shared = d.keys.len() > 1;
     for (product, keys) in &d.keys {
         if shared {
@@ -1245,20 +1041,6 @@ pub fn add_env_as(
     add_env_on(args, store, r, out, &Host::detect, json)
 }
 
-/// `--add-env` writes no target (FR-56): `opv target add` does, once the environment
-/// exists.
-fn refuse_target(args: &InitArgs) -> Result<(), Error> {
-    if args.target.is_none() && args.target_name.is_none() && args.fields.is_empty() {
-        return Ok(());
-    }
-    Err(Error::Config(
-        "--add-env writes no target: add the environment without --target and its options, \
-         then the target with opv target add"
-            .into(),
-    )
-    .with_next(add_env_command(args)))
-}
-
 fn add_env_on(
     args: &InitArgs,
     store: &dyn ConfigStore,
@@ -1268,7 +1050,6 @@ fn add_env_on(
     json: bool,
 ) -> Result<(), Error> {
     check_args(args)?;
-    refuse_target(args)?;
     // The text the write is built from: for the manifest, a person's fresh read (I3, C1).
     let base = store.read_for_write(r)?;
     let original = &base.text;

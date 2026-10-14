@@ -5,8 +5,6 @@
   "manifest": null,
   "environment": "staging",
   "boundary": "core",
-  "target": "web",
-  "provider": "fly",
   "vault_id": "vaultid01",
   "item_id": "itemid01",
   "created": [],

@@ -746,14 +746,27 @@ fn the_same_label_in_two_sections_declares_both() {
 
 // ---- Status and other commands ----
 
-/// Once bootstrapped, `opv status` finds every key saved against the very item the file was
-/// generated from.
+/// The written file with the Fly target `opv target add staging web --fly-app
+/// myapp-staging` adds: the provider's section and the state vault it records.
+fn with_fly_target(dir: &Path) -> Fleet {
+    let fly = crate::adapters::registry::find("fly").unwrap();
+    let section = fly
+        .init_section(&BTreeMap::from([("app", "myapp-staging".to_string())]))
+        .unwrap();
+    let text = fs::read_to_string(dir.join(FILE_NAME)).unwrap()
+        + "\n[environments.staging.targets.web]\nstate_vault_id = \"sstg\"\n"
+        + &section;
+    config::parse(&text).unwrap()
+}
+
+/// Once its target is added, `opv status` finds every key saved against the very item the
+/// file was generated from.
 #[test]
 fn generated_file_passes_status_against_the_same_item() {
-    let (dir, _run) = init_with(&two_products(), &with_target(Some("fly"), &fly_opts()));
+    let (dir, _run) = init_with(&two_products(), &args());
     let r = FakeRunner::new([item(&two_products()), fly_empty()]);
     let mut out = Vec::new();
-    status::run(&bootstrapped(dir.path()), "staging", &r, &mut out).unwrap();
+    status::run(&with_fly_target(dir.path()), "staging", &r, &mut out).unwrap();
     assert!(text_of(&out).contains("3 saved"), "{}", text_of(&out));
 }
 
@@ -864,292 +877,22 @@ fn no_ancestor_note_without_an_ancestor_file() {
     }
 }
 
-// ---- Named targets (FR-56, H3) ----
+// ---- Targets: init writes none (FR-56, FR-60) ----
 
-const GUID: &str = "00000000-0000-0000-0000-0000000000ab";
-
-/// `--target <target> --target-name web` with the provider's options.
-fn with_target(target: Option<&str>, opts: &[(&str, &str)]) -> InitArgs {
-    InitArgs {
-        target: target.map(String::from),
-        target_name: Some("web".into()),
-        fields: opts
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-        ..args()
-    }
-}
-
-fn fly_opts() -> Vec<(&'static str, &'static str)> {
-    vec![("fly-app", "myapp-staging")]
-}
-
-fn azure_opts() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("azure-subscription", GUID),
-        ("azure-key-vault", "kv-myapp"),
-        ("azure-resource-group", "rg-myapp"),
-        ("azure-container-app", "myapp"),
-    ]
-}
-
-fn kubernetes_opts() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("kubernetes-context", "kind-dev"),
-        ("kubernetes-namespace", "myapp"),
-        ("kubernetes-deployment", "web"),
-    ]
-}
-
-/// The written file once `opv bootstrap` has recorded each target's state vault.
-fn bootstrapped(dir: &Path) -> Fleet {
-    let mut doc: toml_edit::DocumentMut = fs::read_to_string(dir.join(FILE_NAME))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let targets = doc["environments"]["staging"]["targets"]
-        .as_table_mut()
-        .unwrap();
-    for (_, t) in targets.iter_mut() {
-        t["state_vault_id"] = toml_edit::value("sstg");
-    }
-    config::parse(&doc.to_string()).unwrap()
-}
-
-/// The provider of target `web`, as loaded.
-fn loaded_provider(dir: &Path) -> &'static str {
-    bootstrapped(dir).environments["staging"].targets["web"]
-        .config
-        .provider()
-        .section()
+#[test]
+fn init_writes_no_target() {
+    let (_dir, run) = init_with(&api_fields(), &args());
+    assert!(!run.file().contains(".targets."), "{}", run.file());
 }
 
 #[test]
-fn a_target_is_written_as_a_named_target_table() {
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+fn init_names_target_add_for_a_deploy_target() {
+    let (_dir, run) = init_with(&api_fields(), &args());
     assert!(
-        run.file().contains("[environments.staging.targets.web]\n"),
-        "{}",
-        run.file()
-    );
-}
-
-#[test]
-fn a_target_is_written_without_a_state_vault_id() {
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
-    assert!(!run.file().contains("state_vault_id"), "{}", run.file());
-}
-
-/// The state vault is `opv bootstrap`'s to record (FR-58): until then the loader says so.
-#[test]
-fn a_written_target_waits_for_bootstrap() {
-    let (dir, _run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
-    let e = config::load(dir.path().join(FILE_NAME)).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::StateVaultMissing);
-}
-
-#[test]
-fn a_target_init_ends_with_next_bootstrap() {
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
-    assert!(run.out.ends_with("Next: opv bootstrap\n"), "{}", run.out);
-}
-
-#[test]
-fn a_target_init_reports_the_target() {
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
-    assert!(
-        run.out.contains("(product api, target web (fly))"),
+        run.out
+            .contains("add a deploy target: opv target add staging <name>"),
         "{}",
         run.out
-    );
-}
-
-#[test]
-fn a_target_without_target_name_is_refused_naming_the_flag() {
-    let mut a = with_target(Some("fly"), &fly_opts());
-    a.target_name = None;
-    let (_dir, run) = init_with(&api_fields(), &a);
-    assert_eq!(run.err().code(), crate::error::Code::TargetNameRequired);
-    assert!(
-        run.err().to_string().contains("needs --target-name <name>"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn a_target_without_target_name_makes_no_call() {
-    let mut a = with_target(Some("fly"), &fly_opts());
-    a.target_name = None;
-    let (_dir, run) = init_with(&api_fields(), &a);
-    assert!(run.r.calls.borrow().is_empty());
-}
-
-#[test]
-fn a_target_inferred_from_its_options_needs_a_target_name() {
-    let mut a = with_target(None, &fly_opts());
-    a.target_name = None;
-    let (_dir, run) = init_with(&api_fields(), &a);
-    assert_eq!(run.err().code(), crate::error::Code::TargetNameRequired);
-    assert!(
-        run.err().to_string().contains("--target-name"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn a_target_name_without_a_target_is_refused() {
-    let a = with_target(None, &[]);
-    let (_dir, run) = init_with(&api_fields(), &a);
-    assert!(
-        run.err().to_string().contains("pass --target <provider>"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn an_invalid_target_name_is_refused_naming_the_flag() {
-    let mut a = with_target(Some("fly"), &fly_opts());
-    a.target_name = Some("Web".into());
-    let (_dir, run) = init_with(&api_fields(), &a);
-    assert!(
-        run.err()
-            .to_string()
-            .contains("--target-name \"Web\" must match"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn a_fly_target_writes_the_fleet_template() {
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
-    assert!(
-        run.file()
-            .contains("fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\""),
-        "{}",
-        run.file()
-    );
-}
-
-#[test]
-fn a_fly_target_loads_once_bootstrapped() {
-    let (dir, _run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
-    assert_eq!(loaded_provider(dir.path()), "fly");
-}
-
-#[test]
-fn an_azure_target_loads_once_bootstrapped() {
-    let (dir, _run) = init_with(&api_fields(), &with_target(Some("azure"), &azure_opts()));
-    assert_eq!(loaded_provider(dir.path()), "azure");
-}
-
-#[test]
-fn a_kubernetes_target_loads_once_bootstrapped() {
-    let (dir, _run) = init_with(
-        &api_fields(),
-        &with_target(Some("kubernetes"), &kubernetes_opts()),
-    );
-    assert_eq!(loaded_provider(dir.path()), "kubernetes");
-}
-
-#[test]
-fn the_target_is_inferred_from_its_options() {
-    let (dir, _run) = init_with(&api_fields(), &with_target(None, &kubernetes_opts()));
-    assert_eq!(loaded_provider(dir.path()), "kubernetes");
-}
-
-#[test]
-fn azure_identity_defaults_to_system() {
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("azure"), &azure_opts()));
-    assert!(
-        run.file().contains("azure.identity = \"system\"\n"),
-        "{}",
-        run.file()
-    );
-}
-
-#[test]
-fn optional_options_are_written() {
-    let mut opts = kubernetes_opts();
-    opts.push(("kubernetes-container", "app"));
-    let (_dir, run) = init_with(&api_fields(), &with_target(Some("kubernetes"), &opts));
-    assert!(
-        run.file().contains("kubernetes.container = \"app\"\n"),
-        "{}",
-        run.file()
-    );
-}
-
-#[test]
-fn a_missing_required_option_is_refused_naming_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let run = run_in(
-        dir.path(),
-        &with_target(Some("azure"), &azure_opts()[..3]),
-        vec![],
-    );
-    assert!(
-        run.err().to_string().contains("--azure-container-app"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn options_of_two_providers_without_target_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut opts = kubernetes_opts();
-    opts.push(("fly-app", "a"));
-    let run = run_in(dir.path(), &with_target(None, &opts), vec![]);
-    assert!(
-        run.err().to_string().contains("pass --target"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn an_option_of_another_provider_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut opts = kubernetes_opts();
-    opts.push(("fly-app", "a"));
-    let run = run_in(dir.path(), &with_target(Some("kubernetes"), &opts), vec![]);
-    assert!(
-        run.err()
-            .to_string()
-            .contains("--fly-app is an option of --target fly"),
-        "{}",
-        run.err()
-    );
-}
-
-#[test]
-fn an_invalid_option_value_is_refused_before_any_call() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut opts = azure_opts();
-    opts[0] = ("azure-subscription", "not-a-guid");
-    let run = run_in(dir.path(), &with_target(Some("azure"), &opts), vec![]);
-    assert!(run.r.calls.borrow().is_empty());
-}
-
-#[test]
-fn a_bad_fly_app_quotes_the_app_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let run = run_in(
-        dir.path(),
-        &with_target(Some("fly"), &[("fly-app", "my app")]),
-        vec![],
-    );
-    assert!(
-        run.err()
-            .to_string()
-            .contains("fly.app \"my app\" must match"),
-        "{}",
-        run.err()
     );
 }
 
@@ -1160,20 +903,6 @@ fn a_bad_environment_name_is_refused_before_any_call() {
     a.env = "a.b".into();
     let run = run_in(dir.path(), &a, vec![]);
     assert!(run.r.calls.borrow().is_empty() && run.res.is_err());
-}
-
-#[test]
-fn an_unknown_target_is_refused_listing_the_providers() {
-    let dir = tempfile::tempdir().unwrap();
-    let run = run_in(dir.path(), &with_target(Some("heroku"), &[]), vec![]);
-    assert!(run.err().to_string().contains("known: "), "{}", run.err());
-}
-
-#[test]
-fn a_target_refusal_points_at_the_init_help() {
-    let dir = tempfile::tempdir().unwrap();
-    let run = run_in(dir.path(), &with_target(Some("azure"), &[]), vec![]);
-    assert_eq!(run.err().next_step(), Some("opv init --help"));
 }
 
 // ---- H2: `init <env> --add-env` adds one environment in the one form ----
@@ -1290,22 +1019,6 @@ fn add_env_gives_unsectioned_fields_to_the_product() {
     assert_eq!(
         run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
         vec!["prod", "staging"]
-    );
-}
-
-#[test]
-fn add_env_refuses_a_target_naming_target_add() {
-    let mut a = args();
-    a.fields = BTreeMap::from([("fly-app".to_string(), "myapp-staging".to_string())]);
-    let run = add_env_with(EXISTING, &a, &two_products());
-    assert!(
-        run.res
-            .as_ref()
-            .unwrap_err()
-            .to_string()
-            .contains("--add-env writes no target"),
-        "{:?}",
-        run.res
     );
 }
 
@@ -1454,7 +1167,7 @@ fn init_json(fields: &[Field], a: &InitArgs) -> (tempfile::TempDir, String) {
 
 #[test]
 fn init_json_success_golden() {
-    let (_dir, out) = init_json(&two_products(), &with_target(Some("fly"), &fly_opts()));
+    let (_dir, out) = init_json(&two_products(), &args());
     crate::app::json_tests::golden("init_success", &out);
 }
 
