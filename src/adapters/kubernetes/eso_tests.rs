@@ -40,35 +40,36 @@ const SECRETS: [&str; 4] = [API_V1, API_V2, DB, OLD];
 
 /// `OLD_KEY` is desired in `old_in`: "dev" keeps it, "staging" makes a sync of dev prune it.
 fn toml(old_in: &str, config_route: &str) -> String {
+    let staging = if old_in == "staging" {
+        "[environments.staging]\nboundaries.app = { vault_id = \"vstg\", item_id = \"istg\" }\n"
+    } else {
+        ""
+    };
     format!(
         r#"
-[profile]
-kind = "simple"
 [stores.{STORE}]
 azure_key_vault = "{VAULT}"
 subscription = "00000000-0000-0000-0000-000000000000"
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
-[environments.dev.kubernetes]
-context = "kind-opv"
-namespace = "opv-spike"
-deployment = "api"
-secrets_in = "{STORE}"
+boundaries.app = {{ vault_id = "vdev", item_id = "idev" }}
+[environments.dev.targets.app]
+state_vault_id = "sdev"
+kubernetes.context = "kind-opv"
+kubernetes.namespace = "opv-spike"
+kubernetes.deployment = "api"
+kubernetes.env_name = "{{KEY}}"
+kubernetes.secrets_in = "{STORE}"
 {config_route}
-[environments.staging]
-vault_id = "vstg"
-item_id = "istg"
-[keys.API_KEY]
+{staging}[products.app.keys.API_KEY]
 kind = "secret"
 environments = ["dev"]
-[keys.DB_URL]
+[products.app.keys.DB_URL]
 kind = "secret"
 environments = ["dev"]
-[keys.LOG_LEVEL]
+[products.app.keys.LOG_LEVEL]
 kind = "config"
 environments = ["dev"]
-[keys.OLD_KEY]
+[products.app.keys.OLD_KEY]
 kind = "secret"
 environments = ["{old_in}"]
 "#
@@ -84,15 +85,15 @@ fn fleet_b() -> Fleet {
 }
 
 fn fleet_store() -> Fleet {
-    config::parse(&toml("dev", "config = \"store\"")).unwrap()
+    config::parse(&toml("dev", "kubernetes.config = \"store\"")).unwrap()
 }
 
 fn item_with(api: &str) -> Vec<u8> {
     item_json(&[
-        secret("", "API_KEY", api),
-        secret("", "DB_URL", DB),
-        text("", "LOG_LEVEL", LOG),
-        secret("", "OLD_KEY", OLD),
+        secret("app", "API_KEY", api),
+        secret("app", "DB_URL", DB),
+        text("app", "LOG_LEVEL", LOG),
+        secret("app", "OLD_KEY", OLD),
     ])
 }
 
@@ -136,6 +137,9 @@ struct World {
     retries_failed: bool,
     /// Reads of each failed ExternalSecret while `retries_failed`.
     failed_reads: BTreeMap<String, u32>,
+    /// `op` items opv created or edited (the delivery state item), by ID.
+    op_items: BTreeMap<String, Vec<u8>>,
+    op_serial: u32,
 }
 
 struct Rec {
@@ -236,6 +240,8 @@ impl Sim {
                 broken_image: false,
                 retries_failed: false,
                 failed_reads: BTreeMap::new(),
+                op_items: BTreeMap::new(),
+                op_serial: 0,
             }),
             calls: RefCell::default(),
             notes: RefCell::default(),
@@ -253,7 +259,7 @@ impl Sim {
         let args: Vec<String> = call.args.iter().map(|a| a.to_string()).collect();
         let stdin = call.stdin.map(<[u8]>::to_vec);
         let out = match call.program {
-            "op" => ok(self.world.borrow().item.clone()),
+            "op" => self.op(&args, stdin.as_deref()),
             "az" => self.az(&args, stdin.as_deref()),
             "kubectl" => self.kubectl(&args, stdin.as_deref()),
             other => panic!("Sim: unexpected program {other}"),
@@ -265,6 +271,53 @@ impl Sim {
         });
         self.check();
         out
+    }
+
+    /// The `op` acts on: delivery state reads/writes, and the values item for everything
+    /// else.
+    fn op(&self, args: &[String], stdin: Option<&[u8]>) -> Output {
+        let mut w = self.world.borrow_mut();
+        if has(args, &["whoami"]) {
+            return ok_json(&json!({"account_uuid": "A000000000000000000000000"}));
+        }
+        if has(args, &["item", "list"]) {
+            if flag(args, "--vault") == Some("sdev") {
+                let rows: Vec<Value> = w
+                    .op_items
+                    .iter()
+                    .map(|(id, raw)| {
+                        let doc: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
+                        json!({"id": id, "title": doc["title"]})
+                    })
+                    .collect();
+                return ok_json(&json!(rows));
+            }
+            return ok_json(&json!([]));
+        }
+        if has(args, &["item", "create"]) {
+            w.op_serial += 1;
+            let id = format!("stateitem{:018}", w.op_serial);
+            let title = flag(args, "--title").unwrap_or_default().to_string();
+            let doc = json!({"id": id, "title": title, "fields": []});
+            w.op_items
+                .insert(id.clone(), serde_json::to_vec(&doc).unwrap());
+            return ok_json(&json!({"id": id}));
+        }
+        if has(args, &["item", "edit"]) {
+            let id = args.get(2).cloned().unwrap_or_default();
+            let mut doc: Value = serde_json::from_slice(stdin.unwrap()).unwrap();
+            doc["id"] = json!(id);
+            w.op_items.insert(id, serde_json::to_vec(&doc).unwrap());
+            return ok(doc.to_string());
+        }
+        if has(args, &["item", "get"]) {
+            let id = args.get(2).cloned().unwrap_or_default();
+            if let Some(raw) = w.op_items.get(&id) {
+                return ok(raw.clone());
+            }
+            return ok(w.item.clone());
+        }
+        ok(w.item.clone())
     }
 
     fn az(&self, args: &[String], stdin: Option<&[u8]>) -> Output {
@@ -1087,7 +1140,7 @@ fn status_shows_the_chain_of_each_bound_key() {
     let v = sim.latest("DB-URL");
     let (_, out) = status_on(&sim, &fleet_a());
     let want = format!(
-        "chain: DB_URL → Key Vault {VAULT} ({}…) → ExternalSecret opv-db-url-{} → env DB_URL",
+        "chain: app/DB_URL (DB_URL) → Key Vault {VAULT} ({}…) → ExternalSecret opv-db-url-{} → env DB_URL",
         &v[..10],
         &v[..10]
     );
@@ -1109,7 +1162,7 @@ fn status_reports_a_changed_secret_as_pending_deploy() {
     assert!(res.is_ok(), "{res:?}");
     let (_, out) = status_on(&sim, &fleet_a());
     assert!(
-        out.contains("pending deploy (opv sync dev --deploy): API_KEY"),
+        out.contains("pending deploy (opv sync dev --deploy): app/API_KEY (API_KEY)"),
         "{out}"
     );
 }

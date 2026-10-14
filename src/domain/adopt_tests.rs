@@ -11,22 +11,23 @@ const MARK: &str = "ADOPTMARKER";
 fn fleet() -> Fleet {
     config::parse(
         r#"
-[profile]
-kind = "fleet"
-
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+modes.api.payments = "off"
+[environments.dev.targets.app]
 fly.app = "app-dev"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
-modes.api.payments = "off"
+state_vault_id = "sdev"
 
 [environments.prod]
-vault_id = "vprod"
-item_id = "iprod"
+boundaries.core = { vault_id = "vprod", item_id = "iprod" }
+[environments.prod.targets.app]
 fly.app = "app-prod"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sprod"
 
+[products.api]
+boundary = "core"
 [products.api.keys.DATABASE_URL]
 kind = "secret"
 environments = ["dev", "prod"]
@@ -65,6 +66,8 @@ kind = "secret"
 environments = ["dev", "prod"]
 from = "shared/FLY_API_TOKEN"
 
+[products.web]
+boundary = "core"
 [products.web.keys.LOG_LEVEL]
 kind = "secret"
 environments = ["dev", "prod"]
@@ -76,7 +79,7 @@ from = "shared/FLY_API_TOKEN"
 
 [products.shared]
 source_only = true
-
+boundary = "core"
 [products.shared.keys.FLY_API_TOKEN]
 kind = "secret"
 environments = ["dev", "prod"]

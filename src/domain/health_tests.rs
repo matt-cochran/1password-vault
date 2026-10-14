@@ -11,20 +11,14 @@ const MARK: &str = "HEALTHMARK";
 /// allow_same_value); api/OTHER (secret, dev and prod). prod and staging deploy.
 fn fleet() -> Fleet {
     crate::config::parse(
-        r#"[profile]
-kind = "fleet"
-
-[environments.dev]
-vault_id = "v1"
-item_id = "i1"
+        r#"[environments.dev]
+boundaries.api = { vault_id = "v1", item_id = "i1" }
 
 [environments.staging]
-vault_id = "v2"
-item_id = "i2"
+boundaries.api = { vault_id = "v2", item_id = "i2" }
 
 [environments.prod]
-vault_id = "v3"
-item_id = "i3"
+boundaries.api = { vault_id = "v3", item_id = "i3" }
 
 [products.api.keys.DATABASE_URL]
 kind = "secret"

@@ -9,12 +9,11 @@ const MARK: &str = "CONVMARKER";
 fn fleet() -> Fleet {
     config::parse(
         r#"
-[profile]
-kind = "fleet"
-
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[products.api]
+boundary = "core"
 
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
@@ -30,18 +29,13 @@ kind = "secret"
 environments = ["dev"]
 rules = { ensure_prefix = "sk_" }
 
+[products.web]
+boundary = "core"
+
 [products.web.keys.SESSION_KEY]
 kind = "secret"
 environments = ["dev"]
 "#,
-    )
-    .unwrap()
-}
-
-fn simple() -> Fleet {
-    config::parse(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
-         [keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
     )
     .unwrap()
 }
@@ -158,8 +152,10 @@ fn a_product_shaped_section_is_never_raided() {
 #[test]
 fn a_field_two_products_could_claim_is_left_alone() {
     let f = config::parse(
-        "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n\
+        "[environments.dev]\nboundaries.core = { vault_id = \"v\", item_id = \"i\" }\n\
+         [products.a]\nboundary = \"core\"\n\
          [products.a.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+         [products.b]\nboundary = \"core\"\n\
          [products.b.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
     )
     .unwrap();
@@ -436,21 +432,6 @@ fn kept_fields_are_never_read() {
 }
 
 #[test]
-fn a_simple_profile_key_in_a_section_is_moved_to_the_top_level() {
-    let l = layout(&[
-        ("Misc", "DB_URL", "CONCEALED", "x"),
-        ("opv", "convention", "STRING", "1"),
-    ]);
-    assert_eq!(
-        plan(&l, &simple(), "dev", DATE).changes,
-        vec![Change::Moved {
-            field: "DB_URL".into(),
-            from: "Misc".into()
-        }]
-    );
-}
-
-#[test]
 fn the_summary_names_keys_never_values() {
     let l = with(
         &[
@@ -461,20 +442,4 @@ fn the_summary_names_keys_never_values() {
     );
     let p = plan_of(&l);
     assert!(!format!("{} {:?}", p.summary(), p.ops).contains(MARK));
-}
-
-/// Found live: a field with no section is hidden in every 1Password app, even in edit mode.
-#[test]
-fn a_simple_profile_key_outside_every_section_is_moved_into_the_default_one() {
-    let l = layout(&[
-        (NO_SECTION, "DB_URL", "CONCEALED", "x"),
-        ("opv", "convention", "STRING", "1"),
-    ]);
-    assert_eq!(
-        plan(&l, &simple(), "dev", DATE).changes,
-        vec![Change::Moved {
-            field: "DB_URL".into(),
-            from: "outside every section (hidden in the 1Password app)".into()
-        }]
-    );
 }
