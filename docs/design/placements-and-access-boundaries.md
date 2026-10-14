@@ -266,12 +266,20 @@ The target name is part of it, so a receipt says where it applies in a person's 
 - Its item ID is recorded on first creation, so `sync` never looks state items up by title
   (FR-13).
 
-**Ledger.** The FR-54 ledger moves out of the values item and into the same state item.
-- One evidence key per item serves both the ledger and the revision evidence.
-- Entries are per placement, so two placements that render the same name never share one.
-- It is written by whoever delivers: the deploy identity in CI, or a person.
-- The values item no longer has an `opv · state` section, and the code that writes it is
-  removed.
+**One store per placement (D11).** The FR-54 ledger and the delivery evidence held the same
+thing per name: the store's version and a keyed fingerprint. They become one store.
+- After each confirmed write, the deliverer records that name's evidence line
+  (`v1|version|fingerprint|item_id|field`) in the placement's state item, under the item's
+  one evidence key. A revision is minted once every name of the binding set has a line.
+- `plan` and `status` judge `same`, `would_change` and `drift` from those lines (the
+  ledger's `check` and `drift`, reading evidence instead of a values-item section).
+- The values item's `opv · state` section, the `ledger key` field, `Ledger::from_layout`,
+  `Ledger::ops` and the person-session-only ledger writer are removed.
+
+**A state vault per target is required (D12).** Without one a target has no change
+detection and no evidence, so `targets.<name>.state_vault_id` is required for every target.
+A target without one fails at load with `state_vault_missing`, whose next step is
+`opv bootstrap --state <env> --target <name>`.
 
 **Per placement.** Staged versus deployed, drift and revisions are computed per placement,
 so a stale revision on `p-overflow` changes nothing about `shared`.
@@ -375,6 +383,8 @@ These run read-only, or against a throwaway test account. Outputs are recorded a
 | D5 | boundary default | one per product; `boundary = "<group>"` is an opt-in, and `opv access` states who can read what |
 | D6 | account-wide sources | a later phase, after the tidy prerequisite (§4.4) |
 | D8 | backward compatibility | none: greenfield, one way only, old forms fail at load (FR-60) |
+| D11 | ledger and delivery evidence | one per-placement store: the evidence lines serve as the ledger (§5.3) |
+| D12 | state vault | required on every target (`state_vault_missing` at load) |
 
 D2 (migrating evidence) and D7 (deleting the old item after a split) are withdrawn: nothing
 migrates.
