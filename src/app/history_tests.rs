@@ -79,8 +79,8 @@ fn the_json_lists_each_row_with_its_state() {
 #[test]
 fn an_environment_without_a_target_has_no_history() {
     let fleet = crate::config::parse(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n\
-         [keys.A]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+        "[environments.dev]\nboundaries.app = { vault_id = \"v\", item_id = \"i\" }\n\
+         [products.app.keys.A]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
     )
     .unwrap();
     let mut out = Vec::new();

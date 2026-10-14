@@ -251,10 +251,7 @@ fn doctor_expired(p: P) {
         // The 1Password app does not approve doctor's vault list.
         r.responses.borrow_mut().push_back(Ok(Output::failure(1)));
     }
-    let no_fly = crate::config::parse(
-        "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n",
-    )
-    .unwrap();
+    let no_fly = crate::config::parse("[environments.dev]\n").unwrap();
     let mut out = Vec::new();
     let e = doctor::run_with(Ok(no_fly), &r, &h, &mut out).unwrap_err();
     let t = text_of(&out);

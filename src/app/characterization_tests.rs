@@ -33,6 +33,14 @@ fn transcript(r: &FakeRunner, out: &[u8], res: &Result<(), Error>) -> String {
     s
 }
 
+/// Queue the delivery recording of a sync that mints no revision (FR-58: prod's
+/// mode-skipped `STRIPE_SECRET_KEY` is never confirmed), then `after` (prune, deploy).
+fn unrecorded_then<const N: usize>(r: &FakeRunner, after: [Output; N]) {
+    let mut q = r.responses.borrow_mut();
+    q.extend(delivery_not_recorded(complete_item()).map(Ok));
+    q.extend(after.map(Ok));
+}
+
 fn golden(name: &str, actual: &str) {
     let path = format!("tests/fixtures/characterization/{name}.txt");
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
@@ -53,6 +61,7 @@ fn sync_new_secrets_without_deploy() {
         ok(),
         fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
     ]);
+    unrecorded_then(&r, []);
     let mut out = Vec::new();
     let res = sync::run(&fleet(), "prod", &r, &mut out, &SyncOpts::default());
     golden(
@@ -71,8 +80,8 @@ fn sync_unchanged_with_deploy() {
         fly_releases("complete"),
         ok(),
         a(),
-        ok(),
     ]);
+    unrecorded_then(&r, [ok()]);
     let opts = SyncOpts {
         deploy: true,
         ..SyncOpts::default()
@@ -91,8 +100,8 @@ fn sync_changed_with_deploy() {
         fly_releases("complete"),
         ok(),
         fly(&[(OPENAI_FLY, "dA2"), (ENC_FLY, "dB")]),
-        ok(),
     ]);
+    unrecorded_then(&r, [ok()]);
     let opts = SyncOpts {
         deploy: true,
         ..SyncOpts::default()
@@ -112,8 +121,8 @@ fn sync_pending_from_earlier_run() {
         fly_releases("complete"),
         ok(),
         a(),
-        ok(),
     ]);
+    unrecorded_then(&r, [ok()]);
     let opts = SyncOpts {
         deploy: true,
         ..SyncOpts::default()
@@ -133,9 +142,8 @@ fn sync_prune_with_deploy() {
         fly_releases("complete"),
         ok(),
         a(),
-        ok(),
-        ok(),
     ]);
+    unrecorded_then(&r, [ok(), ok()]);
     let opts = SyncOpts {
         deploy: true,
         prune: true,
@@ -157,6 +165,7 @@ fn sync_prune_without_flag() {
         ok(),
         a(),
     ]);
+    unrecorded_then(&r, []);
     let mut out = Vec::new();
     let res = sync::run(&fleet(), "prod", &r, &mut out, &SyncOpts::default());
     golden("sync_prune_without_flag", &transcript(&r, &out, &res));
@@ -173,6 +182,7 @@ fn sync_rotate_immutable() {
         // List B shows every staged name (NR-30 polls until it does).
         fly(&[(ENC_FLY, "d-enc2"), (OPENAI_FLY, "d-openai")]),
     ]);
+    unrecorded_then(&r, []);
     let opts = SyncOpts {
         rotate: vec!["allumata/INTEGRATION_ENC_KEY".into()],
         ..SyncOpts::default()
@@ -197,8 +207,8 @@ fn sync_prune_immutable() {
         fly_releases("complete"),
         ok(),
         a(),
-        ok(),
     ]);
+    unrecorded_then(&r, [ok()]);
     let opts = SyncOpts {
         prune: true,
         prune_immutable: vec!["allumata/OLD_ENC".into()],
@@ -243,27 +253,76 @@ fn status_clean() {
 
 #[test]
 fn status_env_without_target() {
-    let fl = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    let fl = fleet_with("[environments.dev]\n");
     let r = FakeRunner::new([]);
     let mut out = Vec::new();
     let res = status::run_with(&fl, "dev", &r, &mut out, false);
     golden("status_env_without_target", &transcript(&r, &out, &res));
 }
 
+/// One app with bare names (formerly the simple profile, FR-20): the one product `app`,
+/// whose target's template is `{KEY}`.
+const SINGLE_APP: &str = r#"
+[environments.staging]
+boundaries.app = { vault_id = "vstg", item_id = "istg" }
+modes.app.payments = "test"
+
+[environments.staging.targets.app]
+fly.app = "myapp-staging"
+fly.secret_name = "{KEY}"
+state_vault_id = "sstaging"
+
+[environments.prod]
+boundaries.app = { vault_id = "vprd", item_id = "iprd" }
+modes.app.payments = "off"
+
+[environments.prod.targets.app]
+fly.app = "myapp-production"
+fly.secret_name = "{KEY}"
+state_vault_id = "sprod"
+
+[products.app.keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging", "prod"]
+rules = { prefix = "postgres://" }
+guidance = "Fly Postgres / connection string"
+
+[products.app.keys.JWT_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+guidance = "32 random bytes, base64"
+
+[products.app.keys.STRIPE_SECRET_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_", live = "sk_live_" }, skip = ["off"] } }
+
+[products.app.keys.STAGING_DEBUG_TOKEN]
+kind = "secret"
+environments = ["staging"]
+
+[products.app.keys.LOG_LEVEL]
+kind = "config"
+environments = ["staging", "prod"]
+rules = { enum = ["debug", "info", "warn"] }
+"#;
+
 #[test]
 fn simple_sync_deploy() {
     fn simple_item() -> Output {
         item(&[
             secret(
-                "",
+                "app",
                 "DATABASE_URL",
                 "postgres://FIXTUREVALUE@db.internal/app",
             ),
-            secret("", "JWT_KEY", &enc()),
-            text("", "LOG_LEVEL", "info"),
+            secret("app", "JWT_KEY", &enc()),
+            text("app", "LOG_LEVEL", "info"),
         ])
     }
-    let fl = config::load("tests/fixtures/simple.toml").unwrap();
+    let fl = config::parse(SINGLE_APP).unwrap();
     let r = FakeRunner::new([
         simple_item(),
         fly(&[("DATABASE_URL", "d1"), ("JWT_KEY", "d2")]),
@@ -271,8 +330,12 @@ fn simple_sync_deploy() {
         fly_releases("complete"),
         ok(),
         fly(&[("DATABASE_URL", "d1b"), ("JWT_KEY", "d2")]),
-        ok(),
     ]);
+    {
+        let mut q = r.responses.borrow_mut();
+        q.extend(delivery_not_recorded(simple_item()).map(Ok));
+        q.push_back(Ok(ok()));
+    }
     let opts = SyncOpts {
         deploy: true,
         ..SyncOpts::default()

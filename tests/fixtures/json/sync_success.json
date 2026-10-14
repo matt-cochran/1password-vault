@@ -48,6 +48,15 @@
     "FLEET__ALLUMATA__OPENAI_API_KEY"
   ],
   "plan_id": "4fe9a87d",
+  "delivery": {
+    "minted": [],
+    "not_minted": [
+      {
+        "product": "allumata",
+        "reason": "not confirmed by this sync: FLEET__ALLUMATA__STRIPE_SECRET_KEY; the target lists no version for: FLEET__ALLUMATA__STRIPE_SECRET_KEY"
+      }
+    ]
+  },
   "next": "opv sync prod --deploy",
   "do": null
 }

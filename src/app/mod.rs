@@ -1936,6 +1936,20 @@ pub(crate) mod testutil {
         [fly_app_ok(), fly_releases("complete")]
     }
 
+    /// `op whoami --format json` of a person: the account delivery evidence is bound to.
+    pub fn whoami() -> Output {
+        Output::success(
+            r#"{"url":"https://my.1password.com","email":"dev@example.com","user_uuid":"UFIXTURE","account_uuid":"AFIXTURE","user_type":"HUMAN"}"#,
+        )
+    }
+
+    /// What a sync's delivery recording asks `op` when no product gets a revision (a name
+    /// this run did not confirm, or the target lists no version for it): `op whoami` and
+    /// the boundary item read fresh (`boundary`).
+    pub fn delivery_not_recorded(boundary: Output) -> [Output; 2] {
+        [whoami(), boundary]
+    }
+
     pub fn op_calls(r: &FakeRunner) -> usize {
         r.calls
             .borrow()

@@ -3,7 +3,7 @@ use crate::adapters::fake_op::FakeOp;
 use crate::adapters::onepassword_manifest::template;
 use crate::config_store::{Request, locate, manifest_tags, manifest_title};
 
-const TOML: &str = "[profile]\nkind = \"simple\"\n\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\nitem_id = \"app\"\n\n[keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\nguidance = \"from the dashboard\"\n";
+const TOML: &str = "[environments.dev]\nboundaries.app = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\n[products.app.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\nguidance = \"from the dashboard\"\n";
 
 const REMOTE: &str = "git@github.com:acme/myapp.git";
 
@@ -125,7 +125,10 @@ fn export_json_holds_the_environments() {
     let mut out = Vec::new();
     export(&manifest_of(dir.path(), &op), Format::Json, &op, &mut out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(v["environments"]["dev"]["item_id"], "app");
+    assert_eq!(
+        v["environments"]["dev"]["boundaries"]["app"]["item_id"],
+        "app"
+    );
 }
 
 // --- check ---
@@ -426,7 +429,7 @@ fn edit_to_an_env_file_never_shows_a_value() {
     assert!(!shown.contains("C1MARKER"), "{shown}");
 }
 
-const FLEET_TOML: &str = "[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\nitem_id = \"app\"\n\n[products.api.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+const FLEET_TOML: &str = "[environments.dev]\nboundaries.api = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\n[products.api.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
 
 /// I7: `status --all` runs from anywhere, so its step names the project.
 #[test]

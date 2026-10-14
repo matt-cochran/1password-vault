@@ -842,7 +842,7 @@ mod tests {
     /// I5: status needs a Fly target; Config naming the environment, before any call.
     #[test]
     fn status_env_without_fly_is_config_error_before_any_call() {
-        let fl = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let fl = fleet_with("[environments.dev]\n");
         let r = FakeRunner::new([]);
         let e = run(&fl, "dev", &r, &mut Vec::new()).unwrap_err();
         assert!(

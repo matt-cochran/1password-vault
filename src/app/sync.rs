@@ -2131,15 +2131,22 @@ mod tests {
     fn fake_with(item: crate::runner::Output, fly_a: crate::runner::Output) -> FakeRunner {
         FakeRunner::new([item, fly_a])
     }
-    /// item, list A, the two preflight reads, import, list B, then spare responses so an unexpected call (deploy,
-    /// unset) is recorded rather than panicking, and the test can assert it never happened.
+    /// item, list A, the two preflight reads, import, list B, the delivery recording (FR-58:
+    /// prod's mode-skipped key is never confirmed, so no revision), then spare responses so
+    /// an unexpected call (deploy, unset) is recorded rather than panicking, and the test
+    /// can assert it never happened.
     fn fake_sync(
         item: crate::runner::Output,
         a: crate::runner::Output,
         b: crate::runner::Output,
     ) -> FakeRunner {
         let [st, rel] = fly_preflight_ok();
-        FakeRunner::new([item, a, st, rel, ok(), b, ok(), ok(), ok()])
+        let again = crate::runner::Output {
+            status: item.status,
+            stdout: item.stdout.clone(),
+        };
+        let [me, fresh] = delivery_not_recorded(again);
+        FakeRunner::new([item, a, st, rel, ok(), b, me, fresh, ok(), ok(), ok()])
     }
     fn fake_complete() -> FakeRunner {
         fake_sync(
@@ -2282,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_call_sequence_is_read_list_stage_list() {
+    fn sync_call_sequence_is_read_list_stage_list_record() {
         let r = fake_complete();
         sync_out(&f(), &r, &opts()).0.unwrap();
         let app = "mcproductlabs-portfolio-production";
@@ -2295,21 +2302,28 @@ mod tests {
                 format!("flyctl releases --app {app} --json"),
                 format!("flyctl secrets import --app {app} --stage"),
                 format!("flyctl secrets list --app {app} --json"),
+                "op whoami --format json".to_string(),
+                "op item get iprd --vault vprd --format json --cache=false".to_string(),
             ]
         );
     }
 
+    /// FR-13: one read of the item for the plan; the delivery recording (FR-58) then asks
+    /// for the account and reads the item fresh, never from `op`'s cache.
     #[test]
-    fn one_op_request_per_run() {
+    fn op_requests_are_one_read_then_the_delivery_recording() {
         let r = fake_complete();
         let _ = run(&f(), "prod", &r, &mut Vec::new(), &opts());
         assert_eq!(
-            r.calls
-                .borrow()
-                .iter()
-                .filter(|c| c.program == "op")
-                .count(),
-            1
+            argvs(&r)
+                .into_iter()
+                .filter(|a| a.starts_with("op "))
+                .collect::<Vec<_>>(),
+            vec![
+                "op item get iprd --vault vprd --format json",
+                "op whoami --format json",
+                "op item get iprd --vault vprd --format json --cache=false",
+            ]
         );
     }
 
@@ -2431,7 +2445,8 @@ mod tests {
         .unwrap();
         let a = || fly_st(&[(ENC_FLY, "d2", "Staged"), (OPENAI_FLY, "d1", "Deployed")]);
         let [st, rel] = fly_preflight_ok();
-        let r = FakeRunner::new([complete_item(), a(), st, rel, ok(), ok()]);
+        let [me, fresh] = delivery_not_recorded(complete_item());
+        let r = FakeRunner::new([complete_item(), a(), st, rel, me, fresh, ok(), ok()]);
         let o = SyncOpts {
             deploy: true,
             ..opts()
@@ -2446,6 +2461,8 @@ mod tests {
                 format!("flyctl secrets list --app {app} --json"),
                 format!("flyctl status --app {app} --json"),
                 format!("flyctl releases --app {app} --json"),
+                "op whoami --format json".to_string(),
+                "op item get iprd --vault vprd --format json --cache=false".to_string(),
                 format!("flyctl secrets deploy --app {app}"),
             ],
             "{out}"
@@ -2499,11 +2516,16 @@ mod tests {
     fn staged_key_without_digest_after_staging_counts_as_changed() {
         let b = || fly(&[(ENC_FLY, "d2")]);
         let [st, rel] = fly_preflight_ok();
-        // List B is polled until the 30 s limit (NR-30): six lists, then the deploy.
+        // List B is polled until the 30 s limit (NR-30): six lists, the delivery recording,
+        // then the deploy.
         let r = FakeRunner::new([complete_item(), b(), st, rel, ok()]);
-        r.responses
-            .borrow_mut()
-            .extend((0..6).map(|_| Ok(b())).chain([Ok(ok())]));
+        r.responses.borrow_mut().extend(
+            (0..6)
+                .map(|_| b())
+                .chain(delivery_not_recorded(complete_item()))
+                .chain([ok()])
+                .map(Ok),
+        );
         let o = SyncOpts {
             deploy: true,
             ..opts()
@@ -2846,7 +2868,7 @@ mod tests {
 
     #[test]
     fn env_without_fly_is_config_error_before_any_call() {
-        let fl = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let fl = fleet_with("[environments.dev]\n");
         let r = FakeRunner::new([]);
         let e = run(&fl, "dev", &r, &mut Vec::new(), &opts()).unwrap_err();
         assert!(
@@ -3073,8 +3095,17 @@ mod tests {
              start (fly scale count 1 --app {APP})\n"
         )
     }
+    /// The preflight reads with `status`, the import, list B and the delivery recording.
     fn staged_after(status: Out) -> (FakeRunner, Result<(), Error>, String) {
-        let r = after_list_a([status, fly_releases("complete")]);
+        let [me, fresh] = delivery_not_recorded(complete_item());
+        let r = after_list_a([
+            status,
+            fly_releases("complete"),
+            ok(),
+            fly_with_prunable_staged(),
+            me,
+            fresh,
+        ]);
         spare(&r);
         let (res, out) = sync_out(&f(), &r, &deploy_opts());
         (r, res, out)
@@ -3151,6 +3182,9 @@ mod tests {
             ok(),
             fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
         ]);
+        r.responses
+            .borrow_mut()
+            .extend(delivery_not_recorded(complete_item()).map(Ok));
         sync_out(&f(), &r, &opts()).0.unwrap();
         assert!(
             called(&r, "flyctl", &["secrets", "import"]),
@@ -3190,6 +3224,9 @@ mod tests {
             fly_empty(),
             fresh,
         ]);
+        r.responses
+            .borrow_mut()
+            .extend(delivery_not_recorded(complete_item()).map(Ok));
         sync_out(&f(), &r, &opts()).0.unwrap();
         let lists = argvs(&r)
             .iter()
@@ -3203,9 +3240,12 @@ mod tests {
     fn stale_list_poll_is_bounded_at_30_seconds() {
         let [st, rel] = fly_preflight_ok();
         let r = FakeRunner::new([complete_item(), fly_empty(), st, rel, ok()]);
-        r.responses
-            .borrow_mut()
-            .extend((0..6).map(|_| Ok(fly_empty())));
+        r.responses.borrow_mut().extend(
+            (0..6)
+                .map(|_| fly_empty())
+                .chain(delivery_not_recorded(complete_item()))
+                .map(Ok),
+        );
         sync_out(&f(), &r, &opts()).0.unwrap();
         assert_eq!(r.elapsed.get(), Duration::from_secs(30));
     }
@@ -3218,6 +3258,8 @@ mod tests {
             fly_releases("complete"),
             ok(),
             fly_with_prunable_staged(),
+            whoami(),        // delivery recording: the account
+            complete_item(), // delivery recording: the item, fresh
             Out::failure(1), // unset
             Out::failure(1), // auth whoami: signed out
         ]);
