@@ -1,5 +1,6 @@
-//! Delivery receipts (#106): the value-free core of "this binding set was delivered and the
-//! target still holds it". See `docs/design/delivery-receipts.md`.
+//! Delivery receipts (#106, FR-58): the value-free core of "this binding set was delivered
+//! and the target still holds it". See `docs/design/delivery-receipts.md` and
+//! `docs/design/placements-and-access-boundaries.md` §5.3.
 //!
 //! A [`Receipt`] holds names, ids and times only: never a value or a value-derived digest
 //! (SR-1). The private per-name [`Evidence`] (store versions and keyed fingerprints) never
@@ -28,6 +29,7 @@ pub struct Scope {
     pub account_id: String,
     pub environment: String,
     pub product: String,
+    pub target: String,
     pub provider: String,
     pub locator: String,
 }
@@ -41,6 +43,35 @@ pub struct Receipt {
     pub delivered_at: String,
     pub plan_id: Option<String>,
     pub opv_version: String,
+}
+
+/// Two or more receipts in one file share a full scope (FR-58).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateScope {
+    pub count: usize,
+}
+
+/// The one receipt whose scope equals `scope` in every field, independent of order;
+/// `Ok(None)` when none does; `Err(DuplicateScope)` when several do.
+pub fn select<'a>(
+    receipts: &'a [Receipt],
+    scope: &Scope,
+) -> Result<Option<&'a Receipt>, DuplicateScope> {
+    let mut found = None;
+    let mut count = 0;
+    for receipt in receipts {
+        if &receipt.scope == scope {
+            count += 1;
+            if found.is_none() {
+                found = Some(receipt);
+            }
+        }
+    }
+    match count {
+        0 => Ok(None),
+        1 => Ok(found),
+        n => Err(DuplicateScope { count: n }),
+    }
 }
 
 /// Private per-name evidence. Never serialized; Debug prints the name only.
@@ -239,6 +270,8 @@ fn first_scope_difference(recorded: &Scope, current: &Scope) -> Option<&'static 
         Some("environment")
     } else if recorded.product != current.product {
         Some("product")
+    } else if recorded.target != current.target {
+        Some("target")
     } else if recorded.provider != current.provider {
         Some("provider")
     } else if recorded.locator != current.locator {

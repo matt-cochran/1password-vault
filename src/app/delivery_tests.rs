@@ -381,6 +381,37 @@ fn the_receipt_file_holds_each_delivery() {
     assert_eq!(doc["deliveries"].as_array().unwrap().len(), 2);
 }
 
+/// The error `verify` returns for a receipt file holding each delivery twice (FR-58).
+fn duplicate_receipt_error() -> Error {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.receipt.json");
+    let opts = SyncOpts {
+        receipt: Some(path.clone()),
+        ..SyncOpts::default()
+    };
+    sync_with(&w, &fleet, opts).0.unwrap();
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let copies = doc["deliveries"].as_array().unwrap().clone();
+    doc["deliveries"].as_array_mut().unwrap().extend(copies);
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    verify(&fleet, "prod", None, Some(&path), &w, true, &mut Vec::new()).unwrap_err()
+}
+
+#[test]
+fn a_duplicate_scope_in_the_receipt_file_is_a_usage_error() {
+    assert_eq!(duplicate_receipt_error().code(), crate::error::Code::Usage);
+}
+
+#[test]
+fn a_duplicate_scope_error_tells_the_caller_to_keep_one() {
+    assert_eq!(
+        duplicate_receipt_error().text(),
+        "the receipt file holds 2 receipts for the same environment, product and target; keep one"
+    );
+}
+
 #[test]
 fn a_kept_receipt_that_is_no_longer_current_is_superseded() {
     let _person = crate::app::tidy::activate();
