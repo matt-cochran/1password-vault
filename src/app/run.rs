@@ -22,8 +22,8 @@ use crate::runner::CommandRunner;
 
 const OP: &str = "op";
 
-/// `run <env> --product <p> -- <cmd>`: `--product` is required; without it the error lists
-/// the runnable products, before any call.
+/// `run <env> --product <p> -- <cmd>`: without `--product`, the one product with keys
+/// desired in `env_name` is used (D10/FR-34); a named product is validated by [`run`].
 pub fn run_for(
     fleet: &Fleet,
     env_name: &str,
@@ -31,27 +31,11 @@ pub fn run_for(
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
-    match product {
-        Some(p) => run(fleet, env_name, p, command, runner),
-        None => {
-            // FR-47: a source-only product is never run on its own, so it is not offered.
-            let available: Vec<&str> = fleet
-                .products
-                .iter()
-                .filter(|(_, p)| !p.source_only)
-                .map(|(n, _)| n.as_str())
-                .collect();
-            Err(Error::Config(format!(
-                "--product is required. Choose one of: {}. Usage: opv run {env_name} --product <name> -- <command>",
-                available.join(", ")
-            ).into())
-            .with_next(super::check_command(
-                fleet,
-                Some(env_name),
-                available.first().copied(),
-            )))
-        }
-    }
+    let product = match product {
+        Some(p) => p.to_string(),
+        None => super::pick_product(fleet, env_name, None, "run")?,
+    };
+    run(fleet, env_name, &product, command, runner)
 }
 
 /// Run `command` under `op run` with the product's references for `env_name` in its
@@ -417,9 +401,9 @@ environments = ["ci"]
     }
 
     #[test]
-    fn run_for_offers_only_non_source_only_products() {
-        let r = FakeRunner::new([]);
-        let e = run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap_err();
-        assert!(matches!(e, Error::Config(m) if m.contains("Choose one of: api.")));
+    fn run_without_product_uses_the_only_non_source_only_product() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap();
+        assert_eq!(argvs(&r), vec!["op run -- env"]);
     }
 }

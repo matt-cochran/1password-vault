@@ -13,38 +13,20 @@ pub fn select(
     required: bool,
 ) -> Result<Fleet, Error> {
     fleet.environment(env)?;
-    // FR-47: a source-only product is never run on its own, so it is not offered by the
-    // "one product needs no choosing" shortcut or the available list.
-    let available: Vec<&str> = fleet
-        .products
-        .iter()
-        .filter(|(_, p)| !p.source_only)
-        .map(|(n, _)| n.as_str())
-        .collect();
-    // One product needs no choosing.
-    let only = (available.len() == 1).then(|| available[0]);
-    let product = product.or(only);
-    if required && product.is_none() {
-        let first = available.first().copied();
-        return Err(Error::Config(format!(
-            "--product is required because this configuration contains multiple products. Choose --product <name> (available: {}).",
-            available.join(", ")
-        ).into())
-        .with_next(super::check_command(fleet, Some(env), first)));
-    }
-    if let Some(p) = product
-        && !fleet.products.contains_key(p)
-    {
-        return Err(super::undefined_product(fleet, p, Some(env)));
-    }
-    if let Some(p) = product
-        && fleet.products[p].source_only
-    {
-        return Err(source_only_error(fleet, env, p));
-    }
+    // D10/FR-34: one product with keys desired in `env` needs no `--product`; the rule
+    // lives in `super::pick_product`. `doctor` (required = false) keeps the whole
+    // environment when the choice is ambiguous instead of failing.
+    let chosen = match product {
+        Some(p) => Some(super::pick_product(fleet, env, Some(p), "check")?),
+        None => match super::pick_product(fleet, env, None, "check") {
+            Ok(p) => Some(p),
+            Err(_) if !required => None,
+            Err(e) => return Err(e),
+        },
+    };
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
-    if let Some(p) = product {
+    if let Some(p) = chosen.as_deref() {
         // The sources of the product's shared keys (FR-45) stay, alone: the read then
         // covers their sections too, and their findings are reported once, on them.
         let sources = fleet.sources_of(p);
@@ -57,16 +39,6 @@ pub fn select(
         }
     }
     Ok(selected)
-}
-
-/// FR-47: `product` holds canonical values for other products' keys and is never run on
-/// its own. The `Next:` step names a product that reads it, when one does.
-fn source_only_error(fleet: &Fleet, env: &str, product: &str) -> Error {
-    let e = super::source_only_message(product);
-    match fleet.referencing_product(product) {
-        Some(q) => e.with_next(format!("opv check {env} --product {q}")),
-        None => e.with_next(super::check_command(fleet, Some(env), None)),
-    }
 }
 
 pub fn check(

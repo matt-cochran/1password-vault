@@ -19,7 +19,10 @@ pub fn run(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    fleet.environment(env_name)?;
+    // D10/FR-34: `config export` has no `--product`; with several products that have keys
+    // desired here the exported product is ambiguous, and naming the first is a usage error.
+    // With one, that product's config is exported (and no other product's).
+    let product = super::pick_product(fleet, env_name, None, "config export")?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, None, r, None, &none, &none)?;
     let refused = row_names(&plan.rows, refuses);
@@ -32,6 +35,7 @@ pub fn run(
     // M4 (owner ruling): config kept concealed in 1Password is accepted, but its value is
     // never printed.
     let mut config = plan.config.clone();
+    config.retain(|p, _| p == &product);
     for (product, key) in &plan.concealed_config {
         if let Some(v) = config.get_mut(product).and_then(|m| m.get_mut(key)) {
             *v = CONCEALED.to_string();

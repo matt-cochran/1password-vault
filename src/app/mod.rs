@@ -45,6 +45,9 @@ mod pinned_tests;
 #[path = "placement_tests.rs"]
 mod placement_tests;
 pub(crate) mod preflight;
+#[cfg(test)]
+#[path = "product_flag_tests.rs"]
+mod product_flag_tests;
 pub mod ready;
 pub mod repair;
 pub mod run;
@@ -1254,6 +1257,92 @@ pub(crate) fn check_product(
         return Err(source_only_message(p).with_next(command(pick)));
     }
     Ok(())
+}
+
+/// D10/FR-34: the product a command acts on in `env`. `given` (a `--product` value, or
+/// the product part of `open`'s target) is validated when present. Without it, exactly one
+/// product that is not source-only and has a key desired in `env` is used; several is a
+/// usage error listing them, with a `Next:` naming the first. `verb` names the command in
+/// the error, e.g. `check`, `run`, `config export`.
+pub(crate) fn pick_product(
+    fleet: &Fleet,
+    env: &str,
+    given: Option<&str>,
+    verb: &str,
+) -> Result<String, Error> {
+    if let Some(p) = given {
+        check_product(fleet, Some(p), verb, Some(env))?;
+        return Ok(p.to_string());
+    }
+    let env_def = fleet.environment(env)?;
+    // FR-47: a source-only product holds shared values for other products' keys and is
+    // never run on its own, so it never qualifies. FR-15: a key refused here is not desired.
+    let mut candidates: Vec<&str> = Vec::new();
+    for (name, product) in &fleet.products {
+        if !product.source_only
+            && product.keys.values().any(|spec| {
+                crate::domain::rules::applies(spec, env, env_def, name)
+                    && !crate::domain::rules::refused_in(spec, env)
+            })
+        {
+            candidates.push(name.as_str());
+        }
+    }
+    match candidates.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(product_choice_error(
+            fleet,
+            env,
+            verb,
+            &[],
+            &non_source_only(fleet),
+        )),
+        many => Err(product_choice_error(fleet, env, verb, many, many)),
+    }
+}
+
+/// The one product-choice error: `--product is required`, the products it lists, and a
+/// `Next:` naming the first of them. `candidates` are the products with keys desired here;
+/// when there are none, `all` names the runnable products for context.
+fn product_choice_error(
+    fleet: &Fleet,
+    env: &str,
+    verb: &str,
+    candidates: &[&str],
+    all: &[&str],
+) -> Error {
+    let reason = if candidates.is_empty() {
+        format!("no product has keys desired in environment {env}")
+    } else {
+        format!("several products have keys desired in environment {env}")
+    };
+    let listed = if candidates.is_empty() {
+        all
+    } else {
+        candidates
+    };
+    let mut error = Error::Config(
+        format!(
+            "--product is required for opv {verb}: {reason}. Choose one of: {}.",
+            listed.join(", ")
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::Usage);
+    if let Some(first) = listed.first() {
+        error = error.with_next(check_command(fleet, Some(env), Some(first)));
+    }
+    error
+}
+
+/// The products that can be run or checked on their own: every non-source-only one (FR-47).
+fn non_source_only(fleet: &Fleet) -> Vec<&str> {
+    fleet
+        .products
+        .iter()
+        .filter(|(_, p)| !p.source_only)
+        .map(|(name, _)| name.as_str())
+        .collect()
 }
 
 /// An undeclared `--product`: the declared ones, the closest named, and a `Next:` step that
