@@ -240,9 +240,15 @@ fn an_unknown_environment_is_refused() {
 }
 
 #[test]
-fn a_fleet_key_without_product_is_refused_naming_one() {
+fn a_key_without_product_is_refused_naming_the_product_form() {
     let a = add_to(COMMENTED, new_key("STRIPE_KEY"));
     assert!(a.err().contains("opv add api/STRIPE_KEY"), "{}", a.err());
+}
+
+#[test]
+fn a_key_without_product_is_refused_naming_the_declared_products() {
+    let a = add_to(COMMENTED, new_key("STRIPE_KEY"));
+    assert!(a.err().contains("(products: api)"), "{}", a.err());
 }
 
 #[test]

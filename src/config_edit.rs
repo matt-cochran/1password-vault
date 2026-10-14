@@ -42,12 +42,9 @@ pub struct ConfigDoc {
     doc: DocumentMut,
 }
 
-/// `products.<product>.keys` (fleet) or `keys` (simple, `product` is `None`).
-fn keys_path(product: Option<&str>) -> Vec<&str> {
-    match product {
-        Some(p) => vec!["products", p, "keys"],
-        None => vec!["keys"],
-    }
+/// `products.<product>.keys`.
+fn keys_path(product: &str) -> Vec<&str> {
+    vec!["products", product, "keys"]
 }
 
 impl ConfigDoc {
@@ -87,19 +84,19 @@ impl ConfigDoc {
         Some(t)
     }
 
-    fn key(&self, product: Option<&str>, key: &str) -> Option<&dyn TableLike> {
+    fn key(&self, product: &str, key: &str) -> Option<&dyn TableLike> {
         self.table_at(&keys_path(product))?
             .get(key)?
             .as_table_like()
     }
 
-    /// True when `[product/]key` is declared.
-    pub fn has_key(&self, product: Option<&str>, key: &str) -> bool {
+    /// True when `product/key` is declared.
+    pub fn has_key(&self, product: &str, key: &str) -> bool {
         self.key(product, key).is_some()
     }
 
     /// The declared key's `environments`, in file order.
-    pub fn key_environments(&self, product: Option<&str>, key: &str) -> Vec<String> {
+    pub fn key_environments(&self, product: &str, key: &str) -> Vec<String> {
         self.key(product, key)
             .and_then(|t| t.get("environments"))
             .and_then(Item::as_array)
@@ -111,21 +108,14 @@ impl ConfigDoc {
             .unwrap_or_default()
     }
 
-    /// Every declared key as (product, key), in file order; product `None` under the simple
-    /// profile.
-    pub fn keys(&self, fleet_profile: bool) -> Vec<(Option<String>, String)> {
+    /// Every declared key as (product, key), in file order.
+    pub fn keys(&self) -> Vec<(String, String)> {
         let names = |t: &dyn TableLike| -> Vec<String> {
             t.iter()
                 .filter(|(_, v)| v.is_table_like())
                 .map(|(k, _)| k.to_string())
                 .collect()
         };
-        if !fleet_profile {
-            return self
-                .table_at(&["keys"])
-                .map(|t| names(t).into_iter().map(|k| (None, k)).collect())
-                .unwrap_or_default();
-        }
         let Some(products) = self.table_at(&["products"]) else {
             return Vec::new();
         };
@@ -138,19 +128,14 @@ impl ConfigDoc {
                     .and_then(Item::as_table_like)
                     .map(names)
                     .unwrap_or_default();
-                keys.into_iter().map(move |k| (Some(p.to_string()), k))
+                keys.into_iter().map(move |k| (p.to_string(), k))
             })
             .collect()
     }
 
-    /// Declare `[product/]key`, after the product's last key (a new product goes last).
+    /// Declare `product/key`, after the product's last key (a new product goes last).
     /// Keys written as inline tables (`K = { kind = … }`) get one more inline table.
-    pub fn add_key(
-        &mut self,
-        product: Option<&str>,
-        key: &str,
-        k: &NewKey<'_>,
-    ) -> Result<(), Error> {
+    pub fn add_key(&mut self, product: &str, key: &str, k: &NewKey<'_>) -> Result<(), Error> {
         let path = keys_path(product);
         let mut t: &mut dyn TableLike = self.doc.as_table_mut();
         for seg in &path {
@@ -213,16 +198,8 @@ impl ConfigDoc {
     }
 
     /// Append `env` to the declared key's `environments`, keeping the array's style.
-    pub fn add_key_env(
-        &mut self,
-        product: Option<&str>,
-        key: &str,
-        env: &str,
-    ) -> Result<(), Error> {
-        let name = match product {
-            Some(p) => format!("{p}/{key}"),
-            None => key.to_string(),
-        };
+    pub fn add_key_env(&mut self, product: &str, key: &str, env: &str) -> Result<(), Error> {
+        let name = format!("{product}/{key}");
         let mut path = keys_path(product);
         path.push(key);
         let arr = self
@@ -357,7 +334,7 @@ pub(crate) fn write_atomic(
 mod tests {
     use super::*;
 
-    const FILE: &str = "# top comment\n[profile]\nkind = \"fleet\"\n\n[environments.prod]  # the live one\nvault_id = \"v\"\nitem_id = \"i\"\n\n# api keys\n[products.api.keys.A]\nkind = \"secret\"\nenvironments = [\"prod\"]  # only prod\n";
+    const FILE: &str = "# top comment\n[environments.prod]  # the live one\nvault_id = \"v\"\nitem_id = \"i\"\n\n# api keys\n[products.api.keys.A]\nkind = \"secret\"\nenvironments = [\"prod\"]  # only prod\n";
 
     fn key<'a>(envs: &'a [String]) -> NewKey<'a> {
         NewKey {
@@ -376,7 +353,7 @@ mod tests {
     fn add_key_keeps_every_existing_line_and_comment() {
         let mut d = ConfigDoc::parse(FILE).unwrap();
         let envs = ["prod".to_string()];
-        d.add_key(Some("api"), "B", &key(&envs)).unwrap();
+        d.add_key("api", "B", &key(&envs)).unwrap();
         assert!(d.to_string().starts_with(FILE));
     }
 
@@ -384,7 +361,7 @@ mod tests {
     fn add_key_in_a_new_product_writes_only_the_key_header() {
         let mut d = ConfigDoc::parse(FILE).unwrap();
         let envs = ["prod".to_string()];
-        d.add_key(Some("web"), "C", &key(&envs)).unwrap();
+        d.add_key("web", "C", &key(&envs)).unwrap();
         assert_eq!(
             &d.to_string()[FILE.len()..],
             "\n[products.web.keys.C]\nkind = \"config\"\nenvironments = [\"prod\"]\n"
@@ -394,7 +371,7 @@ mod tests {
     #[test]
     fn add_key_env_appends_inside_the_existing_array() {
         let mut d = ConfigDoc::parse(FILE).unwrap();
-        d.add_key_env(Some("api"), "A", "dev").unwrap();
+        d.add_key_env("api", "A", "dev").unwrap();
         assert!(
             d.to_string()
                 .contains("environments = [\"prod\", \"dev\"]  # only prod\n")

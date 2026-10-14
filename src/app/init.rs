@@ -1310,8 +1310,7 @@ fn add_env_on(
     let mut added_ids: Vec<(String, String)> = Vec::new();
     // Shared keys (FR-45), decided once their sources are: (product, key, source).
     let mut shared: Vec<(String, String, (String, String))> = Vec::new();
-    for (product, key) in doc.keys(true) {
-        let product = product.unwrap_or_default();
+    for (product, key) in doc.keys() {
         declared.insert((product.clone(), key.clone()));
         let spec = fleet.products.get(&product).and_then(|p| p.keys.get(&key));
         // M6: a shared key has no field of its own; it joins the environment exactly when
@@ -1370,7 +1369,7 @@ fn add_env_on(
         &env_table(&args.env, boundary, (&vault.id, &item.id)),
     )?;
     for (product, key) in &added_ids {
-        doc.add_key_env(Some(product), key, &args.env)?;
+        doc.add_key_env(product, key, &args.env)?;
     }
     let undeclared: Vec<(String, Kind)> = decl
         .keys
