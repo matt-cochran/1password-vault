@@ -49,6 +49,30 @@ fn missing_config_file_exits_2() {
     assert!(err.starts_with("opv: configuration error"), "{err}");
 }
 
+/// FR-24, FR-60: a file that still sets the removed `pattern` rule fails at load as a
+/// configuration error (exit 2), naming the key and the equivalent `regex` rule.
+#[test]
+fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(
+        &path,
+        "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
+         item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
+         environments = [\"prod\"]\nrules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
+    )
+    .unwrap();
+    let (code, out, err) = opv(&["--config", path.to_str().unwrap(), "status", "prod"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        out.is_empty()
+            && err.contains(
+                ":10: keys.K1.rules: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead"
+            ),
+        "{err}"
+    );
+}
+
 /// Run opv with `dir` as the working directory and no `op` or `flyctl` on PATH.
 fn opv_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
@@ -1135,6 +1159,13 @@ fn schema_is_one_json_document_listing_sync() {
         .iter()
         .any(|c| c["name"] == "sync" && c["effect"] == "writes_target");
     assert!(code == 0 && sync, "{out}");
+}
+
+/// FR-60: `opv schema` no longer lists removed forms under a `deprecated` key.
+#[test]
+fn schema_has_no_deprecated_key() {
+    let (_, out, _) = opv(&["schema"]);
+    assert!(json_of(&out).get("deprecated").is_none(), "{out}");
 }
 
 fn schema_command(name: &str) -> serde_json::Value {

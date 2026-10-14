@@ -1,6 +1,6 @@
-//! Delivery receipts (#106, `docs/design/delivery-receipts.md`): value-free, verifiable proof
-//! that a product's binding set was delivered to a target, kept per product in the
-//! target's state vault (`state_vault_id`, FR-58).
+//! Delivery receipts (#106, FR-58, `docs/design/delivery-receipts.md`): value-free,
+//! verifiable proof that a product's binding set was delivered to a target, kept per
+//! product in the target's state vault (`state_vault_id`).
 //!
 //! - After a sync whose writes the provider confirmed, [`record`] mints a revision for each
 //!   product in scope whose every name was written now or proven identical, and keeps in
@@ -26,7 +26,7 @@ use super::write_err;
 use crate::adapters::{onepassword, onepassword_init, onepassword_tidy};
 use crate::domain::delivery::{
     BindingRef, Evidence, Observed, Receipt, SCHEMA, Scope, Source, Verification, decode_evidence,
-    encode_evidence, new_revision,
+    encode_evidence, new_revision, select,
 };
 use crate::domain::ledger::{hmac_hex, random_key};
 use crate::domain::plan::StoreEntry;
@@ -125,6 +125,7 @@ fn scope(
         account_id: account.to_string(),
         environment: env_name.to_string(),
         product: product.to_string(),
+        target: target.to_string(),
         provider: t.provider().section().to_string(),
         locator: t.target_locator(),
     })
@@ -505,17 +506,26 @@ pub fn verify(
         };
         // A receipt the caller kept: it must be this very delivery to count.
         let mut receipt_revision = None;
-        if let Some(kept) = from_file.iter().find(|k| k.scope.product == product)
+        let kept = select(&from_file, &this_scope).map_err(|duplicate| {
+            Error::Config(
+                format!(
+                    "the receipt file holds {} receipts for the same environment, product and \
+                     target; keep one",
+                    duplicate.count
+                )
+                .into(),
+            )
+            .with_code(crate::error::Code::Usage)
+        })?;
+        if let Some(kept) = kept
             && verification.revision.as_deref() != Some(kept.revision.as_str())
         {
-            {
-                receipt_revision = Some(kept.revision.clone());
-                verification.state = "superseded";
-                verification.reason = Some(format!(
-                    "the receipt's revision {} is not the current delivery",
-                    kept.revision
-                ));
-            }
+            receipt_revision = Some(kept.revision.clone());
+            verification.state = "superseded";
+            verification.reason = Some(format!(
+                "the receipt's revision {} is not the current delivery",
+                kept.revision
+            ));
         }
         checks.push(ProductCheck {
             product,

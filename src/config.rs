@@ -105,8 +105,76 @@ pub fn parse(text: &str) -> Result<Fleet, Error> {
     };
     let doc = Doc::parse(text).map_err(invalid)?;
     removed_forms(&doc)?;
+    // The removed `pattern` rule must be reported as such, rather than as the
+    // `deny_unknown_fields` error the typed parse would give (FR-60).
+    reject_removed_pattern(&doc)?;
     let raw: RawConfig = toml::from_str(text).map_err(invalid)?;
     validate(raw, &doc)
+}
+
+/// FR-24, FR-60: the `pattern` rule is removed (0.7.0); a file that still sets it must
+/// fail at load with the key and the equivalent `regex` rule. The typed parse cannot do
+/// this (its `deny_unknown_fields` reports only "unknown field"), so the raw document is
+/// walked first: every `rules` table gets one check, and the error points at the `pattern`
+/// entry's line and column. The replacement is built from configuration (the prefix and
+/// the pattern) and never from a value. A top-level `[keys]` table is [`removed_forms`]'s.
+fn reject_removed_pattern(doc: &Doc<'_>) -> Result<(), Error> {
+    // (owner label, path to the rules table) for every declared key.
+    let mut rules_tables: Vec<(String, Vec<String>)> = Vec::new();
+    let root = doc.root.get_ref();
+    if let Some(products) = table(root, "products") {
+        for (product, pv) in products.iter() {
+            let Some(keys) = pv
+                .get_ref()
+                .get("keys")
+                .and_then(|v| v.get_ref().as_table())
+            else {
+                continue;
+            };
+            for (key, _) in keys.iter() {
+                let (product, key) = (product.get_ref().as_ref(), key.get_ref().as_ref());
+                rules_tables.push((
+                    key_label(product, key),
+                    vec![
+                        "products".into(),
+                        product.into(),
+                        "keys".into(),
+                        key.into(),
+                        "rules".into(),
+                    ],
+                ));
+            }
+        }
+    }
+    for (owner, base) in rules_tables {
+        let mut path = base.clone();
+        path.push("pattern".into());
+        let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let Some(pattern) = doc.value(&path_refs).and_then(|v| v.get_ref().as_str()) else {
+            continue;
+        };
+        let mut prefix = base.clone();
+        prefix.push("ensure_prefix".into());
+        let prefix_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        let prefix = doc
+            .value(&prefix_refs)
+            .and_then(|v| v.get_ref().as_str())
+            .unwrap_or_default();
+        let regex = format!("{}(?:{pattern})", regex::escape(prefix));
+        let msg = format!(
+            "{owner}: the pattern rule was removed; use regex = {} instead",
+            toml::Value::String(regex)
+        );
+        return Err(doc.at_path(&path_refs, msg));
+    }
+    Ok(())
+}
+
+/// The inner table named `name`, if present (raw TOML lookup only; values are never read).
+fn table<'a>(t: &'a DeTable<'a>, name: &str) -> Option<&'a DeTable<'a>> {
+    t.iter()
+        .find(|(n, _)| n.get_ref().as_ref() == name)
+        .and_then(|(_, v)| v.get_ref().as_table())
 }
 
 /// The file as parsed TOML with source positions, so a provider section is read with its
@@ -836,11 +904,51 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
 
 /// FR-58 (D12): a state vault shared by several targets is never readable more widely than
 /// the values its evidence describes (`state_vault_wider_than_values`).
+/// Each target reads the boundaries of the products it delivers and of their `from`
+/// sources (FR-59), named `<boundary> (<vault id>)` so boundaries of different environments
+/// never compare equal.
 fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
-    // TODO(0.7.0 Phase C): run `domain::placement::wider_than_values(fleet)` and fail at load
-    // with its `sentence()`; that module lands with the placements deliverable.
-    let _ = fleet;
-    Ok(())
+    use crate::domain::placement::{STATE_VAULT_WIDER_THAN_VALUES, TargetReads, wider_than_values};
+    let mut reads: Vec<(&str, &str, BTreeSet<String>)> = Vec::new();
+    for (env_name, env) in &fleet.environments {
+        for (name, target) in &env.targets {
+            let mut boundaries = BTreeSet::new();
+            for (product, p) in &fleet.products {
+                if !fleet.delivers(env_name, name, product) {
+                    continue;
+                }
+                let desired = p
+                    .keys
+                    .values()
+                    .filter(|k| k.environments.iter().any(|e| e == env_name));
+                for k in desired {
+                    let source = k.source().map_or(product.as_str(), |(sp, _)| sp);
+                    for needer in [product.as_str(), source] {
+                        let b = fleet.boundary_of(needer);
+                        if let Some(at) = env.boundaries.get(b) {
+                            boundaries.insert(format!("{b} ({})", at.vault_id));
+                        }
+                    }
+                }
+            }
+            reads.push((name, &target.state_vault_id, boundaries));
+        }
+    }
+    let targets: Vec<TargetReads<'_>> = reads
+        .iter()
+        .map(|(target, vault, boundaries)| TargetReads {
+            target,
+            state_vault_id: vault,
+            boundaries: boundaries.iter().map(String::as_str).collect(),
+        })
+        .collect();
+    match wider_than_values(&targets).first() {
+        Some(w) => Err(cfg(format!(
+            "{STATE_VAULT_WIDER_THAN_VALUES}: {}",
+            w.sentence()
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// FR-57: every product with a key desired in an environment, and every source such a key
@@ -1086,22 +1194,12 @@ fn validate_key(
             "{owner}: rule ensure_prefix must be a non-empty string"
         )));
     }
-    if spec.rules.pattern.is_some() && spec.rules.regex.is_some() {
-        return Err(cfg(format!(
-            "{owner}: pattern and regex cannot both be set; keep regex (pattern is deprecated)"
-        )));
-    }
-    if spec.rules.pattern.is_some() && spec.rules.ensure_prefix.is_none() {
-        return Err(cfg(format!("{owner}: rule pattern requires ensure_prefix")));
-    }
-    if let Some(re) = &spec.rules.pattern {
-        regex::Regex::new(re)
-            .map_err(|e| cfg(format!("{owner}: rule pattern does not compile: {e}")))?;
-    }
     if spec.rules.transform.as_deref() == Some("signoz_ingestion_header") {
+        let regex =
+            toml::Value::String(format!("{}(?:{SIGNOZ_BODY})", regex::escape(SIGNOZ_PREFIX)));
         return Err(cfg(format!(
             "{owner}: transform = \"signoz_ingestion_header\" was removed in 0.4.0; \
-             use ensure_prefix = \"{SIGNOZ_PREFIX}\" with pattern = \"{SIGNOZ_BODY}\""
+             use ensure_prefix = \"{SIGNOZ_PREFIX}\" with regex = {regex}"
         )));
     }
     Ok(())
@@ -1834,79 +1932,31 @@ environments = ["prod"]
         assert!(parse(&text).is_ok());
     }
 
+    /// FR-24, FR-60: the `pattern` rule is removed; a file that still sets it fails at
+    /// load with the key and the equivalent `regex` rule.
     #[test]
-    fn parses_the_pattern_rule() {
-        let text = with_prod_key(
-            "p",
-            "K1",
-            "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        );
-        assert_eq!(
-            parse(&text).unwrap().products["p"].keys["K1"]
-                .rules
-                .pattern
-                .as_deref(),
-            Some("[a-z]+")
-        );
-    }
-
-    #[test]
-    fn rejects_pattern_without_ensure_prefix() {
+    fn the_pattern_rule_fails_at_load_with_the_equivalent_regex() {
         let m = config_err(&with_prod_key(
             "p",
             "K1",
-            "rules = { pattern = \"[a-z]+\" }\n",
+            "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
         ));
         assert!(
-            m.contains("p/K1: rule pattern requires ensure_prefix"),
+            m.ends_with(
+                "\np/K1: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead\n"
+            ),
             "{m}"
         );
     }
 
     #[test]
-    fn rejects_a_pattern_that_does_not_compile() {
+    fn the_pattern_rule_error_points_at_the_pattern() {
         let m = config_err(&with_prod_key(
-            "p",
-            "K1",
-            "rules = { ensure_prefix = \"p-\", pattern = \"([a-z\" }\n",
-        ));
-        assert!(m.contains("p/K1: rule pattern does not compile"), "{m}");
-    }
-
-    #[test]
-    fn rejects_pattern_and_regex_together() {
-        let m = config_err(&with_prod_key(
-            "p",
-            "K1",
-            "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\", regex = \"p-[a-z]+\" }\n",
-        ));
-        assert_eq!(
-            m,
-            "p/K1: pattern and regex cannot both be set; keep regex (pattern is deprecated)"
-        );
-    }
-
-    #[test]
-    fn pattern_loads_with_a_note_naming_the_equivalent_regex() {
-        let text = with_prod_key(
             "p",
             "K1",
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        );
-        assert_eq!(
-            parse(&text).unwrap().notes(),
-            vec!["p/K1: pattern is deprecated; use regex = 'p\\-(?:[a-z]+)' instead of pattern"]
-        );
-    }
-
-    #[test]
-    fn regex_emits_no_note() {
-        let text = with_prod_key(
-            "p",
-            "K1",
-            "rules = { ensure_prefix = \"p-\", regex = \"p-[a-z]+\" }\n",
-        );
-        assert!(parse(&text).unwrap().notes().is_empty());
+        ));
+        assert!(m.contains("TOML parse error at line 48, column 33"), "{m}");
     }
 
     #[test]
@@ -1931,7 +1981,8 @@ environments = ["prod"]
         assert_eq!(
             m,
             "p/K1: transform = \"signoz_ingestion_header\" was removed in 0.4.0; use \
-             ensure_prefix = \"signoz-ingestion-key=\" with pattern = \"[A-Za-z0-9._~+/-]+={0,2}\""
+             ensure_prefix = \"signoz-ingestion-key=\" with regex = \
+             'signoz\\-ingestion\\-key=(?:[A-Za-z0-9._~+/-]+={0,2})'"
         );
     }
 
@@ -2383,6 +2434,49 @@ environments = ["prod"]
         );
         let m = config_err(&text);
         assert!(m.contains("unknown field `vault`"), "{m}");
+    }
+
+    /// Targets `site` (web) and `other` (api only) sharing state vault `sweb`.
+    fn shared_state_vault() -> String {
+        bound(
+            &key(
+                &web_plus(
+                    "[environments.prod.targets.other]\nfly.app = \"api-prod\"\n\
+                     fly.secret_name = \"{KEY}\"\nproducts = [\"api\"]\nstate_vault_id = \"sweb\"\n",
+                ),
+                "api",
+                "API_KEY",
+                r#"["prod"]"#,
+                "",
+            ),
+            "prod",
+            "api",
+        )
+    }
+
+    #[test]
+    fn a_state_vault_shared_by_targets_reading_other_boundaries_is_refused() {
+        let m = config_err(&replaced(
+            &shared_state_vault(),
+            "fly.app = \"web-prod\"",
+            "fly.app = \"web-prod\"\nproducts = [\"web\"]",
+        ));
+        assert!(
+            m.starts_with(
+                "state_vault_wider_than_values: state vault sweb is shared by targets other, site"
+            ),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn a_state_vault_shared_by_targets_reading_the_same_boundaries_loads() {
+        let text = replaced(
+            &shared_state_vault(),
+            "products = [\"api\"]",
+            "products = [\"api\", \"web\"]",
+        );
+        assert!(parse(&text).is_ok());
     }
 
     // ---- delivery scope (FR-48, FR-56) -----------------------------------------------
@@ -2935,27 +3029,23 @@ environments = ["prod"]
         assert!(parse(&text).unwrap().products["worker"].keys["INTEGRATION_ENC_KEY"].immutable);
     }
 
-    /// FR-24 (0.6.0): the replacement a `pattern` deprecation note suggests pastes into the
-    /// file as is and loads.
+    /// FR-24, FR-60: the removal error's suggested `regex` rule pastes into the file as is
+    /// and loads.
     #[test]
     fn the_suggested_regex_replacement_loads() {
-        let old = with_prod_key(
+        let m = config_err(&with_prod_key(
             "p",
             "K1",
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        );
-        let note = parse(&old).unwrap().notes().remove(0);
-        let rule = note
-            .split_once("use ")
-            .and_then(|(_, r)| r.strip_suffix(" instead of pattern"))
-            .unwrap()
-            .to_string();
-        let new = with_prod_key(
+        ));
+        let (_, rule) = m.split_once("use regex = ").unwrap();
+        let rule = rule.trim_end().strip_suffix(" instead").unwrap();
+        let text = with_prod_key(
             "p",
             "K1",
-            &format!("rules = {{ ensure_prefix = \"p-\", {rule} }}\n"),
+            &format!("rules = {{ ensure_prefix = \"p-\", regex = {rule} }}\n"),
         );
-        assert!(parse(&new).is_ok(), "{new}");
+        assert!(parse(&text).is_ok(), "{text}");
     }
 
     // ---- personal keys and environment display fields (FR-55) ----------------------

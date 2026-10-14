@@ -1,4 +1,7 @@
 //! Fleet configuration model (§10.2). Holds names, IDs and rules; never values (FR-1).
+//!
+//! Since 0.7.0 (FR-24, FR-60) there is one way to write each rule: the `pattern` rule is
+//! removed and a file that sets it fails at load (see `crate::config`).
 
 use std::collections::BTreeMap;
 
@@ -24,8 +27,6 @@ pub struct Rules {
     pub not_prefix: Option<OneOrMany>,
     /// Accept the value with or without this prefix and stage exactly one occurrence (FR-24).
     pub ensure_prefix: Option<String>,
-    /// Full match required of the text after `ensure_prefix`; valid only with it (FR-24).
-    pub pattern: Option<String>,
     pub regex: Option<String>,
     #[serde(rename = "enum")]
     pub r#enum: Option<Vec<String>>,
@@ -316,31 +317,6 @@ impl Origin {
 }
 
 impl Fleet {
-    /// Load-time deprecation notes, one per affected key (FR-24, 0.6.0): a key that still
-    /// uses `pattern` names the equivalent `regex` rule, built only from configuration
-    /// (the prefix and the pattern), never a value. The CLI prints each on stderr once per
-    /// load. Empty when no key uses a deprecated rule.
-    pub fn notes(&self) -> Vec<String> {
-        let mut notes = Vec::new();
-        for (product, p) in &self.products {
-            for (key, spec) in &p.keys {
-                let Some(pattern) = &spec.rules.pattern else {
-                    continue;
-                };
-                let prefix = spec.rules.ensure_prefix.as_deref().unwrap_or_default();
-                let regex = format!("{}(?:{pattern})", regex::escape(prefix));
-                // A TOML string the user can paste as is (a regex escape such as `\-` is
-                // not a valid escape in a basic string, so this is usually a literal one).
-                let toml_value = toml::Value::String(regex);
-                notes.push(format!(
-                    "{}: pattern is deprecated; use regex = {toml_value} instead of pattern",
-                    key_label(product, key)
-                ));
-            }
-        }
-        notes
-    }
-
     /// Look up an environment by a (possibly user-supplied) name.
     ///
     /// An unknown name suggests the closest defined one, and the `Next:` step is a read-only

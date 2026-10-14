@@ -1044,7 +1044,8 @@ environments = ["dev"]
     fn two_environments_on_different_namespaces_are_accepted() {
         let second = ENV
             .replace("environments.dev", "environments.stage")
-            .replace("\"myapp\"", "\"myapp-stage\"");
+            .replace("\"myapp\"", "\"myapp-stage\"")
+            .replace("state_vault_id = \"s\"", "state_vault_id = \"s-stage\"");
         assert!(parse(&doc(&format!("{ENV}{second}"), KEYS)).is_ok());
     }
 

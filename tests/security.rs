@@ -1353,8 +1353,8 @@ fn status_json_totals_are_names_and_counts() {
     );
 }
 
-/// FR-21: each row object carries product, key, kind, state, failing rule, Fly name and
-/// target presence.
+/// FR-21: each row object carries product, key, kind, state, failing rule, target name
+/// and target presence.
 #[test]
 fn status_json_row_carries_the_contract_fields() {
     let h = Harness::new(&good_item());
@@ -1375,7 +1375,6 @@ fn status_json_row_carries_the_contract_fields() {
             "state": "saved",
             "rule": null,
             "reason": null,
-            "fly_name": N_OPENAI,
             "target_name": N_OPENAI,
             "target": "absent",
             "action": "would_stage",
@@ -1776,11 +1775,6 @@ kind = "secret"
 environments = ["prod"]
 rules = { ensure_prefix = "pre_" }
 
-[products.allumata.keys.PATTERN]
-kind = "secret"
-environments = ["prod"]
-rules = { ensure_prefix = "pre_", pattern = "[a-z]+" }
-
 [products.allumata.keys.UNKNOWN_TRANSFORM]
 kind = "secret"
 environments = ["prod"]
@@ -1939,12 +1933,6 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             "pre_".to_string(),
             "ensure_prefix",
             "nothing after the prefix",
-        ),
-        (
-            "PATTERN",
-            format!("pre_{m}"),
-            "pattern",
-            "text after the prefix does not match the pattern",
         ),
         (
             "UNKNOWN_TRANSFORM",

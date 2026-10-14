@@ -361,10 +361,6 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "text_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
         },
         "documents": documents(),
-        "deprecated": [
-            {"field": "fly_name", "in": ["status", "plan", "check"], "use": "target_name"},
-            {"field": "pattern", "in": ["rules"], "use": "regex"},
-        ],
     })
 }
 
@@ -494,7 +490,6 @@ fn documents() -> Value {
         "rule",
         "reason",
         "target_name",
-        "fly_name",
         "target",
         "action",
         "binding?",

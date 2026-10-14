@@ -14,7 +14,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
-      "fly_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
       "target": null,
       "action": null
     },
@@ -26,7 +25,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target": null,
       "action": null,
       "open_url": "https://start.1password.com/open/i?v=vprd&i=iprd"
@@ -39,7 +37,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
-      "fly_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
       "target": null,
       "action": null
     },
@@ -51,7 +48,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
-      "fly_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
       "target": null,
       "action": null
     }

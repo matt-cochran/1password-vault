@@ -945,7 +945,7 @@ item_id = "idev"
 [keys.API_TOKEN]
 kind = "secret"
 environments = ["dev"]
-rules = { ensure_prefix = "tok_", pattern = "[A-Z]+" }
+rules = { ensure_prefix = "tok_", regex = "tok_(?:[A-Z]+)" }
 "#,
     )
     .unwrap()

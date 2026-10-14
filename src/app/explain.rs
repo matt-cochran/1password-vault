@@ -479,7 +479,6 @@ fn describe_rules(r: &Rules) -> Vec<String> {
         prefix,
         not_prefix,
         ensure_prefix,
-        pattern,
         regex,
         r#enum,
         base64_bytes,
@@ -516,9 +515,6 @@ fn describe_rules(r: &Rules) -> Vec<String> {
     }
     if let Some(p) = ensure_prefix {
         out.push(format!("ensure_prefix = {p:?}"));
-    }
-    if let Some(p) = pattern {
-        out.push(format!("pattern = {p:?}"));
     }
     if let Some(p) = regex {
         out.push(format!("regex = {p:?}"));
@@ -655,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn prints_the_fly_name() {
+    fn prints_the_target_name() {
         assert!(openai_prod().contains("fly name:   FLEET__ALLUMATA__OPENAI_API_KEY"));
     }
 
@@ -680,10 +676,10 @@ mod tests {
     }
 
     #[test]
-    fn prints_ensure_prefix_and_pattern() {
+    fn prints_ensure_prefix_and_regex() {
         assert_eq!(
-            rules_line(r#"ensure_prefix = "sk-", pattern = "[a-z]+""#),
-            r#"ensure_prefix = "sk-", pattern = "[a-z]+""#
+            rules_line(r#"ensure_prefix = "sk-", regex = "sk-[a-z]+""#),
+            r#"ensure_prefix = "sk-", regex = "sk-[a-z]+""#
         );
     }
 
@@ -750,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn config_key_has_no_fly_name() {
+    fn config_key_has_no_target_name() {
         let out = explain(&fleet(), "allumata/SIGNUP_POLICY", Some("prod")).unwrap();
         assert!(
             out.contains("fly name:   - (config: not a Fly secret)"),
@@ -840,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_form_fly_name_is_the_key() {
+    fn simple_form_target_name_is_the_key() {
         let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
         assert!(out.contains("fly name:   DATABASE_URL\n"), "{out}");
     }
