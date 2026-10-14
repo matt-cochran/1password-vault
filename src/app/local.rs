@@ -103,7 +103,8 @@ pub fn check(
         None
     };
     if json {
-        // The shared row shape (A6); no target is read, so `target` and `action` are null.
+        // The shared row shape (A6); no target is read, so `target`, `target_state` and
+        // `action` are null.
         let declared = fleet.environment(env)?;
         let rows: Vec<_> = plan
             .rows
@@ -140,7 +141,7 @@ pub fn check(
         }
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
-        for row in super::problems_first(&plan.rows) {
+        for row in super::problems_first(&plan.rows, |r| r) {
             let label = crate::domain::key_label(&row.product, &row.key);
             writeln!(
                 out,

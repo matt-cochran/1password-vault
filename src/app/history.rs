@@ -53,8 +53,8 @@ pub fn run(
         )
         .map_err(write_err);
     }
-    // The environment's only target (several need --target, a later deliverable).
-    let name = super::resolve_target(fleet, env_name, &[], "history")?;
+    // The one target this command reads ([`super::sole_target`]).
+    let name = super::sole_target(fleet, env_name, "history")?;
     let signed_in = super::signin::open_targeted(
         fleet,
         env_name,

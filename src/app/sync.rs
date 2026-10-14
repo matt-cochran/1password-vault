@@ -16,6 +16,14 @@
 //! only for a value that differs (FR-31), reads the runtime's bindings, and only under
 //! `--deploy` re-pins them in one revision; it prunes only after that revision is healthy
 //! (FR-32). See `run_pinned`.
+//!
+//! Targets (FR-56, D1 "every target, one plan id"): without `--target` a run covers every
+//! target of the environment, in name order; `--target` (repeatable) narrows it. `sync`
+//! first plans every target read-only ([`prepare`]: item read, listing, blocking rows),
+//! derives one plan id from each target's id and name (`run_plan_id`) and checks
+//! `--expect-plan` against it, then applies the targets one by one ([`apply`]), each with
+//! its own ports, deploy identity, preflight and delivery evidence. A target that fails
+//! stops the run before the next one writes; the error names the targets already synced.
 
 use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
@@ -26,12 +34,14 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use super::{
-    KeyNames, check_product, ci_summary, compare, findings_error, is_blocking, managed_names,
-    open_target, plan_id_of, plan_item, plural, preflight, print_extras, print_legend, print_rows,
-    product_names, read_and_plan_versioned, read_item_fields, resolve_target, row_names,
-    rows_item_url, scope_plan, target_word, unmanaged_on_target, write_err, write_json,
+    JsonPart, KeyNames, Prefixed, check_product, ci_summary, compare, findings_error, is_blocking,
+    managed_names, open_target, placement, plan_id_of, plan_item, plural, preflight, print_extras,
+    print_legend, print_rows, product_names, read_and_plan_versioned, read_item_fields,
+    resolve_targets, row_names, rows_item_url, scope_plan, target_runners, target_word,
+    unmanaged_on_target, write_err, write_json,
 };
 use crate::domain::plan::CurrentState::Same;
+use crate::domain::provenance::run_plan_id;
 use crate::domain::rules;
 use crate::domain::{
     Binding, Fleet, Health, ItemField, KeyState, Kind, Revision, Row, RuntimeChange,
@@ -67,8 +77,8 @@ pub struct SyncOpts {
     pub expect_plan: Option<String>,
     /// `--receipt <file>`: write the delivery receipts minted by this sync (#106).
     pub receipt: Option<std::path::PathBuf>,
-    /// `--target <name>` (repeatable, FR-56): the targets to sync. Empty: the environment's
-    /// only target (one target per run for now).
+    /// `--target <name>` (repeatable, FR-56): the targets to sync. Empty: every target of
+    /// the environment, in name order.
     pub targets: Vec<String>,
 }
 
@@ -134,49 +144,228 @@ pub fn run(
     }
     // A write is never suggested on a guessed product: the step is its plan.
     check_product(fleet, opts.product.as_deref(), "plan", Some(env_name))?;
-    let target = resolve_target(fleet, env_name, &opts.targets, "sync")?;
-    let (t, ports) = open_target(fleet, env_name, &target, r)?;
+    let names = resolve_targets(fleet, env_name, &opts.targets, "sync")?;
+    let runners = target_runners(fleet, env_name, &names, r)?;
+    let mut opened = Vec::new();
+    for (name, signed) in names.iter().zip(&runners) {
+        let r: &dyn CommandRunner = match signed {
+            Some(s) => s,
+            None => r,
+        };
+        let (t, ports) = open_target(fleet, env_name, name, r)?;
+        opened.push((name.as_str(), t, ports, r));
+    }
     let rotate = parse_rotate(fleet, env_name, &opts.rotate)?;
     let prune_immutable = parse_prune_immutable(fleet, env_name, opts)?;
-    let scope = match &opts.product {
-        Some(p) => Some(product_names(fleet, env_name, &target, p)?),
-        None => None,
-    };
-    let c = Ctx {
-        fleet,
-        env_name,
-        target: &target,
-        t,
-        r,
-        opts,
-        rotate: &rotate,
-        prune_immutable: &prune_immutable,
-        scope: scope.as_ref(),
-        names: KeyNames::new(fleet, env_name, &target)?,
-        confirm_missing: guard.missing,
-    };
-    let mut sink = std::io::sink();
-    // `--json`: the detail lines are dropped and preflight warnings go to stderr, so stdout
-    // is one document.
-    let details: &mut dyn Write = if opts.json { &mut sink } else { &mut *out };
-    let report = match &ports {
-        Ports::Staged { store, runtime } => {
-            run_staged(&c, &ports, store.as_ref(), runtime.as_ref(), details)?
-        }
-        Ports::Pinned { store, runtime } => {
-            run_pinned(&c, &ports, store.as_ref(), runtime.as_ref(), details)?
-        }
-    };
-    let next = report.next(env_name, opts, guarded);
-    r.step_summary(&report.step_summary(env_name, opts, &c.names));
-    if opts.json {
-        return report.write_json(out, env_name, t, opts, &c.names, next.as_deref());
+    let receipts = std::cell::RefCell::new(Vec::new());
+    let mut targets = Vec::new();
+    for (target, t, ports, r) in opened {
+        let scope = match &opts.product {
+            Some(p) => Some(product_names(fleet, env_name, target, p)?),
+            None => None,
+        };
+        let c = Ctx {
+            fleet,
+            env_name,
+            target,
+            t,
+            r,
+            opts,
+            rotate: &rotate,
+            prune_immutable: &prune_immutable,
+            scope,
+            names: KeyNames::new(fleet, env_name, target)?,
+            confirm_missing: guard.missing,
+            receipts: &receipts,
+        };
+        targets.push((c, ports));
     }
-    writeln!(out, "{}", report.summary()).map_err(write_err)?;
+    // 1. Every target's plan, read-only, before any target is written (FR-41, FR-56).
+    let mut planned = Vec::new();
+    for (c, ports) in &targets {
+        planned.push(details(out, c, |d| prepare(c, ports, d))?);
+    }
+    // 2. One plan id for the whole run, checked before the first write.
+    let plan_id = run_plan_id(
+        targets
+            .iter()
+            .zip(&planned)
+            .map(|((c, _), p)| (c.target, p.id.as_str())),
+    );
+    let item_version = planned.last().and_then(|p| p.item_version);
+    expect_run(fleet, env_name, opts, &plan_id, item_version)?;
+    // 3. Each target in name order; one failing stops the run before the next is written.
+    let mut reports: Vec<Report> = Vec::new();
+    for ((c, ports), p) in targets.iter().zip(planned) {
+        let report = details(out, c, |d| {
+            let report = apply(c, ports, p.prepared, &plan_id, d)?;
+            if !opts.json {
+                writeln!(d, "{}", report.summary()).map_err(write_err)?;
+            }
+            Ok(report)
+        })
+        .map_err(|e| after_targets(e, env_name, &targets, reports.len()))?;
+        r.step_summary(&report.step_summary(env_name, c.target, opts, &c.names));
+        reports.push(report);
+    }
+    let next = next_after(&reports, env_name, opts, guarded);
+    if opts.json {
+        return write_run_json(
+            out,
+            env_name,
+            opts,
+            &targets,
+            &reports,
+            &plan_id,
+            next.as_deref(),
+        );
+    }
     if let Some(n) = next {
         write!(out, "{}", next_line(&n)).map_err(write_err)?;
     }
     Ok(())
+}
+
+/// Run `body` with the detail lines of target `c`: dropped under `--json` (preflight
+/// warnings go to stderr, so stdout is one document), else prefixed `<env>/<target>: `.
+fn details<T>(
+    out: &mut dyn Write,
+    c: &Ctx<'_>,
+    body: impl FnOnce(&mut dyn Write) -> Result<T, Error>,
+) -> Result<T, Error> {
+    if c.opts.json {
+        return body(&mut std::io::sink());
+    }
+    body(&mut Prefixed::new(
+        out,
+        format!("{}: ", placement(c.env_name, c.target)),
+    ))
+}
+
+/// `e`, from target number `done` of `targets`, naming the targets this run already
+/// synced (FR-56): one failing target stops the run before any later one is written.
+fn after_targets(e: Error, env_name: &str, targets: &[(Ctx<'_>, Ports<'_>)], done: usize) -> Error {
+    if done == 0 {
+        return e;
+    }
+    let synced: Vec<String> = targets[..done]
+        .iter()
+        .map(|(c, _)| placement(env_name, c.target))
+        .collect();
+    let rest: Vec<String> = targets[done + 1..]
+        .iter()
+        .map(|(c, _)| placement(env_name, c.target))
+        .collect();
+    let mut note = format!("already synced by this run: {}", synced.join(", "));
+    if !rest.is_empty() {
+        note.push_str(&format!("; not started: {}", rest.join(", ")));
+    }
+    with_note(e, &note)
+}
+
+/// The command that finishes the run's job (FR-56): [`Report::next`] of all targets
+/// together, so a deploy is asked for where a target has names pending and `--prune`
+/// where one keeps extras.
+fn next_after(
+    reports: &[Report],
+    env_name: &str,
+    opts: &SyncOpts,
+    guarded: bool,
+) -> Option<String> {
+    let open: Vec<&Report> = reports
+        .iter()
+        .filter(|r| !r.deploy_skipped && !(r.pending.is_empty() && r.kept.is_empty()))
+        .collect();
+    Report {
+        live: open.iter().all(|r| r.live),
+        pending: open
+            .iter()
+            .flat_map(|r| r.pending.iter().cloned())
+            .collect(),
+        kept: open.iter().flat_map(|r| r.kept.iter().cloned()).collect(),
+        ..Report::default()
+    }
+    .next(env_name, opts, guarded)
+}
+
+/// The run report as one document (A6, S4, FR-56): every list holds `{target, product,
+/// key, target_name}` objects over all targets, in target order; `targets` holds each
+/// target's provider and deploy; `deployed_names` and `written_names` hold bare names.
+fn write_run_json(
+    out: &mut dyn Write,
+    env_name: &str,
+    opts: &SyncOpts,
+    targets: &[(Ctx<'_>, Ports<'_>)],
+    reports: &[Report],
+    plan_id: &str,
+    next: Option<&str>,
+) -> Result<(), Error> {
+    let both = || targets.iter().map(|(c, _)| c).zip(reports);
+    let refs = |list: fn(&Report) -> &Vec<String>| -> Vec<serde_json::Value> {
+        both()
+            .flat_map(|(c, r)| c.names.json_refs(list(r)))
+            .collect()
+    };
+    let mut reasons: Vec<&str> = Vec::new();
+    for r in reports {
+        for why in r.deploy_reason() {
+            if !reasons.contains(&why) {
+                reasons.push(why);
+            }
+        }
+    }
+    let mut doc = serde_json::json!({
+        "schema_version": crate::json::SCHEMA_VERSION,
+        "environment": env_name,
+        "product": opts.product,
+        "targets": both().map(|(c, r)| serde_json::json!({
+            "target": c.target,
+            "provider": c.t.provider().section(),
+            "deployed": r.deployed.is_some(),
+            "revision": r.deployed.as_deref().filter(|d| *d != DEPLOYED),
+        })).collect::<Vec<_>>(),
+        "written": refs(|r| &r.written),
+        "unchanged": refs(|r| &r.unchanged),
+        "held": refs(|r| &r.held),
+        "deployed": reports.iter().any(|r| r.deployed.is_some()),
+        "deploy_reason": reasons,
+        "deployed_names": reports.iter().flat_map(|r| r.deployed_names.iter()).collect::<Vec<_>>(),
+        "pending": refs(|r| &r.pending),
+        "pruned": refs(|r| &r.pruned),
+        "kept": refs(|r| &r.kept),
+        "skipped": refs(|r| &r.skipped),
+        "written_names": reports.iter().flat_map(|r| r.written.iter()).collect::<Vec<_>>(),
+        "next": next,
+        "plan_id": plan_id,
+    });
+    // #106: the receipts minted on each target (FR-58).
+    if reports.iter().any(|r| r.delivery.is_some()) {
+        let minted: Vec<serde_json::Value> = both()
+            .filter_map(|(_, r)| r.delivery.as_ref())
+            .flat_map(|d| &d.minted)
+            .map(|m| {
+                serde_json::json!({
+                    "target": m.scope.target,
+                    "product": m.scope.product,
+                    "revision": m.revision,
+                })
+            })
+            .collect();
+        let not_minted: Vec<serde_json::Value> = both()
+            .filter_map(|(c, r)| r.delivery.as_ref().map(|d| (c, d)))
+            .flat_map(|(c, d)| {
+                d.not_minted.iter().map(|n| {
+                    serde_json::json!({
+                        "target": c.target,
+                        "product": n.product,
+                        "reason": n.reason,
+                    })
+                })
+            })
+            .collect();
+        doc["delivery"] = serde_json::json!({"minted": minted, "not_minted": not_minted});
+    }
+    writeln!(out, "{doc}").map_err(write_err)
 }
 
 /// The `confirm_env` guard of one run (NR-20).
@@ -222,10 +411,12 @@ struct Ctx<'a> {
     prune_immutable: &'a BTreeSet<(String, String)>,
     /// `--product`: that product's managed names; nothing else is written, pruned or
     /// unbound (P20).
-    scope: Option<&'a HashSet<String>>,
+    scope: Option<HashSet<String>>,
     names: KeyNames,
     /// `confirm_env = true` and no `--confirm` (H12).
     confirm_missing: bool,
+    /// The delivery receipts this run minted so far, on every target (#106, FR-58).
+    receipts: &'a std::cell::RefCell<Vec<crate::domain::delivery::Receipt>>,
 }
 
 impl Ctx<'_> {
@@ -263,70 +454,82 @@ impl Ctx<'_> {
 
     /// `plan` limited to `--product`, when given.
     fn scoped(&self, mut plan: SyncPlan) -> SyncPlan {
-        if let (Some(p), Some(names)) = (&self.opts.product, self.scope) {
+        if let (Some(p), Some(names)) = (&self.opts.product, &self.scope) {
             scope_plan(&mut plan, p, names);
         }
         plan
     }
 
     fn in_scope(&self, name: &str) -> bool {
-        self.scope.is_none_or(|s| s.contains(name))
+        self.scope.as_ref().is_none_or(|s| s.contains(name))
     }
 
-    /// This run's plan id (FR-41). With `--expect-plan`, a different id is refused before
-    /// any write (exit 6), naming the new id and the command that applies it.
-    fn expect(
+    /// This target's plan id (FR-41), one input of the run's ([`run_plan_id`]).
+    fn target_id(
         &self,
         plan: &SyncPlan,
         listed: &[StoreEntry],
         item_version: Option<u64>,
         ports: &Ports<'_>,
-    ) -> Result<String, Error> {
-        let product = self.opts.product.as_deref();
-        let expected = self.opts.expect_plan.as_deref();
-        let id = plan_id_of(
+    ) -> String {
+        plan_id_of(
             self.fleet,
             self.env_name,
             self.target,
-            product,
+            self.opts.product.as_deref(),
             item_version,
             plan,
             listed,
             ports,
-            expected,
-        );
-        let Some(expected) = expected else {
-            return Ok(id);
-        };
-        if expected.eq_ignore_ascii_case(&id) {
-            return Ok(id);
-        }
-        let review = match product {
-            Some(p) => format!("opv plan {} --product {p}", self.env_name),
-            None => format!("opv plan {}", self.env_name),
-        };
-        let apply = SyncOpts {
-            expect_plan: Some(id.clone()),
-            receipt: None,
-            confirm: None,
-            ..self.opts.clone()
-        }
-        .command(self.env_name, false);
-        let item = item_version
-            .map(|v| format!(" (1Password item v{v})"))
-            .unwrap_or_default();
-        Err(Error::Policy(
-            format!(
-                "stale plan: the plan changed since {expected}; it is now {id}{item} (the \
-                 1Password item, the target or {} changed); nothing was changed\n  \
-                 review it, then apply exactly that plan with: {apply}",
-                self.fleet.origin.noun()
-            )
-            .into(),
+            self.opts.expect_plan.as_deref(),
         )
-        .with_code(Code::StalePlan)
-        .with_next(review))
     }
+}
+
+/// With `--expect-plan`, refuse a run whose plan id `id` differs (exit 6) before any write,
+/// naming the new id and the command that applies it (FR-41). The id covers every target
+/// the run would sync, so a plan made for other targets never matches (FR-56).
+fn expect_run(
+    fleet: &Fleet,
+    env_name: &str,
+    opts: &SyncOpts,
+    id: &str,
+    item_version: Option<u64>,
+) -> Result<(), Error> {
+    let Some(expected) = opts.expect_plan.as_deref() else {
+        return Ok(());
+    };
+    if expected.eq_ignore_ascii_case(id) {
+        return Ok(());
+    }
+    let mut review = format!("opv plan {env_name}");
+    for t in &opts.targets {
+        review.push_str(&format!(" --target {t}"));
+    }
+    if let Some(p) = &opts.product {
+        review.push_str(&format!(" --product {p}"));
+    }
+    let apply = SyncOpts {
+        expect_plan: Some(id.to_string()),
+        receipt: None,
+        confirm: None,
+        ..opts.clone()
+    }
+    .command(env_name, false);
+    let item = item_version
+        .map(|v| format!(" (1Password item v{v})"))
+        .unwrap_or_default();
+    Err(Error::Policy(
+        format!(
+            "stale plan: the plan changed since {expected}; it is now {id}{item} (the \
+             1Password item, a target, the targets planned or {} changed); nothing was \
+             changed\n  review it, then apply exactly that plan with: {apply}",
+            fleet.origin.noun()
+        )
+        .into(),
+    )
+    .with_code(Code::StalePlan)
+    .with_next(review))
 }
 
 /// What one `sync` run did (NR-18): target names only, never a value. The same on every
@@ -415,9 +618,16 @@ impl Report {
         why
     }
 
-    /// The CI job summary section (H8): the summary line and each list, names only.
-    fn step_summary(&self, env_name: &str, opts: &SyncOpts, names: &KeyNames) -> String {
-        let mut heading = format!("opv sync {env_name}");
+    /// The CI job summary section of target `target` (H8, FR-56): the summary line and
+    /// each list, names only.
+    fn step_summary(
+        &self,
+        env_name: &str,
+        target: &str,
+        opts: &SyncOpts,
+        names: &KeyNames,
+    ) -> String {
+        let mut heading = format!("opv sync {env_name} --target {target}");
         if let Some(p) = &opts.product {
             heading.push_str(&format!(" --product {p}"));
         }
@@ -432,7 +642,9 @@ impl Report {
         let lists: Vec<(&str, &str)> = lists.iter().map(|(l, n)| (*l, n.as_str())).collect();
         ci_summary::lists(&heading, &self.summary(), &lists)
     }
+}
 
+impl Report {
     /// The command that finishes the job: a deploy for pending names, `--prune` for kept
     /// ones. `None` when nothing is left, or a deploy would not help (nothing to restart).
     fn next(&self, env_name: &str, opts: &SyncOpts, guarded: bool) -> Option<String> {
@@ -452,52 +664,6 @@ impl Report {
             targets: opts.targets.clone(),
         };
         Some(o.command(env_name, guarded))
-    }
-
-    /// The run report as one document (A6, S4): every list holds `{product, key,
-    /// target_name}` objects in the order of the summary line; `deployed_names` and
-    /// `written_names` hold bare target names.
-    fn write_json(
-        &self,
-        out: &mut dyn Write,
-        env_name: &str,
-        t: &dyn TargetConfig,
-        opts: &SyncOpts,
-        names: &KeyNames,
-        next: Option<&str>,
-    ) -> Result<(), Error> {
-        let doc = serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "environment": env_name,
-            "provider": t.provider().section(),
-            "product": opts.product,
-            "written": names.json_refs(&self.written),
-            "unchanged": names.json_refs(&self.unchanged),
-            "held": names.json_refs(&self.held),
-            "deployed": self.deployed.is_some(),
-            "revision": self.deployed.as_deref().filter(|r| *r != DEPLOYED),
-            "deploy_reason": self.deploy_reason(),
-            "deployed_names": self.deployed_names,
-            "pending": names.json_refs(&self.pending),
-            "pruned": names.json_refs(&self.pruned),
-            "kept": names.json_refs(&self.kept),
-            "skipped": names.json_refs(&self.skipped),
-            "written_names": self.written,
-            "next": next,
-            "plan_id": self.plan_id,
-        });
-        // #106: only where a state vault is configured, so other documents are unchanged.
-        let mut doc = doc;
-        if let Some(d) = &self.delivery {
-            doc["delivery"] = serde_json::json!({
-                "minted": d.minted.iter().map(|r| serde_json::json!({
-                    "product": r.scope.product,
-                    "revision": r.revision,
-                })).collect::<Vec<_>>(),
-                "not_minted": d.not_minted,
-            });
-        }
-        writeln!(out, "{doc}").map_err(write_err)
     }
 }
 
@@ -523,15 +689,95 @@ fn held_names(c: &Ctx<'_>, plan: &SyncPlan) -> Result<Vec<String>, Error> {
         .collect())
 }
 
-/// `sync` for a staged target (Fly, §6.4): stage, compare digests, deploy.
-fn run_staged(
+/// One target's plan in a `sync` run, read-only: what [`apply`] then carries out.
+struct Planned {
+    prepared: Prepared,
+    /// The target's plan id (FR-41), one input of the run's.
+    id: String,
+    item_version: Option<u64>,
+}
+
+/// What [`prepare`] read and planned, by the target's kind.
+enum Prepared {
+    Staged {
+        plan: SyncPlan,
+        list_a: Vec<StoreEntry>,
+        var_plan: Option<super::variables::VarPlan>,
+    },
+    Pinned {
+        plan: SyncPlan,
+        listed: Vec<StoreEntry>,
+        skip_deploy: Option<String>,
+    },
+}
+
+/// Read and plan target `c` (no write): the item, the store listing and, on a pinned
+/// target, its state (NR-23). Blocking rows refuse here, before any target is written.
+fn prepare(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
+    match ports {
+        Ports::Staged { store, .. } => prepare_staged(c, ports, store.as_ref()),
+        Ports::Pinned { .. } => prepare_pinned(c, ports, out),
+    }
+}
+
+/// Carry out `prepared` on target `c` under the run's plan id `plan_id`.
+fn apply(
+    c: &Ctx<'_>,
+    ports: &Ports<'_>,
+    prepared: Prepared,
+    plan_id: &str,
+    out: &mut dyn Write,
+) -> Result<Report, Error> {
+    match (ports, prepared) {
+        (
+            Ports::Staged { store, runtime },
+            Prepared::Staged {
+                plan,
+                list_a,
+                var_plan,
+            },
+        ) => run_staged(
+            c,
+            store.as_ref(),
+            runtime.as_ref(),
+            Staged {
+                plan,
+                list_a,
+                var_plan,
+                plan_id: plan_id.to_string(),
+            },
+            out,
+        ),
+        (
+            Ports::Pinned { store, runtime },
+            Prepared::Pinned {
+                plan,
+                listed,
+                skip_deploy,
+            },
+        ) => run_pinned(
+            c,
+            store.as_ref(),
+            runtime.as_ref(),
+            Pinned {
+                plan,
+                listed,
+                skip_deploy,
+                plan_id: plan_id.to_string(),
+            },
+            out,
+        ),
+        _ => unreachable!("a target's plan is applied through the ports it was made with"),
+    }
+}
+
+/// [`prepare`] for a staged target: one item read and list A.
+fn prepare_staged(
     c: &Ctx<'_>,
     ports: &Ports<'_>,
     store: &dyn StagedStore,
-    runtime: &dyn StagedRuntime,
-    out: &mut dyn Write,
-) -> Result<Report, Error> {
-    let (fleet, env_name, t, opts) = (c.fleet, c.env_name, c.t, c.opts);
+) -> Result<Planned, Error> {
+    let (fleet, env_name, t) = (c.fleet, c.env_name, c.t);
     let (plan, list_a, item_version) = read_and_plan_versioned(
         fleet,
         env_name,
@@ -544,8 +790,7 @@ fn run_staged(
     let mut plan = c.scoped(plan);
     // A target that delivers config itself (FR-46): its rows get their state first, so a
     // refused or concealed config key blocks like any other finding.
-    let vars = store.variables();
-    let var_plan = match vars {
+    let var_plan = match store.variables() {
         Some(v) => Some(super::variables::plan(
             fleet,
             env_name,
@@ -558,7 +803,42 @@ fn run_staged(
         None => None,
     };
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
-    let plan_id = c.expect(&plan, &list_a, item_version, ports)?;
+    Ok(Planned {
+        id: c.target_id(&plan, &list_a, item_version, ports),
+        item_version,
+        prepared: Prepared::Staged {
+            plan,
+            list_a,
+            var_plan,
+        },
+    })
+}
+
+/// A staged target's plan, ready to apply.
+struct Staged {
+    plan: SyncPlan,
+    list_a: Vec<StoreEntry>,
+    var_plan: Option<super::variables::VarPlan>,
+    /// The run's plan id (FR-41).
+    plan_id: String,
+}
+
+/// `sync` for a staged target (Fly, §6.4): stage, compare digests, deploy.
+fn run_staged(
+    c: &Ctx<'_>,
+    store: &dyn StagedStore,
+    runtime: &dyn StagedRuntime,
+    staged: Staged,
+    out: &mut dyn Write,
+) -> Result<Report, Error> {
+    let (fleet, env_name, t, opts) = (c.fleet, c.env_name, c.t, c.opts);
+    let Staged {
+        plan,
+        list_a,
+        var_plan,
+        plan_id,
+    } = staged;
+    let vars = store.variables();
     let batch: Vec<(String, &SecretValue)> =
         plan.stage.iter().map(|(n, v)| (n.clone(), v)).collect();
     store.validate(&batch).map_err(|e| c.refusal(e))?;
@@ -782,8 +1062,8 @@ pub(crate) fn record_ledger(
     }
 }
 
-/// #106: with a state vault, a delivery revision per product in scope whose every name
-/// this run wrote (`written`, confirmed by the provider) or the plan proved identical, at
+/// #106, FR-58: on target `c` (its own state vault, scope naming the target), a delivery
+/// revision per product in scope whose every name this run wrote (`written`, confirmed by the provider) or the plan proved identical, at
 /// the versions in `listing`. Never fails the sync: what it could not record is reported.
 fn record_delivery(
     c: &Ctx<'_>,
@@ -807,8 +1087,11 @@ fn record_delivery(
     );
     match recorded {
         Ok(rec) => {
+            // The file holds every receipt this run minted so far, on every target, so a
+            // later target that fails leaves the earlier targets' receipts in it (FR-58).
+            c.receipts.borrow_mut().extend(rec.minted.iter().cloned());
             if let Some(path) = &opts.receipt {
-                super::delivery::write_receipt_file(path, &rec.minted)?;
+                super::delivery::write_receipt_file(path, &c.receipts.borrow())?;
             }
             if !opts.json {
                 for m in &rec.minted {
@@ -827,8 +1110,9 @@ fn record_delivery(
             report.delivery = Some(rec);
         }
         Err(e) => c.r.note(&format!(
-            "delivery evidence for {env_name} was not recorded ({}); the target holds what this \
+            "delivery evidence for {} was not recorded ({}); the target holds what this \
              sync wrote, and opv delivery verify reports it as not delivered",
+            placement(env_name, c.target),
             e.code().as_str()
         )),
     }
@@ -886,24 +1170,10 @@ fn print_held(
     Ok(())
 }
 
-/// `sync` for a pinned target (FR-29, FR-31, FR-32, FR-33; spec §6): compare and write new
-/// store versions, read the runtime's bindings, and only with `--deploy` re-pin them in one
-/// revision; prune only after that revision is healthy.
-///
-/// Every step is convergent (NR-1): a run stopped anywhere leaves at most unbound store
-/// versions (never live) or a revision the platform finishes on its own, and the next run
-/// computes what is left from what it reads. A binding never names a version that does not
-/// exist: versions are written before they are pinned, and a store entry is deleted only
-/// once a healthy revision no longer binds it.
-fn run_pinned(
-    c: &Ctx<'_>,
-    ports: &Ports<'_>,
-    store: &dyn PinnedStore,
-    runtime: &dyn PinnedRuntime,
-    out: &mut dyn Write,
-) -> Result<Report, Error> {
+/// [`prepare`] for a pinned target: the item, then (blocking rows refuse first, before any
+/// call to the target) its state (NR-23, NR-25) and its listing.
+fn prepare_pinned(c: &Ctx<'_>, ports: &Ports<'_>, out: &mut dyn Write) -> Result<Planned, Error> {
     let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
-    let names = &c.names;
     let (fields, item_version) = read_item_fields(fleet, env_name, c.r)?;
     // Blocking rows refuse before any call to the target.
     let copy = fields.iter().map(copy_field).collect();
@@ -937,7 +1207,51 @@ fn run_pinned(
     )?;
     let plan = c.scoped(plan);
     refuse_blocking(&plan, env_name).map_err(|e| c.refusal(e))?;
-    let plan_id = c.expect(&plan, &listed, item_version, ports)?;
+    Ok(Planned {
+        id: c.target_id(&plan, &listed, item_version, ports),
+        item_version,
+        prepared: Prepared::Pinned {
+            plan,
+            listed,
+            skip_deploy,
+        },
+    })
+}
+
+/// A pinned target's plan, ready to apply.
+struct Pinned {
+    plan: SyncPlan,
+    listed: Vec<StoreEntry>,
+    /// Preflight's line to print instead of a deploy (nothing to restart).
+    skip_deploy: Option<String>,
+    /// The run's plan id (FR-41).
+    plan_id: String,
+}
+
+/// `sync` for a pinned target (FR-29, FR-31, FR-32, FR-33; spec §6): compare and write new
+/// store versions, read the runtime's bindings, and only with `--deploy` re-pin them in one
+/// revision; prune only after that revision is healthy.
+///
+/// Every step is convergent (NR-1): a run stopped anywhere leaves at most unbound store
+/// versions (never live) or a revision the platform finishes on its own, and the next run
+/// computes what is left from what it reads. A binding never names a version that does not
+/// exist: versions are written before they are pinned, and a store entry is deleted only
+/// once a healthy revision no longer binds it.
+fn run_pinned(
+    c: &Ctx<'_>,
+    store: &dyn PinnedStore,
+    runtime: &dyn PinnedRuntime,
+    pinned: Pinned,
+    out: &mut dyn Write,
+) -> Result<Report, Error> {
+    let (fleet, env_name, opts) = (c.fleet, c.env_name, c.opts);
+    let names = &c.names;
+    let Pinned {
+        plan,
+        listed,
+        skip_deploy,
+        plan_id,
+    } = pinned;
     // FR-42: what every write below records on the target. Never a value.
     let stamp = Stamp::now(env_name, &plan_id);
     let want = pinned_want(
@@ -1716,8 +2030,11 @@ pub fn plan_scoped(
     plan_targeted(fleet, env_name, &[], product, r, out, json)
 }
 
-/// [`plan_scoped`] on the target `--target` names (FR-56); without one, the environment's
-/// only target (several need `--target` for now, [`resolve_target`]).
+/// [`plan_scoped`] on every target of the environment, or the targets `--target` names
+/// (FR-56, [`resolve_targets`]), in name order, under one plan id that covers exactly the
+/// targets planned (FR-41, [`run_plan_id`]). Text: one count line per target, one table
+/// whose rows name their target, each target's `would …` lines prefixed `<env>/<target>: `,
+/// then the plan id and the sync that applies it.
 pub fn plan_targeted(
     fleet: &Fleet,
     env_name: &str,
@@ -1729,23 +2046,251 @@ pub fn plan_targeted(
 ) -> Result<(), Error> {
     check_product(fleet, product, "plan", Some(env_name))?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
-    let target = resolve_target(fleet, env_name, targets, "plan")?;
-    let (t, ports) = open_target(fleet, env_name, &target, r)?;
-    // The target's state, read-only and never waiting (NR-23, NR-25).
+    let names = resolve_targets(fleet, env_name, targets, "plan")?;
+    let runners = target_runners(fleet, env_name, &names, r)?;
+    let mut parts = Vec::new();
+    for (name, signed) in names.iter().zip(&runners) {
+        let r: &dyn CommandRunner = match signed {
+            Some(s) => s,
+            None => r,
+        };
+        parts.push(plan_part(fleet, env_name, name, product, r)?);
+    }
+    let n: usize = parts.iter().map(|p| p.findings()).sum();
+    // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
+    let id = run_plan_id(parts.iter().map(|p| (p.name.as_str(), p.id.as_str())));
+    let all: Vec<Row> = parts
+        .iter()
+        .flat_map(|p| p.plan.rows.iter().cloned())
+        .collect();
+    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
+    let link = if n > 0 {
+        rows_item_url(fleet, env_name, &all, r)?
+    } else {
+        None
+    };
+    let findings = || findings_error(n, &all, env_name);
+    // A clean plan is applied by its id (M13); `--expect-plan` also stands for a guarded
+    // environment's `--confirm`.
+    let clean = n == 0;
+    let sync_next = SyncOpts {
+        // A live target has nothing to deploy (FR-46).
+        deploy: parts.iter().any(|p| !p.live),
+        prune: parts
+            .iter()
+            .any(|p| !p.plan.prune.is_empty() || !p.var_plan.prune.is_empty()),
+        product: product.map(str::to_string),
+        expect_plan: clean.then(|| id.clone()),
+        receipt: None,
+        targets: targets.to_vec(),
+        ..SyncOpts::default()
+    }
+    .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
+    let counts: Vec<String> = parts.iter().map(|p| p.count(env_name)).collect();
+    for (p, count) in parts.iter().zip(&counts) {
+        let heading = match product {
+            Some(pr) => format!("opv plan {env_name} --target {} --product {pr}", p.name),
+            None => format!("opv plan {env_name} --target {}", p.name),
+        };
+        r.step_summary(&ci_summary::table(
+            &heading,
+            count,
+            Some(plan_changes(&p.plan)),
+            &p.name,
+            &p.plan.rows,
+            |row| p.word(row),
+        ));
+    }
+    if json {
+        let doc: Vec<JsonPart<'_>> = parts
+            .iter()
+            .map(|p| JsonPart {
+                target: &p.name,
+                plan: &p.plan,
+                pinned: None,
+            })
+            .collect();
+        write_json(
+            out,
+            fleet,
+            env_name,
+            &doc,
+            product,
+            &super::JsonExtra {
+                plan_id: clean.then_some(id.as_str()),
+                provenance: None,
+                next: Some(&sync_next),
+                link: link.as_deref(),
+            },
+        )?;
+        return if n > 0 { Err(findings()) } else { Ok(()) };
+    }
+    for count in &counts {
+        writeln!(out, "{count}").map_err(write_err)?;
+    }
+    let rows: Vec<(&str, &Row)> = parts
+        .iter()
+        .flat_map(|p| p.plan.rows.iter().map(move |r| (p.name.as_str(), r)))
+        .collect();
+    let by_name: BTreeMap<&str, &PlanPart<'_>> =
+        parts.iter().map(|p| (p.name.as_str(), p)).collect();
+    print_rows(out, &rows, |t, row| by_name[t].word(row))?;
+    let mut legends = BTreeSet::new();
+    for p in &parts {
+        let label = p.t.provider().label();
+        if legends.insert((label, p.live)) {
+            let words: Vec<String> = p.plan.rows.iter().map(|row| p.word(row)).collect();
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            print_legend(out, &words, label, p.live)?;
+        }
+    }
+    // Extras are about the 1Password item, the same for every target.
+    print_extras(out, &parts[0].plan)?;
+    for p in &parts {
+        let mut out = Prefixed::new(out, format!("{}: ", placement(env_name, &p.name)));
+        p.print_changes(&mut out, fleet, env_name, n > 0)?;
+    }
+    if n > 0 {
+        return Err(findings());
+    }
+    let item_version = parts.last().and_then(|p| p.item_version);
+    writeln!(
+        out,
+        "{}",
+        plan_id_line(&id, item_version, fleet.origin.noun())
+    )
+    .map_err(write_err)?;
+    write!(out, "{}", next_line(&sync_next)).map_err(write_err)
+}
+
+/// What `plan` planned for one target (FR-56).
+struct PlanPart<'f> {
+    name: String,
+    t: &'f dyn TargetConfig,
+    plan: SyncPlan,
+    item_version: Option<u64>,
+    /// The target applies writes at once (FR-46).
+    live: bool,
+    /// The config channel (FR-46): what sync would set and prune.
+    var_plan: super::variables::VarPlan,
+    /// `stage` on a staging target, else `write`.
+    verb: &'static str,
+    /// This target's plan id (FR-41), one input of the run's.
+    id: String,
+    /// Names on the target opv does not manage (FR-5, never touched).
+    unmanaged: usize,
+}
+
+impl PlanPart<'_> {
+    fn findings(&self) -> usize {
+        self.plan.rows.iter().filter(|r| is_blocking(r)).count()
+    }
+
+    /// The row's ON TARGET word.
+    fn word(&self, row: &Row) -> String {
+        let held = self
+            .plan
+            .held_immutable
+            .iter()
+            .any(|(p, k)| *p == row.product && *k == row.key);
+        target_word(row, held, None).to_string()
+    }
+
+    /// `prod/web: 4 keys · 0 findings · 1 to stage · …` (NR-16).
+    fn count(&self, env_name: &str) -> String {
+        format!(
+            "{}: {} · {} · {} to {} · {} held (immutable) · {} to prune · {} unmanaged \
+             on {} (never touched)",
+            placement(env_name, &self.name),
+            plural(self.plan.rows.len(), "key", "keys"),
+            plural(self.findings(), "finding", "findings"),
+            self.plan.stage.len() + self.var_plan.set.len(),
+            self.verb,
+            self.plan.held_immutable.len(),
+            self.plan.prune.len() + self.var_plan.prune.len(),
+            self.unmanaged,
+            self.t.provider().label(),
+        )
+    }
+
+    /// What a sync would do on this target, by name: `would stage`, `would prune`, `held`.
+    fn print_changes(
+        &self,
+        out: &mut dyn Write,
+        fleet: &Fleet,
+        env_name: &str,
+        blocked: bool,
+    ) -> Result<(), Error> {
+        let (plan, verb) = (&self.plan, self.verb);
+        let names = KeyNames::new(fleet, env_name, &self.name)?;
+        let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
+        let staged: Vec<&str> = plan
+            .stage
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .chain(self.var_plan.set.iter().map(String::as_str))
+            .collect();
+        if !staged.is_empty() {
+            // Findings block the sync, so nothing is staged until they are fixed (bug 10).
+            let when = if blocked {
+                " once the findings are fixed"
+            } else {
+                ""
+            };
+            line(format!("would {verb}{when}: {}", names.join(&staged)))?;
+        }
+        let prunes: Vec<String> = plan
+            .prune
+            .iter()
+            .chain(&self.var_plan.prune)
+            .cloned()
+            .collect();
+        if !prunes.is_empty() {
+            line(format!(
+                "would prune (needs --prune): {}",
+                names.join(&prunes)
+            ))?;
+        }
+        let hint = KEY_REF_HINT;
+        let held_names: Vec<String> = plan
+            .held_immutable
+            .iter()
+            .map(|(p, k)| self.t.env_name(p, k))
+            .collect();
+        if !held_names.is_empty() {
+            line(format!(
+                "held (immutable): {} (pass --rotate {hint} to replace)",
+                names.join(&held_names)
+            ))?;
+        }
+        if !plan.held_from_prune.is_empty() {
+            line(format!(
+                "held (immutable), not pruned (needs --prune --prune-immutable {hint}): {}",
+                held_from_prune(plan)
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+/// Plan target `name` of `env_name` (FR-56): its state (read-only, never waiting, NR-23,
+/// NR-25), the item and the store listing through its own ports, and its plan id.
+fn plan_part<'f>(
+    fleet: &'f Fleet,
+    env_name: &str,
+    name: &str,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+) -> Result<PlanPart<'f>, Error> {
+    let (_, t) = super::target(fleet, env_name, name)?;
+    let (_, ports) = open_target(fleet, env_name, name, r)?;
     preflight::read(t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, on_target, item_version) = read_and_plan_versioned(
-        fleet,
-        env_name,
-        Some(&target),
-        r,
-        Some(&ports),
-        &none,
-        &none,
-    )?;
+    let (mut plan, on_target, item_version) =
+        read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), &none, &none)?;
     let scope = match product {
         Some(p) => {
-            let names = product_names(fleet, env_name, &target, p)?;
+            let names = product_names(fleet, env_name, name, p)?;
             scope_plan(&mut plan, p, &names);
             Some(names)
         }
@@ -1758,7 +2303,7 @@ pub fn plan_targeted(
                 Some(v) => Some(super::variables::plan(
                     fleet,
                     env_name,
-                    &target,
+                    name,
                     t,
                     &mut plan,
                     v,
@@ -1770,12 +2315,10 @@ pub fn plan_targeted(
         }
         Ports::Pinned { .. } => (false, super::variables::VarPlan::default()),
     };
-    let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
-    // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
     let id = plan_id_of(
         fleet,
         env_name,
-        &target,
+        name,
         product,
         item_version,
         &plan,
@@ -1783,139 +2326,21 @@ pub fn plan_targeted(
         &ports,
         None,
     );
-    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
-    let link = if n > 0 {
-        rows_item_url(fleet, env_name, &plan.rows, r)?
-    } else {
-        None
-    };
-    let findings = || findings_error(n, &plan.rows, env_name);
-    let held: BTreeSet<(&str, &str)> = plan
-        .held_immutable
-        .iter()
-        .map(|(p, k)| (p.as_str(), k.as_str()))
-        .collect();
-    let word = |row: &Row| {
-        target_word(
-            row,
-            held.contains(&(row.product.as_str(), row.key.as_str())),
-            None,
-        )
-        .to_string()
-    };
-    // A clean plan is applied by its id (M13); `--expect-plan` also stands for a guarded
-    // environment's `--confirm`.
-    let clean = n == 0;
-    let sync_next = SyncOpts {
-        // A live target has nothing to deploy (FR-46).
-        deploy: !live,
-        prune: !plan.prune.is_empty() || !var_plan.prune.is_empty(),
-        product: product.map(str::to_string),
-        expect_plan: clean.then(|| id.clone()),
-        receipt: None,
-        targets: targets.to_vec(),
-        ..SyncOpts::default()
-    }
-    .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
     let verb = match ports {
         Ports::Staged { .. } if !live => "stage",
         _ => "write",
     };
-    let label = t.provider().label();
-    let unmanaged = unmanaged_on_target(fleet, env_name, &target, &on_target)?;
-    let count = format!(
-        "{env_name}: {} · {} · {} to {verb} · {} held (immutable) · {} to prune · {} unmanaged \
-         on {label} (never touched)",
-        plural(plan.rows.len(), "key", "keys"),
-        plural(n, "finding", "findings"),
-        plan.stage.len() + var_plan.set.len(),
-        plan.held_immutable.len(),
-        plan.prune.len() + var_plan.prune.len(),
-        unmanaged.len(),
-    );
-    let heading = match product {
-        Some(p) => format!("opv plan {env_name} --product {p}"),
-        None => format!("opv plan {env_name}"),
-    };
-    let changes = plan_changes(&plan);
-    r.step_summary(&ci_summary::table(
-        &heading,
-        &count,
-        Some(changes),
-        &plan.rows,
-        word,
-    ));
-    if json {
-        write_json(
-            out,
-            fleet,
-            env_name,
-            Some(&target),
-            &plan,
-            None,
-            product,
-            &super::JsonExtra {
-                plan_id: (n == 0).then_some(id.as_str()),
-                provenance: None,
-                next: Some(&sync_next),
-                link: link.as_deref(),
-            },
-        )?;
-        return if n > 0 { Err(findings()) } else { Ok(()) };
-    }
-    let names = KeyNames::new(fleet, env_name, &target)?;
-    writeln!(out, "{count}").map_err(write_err)?;
-    print_rows(out, fleet, &plan.rows, word)?;
-    let words: Vec<String> = plan.rows.iter().map(&word).collect();
-    let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(out, &words, label, live)?;
-    print_extras(out, &plan)?;
-    let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
-    let staged: Vec<&str> = plan
-        .stage
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .chain(var_plan.set.iter().map(String::as_str))
-        .collect();
-    if !staged.is_empty() {
-        // Findings block the sync, so nothing is staged until they are fixed (bug 10).
-        let when = if n > 0 {
-            " once the findings are fixed"
-        } else {
-            ""
-        };
-        line(format!("would {verb}{when}: {}", names.join(&staged)))?;
-    }
-    let prunes: Vec<String> = plan.prune.iter().chain(&var_plan.prune).cloned().collect();
-    if !prunes.is_empty() {
-        line(format!(
-            "would prune (needs --prune): {}",
-            names.join(&prunes)
-        ))?;
-    }
-    let hint = KEY_REF_HINT;
-    let held_names: Vec<String> = plan
-        .held_immutable
-        .iter()
-        .map(|(p, k)| t.env_name(p, k))
-        .collect();
-    if !held_names.is_empty() {
-        line(format!(
-            "held (immutable): {} (pass --rotate {hint} to replace)",
-            names.join(&held_names)
-        ))?;
-    }
-    if !plan.held_from_prune.is_empty() {
-        line(format!(
-            "held (immutable), not pruned (needs --prune --prune-immutable {hint}): {}",
-            held_from_prune(&plan)
-        ))?;
-    }
-    if n > 0 {
-        return Err(findings());
-    }
-    line(plan_id_line(&id, item_version, fleet.origin.noun()))?;
-    write!(out, "{}", next_line(&sync_next)).map_err(write_err)
+    Ok(PlanPart {
+        name: name.to_string(),
+        t,
+        unmanaged: unmanaged_on_target(fleet, env_name, name, &on_target)?.len(),
+        plan,
+        item_version,
+        live,
+        var_plan,
+        verb,
+        id,
+    })
 }
 
 /// `plan <id> (1Password item v<n>): sync --expect-plan <id> applies exactly this plan`

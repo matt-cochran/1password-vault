@@ -331,7 +331,8 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
             "values": "no document ever contains a secret value; config export prints config-kind values only",
             "tidy": "a command with tidies_1password true, run by a signed-in person (opv login), may tidy the item's layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written. doctor and ready never write 1Password, whoever runs them: they are the safe readiness checks (doctor --env <env> --json, ready --json). opv tidy <env> is the explicit repair (writes_1password, a signed-in person only)",
-            "plan_id": "plan --json prints plan_id when the plan is clean; sync --expect-plan <plan_id> applies exactly that plan or fails with stale_plan (exit 6) and changes nothing",
+            "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
+            "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
             "schema_version": "stays 1 while fields are only added; changes when a field changes meaning",
         },
@@ -348,7 +349,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "states": {
             "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
-            "row_target": ["present", "absent", "would_change", null],
+            "row_target_state": ["present", "absent", "would_change", null],
             "row_action": ["would_stage", "would_prune", "held", null],
             "row_binding": ["current", "stale", "unbound"],
             "doctor_status": ["ok", "warn", "fail", "skip"],
@@ -358,7 +359,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
                 "created_section", "renamed_section", "created_field", "made_concealed",
                 "renamed_field", "moved_field", "kept_duplicate", "normalized_value"
             ],
-            "text_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
+            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
         },
         "documents": documents(),
     })
@@ -483,6 +484,7 @@ fn exit_codes() -> Value {
 /// (`schema_version`, `ok`, `exit_code` on failure) and last (`next`, `do`, `error`).
 fn documents() -> Value {
     let row = json!([
+        "target",
         "product",
         "key",
         "kind",
@@ -490,7 +492,7 @@ fn documents() -> Value {
         "rule",
         "reason",
         "target_name",
-        "target",
+        "target_state",
         "action",
         "binding?",
         "pending_deploy?",
@@ -499,7 +501,7 @@ fn documents() -> Value {
         "open_url?",
         "shared_from?"
     ]);
-    let key_ref = json!(["product", "key", "target_name"]);
+    let key_ref = json!(["target", "product", "key", "target_name"]);
     json!({
         "frame": {
             "head": ["schema_version", "ok", "exit_code (failure only)"],
@@ -528,9 +530,10 @@ fn documents() -> Value {
             "tidy_error?"
         ],
         "sync": [
-            "environment", "provider", "product", "written", "unchanged", "held", "deployed",
-            "revision", "deploy_reason", "deployed_names", "pruned", "kept", "pending",
-            "skipped", "written_names", "plan_id"
+            "environment", "product", "targets: [{target, provider, deployed, revision}]",
+            "written", "unchanged", "held", "deployed", "deploy_reason", "deployed_names",
+            "pending", "pruned", "kept", "skipped", "written_names", "plan_id",
+            "delivery? ({minted: [{target, product, revision}], not_minted: [{target, product, reason}]})"
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [

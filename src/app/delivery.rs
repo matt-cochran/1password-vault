@@ -439,8 +439,8 @@ pub fn verify(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    // The environment's only target for now (`--target` is a later deliverable, FR-58).
-    let target = super::resolve_target(fleet, env_name, &[], "delivery verify")?;
+    // The one target this command reads ([`super::sole_target`]).
+    let target = super::sole_target(fleet, env_name, "delivery verify")?;
     let from_file: Vec<Receipt> = match receipt_file {
         Some(p) => read_receipt_file(p)?,
         None => Vec::new(),

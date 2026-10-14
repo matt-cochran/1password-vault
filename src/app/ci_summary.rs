@@ -10,30 +10,33 @@
 use super::{is_blocking, kind_label, problems_first};
 use crate::domain::{KeyState, Row};
 
-/// A `status` or `plan` section: a heading, the count line, `changes` when known, and one
-/// table row per key (problems first), with `target` rendering the TARGET word.
+/// A `status` or `plan` section for one target (FR-56): a heading, the count line,
+/// `changes` when known, and one table row per key (problems first), each naming `target`,
+/// with `word` rendering the ON TARGET word.
 pub(crate) fn table(
     heading: &str,
     count_line: &str,
     changes: Option<&str>,
+    target: &str,
     rows: &[Row],
-    target: impl Fn(&Row) -> String,
+    word: impl Fn(&Row) -> String,
 ) -> String {
     let mut md = format!("### {}\n\n{}\n", cell(heading), cell(count_line));
     if let Some(c) = changes {
         md.push_str(&format!("\nchanges: **{c}**\n"));
     }
     md.push('\n');
-    let head = ["Product", "Key", "Kind", "State", "Target"];
+    let head = ["Target", "Product", "Key", "Kind", "State", "On target"];
     md.push_str(&format!("| {} |\n", head.join(" | ")));
     md.push_str(&format!("|{}\n", "---|".repeat(head.len())));
-    for r in problems_first(rows) {
+    for r in problems_first(rows, |r| r) {
         let cells = [
+            target.to_string(),
             r.product.clone(),
             r.key.clone(),
             kind_label(r.kind).to_string(),
             state_word(r),
-            target(r),
+            word(r),
         ];
         let cells: Vec<String> = cells.iter().map(|c| cell(c)).collect();
         md.push_str(&format!("| {} |\n", cells.join(" | ")));
@@ -99,9 +102,14 @@ mod tests {
     }
 
     fn md(rows: &[Row]) -> String {
-        table("opv plan prod", "prod: 2 keys", Some("some"), rows, |_| {
-            "new".into()
-        })
+        table(
+            "opv plan prod",
+            "prod/app: 2 keys",
+            Some("some"),
+            "app",
+            rows,
+            |_| "new".into(),
+        )
     }
 
     #[test]

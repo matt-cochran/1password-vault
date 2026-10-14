@@ -15,10 +15,10 @@ use std::io::Write;
 use super::sync::{drift_line, pinned_diff, pinned_want};
 use super::tidy::Mode;
 use super::{
-    JsonExtra, KeyNames, PinnedRow, check_product, ci_summary, count_line, findings_error,
-    is_blocking, open_target, personal, plan_item, plural, preflight, print_extras, print_legend,
-    print_rows, product_names, read_and_plan, resolve_target, rows_item_url, scope_plan,
-    target_word, write_err, write_json,
+    JsonExtra, JsonPart, KeyNames, PinnedRow, Prefixed, check_product, ci_summary, count_line,
+    findings_error, is_blocking, open_target, personal, placement, plan_item, plural, preflight,
+    print_extras, print_legend, print_rows, product_names, read_and_plan, resolve_targets,
+    rows_item_url, scope_plan, target_runners, target_word, write_err, write_json,
 };
 use crate::domain::provenance::latest;
 use crate::domain::{Binding, Fleet, KeyState, Row, StoreEntry, SyncPlan};
@@ -62,8 +62,10 @@ pub fn run_scoped(
     run_targeted(fleet, env_name, &[], product, r, out, json)
 }
 
-/// [`run_scoped`] on the target `--target` names (FR-56); without one, the environment's
-/// only target (several need `--target` for now, [`resolve_target`]).
+/// [`run_scoped`] on every target of the environment, or the targets `--target` names
+/// (FR-56, [`resolve_targets`]), in name order. Text starts with one count line per
+/// target, then one table whose rows name their target; `--json` is one document whose
+/// rows each carry `target`. Findings add up over the targets.
 pub fn run_targeted(
     fleet: &Fleet,
     env_name: &str,
@@ -75,28 +77,168 @@ pub fn run_targeted(
 ) -> Result<(), Error> {
     check_product(fleet, product, "status", Some(env_name))?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
-    let target = resolve_target(fleet, env_name, targets, "status")?;
-    let (t, ports) = open_target(fleet, env_name, &target, r)?;
-    // The target's state, read-only and never waiting (NR-23, NR-25).
+    let names = resolve_targets(fleet, env_name, targets, "status")?;
+    let runners = target_runners(fleet, env_name, &names, r)?;
+    let mut parts = Vec::new();
+    for (name, signed) in names.iter().zip(&runners) {
+        let r: &dyn CommandRunner = match signed {
+            Some(s) => s,
+            None => r,
+        };
+        parts.push(status_part(fleet, env_name, name, product, r)?);
+    }
+    let n: usize = parts
+        .iter()
+        .map(|p| p.plan.rows.iter().filter(|r| is_blocking(r)).count())
+        .sum();
+    let all: Vec<Row> = parts
+        .iter()
+        .flat_map(|p| p.plan.rows.iter().cloned())
+        .collect();
+    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
+    let link = if n > 0 {
+        rows_item_url(fleet, env_name, &all, r)?
+    } else {
+        None
+    };
+    let findings = || findings_error(n, &all, env_name);
+    let counts: Vec<String> = parts
+        .iter()
+        .map(|p| count_line(env_name, &p.name, &p.plan.rows, p.t.provider().label()))
+        .collect();
+    for (p, count) in parts.iter().zip(&counts) {
+        r.step_summary(&ci_summary::table(
+            &status_command(env_name, product, &p.name),
+            count,
+            None,
+            &p.name,
+            &p.plan.rows,
+            |row| p.word(row),
+        ));
+    }
+    if json {
+        // FR-42: the latest provenance stamp opv left on any of the targets (pinned only).
+        let stamp = parts
+            .iter()
+            .filter_map(StatusPart::stamp)
+            .max_by(|a, b| a.written.cmp(&b.written));
+        let doc: Vec<JsonPart<'_>> = parts
+            .iter()
+            .map(|p| JsonPart {
+                target: &p.name,
+                plan: &p.plan,
+                pinned: p.pinned.as_ref().map(|s| &s.rows),
+            })
+            .collect();
+        write_json(
+            out,
+            fleet,
+            env_name,
+            &doc,
+            product,
+            &JsonExtra {
+                plan_id: None,
+                provenance: stamp,
+                next: None,
+                link: link.as_deref(),
+            },
+        )?;
+        return if n > 0 { Err(findings()) } else { Ok(()) };
+    }
+    for count in &counts {
+        writeln!(out, "{count}").map_err(write_err)?;
+    }
+    let rows: Vec<(&str, &Row)> = parts
+        .iter()
+        .flat_map(|p| p.plan.rows.iter().map(move |r| (p.name.as_str(), r)))
+        .collect();
+    let by_name: BTreeMap<&str, &StatusPart<'_>> =
+        parts.iter().map(|p| (p.name.as_str(), p)).collect();
+    print_rows(out, &rows, |t, row| by_name[t].word(row))?;
+    let mut legends = BTreeSet::new();
+    for p in &parts {
+        let label = p.t.provider().label();
+        if legends.insert((label, p.live)) {
+            let words: Vec<String> = p.plan.rows.iter().map(|row| p.word(row)).collect();
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            print_legend(out, &words, label, p.live)?;
+        }
+    }
+    // Extras and concealed config are about the 1Password item, the same for every target.
+    print_extras(out, &parts[0].plan)?;
+    print_concealed_config(out, &parts[0].plan)?;
+    for p in &parts {
+        let mut out = Prefixed::new(out, format!("{}: ", placement(env_name, &p.name)));
+        if let Some(pinned) = &p.pinned {
+            pinned.print(
+                &mut out,
+                env_name,
+                &KeyNames::new(fleet, env_name, &p.name)?,
+            )?;
+        }
+        if let Some(s) = p.stamp() {
+            writeln!(out, "{}: {}", p.t.provider().label(), s.line()).map_err(write_err)?;
+        }
+    }
+    if n > 0 {
+        return Err(findings());
+    }
+    Ok(())
+}
+
+/// What `status` read for one target (FR-56).
+struct StatusPart<'f> {
+    name: String,
+    t: &'f dyn TargetConfig,
+    plan: SyncPlan,
+    listed: Vec<StoreEntry>,
+    pinned: Option<PinnedStatus>,
+    /// The target applies writes at once (FR-46).
+    live: bool,
+}
+
+impl StatusPart<'_> {
+    /// The row's ON TARGET word.
+    fn word(&self, row: &Row) -> String {
+        let name = self.t.env_name(&row.product, &row.key);
+        let binding = self.pinned.as_ref().and_then(|p| p.rows.get(&name));
+        let held = self
+            .plan
+            .held_immutable
+            .iter()
+            .any(|(p, k)| *p == row.product && *k == row.key);
+        target_word(row, held, binding).to_string()
+    }
+
+    /// FR-42: the latest provenance stamp opv left on the target (pinned targets only).
+    fn stamp(&self) -> Option<&crate::domain::Stamp> {
+        self.pinned.as_ref().and_then(|_| latest(&self.listed))
+    }
+}
+
+/// Read target `name` of `env_name` for `status`: its state (read-only, never waiting,
+/// NR-23, NR-25), the item and the store listing, through its own ports (FR-56).
+fn status_part<'f>(
+    fleet: &'f Fleet,
+    env_name: &str,
+    name: &str,
+    product: Option<&str>,
+    r: &dyn CommandRunner,
+) -> Result<StatusPart<'f>, Error> {
+    let (_, t) = super::target(fleet, env_name, name)?;
+    let (_, ports) = open_target(fleet, env_name, name, r)?;
     preflight::read(t, r)?;
     let none = BTreeSet::new();
-    let (mut plan, listed) = read_and_plan(
-        fleet,
-        env_name,
-        Some(&target),
-        r,
-        Some(&ports),
-        &none,
-        &none,
-    )?;
+    let (mut plan, listed) =
+        read_and_plan(fleet, env_name, Some(name), r, Some(&ports), &none, &none)?;
     if let Some(p) = product {
-        scope_plan(&mut plan, p, &product_names(fleet, env_name, &target, p)?);
+        scope_plan(&mut plan, p, &product_names(fleet, env_name, name, p)?);
     }
     // Config delivered as variables (FR-46): each config row's state on the target.
     if let Ports::Staged { store, .. } = &ports
         && let Some(v) = store.variables()
     {
-        crate::app::variables::plan(fleet, env_name, &target, t, &mut plan, v, &|_| true)?;
+        crate::app::variables::plan(fleet, env_name, name, t, &mut plan, v, &|_| true)?;
     }
     let pinned = match &ports {
         Ports::Pinned { store, runtime } => Some(pinned_status(
@@ -110,80 +252,14 @@ pub fn run_targeted(
         )?),
         Ports::Staged { .. } => None,
     };
-    let n = plan.rows.iter().filter(|r| is_blocking(r)).count();
-    // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
-    let link = if n > 0 {
-        rows_item_url(fleet, env_name, &plan.rows, r)?
-    } else {
-        None
-    };
-    let findings = || findings_error(n, &plan.rows, env_name);
-    let held: BTreeSet<(&str, &str)> = plan
-        .held_immutable
-        .iter()
-        .map(|(p, k)| (p.as_str(), k.as_str()))
-        .collect();
-    let word = |row: &Row| {
-        let name = t.env_name(&row.product, &row.key);
-        let binding = pinned.as_ref().and_then(|p| p.rows.get(&name));
-        target_word(
-            row,
-            held.contains(&(row.product.as_str(), row.key.as_str())),
-            binding,
-        )
-        .to_string()
-    };
-    let count = count_line(env_name, &plan.rows, t.provider().label());
-    r.step_summary(&ci_summary::table(
-        &status_command(env_name, product),
-        &count,
-        None,
-        &plan.rows,
-        word,
-    ));
-    // FR-42: the latest provenance stamp opv left on the target (pinned targets only).
-    let stamp = pinned.as_ref().and_then(|_| latest(&listed));
-    if json {
-        write_json(
-            out,
-            fleet,
-            env_name,
-            Some(&target),
-            &plan,
-            pinned.as_ref().map(|p| &p.rows),
-            product,
-            &JsonExtra {
-                plan_id: None,
-                provenance: stamp,
-                next: None,
-                link: link.as_deref(),
-            },
-        )?;
-        return if n > 0 { Err(findings()) } else { Ok(()) };
-    }
-    let names = KeyNames::new(fleet, env_name, &target)?;
-    writeln!(out, "{count}").map_err(write_err)?;
-    print_rows(out, fleet, &plan.rows, word)?;
-    let words: Vec<String> = plan.rows.iter().map(&word).collect();
-    let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    print_legend(
-        out,
-        &words,
-        t.provider().label(),
-        super::live_writes(&ports),
-    )?;
-    print_extras(out, &plan)?;
-    print_concealed_config(out, &plan)?;
-    if let Some(p) = &pinned {
-        p.print(out, env_name, &names)?;
-    }
-    if let Some(s) = stamp {
-        writeln!(out, "{}: {}", t.provider().label(), s.line()).map_err(write_err)?;
-    }
-    if n > 0 {
-        return Err(findings());
-    }
-    Ok(())
+    Ok(StatusPart {
+        name: name.to_string(),
+        t,
+        live: super::live_writes(&ports),
+        plan,
+        listed,
+        pinned,
+    })
 }
 
 /// M4 (owner ruling): one warning per config key whose 1Password field is concealed. The
@@ -201,18 +277,20 @@ fn print_concealed_config(out: &mut dyn Write, plan: &SyncPlan) -> Result<(), Er
     Ok(())
 }
 
-/// `opv status <env>[ --product p]`.
-fn status_command(env_name: &str, product: Option<&str>) -> String {
+/// `opv status <env> --target <t>[ --product p]`.
+fn status_command(env_name: &str, product: Option<&str>, target: &str) -> String {
     match product {
-        Some(p) => format!("opv status {env_name} --product {p}"),
-        None => format!("opv status {env_name}"),
+        Some(p) => format!("opv status {env_name} --target {target} --product {p}"),
+        None => format!("opv status {env_name} --target {target}"),
     }
 }
 
-/// `status` without an environment (P22, H11): one count line per environment, in name
-/// order. Every environment is read, a run-only one too (`dev: run-only · 2 keys · 1
-/// finding`), so a green overview means every environment is green. One item read per
-/// environment (FR-13); a target is also listed as `status <env>` does. `product` limits
+/// `status` without an environment (P22, H11): one count line per target of each
+/// environment (`prod/web: …`, FR-56), environments and targets in name order. Every
+/// environment is read, a run-only one too (`dev: run-only · 2 keys · 1 finding`), so a
+/// green overview means every environment is green. One item read per target (FR-13); each
+/// target is also listed as `status <env>` does. A JSON entry adds up its environment's
+/// targets. `product` limits
 /// every line to that product's keys. An environment that cannot be read is one line
 /// naming the error, and the rest are still shown; the first such error is the result,
 /// else `Findings` when any environment has findings.
@@ -306,45 +384,54 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
         first_finding: None,
     };
     for (name, env) in &fleet.environments {
-        // The environment's only target (several need `status <env> --target` for now).
-        let t = match env.targets.len() {
-            0 => Ok(None),
-            _ => resolve_target(fleet, name, &[], "status").map(|n| {
-                env.targets
-                    .get_key_value(&n)
-                    .map(|(n, t)| (n.as_str(), t.config.as_ref()))
-            }),
+        // Every target of the environment (FR-56), or the item alone for a run-only one.
+        let targets: Vec<Option<(&str, &dyn TargetConfig)>> = if env.targets.is_empty() {
+            vec![None]
+        } else {
+            env.targets
+                .iter()
+                .map(|(n, t)| Some((n.as_str(), t.config.as_ref())))
+                .collect()
         };
         let target = env
             .targets
             .values()
             .next()
             .map(|t| t.config.provider().section());
-        let rows = t.and_then(|t| {
-            env_rows(fleet, name, t, r).map(|mut rows| {
-                if let Some(p) = product {
-                    rows.retain(|row| row.product == p);
-                }
-                rows
+        let read: Result<Vec<_>, Error> = targets
+            .into_iter()
+            .map(|t| {
+                env_rows(fleet, name, t, r).map(|mut rows| {
+                    if let Some(p) = product {
+                        rows.retain(|row| row.product == p);
+                    }
+                    (t, rows)
+                })
             })
-        });
-        let t = env.targets.values().next().map(|t| t.config.as_ref());
-        match rows {
-            Ok(rows) => {
-                let line = match t {
-                    Some(t) => count_line(name, &rows, t.provider().label()),
-                    None => run_only_line(name, &rows),
-                };
+            .collect();
+        match read {
+            Ok(read) => {
+                let mut rows: Vec<Row> = Vec::new();
+                for (t, part) in read {
+                    o.lines.push(match t {
+                        Some((tn, t)) => count_line(name, tn, &part, t.provider().label()),
+                        None => run_only_line(name, &part),
+                    });
+                    rows.extend(part);
+                }
                 let n = rows.iter().filter(|r| is_blocking(r)).count();
                 if n > 0 {
                     o.findings += n;
                     o.first_finding.get_or_insert_with(|| name.clone());
                 }
-                o.lines.push(line);
                 o.envs.push(OverviewEnv {
                     name: name.clone(),
                     target,
-                    state: if t.is_some() { "checked" } else { "run_only" },
+                    state: if target.is_some() {
+                        "checked"
+                    } else {
+                        "run_only"
+                    },
                     keys: Some(rows.len()),
                     saved: Some(rows.iter().filter(|r| r.state == KeyState::Ready).count()),
                     skipped: Some(rows.iter().filter(|r| r.state == KeyState::Skipped).count()),
