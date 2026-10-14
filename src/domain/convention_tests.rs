@@ -164,6 +164,45 @@ fn a_field_two_products_could_claim_is_left_alone() {
 }
 
 #[test]
+fn an_unsectioned_field_matching_one_products_key_is_moved_home() {
+    let l = with(
+        &[("", "OPENAI_API_KEY", "CONCEALED", "sk-x")],
+        "OPENAI_API_KEY",
+    );
+    assert_eq!(
+        plan_of(&l).changes,
+        vec![Change::Moved {
+            field: "api/OPENAI_API_KEY".into(),
+            from: "the default section".into(),
+        }]
+    );
+}
+
+#[test]
+fn a_field_outside_every_section_is_moved_with_a_hidden_origin() {
+    let l = with(
+        &[(NO_SECTION, "OPENAI_API_KEY", "CONCEALED", "sk-x")],
+        "OPENAI_API_KEY",
+    );
+    assert_eq!(
+        plan_of(&l).changes,
+        vec![Change::Moved {
+            field: "api/OPENAI_API_KEY".into(),
+            from: "outside every section (hidden in the 1Password app)".into(),
+        }]
+    );
+}
+
+#[test]
+fn an_unsectioned_duplicate_is_kept_not_moved_into_the_product_section() {
+    let l = with(&[("", "LOG_LEVEL", "STRING", "debug")], "");
+    assert_eq!(
+        plan_of(&l).changes,
+        vec![Change::KeptDuplicate("api/LOG_LEVEL".into())]
+    );
+}
+
+#[test]
 fn a_filled_field_wins_over_an_empty_one_at_home() {
     let l = with(
         &[
@@ -316,7 +355,7 @@ fn a_duplicate_goes_to_kept_with_its_origin_and_date() {
     let p = plan_of(&l);
     assert!(p.ops.iter().any(|op| matches!(op,
         Op::Place { index: 5, section: Some(s), label, .. }
-            if s == KEPT_SECTION && label == "log level (from top level, 2026-10-08)")));
+            if s == KEPT_SECTION && label == "log level (from the default section, 2026-10-08)")));
 }
 
 #[test]

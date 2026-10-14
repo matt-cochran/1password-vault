@@ -144,7 +144,7 @@ fn is_generated(text: &str) -> bool {
 }
 
 /// The vault titled `title` in the signed-in account, created when missing.
-fn ensure_vault(r: &dyn CommandRunner, title: &str) -> Result<init_op::Named, Error> {
+pub(crate) fn ensure_vault(r: &dyn CommandRunner, title: &str) -> Result<init_op::Named, Error> {
     match init_op::find_vault(r, title, &Host::detect)? {
         Lookup::Found(n) => Ok(n),
         Lookup::Missing(_) => init_op::create_vault(r, title),

@@ -7,7 +7,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
     STATES_HELP, add, config_cmd, config_export, doctor, explain, init, open, run as run_cmd,
-    signin, skeleton, status, sync,
+    signin, skeleton, status, sync, target_cmd,
 };
 use opv::config;
 use opv::config_store;
@@ -343,6 +343,23 @@ and their IDs are recorded in secrets.toml. Recorded IDs the account cannot see 
 with ids_not_in_account: select the owning account, or pass --rebind <env>. Then every
 declared field is added, empty. Nothing is synced, deployed or given a value. Next: opv ready";
 
+const TARGET_ADD_QUICK: &str = "\
+Examples:
+  opv target add prod p-overflow --provider fly --fly-app p-overflow-prod --products p
+  opv target add staging site --provider fly --fly-app site-staging --dry-run";
+
+const TARGET_ADD_MORE: &str = "\
+Declares one named deployment target under [environments.<env>.targets.<name>]: the
+provider's options (the same ones opv init --target takes), the products it delivers
+and its deploy identity. In the same step it finds or creates the state vault
+<project>-<env>-<target>-state and records its ID. The edit keeps comments, validates
+the whole configuration first and refuses a concurrent change; --dry-run changes nothing.";
+
+const TARGET_LIST_QUICK: &str = "\
+Examples:
+  opv target list                     # every declared target
+  opv target list --env prod --json   # one environment as one document";
+
 const ACCOUNT_LIST_QUICK: &str = "\
 Examples:
   opv account list           # accounts, which is selected, what to do next
@@ -595,6 +612,9 @@ enum Cmd {
     /// Delivery receipts: whether a product's target still holds what opv delivered.
     #[command(subcommand)]
     Delivery(DeliveryCmd),
+    /// Declare a named deployment target of an environment, or list the declared ones.
+    #[command(subcommand)]
+    Target(TargetCmd),
     /// Bring values that exist elsewhere into the environment's 1Password item, after review.
     #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
     Adopt {
@@ -1040,6 +1060,49 @@ Examples:
   opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
 
 #[derive(Subcommand)]
+enum TargetCmd {
+    /// Declare one named deployment target of an environment: writes the configuration and
+    /// creates the target's state vault.
+    #[command(before_help = TARGET_ADD_QUICK, after_help = TARGET_ADD_MORE)]
+    Add {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// New target name (^[a-z][a-z0-9-]*$); there is no default.
+        name: String,
+        /// Provider section: fly, azure, kubernetes or github; its options follow.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: String,
+        /// Products this target delivers (repeat or comma-separate); without it, every
+        /// non-source-only product.
+        #[arg(long, value_delimiter = ',')]
+        products: Vec<String>,
+        /// The item holding this target's least-privilege deploy identity
+        /// (op://<vault>/<item>).
+        #[arg(long, value_name = "OP_REF")]
+        deploy_credentials: Option<String>,
+        /// Project naming the state vault; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Show what would be written and created; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the declared deployment targets (read-only).
+    #[command(before_help = TARGET_LIST_QUICK)]
+    List {
+        /// Only this environment.
+        #[arg(long)]
+        env: Option<String>,
+        /// Print one JSON array instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AccountCmd {
     /// List the 1Password accounts this CLI knows and which one this project uses (read-only).
     #[command(before_help = ACCOUNT_LIST_QUICK)]
@@ -1159,62 +1222,91 @@ impl<W: Write> Write for PipeSafe<W> {
 
 /// The command line: the derived [`Cli`] plus each provider's `init` options
 /// (`--<provider>-<field>`), taken from the plug-in contract so a new provider adds its
-/// options without a change here (H3).
+/// options without a change here (H3). `opv target add` takes the same options.
 fn command_line() -> clap::Command {
     use opv::adapters::registry;
-    use opv::provider::init_flag;
-    Cli::command().mut_subcommand("init", |mut c| {
-        c = c.mut_arg("target", |a| {
-            a.hide_possible_values(true)
-                .value_parser(clap::builder::PossibleValuesParser::new(
-                    registry::PROVIDERS
-                        .iter()
-                        .filter(|p| !p.init_fields().is_empty())
-                        .map(|p| p.section()),
-                ))
-        });
-        // One line per provider in the help (H9: --help fits on one screen); each option is
-        // a hidden argument, so clap still parses and completes it.
-        let mut summary = String::from("Target options (* required with that --target):");
-        for p in registry::PROVIDERS
-            .iter()
-            .filter(|p| !p.init_fields().is_empty())
-        {
-            let flags: Vec<String> = p
-                .init_fields()
-                .iter()
-                .map(|f| {
-                    let star = if f.required { "*" } else { "" };
-                    format!("--{}{star}", init_flag(*p, f))
-                })
-                .collect();
-            summary.push_str(&format!("\n  {:<11} {}", p.section(), flags.join(" ")));
-            for f in p.init_fields() {
-                let flag = init_flag(*p, f);
-                c = c.arg(
-                    clap::Arg::new(flag.clone())
-                        .long(flag)
-                        .value_name(f.field.to_ascii_uppercase())
-                        .help(f.help)
-                        .hide(true),
-                );
-            }
-        }
-        c = match c.get_after_help().map(|a| a.to_string()) {
-            Some(more) => c.after_help(format!("{summary}\n\n{more}")),
-            None => c.after_help(summary),
-        };
-        c
-    })
+    Cli::command()
+        .mut_subcommand("init", |c| {
+            provider_options(c, "Target options (* required with that --target):").mut_arg(
+                "target",
+                |a| {
+                    a.hide_possible_values(true).value_parser(
+                        clap::builder::PossibleValuesParser::new(
+                            registry::PROVIDERS
+                                .iter()
+                                .filter(|p| !p.init_fields().is_empty())
+                                .map(|p| p.section()),
+                        ),
+                    )
+                },
+            )
+        })
+        .mut_subcommand("target", |t| {
+            t.mut_subcommand("add", |c| {
+                provider_options(c, "Provider options (* required for that --provider):")
+            })
+        })
 }
 
-/// The provider options given to `init`, by option name.
-fn init_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
+/// Every provider's `init` options as hidden arguments plus one summary line per provider
+/// in the command's help (H3, I6), shared by `opv init` and `opv target add`.
+fn provider_options(mut c: clap::Command, header: &str) -> clap::Command {
     use opv::adapters::registry;
     use opv::provider::init_flag;
+    let mut summary = String::from(header);
+    for p in registry::PROVIDERS
+        .iter()
+        .filter(|p| !p.init_fields().is_empty())
+    {
+        let flags: Vec<String> = p
+            .init_fields()
+            .iter()
+            .map(|f| {
+                let star = if f.required { "*" } else { "" };
+                format!("--{}{star}", init_flag(*p, f))
+            })
+            .collect();
+        summary.push_str(&format!("\n  {:<11} {}", p.section(), flags.join(" ")));
+        for f in p.init_fields() {
+            let flag = init_flag(*p, f);
+            c = c.arg(
+                clap::Arg::new(flag.clone())
+                    .long(flag)
+                    .value_name(f.field.to_ascii_uppercase())
+                    .help(f.help)
+                    .hide(true),
+            );
+        }
+    }
+    match c.get_after_help().map(|a| a.to_string()) {
+        Some(more) => c.after_help(format!("{summary}\n\n{more}")),
+        None => c.after_help(summary),
+    }
+}
+
+/// The provider options given to `init` or `target add`, by option name.
+fn init_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
     let Some(m) = matches.subcommand_matches("init") else {
         return Default::default();
     };
+    provider_fields(m)
+}
+
+/// The provider options given to `target add`, by option name.
+fn target_fields(matches: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
+    let Some(m) = matches
+        .subcommand_matches("target")
+        .and_then(|t| t.subcommand_matches("add"))
+    else {
+        return Default::default();
+    };
+    provider_fields(m)
+}
+
+/// Every provider option present in `m`, by option name.
+fn provider_fields(m: &clap::ArgMatches) -> std::collections::BTreeMap<String, String> {
+    use opv::adapters::registry;
+    use opv::provider::init_flag;
     registry::PROVIDERS
         .iter()
         .flat_map(|p| p.init_fields().iter().map(move |f| init_flag(*p, f)))
@@ -1250,6 +1342,7 @@ fn main() -> ExitCode {
         Err(e) => return usage_error(e),
     };
     let init_options = init_fields(&matches);
+    let target_options = target_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
     let help = help_command();
     let json = cli.cmd.json_mode();
@@ -1283,14 +1376,32 @@ fn main() -> ExitCode {
             },
         };
         let res = if json.is_some() {
-            run(cli, config_source, &init_options, &mut body)
+            run(
+                cli,
+                config_source,
+                &init_options,
+                &target_options,
+                &mut body,
+            )
         } else if paint {
             let mut painter = colour::Painter::new(&mut stdout);
-            let res = run(cli, config_source, &init_options, &mut painter);
+            let res = run(
+                cli,
+                config_source,
+                &init_options,
+                &target_options,
+                &mut painter,
+            );
             let _ = painter.flush();
             res
         } else {
-            run(cli, config_source, &init_options, &mut stdout)
+            run(
+                cli,
+                config_source,
+                &init_options,
+                &target_options,
+                &mut stdout,
+            )
         };
         let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
         if may_sign_in && signed_out && !signed_in {
@@ -1611,6 +1722,8 @@ impl Cmd {
             | Cmd::Tidy { json, .. }
             | Cmd::Access { json, .. }
             | Cmd::Delivery(DeliveryCmd::Verify { json, .. })
+            | Cmd::Target(TargetCmd::Add { json, .. })
+            | Cmd::Target(TargetCmd::List { json, .. })
             | Cmd::Adopt { json, .. }
             | Cmd::Account(AccountCmd::List { json, .. })
             | Cmd::Account(AccountCmd::Use { json, .. })
@@ -1698,6 +1811,7 @@ fn run(
     cli: Cli,
     config_source: ConfigSource,
     init_options: &std::collections::BTreeMap<String, String>,
+    target_options: &std::collections::BTreeMap<String, String>,
     out: &mut dyn Write,
 ) -> Result<i32, Error> {
     if let Cmd::Completions { shell } = &cli.cmd {
@@ -1920,8 +2034,10 @@ fn run(
     }
     // `add` and `init --add-env` edit the configuration where it lives, file or manifest
     // (FR-44), with the same validation and concurrency refusal.
-    if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } = &cli.cmd {
-        return run_edit(cli.cmd, &found?, init_options, &r, out).map(|()| 0);
+    if let Cmd::Init { add_env: true, .. } | Cmd::Add { .. } | Cmd::Target(TargetCmd::Add { .. }) =
+        &cli.cmd
+    {
+        return run_edit(cli.cmd, &found?, init_options, target_options, &r, out).map(|()| 0);
     }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
     // The project's account (its manifest's, or the one recorded in .opv): `doctor`
@@ -2210,6 +2326,7 @@ fn run_other(
         Cmd::Run { .. } => unreachable!("handled by run"),
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
+        Cmd::Target(TargetCmd::Add { .. }) => unreachable!("handled by run_edit"),
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
         | Cmd::Skill(_)
@@ -2266,6 +2383,9 @@ fn run_other(
             opv::app::adopt::run(&loaded?, &env, &opts, r, out)
         }
         Cmd::History { env, json } => opv::app::history::run(&loaded?, &env, r, json, out),
+        Cmd::Target(TargetCmd::List { env, json }) => {
+            target_cmd::list(&loaded?, &target_cmd::ListArgs { env, json }, out)
+        }
         Cmd::Tidy { env, json } => opv::app::repair::run(&loaded?, &env, r, json, out),
         Cmd::Access { env, json } => opv::app::access::run(&loaded?, env.as_deref(), r, json, out),
         Cmd::Delivery(DeliveryCmd::Verify {
@@ -2542,6 +2662,7 @@ fn run_edit(
     cmd: Cmd,
     found: &config_store::Found,
     init_options: &std::collections::BTreeMap<String, String>,
+    target_options: &std::collections::BTreeMap<String, String>,
     r: &ProcessRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -2581,7 +2702,32 @@ fn run_edit(
             })?;
             init::add_env_as(&init_args(cmd, init_options, r, &dir)?, store, r, out, json)
         }
-        _ => unreachable!("called for add and init --add-env only"),
+        Cmd::Target(TargetCmd::Add {
+            env,
+            name,
+            provider,
+            products,
+            deploy_credentials,
+            project,
+            dry_run,
+            json,
+        }) => target_cmd::add(
+            &target_cmd::AddArgs {
+                env,
+                name,
+                provider,
+                fields: target_options.clone(),
+                products,
+                deploy_credentials,
+                project,
+                dry_run,
+                json,
+            },
+            store,
+            r,
+            out,
+        ),
+        _ => unreachable!("called for add, init --add-env and target add only"),
     }
 }
 
