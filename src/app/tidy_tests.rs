@@ -1485,3 +1485,174 @@ fn run_names_a_key_that_still_needs_a_value() {
             .contains("still needs a value in 1Password (dev): api/LOG_LEVEL. Open it with opv open api/LOG_LEVEL --env dev, then click Edit")
     );
 }
+
+// #113: doctor never writes 1Password, whoever runs it; `opv tidy <env>` is the explicit
+// repair.
+
+fn doctor(op: &FakeOp, settings: bool) -> String {
+    let _on = activate();
+    let mut out = Vec::new();
+    let request = crate::app::doctor::Request {
+        // The settings check reads every environment; without it, the `--env` item check.
+        env: (!settings).then_some("dev"),
+        json: true,
+        settings,
+        ..Default::default()
+    };
+    let _ = crate::app::doctor::run_request(Ok(fleet()), request, op, &mut out);
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn doctor_never_writes_a_persons_messy_item() {
+    let op = FakeOp::person(messy_item());
+    doctor(&op, false);
+    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
+}
+
+#[test]
+fn doctor_settings_check_never_writes_a_persons_messy_item() {
+    let op = FakeOp::person(messy_item());
+    doctor(&op, true);
+    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
+}
+
+#[test]
+fn doctor_leaves_the_item_version_unchanged() {
+    let op = FakeOp::person(messy_item());
+    doctor(&op, true);
+    assert_eq!(op.item.borrow()["version"], json!(1));
+}
+
+#[test]
+fn doctor_names_the_explicit_repair() {
+    let op = FakeOp::person(messy_item());
+    doctor(&op, false);
+    assert!(op.notes().contains("opv tidy dev"), "{}", op.notes());
+}
+
+#[test]
+fn doctor_never_carries_a_value() {
+    let op = FakeOp::person(messy_item());
+    assert!(!doctor(&op, true).contains(MARKER));
+}
+
+#[test]
+fn an_inspect_read_never_asks_who_runs_opv() {
+    let op = FakeOp::person(messy_item());
+    let _on = activate();
+    let _ = inspect(&fleet(), "dev", &op);
+    assert_eq!(op.count(&["whoami"]), 0);
+}
+
+#[test]
+fn an_inspect_read_finds_a_misplaced_field() {
+    let op = FakeOp::person(item(&[("Misc", "log-level", "STRING", "debug")]));
+    let _on = activate();
+    let r = inspect(&fleet(), "dev", &op).unwrap();
+    let f = r.fields.iter().find(|f| f.label == "LOG_LEVEL").unwrap();
+    assert_eq!(f.value.expose(), "debug");
+}
+
+fn repair(op: &FakeOp, json: bool) -> (Result<(), Error>, String) {
+    let _on = activate();
+    let mut out = Vec::new();
+    let res = crate::app::repair::run(&fleet(), "dev", op, json, &mut out);
+    (res, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn opv_tidy_writes_one_edit_for_a_person() {
+    let op = FakeOp::person(messy_item());
+    let _ = repair(&op, false);
+    assert_eq!(op.edits(), 1);
+}
+
+#[test]
+fn opv_tidy_refuses_a_service_account() {
+    let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
+    let (res, _) = repair(&op, false);
+    assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
+}
+
+#[test]
+fn opv_tidy_never_writes_for_a_service_account() {
+    let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
+    let _ = repair(&op, false);
+    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
+}
+
+#[test]
+fn opv_tidy_never_writes_in_ci() {
+    let op = FakeOp::person(messy_item());
+    let _ = with_host(FakeEnv::new("linux").var("CI"), || repair(&op, false));
+    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
+}
+
+#[test]
+fn opv_tidy_never_writes_under_deploy_credentials() {
+    let op = FakeOp::person(messy_item());
+    let _on = activate();
+    let mut out = Vec::new();
+    let _ = crate::app::repair::run(
+        &fleet(),
+        "dev",
+        &UnderDeployCredentials(&op),
+        false,
+        &mut out,
+    );
+    assert_eq!(op.edits(), 0);
+}
+
+#[test]
+fn opv_tidy_json_lists_what_changed_by_name() {
+    let op = FakeOp::person(item(&[(
+        "api",
+        "OPENAI_API_KEY",
+        "STRING",
+        "sk-TIDYMARKER",
+    )]));
+    let (_, out) = repair(&op, true);
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        doc["tidy"],
+        json!([
+            {"action": "created_field", "name": "api/LOG_LEVEL"},
+            {"action": "made_concealed", "name": "api/OPENAI_API_KEY"},
+            {"action": "created_section", "name": "web"},
+            {"action": "created_field", "name": "web/SESSION_KEY"},
+        ])
+    );
+}
+
+#[test]
+fn opv_tidy_json_never_carries_a_value() {
+    let op = FakeOp::person(messy_item());
+    assert!(!repair(&op, true).1.contains(MARKER));
+}
+
+#[test]
+fn opv_tidy_on_a_tidy_item_writes_nothing() {
+    let op = FakeOp::person(tidy_item());
+    let _ = repair(&op, false);
+    assert_eq!(op.edits(), 0);
+}
+
+/// #113 AC4: the handoff receipt never tidies, so it never bumps the item version.
+#[test]
+fn ready_never_writes_a_persons_messy_item() {
+    let op = FakeOp::person(messy_item());
+    let _on = activate();
+    let mut out = Vec::new();
+    let _ = crate::app::ready::run(&fleet(), None, Some("dev"), &op, true, None, &mut out);
+    assert_eq!(op.count(&["item"]) - op.count(&["item", "get"]), 0);
+}
+
+/// `status` still tidies for a person (FR-43): only doctor and ready changed.
+#[test]
+fn status_still_tidies_a_persons_messy_item() {
+    let op = FakeOp::person(messy_item());
+    let _on = activate();
+    let _ = crate::app::status::env_rows(&fleet(), "dev", None, &op);
+    assert_eq!(op.edits(), 1);
+}
