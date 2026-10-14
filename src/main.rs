@@ -132,12 +132,15 @@ Examples:
 const DOCTOR_MORE: &str = "\
 Checks configuration, CLI installation and sign-in. --env limits the checks to what that
 environment needs, including whether op can start local commands, and reads its item once
-to check the keys as `check` does (names only, never values). Never writes anything,
+to check the keys as `check` does (names only, never values). Each target of the
+environment (or each --target) gets its own lines, `<target>: <check>`: its CLI, its deploy
+credentials and whether its state vault is visible. Never writes anything,
 whoever is signed in: an item not in opv's layout is read as it is, and doctor names
 opv tidy <ENV>, the explicit repair.
 
 More examples:
-  opv doctor --env prod --product api   # one product's keys";
+  opv doctor --env prod --product api   # one product's keys
+  opv doctor --env prod --target web    # one target's checks";
 
 const CHECK_QUICK: &str = "\
 Examples:
@@ -535,6 +538,9 @@ enum Cmd {
         /// Limit configuration checks to one product; requires --env. [env: OPV_PRODUCT]
         #[arg(long, requires = "env")]
         product: Option<String>,
+        /// Check only this named target of the environment (repeatable); requires --env.
+        #[arg(long = "target", value_name = "NAME", requires = "env")]
+        target: Vec<String>,
         /// Print one JSON document (check names, states and next steps) instead of lines.
         #[arg(long)]
         json: bool,
@@ -2126,14 +2132,12 @@ fn run(
     // Every call for the environment uses its 1Password account, and commands that reach
     // the target sign in with its deploy credentials for this run only (FR-40). Dropped
     // (signed out, its private directory removed) when this function returns.
-    // `doctor --env` reports a failed deploy sign-in as one check and keeps going.
-    let mut deploy_failure = None;
+    // `doctor --env` signs in per target itself, so one target's failed sign-in never
+    // stops another; the runner here only carries the environment's account.
     let env_runner = match (&loaded, cmd.env()) {
-        (Ok(fleet), Some((env, _))) if matches!(cmd, Cmd::Doctor { .. }) => {
-            let (runner, failed) = signin::open_for_doctor(fleet, env, &r);
-            deploy_failure = failed;
-            Some(runner)
-        }
+        (Ok(fleet), Some((env, _))) if matches!(cmd, Cmd::Doctor { .. }) => Some(
+            signin::open_targeted(fleet, env, None, &r, signin::Reach::Store)?,
+        ),
         (Ok(fleet), Some((env, reach))) => {
             Some(signin::open_targeted(fleet, env, cmd.target(), &r, reach)?)
         }
@@ -2154,7 +2158,7 @@ fn run(
     {
         return run_cmd::run_for(&loaded?, env, product.as_deref(), command, runner);
     }
-    run_other(cmd, loaded, source.as_deref(), runner, deploy_failure, out).map(|()| 0)
+    run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
 }
 
 /// `opv skill install` / `opv skill status`: the agent skill embedded in this binary
@@ -2376,7 +2380,6 @@ fn run_other(
     loaded: Result<opv::domain::Fleet, Error>,
     source: Option<&str>,
     r: &dyn CommandRunner,
-    deploy_failure: Option<opv::app::signin::DeployFailure>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     match cmd {
@@ -2401,6 +2404,7 @@ fn run_other(
         Cmd::Doctor {
             env,
             product,
+            target,
             json,
             settings,
         } => {
@@ -2409,7 +2413,7 @@ fn run_other(
                 product: product.as_deref(),
                 json,
                 source,
-                deploy_failure,
+                targets: &target,
                 settings,
             };
             doctor::run_request(loaded, scope, r, out)
