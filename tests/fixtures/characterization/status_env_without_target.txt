@@ -1,3 +1,3 @@
 --- stdout
 --- result
-Err(Config("environment \"dev\" has no deployment target. For local settings use opv check dev --product <name> and opv run dev --product <name> -- <command>. To deploy, add a named target [environments.dev.targets.<name>] with one provider section (fly, azure, kubernetes, github) to the configuration first: secrets.toml, or opv config edit for a manifest (https://github.com/matt-cochran/1password-vault/blob/main/docs/configuration.md)." next "opv check dev --product allumata"))
+Err(Config("environment \"dev\" has no deployment target. For local settings use opv check dev --product <name> and opv run dev --product <name> -- <command>. To deploy, add a named target first with opv target add dev <name> and one provider's options (fly, azure, kubernetes, github; opv target add --help)." next "opv check dev --product allumata"))

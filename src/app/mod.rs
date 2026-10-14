@@ -1688,16 +1688,15 @@ fn no_target(fleet: &Fleet, env: &str) -> Error {
     Error::Config(
         format!(
             "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add a named target [environments.{env}.targets.<name>] with one provider \
-             section ({}) to the configuration first: secrets.toml, or opv config edit for a \
-             manifest ({DOCS}/configuration.md).",
+             deploy, add a named target first with opv target add {env} <name> and one \
+             provider's options ({}; opv target add --help).",
             sections.join(", ")
         )
         .into(),
     )
     .with_code(crate::error::Code::NoTarget)
     .with_do(format!(
-        "to deploy, add [environments.{env}.targets.<name>] with a {} section to the configuration (secrets.toml, or opv config edit) ({DOCS}/configuration.md)",
+        "to deploy, add a target with opv target add {env} <name> and one provider's options ({})",
         sections.join(", ")
     ))
     .with_next(check_command(
