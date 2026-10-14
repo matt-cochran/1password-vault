@@ -252,6 +252,9 @@ fn sync_writes_its_summary_line_to_the_step_summary() {
         rel,
         ok(),
         fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
+        ok(),
+        ok(),
+        ok(),
     ]);
     let _ = sync::run(&fleet(), "prod", &r, &mut Vec::new(), &SyncOpts::default());
     assert!(

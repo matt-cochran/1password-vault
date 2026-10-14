@@ -1,7 +1,7 @@
-//! Simple-profile (FR-20) command tests against `tests/fixtures/simple.toml`.
+//! Single-product command tests: one product `app` whose Fly target uses `{KEY}` names.
 //!
 //! Every command (status, fly plan, fly sync, item skeleton, config export, run) runs with
-//! a [`FakeRunner`]. Items hold unsectioned fields only; every value carries
+//! a [`FakeRunner`]. Items hold product-`app` fields; every value carries
 //! [`MARKER`](super::testutil::MARKER). The managed set is exactly the declared keys:
 //! an undeclared Fly name is reported as unmanaged and never pruned (FR-8, SR-6), and a
 //! command reads one whole item by IDs (FR-13).
@@ -24,24 +24,72 @@ const FOREIGN: &str = "SENTRY_DSN";
 /// Declared for staging only, so a managed name that is not desired in prod.
 const STAGING_ONLY: &str = "STAGING_DEBUG_TOKEN";
 
+/// The one-product configuration: product `app` with a `{KEY}` target name template.
+const CONFIG: &str = r#"
+[environments.staging]
+boundaries.app = { vault_id = "vstg", item_id = "istg" }
+modes.app.payments = "test"
+
+[environments.staging.targets.app]
+fly.app = "myapp-staging"
+fly.secret_name = "{KEY}"
+state_vault_id = "sstg"
+
+[environments.prod]
+boundaries.app = { vault_id = "vprd", item_id = "iprd" }
+modes.app.payments = "off"
+
+[environments.prod.targets.app]
+fly.app = "myapp-production"
+fly.secret_name = "{KEY}"
+state_vault_id = "sprd"
+
+[products.app.keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging", "prod"]
+rules = { prefix = "postgres://" }
+guidance = "Fly Postgres / connection string"
+
+[products.app.keys.JWT_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+immutable = true
+rules = { base64_bytes = 32 }
+guidance = "32 random bytes, base64"
+
+[products.app.keys.STRIPE_SECRET_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_", live = "sk_live_" }, skip = ["off"] } }
+
+[products.app.keys.STAGING_DEBUG_TOKEN]
+kind = "secret"
+environments = ["staging"]
+
+[products.app.keys.LOG_LEVEL]
+kind = "config"
+environments = ["staging", "prod"]
+rules = { enum = ["debug", "info", "warn"] }
+"#;
+
 fn simple() -> Fleet {
-    config::load("tests/fixtures/simple.toml").unwrap()
+    config::parse(CONFIG).unwrap()
 }
 
-/// An unsectioned field (testutil treats an empty section as "no section").
-fn top_secret(label: &str, v: &str) -> Field {
-    secret("", label, v)
+/// A field in the product's own section `app`.
+fn app_secret(label: &str, v: &str) -> Field {
+    secret("app", label, v)
 }
-fn top_text(label: &str, v: &str) -> Field {
-    text("", label, v)
+fn app_text(label: &str, v: &str) -> Field {
+    text("app", label, v)
 }
 
 /// Every key desired in prod, correctly typed and rule-valid (STRIPE is mode-skipped).
 fn prod_fields() -> Vec<Field> {
     vec![
-        top_secret("DATABASE_URL", DB),
-        top_secret("JWT_KEY", &enc()),
-        top_text("LOG_LEVEL", LOG),
+        app_secret("DATABASE_URL", DB),
+        app_secret("JWT_KEY", &enc()),
+        app_text("LOG_LEVEL", LOG),
     ]
 }
 fn prod_item() -> Output {
@@ -112,21 +160,18 @@ fn status_reads_one_item_by_ids_and_lists_the_app_once() {
 }
 
 #[test]
-fn status_table_has_no_product_column() {
+fn status_table_has_a_product_column() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = status_of(&r, false);
     let header = out.lines().nth(1).unwrap();
-    assert!(
-        header.starts_with("KEY ") && !header.contains("PRODUCT"),
-        "{out}"
-    );
+    assert!(header.starts_with("PRODUCT "), "{out}");
 }
 
 #[test]
-fn status_row_starts_with_the_key_name() {
+fn status_row_starts_with_the_product() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = status_of(&r, false);
-    assert!(out.lines().any(|l| l.starts_with("JWT_KEY ")), "{out}");
+    assert!(out.lines().any(|l| l.starts_with("app ")), "{out}");
 }
 
 #[test]
@@ -153,59 +198,46 @@ fn status_missing_key_is_a_finding_naming_the_key_with_guidance() {
 }
 
 #[test]
-fn status_ignores_sectioned_fields_under_simple() {
+fn status_names_an_undeclared_field_with_its_product() {
     let mut fs = prod_fields();
-    fs.push(secret(
-        "api",
-        "DATABASE_URL",
-        "postgres://FIXTUREVALUE-sectioned",
-    ));
-    let r = FakeRunner::new([item(&fs), fly_empty()]);
-    let (res, out) = status_of(&r, false);
-    res.unwrap();
-    assert!(!out.contains("extra field"), "{out}");
-}
-
-#[test]
-fn status_names_an_undeclared_unsectioned_field_without_a_product() {
-    let mut fs = prod_fields();
-    fs.push(top_secret("UNDECLARED_KEY", "x-FIXTUREVALUE"));
+    fs.push(app_secret("UNDECLARED_KEY", "x-FIXTUREVALUE"));
     let r = FakeRunner::new([item(&fs), fly_empty()]);
     let (_, out) = status_of(&r, false);
     assert!(
-        out.contains("warning: extra field UNDECLARED_KEY is in the 1Password item"),
+        out.contains("warning: extra field app/UNDECLARED_KEY is in the 1Password item"),
         "{out}"
     );
 }
 
 #[test]
-fn status_mode_rule_failure_names_the_key_alone() {
+fn status_mode_rule_failure_names_the_product_and_key() {
     // staging: payments = "test", so STRIPE_SECRET_KEY needs sk_test_.
     let fs = vec![
-        top_secret("DATABASE_URL", DB),
-        top_secret("JWT_KEY", &enc()),
-        top_secret("STRIPE_SECRET_KEY", "sk_live_FIXTUREVALUE"),
-        top_secret(STAGING_ONLY, "t-FIXTUREVALUE"),
-        top_text("LOG_LEVEL", LOG),
+        app_secret("DATABASE_URL", DB),
+        app_secret("JWT_KEY", &enc()),
+        app_secret("STRIPE_SECRET_KEY", "sk_live_FIXTUREVALUE"),
+        app_secret(STAGING_ONLY, "t-FIXTUREVALUE"),
+        app_text("LOG_LEVEL", LOG),
     ];
     let r = FakeRunner::new([item(&fs), fly_empty()]);
     let (res, out) = out_of(|o| status::run(&simple(), "staging", &r, o));
     assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
     assert!(
-        out.lines().any(|l| l.starts_with("STRIPE_SECRET_KEY")
+        out.lines().any(|l| l.starts_with("app ")
+            && l.contains("STRIPE_SECRET_KEY")
             && l.contains("failed prefix_by_mode (wrong prefix for mode test)")),
         "{out}"
     );
 }
 
 #[test]
-fn status_json_product_is_null_in_every_row() {
+fn status_json_names_every_rows_product() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = status_of(&r, true);
     let doc = json_doc(&out);
     let rows = doc["rows"].as_array().unwrap();
     assert!(!rows.is_empty());
-    assert!(rows.iter().all(|r| r["product"].is_null()), "{out}");
+    assert!(rows.iter().all(|r| r["product"] == "app"), "{out}");
 }
 
 #[test]
@@ -223,14 +255,14 @@ fn status_json_target_name_is_the_key_name() {
 }
 
 #[test]
-fn status_json_extra_product_is_null() {
+fn status_json_extra_names_its_product() {
     let mut fs = prod_fields();
-    fs.push(top_secret("UNDECLARED_KEY", "x-FIXTUREVALUE"));
+    fs.push(app_secret("UNDECLARED_KEY", "x-FIXTUREVALUE"));
     let r = FakeRunner::new([item(&fs), fly_empty()]);
     let (_, out) = status_of(&r, true);
     let doc = json_doc(&out);
     assert_eq!(doc["extras"][0]["key"], "UNDECLARED_KEY");
-    assert!(doc["extras"][0]["product"].is_null());
+    assert_eq!(doc["extras"][0]["product"], "app");
 }
 
 // ---------- fly plan ----------
@@ -255,7 +287,7 @@ fn plan_lists_a_declared_key_not_desired_here_to_prune() {
     let r = FakeRunner::new([prod_item(), fly(&[(STAGING_ONLY, "d-s")])]);
     let (_, out) = plan_of(&r, false);
     assert!(
-        out.contains(&format!("would prune (needs --prune): {STAGING_ONLY}")),
+        out.contains(&format!("would prune (needs --prune): app/{STAGING_ONLY}")),
         "{out}"
     );
 }
@@ -268,10 +300,10 @@ fn plan_reads_the_item_once() {
 }
 
 #[test]
-fn plan_table_has_no_product_column() {
+fn plan_table_has_a_product_column() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = plan_of(&r, false);
-    assert!(out.lines().nth(1).unwrap().starts_with("KEY "), "{out}");
+    assert!(out.lines().nth(1).unwrap().starts_with("PRODUCT "), "{out}");
 }
 
 #[test]
@@ -282,12 +314,12 @@ fn plan_json_prune_holds_only_declared_names() {
 }
 
 #[test]
-fn plan_json_held_product_is_null() {
+fn plan_json_held_names_its_product() {
     let r = FakeRunner::new([prod_item(), fly(&[("JWT_KEY", "d-j")])]);
     let (_, out) = plan_of(&r, true);
     let doc = json_doc(&out);
     assert_eq!(doc["held"][0]["key"], "JWT_KEY");
-    assert!(doc["held"][0]["product"].is_null(), "{out}");
+    assert_eq!(doc["held"][0]["product"], "app", "{out}");
 }
 
 // ---------- fly sync ----------
@@ -321,14 +353,18 @@ fn sync_puts_no_value_in_argv_or_output() {
 }
 
 #[test]
-fn sync_reads_the_item_once() {
+fn sync_reads_the_values_item_once_for_its_plan() {
     let r = fake_sync(
         prod_item(),
         fly_empty(),
         fly(&[("DATABASE_URL", "d1"), ("JWT_KEY", "d2")]),
     );
     sync_of(&r, &Default::default()).0.unwrap();
-    assert_eq!(op_calls(&r), 1);
+    let plan_reads = argvs(&r)
+        .iter()
+        .filter(|c| c.as_str() == "op item get iprd --vault vprd --format json")
+        .count();
+    assert_eq!(plan_reads, 1, "{:?}", argvs(&r));
 }
 
 /// Required (FR-8, SR-6): `--prune` never touches a name the file does not declare.
@@ -360,11 +396,12 @@ fn sync_prune_unsets_only_the_declared_key_not_desired_here() {
 }
 
 #[test]
-fn sync_refusal_names_the_key_alone() {
+fn sync_refusal_names_the_product_and_key() {
     let r = fake_sync(prod_item_without("JWT_KEY"), fly_empty(), fly_empty());
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
-        e.to_string().ends_with("nothing staged: JWT_KEY (missing)"),
+        e.to_string()
+            .ends_with("nothing staged: app/JWT_KEY (missing)"),
         "{e}"
     );
 }
@@ -376,7 +413,7 @@ fn prod_item_with_db(v: &str) -> Output {
         .into_iter()
         .map(|f| {
             if f.1 == "DATABASE_URL" {
-                top_secret("DATABASE_URL", v)
+                app_secret("DATABASE_URL", v)
             } else {
                 f
             }
@@ -386,11 +423,12 @@ fn prod_item_with_db(v: &str) -> Output {
 }
 
 #[test]
-fn status_reason_row_starts_with_the_key_alone() {
+fn status_reason_row_names_the_product_and_key() {
     let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
     let (_, out) = status_of(&r, false);
     assert!(
-        out.lines().any(|l| l.starts_with("DATABASE_URL ")
+        out.lines().any(|l| l.starts_with("app ")
+            && l.contains("DATABASE_URL")
             && l.contains("failed prefix (expected prefix postgres://)")),
         "{out}"
     );
@@ -408,7 +446,7 @@ fn status_reason_never_shows_the_hidden_product() {
 }
 
 #[test]
-fn status_json_failing_row_has_null_product_and_a_reason() {
+fn status_json_failing_row_names_the_product_and_a_reason() {
     let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
     let (_, out) = status_of(&r, true);
     let doc = json_doc(&out);
@@ -426,7 +464,7 @@ fn status_json_failing_row_has_null_product_and_a_reason() {
             row["reason"].clone()
         ),
         (
-            Value::Null,
+            Value::from("app"),
             Value::from("prefix"),
             Value::from("expected prefix postgres://")
         ),
@@ -435,18 +473,19 @@ fn status_json_failing_row_has_null_product_and_a_reason() {
 }
 
 #[test]
-fn plan_reason_row_starts_with_the_key_alone() {
+fn plan_reason_row_names_the_product_and_key() {
     let r = FakeRunner::new([prod_item_with_db("mysql://FIXTUREVALUE"), fly_empty()]);
     let (_, out) = plan_of(&r, false);
     assert!(
-        out.lines().any(|l| l.starts_with("DATABASE_URL ")
+        out.lines().any(|l| l.starts_with("app ")
+            && l.contains("DATABASE_URL")
             && l.contains("failed prefix (expected prefix postgres://)")),
         "{out}"
     );
 }
 
 #[test]
-fn sync_refusal_names_the_key_alone_with_rule_and_reason() {
+fn sync_refusal_names_the_product_and_key_with_rule_and_reason() {
     let r = fake_sync(
         prod_item_with_db("mysql://FIXTUREVALUE"),
         fly_empty(),
@@ -455,29 +494,30 @@ fn sync_refusal_names_the_key_alone_with_rule_and_reason() {
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
         e.to_string().ends_with(
-            "nothing staged: DATABASE_URL (failed prefix (expected prefix postgres://))"
+            "nothing staged: app/DATABASE_URL (failed prefix (expected prefix postgres://))"
         ),
         "{e}"
     );
 }
 
 #[test]
-fn mode_not_set_reason_reads_without_a_product() {
+fn mode_not_set_reason_names_the_product_and_key() {
     let mut fleet = simple();
     for env in fleet.environments.values_mut() {
         env.modes.clear();
     }
     let fs = vec![
-        top_secret("DATABASE_URL", DB),
-        top_secret("JWT_KEY", &enc()),
-        top_secret("STRIPE_SECRET_KEY", "sk_test_FIXTUREVALUE"),
-        top_secret(STAGING_ONLY, "t-FIXTUREVALUE"),
-        top_text("LOG_LEVEL", LOG),
+        app_secret("DATABASE_URL", DB),
+        app_secret("JWT_KEY", &enc()),
+        app_secret("STRIPE_SECRET_KEY", "sk_test_FIXTUREVALUE"),
+        app_secret(STAGING_ONLY, "t-FIXTUREVALUE"),
+        app_text("LOG_LEVEL", LOG),
     ];
     let r = FakeRunner::new([item(&fs), fly_empty()]);
     let (_, out) = out_of(|o| status::run(&fleet, "staging", &r, o));
     assert!(
-        out.lines().any(|l| l.starts_with("STRIPE_SECRET_KEY")
+        out.lines().any(|l| l.starts_with("app ")
+            && l.contains("STRIPE_SECRET_KEY")
             && l.contains("failed prefix_by_mode (mode payments is not set in this environment)")),
         "{out}"
     );
@@ -492,11 +532,11 @@ fn sync_holds_an_immutable_key_present_on_fly() {
 }
 
 #[test]
-fn sync_rotate_takes_the_bare_key_name() {
+fn sync_rotate_takes_the_product_qualified_name() {
     let on_fly = [("DATABASE_URL", "d1"), ("JWT_KEY", "d2")];
     let r = fake_sync(prod_item(), fly(&on_fly), fly(&on_fly));
     let opts = sync::SyncOpts {
-        rotate: vec!["JWT_KEY".into()],
+        rotate: vec!["app/JWT_KEY".into()],
         ..Default::default()
     };
     sync_of(&r, &opts).0.unwrap();
@@ -504,29 +544,12 @@ fn sync_rotate_takes_the_bare_key_name() {
 }
 
 #[test]
-fn sync_rotate_with_a_product_is_a_config_error_before_any_call() {
-    let r = FakeRunner::new([]);
-    let opts = sync::SyncOpts {
-        rotate: vec!["app/JWT_KEY".into()],
-        ..Default::default()
-    };
-    let e = sync_of(&r, &opts).0.unwrap_err();
-    assert!(
-        matches!(&e, Error::Config(m) if m.contains("expected KEY")),
-        "{e}"
-    );
-    assert!(r.calls.borrow().is_empty());
-}
-
-#[test]
-fn sync_prune_immutable_takes_the_bare_key_name() {
+fn sync_prune_immutable_takes_the_product_qualified_name() {
     let fleet = config::parse(
-        &std::fs::read_to_string("tests/fixtures/simple.toml")
-            .unwrap()
-            .replace(
-                "environments = [\"staging\"]",
-                "environments = [\"staging\"]\nimmutable = true",
-            ),
+        &CONFIG.replace(
+            "[products.app.keys.STAGING_DEBUG_TOKEN]\nkind = \"secret\"\nenvironments = [\"staging\"]",
+            "[products.app.keys.STAGING_DEBUG_TOKEN]\nkind = \"secret\"\nenvironments = [\"staging\"]\nimmutable = true",
+        ),
     )
     .unwrap();
     let on_fly = [
@@ -537,7 +560,7 @@ fn sync_prune_immutable_takes_the_bare_key_name() {
     let r = fake_sync(prod_item(), fly(&on_fly), fly(&on_fly));
     let opts = sync::SyncOpts {
         prune: true,
-        prune_immutable: vec![STAGING_ONLY.into()],
+        prune_immutable: vec!["app/STAGING_DEBUG_TOKEN".into()],
         ..Default::default()
     };
     sync::run(&fleet, "prod", &r, &mut Vec::new(), &opts).unwrap();
@@ -547,20 +570,20 @@ fn sync_prune_immutable_takes_the_bare_key_name() {
 // ---------- item skeleton ----------
 
 #[test]
-fn skeleton_adds_missing_keys_as_top_level_fields() {
+fn skeleton_adds_missing_keys_under_the_product() {
     let r = FakeRunner::new([prod_item_without("DATABASE_URL"), ok()]);
     let (res, out) = out_of(|o| skeleton::run(&simple(), "prod", &r, o));
     res.unwrap();
     // Every key declared for prod: STRIPE (mode-skipped) and DATABASE_URL are missing.
-    assert!(out.contains("added DATABASE_URL (secret, empty)"), "{out}");
     assert!(
-        out.contains("added STRIPE_SECRET_KEY (secret, empty)"),
+        out.contains("added app/DATABASE_URL (secret, empty)")
+            && out.contains("added app/STRIPE_SECRET_KEY (secret, empty)"),
         "{out}"
     );
 }
 
 #[test]
-fn skeleton_writes_fields_in_the_default_section() {
+fn skeleton_writes_fields_in_the_products_section() {
     let r = FakeRunner::new([prod_item_without("DATABASE_URL"), ok()]);
     out_of(|o| skeleton::run(&simple(), "prod", &r, o))
         .0
@@ -573,13 +596,17 @@ fn skeleton_writes_fields_in_the_default_section() {
         .iter()
         .find(|f| f["label"] == "DATABASE_URL")
         .unwrap();
-    assert_eq!(f["section"], serde_json::json!({"id": "add more"}), "{f}");
+    assert_eq!(
+        f["section"],
+        serde_json::json!({"id": "app", "label": "app"}),
+        "{f}"
+    );
 }
 
 #[test]
 fn skeleton_with_every_field_present_makes_no_write() {
     let mut fs = prod_fields();
-    fs.push(top_secret("STRIPE_SECRET_KEY", ""));
+    fs.push(app_secret("STRIPE_SECRET_KEY", ""));
     let r = FakeRunner::new([item(&fs)]);
     let (res, out) = out_of(|o| skeleton::run(&simple(), "prod", &r, o));
     res.unwrap();
@@ -590,11 +617,14 @@ fn skeleton_with_every_field_present_makes_no_write() {
 // ---------- config export ----------
 
 #[test]
-fn config_export_is_a_flat_key_map() {
+fn config_export_is_a_key_map_per_product() {
     let r = FakeRunner::new([prod_item()]);
     let (res, out) = out_of(|o| config_export::run(&simple(), "prod", &r, o));
     res.unwrap();
-    assert_eq!(json_doc(&out), serde_json::json!({"LOG_LEVEL": "info"}));
+    assert_eq!(
+        json_doc(&out),
+        serde_json::json!({"app": {"LOG_LEVEL": "info"}})
+    );
 }
 
 #[test]
@@ -616,21 +646,24 @@ fn cmd(args: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn run_passes_unsectioned_references_for_desired_keys() {
+fn run_passes_product_scoped_references_for_desired_keys() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
-    run::run_for(&simple(), "prod", None, &cmd(&["env"]), &r).unwrap();
+    run::run_for(&simple(), "prod", Some("app"), &cmd(&["env"]), &r).unwrap();
     let env = r.calls.borrow()[0].env.clone();
     assert_eq!(
         env,
         vec![
             (
                 "DATABASE_URL".to_string(),
-                "op://vprd/iprd/DATABASE_URL".to_string()
+                "op://vprd/iprd/app/DATABASE_URL".to_string()
             ),
-            ("JWT_KEY".to_string(), "op://vprd/iprd/JWT_KEY".to_string()),
+            (
+                "JWT_KEY".to_string(),
+                "op://vprd/iprd/app/JWT_KEY".to_string()
+            ),
             (
                 "LOG_LEVEL".to_string(),
-                "op://vprd/iprd/LOG_LEVEL".to_string()
+                "op://vprd/iprd/app/LOG_LEVEL".to_string()
             ),
         ]
     );
@@ -639,19 +672,8 @@ fn run_passes_unsectioned_references_for_desired_keys() {
 #[test]
 fn run_execs_op_run_with_the_command() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
-    run::run_for(&simple(), "prod", None, &cmd(&["env", "-0"]), &r).unwrap();
+    run::run_for(&simple(), "prod", Some("app"), &cmd(&["env", "-0"]), &r).unwrap();
     assert_eq!(argvs(&r), vec!["op run -- env -0"]);
-}
-
-#[test]
-fn run_with_product_under_simple_is_a_config_error_before_any_call() {
-    let r = FakeRunner::new([]);
-    let e = run::run_for(&simple(), "prod", Some("api"), &cmd(&["env"]), &r).unwrap_err();
-    assert!(
-        matches!(&e, Error::Config(m) if m.contains("--product")),
-        "{e}"
-    );
-    assert!(r.calls.borrow().is_empty());
 }
 
 #[test]

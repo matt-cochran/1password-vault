@@ -29,11 +29,22 @@ fn guarded() -> Fleet {
 }
 
 /// The fixture plus a second product, `web`: TOKEN (prod) and OLD (staging only).
+///
+/// The old environment item held both products, so it stays one opt-in boundary group.
 fn two_products() -> Fleet {
-    fleet_with(
-        "[products.web.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
+    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = text
+        .replace("boundaries.allumata =", "boundaries.core =")
+        .replace(
+            "[products.allumata.keys.OPENAI_API_KEY]",
+            "[products.allumata]\nboundary = \"core\"\n\n[products.allumata.keys.OPENAI_API_KEY]",
+        );
+    config::parse(&format!(
+        "{text}\n[products.web]\nboundary = \"core\"\n\n\
+         [products.web.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
          [products.web.keys.OLD]\nkind = \"secret\"\nenvironments = [\"staging\"]\n",
-    )
+    ))
+    .unwrap()
 }
 
 fn with_web_token() -> Output {
@@ -445,20 +456,6 @@ fn sync_product_next_step_keeps_the_product() {
 }
 
 #[test]
-fn sync_product_under_the_simple_profile_is_a_config_error() {
-    let simple = config::load("tests/fixtures/simple.toml").unwrap();
-    let mut out = Vec::new();
-    let res = sync::run(
-        &simple,
-        "prod",
-        &FakeRunner::new([]),
-        &mut out,
-        &product("x"),
-    );
-    assert!(matches!(res, Err(Error::Config(m)) if m.contains("simple profile")));
-}
-
-#[test]
 fn undefined_product_is_a_config_error_naming_the_choices() {
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("nope"));
     assert!(matches!(res, Err(Error::Config(m)) if m.contains("choose one of: allumata")));
@@ -609,13 +606,6 @@ fn status_json_names_its_product() {
     assert_eq!(doc["product"], "web");
 }
 
-#[test]
-fn status_product_under_the_simple_profile_is_a_config_error() {
-    let simple = config::load("tests/fixtures/simple.toml").unwrap();
-    let (res, _) = status_out(&simple, &FakeRunner::new([]), Some("x"));
-    assert!(matches!(res, Err(Error::Config(_))), "{res:?}");
-}
-
 // ---- P22: status without an environment ---------------------------------------------
 
 /// Staging's and prod's items and lists, in environment name order (prod first).
@@ -645,7 +635,10 @@ fn status_without_env_prints_one_line_per_environment() {
 
 #[test]
 fn status_without_env_reads_a_run_only_environment() {
-    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    let f = fleet_with(
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+         [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
     let r = FakeRunner::new([
         item_without("allumata", "OPENAI_API_KEY"),
         complete_item(),
@@ -661,7 +654,7 @@ fn status_without_env_reads_a_run_only_environment() {
 #[test]
 fn status_without_env_counts_run_only_findings() {
     let f = fleet_with(
-        "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
          [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
     );
     let r = FakeRunner::new([
@@ -692,7 +685,10 @@ fn status_without_env_scopes_to_a_product() {
 
 #[test]
 fn status_without_env_json_lists_every_environment() {
-    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    let f = fleet_with(
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+         [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
     let r = FakeRunner::new([
         complete_item(),
         complete_item(),
@@ -874,7 +870,7 @@ fn staged_not_deployed() -> FakeRunner {
 fn expect_plan_rerun_after_an_interrupted_deploy_succeeds() {
     let id = fly_plan_id(&fleet());
     let first = new_secrets();
-    first.responses.borrow_mut().truncate(6);
+    first.responses.borrow_mut().truncate(8);
     first.push_unknown("timeout");
     let o = SyncOpts {
         deploy: true,

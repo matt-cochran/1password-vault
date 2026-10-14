@@ -232,12 +232,11 @@ impl CommandRunner for FakeOp {
 fn fleet() -> Fleet {
     config::parse(
         r#"
-[profile]
-kind = "fleet"
-
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[products.api]
+boundary = "core"
 
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
@@ -247,6 +246,9 @@ rules = { prefix = "sk-" }
 [products.api.keys.LOG_LEVEL]
 kind = "config"
 environments = ["dev"]
+
+[products.web]
+boundary = "core"
 
 [products.web.keys.SESSION_KEY]
 kind = "secret"
@@ -827,26 +829,6 @@ fn run_after_a_persons_tidy_uses_the_convention_reference() {
 }
 
 #[test]
-fn init_creates_a_missing_item_for_a_person() {
-    let dir = tempfile::tempdir().unwrap();
-    let op = FakeOp::person(json!({}));
-    let args = crate::app::init::InitArgs {
-        env: "dev".into(),
-        vault: "dev".into(),
-        item: "app".into(),
-        target: None,
-        fields: Default::default(),
-        profile: Some(crate::app::init::Profile::Simple),
-        force: false,
-        from: None,
-    };
-    let _on = activate();
-    let mut out = Vec::new();
-    let res = crate::app::init::run(&args, dir.path(), &op, &mut out);
-    assert!(res.is_ok() && op.count(&["item", "create"]) == 1, "{res:?}");
-}
-
-#[test]
 fn init_never_creates_an_item_for_a_service_account() {
     let dir = tempfile::tempdir().unwrap();
     let op = FakeOp::new(json!({}), "SERVICE_ACCOUNT");
@@ -871,16 +853,18 @@ fn init_never_creates_an_item_for_a_service_account() {
 fn shared_fleet() -> Fleet {
     config::parse(
         r#"
-[profile]
-kind = "fleet"
-
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[products.api]
+boundary = "core"
 
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
 environments = ["dev"]
+
+[products.worker]
+boundary = "core"
 
 [products.worker.keys.OPENAI_API_KEY]
 kind = "secret"
@@ -935,14 +919,10 @@ fn an_item_edited_twice_reports_tidy_conflict() {
 fn prefixed_fleet() -> Fleet {
     config::parse(
         r#"
-[profile]
-kind = "simple"
-
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.app = { vault_id = "vdev", item_id = "idev" }
 
-[keys.API_TOKEN]
+[products.app.keys.API_TOKEN]
 kind = "secret"
 environments = ["dev"]
 rules = { ensure_prefix = "tok_", regex = "tok_(?:[A-Z]+)" }
@@ -953,7 +933,7 @@ rules = { ensure_prefix = "tok_", regex = "tok_(?:[A-Z]+)" }
 
 /// A stored value a person's tidy rewrites: trailing newline, missing `ensure_prefix`.
 fn unnormalized_item() -> Value {
-    item(&[("", "API_TOKEN", "CONCEALED", "TIDYMARKER\n")])
+    item(&[("app", "API_TOKEN", "CONCEALED", "TIDYMARKER\n")])
 }
 
 fn token_value(op: &FakeOp) -> String {
@@ -975,14 +955,14 @@ fn a_persons_tidy_writes_the_normalized_value() {
     let person = FakeOp::person(unnormalized_item());
     token_value(&person);
     assert_eq!(
-        person.field(None, "API_TOKEN").unwrap()["value"],
+        person.field(Some("app"), "API_TOKEN").unwrap()["value"],
         "tok_TIDYMARKER"
     );
 }
 
 fn token_in_child_env(op: &FakeOp) -> String {
     let _on = activate();
-    crate::app::run::run(&prefixed_fleet(), "dev", "", &["true".into()], op).unwrap();
+    crate::app::run::run(&prefixed_fleet(), "dev", "app", &["true".into()], op).unwrap();
     op.child_env
         .borrow()
         .iter()
@@ -996,7 +976,7 @@ fn token_in_child_env(op: &FakeOp) -> String {
 #[test]
 fn run_as_a_read_only_identity_gives_the_child_a_reference() {
     let service = FakeOp::new(unnormalized_item(), "SERVICE_ACCOUNT");
-    assert_eq!(token_in_child_env(&service), "op://vdev/idev/API_TOKEN");
+    assert_eq!(token_in_child_env(&service), "op://vdev/idev/app/API_TOKEN");
 }
 
 #[test]
@@ -1013,8 +993,8 @@ fn run_as_a_read_only_identity_warns_once_per_fixable_key() {
     assert_eq!(
         warnings,
         [
-            "API_TOKEN has a fixable formatting problem in 1Password; run as yourself (opv login \
-          dev) and opv will tidy it"
+            "app/API_TOKEN has a fixable formatting problem in 1Password; run as yourself (opv \
+          login dev) and opv will tidy it"
         ]
     );
 }
@@ -1029,7 +1009,7 @@ fn run_after_a_persons_tidy_does_not_warn() {
 #[test]
 fn run_after_a_persons_tidy_gives_the_child_a_reference() {
     let person = FakeOp::person(unnormalized_item());
-    assert_eq!(token_in_child_env(&person), "op://vdev/idev/API_TOKEN");
+    assert_eq!(token_in_child_env(&person), "op://vdev/idev/app/API_TOKEN");
 }
 
 #[test]
@@ -1340,83 +1320,6 @@ fn run_after_a_persons_failed_tidy_points_at_the_note() {
         person.notes().contains("opv could not tidy it in this run"),
         "{}",
         person.notes()
-    );
-}
-
-fn simple_fleet() -> Fleet {
-    config::parse(
-        r#"
-[profile]
-kind = "simple"
-
-[environments.dev]
-vault_id = "vdev"
-item_id = "idev"
-
-[keys.LOG_LEVEL]
-kind = "config"
-environments = ["dev"]
-"#,
-    )
-    .unwrap()
-}
-
-/// One item shared by a simple and a fleet configuration (M1).
-fn shared_item() -> Value {
-    item(&[
-        ("", "LOG_LEVEL", "STRING", "info"),
-        ("api", "OPENAI_API_KEY", "CONCEALED", "sk-TIDYMARKER"),
-        ("api", "LOG_LEVEL", "STRING", "debug"),
-        ("web", "SESSION_KEY", "CONCEALED", "s-TIDYMARKER"),
-    ])
-}
-
-fn both(op: &FakeOp) {
-    let _on = activate();
-    read(&fleet(), "dev", op).unwrap();
-    read(&simple_fleet(), "dev", op).unwrap();
-}
-
-#[test]
-fn simple_and_fleet_configurations_sharing_an_item_settle() {
-    let op = FakeOp::person(shared_item());
-    both(&op);
-    let settled = op.edits();
-    both(&op);
-    both(&op);
-    assert_eq!(op.edits(), settled);
-}
-
-#[test]
-fn a_fleet_tidy_never_moves_a_simple_configurations_top_level_key() {
-    let op = FakeOp::person(shared_item());
-    tidied(&op);
-    assert_eq!(op.field(None, "LOG_LEVEL").unwrap()["value"], "info");
-}
-
-#[test]
-fn a_simple_tidy_never_moves_a_fleet_configurations_field() {
-    let op = FakeOp::person(item(&[("api", "LOG_LEVEL", "STRING", "debug")]));
-    let _on = activate();
-    read(&simple_fleet(), "dev", &op).unwrap();
-    assert_eq!(
-        op.field(Some("api"), "LOG_LEVEL").unwrap()["value"],
-        "debug"
-    );
-}
-
-#[test]
-fn a_field_left_for_the_other_configuration_is_named_in_one_note() {
-    let op = FakeOp::person(item(&[("api", "LOG_LEVEL", "STRING", "debug")]));
-    let _on = activate();
-    read(&simple_fleet(), "dev", &op).unwrap();
-    assert_eq!(
-        op.notes()
-            .matches("where a fleet-profile configuration keeps it")
-            .count(),
-        1,
-        "{}",
-        op.notes()
     );
 }
 
