@@ -12,8 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Error code for a state vault shared by targets that read different boundaries (FR-58).
 pub const STATE_VAULT_WIDER_THAN_VALUES: &str = "state_vault_wider_than_values";
 
-/// One target: its name, its state vault and the boundaries its deploy identity reads.
+/// One target: its environment, name, state vault and the boundaries its deploy identity
+/// reads.
 pub struct TargetReads<'a> {
+    pub environment: &'a str,
     pub target: &'a str,
     pub state_vault_id: &'a str,
     pub boundaries: std::collections::BTreeSet<&'a str>,
@@ -24,7 +26,9 @@ pub struct TargetReads<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WiderThanValues {
     pub state_vault_id: String,
+    /// The group's targets as `<environment>/<target>`, sorted.
     pub targets: Vec<String>,
+    pub environment: String,
     pub target: String,
     pub unreadable_boundary: String,
 }
@@ -53,13 +57,17 @@ pub fn wider_than_values(targets: &[TargetReads<'_>]) -> Vec<WiderThanValues> {
         for target in &group {
             group_boundaries.extend(target.boundaries.iter().copied());
         }
-        let mut names: Vec<String> = group.iter().map(|t| t.target.to_string()).collect();
+        let mut names: Vec<String> = group
+            .iter()
+            .map(|t| format!("{}/{}", t.environment, t.target))
+            .collect();
         names.sort();
         for target in &group {
             for boundary in group_boundaries.difference(&target.boundaries) {
                 out.push(WiderThanValues {
                     state_vault_id: state_vault_id.to_string(),
                     targets: names.clone(),
+                    environment: target.environment.to_string(),
                     target: target.target.to_string(),
                     unreadable_boundary: (*boundary).to_string(),
                 });
@@ -68,11 +76,18 @@ pub fn wider_than_values(targets: &[TargetReads<'_>]) -> Vec<WiderThanValues> {
     }
 
     out.sort_by(|a, b| {
-        (&a.state_vault_id, &a.target, &a.unreadable_boundary).cmp(&(
-            &b.state_vault_id,
-            &b.target,
-            &b.unreadable_boundary,
-        ))
+        (
+            &a.state_vault_id,
+            &a.environment,
+            &a.target,
+            &a.unreadable_boundary,
+        )
+            .cmp(&(
+                &b.state_vault_id,
+                &b.environment,
+                &b.target,
+                &b.unreadable_boundary,
+            ))
     });
     out.dedup();
     out
@@ -83,13 +98,15 @@ impl WiderThanValues {
     /// with the command that gives the target its own state vault (FR-58, §6.3).
     pub fn sentence(&self) -> String {
         format!(
-            "state vault {} is shared by targets {}, but {} cannot read boundary {}; that \
+            "state vault {} is shared by targets {}, but {}/{} cannot read boundary {}; that \
              target's deploy identity would read evidence for values it cannot read. Give each \
-             target its own state vault (opv bootstrap --state <env> --target {}).",
+             target its own state vault (opv bootstrap --state {} --target {}).",
             self.state_vault_id,
             self.targets.join(", "),
+            self.environment,
             self.target,
             self.unreadable_boundary,
+            self.environment,
             self.target,
         )
     }

@@ -7,6 +7,7 @@ use super::*;
 
 fn reads<'a>(target: &'a str, state_vault_id: &'a str, boundaries: &[&'a str]) -> TargetReads<'a> {
     TargetReads {
+        environment: "prod",
         target,
         state_vault_id,
         boundaries: boundaries.iter().copied().collect(),
@@ -21,7 +22,8 @@ fn finding(
 ) -> WiderThanValues {
     WiderThanValues {
         state_vault_id: state_vault_id.into(),
-        targets: targets.iter().map(|t| (*t).to_string()).collect(),
+        targets: targets.iter().map(|t| format!("prod/{t}")).collect(),
+        environment: "prod".into(),
         target: target.into(),
         unreadable_boundary: unreadable_boundary.into(),
     }
@@ -114,8 +116,9 @@ fn sentence_returns_the_documented_text() {
     let finding = finding("v1", &["api", "web"], "api", "staging");
     assert_eq!(
         finding.sentence(),
-        "state vault v1 is shared by targets api, web, but api cannot read boundary staging; \
-         that target's deploy identity would read evidence for values it cannot read. \
-         Give each target its own state vault (opv bootstrap --state <env> --target api)."
+        "state vault v1 is shared by targets prod/api, prod/web, but prod/api cannot read \
+         boundary staging; that target's deploy identity would read evidence for values it \
+         cannot read. Give each target its own state vault (opv bootstrap --state prod \
+         --target api)."
     );
 }

@@ -909,7 +909,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
 /// never compare equal.
 fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
     use crate::domain::placement::{STATE_VAULT_WIDER_THAN_VALUES, TargetReads, wider_than_values};
-    let mut reads: Vec<(&str, &str, BTreeSet<String>)> = Vec::new();
+    let mut reads: Vec<(&str, &str, &str, BTreeSet<String>)> = Vec::new();
     for (env_name, env) in &fleet.environments {
         for (name, target) in &env.targets {
             let mut boundaries = BTreeSet::new();
@@ -931,12 +931,13 @@ fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
                     }
                 }
             }
-            reads.push((name, &target.state_vault_id, boundaries));
+            reads.push((env_name, name, &target.state_vault_id, boundaries));
         }
     }
     let targets: Vec<TargetReads<'_>> = reads
         .iter()
-        .map(|(target, vault, boundaries)| TargetReads {
+        .map(|(environment, target, vault, boundaries)| TargetReads {
+            environment,
             target,
             state_vault_id: vault,
             boundaries: boundaries.iter().map(String::as_str).collect(),
@@ -951,8 +952,9 @@ fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
     }
 }
 
-/// FR-57: every product with a key desired in an environment, and every source such a key
-/// reads with `from`, has its boundary recorded there (`boundary_missing`, next step
+/// FR-57: every product with a team key desired in an environment, and every source such a
+/// key reads with `from`, has its boundary recorded there (personal keys live in each
+/// person's own item, FR-55, so they need none) (`boundary_missing`, next step
 /// `opv bootstrap`); a recorded boundary no such product uses is refused, so the
 /// configuration never names a vault nothing reads.
 fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
@@ -962,7 +964,7 @@ fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
             let desired: Vec<&KeySpec> = p
                 .keys
                 .values()
-                .filter(|k| k.environments.iter().any(|e| e == env_name))
+                .filter(|k| !k.personal && k.environments.iter().any(|e| e == env_name))
                 .collect();
             if desired.is_empty() {
                 continue;
@@ -2463,7 +2465,8 @@ environments = ["prod"]
         ));
         assert!(
             m.starts_with(
-                "state_vault_wider_than_values: state vault sweb is shared by targets other, site"
+                "state_vault_wider_than_values: state vault sweb is shared by targets prod/other, \
+                 prod/site"
             ),
             "{m}"
         );
@@ -3092,8 +3095,9 @@ environments = ["prod"]
 
     #[test]
     fn products_share_a_personal_value_through_a_personal_source() {
+        // A source holding only personal keys needs no boundary (FR-55, FR-57).
         let text = team(
-            true,
+            false,
             "[products.shared]\nsource_only = true\n\
              [products.shared.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\n\
              [products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\nfrom = \"shared/OPENAI_API_KEY\"\n",
