@@ -18,6 +18,11 @@ opv schema                 # every command, flag, effect, JSON document and erro
 opv ready --json           # what is ready, what is not, who acts next (read-only)
 ```
 
+`opv ready --json` and `opv doctor --env <env> --json` never write 1Password, whoever is
+signed in: they are the safe readiness checks. Other commands that read an item may tidy its
+layout when run in the user's own session (the schema's `tidies_1password`); when a layout
+needs tidying, the explicit repair is `opv tidy <env>` (writes 1Password: ask first).
+
 Read the rules in `opv guide agent` before anything else. In short: you never see, ask for,
 type or store a secret value; the user signs in and types values only at 1Password's own
 prompts or in the 1Password app; ask before anything that writes (the schema's

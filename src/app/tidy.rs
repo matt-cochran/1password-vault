@@ -223,6 +223,42 @@ pub(crate) struct Read {
 /// The environment's item, read tolerantly and tidied when a person runs opv (see the
 /// module docs). Errors only when the item cannot be read at all.
 pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Result<Read, Error> {
+    read_as(fleet, env_name, r, Mode::Tidy)
+}
+
+/// The environment's item, read tolerantly and never written, whoever runs opv (#113):
+/// `doctor`'s read, so a machine caller holding a person's session can rely on its
+/// `reads` effect. No `op whoami`; a layout a person's run would tidy gets one note per
+/// environment naming `opv tidy <env>`, the explicit repair.
+pub(crate) fn inspect(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Result<Read, Error> {
+    read_as(fleet, env_name, r, Mode::Inspect)
+}
+
+/// Whether a read may tidy the item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// Tidy when a person runs opv ([`read`]).
+    Tidy,
+    /// Never write ([`inspect`]).
+    Inspect,
+}
+
+/// The note an [`inspect`] read gives for a layout a person's run would tidy.
+pub(crate) fn inspect_note(env_name: &str) -> String {
+    format!(
+        "1Password ({env_name}) is not laid out the way opv expects; read it as it is (this \
+         command never writes 1Password). To tidy it, a signed-in person runs: opv tidy \
+         {env_name}"
+    )
+}
+
+/// [`read`] or [`inspect`], by `mode`.
+pub(crate) fn read_as(
+    fleet: &Fleet,
+    env_name: &str,
+    r: &dyn CommandRunner,
+    mode: Mode,
+) -> Result<Read, Error> {
     let env = fleet.environment(env_name)?;
     let item = onepassword::read_whole(r, env)?;
     let (layout, stamp) = onepassword_tidy::parse(item.raw())?;
@@ -260,6 +296,12 @@ pub(crate) fn read(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner) -> Resu
     // never rewritten.
     if let Some(what) = onepassword_tidy::unprovable(item.raw()) {
         r.note(&unprovable_note(env_name, what));
+        return Ok(done(layout, Vec::new(), None, first, None));
+    }
+    if mode == Mode::Inspect {
+        if plan.fixes_layout() && first_note(env_name) {
+            r.note(&inspect_note(env_name));
+        }
         return Ok(done(layout, Vec::new(), None, first, None));
     }
     let who = identity(r);

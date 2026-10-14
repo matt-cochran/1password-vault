@@ -43,6 +43,7 @@ pub mod personal;
 mod pinned_tests;
 pub(crate) mod preflight;
 pub mod ready;
+pub mod repair;
 pub mod run;
 pub mod setup;
 mod setup_import;
@@ -148,17 +149,8 @@ pub(crate) fn read_and_plan_versioned(
     Ok((plan, listed, read.version))
 }
 
-/// The environment's item fields: its one read by IDs (FR-13), tolerant and tidied when a
-/// person runs opv (FR-43, [`tidy::read`]).
-pub(crate) fn read_fields(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &dyn CommandRunner,
-) -> Result<Vec<plan::ItemField>, Error> {
-    Ok(read_item_fields(fleet, env_name, r)?.0)
-}
-
-/// [`read_fields`] with the item's `version` integer (FR-41).
+/// The environment's item fields and `version` integer (FR-41): its one read by IDs
+/// (FR-13), tolerant and tidied when a person runs opv (FR-43, [`tidy::read`]).
 pub(crate) fn read_item_fields(
     fleet: &Fleet,
     env_name: &str,

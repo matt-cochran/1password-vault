@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-14
+
+A safety fix for assistants working in a person's signed-in session: `opv doctor` and `opv ready` now never write 1Password, and the layout repair is an explicit command. No configuration change is required to upgrade.
+
+### Fixed
+
+- **`opv doctor` and `opv ready` never write 1Password** ([#113](https://github.com/matt-cochran/1password-vault/issues/113)): the schema says `doctor` only reads, yet run in a person's signed-in session its item check and `--settings` check could tidy the item's layout (one `op item edit`, bumping its version), and so could the `ready` receipt. Both now read the item as it is, whoever runs them, so an agent holding a person's session can rely on them as the readiness check; when the layout needs a tidy, `doctor` names the explicit repair.
+
+### Added
+
+- **`opv tidy <env> [--json]`** ([#113](https://github.com/matt-cochran/1password-vault/issues/113)): the explicit layout repair, the same guarded, verified, non-destructive tidy a person's reads run (nothing deleted; displaced fields kept in `opv · kept`). It refuses unless a person signed in with their own session runs it; `opv schema` lists it as `writes_1password`, asked first.
+- **`tidies_1password` in `opv schema`**: per command, whether a person's run may tidy the item's layout. `doctor` and `ready` are `false`.
+
 ## [0.6.0] - 2026-10-13
 
 A terminal UI (`opv ui`) over everything opv knows, a one-step start from an existing `.env`, per-developer personal keys, GitHub Actions as a target, settings health checks, verifiable delivery receipts per product, and a readiness receipt that people and agents share. No configuration change is required to upgrade.
@@ -239,7 +252,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/matt-cochran/1password-vault/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/matt-cochran/1password-vault/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/matt-cochran/1password-vault/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/matt-cochran/1password-vault/compare/v0.3.0...v0.4.0

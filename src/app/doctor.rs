@@ -624,8 +624,9 @@ fn item_check(
         return report.skip(ITEM_CHECK, "not checked (undefined environment)".into());
     };
     let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
-    // Tolerant, and tidied when a person runs doctor (FR-43).
-    let item = match super::tidy::read(fleet, env_name, r) {
+    // Tolerant and never written, whoever runs doctor (#113): a layout a person's run would
+    // tidy is noted with the explicit `opv tidy <env>`.
+    let item = match super::tidy::inspect(fleet, env_name, r) {
         Ok(i) => i,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
@@ -707,7 +708,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
     let mut read = Vec::new();
     let mut unread = Vec::new();
     for (name, env) in ordered {
-        match super::read_fields(fleet, name, r) {
+        match super::tidy::inspect(fleet, name, r).map(|i| i.fields) {
             Ok(fields) => read.push((name.as_str(), env, fields)),
             Err(_) => unread.push(name.as_str()),
         }
