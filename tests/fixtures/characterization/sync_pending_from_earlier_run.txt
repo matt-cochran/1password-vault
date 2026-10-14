@@ -9,10 +9,10 @@ $ op whoami --format json
 $ op item get iprd --vault vprd --format json --cache=false
 $ flyctl secrets deploy --app mcproductlabs-portfolio-production
 --- stdout
-delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY, FLEET__ALLUMATA__STRIPE_SECRET_KEY; the target lists no version for: FLEET__ALLUMATA__STRIPE_SECRET_KEY
-unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
-held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
-deployed: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
-summary: written 0 · unchanged 1 · held 1 · deployed yes (1 pending from an earlier run) · pending 0 · pruned 0 · kept 0 · skipped 1
+prod/portfolio: delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY, FLEET__ALLUMATA__STRIPE_SECRET_KEY; the target lists no version for: FLEET__ALLUMATA__STRIPE_SECRET_KEY
+prod/portfolio: unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+prod/portfolio: held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
+prod/portfolio: deployed: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+prod/portfolio: summary: written 0 · unchanged 1 · held 1 · deployed yes (1 pending from an earlier run) · pending 0 · pruned 0 · kept 0 · skipped 1
 --- result
 Ok(())

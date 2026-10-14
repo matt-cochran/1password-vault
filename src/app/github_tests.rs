@@ -569,7 +569,7 @@ fn sync_deploy_says_github_applies_each_write_at_once() {
     res.unwrap();
     assert!(
         out.lines()
-            .any(|l| l == "nothing to deploy: GitHub applies each write at once"),
+            .any(|l| l == "ci/app: nothing to deploy: GitHub applies each write at once"),
         "{out}"
     );
 }

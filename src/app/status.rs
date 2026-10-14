@@ -899,7 +899,7 @@ mod tests {
         let out = text_of(&out);
         assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
         assert!(
-            out.lines().any(|l| l.starts_with("allumata")
+            out.lines().any(|l| l.starts_with("portfolio  allumata")
                 && l.contains("SMTP_PASS")
                 && l.contains("failed refuse_in (")),
             "{out}"
@@ -980,7 +980,7 @@ mod tests {
         // (config); the Stripe key is skipped.
         assert_eq!(
             out.lines().next().unwrap(),
-            "prod: 4 keys · 3 saved · 1 skipped · 0 findings · 1 not yet on Fly",
+            "prod/portfolio: 4 keys · 3 saved · 1 skipped · 0 findings · 1 not yet on Fly",
             "{out}"
         );
     }
