@@ -105,7 +105,6 @@ fn add_args(env: &str, name: &str) -> AddArgs {
     AddArgs {
         env: env.into(),
         name: name.into(),
-        provider: "fly".into(),
         fields: BTreeMap::from([("fly-app".to_string(), format!("{name}-app"))]),
         project: Some("myapp".into()),
         ..AddArgs::default()
@@ -307,14 +306,38 @@ fn a_source_only_product_writes_nothing() {
 #[test]
 fn an_unknown_provider_is_refused_naming_it() {
     let mut args = add_args("dev", "site");
-    args.provider = "aws".into();
+    args.provider = Some("aws".into());
     let a = add_to(FLEET, args);
     assert!(a.err().contains("aws"), "{}", a.err());
 }
 
 #[test]
+fn an_explicit_provider_writes_its_section() {
+    let mut args = add_args("dev", "site");
+    args.provider = Some("fly".into());
+    assert!(add_to(FLEET, args).text().contains("site-app"));
+}
+
+#[test]
+fn without_provider_or_its_options_add_is_refused_naming_both() {
+    let mut args = add_args("dev", "site");
+    args.fields.clear();
+    let a = add_to(FLEET, args);
+    assert!(a.err().contains("--provider"), "{}", a.err());
+}
+
+#[test]
+fn options_of_two_providers_are_refused() {
+    let mut args = add_args("dev", "site");
+    args.fields.insert("github-repo".into(), "org/site".into());
+    let a = add_to(FLEET, args);
+    assert!(a.err().contains("a target has one provider"), "{}", a.err());
+}
+
+#[test]
 fn a_required_provider_option_missing_is_refused_naming_it() {
     let mut args = add_args("dev", "site");
+    args.provider = Some("fly".into());
     args.fields.clear();
     let a = add_to(FLEET, args);
     assert!(a.err().contains("--fly-app"), "{}", a.err());

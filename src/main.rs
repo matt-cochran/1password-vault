@@ -345,8 +345,8 @@ declared field is added, empty. Nothing is synced, deployed or given a value. Ne
 
 const TARGET_ADD_QUICK: &str = "\
 Examples:
-  opv target add prod p-overflow --provider fly --fly-app p-overflow-prod --products p
-  opv target add staging site --provider fly --fly-app site-staging --dry-run";
+  opv target add prod p-overflow --fly-app p-overflow-prod --products p
+  opv target add staging site --fly-app site-staging --dry-run";
 
 const TARGET_ADD_MORE: &str = "\
 Declares one named deployment target under [environments.<env>.targets.<name>]: the
@@ -1073,9 +1073,10 @@ enum TargetCmd {
         env: String,
         /// New target name (^[a-z][a-z0-9-]*$); there is no default.
         name: String,
-        /// Provider section: fly, azure, kubernetes or github; its options follow.
+        /// Provider section: fly, azure, kubernetes or github; inferred from its options
+        /// (for example --fly-app) when omitted.
         #[arg(long, value_name = "PROVIDER")]
-        provider: String,
+        provider: Option<String>,
         /// Products this target delivers (repeat or comma-separate); without it, every
         /// non-source-only product.
         #[arg(long, value_delimiter = ',')]

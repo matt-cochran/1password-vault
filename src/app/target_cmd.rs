@@ -38,8 +38,9 @@ pub struct AddArgs {
     pub env: String,
     /// New target name (`^[a-z][a-z0-9-]*$`).
     pub name: String,
-    /// Provider section: `fly`, `azure`, `kubernetes`, `github`.
-    pub provider: String,
+    /// `--provider`: `fly`, `azure`, `kubernetes`, `github`; `None` infers it from the
+    /// provider options given, as `opv init` does.
+    pub provider: Option<String>,
     /// The provider's options, by flag (`fly-app` → its value); validated against the
     /// provider's [`InitField`]s.
     pub fields: BTreeMap<String, String>,
@@ -202,19 +203,21 @@ fn add_inner(
     )
 }
 
-/// The provider named by `--provider`, with the given options checked against its
-/// [`InitField`]s: unknown option, another provider's option, or a missing required one is
-/// refused, exactly as `opv init --target` does (H3).
+/// The provider named by `--provider`, or else the one provider whose options were given,
+/// with the options checked against its [`InitField`]s: unknown option, another provider's
+/// option, or a missing required one is refused, exactly as `opv init --target` does (H3).
 fn provider_and_values(
     args: &AddArgs,
 ) -> Result<(&'static dyn Provider, BTreeMap<&'static str, String>), Error> {
-    let provider = registry::find(&args.provider).ok_or_else(|| {
-        cfg(format!(
-            "--provider {:?} is not a provider; known: {}",
-            args.provider,
-            registry::sections().join(", ")
-        ))
-    })?;
+    let provider = match &args.provider {
+        Some(named) => registry::find(named).ok_or_else(|| {
+            cfg(format!(
+                "--provider {named:?} is not a provider; known: {}",
+                registry::sections().join(", ")
+            ))
+        })?,
+        None => inferred_provider(args)?,
+    };
     if provider.init_fields().is_empty() {
         return Err(cfg(format!(
             "opv target add cannot write a {} target yet; add [environments.{}.targets.{}] by \
@@ -254,6 +257,36 @@ fn provider_and_values(
         )));
     }
     Ok((provider, values))
+}
+
+/// The one provider whose options `args` gives, when `--provider` is omitted: none or
+/// several are refused, naming what to pass.
+fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
+    let mut owners: Vec<&'static dyn Provider> = Vec::new();
+    for flag in args.fields.keys() {
+        if let Some((p, _)) = find_field(flag)
+            && !owners.iter().any(|o| o.section() == p.section())
+        {
+            owners.push(p);
+        }
+    }
+    match owners.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(cfg(format!(
+            "opv target add needs the target's provider options (for example --fly-app <app>) \
+             or --provider <{}>",
+            registry::sections().join("|")
+        ))),
+        _ => Err(cfg(format!(
+            "the options given belong to {} providers ({}); a target has one provider",
+            owners.len(),
+            owners
+                .iter()
+                .map(|p| p.section())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 /// The provider field flag `flag` (for example `fly-app`), across every registered

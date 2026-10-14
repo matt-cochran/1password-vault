@@ -662,7 +662,7 @@ fn explain_undeclared_bare_key_under_fleet_exits_2() {
 
 // --- init (FR-23) ---
 
-const INIT: [&str; 8] = [
+const INIT: [&str; 10] = [
     "init",
     "staging",
     "--vault",
@@ -671,6 +671,8 @@ const INIT: [&str; 8] = [
     "i",
     "--fly-app",
     "app",
+    "--target-name",
+    "web",
 ];
 
 #[test]
@@ -694,7 +696,7 @@ fn init_in_an_existing_project_suggests_add_env() {
     let (_, _, err) = opv_in(dir.path(), &INIT);
     assert_eq!(
         err.lines().last(),
-        Some("Next: opv init staging --vault v --item i --fly-app app --add-env"),
+        Some("Next: opv init staging --vault v --item i --add-env"),
         "{err}"
     );
 }
