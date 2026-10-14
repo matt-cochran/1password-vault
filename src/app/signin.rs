@@ -111,51 +111,6 @@ fn open_at<'a>(
     Ok(runner)
 }
 
-/// `doctor --env` (owner ruling): like [`open`] for a command that reaches the target, but
-/// a deploy sign-in that fails does not stop the run. The runner comes back without a
-/// deploy identity, beside the error, so doctor reports it as one check and skips only
-/// the target checks that need those credentials.
-pub fn open_for_doctor<'a>(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &'a dyn CommandRunner,
-) -> (EnvRunner<'a>, Option<DeployFailure>) {
-    open_for_doctor_on(fleet, env_name, r, &Host::detect)
-}
-
-/// A failed deploy sign-in for `doctor --env` (FR-40): the error, and beside it the failed
-/// call's scrubbed stderr excerpt (`  az said: …`, NR-31). The excerpt is never part of the
-/// error's text, so it reaches stderr only and never a JSON document (M2, SR-1).
-#[derive(Debug)]
-pub struct DeployFailure {
-    pub error: Error,
-    pub excerpt: Option<crate::scrub::Excerpt>,
-}
-
-/// [`open_for_doctor`] on a given host (tests).
-pub fn open_for_doctor_on<'a>(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &'a dyn CommandRunner,
-    host: &dyn Fn() -> Host,
-) -> (EnvRunner<'a>, Option<DeployFailure>) {
-    let mut runner = match open_on(fleet, env_name, r, Reach::Store, host) {
-        Ok(runner) => runner,
-        Err(e) => {
-            let failure = DeployFailure {
-                error: e,
-                excerpt: None,
-            };
-            return (EnvRunner::new(r, None), Some(failure));
-        }
-    };
-    let failed = runner
-        .deploy_sign_in(fleet, env_name, None)
-        .err()
-        .map(with_excerpt);
-    (runner, failed)
-}
-
 /// A deploy sign-in error (FR-40) with its stable code: a credential the target rejected is
 /// `deploy_credentials_failed` (exit 7); a missing CLI or field, a refused private
 /// directory or an unknown outcome keeps its own code and exit.
@@ -164,15 +119,6 @@ fn deploy_failed(e: Error) -> Error {
         e @ Error::Auth(_) => e.with_code(crate::error::Code::DeployCredentialsFailed),
         e => e,
     }
-}
-
-/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) taken now,
-/// as doctor runs more calls before it prints and the excerpt would otherwise be dropped.
-/// It is kept beside the error, never in its text: doctor prints it under the FAIL line in
-/// text output only (M2).
-fn with_excerpt(e: Error) -> DeployFailure {
-    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
-    DeployFailure { error: e, excerpt }
 }
 
 impl<'a> EnvRunner<'a> {

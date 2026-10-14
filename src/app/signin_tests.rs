@@ -168,35 +168,6 @@ fn token_of_the_wrong_type_is_refused() {
     assert!(e.contains("must be a Password (concealed) field"), "{e}");
 }
 
-/// Owner ruling: `doctor --env` gets the failed deploy sign-in back instead of stopping.
-#[test]
-fn doctor_gets_a_failed_deploy_sign_in_back() {
-    let fl = fleet_with_credentials();
-    let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)])]);
-    let (_, failed) = open_for_doctor_on(&fl, "prod", &r, &linux);
-    assert!(failed.is_some_and(|f| {
-        f.error
-            .to_string()
-            .contains("field FLY_API_TOKEN is missing")
-    }));
-}
-
-/// After a failed deploy sign-in, doctor's `op` calls still carry the account.
-#[test]
-fn doctor_runner_keeps_the_account_after_a_failed_deploy_sign_in() {
-    let fl = fleet_with_credentials();
-    let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)]), complete_item()]);
-    let (runner, _) = open_for_doctor_on(&fl, "prod", &r, &linux);
-    let prod = fl.environment("prod").unwrap();
-    crate::adapters::onepassword::read_item(
-        &runner,
-        prod,
-        prod.boundaries.values().next().unwrap(),
-    )
-    .unwrap();
-    assert_eq!(env_of(&r.calls.borrow()[1], "OP_ACCOUNT"), Some(ACCOUNT));
-}
-
 /// A Kubernetes runtime keeping its secrets in a Key Vault (`secrets_in`) signs `az` in
 /// with the deploy credentials: `az` writes the secrets, kubectl uses the kubeconfig.
 #[test]
@@ -264,9 +235,9 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
 /// (NR-31, UX1), for the text output only.
 #[test]
 fn doctor_deploy_failure_keeps_the_excerpt_beside_the_error() {
-    let f = doctor_signed_out_failure();
+    let (_, excerpt) = doctor_signed_out_failure();
     assert_eq!(
-        f.excerpt.map(|x| x.render()).as_deref(),
+        excerpt.map(|x| x.render()).as_deref(),
         Some("  op said: [ERROR] not signed in\n"),
     );
 }
@@ -290,10 +261,12 @@ fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
 }
 
 fn doctor_signed_out_deploy_failure() -> Error {
-    doctor_signed_out_failure().error
+    doctor_signed_out_failure().0
 }
 
-fn doctor_signed_out_failure() -> super::DeployFailure {
+/// What `doctor --env` gets from a failed per-target deploy sign-in: the error, and the
+/// failed call's scrubbed excerpt taken right away, as doctor takes it (NR-31, M2).
+fn doctor_signed_out_failure() -> (Error, Option<crate::scrub::Excerpt>) {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([]);
     r.push_with_stderr(crate::runner::Output::failure(1), "[ERROR] not signed in");
@@ -306,8 +279,12 @@ fn doctor_signed_out_failure() -> super::DeployFailure {
             br#"[{"url":"x"}]"#.to_vec(),
         )));
     let tty = Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").tty());
-    crate::host::with_test_host(tty, || open_for_doctor_on(&fl, "prod", &r, &linux).1)
-        .expect("signed out")
+    let e = crate::host::with_test_host(tty, || {
+        open_targeted(&fl, "prod", None, &r, Reach::Target).err()
+    })
+    .expect("signed out");
+    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
+    (e, excerpt)
 }
 
 // ---- FR-41 plan ids on deploy-credential runs and manifest configurations ----
