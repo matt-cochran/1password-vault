@@ -288,9 +288,9 @@ Prints the op:// reference, kind, target name, rules, immutable and guidance, an
 
 const INIT_QUICK: &str = "\
 Examples:
-  opv init dev                          # run-only; vault myapp-dev, item \"myapp · dev values\"
-  opv init prod --fly-app myapp         # deploys to Fly
-  opv init dev --from .env --apply      # start from an existing .env (without --apply: the plan)";
+  opv init dev --product api            # run-only; vault myapp-api-dev, item \"myapp · api · dev values\"
+  opv init prod --product api --fly-app myapp --target-name web   # deploys to Fly
+  opv init dev --product api --from .env --apply   # start from an existing .env (without --apply: the plan)";
 
 const ADOPT_QUICK: &str = "\
 Examples:
@@ -763,33 +763,32 @@ enum Cmd {
     Init {
         /// Environment name to declare (for example staging or prod).
         env: String,
-        /// Vault title, matched exactly; defaults to <project>-<env> (created if missing).
+        /// Vault title, matched exactly; defaults to <project>-<product>-<env> (created if
+        /// missing; <product> is core without --product).
         #[arg(long)]
         vault: Option<String>,
         /// Item title in that vault, matched exactly; its field names and types are read
-        /// once, never its values. Defaults to "<project> · <env> values".
+        /// once, never its values. Defaults to "<project> · <product> · <env> values".
         #[arg(long)]
         item: Option<String>,
+        /// Product the item's unsectioned fields belong to (the app's role, such as api);
+        /// required when it has any. Each named section is a product of its own.
+        #[arg(long)]
+        product: Option<String>,
         /// Deployment target of the environment; its options follow (--<target>-<field>).
         /// Inferred from those options when omitted; omit both for a run-only environment
         /// used for local development. Nothing is looked up.
         #[arg(long, value_name = "PROVIDER")]
         target: Option<String>,
+        /// Name of the target, chosen by you (^[a-z][a-z0-9-]*$); required with --target.
+        #[arg(long, value_name = "NAME")]
+        target_name: Option<String>,
         /// Add this environment to the existing configuration (a secrets.toml or the
         /// project's manifest, found like other commands) instead of writing a new one;
         /// comments are kept, and every declared key the item has includes the environment.
-        #[arg(long, conflicts_with_all = ["force", "profile"])]
+        /// It writes no target: add one with opv target add.
+        #[arg(long, conflicts_with_all = ["force", "target", "target_name"])]
         add_env: bool,
-        /// Profile to write, simple or fleet; without it, it follows the item's shape.
-        /// Hidden from help (one screen, H9): the mixed-shape error names it.
-        #[arg(
-            long,
-            value_parser = ["simple", "fleet"],
-            hide_possible_values = true,
-            hide_short_help = true,
-            hide_long_help = true
-        )]
-        profile: Option<String>,
         /// Overwrite an existing secrets.toml. Hidden from help (H9): the refusal names it.
         #[arg(long, hide_short_help = true, hide_long_help = true)]
         force: bool,
@@ -808,7 +807,12 @@ enum Cmd {
         account: Option<String>,
         /// Start from a private .env: declare every key (kind by name; --config-key or
         /// --secret-key KEY to change one) and, with --apply, import the values, verified.
-        #[arg(long, value_name = "FILE", conflicts_with_all = ["add_env", "profile"])]
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with = "add_env",
+            requires = "product"
+        )]
         from: Option<std::path::PathBuf>,
         /// With --from: declare this key as config whatever its name (repeatable).
         #[arg(
@@ -2512,8 +2516,9 @@ fn run_init(
             env,
             vault,
             item,
+            product,
             target,
-            profile,
+            target_name,
             force,
             ..
         } = &cli.cmd
@@ -2533,14 +2538,17 @@ fn run_init(
         if let Some(i) = item {
             again.push_str(&format!(" --item {}", shell_word(i)));
         }
+        if let Some(p) = product {
+            again.push_str(&format!(" --product {}", shell_word(p)));
+        }
         if let Some(t) = &target {
             again.push_str(&format!(" --target {}", shell_word(t)));
         }
         for (flag, value) in init_options {
             again.push_str(&format!(" --{flag} {}", shell_word(value)));
         }
-        if let Some(p) = &profile {
-            again.push_str(&format!(" --profile {p}"));
+        if let Some(n) = target_name {
+            again.push_str(&format!(" --target-name {}", shell_word(n)));
         }
         if *force {
             again.push_str(" --force");
@@ -2630,11 +2638,17 @@ fn init_from_again(
         shell_word(&args.vault),
         shell_word(&args.item)
     );
+    if let Some(p) = &args.product {
+        c.push_str(&format!(" --product {}", shell_word(p)));
+    }
     if let Some(t) = &args.target {
         c.push_str(&format!(" --target {}", shell_word(t)));
     }
     for (flag, value) in init_options {
         c.push_str(&format!(" --{flag} {}", shell_word(value)));
+    }
+    if let Some(n) = &args.target_name {
+        c.push_str(&format!(" --target-name {}", shell_word(n)));
     }
     if file {
         c.push_str(" --file");
@@ -2731,10 +2745,10 @@ fn run_edit(
     }
 }
 
-/// The init arguments, with the vault and item titles defaulted from the project name
-/// (`--project`, else the repository's, else the directory's) when not given: `opv init
-/// dev` alone is enough (found live: two notes, `demo-app` and `opv · demo-app`, and no
-/// way to tell which held the values).
+/// The init arguments, with the vault and item titles defaulted to the boundary titles
+/// (FR-57) of `--product` (else `core`) and the project name (`--project`, else the
+/// repository's, else the directory's) when not given: `opv init dev --product api` alone
+/// is enough.
 fn init_args(
     cmd: Cmd,
     init_options: &std::collections::BTreeMap<String, String>,
@@ -2745,9 +2759,10 @@ fn init_args(
         env,
         vault,
         item,
+        product,
         target,
+        target_name,
         add_env: _,
-        profile,
         force,
         file: _,
         project,
@@ -2766,9 +2781,10 @@ fn init_args(
         (vault, item) => {
             let repo = config_store::git_repo(r);
             let name = config_store::default_project(project.as_deref(), repo.as_deref(), dir)?;
+            let boundary = product.as_deref().unwrap_or(init::SHARED_BOUNDARY);
             (
-                vault.unwrap_or_else(|| init::default_vault(&name, &env)),
-                item.unwrap_or_else(|| init::default_item(&name, &env)),
+                vault.unwrap_or_else(|| opv::domain::naming::boundary_vault(&name, boundary, &env)),
+                item.unwrap_or_else(|| opv::domain::naming::boundary_item(&name, boundary, &env)),
             )
         }
     };
@@ -2776,9 +2792,10 @@ fn init_args(
         env,
         vault,
         item,
+        product,
         target,
+        target_name,
         fields: init_options.clone(),
-        profile: profile.as_deref().map(init::parse_profile).transpose()?,
         force,
         from: from.map(|path| init::FromFile {
             path,

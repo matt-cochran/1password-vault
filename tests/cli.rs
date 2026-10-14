@@ -525,7 +525,15 @@ mod run_with_fake_op {
         let (dir, _) = fake_op_dir("simple-env");
         let out = Command::new(env!("CARGO_BIN_EXE_opv"))
             .env_remove("GITHUB_STEP_SUMMARY") // never the job summary of the run testing opv
-            .args(["--config", super::SIMPLE, "run", "prod", "--product", "app", "--"])
+            .args([
+                "--config",
+                super::SIMPLE,
+                "run",
+                "prod",
+                "--product",
+                "app",
+                "--",
+            ])
             .args(["sh", "-c", "printf %s \"$JWT_KEY\""])
             .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
             .env_remove("OPV_CONFIG")

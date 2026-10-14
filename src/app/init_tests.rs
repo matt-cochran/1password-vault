@@ -1,5 +1,6 @@
-//! Tests for `opv init` (FR-23). Every fake item value contains [`MARKER`]; no marker may
-//! reach the written file, stdout, an error or argv (SR-1, SR-3, SR-4).
+//! Tests for `opv init` (FR-23) in the one configuration form (FR-56, FR-57, FR-60). Every
+//! fake item value contains [`MARKER`]; no marker may reach the written file, stdout, an
+//! error or argv (SR-1, SR-3, SR-4).
 
 use std::path::Path;
 
@@ -33,29 +34,30 @@ fn items() -> Output {
     Output::success(serde_json::to_vec(&v).unwrap())
 }
 
-fn args(profile: Option<Profile>, force: bool) -> InitArgs {
+/// `opv init staging --vault myapp-staging --item myapp`: no product, no target.
+fn args() -> InitArgs {
     InitArgs {
         env: "staging".into(),
         vault: "myapp-staging".into(),
         item: "myapp".into(),
-        target: None,
-        fields: fly("myapp-staging"),
-        profile,
-        force,
-        from: None,
+        ..Default::default()
     }
 }
 
-/// The Fly provider's `--fly-app` option.
-fn fly(app: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([("fly-app".to_string(), app.to_string())])
+/// [`args`] with `--product api`.
+fn api_args() -> InitArgs {
+    InitArgs {
+        product: Some("api".into()),
+        ..args()
+    }
 }
 
 fn v(s: &str) -> String {
     format!("{s}-{MARKER}")
 }
 
-fn simple_fields() -> Vec<Field> {
+/// Fields outside any section: the keys of the product `--product` names.
+fn unsectioned_fields() -> Vec<Field> {
     vec![
         secret("", "DATABASE_URL", &v("postgres://u:p@h/db")),
         secret("", "JWT_KEY", &v("jwt")),
@@ -63,12 +65,19 @@ fn simple_fields() -> Vec<Field> {
     ]
 }
 
-fn fleet_fields() -> Vec<Field> {
+/// One section, one product.
+fn api_fields() -> Vec<Field> {
     vec![
         secret("api", "OPENAI_API_KEY", &v("sk-proj")),
         text("api", "SIGNUP_POLICY", &v("open")),
-        secret("web-app", "SESSION_KEY", &v("sess")),
     ]
+}
+
+/// Two sections, two products sharing the item.
+fn two_products() -> Vec<Field> {
+    let mut f = api_fields();
+    f.push(secret("web-app", "SESSION_KEY", &v("sess")));
+    f
 }
 
 struct Run {
@@ -133,11 +142,163 @@ fn dir_entries(dir: &Path) -> Vec<String> {
     v
 }
 
+/// The written configuration, loaded with the normal loader.
+fn loaded(dir: &Path) -> Fleet {
+    config::load(dir.join(FILE_NAME)).unwrap()
+}
+
+/// The written environment's recorded boundary names.
+fn boundaries(dir: &Path) -> Vec<String> {
+    loaded(dir).environments["staging"]
+        .boundaries
+        .keys()
+        .cloned()
+        .collect()
+}
+
+// ---- One item, one boundary (FR-57) ----
+
 #[test]
-fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
-    let (dir, run) = init_with(&simple_fields(), &args(None, false));
-    run.res.as_ref().unwrap();
-    // Two lookups and one whole-item read by IDs; nothing else, nothing written to 1Password.
+fn a_one_section_item_records_its_products_boundary() {
+    let (dir, _run) = init_with(&api_fields(), &args());
+    assert_eq!(boundaries(dir.path()), ["api"]);
+}
+
+#[test]
+fn the_boundary_records_the_items_ids() {
+    let (dir, _run) = init_with(&api_fields(), &args());
+    let fleet = loaded(dir.path());
+    let b = &fleet.environments["staging"].boundaries["api"];
+    assert_eq!(
+        (b.vault_id.as_str(), b.item_id.as_str()),
+        (VAULT_ID, ITEM_ID)
+    );
+}
+
+#[test]
+fn a_several_section_item_records_the_core_boundary() {
+    let (dir, _run) = init_with(&two_products(), &args());
+    assert_eq!(boundaries(dir.path()), ["core"]);
+}
+
+#[test]
+fn a_several_section_item_puts_each_product_in_core() {
+    let (dir, _run) = init_with(&two_products(), &args());
+    let fleet = loaded(dir.path());
+    assert_eq!(
+        [fleet.boundary_of("api"), fleet.boundary_of("web-app")],
+        ["core", "core"]
+    );
+}
+
+#[test]
+fn each_section_is_declared_as_its_product() {
+    let (dir, _run) = init_with(&two_products(), &args());
+    let products: Vec<String> = loaded(dir.path()).products.keys().cloned().collect();
+    assert_eq!(products, ["api", "web-app"]);
+}
+
+#[test]
+fn unsectioned_fields_become_the_products_keys() {
+    let (dir, _run) = init_with(&unsectioned_fields(), &api_args());
+    let keys: Vec<String> = loaded(dir.path()).products["api"]
+        .keys
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(keys, ["DATABASE_URL", "JWT_KEY", "LOG_LEVEL"]);
+}
+
+#[test]
+fn unsectioned_fields_record_the_products_boundary() {
+    let (dir, _run) = init_with(&unsectioned_fields(), &api_args());
+    assert_eq!(boundaries(dir.path()), ["api"]);
+}
+
+#[test]
+fn a_concealed_field_is_declared_secret() {
+    let (dir, _run) = init_with(&api_fields(), &args());
+    assert_eq!(
+        loaded(dir.path()).products["api"].keys["OPENAI_API_KEY"].kind,
+        Kind::Secret
+    );
+}
+
+#[test]
+fn a_text_field_is_declared_config() {
+    let (dir, _run) = init_with(&api_fields(), &args());
+    assert_eq!(
+        loaded(dir.path()).products["api"].keys["SIGNUP_POLICY"].kind,
+        Kind::Config
+    );
+}
+
+#[test]
+fn a_key_is_declared_for_the_environment() {
+    let (dir, _run) = init_with(&api_fields(), &args());
+    assert_eq!(
+        loaded(dir.path()).products["api"].keys["OPENAI_API_KEY"].environments,
+        ["staging"]
+    );
+}
+
+#[test]
+fn built_in_fields_are_not_keys() {
+    let (_dir, run) = init_with(&api_fields(), &args());
+    assert!(!run.file().contains("notesPlain"), "{}", run.file());
+}
+
+#[test]
+fn unsectioned_fields_without_product_are_refused_naming_the_flag() {
+    let (_dir, run) = init_with(&unsectioned_fields(), &args());
+    assert!(
+        run.err().to_string().contains("pass --product <name>"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn unsectioned_fields_without_product_write_nothing() {
+    let (dir, _run) = init_with(&unsectioned_fields(), &args());
+    assert!(dir_entries(dir.path()).is_empty());
+}
+
+#[test]
+fn an_invalid_product_is_refused_before_any_call() {
+    let mut a = api_args();
+    a.product = Some("My App".into());
+    let (_dir, run) = init_with(&unsectioned_fields(), &a);
+    assert!(run.r.calls.borrow().is_empty());
+}
+
+#[test]
+fn a_mixed_item_is_refused_naming_both_shapes() {
+    let mut fields = unsectioned_fields();
+    fields.extend(two_products());
+    let (_dir, run) = init_with(&fields, &api_args());
+    assert!(
+        run.err()
+            .to_string()
+            .contains("mixes 3 unsectioned fields and 3 sectioned fields"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn a_mixed_item_writes_nothing() {
+    let mut fields = unsectioned_fields();
+    fields.extend(two_products());
+    let (dir, _run) = init_with(&fields, &api_args());
+    assert!(dir_entries(dir.path()).is_empty());
+}
+
+// ---- Output ----
+
+#[test]
+fn init_makes_two_lookups_and_one_item_read() {
+    let (_dir, run) = init_with(&api_fields(), &args());
     assert_eq!(
         argvs(&run.r),
         vec![
@@ -146,159 +307,109 @@ fn simple_item_writes_a_simple_file_with_ids_names_and_kinds() {
             format!("op item get {ITEM_ID} --vault {VAULT_ID} --format json"),
         ]
     );
-    let f = run.file();
-    assert!(f.contains("[profile]\nkind = \"simple\""), "{f}");
-    assert!(f.contains("[environments.staging]"), "{f}");
-    assert!(f.contains(&format!("vault_id = \"{VAULT_ID}\"")), "{f}");
-    assert!(f.contains(&format!("item_id = \"{ITEM_ID}\"")), "{f}");
-    assert!(f.contains("fly.app = \"myapp-staging\""), "{f}");
-    assert!(!f.contains("secret_name"), "{f}");
-    assert!(
-        f.contains("[keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"staging\"]"),
-        "{f}"
-    );
-    assert!(f.contains("[keys.LOG_LEVEL]\nkind = \"config\""), "{f}");
-    assert!(
-        !f.contains("notesPlain"),
-        "built-in fields are not keys: {f}"
-    );
-
-    let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
-    assert_eq!(
-        fleet.target_name("staging", "staging", "", "JWT_KEY"),
-        "JWT_KEY"
-    );
-
-    let out = &run.out;
-    let path = dir.path().join(FILE_NAME);
-    assert!(
-        out.contains(&format!(
-            "wrote {} (simple profile, fly target): 2 secret, 1 config, skipped 0",
-            path.display()
-        )),
-        "{out}"
-    );
-    assert!(out.ends_with("Next: opv plan staging\n"), "{out}");
-    assert!(out.contains(VAULT_ID) && out.contains(ITEM_ID), "{out}");
 }
 
 #[test]
-fn sectioned_item_writes_a_fleet_file_that_the_loader_accepts() {
-    let (dir, run) = init_with(&fleet_fields(), &args(None, false));
-    run.res.as_ref().unwrap();
-    let f = run.file();
-    assert!(f.contains("[profile]\nkind = \"fleet\""), "{f}");
+fn init_reports_the_vault_and_item_ids() {
+    let (_dir, run) = init_with(&api_fields(), &args());
     assert!(
-        f.contains("fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\""),
-        "{f}"
-    );
-    assert!(
-        f.contains("[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\""),
-        "{f}"
-    );
-    assert!(
-        f.contains("[products.api.keys.SIGNUP_POLICY]\nkind = \"config\""),
-        "{f}"
-    );
-    assert!(f.contains("[products.web-app.keys.SESSION_KEY]"), "{f}");
-
-    let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
-    assert_eq!(
-        fleet.target_name("staging", "staging", "web-app", "SESSION_KEY"),
-        "FLEET__WEB_APP__SESSION_KEY"
-    );
-    assert_eq!(
-        fleet.products["api"].keys["SIGNUP_POLICY"].kind,
-        Kind::Config
-    );
-    assert!(
-        run.out
-            .contains("(fleet profile, fly target): 2 secret, 1 config, skipped 0"),
+        run.out.contains(&format!(
+            "vault \"myapp-staging\" is {VAULT_ID}, item \"myapp\" is {ITEM_ID}"
+        )),
         "{}",
         run.out
     );
 }
 
 #[test]
-fn mixed_item_fails_naming_both_shapes_and_writes_nothing() {
-    let mut fs_ = simple_fields();
-    fs_.extend(fleet_fields());
-    let (dir, run) = init_with(&fs_, &args(None, false));
-    let e = run.err();
-    assert_eq!(e.exit_code(), 2, "{e}");
-    let m = e.to_string();
+fn init_reports_the_product_and_counts() {
+    let (dir, run) = init_with(&api_fields(), &args());
     assert!(
-        m.contains("3 unsectioned fields (the simple profile shape)"),
-        "{m}"
+        run.out.contains(&format!(
+            "wrote {} (product api): 1 secret, 1 config, skipped 0",
+            dir.path().join(FILE_NAME).display()
+        )),
+        "{}",
+        run.out
     );
-    assert!(
-        m.contains("3 sectioned fields (the fleet profile shape)"),
-        "{m}"
-    );
-    assert!(m.contains("--profile simple or --profile fleet"), "{m}");
-    assert!(run.file.is_none());
-    assert!(dir_entries(dir.path()).is_empty());
 }
 
 #[test]
-fn mixed_item_with_profile_simple_keeps_unsectioned_and_notes_the_rest() {
-    let mut fs_ = simple_fields();
-    fs_.extend(fleet_fields());
-    let (dir, run) = init_with(&fs_, &args(Some(Profile::Simple), false));
-    run.res.as_ref().unwrap();
-    let f = run.file();
-    assert!(f.contains("kind = \"simple\""), "{f}");
+fn init_reports_the_shared_boundary() {
+    let (_dir, run) = init_with(&two_products(), &args());
     assert!(
-        f.contains("[keys.DATABASE_URL]") && !f.contains("OPENAI_API_KEY"),
-        "{f}"
+        run.out
+            .contains("(products api, web-app (boundary core)): 2 secret, 1 config"),
+        "{}",
+        run.out
     );
-    let out = &run.out;
-    assert!(
-        out.contains(
-            "note: ignored 3 sectioned fields under --profile simple: \"api\"/\"OPENAI_API_KEY\""
-        ),
-        "{out}"
-    );
-    assert!(out.contains("2 secret, 1 config, skipped 3"), "{out}");
-    config::load(dir.path().join(FILE_NAME)).unwrap();
 }
 
 #[test]
-fn mixed_item_with_profile_fleet_keeps_sections_and_notes_the_rest() {
-    let mut fs_ = simple_fields();
-    fs_.extend(fleet_fields());
-    let (dir, run) = init_with(&fs_, &args(Some(Profile::Fleet), false));
-    run.res.as_ref().unwrap();
-    let f = run.file();
+fn init_ends_with_next_bootstrap() {
+    let (_dir, run) = init_with(&api_fields(), &args());
+    assert!(run.out.ends_with("Next: opv bootstrap\n"), "{}", run.out);
+}
+
+/// Review #16, #17: found live, a docs pointer on every init that asked nothing of the
+/// person.
+#[test]
+fn init_with_keys_prints_no_docs_pointer() {
+    let (_dir, run) = init_with(&two_products(), &args());
+    assert!(!run.out.contains("https://"), "{}", run.out);
+}
+
+/// An empty item's one useful pointer: how to declare a key in the product.
+#[test]
+fn init_of_an_empty_item_says_how_to_add_a_key() {
+    let (_dir, run) = init_with(&[], &api_args());
     assert!(
-        f.contains("kind = \"fleet\"") && !f.contains("DATABASE_URL"),
-        "{f}"
+        run.out
+            .contains("add a key: opv add api/<KEY> --kind secret --env staging"),
+        "{}",
+        run.out
     );
-    let out = &run.out;
-    assert!(
-        out.contains("note: ignored 3 unsectioned fields under --profile fleet: \"DATABASE_URL\""),
-        "{out}"
-    );
-    assert!(out.contains("2 secret, 1 config, skipped 3"), "{out}");
-    config::load(dir.path().join(FILE_NAME)).unwrap();
 }
 
 #[test]
-fn no_matching_vault_lists_candidates_and_reads_nothing_more() {
+fn init_of_an_empty_item_writes_a_configuration_that_loads() {
+    let (dir, _run) = init_with(&[], &api_args());
+    assert!(config::load(dir.path().join(FILE_NAME)).is_ok());
+}
+
+// ---- Lookups and refusals ----
+
+#[test]
+fn no_matching_vault_is_a_usage_error() {
     let dir = tempfile::tempdir().unwrap();
-    let mut a = args(None, false);
+    let mut a = args();
     a.vault = "myapp-prod".into();
     let run = run_in(dir.path(), &a, vec![vaults()]);
-    let m = run.err().to_string();
     assert_eq!(run.err().exit_code(), 2);
-    assert!(m.contains("no vault titled \"myapp-prod\""), "{m}");
+}
+
+#[test]
+fn no_matching_vault_lists_the_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args();
+    a.vault = "myapp-prod".into();
+    let run = run_in(dir.path(), &a, vec![vaults()]);
     assert!(
-        m.contains(&format!("\"myapp-staging\" ({VAULT_ID})")),
-        "{m}"
+        run.err().to_string().contains(&format!(
+            "\"Private\" (othervault), \"myapp-staging\" ({VAULT_ID})"
+        )),
+        "{}",
+        run.err()
     );
-    assert!(m.contains("\"Private\" (othervault)"), "{m}");
+}
+
+#[test]
+fn no_matching_vault_reads_nothing_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args();
+    a.vault = "myapp-prod".into();
+    let run = run_in(dir.path(), &a, vec![vaults()]);
     assert_eq!(argvs(&run.r).len(), 1);
-    assert!(run.file.is_none());
 }
 
 /// Found live: when opv may not create a missing vault, the person is told to create it
@@ -306,7 +417,7 @@ fn no_matching_vault_lists_candidates_and_reads_nothing_more() {
 #[test]
 fn a_vault_opv_may_not_create_asks_the_person_to_create_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut a = args(None, false);
+    let mut a = args();
     a.vault = "myapp-prod".into();
     let run = run_in(dir.path(), &a, vec![vaults()]);
     assert_eq!(
@@ -318,8 +429,22 @@ fn a_vault_opv_may_not_create_asks_the_person_to_create_it() {
     );
 }
 
+/// FR-43: in a person's own session, a missing item is created (one `op item create`).
 #[test]
-fn several_matching_items_list_them_and_write_nothing() {
+fn init_creates_a_missing_item_for_a_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let op = crate::adapters::fake_op::FakeOp::default();
+    let _person = crate::app::tidy::activate();
+    let a = InitArgs {
+        vault: "myapp-dev".into(),
+        ..api_args()
+    };
+    let _ = run(&a, dir.path(), &op, &mut Vec::new());
+    assert_eq!(op.count(&["op", "item", "create"]), 1);
+}
+
+#[test]
+fn several_matching_items_list_them() {
     let dir = tempfile::tempdir().unwrap();
     let dup = Output::success(
         serde_json::to_vec(&json!([
@@ -328,106 +453,174 @@ fn several_matching_items_list_them_and_write_nothing() {
         ]))
         .unwrap(),
     );
-    let run = run_in(dir.path(), &args(None, false), vec![vaults(), dup]);
-    let m = run.err().to_string();
-    assert_eq!(run.err().exit_code(), 2);
-    assert!(m.contains("2 items are titled \"myapp\""), "{m}");
-    assert!(m.contains("\"myapp\" (item_a), \"myapp\" (item_b)"), "{m}");
-    assert_eq!(argvs(&run.r).len(), 2, "no item read");
-    assert!(run.file.is_none());
-}
-
-#[test]
-fn existing_file_without_force_is_refused_before_any_call_and_left_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(FILE_NAME);
-    fs::write(&path, "# hand-written\n").unwrap();
-    let run = run_in(dir.path(), &args(None, false), vec![]);
-    let e = run.err();
-    assert_eq!(e.exit_code(), 2);
-    assert!(e.to_string().contains(&path.display().to_string()), "{e}");
-    assert!(e.to_string().contains("--force"), "{e}");
-    assert!(run.r.calls.borrow().is_empty());
-    assert_eq!(fs::read_to_string(&path).unwrap(), "# hand-written\n");
-}
-
-#[test]
-fn force_overwrites_atomically_and_leaves_no_temp_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(FILE_NAME);
-    fs::write(&path, "# hand-written\n").unwrap();
-    let run = run_in(
-        dir.path(),
-        &args(None, true),
-        vec![vaults(), items(), item(&simple_fields())],
-    );
-    run.res.as_ref().unwrap();
-    assert!(!run.file().contains("hand-written"));
-    assert!(run.file().contains("[keys.JWT_KEY]"));
-    assert_eq!(dir_entries(dir.path()), vec![FILE_NAME.to_string()]);
-}
-
-#[test]
-fn failed_validation_leaves_an_existing_file_untouched_even_with_force() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(FILE_NAME);
-    fs::write(&path, "# hand-written\n").unwrap();
-    let mut fs_ = simple_fields();
-    fs_.extend(fleet_fields());
-    let run = run_in(
-        dir.path(),
-        &args(None, true),
-        vec![vaults(), items(), item(&fs_)],
-    );
-    assert_eq!(run.err().exit_code(), 2);
-    assert_eq!(fs::read_to_string(&path).unwrap(), "# hand-written\n");
-    assert_eq!(dir_entries(dir.path()), vec![FILE_NAME.to_string()]);
-}
-
-#[test]
-fn invalid_key_names_are_skipped_by_name_never_renamed() {
-    let mut fs_ = simple_fields();
-    fs_.push(secret("", "db-password", &v("pw")));
-    fs_.push(text("", "Api_Url", &v("u")));
-    let (dir, run) = init_with(&fs_, &args(None, false));
-    run.res.as_ref().unwrap();
-    let f = run.file();
-    for bad in ["db-password", "DB_PASSWORD", "Api_Url", "API_URL"] {
-        assert!(!f.contains(bad), "{bad}: {f}");
-    }
-    let out = &run.out;
+    let run = run_in(dir.path(), &args(), vec![vaults(), dup]);
     assert!(
-        out.contains("note: skipped \"db-password\": not a valid key name (^[A-Z][A-Z0-9_]*$)"),
-        "{out}"
+        run.err()
+            .to_string()
+            .contains("\"myapp\" (item_a), \"myapp\" (item_b)"),
+        "{}",
+        run.err()
     );
-    assert!(out.contains("note: skipped \"Api_Url\""), "{out}");
-    assert!(out.contains("2 secret, 1 config, skipped 2"), "{out}");
-    config::load(dir.path().join(FILE_NAME)).unwrap();
 }
 
 #[test]
-fn other_field_types_are_skipped_with_a_note() {
-    let mut fs_ = fleet_fields();
-    fs_.push(("api".into(), "HOMEPAGE".into(), "URL", Some(v("https://x"))));
-    let (_dir, run) = init_with(&fs_, &args(None, false));
-    run.res.as_ref().unwrap();
-    assert!(!run.file().contains("HOMEPAGE"));
+fn an_existing_file_without_force_is_refused_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
+    let run = run_in(dir.path(), &args(), vec![]);
+    assert!(run.r.calls.borrow().is_empty() && run.res.is_err());
+}
+
+#[test]
+fn an_existing_file_without_force_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
+    let run = run_in(dir.path(), &args(), vec![]);
+    assert_eq!(run.file(), "# hand-written\n");
+}
+
+#[test]
+fn an_existing_file_refusal_names_add_env() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
+    let run = run_in(dir.path(), &api_args(), vec![]);
+    assert_eq!(
+        run.err().next_step(),
+        Some("opv init staging --vault myapp-staging --item myapp --product api --add-env")
+    );
+}
+
+#[test]
+fn force_overwrites_and_leaves_no_temp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
+    let mut a = args();
+    a.force = true;
+    let _run = run_in(dir.path(), &a, vec![vaults(), items(), item(&api_fields())]);
+    assert_eq!(dir_entries(dir.path()), vec![FILE_NAME.to_string()]);
+}
+
+#[test]
+fn force_replaces_the_files_text() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
+    let mut a = args();
+    a.force = true;
+    let run = run_in(dir.path(), &a, vec![vaults(), items(), item(&api_fields())]);
+    assert!(!run.file().contains("hand-written"), "{}", run.file());
+}
+
+#[test]
+fn a_refused_item_leaves_an_existing_file_untouched_even_with_force() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
+    let mut a = args();
+    a.force = true;
+    let run = run_in(
+        dir.path(),
+        &a,
+        vec![vaults(), items(), item(&unsectioned_fields())],
+    );
+    assert_eq!(run.file(), "# hand-written\n");
+}
+
+#[test]
+fn op_failure_goes_through_diagnosis() {
+    let dir = tempfile::tempdir().unwrap();
+    // vault list fails; op whoami fails; account list has one account → not signed in.
+    let run = run_in(
+        dir.path(),
+        &args(),
+        failed_read(1)
+            .chain([Output::failure(1), Output::success(b"[{}]".to_vec())])
+            .collect(),
+    );
+    assert!(
+        run.err().to_string().contains("not signed in to 1Password"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn init_never_writes_to_1password() {
+    let (_dir, run) = init_with(&two_products(), &args());
+    let writes: Vec<String> = run
+        .r
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| {
+            c.stdin.is_some() || !matches!(c.args.get(1).map(String::as_str), Some("list" | "get"))
+        })
+        .map(|c| c.args.join(" "))
+        .collect();
+    assert!(writes.is_empty(), "{writes:?}");
+}
+
+// ---- Skipped fields ----
+
+#[test]
+fn invalid_key_names_are_never_declared() {
+    let mut fields = unsectioned_fields();
+    fields.push(secret("", "db-password", &v("pw")));
+    fields.push(text("", "Api_Url", &v("u")));
+    let (_dir, run) = init_with(&fields, &api_args());
+    let f = run.file();
+    assert!(
+        ["db-password", "DB_PASSWORD", "Api_Url", "API_URL"]
+            .iter()
+            .all(|bad| !f.contains(bad)),
+        "{f}"
+    );
+}
+
+#[test]
+fn an_invalid_key_name_is_noted_by_name() {
+    let mut fields = unsectioned_fields();
+    fields.push(secret("", "db-password", &v("pw")));
+    let (_dir, run) = init_with(&fields, &api_args());
     assert!(
         run.out
-            .contains("note: skipped \"api\"/\"HOMEPAGE\": field type \"URL\" is neither"),
+            .contains("note: skipped \"db-password\": not a valid key name (^[A-Z][A-Z0-9_]*$)"),
         "{}",
         run.out
     );
-    assert!(run.out.contains("skipped 1"), "{}", run.out);
+}
+
+#[test]
+fn other_field_types_are_noted_as_rejected() {
+    let mut fields = api_fields();
+    fields.push(("api".into(), "HOMEPAGE".into(), "URL", Some(v("https://x"))));
+    let (_dir, run) = init_with(&fields, &args());
+    assert!(
+        run.out.contains(&format!(
+            "note: skipped \"api\"/\"HOMEPAGE\": field type \"URL\" is neither concealed \
+             (secret) nor text (config); {REJECT}"
+        )),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn an_unsectioned_field_of_another_type_is_noted() {
+    let mut fields = unsectioned_fields();
+    fields.push(("".into(), "HOMEPAGE".into(), "URL", Some(v("https://x"))));
+    let (_dir, run) = init_with(&fields, &api_args());
+    assert!(
+        run.out
+            .contains("note: skipped \"HOMEPAGE\": field type \"URL\" is neither"),
+        "{}",
+        run.out
+    );
 }
 
 #[test]
 fn invalid_section_names_are_skipped_by_name() {
-    let mut fs_ = fleet_fields();
-    fs_.push(secret("My App", "TOKEN", &v("t")));
-    let (_dir, run) = init_with(&fs_, &args(None, false));
-    run.res.as_ref().unwrap();
-    assert!(!run.file().contains("TOKEN") && !run.file().contains("[products.my"));
+    let mut fields = two_products();
+    fields.push(secret("My App", "TOKEN", &v("t")));
+    let (_dir, run) = init_with(&fields, &args());
     assert!(
         run.out
             .contains("note: skipped section \"My App\" (1 field): not a valid product name"),
@@ -437,189 +630,18 @@ fn invalid_section_names_are_skipped_by_name() {
 }
 
 #[test]
-fn duplicate_field_is_declared_once() {
+fn a_duplicate_field_is_declared_once() {
     // FR-43: a label given twice is read tolerantly, never an error.
-    let mut fs_ = simple_fields();
-    fs_.push(text("", "LOG_LEVEL", &v("debug")));
-    let (_dir, run) = init_with(&fs_, &args(None, false));
-    assert_eq!(run.file().matches("[keys.LOG_LEVEL]").count(), 1);
-}
-
-#[test]
-fn bad_fly_app_or_env_name_fails_before_any_call() {
-    let dir = tempfile::tempdir().unwrap();
-    for (env, app) in [
-        ("staging", "-flag"),
-        ("staging", "my app"),
-        ("a.b", "ok"),
-        ("", "ok"),
-    ] {
-        let mut a = args(None, false);
-        a.env = env.into();
-        a.fields = fly(app);
-        let run = run_in(dir.path(), &a, vec![]);
-        assert_eq!(run.err().exit_code(), 2, "{env} {app}");
-        assert!(run.r.calls.borrow().is_empty());
-    }
-    assert!(dir_entries(dir.path()).is_empty());
-}
-
-#[test]
-fn bad_fly_app_error_quotes_the_app_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = args(None, false);
-    a.fields = fly("my app");
-    let run = run_in(dir.path(), &a, vec![]);
-    assert!(
-        run.err()
-            .to_string()
-            .contains("fly.app \"my app\" must match"),
-        "{}",
-        run.err()
+    let mut fields = api_fields();
+    fields.push(text("api", "SIGNUP_POLICY", &v("closed")));
+    let (_dir, run) = init_with(&fields, &args());
+    assert_eq!(
+        run.file()
+            .matches("[products.api.keys.SIGNUP_POLICY]")
+            .count(),
+        1
     );
 }
-
-#[test]
-fn op_failure_goes_through_diagnosis() {
-    let dir = tempfile::tempdir().unwrap();
-    // vault list fails; op whoami fails; account list has one account → not signed in.
-    let run = run_in(
-        dir.path(),
-        &args(None, false),
-        failed_read(1)
-            .chain([Output::failure(1), Output::success(b"[{}]".to_vec())])
-            .collect(),
-    );
-    assert_eq!(run.err().exit_code(), 7, "{}", run.err());
-    assert!(run.err().to_string().contains("not signed in to 1Password"));
-    assert!(run.file.is_none());
-}
-
-#[test]
-fn init_never_writes_to_1password() {
-    let (_dir, run) = init_with(&fleet_fields(), &args(None, false));
-    run.res.as_ref().unwrap();
-    for c in run.r.calls.borrow().iter() {
-        assert_eq!(c.program, "op");
-        assert!(c.stdin.is_none(), "{c:?}");
-        assert!(
-            matches!(c.args.get(1).map(String::as_str), Some("list" | "get")),
-            "{c:?}"
-        );
-    }
-}
-
-/// The generated file loads with the normal loader and `opv status` passes (exit 0) against
-/// the very item it was generated from, for both shapes.
-#[test]
-fn generated_file_passes_status_against_the_same_item() {
-    for fields in [simple_fields(), fleet_fields()] {
-        let (dir, run) = init_with(&fields, &args(None, false));
-        run.res.as_ref().unwrap();
-        let fleet = config::load(dir.path().join(FILE_NAME)).unwrap();
-        let r = FakeRunner::new([item(&fields), fly_empty()]);
-        let mut out = Vec::new();
-        status::run(&fleet, "staging", &r, &mut out).unwrap();
-        let out = text_of(&out);
-        assert!(out.contains("3 saved"), "{out}");
-        assert!(out.contains("0 findings"), "{out}");
-        assert_no_values(&out);
-        // status reads by IDs, written by init.
-        assert!(
-            crate::app::testutil::called(&r, "op", &["item", "get", ITEM_ID, "--vault", VAULT_ID]),
-            "{:?}",
-            argvs(&r)
-        );
-    }
-}
-
-// --- The title lookup is unreachable from every other command (FR-13, acceptance 20) ---
-
-fn is_title_lookup(c: &crate::runner::fake::Call) -> bool {
-    c.program == "op"
-        && matches!(
-            (
-                c.args.first().map(String::as_str),
-                c.args.get(1).map(String::as_str)
-            ),
-            (Some("vault" | "item"), Some("list"))
-        )
-}
-
-/// Run sync, plan, status, run and config export (both profiles) against a recording runner
-/// and assert none makes a title lookup; their one item read is by vault ID and item ID.
-#[test]
-fn other_commands_never_look_up_titles() {
-    let fleet_cfg = crate::app::testutil::fleet();
-    let simple_cfg = config::load("tests/fixtures/simple.toml").unwrap();
-    let responses = || {
-        let mut v = vec![crate::app::testutil::complete_item(), fly_empty()];
-        v.extend((0..10).map(|_| ok()));
-        v
-    };
-    for (cfg, product) in [(&fleet_cfg, Some("allumata")), (&simple_cfg, None)] {
-        type Cmd<'a> = Box<dyn Fn(&FakeRunner) + 'a>;
-        let cmds: Vec<(&str, Cmd)> = vec![
-            (
-                "status",
-                Box::new(|r| {
-                    let _ = status::run(cfg, "prod", r, &mut Vec::new());
-                }),
-            ),
-            (
-                "fly plan",
-                Box::new(|r| {
-                    let _ = sync::plan_with(cfg, "prod", r, &mut Vec::new(), true);
-                }),
-            ),
-            (
-                "fly sync",
-                Box::new(|r| {
-                    let opts = sync::SyncOpts {
-                        deploy: true,
-                        prune: true,
-                        ..Default::default()
-                    };
-                    let _ = sync::run(cfg, "prod", r, &mut Vec::new(), &opts);
-                }),
-            ),
-            (
-                "config export",
-                Box::new(|r| {
-                    let _ = config_export::run(cfg, "prod", r, &mut Vec::new());
-                }),
-            ),
-            (
-                "run",
-                Box::new(move |r| {
-                    let _ = run_cmd::run_for(cfg, "prod", product, &["true".into()], r);
-                }),
-            ),
-        ];
-        for (name, cmd) in cmds {
-            let r = FakeRunner::new(responses());
-            cmd(&r);
-            let calls = r.calls.borrow();
-            assert!(!calls.is_empty(), "{name}: made no call");
-            assert!(
-                !calls.iter().any(is_title_lookup),
-                "{name}: title lookup in {:?}",
-                argvs(&r)
-            );
-            for c in calls
-                .iter()
-                .filter(|c| c.args.get(1).is_some_and(|a| a == "get"))
-            {
-                assert!(
-                    c.args.contains(&"iprd".to_string()) && c.args.contains(&"vprd".to_string()),
-                    "{name}: item read not by IDs: {c:?}"
-                );
-            }
-        }
-    }
-}
-
-// --- Fix round 1: reader-rejected shapes, duplicates, ancestor note ---
 
 const REJECT: &str = "status and sync will reject it until it is fixed in 1Password";
 
@@ -643,40 +665,22 @@ fn api() -> serde_json::Value {
     json!({"id": "api", "label": "api"})
 }
 
+/// A field in 1Password's unlabelled default section is unsectioned: a key of `--product`.
 #[test]
-fn unlabelled_section_under_fleet_is_noted_as_rejected() {
-    let fields = vec![
-        sf(api(), "CONCEALED", "TOKEN"),
-        sf(json!({"id": "nolabel"}), "STRING", "MODE"),
-    ];
-    let (_dir, run) = init_raw(fields, &args(Some(Profile::Fleet), false));
-    run.res.as_ref().unwrap();
-    assert!(
-        run.out.contains(&format!(
-            "note: skipped \"MODE\": it is in a section without a label; {REJECT}"
-        )),
-        "{}",
-        run.out
-    );
-    assert!(!run.out.contains("ignored"), "{}", run.out);
-    assert!(run.out.contains("skipped 1"), "{}", run.out);
-}
-
-/// Under simple the same field is an ordinary unsectioned key (the simple reader agrees).
-#[test]
-fn unlabelled_section_under_simple_is_a_key() {
+fn an_unlabelled_section_field_is_a_key_of_the_product() {
     let fields = vec![sf(json!({"id": "nolabel"}), "STRING", "MODE")];
-    let (_dir, run) = init_raw(fields, &args(None, false));
-    run.res.as_ref().unwrap();
-    assert!(run.file().contains("[keys.MODE]"), "{}", run.file());
-    assert!(!run.out.contains(REJECT), "{}", run.out);
+    let (_dir, run) = init_raw(fields, &api_args());
+    assert!(
+        run.file().contains("[products.api.keys.MODE]"),
+        "{}",
+        run.file()
+    );
 }
 
 #[test]
-fn empty_label_in_a_section_is_noted_as_rejected() {
+fn an_empty_label_in_a_section_is_noted_as_rejected() {
     let fields = vec![sf(api(), "CONCEALED", "TOKEN"), sf(api(), "STRING", "")];
-    let (_dir, run) = init_raw(fields, &args(None, false));
-    run.res.as_ref().unwrap();
+    let (_dir, run) = init_raw(fields, &args());
     assert!(
         run.out.contains(&format!(
             "note: skipped \"api\"/\"\": not a valid key name (^[A-Z][A-Z0-9_]*$); rename the \
@@ -688,110 +692,158 @@ fn empty_label_in_a_section_is_noted_as_rejected() {
 }
 
 #[test]
-fn wrong_type_in_a_skipped_section_is_noted_as_rejected() {
+fn a_wrong_type_in_a_skipped_section_is_noted_as_rejected() {
     let bad = json!({"id": "s", "label": "My App"});
     let fields = vec![
         sf(api(), "CONCEALED", "TOKEN"),
         sf(bad.clone(), "URL", "SITE"),
         sf(bad, "CONCEALED", "KEY"),
     ];
-    let (_dir, run) = init_raw(fields, &args(None, false));
-    run.res.as_ref().unwrap();
-    let out = &run.out;
-    assert!(
-        out.contains(&format!(
-            "note: skipped \"My App\"/\"SITE\": its section is skipped; field type \"URL\" is \
-             neither concealed (secret) nor text (config); {REJECT}"
-        )),
-        "{out}"
-    );
-    // The valid field in the skipped section has no per-field note, only the section one.
-    assert!(!out.contains("\"My App\"/\"KEY\""), "{out}");
-    assert!(
-        out.contains("skipped section \"My App\" (2 fields)"),
-        "{out}"
-    );
-}
-
-#[test]
-fn wrong_type_note_uses_the_rejection_wording() {
-    let mut fs_ = simple_fields();
-    fs_.push(("".into(), "HOMEPAGE".into(), "URL", Some(v("https://x"))));
-    let (_dir, run) = init_with(&fs_, &args(None, false));
-    run.res.as_ref().unwrap();
+    let (_dir, run) = init_raw(fields, &args());
     assert!(
         run.out.contains(&format!(
-            "note: skipped \"HOMEPAGE\": field type \"URL\" is neither concealed (secret) nor \
-             text (config); {REJECT}"
+            "note: skipped \"My App\"/\"SITE\": its section is skipped; field type \"URL\" is \
+             neither concealed (secret) nor text (config); {REJECT}"
         )),
         "{}",
         run.out
     );
 }
 
-/// The readers reject a label given twice whatever the field types, so init does too.
 #[test]
-fn duplicates_never_fail_init() {
+fn a_valid_field_in_a_skipped_section_has_no_note_of_its_own() {
     let bad = json!({"id": "s", "label": "My App"});
-    let cases: Vec<(Vec<serde_json::Value>, &str)> = vec![
-        (
-            vec![sf(api(), "CONCEALED", "TOKEN"), sf(api(), "URL", "TOKEN")],
-            "duplicate field \"api\"/\"TOKEN\"",
-        ),
-        (
-            vec![
-                sf(api(), "CONCEALED", "A"),
-                sf(bad.clone(), "URL", "X"),
-                sf(bad, "STRING", "X"),
-            ],
-            "duplicate field \"My App\"/\"X\"",
-        ),
-        (
-            vec![
-                json!({"id": "a", "type": "CONCEALED", "label": "TOKEN", "value": v("1")}),
-                json!({"id": "b", "type": "URL", "label": "TOKEN", "value": v("2")}),
-            ],
-            "duplicate field \"TOKEN\"",
-        ),
+    let fields = vec![
+        sf(api(), "CONCEALED", "TOKEN"),
+        sf(bad.clone(), "URL", "SITE"),
+        sf(bad, "CONCEALED", "KEY"),
     ];
-    // FR-43: duplicates are read tolerantly; init writes the file.
-    for (fields, _was) in cases {
-        let (_dir, run) = init_raw(fields, &args(None, false));
-        assert!(run.res.is_ok(), "{:?}", run.res);
-    }
+    let (_dir, run) = init_raw(fields, &args());
+    assert!(!run.out.contains("\"My App\"/\"KEY\""), "{}", run.out);
 }
 
-/// Not duplicates: the same label in two sections, or an invalid-name label twice under
-/// simple (the simple reader ignores labels that cannot be keys).
+/// FR-43: a label given twice is read tolerantly, whatever the field types.
 #[test]
-fn same_label_in_other_sections_is_not_a_duplicate() {
+fn duplicates_never_fail_init() {
+    let fields = vec![sf(api(), "CONCEALED", "TOKEN"), sf(api(), "URL", "TOKEN")];
+    let (_dir, run) = init_raw(fields, &args());
+    assert!(run.res.is_ok(), "{:?}", run.res);
+}
+
+#[test]
+fn the_same_label_in_two_sections_declares_both() {
     let fields = vec![
         sf(api(), "CONCEALED", "TOKEN"),
         sf(json!({"id": "web", "label": "web"}), "CONCEALED", "TOKEN"),
     ];
-    let (_dir, run) = init_raw(fields, &args(None, false));
-    run.res.as_ref().unwrap();
-    let fields = vec![
-        json!({"id": "a", "type": "STRING", "label": "site url"}),
-        json!({"id": "b", "type": "URL", "label": "site url"}),
-        json!({"id": "c", "type": "STRING", "label": "MODE"}),
-    ];
-    let (_dir, run) = init_raw(fields, &args(None, false));
-    run.res.as_ref().unwrap();
+    let (dir, _run) = init_raw(fields, &args());
+    let fleet = loaded(dir.path());
+    assert!(
+        fleet.products["api"].keys.contains_key("TOKEN")
+            && fleet.products["web"].keys.contains_key("TOKEN")
+    );
 }
 
+// ---- Status and other commands ----
+
+/// Once bootstrapped, `opv status` finds every key saved against the very item the file was
+/// generated from.
 #[test]
-fn ancestor_secrets_toml_is_noted_never_refused() {
+fn generated_file_passes_status_against_the_same_item() {
+    let (dir, _run) = init_with(&two_products(), &with_target(Some("fly"), &fly_opts()));
+    let r = FakeRunner::new([item(&two_products()), fly_empty()]);
+    let mut out = Vec::new();
+    status::run(&bootstrapped(dir.path()), "staging", &r, &mut out).unwrap();
+    assert!(text_of(&out).contains("3 saved"), "{}", text_of(&out));
+}
+
+fn is_title_lookup(c: &crate::runner::fake::Call) -> bool {
+    c.program == "op"
+        && matches!(
+            (
+                c.args.first().map(String::as_str),
+                c.args.get(1).map(String::as_str)
+            ),
+            (Some("vault" | "item"), Some("list"))
+        )
+}
+
+/// FR-13, acceptance 20: sync, plan, status, run and config export make no title lookup.
+#[test]
+fn other_commands_never_look_up_titles() {
+    let cfg = crate::app::testutil::fleet();
+    let responses = || {
+        let mut v = vec![crate::app::testutil::complete_item(), fly_empty()];
+        v.extend((0..10).map(|_| ok()));
+        v
+    };
+    type Cmd<'a> = Box<dyn Fn(&FakeRunner) + 'a>;
+    let cmds: Vec<(&str, Cmd)> = vec![
+        (
+            "status",
+            Box::new(|r| {
+                let _ = status::run(&cfg, "prod", r, &mut Vec::new());
+            }),
+        ),
+        (
+            "fly plan",
+            Box::new(|r| {
+                let _ = sync::plan_with(&cfg, "prod", r, &mut Vec::new(), true);
+            }),
+        ),
+        (
+            "fly sync",
+            Box::new(|r| {
+                let opts = sync::SyncOpts {
+                    deploy: true,
+                    prune: true,
+                    ..Default::default()
+                };
+                let _ = sync::run(&cfg, "prod", r, &mut Vec::new(), &opts);
+            }),
+        ),
+        (
+            "config export",
+            Box::new(|r| {
+                let _ = config_export::run(&cfg, "prod", r, &mut Vec::new());
+            }),
+        ),
+        (
+            "run",
+            Box::new(|r| {
+                let _ = run_cmd::run_for(&cfg, "prod", Some("allumata"), &["true".into()], r);
+            }),
+        ),
+    ];
+    let lookups: Vec<String> = cmds
+        .iter()
+        .flat_map(|(name, cmd)| {
+            let r = FakeRunner::new(responses());
+            cmd(&r);
+            let calls = r.calls.borrow();
+            calls
+                .iter()
+                .filter(|c| is_title_lookup(c))
+                .map(|c| format!("{name}: {}", c.args.join(" ")))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(lookups.is_empty(), "{lookups:?}");
+}
+
+// ---- Ancestor note ----
+
+#[test]
+fn an_ancestor_secrets_toml_is_noted_never_refused() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join(FILE_NAME), "# parent\n").unwrap();
     let nested = root.path().join("svc").join("api");
     fs::create_dir_all(&nested).unwrap();
     let run = run_in(
         &nested,
-        &args(None, false),
-        vec![vaults(), items(), item(&simple_fields())],
+        &args(),
+        vec![vaults(), items(), item(&api_fields())],
     );
-    run.res.as_ref().unwrap();
     let want = format!(
         "note: {} also exists; the new secrets.toml takes precedence for commands run from {} \
          and below",
@@ -799,14 +851,6 @@ fn ancestor_secrets_toml_is_noted_never_refused() {
         nested.display()
     );
     assert!(run.out.contains(&want), "{}", run.out);
-    assert_eq!(run.out.matches("also exists").count(), 1);
-    assert!(nested.join(FILE_NAME).exists());
-    assert_eq!(
-        fs::read_to_string(root.path().join(FILE_NAME)).unwrap(),
-        "# parent\n"
-    );
-    // The file init wrote is the one discovery now finds from below.
-    assert_eq!(config::discover(&nested), Some(nested.join(FILE_NAME)));
 }
 
 #[test]
@@ -820,60 +864,25 @@ fn no_ancestor_note_without_an_ancestor_file() {
     }
 }
 
-#[test]
-fn targetless_init_writes_no_fly_section() {
-    let mut a = args(None, false);
-    a.fields.clear();
-    let (_dir, run) = init_with(&simple_fields(), &a);
-    assert!(!run.file().contains("fly."));
-}
-
-#[test]
-fn targetless_fleet_init_points_to_product_check() {
-    let mut a = args(None, false);
-    a.fields.clear();
-    let (_dir, run) = init_with(&fleet_fields(), &a);
-    assert!(run.out.contains("Next: opv doctor --env staging\n"));
-}
-
-/// Review #16: with one product, the next step names it instead of a placeholder.
-#[test]
-fn targetless_single_product_init_names_the_product() {
-    let mut a = args(None, false);
-    a.fields.clear();
-    let one: Vec<Field> = fleet_fields()
-        .into_iter()
-        .filter(|f| f.0 == "api")
-        .collect();
-    let (_dir, run) = init_with(&one, &a);
-    assert!(
-        run.out.contains("opv check staging --product api"),
-        "{}",
-        run.out
-    );
-}
-
-/// Review #16, #17: the rules reference is a URL a binary install can open.
-/// Found live: a docs pointer on every init that asked nothing of the person.
-#[test]
-fn init_with_keys_prints_no_docs_pointer() {
-    let (_dir, run) = init_with(&fleet_fields(), &args(None, false));
-    assert!(!run.out.contains("https://"), "{}", run.out);
-}
-
-// H3: `init --target <provider>` with the provider's own options, through the plug-in
-// contract.
+// ---- Named targets (FR-56, H3) ----
 
 const GUID: &str = "00000000-0000-0000-0000-0000000000ab";
 
+/// `--target <target> --target-name web` with the provider's options.
 fn with_target(target: Option<&str>, opts: &[(&str, &str)]) -> InitArgs {
-    let mut a = args(None, false);
-    a.target = target.map(String::from);
-    a.fields = opts
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    a
+    InitArgs {
+        target: target.map(String::from),
+        target_name: Some("web".into()),
+        fields: opts
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        ..args()
+    }
+}
+
+fn fly_opts() -> Vec<(&'static str, &'static str)> {
+    vec![("fly-app", "myapp-staging")]
 }
 
 fn azure_opts() -> Vec<(&'static str, &'static str)> {
@@ -893,64 +902,167 @@ fn kubernetes_opts() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// The provider section of the written file's environment, as loaded.
-fn loaded_target(dir: &Path) -> &'static str {
-    let fleet = config::load(dir.join(FILE_NAME)).unwrap();
-    fleet.environments["staging"]
-        .targets
-        .values()
-        .next()
-        .map_or("none", |t| t.config.provider().section())
+/// The written file once `opv bootstrap` has recorded each target's state vault.
+fn bootstrapped(dir: &Path) -> Fleet {
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(dir.join(FILE_NAME))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let targets = doc["environments"]["staging"]["targets"]
+        .as_table_mut()
+        .unwrap();
+    for (_, t) in targets.iter_mut() {
+        t["state_vault_id"] = toml_edit::value("sstg");
+    }
+    config::parse(&doc.to_string()).unwrap()
+}
+
+/// The provider of target `web`, as loaded.
+fn loaded_provider(dir: &Path) -> &'static str {
+    bootstrapped(dir).environments["staging"].targets["web"]
+        .config
+        .provider()
+        .section()
 }
 
 #[test]
-fn fly_target_by_option_writes_a_file_that_loads() {
-    let (dir, _run) = init_with(
-        &fleet_fields(),
-        &with_target(Some("fly"), &[("fly-app", "a")]),
+fn a_target_is_written_as_a_named_target_table() {
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    assert!(
+        run.file().contains("[environments.staging.targets.web]\n"),
+        "{}",
+        run.file()
     );
-    assert_eq!(loaded_target(dir.path()), "fly");
 }
 
 #[test]
-fn azure_target_writes_a_fleet_file_that_loads() {
-    let (dir, _run) = init_with(&fleet_fields(), &with_target(Some("azure"), &azure_opts()));
-    assert_eq!(loaded_target(dir.path()), "azure");
+fn a_target_is_written_without_a_state_vault_id() {
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    assert!(!run.file().contains("state_vault_id"), "{}", run.file());
+}
+
+/// The state vault is `opv bootstrap`'s to record (FR-58): until then the loader says so.
+#[test]
+fn a_written_target_waits_for_bootstrap() {
+    let (dir, _run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    let e = config::load(dir.path().join(FILE_NAME)).unwrap_err();
+    assert!(e.to_string().contains("state_vault_missing"), "{e}");
 }
 
 #[test]
-fn azure_target_writes_a_simple_file_that_loads() {
-    let (dir, _run) = init_with(&simple_fields(), &with_target(Some("azure"), &azure_opts()));
-    assert_eq!(loaded_target(dir.path()), "azure");
+fn a_target_init_ends_with_next_bootstrap() {
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    assert!(run.out.ends_with("Next: opv bootstrap\n"), "{}", run.out);
 }
 
 #[test]
-fn kubernetes_target_writes_a_fleet_file_that_loads() {
+fn a_target_init_reports_the_target() {
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    assert!(
+        run.out.contains("(product api, target web (fly))"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_target_without_target_name_is_refused_naming_the_flag() {
+    let mut a = with_target(Some("fly"), &fly_opts());
+    a.target_name = None;
+    let (_dir, run) = init_with(&api_fields(), &a);
+    assert!(
+        run.err().to_string().contains("needs --target-name <name>"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn a_target_without_target_name_makes_no_call() {
+    let mut a = with_target(Some("fly"), &fly_opts());
+    a.target_name = None;
+    let (_dir, run) = init_with(&api_fields(), &a);
+    assert!(run.r.calls.borrow().is_empty());
+}
+
+#[test]
+fn a_target_inferred_from_its_options_needs_a_target_name() {
+    let mut a = with_target(None, &fly_opts());
+    a.target_name = None;
+    let (_dir, run) = init_with(&api_fields(), &a);
+    assert!(
+        run.err().to_string().contains("--target-name"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn a_target_name_without_a_target_is_refused() {
+    let a = with_target(None, &[]);
+    let (_dir, run) = init_with(&api_fields(), &a);
+    assert!(
+        run.err().to_string().contains("pass --target <provider>"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn an_invalid_target_name_is_refused_naming_the_flag() {
+    let mut a = with_target(Some("fly"), &fly_opts());
+    a.target_name = Some("Web".into());
+    let (_dir, run) = init_with(&api_fields(), &a);
+    assert!(
+        run.err()
+            .to_string()
+            .contains("--target-name \"Web\" must match"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn a_fly_target_writes_the_fleet_template() {
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    assert!(
+        run.file()
+            .contains("fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\""),
+        "{}",
+        run.file()
+    );
+}
+
+#[test]
+fn a_fly_target_loads_once_bootstrapped() {
+    let (dir, _run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
+    assert_eq!(loaded_provider(dir.path()), "fly");
+}
+
+#[test]
+fn an_azure_target_loads_once_bootstrapped() {
+    let (dir, _run) = init_with(&api_fields(), &with_target(Some("azure"), &azure_opts()));
+    assert_eq!(loaded_provider(dir.path()), "azure");
+}
+
+#[test]
+fn a_kubernetes_target_loads_once_bootstrapped() {
     let (dir, _run) = init_with(
-        &fleet_fields(),
+        &api_fields(),
         &with_target(Some("kubernetes"), &kubernetes_opts()),
     );
-    assert_eq!(loaded_target(dir.path()), "kubernetes");
-}
-
-#[test]
-fn kubernetes_target_writes_a_simple_file_that_loads() {
-    let (dir, _run) = init_with(
-        &simple_fields(),
-        &with_target(Some("kubernetes"), &kubernetes_opts()),
-    );
-    assert_eq!(loaded_target(dir.path()), "kubernetes");
+    assert_eq!(loaded_provider(dir.path()), "kubernetes");
 }
 
 #[test]
 fn the_target_is_inferred_from_its_options() {
-    let (dir, _run) = init_with(&fleet_fields(), &with_target(None, &kubernetes_opts()));
-    assert_eq!(loaded_target(dir.path()), "kubernetes");
+    let (dir, _run) = init_with(&api_fields(), &with_target(None, &kubernetes_opts()));
+    assert_eq!(loaded_provider(dir.path()), "kubernetes");
 }
 
 #[test]
 fn azure_identity_defaults_to_system() {
-    let (_dir, run) = init_with(&fleet_fields(), &with_target(Some("azure"), &azure_opts()));
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("azure"), &azure_opts()));
     assert!(
         run.file().contains("azure.identity = \"system\"\n"),
         "{}",
@@ -962,7 +1074,7 @@ fn azure_identity_defaults_to_system() {
 fn optional_options_are_written() {
     let mut opts = kubernetes_opts();
     opts.push(("kubernetes-container", "app"));
-    let (_dir, run) = init_with(&fleet_fields(), &with_target(Some("kubernetes"), &opts));
+    let (_dir, run) = init_with(&api_fields(), &with_target(Some("kubernetes"), &opts));
     assert!(
         run.file().contains("kubernetes.container = \"app\"\n"),
         "{}",
@@ -971,7 +1083,7 @@ fn optional_options_are_written() {
 }
 
 #[test]
-fn a_missing_required_option_is_refused_before_any_call() {
+fn a_missing_required_option_is_refused_naming_it() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_in(
         dir.path(),
@@ -1023,6 +1135,32 @@ fn an_invalid_option_value_is_refused_before_any_call() {
 }
 
 #[test]
+fn a_bad_fly_app_quotes_the_app_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_in(
+        dir.path(),
+        &with_target(Some("fly"), &[("fly-app", "my app")]),
+        vec![],
+    );
+    assert!(
+        run.err()
+            .to_string()
+            .contains("fly.app \"my app\" must match"),
+        "{}",
+        run.err()
+    );
+}
+
+#[test]
+fn a_bad_environment_name_is_refused_before_any_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args();
+    a.env = "a.b".into();
+    let run = run_in(dir.path(), &a, vec![]);
+    assert!(run.r.calls.borrow().is_empty() && run.res.is_err());
+}
+
+#[test]
 fn an_unknown_target_is_refused_listing_the_providers() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_in(dir.path(), &with_target(Some("heroku"), &[]), vec![]);
@@ -1036,10 +1174,10 @@ fn a_target_refusal_points_at_the_init_help() {
     assert_eq!(run.err().next_step(), Some("opv init --help"));
 }
 
-// H2: `init <env> --add-env` adds one environment to an existing file.
+// ---- H2: `init <env> --add-env` adds one environment in the one form ----
 
-const EXISTING: &str = "# Fleet config; values live in 1Password.\n[profile]\nkind = \"fleet\"\n\n\
-[environments.prod]   # live\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\n\
+const EXISTING: &str = "# Fleet config; values live in 1Password.\n\
+[environments.prod]   # live\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\n\
 # api\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
 [products.api.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]  # going away\n";
 
@@ -1055,8 +1193,15 @@ impl AddEnv {
     fn text(&self) -> String {
         fs::read_to_string(&self.path).unwrap()
     }
-    fn fleet(&self) -> crate::domain::Fleet {
+    fn fleet(&self) -> Fleet {
         config::parse(&self.text()).unwrap()
+    }
+    fn boundaries(&self) -> Vec<String> {
+        self.fleet().environments["staging"]
+            .boundaries
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
@@ -1081,36 +1226,34 @@ fn add_env_with(file: &str, a: &InitArgs, fields: &[Field]) -> AddEnv {
     run
 }
 
-fn staging() -> InitArgs {
-    let mut a = args(None, false);
-    a.fields.clear();
-    a
-}
-
 #[test]
 fn add_env_keeps_every_comment() {
-    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let run = add_env_with(EXISTING, &args(), &two_products());
     let text = run.text();
     let comments: Vec<&str> = EXISTING.lines().filter(|l| l.contains('#')).collect();
     assert!(comments.iter().all(|c| text.contains(c)), "{text}");
 }
 
 #[test]
-fn add_env_writes_the_environment_with_its_ids() {
-    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
-    let env = &run.fleet().environments["staging"];
+fn add_env_records_the_products_boundary() {
+    let run = add_env_with(EXISTING, &args(), &two_products());
+    assert_eq!(run.boundaries(), ["api"]);
+}
+
+#[test]
+fn add_env_records_the_items_ids() {
+    let run = add_env_with(EXISTING, &args(), &two_products());
+    let fleet = run.fleet();
+    let b = &fleet.environments["staging"].boundaries["api"];
     assert_eq!(
-        (
-            env.boundaries.values().next().unwrap().vault_id.as_str(),
-            env.boundaries.values().next().unwrap().item_id.as_str()
-        ),
+        (b.vault_id.as_str(), b.item_id.as_str()),
         (VAULT_ID, ITEM_ID)
     );
 }
 
 #[test]
 fn add_env_includes_the_keys_the_item_has() {
-    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let run = add_env_with(EXISTING, &args(), &two_products());
     assert_eq!(
         run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
         vec!["prod", "staging"]
@@ -1119,7 +1262,7 @@ fn add_env_includes_the_keys_the_item_has() {
 
 #[test]
 fn add_env_leaves_out_the_keys_the_item_lacks() {
-    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let run = add_env_with(EXISTING, &args(), &two_products());
     assert_eq!(
         run.fleet().products["api"].keys["LEGACY_TOKEN"].environments,
         vec!["prod"]
@@ -1128,7 +1271,7 @@ fn add_env_leaves_out_the_keys_the_item_lacks() {
 
 #[test]
 fn add_env_names_the_item_fields_not_declared() {
-    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+    let run = add_env_with(EXISTING, &args(), &two_products());
     assert!(
         run.out
             .contains("in the item but not declared: api/SIGNUP_POLICY, web-app/SESSION_KEY"),
@@ -1138,24 +1281,43 @@ fn add_env_names_the_item_fields_not_declared() {
 }
 
 #[test]
-fn add_env_writes_the_target_options() {
-    let mut a = staging();
-    a.fields = fly("myapp-staging");
-    let run = add_env_with(EXISTING, &a, &fleet_fields());
-    assert!(!run.fleet().environments["staging"].targets.is_empty());
+fn add_env_gives_unsectioned_fields_to_the_product() {
+    let mut fields = unsectioned_fields();
+    fields.push(secret("", "OPENAI_API_KEY", &v("sk")));
+    let run = add_env_with(EXISTING, &api_args(), &fields);
+    assert_eq!(
+        run.fleet().products["api"].keys["OPENAI_API_KEY"].environments,
+        vec!["prod", "staging"]
+    );
+}
+
+#[test]
+fn add_env_refuses_a_target_naming_target_add() {
+    let mut a = args();
+    a.fields = BTreeMap::from([("fly-app".to_string(), "myapp-staging".to_string())]);
+    let run = add_env_with(EXISTING, &a, &two_products());
+    assert!(
+        run.res
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("--add-env writes no target"),
+        "{:?}",
+        run.res
+    );
 }
 
 #[test]
 fn add_env_refuses_an_existing_environment_before_any_call() {
-    let mut a = staging();
+    let mut a = args();
     a.env = "prod".into();
-    let run = add_env_with(EXISTING, &a, &fleet_fields());
+    let run = add_env_with(EXISTING, &a, &two_products());
     assert!(run.r.calls.borrow().is_empty() && run.res.is_err());
 }
 
 #[test]
-fn add_env_without_a_target_points_at_check() {
-    let run = add_env_with(EXISTING, &staging(), &fleet_fields());
+fn add_env_points_at_check() {
+    let run = add_env_with(EXISTING, &args(), &two_products());
     assert!(
         run.out.ends_with("Next: opv check staging --product api\n"),
         "{}",
@@ -1163,7 +1325,7 @@ fn add_env_without_a_target_points_at_check() {
     );
 }
 
-// --- init --add-env on a manifest (FR-44): the same edit through ConfigStore ---
+// ---- init --add-env on a manifest (FR-44): the same edit through ConfigStore ----
 
 /// Manifest calls (`item get <manifest>`, `item edit`) and the identity probe (`whoami`) go
 /// to the stateful fake; the item lookups `init` makes go to the scripted one.
@@ -1219,7 +1381,7 @@ impl CommandRunner for Split<'_> {
 }
 
 /// `init --add-env` against a manifest holding `body`; returns the manifest's text after.
-fn add_env_to_manifest(body: &str, a: &InitArgs) -> (Result<(), Error>, String, String) {
+fn add_env_to_manifest(body: &str, a: &InitArgs) -> (Result<(), Error>, String) {
     use crate::adapters::onepassword_manifest::{Row, VaultRef, template};
     use crate::config_store::{Found, ManifestStore, Matched, manifest_title};
     let op = crate::adapters::fake_op::FakeOp::default();
@@ -1238,7 +1400,7 @@ fn add_env_to_manifest(body: &str, a: &InitArgs) -> (Result<(), Error>, String, 
         },
     };
     let found = Found::Manifest(ManifestStore::from_row(&row, None, Matched::Given));
-    let rest = FakeRunner::new(vec![vaults(), items(), item(&fleet_fields())]);
+    let rest = FakeRunner::new(vec![vaults(), items(), item(&two_products())]);
     let r = Split {
         op: &op,
         rest: &rest,
@@ -1249,34 +1411,29 @@ fn add_env_to_manifest(body: &str, a: &InitArgs) -> (Result<(), Error>, String, 
     let text = found.store().read(&op).unwrap().text;
     assert_no_values(&text);
     assert_no_values(&text_of(&out));
-    (res, text, text_of(&out))
+    (res, text)
 }
 
 #[test]
 fn add_env_on_a_manifest_saves_the_environment_in_it() {
-    let (res, text, _) = add_env_to_manifest(EXISTING, &staging());
-    res.unwrap();
+    let (_res, text) = add_env_to_manifest(EXISTING, &args());
     assert!(
-        config::parse(&text)
-            .unwrap()
-            .environments
-            .contains_key("staging"),
+        config::parse(&text).is_ok_and(|f| f.environments.contains_key("staging")),
         "{text}"
     );
 }
 
 #[test]
 fn add_env_on_a_manifest_keeps_its_comments() {
-    let (res, text, _) = add_env_to_manifest(EXISTING, &staging());
-    res.unwrap();
+    let (_res, text) = add_env_to_manifest(EXISTING, &args());
     assert!(text.contains("# going away"), "{text}");
 }
 
 #[test]
 fn add_env_on_a_manifest_refuses_an_existing_environment_naming_config_edit() {
-    let mut a = staging();
+    let mut a = args();
     a.env = "prod".into();
-    let (res, _, _) = add_env_to_manifest(EXISTING, &a);
+    let (res, _) = add_env_to_manifest(EXISTING, &a);
     assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
 }
 
@@ -1295,22 +1452,24 @@ fn init_json(fields: &[Field], a: &InitArgs) -> (tempfile::TempDir, String) {
 
 #[test]
 fn init_json_success_golden() {
-    let (_dir, out) = init_json(&fleet_fields(), &args(None, false));
+    let (_dir, out) = init_json(&two_products(), &with_target(Some("fly"), &fly_opts()));
     crate::app::json_tests::golden("init_success", &out);
 }
 
 #[test]
 fn init_json_refusal_golden() {
-    let mut a = args(None, false);
+    let mut a = args();
     a.vault = "no-such-vault".into();
-    let (_dir, out) = init_json(&fleet_fields(), &a);
+    let (_dir, out) = init_json(&two_products(), &a);
     crate::app::json_tests::golden("init_unknown_vault", &out);
 }
 
 // ---- M6: `--add-env` and shared keys (FR-45) ----
 
-const SHARED: &str = "[profile]\nkind = \"fleet\"\n\n\
-[environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\n\
+const SHARED: &str = "[environments.prod]\n\
+boundaries.core = { vault_id = \"vprd\", item_id = \"iprd\" }\n\n\
+[products.api]\nboundary = \"core\"\n\n\
+[products.worker]\nboundary = \"core\"\n\n\
 [products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
 [products.api.keys.LEGACY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
 [products.worker.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"api/OPENAI_API_KEY\"\n\n\
@@ -1318,7 +1477,7 @@ const SHARED: &str = "[profile]\nkind = \"fleet\"\n\n\
 
 #[test]
 fn add_env_adds_a_shared_key_with_its_source() {
-    let run = add_env_with(SHARED, &staging(), &fleet_fields());
+    let run = add_env_with(SHARED, &args(), &two_products());
     assert_eq!(
         run.fleet().products["worker"].keys["OPENAI_API_KEY"].environments,
         vec!["prod", "staging"]
@@ -1326,8 +1485,14 @@ fn add_env_adds_a_shared_key_with_its_source() {
 }
 
 #[test]
+fn add_env_records_the_shared_boundary() {
+    let run = add_env_with(SHARED, &args(), &two_products());
+    assert_eq!(run.boundaries(), ["core"]);
+}
+
+#[test]
 fn add_env_leaves_out_a_shared_key_whose_source_is_absent() {
-    let run = add_env_with(SHARED, &staging(), &fleet_fields());
+    let run = add_env_with(SHARED, &args(), &two_products());
     assert_eq!(
         run.fleet().products["worker"].keys["LEGACY_TOKEN"].environments,
         vec!["prod"]
@@ -1336,10 +1501,32 @@ fn add_env_leaves_out_a_shared_key_whose_source_is_absent() {
 
 #[test]
 fn add_env_saves_despite_a_stray_field_for_a_shared_key() {
-    let mut fields = fleet_fields();
+    let mut fields = two_products();
     fields.push(secret("worker", "LEGACY_TOKEN", &v("stray")));
-    let run = add_env_with(SHARED, &staging(), &fields);
+    let run = add_env_with(SHARED, &args(), &fields);
     assert!(run.res.is_ok(), "{:?}", run.res);
+}
+
+#[test]
+fn add_env_refuses_products_in_different_boundaries() {
+    let separate = SHARED
+        .replace("[products.api]\nboundary = \"core\"\n\n", "")
+        .replace("[products.worker]\nboundary = \"core\"\n\n", "")
+        .replace(
+            "boundaries.core = { vault_id = \"vprd\", item_id = \"iprd\" }",
+            "boundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             boundaries.worker = { vault_id = \"vwrk\", item_id = \"iwrk\" }",
+        );
+    let run = add_env_with(&separate, &args(), &two_products());
+    assert!(
+        run.res
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("live in different boundaries (api, worker)"),
+        "{:?}",
+        run.res
+    );
 }
 
 /// Found live: `demo-app` beside `opv · demo-app` gave no hint which note held the values.
@@ -1351,16 +1538,4 @@ fn the_default_item_reads_apart_from_the_manifest() {
 #[test]
 fn the_default_vault_is_the_project_and_environment() {
     assert_eq!(default_vault("demo-app", "dev"), "demo-app-dev");
-}
-
-/// An empty item's one useful pointer: how to declare a key.
-#[test]
-fn init_of_an_empty_item_says_how_to_add_a_key() {
-    let (_dir, run) = init_with(&[], &args(Some(Profile::Simple), false));
-    assert!(
-        run.out
-            .contains("add a key: opv add <KEY> --kind secret --env staging"),
-        "{}",
-        run.out
-    );
 }
