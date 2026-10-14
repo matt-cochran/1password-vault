@@ -143,7 +143,7 @@ fn add_inner(
         "# deploy target {} in {}; added by opv target add",
         args.name, args.env
     );
-    let build = |state_vault_id: &str| -> Result<String, Error> {
+    let build = |state_vault_id: &str, items: &[(String, String)]| -> Result<String, Error> {
         let body = target_table(
             &args.env,
             &args.name,
@@ -151,6 +151,7 @@ fn add_inner(
             &products,
             args.deploy_credentials.as_deref(),
             state_vault_id,
+            items,
         );
         let text = insert_target(original, &args.env, &args.name, &body, &comment)?;
         // The same validation as a hand-written file: provider fields, products, deploy
@@ -171,7 +172,7 @@ fn add_inner(
             Lookup::Found(n) => (n.id, false),
             Lookup::Missing(_) => (title.clone(), true),
         };
-        build(&state_vault_id)?;
+        build(&state_vault_id, &[])?;
         if args.json {
             return write_json(out, &args.env, &args.name, &state_vault_id, created, &next);
         }
@@ -191,10 +192,14 @@ fn add_inner(
     // Creating the vault and writing the configuration write to 1Password: a person's own
     // session (FR-43). The target is validated before the vault is created.
     tidy::require_person(r, "opv target add")?;
-    build(&title)?;
+    build(&title, &[])?;
     let notes = naming::state_vault_notes(&project, &args.env, &args.name);
     let vault = bootstrap::ensure_vault(r, &title, &notes)?;
-    let text = build(&vault.id)?;
+    // Each placement's delivery item too (FR-58), so the first sync can record evidence
+    // without another opv bootstrap: one command per intent (E2).
+    let planned = store.parse(&build(&vault.id, &[])?)?;
+    let items = bootstrap::placement_items(&planned, &project, &args.env, &args.name, r)?;
+    let text = build(&vault.id, &items)?;
     config_store::save(store, r, &base, &text)?;
     if args.json {
         return write_json(out, &args.env, &args.name, &vault.id, false, &next);
@@ -339,6 +344,7 @@ fn target_table(
     products: &[String],
     deploy: Option<&str>,
     state_vault_id: &str,
+    items: &[(String, String)],
 ) -> String {
     let mut s = format!("[environments.{env}.targets.{name}]\n");
     s.push_str(section);
@@ -359,6 +365,13 @@ fn target_table(
         "state_vault_id = {}\n",
         toml::Value::String(state_vault_id.to_string())
     ));
+    if !items.is_empty() {
+        let entries: Vec<String> = items
+            .iter()
+            .map(|(p, id)| format!("{p} = {}", toml::Value::String(id.clone())))
+            .collect();
+        s.push_str(&format!("delivery_items = {{ {} }}\n", entries.join(", ")));
+    }
     s
 }
 

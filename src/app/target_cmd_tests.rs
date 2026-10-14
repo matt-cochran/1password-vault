@@ -311,6 +311,20 @@ fn an_unknown_provider_is_refused_naming_it() {
     assert!(a.err().contains("aws"), "{}", a.err());
 }
 
+/// FR-58, E2: target add records each placement's delivery item in the same step, so the
+/// first sync records evidence without another opv bootstrap.
+#[test]
+fn add_records_a_delivery_item_for_each_placement() {
+    let a = add_to(FLEET, add_args("dev", "site"));
+    assert!(
+        !a.fleet().environments["dev"].targets["site"]
+            .delivery_items
+            .is_empty(),
+        "{}",
+        a.text()
+    );
+}
+
 #[test]
 fn an_explicit_provider_writes_its_section() {
     let mut args = add_args("dev", "site");

@@ -501,28 +501,48 @@ fn delivery_items(
 ) -> Result<Vec<Recorded>, Error> {
     let mut out = Vec::new();
     for (env, e) in &fleet.environments {
-        for (target, t) in &e.targets {
-            for product in fleet.products.keys() {
-                if t.delivery_items.contains_key(product)
-                    || super::delivery::bindings(fleet, env, target, product)?.is_empty()
-                {
-                    continue;
-                }
-                let item = ensure_item(
-                    r,
-                    &t.state_vault_id,
-                    &naming::delivery_item(product, target),
-                    &format!("opv-delivery:{project}/{env}/{target}/{product}"),
-                    &naming::delivery_item_notes(product, target, env),
-                )?;
+        for target in e.targets.keys() {
+            for (product, item_id) in placement_items(fleet, project, env, target, r)? {
                 out.push(Recorded::DeliveryItem {
                     env: env.clone(),
                     target: target.clone(),
-                    product: product.clone(),
-                    item_id: item.id,
+                    product,
+                    item_id,
                 });
             }
         }
+    }
+    Ok(out)
+}
+
+/// FR-58: `(product, item ID)` for every placement on `env`/`target` without a recorded
+/// delivery item, found or created in the target's state vault with its notes. Shared by
+/// bootstrap and `opv target add`, which records a new target's placements in one step.
+pub(crate) fn placement_items(
+    fleet: &crate::domain::Fleet,
+    project: &str,
+    env: &str,
+    target: &str,
+    r: &dyn CommandRunner,
+) -> Result<Vec<(String, String)>, Error> {
+    let Some(t) = fleet.environment(env)?.targets.get(target) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for product in fleet.products.keys() {
+        if t.delivery_items.contains_key(product)
+            || super::delivery::bindings(fleet, env, target, product)?.is_empty()
+        {
+            continue;
+        }
+        let item = ensure_item(
+            r,
+            &t.state_vault_id,
+            &naming::delivery_item(product, target),
+            &format!("opv-delivery:{project}/{env}/{target}/{product}"),
+            &naming::delivery_item_notes(product, target, env),
+        )?;
+        out.push((product.clone(), item.id));
     }
     Ok(out)
 }
