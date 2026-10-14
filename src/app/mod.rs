@@ -380,8 +380,7 @@ pub(crate) struct JsonExtra<'a> {
 /// `pinned` adds the per-row binding fields of a pinned target (R5): `binding`,
 /// `pending_deploy` and `drift`, keyed by env name. They are absent for a staged target.
 ///
-/// `target_name` is the row's name on the target for every provider; `fly_name` holds the
-/// same value and is kept for scripts written before 0.5.0 (deprecated, P4). `product` is
+/// `target_name` is the row's name on the target for every provider. `product` is
 /// set when `--product` scoped the document (NR-16). `extra` adds `plan_id` (`plan`) and
 /// `provenance` (`status`), each left out when unset, and `next`.
 ///
@@ -467,7 +466,6 @@ pub(crate) fn write_json(
                 product: json_product(product),
                 key: key.clone(),
                 target_name: env.target_name(product, key),
-                fly_name: env.target_name(product, key),
             })
             .collect(),
         prune: plan.prune.clone(),
@@ -577,8 +575,6 @@ pub(crate) struct JsonRow {
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
     reason: Option<String>,
     target_name: Option<String>,
-    /// Deprecated alias of `target_name` (P4).
-    fly_name: Option<String>,
     target: Option<&'static str>,
     action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -612,7 +608,6 @@ impl JsonRow {
             state: json_state(&r.state),
             rule: json_rule(&r.state),
             reason: json_reason(&r.state),
-            fly_name: target_name.clone(),
             target_name,
             target,
             action,
@@ -671,8 +666,6 @@ struct JsonHeld {
     product: Option<String>,
     key: String,
     target_name: Option<String>,
-    /// Deprecated alias of `target_name` (P4).
-    fly_name: Option<String>,
 }
 
 #[derive(serde::Serialize)]

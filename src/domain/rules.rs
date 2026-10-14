@@ -89,8 +89,8 @@ pub const REASON_SURROUNDING_SPACE: &str = "leading or trailing whitespace";
 pub const REASON_TOO_LONG: &str = "longer than the 59000-byte limit";
 /// `not_prefix`. Never names which refused prefix matched: that would be the actual prefix.
 pub const REASON_REFUSED_PREFIX: &str = "starts with a refused prefix";
-/// `prefix_by_mode` and `regex`/`pattern` when the configured pattern does not compile.
-pub const REASON_BAD_PATTERN: &str = "configured pattern does not compile";
+/// `prefix_by_mode` and `regex` when the configured regular expression does not compile.
+pub const REASON_BAD_REGEX: &str = "configured regex does not compile";
 /// `regex`.
 pub const REASON_NO_REGEX_MATCH: &str = "does not match the configured regex";
 /// `enum` with an empty allowed list (the configuration names no value).
@@ -107,8 +107,6 @@ pub const REASON_NOT_HTTPS: &str = "not an https:// URL";
 pub const REASON_URL_WHITESPACE: &str = "URL contains whitespace";
 /// `ensure_prefix`.
 pub const REASON_NOTHING_AFTER_PREFIX: &str = "nothing after the prefix";
-/// `pattern`.
-pub const REASON_NO_PATTERN_MATCH: &str = "text after the prefix does not match the pattern";
 /// `transform` with a name this version does not know.
 pub const REASON_UNKNOWN_TRANSFORM: &str = "unknown transform";
 
@@ -169,8 +167,8 @@ fn email_re() -> &'static Regex {
     re(&R, r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 }
 
-/// The generic `pattern` used to reproduce the removed SigNoz body check in the 0.4.0
-/// removal error (FR-24).
+/// The generic body regular expression used to reproduce the removed SigNoz check in the
+/// 0.4.0 removal error (FR-24).
 pub const SIGNOZ_BODY: &str = r"[A-Za-z0-9._~+/-]+={0,2}";
 /// The prefix of the removed SigNoz ingestion header (FR-24).
 pub const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
@@ -178,27 +176,14 @@ pub const SIGNOZ_PREFIX: &str = "signoz-ingestion-key=";
 /// Transform name: one PEM private key block, staged as a single line.
 pub const PEM_PRIVATE_KEY: &str = "pem_private_key";
 
-/// `ensure_prefix`/`pattern` normalisation (FR-24). Accepts the value with or without
-/// `prefix`, stages exactly one `prefix`, and (when given) requires the body after the
-/// prefix to fully match `pattern`. Returns the staged value or the failing rule name and
-/// its reason. Built at its final size: no reallocation leaves an unzeroized copy behind
-/// (SR-8).
-fn ensure_prefixed(
-    v: &str,
-    prefix: &str,
-    pattern: Option<&str>,
-) -> Result<SecretValue, (&'static str, &'static str)> {
+/// `ensure_prefix` normalisation (FR-24). Accepts the value with or without `prefix`,
+/// stages exactly one `prefix`, and requires a non-empty body. Returns the staged value or
+/// the failing rule name and its reason. Built at its final size: no reallocation leaves
+/// an unzeroized copy behind (SR-8).
+fn ensure_prefixed(v: &str, prefix: &str) -> Result<SecretValue, (&'static str, &'static str)> {
     let body = v.strip_prefix(prefix).unwrap_or(v);
     if body.is_empty() {
         return Err(("ensure_prefix", REASON_NOTHING_AFTER_PREFIX));
-    }
-    if let Some(pat) = pattern {
-        // Config validation guarantees the pattern compiles; fail closed otherwise.
-        let full =
-            Regex::new(&format!("^(?:{pat})$")).map_err(|_| ("pattern", REASON_BAD_PATTERN))?;
-        if !full.is_match(body) {
-            return Err(("pattern", REASON_NO_PATTERN_MATCH));
-        }
     }
     let mut out = String::with_capacity(prefix.len() + body.len());
     out.push_str(prefix);
@@ -350,14 +335,14 @@ pub fn check(
         // unchanged. A value that is only the prefix still fails as `ensure_prefix` first.
         let staged = match &r.ensure_prefix {
             Some(prefix) => {
-                Some(ensure_prefixed(v, prefix, None).map_err(|(rule, why)| fail(rule, why))?)
+                Some(ensure_prefixed(v, prefix).map_err(|(rule, why)| fail(rule, why))?)
             }
             None => None,
         };
         let checked = staged.as_ref().map_or(v, SecretValue::expose);
-        // Config validation guarantees the pattern compiles; fail closed otherwise.
+        // Config validation guarantees the regex compiles; fail closed otherwise.
         let full =
-            Regex::new(&format!("^(?:{pat})$")).map_err(|_| fail("regex", REASON_BAD_PATTERN))?;
+            Regex::new(&format!("^(?:{pat})$")).map_err(|_| fail("regex", REASON_BAD_REGEX))?;
         if !full.is_match(checked) {
             return Err(fail("regex", REASON_NO_REGEX_MATCH));
         }
@@ -401,7 +386,7 @@ pub fn check(
         }
     }
     if let Some(prefix) = &r.ensure_prefix {
-        return ensure_prefixed(v, prefix, r.pattern.as_deref())
+        return ensure_prefixed(v, prefix)
             .map(Some)
             .map_err(|(rule, why)| fail(rule, why));
     }
@@ -776,64 +761,29 @@ mod tests {
         };
         assert_eq!(rule_of(alt, "aax"), "regex");
     }
-    fn prefixed_rules(prefix: &str, pattern: Option<&str>) -> Rules {
+    fn prefixed_rules(prefix: &str) -> Rules {
         Rules {
             ensure_prefix: Some(prefix.into()),
-            pattern: pattern.map(Into::into),
             ..Rules::default()
         }
     }
     #[test]
     fn ensure_prefix_prepends_a_missing_prefix() {
         assert_eq!(
-            with(prefixed_rules("sk-", None), "abc").unwrap().unwrap(),
+            with(prefixed_rules("sk-"), "abc").unwrap().unwrap(),
             "sk-abc"
         );
     }
     #[test]
     fn ensure_prefix_keeps_an_existing_prefix_once() {
         assert_eq!(
-            with(prefixed_rules("sk-", None), "sk-abc")
-                .unwrap()
-                .unwrap(),
+            with(prefixed_rules("sk-"), "sk-abc").unwrap().unwrap(),
             "sk-abc"
         );
     }
     #[test]
     fn ensure_prefix_empty_body_fails_as_ensure_prefix() {
-        assert_eq!(rule_of(prefixed_rules("sk-", None), "sk-"), "ensure_prefix");
-    }
-    #[test]
-    fn pattern_rejects_a_body_that_does_not_match() {
-        assert_eq!(
-            rule_of(prefixed_rules("sk-", Some("[a-z]+")), "sk-ABC"),
-            "pattern"
-        );
-    }
-    #[test]
-    fn pattern_accepts_a_body_after_the_prefix_is_prepended() {
-        assert_eq!(
-            with(prefixed_rules("sk-", Some("[a-z]+")), "abc")
-                .unwrap()
-                .unwrap(),
-            "sk-abc"
-        );
-    }
-
-    /// The `regex` equivalent of `ensure_prefix` + `pattern` (FR-24, 0.6.0): the prefix
-    /// escaped, then the body pattern as a group, exactly as the deprecation note suggests.
-    fn equivalent_regex(prefix: &str, pattern: &str) -> Rules {
-        Rules {
-            ensure_prefix: Some(prefix.into()),
-            regex: Some(format!("{}(?:{pattern})", regex::escape(prefix))),
-            ..Rules::default()
-        }
-    }
-
-    /// Accept/refuse and the staged value, ignoring which rule refused (the rule name is
-    /// deliberately different: `pattern` keeps its own name as a deprecated alias).
-    fn outcome(rules: Rules, v: &str) -> Result<Option<String>, ()> {
-        with(rules, v).map_err(|_| ())
+        assert_eq!(rule_of(prefixed_rules("sk-"), "sk-"), "ensure_prefix");
     }
 
     fn prefixed_regex(prefix: &str, regex: &str) -> Rules {
@@ -877,37 +827,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pattern_and_equivalent_regex_agree_when_the_prefix_is_missing() {
-        assert_eq!(
-            outcome(equivalent_regex("p-", "[a-z]+"), "abc"),
-            outcome(prefixed_rules("p-", Some("[a-z]+")), "abc")
-        );
-    }
-
-    #[test]
-    fn pattern_and_equivalent_regex_agree_when_the_prefix_is_present() {
-        assert_eq!(
-            outcome(equivalent_regex("p-", "[a-z]+"), "p-abc"),
-            outcome(prefixed_rules("p-", Some("[a-z]+")), "p-abc")
-        );
-    }
-
-    #[test]
-    fn pattern_and_equivalent_regex_agree_on_a_body_that_does_not_match() {
-        assert_eq!(
-            outcome(equivalent_regex("p-", "[a-z]+"), "p-ABC"),
-            outcome(prefixed_rules("p-", Some("[a-z]+")), "p-ABC")
-        );
-    }
-
-    #[test]
-    fn pattern_and_equivalent_regex_agree_when_the_value_is_only_the_prefix() {
-        assert_eq!(
-            outcome(equivalent_regex("p-", "[a-z]+"), "p-"),
-            outcome(prefixed_rules("p-", Some("[a-z]+")), "p-")
-        );
-    }
     fn pem(label: &str, eol: &str) -> (String, String) {
         let der: Vec<u8> = std::iter::once(0x30u8)
             .chain((0..150u8).map(|i| i.wrapping_mul(7)))
@@ -1154,15 +1073,8 @@ mod tests {
     #[test]
     fn ensure_prefix_reason_nothing_after_prefix() {
         assert_eq!(
-            reason_of(prefixed_rules("sk-", None), "sk-"),
+            reason_of(prefixed_rules("sk-"), "sk-"),
             REASON_NOTHING_AFTER_PREFIX
-        );
-    }
-    #[test]
-    fn pattern_reason_body_does_not_match() {
-        assert_eq!(
-            reason_of(prefixed_rules("sk-", Some("[a-z]+")), "sk-ABC"),
-            REASON_NO_PATTERN_MATCH
         );
     }
     #[test]
@@ -1294,7 +1206,7 @@ mod tests {
                 n += 1;
                 let shown = format!("{e} {e:?} {e:#?}");
                 let _ = &shown;
-                // the regex-pattern case legitimately names no value; check all the same
+                // the regex case legitimately names no value; check all the same
                 assert!(!shown.contains(MARK), "leak in {shown}");
                 let err = crate::error::Error::Policy(e.to_string().into());
                 let shown = format!("{err} {err:?}");

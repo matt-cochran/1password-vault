@@ -101,14 +101,90 @@ pub fn parse(text: &str) -> Result<Fleet, Error> {
             .into(),
         )
     };
+    // The raw document first: the removed `pattern` rule must be reported as such, rather
+    // than as the `deny_unknown_fields` error the typed parse would give (FR-60).
+    let doc = Doc::parse(text).map_err(invalid)?;
+    reject_removed_pattern(&doc)?;
     if peek_kind(text).as_deref() == Some("simple") {
         let raw: RawSimpleConfig = toml::from_str(text).map_err(invalid)?;
-        let doc = Doc::parse(text).map_err(invalid)?;
         return validate_simple(raw, &doc);
     }
     let raw: RawConfig = toml::from_str(text).map_err(invalid)?;
-    let doc = Doc::parse(text).map_err(invalid)?;
     validate(raw, &doc)
+}
+
+/// FR-24, FR-60: the `pattern` rule is removed (0.7.0); a file that still sets it must
+/// fail at load with the key and the equivalent `regex` rule. The typed parse cannot do
+/// this (its `deny_unknown_fields` reports only "unknown field"), so the raw document is
+/// walked first: every `rules` table gets one check, and the error points at the `pattern`
+/// entry's line and column. The replacement is built from configuration (the prefix and
+/// the pattern) and never from a value.
+fn reject_removed_pattern(doc: &Doc<'_>) -> Result<(), Error> {
+    // (owner label, path to the rules table) for every declared key in either profile.
+    let mut rules_tables: Vec<(String, Vec<String>)> = Vec::new();
+    let root = doc.root.get_ref();
+    if let Some(products) = table(root, "products") {
+        for (product, pv) in products.iter() {
+            let Some(keys) = pv
+                .get_ref()
+                .get("keys")
+                .and_then(|v| v.get_ref().as_table())
+            else {
+                continue;
+            };
+            for (key, _) in keys.iter() {
+                let (product, key) = (product.get_ref().as_ref(), key.get_ref().as_ref());
+                rules_tables.push((
+                    key_label(product, key),
+                    vec![
+                        "products".into(),
+                        product.into(),
+                        "keys".into(),
+                        key.into(),
+                        "rules".into(),
+                    ],
+                ));
+            }
+        }
+    }
+    if let Some(keys) = table(root, "keys") {
+        for (key, _) in keys.iter() {
+            let key = key.get_ref().as_ref();
+            rules_tables.push((
+                key_label(SIMPLE_PRODUCT, key),
+                vec!["keys".into(), key.into(), "rules".into()],
+            ));
+        }
+    }
+    for (owner, base) in rules_tables {
+        let mut path = base.clone();
+        path.push("pattern".into());
+        let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        let Some(pattern) = doc.value(&path_refs).and_then(|v| v.get_ref().as_str()) else {
+            continue;
+        };
+        let mut prefix = base.clone();
+        prefix.push("ensure_prefix".into());
+        let prefix_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        let prefix = doc
+            .value(&prefix_refs)
+            .and_then(|v| v.get_ref().as_str())
+            .unwrap_or_default();
+        let regex = format!("{}(?:{pattern})", regex::escape(prefix));
+        let msg = format!(
+            "{owner}: the pattern rule was removed; use regex = {} instead",
+            toml::Value::String(regex)
+        );
+        return Err(doc.at_path(&path_refs, msg));
+    }
+    Ok(())
+}
+
+/// The inner table named `name`, if present (raw TOML lookup only; values are never read).
+fn table<'a>(t: &'a DeTable<'a>, name: &str) -> Option<&'a DeTable<'a>> {
+    t.iter()
+        .find(|(n, _)| n.get_ref().as_ref() == name)
+        .and_then(|(_, v)| v.get_ref().as_table())
 }
 
 /// The file as parsed TOML with source positions, so a provider section is read with its
@@ -888,22 +964,12 @@ fn validate_key(
             "{owner}: rule ensure_prefix must be a non-empty string"
         )));
     }
-    if spec.rules.pattern.is_some() && spec.rules.regex.is_some() {
-        return Err(cfg(format!(
-            "{owner}: pattern and regex cannot both be set; keep regex (pattern is deprecated)"
-        )));
-    }
-    if spec.rules.pattern.is_some() && spec.rules.ensure_prefix.is_none() {
-        return Err(cfg(format!("{owner}: rule pattern requires ensure_prefix")));
-    }
-    if let Some(re) = &spec.rules.pattern {
-        regex::Regex::new(re)
-            .map_err(|e| cfg(format!("{owner}: rule pattern does not compile: {e}")))?;
-    }
     if spec.rules.transform.as_deref() == Some("signoz_ingestion_header") {
+        let regex =
+            toml::Value::String(format!("{}(?:{SIGNOZ_BODY})", regex::escape(SIGNOZ_PREFIX)));
         return Err(cfg(format!(
             "{owner}: transform = \"signoz_ingestion_header\" was removed in 0.4.0; \
-             use ensure_prefix = \"{SIGNOZ_PREFIX}\" with pattern = \"{SIGNOZ_BODY}\""
+             use ensure_prefix = \"{SIGNOZ_PREFIX}\" with regex = {regex}"
         )));
     }
     Ok(())
@@ -1260,7 +1326,7 @@ mod tests {
         base.replace(from, to)
     }
     #[test]
-    fn loads_fleet_profile_and_builds_fly_names() {
+    fn loads_fleet_profile_and_builds_target_names() {
         let f = parse(&ok()).unwrap();
         assert_eq!(
             f.target_name("prod", "allumata", "OPENAI_API_KEY"),
@@ -1426,91 +1492,36 @@ mod tests {
         );
     }
 
+    /// FR-24, FR-60: the `pattern` rule is removed; a file that still sets it fails at
+    /// load, naming the key and the equivalent `regex` rule to write. The entry's line and
+    /// column are reported like any other rule error, and the file's text is never quoted.
     #[test]
-    fn parses_pattern_rule() {
-        let fleet = parse(&format!(
+    fn pattern_rule_fails_at_load_with_the_equivalent_regex() {
+        let text = "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
+                    item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
+                    environments = [\"prod\"]\nrules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n";
+        assert_eq!(
+            config_err(text),
+            "invalid secrets.toml: TOML parse error at line 10, column 33\n\
+             K1: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead\n"
+        );
+    }
+
+    /// FR-24, FR-60: the same check applies under the fleet profile, naming the key as
+    /// `product/KEY`.
+    #[test]
+    fn pattern_rule_fails_under_the_fleet_profile_naming_the_key() {
+        let text = format!(
             "{}{}",
             ok(),
             signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"[a-z]+\"")
-        ))
-        .unwrap();
-        assert_eq!(
-            fleet.products["p"].keys["K1"].rules.pattern.as_deref(),
-            Some("[a-z]+")
         );
-    }
-
-    #[test]
-    fn rejects_pattern_without_ensure_prefix_naming_key() {
-        let m = config_err(&format!(
-            "{}{}",
-            ok(),
-            signoz_like_key("K1", "pattern = \"[a-z]+\"")
-        ));
-        assert!(m.contains("p/K1"), "{m}");
-    }
-
-    #[test]
-    fn rejects_pattern_that_does_not_compile_naming_key() {
-        let m = config_err(&format!(
-            "{}{}",
-            ok(),
-            signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"([a-z\"")
-        ));
-        assert!(m.contains("p/K1"), "{m}");
-    }
-
-    #[test]
-    fn rejects_pattern_and_regex_together_naming_the_key() {
-        let m = config_err(&format!(
-            "{}{}",
-            ok(),
-            signoz_like_key(
-                "K1",
-                "ensure_prefix = \"p-\", pattern = \"[a-z]+\", regex = \"p-[a-z]+\""
-            )
-        ));
+        let m = config_err(&text);
+        let message = m.split_once('\n').map_or(m.as_str(), |(_, rest)| rest);
         assert_eq!(
-            m,
-            "p/K1: pattern and regex cannot both be set; keep regex (pattern is deprecated)"
+            message,
+            "p/K1: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead\n"
         );
-    }
-
-    #[test]
-    fn pattern_loads_with_a_deprecation_note_naming_the_key_and_equivalent_regex() {
-        let fleet = parse(&format!(
-            "{}{}",
-            ok(),
-            signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"[a-z]+\"")
-        ))
-        .unwrap();
-        assert_eq!(
-            fleet.notes(),
-            vec!["p/K1: pattern is deprecated; use regex = 'p\\-(?:[a-z]+)' instead of pattern"]
-        );
-    }
-
-    #[test]
-    fn pattern_emits_one_deprecation_note_per_key() {
-        let fleet = parse(&format!(
-            "{}{}{}",
-            ok(),
-            signoz_like_key("K1", "ensure_prefix = \"p-\", pattern = \"[a-z]+\""),
-            signoz_like_key("K2", "ensure_prefix = \"q-\", pattern = \"[0-9]+\"")
-        ))
-        .unwrap();
-        assert_eq!(fleet.notes().len(), 2);
-    }
-
-    #[test]
-    fn regex_emits_no_deprecation_note() {
-        let fleet = parse(&format!(
-            "{}{}",
-            ok(),
-            signoz_like_key("K1", "ensure_prefix = \"p-\", regex = \"p-[a-z]+\"")
-        ))
-        .unwrap();
-        assert!(fleet.notes().is_empty());
     }
 
     #[test]
@@ -1553,7 +1564,8 @@ mod tests {
         assert_eq!(
             m,
             "p/K1: transform = \"signoz_ingestion_header\" was removed in 0.4.0; use \
-             ensure_prefix = \"signoz-ingestion-key=\" with pattern = \"[A-Za-z0-9._~+/-]+={0,2}\""
+             ensure_prefix = \"signoz-ingestion-key=\" with regex = \
+             'signoz\\-ingestion\\-key=(?:[A-Za-z0-9._~+/-]+={0,2})'"
         );
     }
 
@@ -1608,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fly_name_collision_from_product_normalization() {
+    fn rejects_target_name_collision_from_product_normalization() {
         let text = with_key("my-app", "K", r#"["prod"]"#);
         let text = format!(
             "{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
@@ -1621,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fly_name_collision_across_double_underscore() {
+    fn rejects_target_name_collision_across_double_underscore() {
         let text = with_key("a__b", "C", r#"["staging"]"#);
         let text = format!(
             "{text}\n[products.a.keys.B__C]\nkind = \"secret\"\nenvironments = [\"staging\"]\n"
@@ -1640,7 +1652,7 @@ mod tests {
     /// `my_app/K` (staging only) is not desired there, and `--prune` would delete the very
     /// name the same run staged.
     #[test]
-    fn rejects_fly_name_collision_even_across_environments() {
+    fn rejects_target_name_collision_even_across_environments() {
         let text = with_key("my-app", "K", r#"["prod"]"#);
         let text = format!(
             "{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"staging\"]\n"
@@ -1654,7 +1666,7 @@ mod tests {
 
     /// The collision check covers keys declared for no environment of their own, too.
     #[test]
-    fn rejects_fly_name_collision_with_key_declared_for_no_environment() {
+    fn rejects_target_name_collision_with_key_declared_for_no_environment() {
         let text = with_key("my-app", "K", r#"["prod"]"#);
         let text =
             format!("{text}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = []\n");
@@ -1765,7 +1777,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
     }
 
     #[test]
-    fn rejects_template_rendering_invalid_fly_names() {
+    fn rejects_template_rendering_invalid_target_names() {
         let m = config_err(&mutate(
             "FLEET__{PRODUCT}__{KEY}",
             "fleet__{PRODUCT}__{KEY}",
@@ -1889,7 +1901,7 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
     }
 
     #[test]
-    fn simple_fly_name_is_the_key_name() {
+    fn simple_target_name_is_the_key_name() {
         let f = parse(&simple()).unwrap();
         assert_eq!(f.target_name("prod", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
     }
@@ -2331,25 +2343,20 @@ fly.secret_name = "STG__{PRODUCT}__{KEY}""#,
         );
     }
 
-    /// FR-24 (0.6.0): the replacement a `pattern` deprecation note suggests pastes into the
-    /// file as is and loads.
+    /// FR-24, FR-60: the removal error's suggested `regex` rule pastes into the file as is
+    /// and loads.
     #[test]
     fn the_suggested_regex_replacement_loads() {
         let head = "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
                     item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
                     environments = [\"prod\"]\n";
-        let old = parse(&format!(
+        let m = config_err(&format!(
             "{head}rules = {{ ensure_prefix = \"p-\", pattern = \"[a-z]+\" }}\n"
-        ))
-        .unwrap();
-        let note = old.notes().remove(0);
-        let rule = note
-            .split_once("use ")
-            .and_then(|(_, r)| r.strip_suffix(" instead of pattern"))
-            .unwrap()
-            .to_string();
-        let new = format!("{head}rules = {{ ensure_prefix = \"p-\", {rule} }}\n");
-        assert!(parse(&new).is_ok(), "{new}");
+        ));
+        let (_, rule) = m.split_once("use regex = ").unwrap();
+        let rule = rule.trim_end().strip_suffix(" instead").unwrap();
+        let text = format!("{head}rules = {{ ensure_prefix = \"p-\", regex = {rule} }}\n");
+        assert!(parse(&text).is_ok(), "{text}");
     }
 
     // ---- personal keys and environment display fields (FR-55) ----------------------

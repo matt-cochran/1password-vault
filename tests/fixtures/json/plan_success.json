@@ -13,7 +13,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
-      "fly_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
       "target": "absent",
       "action": "would_stage"
     },
@@ -25,7 +24,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
       "target": "present",
       "action": "would_stage"
     },
@@ -37,7 +35,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
-      "fly_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
       "target": null,
       "action": null
     },
@@ -49,7 +46,6 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
-      "fly_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
       "target": "absent",
       "action": null
     }

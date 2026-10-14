@@ -766,7 +766,7 @@ environments = ["staging", "prod"]
 [products.p.keys.TRACE]
 kind = "secret"
 environments = ["staging", "prod"]
-rules = { ensure_prefix = "signoz-ingestion-key=", pattern = "[A-Za-z0-9._~+/-]+={0,2}" }
+rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key=(?:[A-Za-z0-9._~+/-]+={0,2})" }
 "#;
 
     #[test]

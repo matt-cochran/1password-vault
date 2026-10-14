@@ -1909,9 +1909,6 @@ fn run(
     .or_else(config_store::account_env);
     r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
-    if let Ok(fleet) = &loaded {
-        write_notes(fleet, &mut io::stderr());
-    }
     let mut cmd = cli.cmd;
     // A file that does not load: re-check it with a read-only command (H10). A manifest
     // has no file to fix in place: `opv config edit` opens it (FR-44).
@@ -2039,21 +2036,13 @@ fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()).into())
 }
 
-/// Print each load-time deprecation note (FR-24, 0.6.0) to `out`, one line per note. The
-/// note names the key and the equivalent rule, never a value.
-fn write_notes(fleet: &opv::domain::Fleet, out: &mut dyn Write) {
-    for note in fleet.notes() {
-        let _ = writeln!(out, "{note}");
-    }
-}
-
 /// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
 /// current directory up (printed as `using <path>`). `None` when none was found.
 fn find_config(
     config: Option<&PathBuf>,
     config_source: ConfigSource,
 ) -> Option<Result<opv::domain::Fleet, Error>> {
-    let loaded = match config {
+    match config {
         Some(path) => {
             if config_source == ConfigSource::Env {
                 let _ = writeln!(io::stderr(), "using {} (from OPV_CONFIG)", path.display());
@@ -2069,11 +2058,7 @@ fn find_config(
                 config::load(&found)
             }),
         },
-    };
-    if let Some(Ok(fleet)) = &loaded {
-        write_notes(fleet, &mut io::stderr());
     }
-    loaded
 }
 
 /// `opv login` in a project whose configuration lives in 1Password (FR-44): the manifest,
@@ -2698,22 +2683,6 @@ mod tests {
             closed: false,
         };
         assert!(writeln!(w, "a").is_err());
-    }
-
-    #[test]
-    fn load_notes_are_written_one_line_each() {
-        let fleet = opv::config::parse(
-            "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
-             item_id = \"i\"\nfly.app = \"app\"\n[keys.K1]\nkind = \"secret\"\n\
-             environments = [\"prod\"]\nrules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        )
-        .unwrap();
-        let mut out = Vec::new();
-        write_notes(&fleet, &mut out);
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "K1: pattern is deprecated; use regex = 'p\\-(?:[a-z]+)' instead of pattern\n"
-        );
     }
 
     /// Usage reads `opv` whatever argv[0] is (Windows passes `opv.exe`).

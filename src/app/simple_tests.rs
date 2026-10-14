@@ -209,7 +209,7 @@ fn status_json_product_is_null_in_every_row() {
 }
 
 #[test]
-fn status_json_fly_name_is_the_key_name() {
+fn status_json_target_name_is_the_key_name() {
     let r = FakeRunner::new([prod_item(), fly_empty()]);
     let (_, out) = status_of(&r, true);
     let doc = json_doc(&out);
@@ -219,7 +219,7 @@ fn status_json_fly_name_is_the_key_name() {
         .iter()
         .find(|r| r["key"] == "JWT_KEY")
         .unwrap();
-    assert_eq!(jwt["fly_name"], "JWT_KEY");
+    assert_eq!(jwt["target_name"], "JWT_KEY");
 }
 
 #[test]
@@ -236,14 +236,14 @@ fn status_json_extra_product_is_null() {
 // ---------- fly plan ----------
 
 #[test]
-fn plan_counts_an_undeclared_fly_name_as_unmanaged() {
+fn plan_counts_an_undeclared_secret_on_fly_as_unmanaged() {
     let r = FakeRunner::new([prod_item(), fly(&[(FOREIGN, "d-f")])]);
     let (_, out) = plan_of(&r, false);
     assert!(out.contains("1 unmanaged on Fly (never touched)"), "{out}");
 }
 
 #[test]
-fn plan_never_lists_an_undeclared_fly_name_to_prune() {
+fn plan_never_lists_an_undeclared_secret_on_fly_to_prune() {
     let r = FakeRunner::new([prod_item(), fly(&[(FOREIGN, "d-f")])]);
     let (_, out) = plan_of(&r, false);
     assert!(!out.contains(FOREIGN), "{out}");
@@ -333,7 +333,7 @@ fn sync_reads_the_item_once() {
 
 /// Required (FR-8, SR-6): `--prune` never touches a name the file does not declare.
 #[test]
-fn sync_prune_never_touches_an_undeclared_fly_name() {
+fn sync_prune_never_touches_an_undeclared_secret_on_fly() {
     let on_fly = [("DATABASE_URL", "d1"), ("JWT_KEY", "d2"), (FOREIGN, "d-f")];
     let r = fake_sync(prod_item(), fly(&on_fly), fly(&on_fly));
     let (res, out) = sync_of(&r, &prune());
