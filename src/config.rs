@@ -792,7 +792,7 @@ fn target(
             &base,
             format!(
                 "state_vault_missing: target {name} in {env} needs state_vault_id; next: opv \
-                 bootstrap --state {env} --target {name}"
+                 bootstrap (it creates the target's state vault and records it)"
             ),
         ));
     };
@@ -2233,7 +2233,7 @@ environments = ["prod"]
         assert!(
             m.contains(
                 "state_vault_missing: target site in prod needs state_vault_id; next: opv \
-                 bootstrap --state prod --target site"
+                 bootstrap (it creates the target's state vault and records it)"
             ),
             "{m}"
         );

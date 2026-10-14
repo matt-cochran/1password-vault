@@ -184,7 +184,7 @@ sections no configuration here declares.
 fly.app = "portfolio-prod"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
 deploy_credentials = "op://infra-prod/fly-deploy-shared"
-state_vault_id = "vst1…"              # recorded by opv bootstrap --state prod --target shared
+state_vault_id = "vst1…"              # recorded by opv bootstrap or opv target add
 
 [environments.prod.targets.p-overflow]
 # deploy target for p only; added by opv target add
@@ -236,7 +236,7 @@ opv delivery verify prod --product p [--target p-overflow] --json
 - **`opv target add`**
   - writes through `config_edit`: comments kept, validated, concurrency refused;
   - is also how the first target is declared;
-  - ends with `Next: opv bootstrap --state prod --target p-overflow`, then `opv access prod --target p-overflow`.
+  - creates and records the target's state vault in the same step, and ends with `Next: opv access prod --target p-overflow`.
 - **`plan` / `sync`**
   - Without `--target`: every target, under one plan id that covers exactly the targets
     planned.
@@ -279,7 +279,7 @@ thing per name: the store's version and a keyed fingerprint. They become one sto
 **A state vault per target is required (D12).** Without one a target has no change
 detection and no evidence, so `targets.<name>.state_vault_id` is required for every target.
 A target without one fails at load with `state_vault_missing`, whose next step is
-`opv bootstrap --state <env> --target <name>`.
+`opv bootstrap`, which creates the target's state vault and records it.
 
 **Per placement.** Staged versus deployed, drift and revisions are computed per placement,
 so a stale revision on `p-overflow` changes nothing about `shared`.
@@ -325,7 +325,7 @@ values. So each target has its own state vault, `<project>-<env>-<target>-state`
   - the state vault;
   - the targets sharing it;
   - the boundary one of them cannot read.
-- **Creating it:** `opv bootstrap --state <env> --target <t>`.
+- **Creating it:** `opv target add` creates it with the target; `opv bootstrap` creates any that is missing.
 
 ## 7. What the change removes (FR-60)
 
