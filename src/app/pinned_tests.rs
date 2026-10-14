@@ -11,21 +11,21 @@ use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
 
 const AZURE: &str = r#"
-[profile]
-kind = "simple"
 [environments.prod]
-vault_id = "vprd"
-item_id = "iprd"
-[environments.prod.azure]
+boundaries.app = { vault_id = "vprd", item_id = "iprd" }
+[environments.prod.targets.app]
+state_vault_id = "sprod"
+[environments.prod.targets.app.azure]
 subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "kv-app"
 resource_group = "rg-app"
 container_app = "ca-app"
 identity = "system"
-[keys.API_KEY]
+env_name = "{KEY}"
+[products.app.keys.API_KEY]
 kind = "secret"
 environments = ["prod"]
-[keys.DB_URL]
+[products.app.keys.DB_URL]
 kind = "secret"
 environments = ["prod"]
 "#;
@@ -60,7 +60,10 @@ fn preflight() -> Vec<Output> {
 }
 
 fn azure_item() -> Output {
-    item(&[secret("", "API_KEY", API_KEY), secret("", "DB_URL", DB_URL)])
+    item(&[
+        secret("app", "API_KEY", API_KEY),
+        secret("app", "DB_URL", DB_URL),
+    ])
 }
 
 /// `az keyvault secret list -o json`: entries opv owns in prod, by Key Vault name.
@@ -272,9 +275,10 @@ fn azure_plan_shows_an_unchanged_secret_as_same() {
     let mut out = Vec::new();
     super::sync::plan_with(&azure(), "prod", &r, &mut out, false).unwrap();
     assert!(
-        text_of(&out)
-            .lines()
-            .any(|l| l.starts_with("API_KEY") && l.ends_with("same")),
+        text_of(&out).lines().any(|l| {
+            l.split_whitespace().collect::<Vec<_>>()
+                == ["app", "API_KEY", "secret", "saved", "same"]
+        }),
         "{}",
         text_of(&out)
     );

@@ -557,10 +557,55 @@ mod tests {
         explain(&fleet(), "allumata/OPENAI_API_KEY", Some("prod")).unwrap()
     }
 
+    /// The fixture plus `extra`, recording a boundary for every product `extra`
+    /// introduces under the fixture's shared vault and item.
+    fn fleet_with(extra: &str) -> Fleet {
+        let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let doc: toml::Table = toml::from_str(&format!("{base}\n{extra}")).unwrap();
+        let ids = |env: &str| match env {
+            "prod" => ("vprd", "iprd"),
+            _ => ("vstg", "istg"),
+        };
+        let envs = doc["environments"].as_table().unwrap();
+        let mut out = format!("{base}\n{extra}");
+        let mut seen = std::collections::BTreeSet::new();
+        for (product, p) in doc["products"].as_table().unwrap() {
+            let Some(keys) = p.get("keys").and_then(|v| v.as_table()) else {
+                continue;
+            };
+            for spec in keys.values() {
+                let Some(list) = spec.get("environments").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                for env in list.iter().filter_map(|v| v.as_str()) {
+                    let already = envs
+                        .get(env)
+                        .and_then(|e| e.get("boundaries"))
+                        .and_then(|b| b.as_table())
+                        .is_some_and(|b| b.contains_key(product));
+                    if already || !seen.insert((product.clone(), env.to_string())) {
+                        continue;
+                    }
+                    let (vault_id, item_id) = ids(env);
+                    let header = format!("[environments.{env}]\n");
+                    out = out.replacen(
+                        &header,
+                        &format!(
+                            "{header}boundaries.{product} = {{ vault_id = \"{vault_id}\", \
+                             item_id = \"{item_id}\" }}\n"
+                        ),
+                        1,
+                    );
+                }
+            }
+        }
+        crate::config::parse(&out).unwrap()
+    }
+
     fn single_env() -> Fleet {
         crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
              fly.app = \"a\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
              [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
         )
@@ -586,9 +631,9 @@ mod tests {
     #[test]
     fn prints_the_key_vault_name_of_an_azure_target() {
         let fleet = crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+             [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
              key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
@@ -604,9 +649,9 @@ mod tests {
 
     fn azure_fleet() -> Fleet {
         crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+             [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
              key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
@@ -626,7 +671,7 @@ mod tests {
     #[test]
     fn run_only_environment_says_run_only() {
         let f = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+            "[environments.dev]\n\
              [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let out = explain(&f, "allumata/DEV_KEY", Some("dev")).unwrap();
@@ -637,9 +682,9 @@ mod tests {
     #[test]
     fn prints_the_routing_of_a_config_key_on_an_azure_target() {
         let fleet = crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+             [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
              key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
@@ -816,75 +861,6 @@ mod tests {
         );
     }
 
-    fn simple() -> Fleet {
-        crate::config::load("tests/fixtures/simple.toml").unwrap()
-    }
-
-    #[test]
-    fn simple_form_prints_the_key_alone() {
-        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
-        assert!(out.starts_with("DATABASE_URL in prod\n"), "{out}");
-    }
-
-    #[test]
-    fn simple_form_reference_is_an_unsectioned_field() {
-        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
-        assert!(
-            out.contains("reference:  op://vprd/iprd/DATABASE_URL\n"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn simple_form_target_name_is_the_key() {
-        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
-        assert!(out.contains("fly name:   DATABASE_URL\n"), "{out}");
-    }
-
-    #[test]
-    fn simple_form_prints_op_item_get_without_reveal() {
-        let out = explain(&simple(), "JWT_KEY", Some("staging")).unwrap();
-        assert!(
-            out.contains("inspect:    op item get istg --vault vstg") && !out.contains("--reveal"),
-            "{out}"
-        );
-    }
-
-    /// The hidden implicit product never shows: no empty `//` section and no leading `/`.
-    #[test]
-    fn simple_form_never_shows_the_hidden_product() {
-        let out = explain(&simple(), "JWT_KEY", Some("staging")).unwrap();
-        assert!(!out.contains("istg//") && !out.starts_with('/'), "{out}");
-    }
-
-    #[test]
-    fn simple_undeclared_key_is_config_error() {
-        let e = explain(&simple(), "NOPE", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("NOPE")),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn product_form_under_simple_is_config_error() {
-        let e = explain(&simple(), "api/DATABASE_URL", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("<KEY>")),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn simple_key_not_declared_for_env_names_the_key_alone() {
-        let e = explain(&simple(), "STAGING_DEBUG_TOKEN", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.starts_with("STAGING_DEBUG_TOKEN is not declared")),
-            "{e}"
-        );
-    }
-
-    /// P8: a bare key declared by one product resolves to that product.
     #[test]
     fn bare_key_unique_across_products_resolves() {
         let out = explain(&fleet(), "OPENAI_API_KEY", Some("prod")).unwrap();
@@ -938,17 +914,5 @@ mod tests {
             Some("opv explain allumata/OPENAI_API_KEY --env prod"),
             "{e}"
         );
-    }
-
-    #[test]
-    fn simple_product_form_suggests_the_bare_key() {
-        let e = explain(&simple(), "api/DATABASE_URL", Some("prod")).unwrap_err();
-        assert!(e.to_string().contains("did you mean DATABASE_URL?"), "{e}");
-    }
-
-    #[test]
-    fn simple_misspelt_key_suggests_the_declared_key() {
-        let e = explain(&simple(), "DATABASE_UR", Some("prod")).unwrap_err();
-        assert!(e.to_string().contains("did you mean DATABASE_URL?"), "{e}");
     }
 }

@@ -162,9 +162,12 @@ fn world() -> (World, Fleet) {
         }),
     );
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n\
-         [environments.prod]\nvault_id = \"{VALUES}\"\nitem_id = \"{id}\"\n\
-         state_vault_id = \"{STATE}\"\nfly.app = \"myapp\"\n\
+        "[environments.prod]\n\
+         boundaries.shared = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+         boundaries.api = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+         boundaries.web = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+         [environments.prod.targets.app]\nstate_vault_id = \"{STATE}\"\n\
+         fly.app = \"myapp\"\n\
          fly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
          [products.shared]\nsource_only = true\n\
          [products.shared.keys.KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
@@ -357,8 +360,11 @@ fn another_target_cannot_reuse_the_revision() {
     let mut moved = fleet.clone();
     let env = moved.environments.get_mut("prod").unwrap();
     let other = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n[environments.prod]\nvault_id = \"{VALUES}\"\nitem_id = \"x\"\n\
-         fly.app = \"another-app\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n[products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+        "[environments.prod]\n\
+         boundaries.api = {{ vault_id = \"{VALUES}\", item_id = \"x\" }}\n\
+         [environments.prod.targets.app]\nstate_vault_id = \"sother\"\n\
+         fly.app = \"another-app\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+         [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
     ))
     .unwrap();
     env.targets = other.environments["prod"].targets.clone();

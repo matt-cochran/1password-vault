@@ -11,9 +11,10 @@ use crate::app::testutil::text_of;
 use crate::config_store::{FileStore, Found, ManifestStore, Matched, Snapshot, manifest_title};
 use crate::domain::Kind;
 
-const COMMENTED: &str = "# Our services. Values live in 1Password.\n\n[profile]\nkind = \"fleet\"\n\n\
-[environments.dev]   # local only\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\n\
-[environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\nfly.app = \"myapp\"\n\
+const COMMENTED: &str = "# Our services. Values live in 1Password.\n\n\
+[environments.dev]   # local only\nboundaries.api = { vault_id = \"vdev\", item_id = \"idev\" }\n\n\
+[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+[environments.prod.targets.app]\nstate_vault_id = \"sprod\"\nfly.app = \"myapp\"\n\
 fly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n\n\
 # The API\n[products.api.keys.DATABASE_URL]\nkind = \"secret\"\n\
 environments = [\"dev\", \"prod\"]   # both\n";
@@ -60,10 +61,6 @@ fn new_key(name: &str) -> AddArgs {
     }
 }
 
-fn simple() -> String {
-    fs::read_to_string("tests/fixtures/simple.toml").unwrap()
-}
-
 #[test]
 fn adding_a_key_keeps_every_comment_and_line() {
     let a = add_to(COMMENTED, new_key("api/STRIPE_KEY"));
@@ -105,6 +102,10 @@ fn env_limits_the_environments() {
 fn a_name_colliding_on_a_target_is_refused() {
     let file = format!(
         "{COMMENTED}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+    )
+    .replace(
+        "[environments.prod]\n",
+        "[environments.prod]\nboundaries.my_app = { vault_id = \"vprd\", item_id = \"iprd\" }\n",
     );
     let a = add_to(&file, new_key("my-app/K"));
     assert_eq!(a.res.as_ref().unwrap_err().exit_code(), 2, "{:?}", a.res);
@@ -114,6 +115,10 @@ fn a_name_colliding_on_a_target_is_refused() {
 fn a_refused_add_leaves_the_file_byte_for_byte() {
     let file = format!(
         "{COMMENTED}\n[products.my_app.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+    )
+    .replace(
+        "[environments.prod]\n",
+        "[environments.prod]\nboundaries.my_app = { vault_id = \"vprd\", item_id = \"iprd\" }\n",
     );
     let a = add_to(&file, new_key("my-app/K"));
     assert_eq!(a.text(), file);
@@ -241,25 +246,12 @@ fn a_fleet_key_without_product_is_refused_naming_one() {
 }
 
 #[test]
-fn a_simple_key_with_a_product_is_refused() {
-    let a = add_to(&simple(), new_key("api/STRIPE_KEY"));
-    assert!(a.err().contains("no products"), "{}", a.err());
-}
-
-#[test]
-fn a_simple_key_is_declared_under_keys() {
-    let a = add_to(&simple(), new_key("SENTRY_DSN"));
-    assert!(
-        a.text()
-            .contains("\n[keys.SENTRY_DSN]\nkind = \"secret\"\n"),
-        "{}",
-        a.text()
-    );
-}
-
-#[test]
 fn a_declared_key_gains_the_new_environment_in_its_own_array() {
-    let file = COMMENTED.replace("[\"dev\", \"prod\"]", "[\"prod\"]");
+    // Another key keeps dev's boundary in use, so the file loads before the add.
+    let file = format!(
+        "{COMMENTED}\n[products.api.keys.OTHER]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
+    )
+    .replace("[\"dev\", \"prod\"]", "[\"prod\"]");
     let mut args = new_key("api/DATABASE_URL");
     args.kind = None;
     args.envs = vec!["dev".into()];
@@ -375,7 +367,7 @@ fn a_manifest_add_names_the_manifest_in_its_summary() {
 
 #[test]
 fn a_broken_manifest_names_the_manifest_and_points_at_config_edit() {
-    let broken = COMMENTED.replace("kind = \"fleet\"", "kind = \"flet\"");
+    let broken = COMMENTED.replace("kind = \"secret\"", "kind = \"secre\"");
     let (_, _, res, _) = add_to_manifest(&broken, new_key("api/STRIPE_KEY"));
     let e = res.unwrap_err();
     assert!(
@@ -420,9 +412,14 @@ fn a_file_changed_since_it_was_read_is_refused() {
 
 #[test]
 fn from_declares_a_shared_key() {
+    // `web` is declared already (its boundary is `api`'s), so only the shared key is new.
+    let file = format!(
+        "{COMMENTED}\n[products.web]\nboundary = \"api\"\n\n\
+         [products.web.keys.SESSION]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n"
+    );
     let mut args = new_key("web/DATABASE_URL");
     args.from = Some("api/DATABASE_URL".into());
-    let a = add_to(COMMENTED, args);
+    let a = add_to(&file, args);
     assert_eq!(
         a.fleet().products["web"].keys["DATABASE_URL"]
             .from

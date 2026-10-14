@@ -18,11 +18,7 @@ use crate::runner::fake::FakeRunner;
 fn personal_fleet() -> Fleet {
     crate::config::parse(
         r#"
-[profile]
-kind = "fleet"
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
 environments = ["dev"]
@@ -127,18 +123,26 @@ fn check_shows_the_personal_key_as_a_row() {
     let mut personal = item_with("api", "OPENAI_API_KEY", "CONCEALED", "sk-personal");
     personal["title"] = json!("My Keys");
     op.insert("Private", personal);
+    // A team key keeps api's boundary in use; the personal key is added beside it.
     let team_id = op.insert(
         "myapp-dev",
-        json!({"title": "dev", "category": "SECURE_NOTE", "version": 1, "fields": []}),
+        json!({
+            "title": "dev", "category": "SECURE_NOTE", "version": 1,
+            "fields": [{
+                "id": "f_API_KEY", "type": "CONCEALED", "label": "API_KEY",
+                "value": "team-value",
+                "section": {"id": "s_api", "label": "api"}
+            }]
+        }),
     );
     let f = crate::config::parse(&format!(
         r#"
-[profile]
-kind = "fleet"
 [environments.dev]
-vault_id = "vdev0000000000000000000001"
-item_id = "{team_id}"
 personal_item = "My Keys"
+boundaries.api = {{ vault_id = "vdev0000000000000000000001", item_id = "{team_id}" }}
+[products.api.keys.API_KEY]
+kind = "secret"
+environments = ["dev"]
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
 environments = ["dev"]
@@ -208,11 +212,7 @@ fn merged_fields_follows_a_shared_personal_key_to_its_source() {
     );
     let f = crate::config::parse(
         r#"
-[profile]
-kind = "fleet"
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
 environments = ["dev"]
@@ -267,11 +267,7 @@ fn locate_prefers_personal_vault() {
     let id = personal_item(&op, "TeamKeys");
     let f = crate::config::parse(
         r#"
-[profile]
-kind = "fleet"
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
 personal_vault = "TeamKeys"
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"
@@ -298,11 +294,7 @@ fn locate_reports_setup_missing_when_the_item_does_not_exist() {
 fn item_title_uses_personal_item_when_set() {
     let f = crate::config::parse(
         r#"
-[profile]
-kind = "fleet"
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
 personal_item = "My Keys"
 [products.api.keys.OPENAI_API_KEY]
 kind = "secret"

@@ -13,12 +13,14 @@ const TOKEN: &str = "fo1_FIXTUREVALUE_deploy_token";
 /// The fixture with prod in `ACCOUNT`, signing in to Fly with `op://deploy-prd/fly`.
 fn fleet_with_credentials() -> Fleet {
     let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = text.replacen(
+        "[environments.prod]\n",
+        &format!("[environments.prod]\naccount = \"{ACCOUNT}\"\n"),
+        1,
+    );
     config::parse(&text.replacen(
-        "item_id = \"iprd\"\n",
-        &format!(
-            "item_id = \"iprd\"\naccount = \"{ACCOUNT}\"\ndeploy_credentials = \
-             \"op://deploy-prd/fly\"\n"
-        ),
+        "state_vault_id = \"sprd\"\n",
+        "state_vault_id = \"sprd\"\ndeploy_credentials = \"op://deploy-prd/fly\"\n",
         1,
     ))
     .unwrap()
@@ -201,21 +203,23 @@ fn doctor_runner_keeps_the_account_after_a_failed_deploy_sign_in() {
 fn key_vault_behind_kubernetes_signs_in_to_azure() {
     let fl = config::parse(
         r#"
-[profile]
-kind = "simple"
 [stores.kv]
 azure_key_vault = "kv-opv-fixture"
 subscription = "00000000-0000-0000-0000-000000000000"
+
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.app = { vault_id = "vdev", item_id = "idev" }
+[environments.dev.targets.app]
+state_vault_id = "sdev"
 deploy_credentials = "op://deploy/azure"
-[environments.dev.kubernetes]
+[environments.dev.targets.app.kubernetes]
 context = "kind-opv"
 namespace = "opv"
 deployment = "api"
+env_name = "{KEY}"
 secrets_in = "kv"
-[keys.API_KEY]
+
+[products.app.keys.API_KEY]
 kind = "secret"
 environments = ["dev"]
 "#,

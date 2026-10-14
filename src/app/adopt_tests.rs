@@ -56,8 +56,8 @@ fn world(empty: bool) -> (FakeOp, Fleet, tempfile::TempDir) {
         }),
     );
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{id}\"\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\n\
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\n\
          environments = [\"dev\"]\nrules = {{ prefix = \"sk-\" }}\n\
          [products.api.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n"
     ))
