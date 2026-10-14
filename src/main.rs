@@ -333,15 +333,17 @@ Examples:
 
 const BOOTSTRAP_QUICK: &str = "\
 Examples:
-  opv bootstrap --dry-run      # what would be created or checked, per environment
+  opv bootstrap --dry-run      # each boundary and state vault: ok, create or ids_not_in_account
   opv bootstrap                # create missing vaults and items, record their IDs";
 
 const BOOTSTRAP_MORE: &str = "\
-Environments without vault_id and item_id get a vault <project>-<env> and an item
-\"<project> · <env> values\" in the selected 1Password account (found when they exist),
-and their IDs are recorded in secrets.toml. Recorded IDs the account cannot see stop
-with ids_not_in_account: select the owning account, or pass --rebind <env>. Then every
-declared field is added, empty. Nothing is synced, deployed or given a value. Next: opv ready";
+Records every missing ID, and nothing else. Each boundary an environment needs, without
+boundaries.<b>, gets a vault <project>-<b>-<env> and an item \"<project> · <b> · <env> values\"
+in the selected 1Password account (found when they exist); each target without
+state_vault_id gets a vault <project>-<env>-<target>-state. Their IDs are recorded in
+secrets.toml. Recorded IDs the account cannot see stop with ids_not_in_account: select the
+owning account, or pass --rebind <env>. Then every declared field is added, empty. Nothing
+is synced, deployed or given a value. Next: opv ready";
 
 const TARGET_ADD_QUICK: &str = "\
 Examples:
@@ -686,7 +688,8 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
     },
-    /// Create every environment's vault, item and empty fields in the selected account.
+    /// Create every missing boundary vault, item and state vault, record their IDs, and add
+    /// the empty fields.
     #[command(before_help = BOOTSTRAP_QUICK, after_help = BOOTSTRAP_MORE)]
     Bootstrap {
         /// The configuration file to complete; defaults to the secrets.toml found from here.
@@ -698,19 +701,16 @@ enum Cmd {
         /// Show what would be created or checked; change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Replace this environment's recorded IDs with a vault and item in the selected
-        /// account (repeatable). Values are not moved.
+        /// Replace this environment's recorded boundary IDs with vaults and items in the
+        /// selected account (repeatable). Values are not moved.
         #[arg(long, value_name = "ENV")]
         rebind: Vec<String>,
-        /// Also print the owner's steps for a read-only CI service account for this
-        /// environment's vault.
+        /// Also print the owner's command for a read-only CI service account for every
+        /// boundary vault of this environment.
         #[arg(long, value_name = "ENV")]
         ci_reader: Option<String>,
-        /// Create this environment's state vault for delivery receipts, record it as
-        /// state_vault_id, and print the deploy identity's command (repeatable).
-        #[arg(long, value_name = "ENV")]
-        state: Vec<String>,
-        /// Print one JSON document (one step per environment) instead of lines.
+        /// Print one JSON document (each environment's boundaries and state vaults) instead
+        /// of lines.
         #[arg(long)]
         json: bool,
     },
@@ -1951,7 +1951,6 @@ fn run(
             dry_run,
             rebind,
             ci_reader,
-            state,
             json,
         } => {
             let here = std::env::current_dir().unwrap_or_default();
@@ -1974,7 +1973,6 @@ fn run(
                 dry_run: *dry_run,
                 rebind: rebind.iter().cloned().collect(),
                 ci_reader: ci_reader.clone(),
-                state: state.iter().cloned().collect(),
                 json: *json,
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);

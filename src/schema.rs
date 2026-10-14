@@ -540,7 +540,8 @@ fn documents() -> Value {
             "rules", "immutable", "guidance", "required_here", "inspect", "shared_from", "shared_by"
         ],
         "init": [
-            "path", "manifest", "environment", "profile", "target", "vault_id", "item_id",
+            "path", "manifest", "environment", "boundary", "target", "provider", "vault_id",
+            "item_id",
             "created", "keys: [{product, key, kind}]", "skipped"
         ],
         "init --add-env": [

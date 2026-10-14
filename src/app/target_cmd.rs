@@ -192,7 +192,8 @@ fn add_inner(
     // session (FR-43). The target is validated before the vault is created.
     tidy::require_person(r, "opv target add")?;
     build(&title)?;
-    let vault = bootstrap::ensure_vault(r, &title)?;
+    let notes = naming::state_vault_notes(&project, &args.env, &args.name);
+    let vault = bootstrap::ensure_vault(r, &title, &notes)?;
     let text = build(&vault.id)?;
     config_store::save(store, r, &base, &text)?;
     if args.json {
@@ -273,8 +274,8 @@ fn inferred_provider(args: &AddArgs) -> Result<&'static dyn Provider, Error> {
     match owners.as_slice() {
         [one] => Ok(*one),
         [] => Err(cfg(format!(
-            "opv target add needs the target's provider options (for example --fly-app <app>) \
-             or --provider <{}>",
+            "opv target add needs the target's provider options (opv target add --help lists \
+             them) or --provider <{}>",
             registry::sections().join("|")
         ))),
         _ => Err(cfg(format!(

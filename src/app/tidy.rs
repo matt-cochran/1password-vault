@@ -274,20 +274,8 @@ pub(crate) fn boundaries_needed<'f>(
     env_name: &str,
 ) -> Result<BTreeMap<String, &'f Boundary>, Error> {
     let mut out = BTreeMap::new();
-    for (product, p) in &fleet.products {
-        let desired: Vec<_> = p
-            .keys
-            .values()
-            .filter(|k| k.environments.iter().any(|e| e == env_name))
-            .collect();
-        if desired.is_empty() {
-            continue;
-        }
-        let sources = desired.iter().filter_map(|k| k.source()).map(|(sp, _)| sp);
-        for needer in std::iter::once(product.as_str()).chain(sources) {
-            let b = fleet.boundary(env_name, needer)?;
-            out.insert(fleet.boundary_of(needer).to_string(), b);
-        }
+    for (b, needer) in fleet.needed_boundaries(env_name) {
+        out.insert(b.to_string(), fleet.boundary(env_name, needer)?);
     }
     Ok(out)
 }

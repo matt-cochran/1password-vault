@@ -952,43 +952,34 @@ fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
     }
 }
 
-/// FR-57: every product with a team key desired in an environment, and every source such a
-/// key reads with `from`, has its boundary recorded there (personal keys live in each
+/// FR-57: every boundary [`Fleet::needed_boundaries`] names is recorded in its environment (personal keys live in each
 /// person's own item, FR-55, so they need none) (`boundary_missing`, next step
 /// `opv bootstrap`); a recorded boundary no such product uses is refused, so the
 /// configuration never names a vault nothing reads.
 fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (env_name, env) in &fleet.environments {
-        let mut used = BTreeSet::new();
-        for (product, p) in &fleet.products {
-            let desired: Vec<&KeySpec> = p
-                .keys
-                .values()
-                .filter(|k| !k.personal && k.environments.iter().any(|e| e == env_name))
-                .collect();
-            if desired.is_empty() {
-                continue;
-            }
-            let sources = desired.iter().filter_map(|k| k.source()).map(|(sp, _)| sp);
-            for needer in std::iter::once(product.as_str()).chain(sources) {
-                let b = fleet.boundary_of(needer);
-                if !env.boundaries.contains_key(b) {
-                    let msg = boundary_missing(env_name, needer, b);
-                    return Err(
-                        if doc
-                            .value(&["environments", env_name, "boundaries"])
-                            .is_some()
-                        {
-                            doc.at(env_name, "boundaries", msg)
-                        } else {
-                            doc.at_path(&["environments", env_name], msg)
-                        },
-                    );
-                }
-                used.insert(b);
-            }
+        let needed = fleet.needed_boundaries(env_name);
+        if let Some((b, needer)) = needed
+            .iter()
+            .find(|(b, _)| !env.boundaries.contains_key(**b))
+        {
+            let msg = boundary_missing(env_name, needer, b);
+            return Err(
+                if doc
+                    .value(&["environments", env_name, "boundaries"])
+                    .is_some()
+                {
+                    doc.at(env_name, "boundaries", msg)
+                } else {
+                    doc.at_path(&["environments", env_name], msg)
+                },
+            );
         }
-        if let Some(b) = env.boundaries.keys().find(|b| !used.contains(b.as_str())) {
+        if let Some(b) = env
+            .boundaries
+            .keys()
+            .find(|b| !needed.contains_key(b.as_str()))
+        {
             return Err(doc.at_path(
                 &["environments", env_name, "boundaries", b],
                 format!(

@@ -387,6 +387,30 @@ impl Fleet {
             .unwrap_or(product)
     }
 
+    /// Every boundary `env` needs (FR-57, FR-55), each with the product that first needs it:
+    /// the boundary of each product with a team (non-personal) key desired in `env`, and of
+    /// every source such a key reads with `from`. Personal keys live in each person's own
+    /// item, so a product whose keys in `env` are all personal needs none. The one rule the
+    /// loader, the tidy and every reader use.
+    pub fn needed_boundaries<'a>(&'a self, env: &str) -> BTreeMap<&'a str, &'a str> {
+        let mut out = BTreeMap::new();
+        for (product, p) in &self.products {
+            let team: Vec<&KeySpec> = p
+                .keys
+                .values()
+                .filter(|k| !k.personal && k.environments.iter().any(|e| e == env))
+                .collect();
+            if team.is_empty() {
+                continue;
+            }
+            let sources = team.iter().filter_map(|k| k.source()).map(|(sp, _)| sp);
+            for needer in std::iter::once(product.as_str()).chain(sources) {
+                out.entry(self.boundary_of(needer)).or_insert(needer);
+            }
+        }
+        out
+    }
+
     /// The recorded boundary of `product` in `env` (FR-57): the vault and item its values
     /// live in. An undefined environment is [`Fleet::environment`]'s error; a boundary not
     /// recorded is `boundary_missing` (load refuses that for every product with a key
