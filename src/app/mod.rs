@@ -1706,7 +1706,6 @@ fn no_target(fleet: &Fleet, env: &str) -> Error {
     ))
 }
 
-
 /// Resolve target `name` of the environment and open its ports, before any call.
 /// Mutating commands run [`preflight`] before their first write.
 pub(crate) fn open_target<'a>(
