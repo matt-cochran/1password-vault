@@ -28,7 +28,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv run <env> [--product <p>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)) | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
-| `opv init <env> [--vault <title>] [--item <title>] [--product <p>] [--target <provider> --target-name <name> [target options]]` | configuration from an existing item ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
+| `opv init <env> [--vault <title>] [--item <title>] [--product <p>]` | configuration (boundaries and products) from an existing item; no target ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
 | `opv init <env> --from <file.env> [--config-key KEY]... [--secret-key KEY]... [--apply]` | start from an existing `.env`: declare every key, then import the values, verified ([configuration](configuration.md#start-from-an-existing-env-opv-init---from)) | with `--apply`: the configuration and the item's fields |
 | `opv add <[product/]KEY> --kind secret\|config [...]` | declare a key, or add environments to one | the configuration |
 | `opv item skeleton <env> [--json]` | add every missing declared field to the item, empty | the 1Password item |
@@ -524,18 +524,19 @@ Next: opv adopt staging --from .env.staging --apply
 
 ## New environment: `opv init`
 
-`opv init <env>` writes the configuration from an environment's 1Password item, created if missing. There is one model for every project: a run-only environment's item has unsectioned fields, so `--product` names the product they belong to (each named section is a product of its own). To declare a deployment target, pass `--target <provider>` with its options and `--target-name <name>` (a name you choose, `^[a-z][a-z0-9-]*$`); `--target-name` is required with `--target`, and both are left out for a run-only environment.
+`opv init <env>` writes the configuration from an environment's 1Password item, created if missing. There is one model for every project: a run-only environment's item has unsectioned fields, so `--product` names the product they belong to (each named section is a product of its own). It writes boundaries and products, never a target: `opv target add` is the one way to add a deployment target ([below](#named-targets-opv-target-add-and-opv-target-list)), and a run-only environment needs none.
 
 ```sh
-opv init dev --product api                                       # run-only: vault myapp-api-dev, item "myapp · api · dev values"
-opv init prod --product api --target fly --target-name web --fly-app myapp   # deploys to Fly
+opv init dev --product api                    # run-only: vault myapp-api-dev, item "myapp · api · dev values"
+opv init prod --product api                   # then its deployment target:
+opv target add prod web --fly-app myapp       # validates it, creates its state vault and records its placements
 ```
 
-It reads field names and types once, never values, and ends with `Next: opv bootstrap`, which creates the boundary and state vaults and records their IDs. `--add-env` adds the environment to the existing configuration instead of writing a new one and declares no target: add one with `opv target add`. Details and the `--from` form: [configuration](configuration.md#start-from-an-existing-item-opv-init).
+It reads field names and types once, never values. Its output names `opv target add` for a deployment target and ends with `Next: opv bootstrap`, which is runnable as printed for every environment: it records any boundary still missing its IDs, adds each declared field, empty, and ends with `Next: opv ready`. `--add-env` adds the environment to the existing configuration instead of writing a new one. Details and the `--from` form: [configuration](configuration.md#start-from-an-existing-item-opv-init).
 
 ## Named targets: `opv target add` and `opv target list`
 
-A target is one named deployment target under `[environments.<env>.targets.<name>]`. `opv target add <env> <name>` writes one: pass the provider's options (the same ones `opv init --target` takes) and opv infers the provider from them, or pass `--provider`. `--products <p>` (repeatable) limits what it delivers (without it, every non-source-only product), and `--deploy-credentials op://<vault>/<item>` records its least-privilege deploy identity. In the same step it finds or creates the target's state vault `<project>-<env>-<target>-state` and records its ID; the edit keeps comments, validates the whole configuration first and refuses a concurrent change. `--dry-run` changes nothing. It ends with `Next: opv access <env> --target <name>`. `opv target list [--env <env>]` is read-only and shows each target's provider, locator, products, deploy identity and state vault.
+A target is one named deployment target under `[environments.<env>.targets.<name>]`. `opv target add <env> <name>` writes one: pass the provider's options (`opv target add --help` lists them) and opv infers the provider from them, or pass `--provider`. `--products <p>` (repeatable) limits what it delivers (without it, every non-source-only product), and `--deploy-credentials op://<vault>/<item>` records its least-privilege deploy identity. In the same step it finds or creates the target's state vault `<project>-<env>-<target>-state` and records its ID; the edit keeps comments, validates the whole configuration first and refuses a concurrent change. `--dry-run` changes nothing. It ends with `Next: opv access <env> --target <name>`. `opv target list [--env <env>]` is read-only and shows each target's provider, locator, products, deploy identity and state vault.
 
 ```sh
 opv target add prod p-overflow --fly-app p-overflow-prod --products p
@@ -558,8 +559,8 @@ opv bootstrap --ci-reader prod         # also print the CI reader's create comma
 Product `p` runs on the shared app `portfolio-prod` and, for overflow, on the dedicated app `p-overflow-prod`. Both placements read the same boundary item, so no value is entered twice; each target keeps its own state vault and its own delivery evidence. The configuration is the one in [configuration](configuration.md#one-baseline-plus-a-dedicated-overflow).
 
 ```sh
-opv init prod --product p --target fly --target-name shared --fly-app portfolio-prod
-opv bootstrap                                # creates p's boundary and shared's state vault, records their IDs
+opv init prod --product p                    # p's boundary: vault and item, IDs recorded
+opv target add prod shared --fly-app portfolio-prod
 opv target add prod p-overflow --fly-app p-overflow-prod --products p
 opv access prod --target p-overflow          # the deploy identity's vaults and its create command
 opv bootstrap --ci-reader prod               # the CI reader's command over every boundary vault
@@ -661,7 +662,6 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
 | `state_vault_wider_than_values` | 2 | after_fix | yes | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
 | `duplicate_scope` | 2 | never | no | a receipt file holds more than one entry for the same environment, product and target |
-| `target_name_required` | 2 | after_fix | no | --target needs --target-name <name>, the target's name, chosen by a person |
 | `unknown_env` | 2 | never | no | the environment is not defined in secrets.toml |
 | `unknown_product` | 2 | never | no | the product is not declared |
 | `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
@@ -698,7 +698,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `tidy_unverified` | 4 | after_fix | yes | opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; never a failure: reported in a document's tidy_error |
 <!-- error-codes:end -->
 
-`opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); `init`'s provider options (`--fly-app`, `--azure-key-vault`, `--kubernetes-context`, ...), each with its `provider` and `required_with_target`; the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
+`opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); `target add`'s provider options (`--fly-app`, `--azure-key-vault`, `--kubernetes-context`, ...), each with its `provider` and `required_with_target` (required for that provider); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
 
 ```sh
 opv schema | jq '.commands[] | select(.ask_user_first) | .name'

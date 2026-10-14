@@ -358,9 +358,9 @@ Examples:
 
 const TARGET_ADD_MORE: &str = "\
 Declares one named deployment target under [environments.<env>.targets.<name>]: the
-provider's options (the same ones opv init --target takes), the products it delivers
-and its deploy identity. In the same step it finds or creates the state vault
-<project>-<env>-<target>-state and records its ID. The edit keeps comments, validates
+provider's options (listed above), the products it delivers and its deploy identity.
+In the same step it finds or creates the state vault <project>-<env>-<target>-state
+and records its ID. The edit keeps comments, validates
 the whole configuration first and refuses a concurrent change; --dry-run changes nothing.";
 
 const TARGET_LIST_QUICK: &str = "\

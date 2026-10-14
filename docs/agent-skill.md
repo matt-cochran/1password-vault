@@ -33,9 +33,11 @@ on message text.
 
 - **No configuration yet** (`config_not_found`): there is one form (FR-60). Let
   `opv init`/`opv add` write `[products.<name>.keys.<KEY>]` (one product for one app, more
-  for a fleet), a boundary per environment and a named target; then the user runs
-  `opv bootstrap`, which creates each boundary's vault and item and each target's state vault
-  in the selected account and records their IDs. Never create a second configuration beside
+  for a fleet) and a boundary per environment; `opv init` writes no target. Then the user
+  runs `opv bootstrap`, which creates each boundary's vault and item in the selected account
+  and records their IDs, and adds each deploying environment's target with
+  `opv target add <env> <name> --<provider options>`, the one way to add a target (it
+  validates it, creates its state vault and records its placements). Never create a second configuration beside
   one that exists, and never edit a file whose first line says it is generated: hand the
   printed IDs to its generator.
 - **Adding a placement** (a product on another target): `opv ready --json` names a target as

@@ -2,7 +2,7 @@
 //! §5.2).
 //!
 //! `target add` declares one named target under `[environments.<env>.targets.<name>]`: the
-//! provider's section (the same options and validation `opv init --target` uses, through the
+//! provider's section (its options and validation come through the
 //! provider plug-in contract, FR-37), the products it delivers (FR-48), its deploy identity
 //! (`deploy_credentials`, FR-40) and its state vault (FR-58). In the same confirmed step it
 //! finds or creates the state vault titled [`naming::state_vault`] and records its ID. The
@@ -211,7 +211,7 @@ fn add_inner(
 
 /// The provider named by `--provider`, or else the one provider whose options were given,
 /// with the options checked against its [`InitField`]s: unknown option, another provider's
-/// option, or a missing required one is refused, exactly as `opv init --target` does (H3).
+/// option, or a missing required one is refused (H3).
 fn provider_and_values(
     args: &AddArgs,
 ) -> Result<(&'static dyn Provider, BTreeMap<&'static str, String>), Error> {

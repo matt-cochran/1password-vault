@@ -50,15 +50,15 @@ pub trait Provider: Sync {
     /// What a person adds to deploy with this provider, e.g. `configure fly.app`. Only the
     /// default provider (`adapters::registry::DEFAULT`) is ever asked.
     fn setup_hint(&self) -> String;
-    /// The fields `opv init --target <section>` takes (FR-23, H3), each as the option
+    /// The fields `opv target add` takes for this provider (FR-56, H3), each as the option
     /// `--<section>-<field>` ([`init_flag`]). Empty when the provider does not support
-    /// `init`. A new provider adds its options here; core and the CLI need no change.
+    /// `target add`. A new provider adds its options here; core and the CLI need no change.
     fn init_fields(&self) -> &'static [InitField] {
         &[]
     }
-    /// The TOML lines `opv init` writes under `[environments.<env>.targets.<name>]` for this
-    /// target, from the given `values` (field → value; every required field present), or
-    /// `None` when the provider does not support `init`. Fill what the target needs and the
+    /// The TOML lines `opv target add` writes under `[environments.<env>.targets.<name>]`
+    /// for this target, from the given `values` (field → value; every required field
+    /// present), or `None` when the provider does not support `target add`. Fill what the target needs and the
     /// user did not give (a name template). Nothing is looked up; the result is validated
     /// with the same loader as a hand-written file.
     fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
@@ -166,13 +166,13 @@ pub fn deploy_provider(target: &dyn TargetConfig) -> &'static dyn Provider {
 pub struct InitField {
     /// The field under the provider's section, e.g. `key_vault`.
     pub field: &'static str,
-    /// What to give, for `opv init --help`.
+    /// What to give, for `opv target add --help`.
     pub help: &'static str,
-    /// Whether `init --target <section>` needs it.
+    /// Whether a target of this provider needs it.
     pub required: bool,
 }
 
-/// The `opv init` option of `field`: `--azure-key-vault` is `azure-key-vault`.
+/// The `opv target add` option of `field`: `--azure-key-vault` is `azure-key-vault`.
 pub fn init_flag(p: &dyn Provider, field: &InitField) -> String {
     format!("{}-{}", p.section(), field.field.replace('_', "-"))
 }

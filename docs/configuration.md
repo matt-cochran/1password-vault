@@ -576,7 +576,7 @@ opv init staging --vault myapp-staging --item myapp --product api
 - It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs into that boundary (`boundaries.<product>`, or `boundaries.<group>` when several products share it). No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
 - It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
 - A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed by `init` itself: rename the field in 1Password and run `init --force` again. A label given twice is declared once. When you run `init` yourself and the vault or item does not exist yet, it creates them (the vault only if your account allows it) and writes their IDs; under a service account or in CI it stops and names the next step.
-- **It can write one target.** `--target <provider> ... --target-name <name>` writes `[environments.<env>.targets.<name>]` and, in the same confirmed step, creates the target's state vault and records `state_vault_id`, exactly as `opv target add` does ([adding a target](#adding-a-target)). Without `--target` the environment is run-only, and you add a target later with `opv target add` ([below](#add-a-target-opv-target-add)). The provider's fields are in [targets by provider](#targets-by-provider); `opv init --help` lists every option.
+- **It writes no target.** It writes boundaries and products only; `opv target add` is the one way to add a deployment target ([below](#add-a-target-opv-target-add)), and a run-only environment needs none.
 - **Where it writes.** In a new project (no `secrets.toml` here or in a parent) it saves a manifest `opv · <project>` in the item's vault, tagged with the git remote (`--project <name>` names it; default: the repository's name). This is a 1Password write, so it needs a person signed in with their own session; under a service account or CI it refuses with `Next: opv login`. An existing manifest for the project is never overwritten: change it with `opv config edit`. With `--file`, or when a `secrets.toml` is already found, it writes `./secrets.toml` in the current directory instead (`--config` and `OPV_CONFIG` are refused; use `--add-env` to extend a file elsewhere). An existing file is refused (exit 2) unless `--force` is given; it never merges. The text is validated like a hand-written one and written atomically.
 - It reads three things from 1Password: `op vault list`, `op item list` and one `op item get`.
 
@@ -586,11 +586,11 @@ It ends with what it wrote and the next command:
 $ opv init prod --vault myapp-prod --item app --product api --file
 vault "myapp-prod" is vprd, item "app" is iprd
 wrote /home/me/myapp/secrets.toml (product api): 1 secret, 1 config, skipped 0
-add keys with opv add, rules and guidance by hand; see https://github.com/matt-cochran/1password-vault/blob/main/docs/configuration.md#rules-reference
+add a deploy target: opv target add prod <name> --<provider options> (opv target add --help); a run-only environment needs none
 Next: opv bootstrap
 ```
 
-`opv bootstrap` records every boundary the configuration declares. Give an environment a target it does not have yet with `opv target add`.
+`opv bootstrap` is runnable as printed for every environment: it records any boundary still missing its IDs and adds each declared field, empty. Give an environment that deploys its target with `opv target add`.
 
 ### Add a target: `opv target add`
 

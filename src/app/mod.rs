@@ -1706,8 +1706,6 @@ fn no_target(fleet: &Fleet, env: &str) -> Error {
     ))
 }
 
-/// Where the user documentation lives (for next steps that are a page to read).
-pub(crate) const DOCS: &str = "https://github.com/matt-cochran/1password-vault/blob/main/docs";
 
 /// Resolve target `name` of the environment and open its ports, before any call.
 /// Mutating commands run [`preflight`] before their first write.

@@ -409,8 +409,9 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
             })
         })
         .collect();
-    // `init`'s provider options are hidden from --help (one summary line per provider)
-    // but listed here, each with its provider and whether that --target needs it (I6).
+    // `target add`'s provider options are hidden from --help (one summary line per
+    // provider) but listed here, each with its provider and whether that provider's target
+    // needs it (I6).
     let flags: Vec<Value> = cmd
         .get_arguments()
         .filter(|a| !a.is_positional() && !a.is_global_set())

@@ -134,7 +134,7 @@ impl Provider for FlyProvider {
     }
 }
 
-/// `opv init --target fly` options (H3): `--fly-app` and `--fly-secret-name`.
+/// `opv target add` options of the Fly provider (H3): `--fly-app` and `--fly-secret-name`.
 static INIT_FIELDS: [InitField; 2] = [
     InitField {
         field: "app",

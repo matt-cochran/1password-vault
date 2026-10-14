@@ -129,7 +129,7 @@ struct RawAzure {
 /// The env-name template `opv init` writes when none is given.
 const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
-/// `opv init --target azure` options (H3), in the order they are written.
+/// `opv target add` options of the Azure provider (H3), in the order they are written.
 static INIT_FIELDS: [InitField; 8] = [
     InitField {
         field: "subscription",

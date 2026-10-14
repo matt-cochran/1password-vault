@@ -56,18 +56,17 @@ A concealed field is a **secret**; a text field is **config**. Each environment 
 First check whether the project already has one: `opv doctor` names it on its `config` line (a `secrets.toml`, or a manifest in 1Password found by the git remote). If it has none and the 1Password item already exists, let opv write it. `init` looks the vault and item up by title once and writes their IDs and the field names and kinds, never values. `--product <name>` names the product that unsectioned fields belong to; sectioned fields become products named by their section. In a new project it saves a manifest in 1Password (ask first; it needs the user's own signed-in session), or with `--file` a `secrets.toml`:
 
 ```sh
-opv init staging --vault myapp-staging --item myapp --product web \
-  --target fly --target-name shared --fly-app myapp-staging
+opv init staging --vault myapp-staging --item myapp --product web
 ```
 
-`init` ends with `Next: opv bootstrap`, which records every boundary the configuration declares; a target you do not pass with `--target` is added later with `opv target add`. Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same configuration (comments kept) and includes it in every declared key the item has; pass the same `--product`:
+`init` writes boundaries and products, never a target, and ends with `Next: opv bootstrap`, which records any boundary still missing its IDs and adds each declared field, empty. Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same configuration (comments kept) and includes it in every declared key the item has; pass the same `--product`:
 
 ```sh
 opv init dev --vault myapp-dev --item myapp --product web --add-env
 opv init prod --vault myapp-prod --item myapp --product web --add-env
 ```
 
-Give an environment that deploys a named target with `opv target add`. It writes `[environments.<env>.targets.<name>]`, creates the target's state vault and records `state_vault_id`, so the configuration never names a target without one; `opv target list [--env <env>]` shows the declared targets. A local-only environment (`dev`) has no target:
+Give an environment that deploys a named target with `opv target add`, the one way to add a target. It validates the target, writes `[environments.<env>.targets.<name>]`, creates the target's state vault and records `state_vault_id`, so the configuration never names a target without one; `opv target list [--env <env>]` shows the declared targets. A local-only environment (`dev`) has no target:
 
 ```sh
 opv target add staging shared --fly-app myapp-staging

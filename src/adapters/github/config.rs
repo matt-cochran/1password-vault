@@ -59,7 +59,7 @@ struct RawGithub {
     secret_name: Option<String>,
 }
 
-/// `opv init --target github` options (H3), in the order they are written. `repos` is not
+/// `opv target add` options of the GitHub provider (H3), in the order they are written. `repos` is not
 /// offered: `repo` names the one repository most environments use; edit the file for more.
 static INIT_FIELDS: [InitField; 3] = [
     InitField {
