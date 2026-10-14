@@ -537,9 +537,12 @@ fn documents() -> Value {
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
-            "environment", "product", "key", "reference", "kind", "field", "target_name",
-            "target_details: [{label, value}]",
-            "rules", "immutable", "guidance", "required_here", "inspect", "shared_from", "shared_by"
+            "environment", "product", "key", "kind", "field", "source", "personal",
+            "boundary: {name, vault_id, item_id}",
+            "targets: [{name, provider, rendered_name, details: [{label, value}]}]",
+            "rules", "immutable", "guidance", "required_here", "shared_from", "shared_by",
+            "reference", "inspect", "readers: {deploy: [service account], ci}",
+            "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
         ],
         "init": [
             "path", "manifest", "environment", "boundary", "target", "provider", "vault_id",

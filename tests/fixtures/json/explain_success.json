@@ -4,14 +4,26 @@
   "environment": "prod",
   "product": "allumata",
   "key": "OPENAI_API_KEY",
-  "reference": "op://vprd/iprd/allumata/OPENAI_API_KEY",
   "kind": "secret",
   "field": "concealed field",
-  "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-  "target_details": [
+  "source": "own field",
+  "personal": false,
+  "boundary": {
+    "name": "allumata",
+    "vault_id": "vprd",
+    "item_id": "iprd"
+  },
+  "targets": [
     {
-      "label": "fly name",
-      "value": "FLEET__ALLUMATA__OPENAI_API_KEY"
+      "name": "portfolio",
+      "provider": "fly",
+      "rendered_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
+      "details": [
+        {
+          "label": "fly name",
+          "value": "FLEET__ALLUMATA__OPENAI_API_KEY"
+        }
+      ]
     }
   ],
   "rules": [
@@ -21,9 +33,16 @@
   "immutable": false,
   "guidance": "OpenAI platform / API keys",
   "required_here": true,
-  "inspect": "op item get iprd --vault vprd",
   "shared_from": null,
   "shared_by": [],
+  "reference": "op://vprd/iprd/allumata/OPENAI_API_KEY",
+  "inspect": "op item get iprd --vault vprd",
+  "readers": {
+    "deploy": [
+      "1password-vault-prod-portfolio-deploy"
+    ],
+    "ci": "1password-vault-prod-ci"
+  },
   "next": null,
   "do": null
 }
