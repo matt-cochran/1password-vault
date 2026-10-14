@@ -19,8 +19,10 @@ fn world() -> (FakeOp, Fleet) {
         }),
     );
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{id}\"\nfly.app = \"a\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+        "[environments.dev]\n\
+         boundaries.api = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id}\" }}\n\
+         [environments.dev.targets.app]\nfly.app = \"a\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+         state_vault_id = \"sdev\"\n\
          [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
     ))
     .unwrap();
@@ -123,7 +125,7 @@ fn planned_target(op: &FakeOp, fleet: &Fleet, version: &str) -> TargetState {
         read.fields,
         &listed(version),
         &crate::domain::plan::PlanOptions {
-            target: None,
+            target: Some("app"),
             rotate: &none,
             prune_immutable: &none,
             digest: &|_| None,

@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn targetless_check_reports_missing_without_values() {
         let f = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([item(&[])]);
         let mut out = Vec::new();
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn a_missing_key_tells_the_person_to_click_edit() {
         let f = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([item(&[])]);
         let e = check(&f, "dev", Some("allumata"), &r, &mut Vec::new(), true).unwrap_err();
@@ -246,9 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn simple_check_accepts_no_product_selection() {
-        let f = crate::config::parse("[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n").unwrap();
-        let r = FakeRunner::new([item(&[secret("", "DEV_KEY", "FIXTUREVALUE")])]);
+    fn a_single_product_check_accepts_no_product_selection() {
+        let f = crate::config::parse(
+            "[environments.dev]\nboundaries.app = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+             [products.app.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+        )
+        .unwrap();
+        let r = FakeRunner::new([item(&[secret("app", "DEV_KEY", "FIXTUREVALUE")])]);
         let mut out = Vec::new();
         assert!(check(&f, "dev", None, &r, &mut out, true).is_ok());
     }
@@ -266,7 +270,7 @@ mod tests {
     #[test]
     fn malformed_field_in_another_products_section_does_not_fail_the_check() {
         let f = fleet_with(
-            "[products.other.keys.SITE]\nkind = \"config\"\nenvironments = [\"prod\"]\n",
+            "[products.other]\nboundary = \"allumata\"\n[products.other.keys.SITE]\nkind = \"config\"\nenvironments = [\"prod\"]\n",
         );
         let mut doc: serde_json::Value =
             serde_json::from_slice(&item_json(&complete_fields())).unwrap();
@@ -289,18 +293,20 @@ mod tests {
     fn select_ignores_a_source_only_product_for_the_single_product_shortcut() {
         let f = crate::config::parse(
             r#"
-[profile]
-kind = "fleet"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.core = { vault_id = "vci", item_id = "ici" }
+[environments.ci.targets.app]
 fly.app = "app"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sci"
 [products.shared]
 source_only = true
+boundary = "core"
 [products.shared.keys.TOKEN]
 kind = "secret"
 environments = ["ci"]
+[products.api]
+boundary = "core"
 [products.api.keys.TOKEN]
 kind = "secret"
 environments = ["ci"]

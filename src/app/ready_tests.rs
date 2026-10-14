@@ -797,15 +797,19 @@ fn ready_on_two_items(dev: &str, ci: &str) -> serde_json::Value {
     let item = |value: &str| {
         serde_json::json!({
             "title": "t", "category": "SECURE_NOTE",
-            "fields": [{"id": "f1", "type": "CONCEALED", "label": "DATABASE_URL", "value": value}]
+            "sections": [{"id": "app", "label": "app"}],
+            "fields": [{"id": "f1", "type": "CONCEALED", "section": {"id": "app", "label": "app"},
+                        "label": "DATABASE_URL", "value": value}]
         })
     };
     let dev_id = op.insert("vdev0000000000000000000001", item(dev));
     let ci_id = op.insert("vdev0000000000000000000001", item(ci));
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{dev_id}\"\n[environments.ci]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{ci_id}\"\n[keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"ci\"]\n"
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{dev_id}\" }}\n\
+         [environments.ci]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{ci_id}\" }}\n\
+         [products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"ci\"]\n"
     ))
     .unwrap();
     let mut out = Vec::new();

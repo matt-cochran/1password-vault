@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn works_without_fly_section() {
         let fl = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
              [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([Output::success(Vec::new())]);
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn clears_another_products_managed_keys() {
         let f = fleet_with(
-            "[products.other.keys.OTHER_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+            "[products.other]\nboundary = \"allumata\"\n[products.other.keys.OTHER_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
         );
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run(&f, "prod", "allumata", &cmd(&["true"]), &r).unwrap();
@@ -386,18 +386,20 @@ mod tests {
     fn source_only_fleet() -> Fleet {
         crate::config::parse(
             r#"
-[profile]
-kind = "fleet"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.core = { vault_id = "vci", item_id = "ici" }
+[environments.ci.targets.app]
 fly.app = "app"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sci"
 [products.shared]
 source_only = true
+boundary = "core"
 [products.shared.keys.TOKEN]
 kind = "secret"
 environments = ["ci"]
+[products.api]
+boundary = "core"
 [products.api.keys.TOKEN]
 kind = "secret"
 from = "shared/TOKEN"

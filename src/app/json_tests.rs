@@ -114,10 +114,10 @@ fn status_unknown_environment() {
 
 #[test]
 fn status_overview_run_only_environment() {
-    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
-    // dev (run-only) is read too (H11): item only; then prod and staging, item and list.
+    let f = fleet_with("[environments.dev]\n");
+    // dev (run-only) declares no key, so it has no boundary to read (FR-57); then prod and
+    // staging, item and list.
     let r = FakeRunner::new([
-        complete_item(),
         complete_item(),
         fly(&[(OPENAI_FLY, "d1")]),
         complete_item(),
@@ -189,6 +189,9 @@ fn sync_success() {
         ok(),
         fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
     ]);
+    r.responses
+        .borrow_mut()
+        .extend(delivery_not_recorded(complete_item()).map(Ok));
     golden("sync_success", &sync_json(&r));
 }
 

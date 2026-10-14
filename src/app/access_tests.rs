@@ -10,9 +10,11 @@ const PROD: &str = "vshr0000000000000000000002";
 
 fn fleet() -> crate::domain::Fleet {
     crate::config::parse(&format!(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"{DEV}\"\nitem_id = \"i1\"\n\
-         [environments.prod]\nvault_id = \"{PROD}\"\nitem_id = \"i2\"\nfly.app = \"myapp\"\n\
-         [keys.A]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n"
+        "[environments.dev]\nboundaries.app = {{ vault_id = \"{DEV}\", item_id = \"i1\" }}\n\
+         [environments.prod]\nboundaries.app = {{ vault_id = \"{PROD}\", item_id = \"i2\" }}\n\
+         [environments.prod.targets.app]\nfly.app = \"myapp\"\nfly.secret_name = \"{{KEY}}\"\n\
+         state_vault_id = \"sprod\"\n\
+         [products.app.keys.A]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n"
     ))
     .unwrap()
 }

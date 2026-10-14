@@ -1353,10 +1353,7 @@ mod tests {
     /// without one are named when others have it.
     #[test]
     fn fly_checks_follow_fly_sections() {
-        let no_fly = crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n",
-        )
-        .unwrap();
+        let no_fly = crate::config::parse("[environments.dev]\n").unwrap();
         let r = FakeRunner::new(good().into_iter().take(2));
         let (res, out) = doctor(Ok(no_fly), &r);
         res.unwrap();
@@ -1366,7 +1363,7 @@ mod tests {
         );
         assert_eq!(r.calls.borrow().len(), 2, "{:?}", argvs(&r));
 
-        let mixed = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let mixed = fleet_with("[environments.dev]\n");
         let r = FakeRunner::new(good());
         let (res, out) = doctor(Ok(mixed), &r);
         res.unwrap();
@@ -1377,10 +1374,11 @@ mod tests {
         );
     }
 
-    const AZURE: &str = "[profile]\nkind = \"simple\"\n\
-        [environments.prod]\nvault_id = \"v\"\nitem_id = \"i\"\n\
-        [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
-        key_vault = \"kv\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\n";
+    const AZURE: &str = "[environments.prod]\n\
+        [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+        [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+        key_vault = \"kv\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\n\
+        env_name = \"{KEY}\"\n";
 
     /// FR-37: az is only checked when an environment has an azure section.
     #[test]
@@ -1412,13 +1410,13 @@ mod tests {
     }
 
     #[test]
-    fn simple_profile_config_line_counts_keys_not_products() {
-        let simple = crate::config::load("tests/fixtures/simple.toml").unwrap();
+    fn a_simple_profile_config_line_shows_the_current_form() {
+        let removed = crate::config::parse("[profile]\nkind = \"simple\"\n");
         let r = FakeRunner::new(good());
-        let (_, out) = doctor(Ok(simple), &r);
-        assert_eq!(
-            checks(&out)[0],
-            "ok    config: valid (2 environments, 5 keys)",
+        let (_, out) = doctor(removed, &r);
+        assert!(
+            checks(&out)[0].starts_with("FAIL  config: ")
+                && out.contains("[products.<name>.keys.<KEY>]"),
             "{out}"
         );
     }

@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn works_without_fly_section() {
         let fl = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
              [products.allumata.keys.DEV_FLAG]\nkind = \"config\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([item(&[text("allumata", "DEV_FLAG", "on")])]);
