@@ -97,15 +97,24 @@ pub fn run_as(
     } else {
         ""
     };
-    let (product, key, env_name) = explain::locate(fleet, target, env).map_err(|e| {
-        match e.next_step().filter(|n| n.starts_with("opv open ")) {
-            Some(n) => {
-                let next = format!("{n}{flag}");
-                e.with_next(next)
-            }
-            None => e,
+    let with_flag = |e: Error| match e.next_step().filter(|n| n.starts_with("opv open ")) {
+        Some(n) => {
+            let next = format!("{n}{flag}");
+            e.with_next(next)
         }
-    })?;
+        None => e,
+    };
+    // D10/FR-34: a bare `KEY` uses the one product with keys desired in the environment,
+    // the same rule as `check` and `run`; a `<product>/KEY` names its product. Resolve the
+    // environment from the bare key first (as `explain` does), then pick.
+    let resolved = if target.contains('/') {
+        target.to_string()
+    } else {
+        let (_, _, env_name) = explain::locate(fleet, target, env).map_err(with_flag)?;
+        let product = super::pick_product(fleet, env_name, None, "open")?;
+        format!("{product}/{target}")
+    };
+    let (product, key, env_name) = explain::locate(fleet, &resolved, env).map_err(with_flag)?;
     // A shared key (FR-45) has no field of its own: open its source's field.
     let (product, key) = match fleet.products[&product].keys[&key].source() {
         Some((p, k)) => (p.to_string(), k.to_string()),

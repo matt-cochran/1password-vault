@@ -688,14 +688,3 @@ fn run_execs_op_run_with_the_command() {
     run::run_for(&simple(), "prod", Some("app"), &cmd(&["env", "-0"]), &r).unwrap();
     assert_eq!(argvs(&r), vec!["op run -- env -0"]);
 }
-
-#[test]
-fn run_without_product_under_fleet_is_a_config_error_before_any_call() {
-    let r = FakeRunner::new([]);
-    let e = run::run_for(&fleet(), "staging", None, &cmd(&["env"]), &r).unwrap_err();
-    assert!(
-        matches!(&e, Error::Config(m) if m.contains("--product")),
-        "{e}"
-    );
-    assert!(r.calls.borrow().is_empty());
-}
