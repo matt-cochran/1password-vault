@@ -51,8 +51,8 @@ pub enum Reason {
     /// `prefix_by_mode`: the environment's mode value (from config) whose prefixes the
     /// value does not start with.
     WrongPrefixForMode(String),
-    /// `prefix_by_mode`: the configured mode name is not set (for the product, under the
-    /// fleet profile) in this environment. Worded to read under both profiles (FR-20).
+    /// `prefix_by_mode`: the configured mode name is not set for the product in this
+    /// environment.
     ModeNotSet(String),
     /// `prefix_by_mode`: the configured mode value has no prefix and is not skipped.
     ModeUnmapped(String),

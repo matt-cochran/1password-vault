@@ -78,8 +78,8 @@ pub fn run(
 }
 
 /// [`run`], or with `json` one document and no opener (A5):
-/// `{schema_version, environment, product, key, section, field, open_url}`; `section` is
-/// null under the simple profile. IDs and names only.
+/// `{schema_version, environment, product, key, section, field, open_url}`. IDs and names
+/// only.
 pub fn run_as(
     fleet: &Fleet,
     target: &str,
@@ -125,7 +125,7 @@ pub fn run_as(
         let doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
-            "product": super::json_product(&product),
+            "product": Some(&product.to_string()),
             "key": key,
             "section": product.as_str(),
             "field": key,

@@ -114,7 +114,7 @@ fn print_added(
             .iter()
             .map(|(product, key, kind)| {
                 serde_json::json!({
-                    "product": super::json_product(product),
+                    "product": Some(product.to_string()),
                     "key": key,
                     "kind": kind_label(*kind),
                 })

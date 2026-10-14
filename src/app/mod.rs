@@ -397,12 +397,6 @@ pub(crate) fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()).into())
 }
 
-/// The `product` of a JSON row: `None` (JSON `null`) for the simple profile's implicit
-/// product, which is never shown (FR-20).
-pub(crate) fn json_product(product: &str) -> Option<String> {
-    Some(product.to_string())
-}
-
 /// Additive fields of the FR-21 document.
 #[derive(Default)]
 pub(crate) struct JsonExtra<'a> {
@@ -425,10 +419,8 @@ pub(crate) struct JsonPart<'a> {
     pub pinned: Option<&'a BTreeMap<String, PinnedRow>>,
 }
 
-/// FR-21: one names-only JSON document for `status --json` and `plan --json`.
-///
-/// Under the simple profile (FR-20) `product` is `null` in rows, extras and held entries,
-/// matching the text table, which has no PRODUCT column there.
+/// FR-21: one names-only JSON document for `status --json` and `plan --json`. Every row
+/// names its product (FR-20 removed).
 ///
 /// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
 /// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
@@ -490,7 +482,7 @@ pub(crate) fn write_json(
         rows.extend(part_rows);
         held.extend(plan.held_immutable.iter().map(|(product, key)| JsonHeld {
             target: part.target.to_string(),
-            product: json_product(product),
+            product: Some(String::from(product)),
             key: key.clone(),
             target_name: name_of(product, key),
         }));
@@ -705,7 +697,7 @@ pub(crate) struct JsonRow {
     /// The 1Password item link to fix a blocking row in (H1); IDs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     open_url: Option<String>,
-    /// A shared key's source, `product/KEY` (`KEY` under the simple profile) (FR-45).
+    /// A shared key's source, `product/KEY` (FR-45).
     #[serde(skip_serializing_if = "Option::is_none")]
     shared_from: Option<String>,
 }
@@ -721,7 +713,7 @@ impl JsonRow {
     ) -> JsonRow {
         JsonRow {
             target: None,
-            product: json_product(&r.product),
+            product: Some(String::from(&r.product)),
             key: r.key.clone(),
             kind: kind_label(r.kind),
             state: json_state(&r.state),
@@ -783,7 +775,7 @@ struct JsonName {
 impl JsonName {
     fn new(product: &str, key: &str) -> JsonName {
         JsonName {
-            product: json_product(product),
+            product: Some(String::from(product)),
             key: key.to_string(),
         }
     }
@@ -965,7 +957,7 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
 
-/// `product/KEY` (`KEY` under the simple profile) of every row in `rows` matching `pred`,
+/// `product/KEY` of every row in `rows` matching `pred`,
 /// for names-only messages.
 pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String> {
     rows.iter()
@@ -1226,7 +1218,7 @@ fn json_names(pairs: &[(String, String)]) -> Vec<JsonName> {
     pairs
         .iter()
         .map(|(product, key)| JsonName {
-            product: json_product(product),
+            product: Some(String::from(product)),
             key: key.clone(),
         })
         .collect()
@@ -1245,8 +1237,8 @@ pub(crate) fn source_only_message(product: &str) -> Error {
     )
 }
 
-/// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused under the simple
-/// profile, which has no products (FR-20), and for an undeclared product. Before any call.
+/// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused for an undeclared
+/// product, before any call.
 /// `--product` (or `OPV_PRODUCT`) of `opv <verb> [<env>]`: an undeclared one ends with the
 /// same read-only command on the closest declared product (I4).
 pub(crate) fn check_product(
@@ -1492,8 +1484,7 @@ impl KeyNames {
         })
     }
 
-    /// `product/KEY (NAME)`; the bare name when it is no declared key's, or when the label
-    /// is the name itself (simple profile).
+    /// `product/KEY (NAME)`; the bare name when it is no declared key's.
     pub(crate) fn label(&self, name: &str) -> String {
         match self.labels.get(name) {
             Some(key) if key != name => format!("{key} ({name})"),
@@ -2081,7 +2072,7 @@ pub(crate) mod testutil {
             "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain"
         })];
         for (s, l, ty, v) in fields {
-            // An empty section is an unsectioned field (simple profile, FR-20).
+            // An empty section is an unsectioned field (FR-43).
             let mut f = if s.is_empty() {
                 json!({"id": l.to_lowercase(), "type": ty, "label": l})
             } else {

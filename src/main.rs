@@ -145,7 +145,7 @@ More examples:
 const CHECK_QUICK: &str = "\
 Examples:
   opv check dev --product api          # are api's keys saved and valid?
-  opv check dev                        # simple profile: every declared key
+  opv check dev                        # one product: no --product needed
   opv check dev --product api --json   # names and states for scripts";
 
 const CHECK_MORE: &str = "\
@@ -173,7 +173,7 @@ More examples:
 const RUN_QUICK: &str = "\
 Examples:
   opv run dev --product api -- npm run dev    # start the app with api's settings
-  opv run dev -- cargo test                   # simple profile: every declared key
+  opv run dev -- cargo test                   # one product: no --product needed
   opv run staging --product api -- ./migrate  # use staging's values locally";
 
 const RUN_MORE: &str = "\
@@ -205,10 +205,7 @@ Examples:
 const SYNC_MORE: &str = "\
 Refuses (exit 6) and stages nothing when a key is missing or failing a rule, naming a
 missing --confirm too. Nothing is deployed or removed without --deploy/--prune.
-
-More examples:
   opv sync prod --deploy --expect-plan 674d43e2  # exactly the plan opv plan showed
-  opv sync staging --deploy --prune      # also remove managed names no longer declared
   opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set";
 
 const EXPORT_QUICK: &str = "\
@@ -272,7 +269,7 @@ the item; an AI assistant asks the user first.";
 const ADD_QUICK: &str = "\
 Examples:
   opv add api/STRIPE_KEY --kind secret --env dev,prod --rule prefix=sk_
-  opv add LOG_LEVEL --kind config --rule enum=debug,info,warn   # simple profile
+  opv add api/LOG_LEVEL --kind config --rule enum=debug,info,warn
   opv add api/STRIPE_KEY --env staging          # include a declared key in staging";
 
 const ADD_MORE: &str = "\
@@ -555,7 +552,7 @@ enum Cmd {
     Check {
         /// Environment name from the configuration (for example dev).
         env: String,
-        /// Product whose keys are checked (fleet profile only; required there).
+        /// Product whose keys are checked; optional when exactly one product has keys here.
         /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
@@ -569,7 +566,7 @@ enum Cmd {
         /// Environment name from the configuration (for example staging or prod); without
         /// it, one line per environment.
         env: Option<String>,
-        /// Only this product's rows, totals and findings (fleet profile only).
+        /// Only this product's rows, totals and findings.
         /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
@@ -605,8 +602,8 @@ enum Cmd {
     Run {
         /// Environment name from the configuration (for example dev or staging).
         env: String,
-        /// Product whose declared keys are passed to the command (fleet profile only;
-        /// a simple-profile file takes none and passes every declared key).
+        /// Product whose declared keys are passed to the command; optional when exactly one
+        /// product has keys desired in the environment.
         /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
@@ -749,7 +746,7 @@ enum Cmd {
         /// An unknown name suggests the closest declared ones.
         #[arg(value_name = "[PRODUCT/]KEY", required_unless_present = "target_name")]
         target: Option<String>,
-        /// Explain this named target (FR-56) instead of a key: its provider and locator,
+        /// Explain this named target instead of a key: its provider and locator,
         /// products, deploy credentials, state vault and deploy service account.
         #[arg(long = "target", value_name = "NAME", conflicts_with = "target")]
         target_name: Option<String>,
@@ -867,7 +864,7 @@ enum Cmd {
     /// Declare a key in the configuration, or add environments to a declared key.
     #[command(before_help = ADD_QUICK, after_help = ADD_MORE)]
     Add {
-        /// The key: PRODUCT/KEY (fleet profile) or KEY (simple profile).
+        /// The key: PRODUCT/KEY, or a bare KEY that exactly one product declares.
         #[arg(value_name = "[PRODUCT/]KEY")]
         name: String,
         /// secret (a concealed field) or config (a text field); required for a new key.
@@ -987,7 +984,7 @@ impl SkillTarget {
 struct PlanArgs {
     /// Environment name from the configuration (for example staging or prod).
     env: String,
-    /// Only this product's rows, totals and findings (fleet profile only).
+    /// Only this product's rows, totals and findings.
     /// [env: OPV_PRODUCT]
     #[arg(long)]
     product: Option<String>,
@@ -1016,7 +1013,7 @@ struct SyncArgs {
     /// The environment's name again; required when it sets confirm_env = true.
     #[arg(long, value_name = "ENV")]
     confirm: Option<String>,
-    /// Write, prune and deploy only this product's names (fleet profile only). A deploy
+    /// Write, prune and deploy only this product's names. A deploy
     /// still restarts the whole app. OPV_PRODUCT is never used here.
     #[arg(long)]
     product: Option<String>,
@@ -1815,17 +1812,12 @@ impl Cmd {
     }
 }
 
-/// `--product`, or else `OPV_PRODUCT` (non-empty) under the fleet profile; the simple
-/// profile takes no product, so the variable is ignored there. Returns the product and
+/// `--product`, or else `OPV_PRODUCT` when it is non-empty. Returns the product and
 /// whether it came from the variable.
-fn product_or_env(
-    flag: Option<String>,
-    env: Option<String>,
-    fleet_profile: bool,
-) -> (Option<String>, bool) {
+fn product_or_env(flag: Option<String>, env: Option<String>) -> (Option<String>, bool) {
     match (flag, env) {
         (Some(p), _) => (Some(p), false),
-        (None, Some(p)) if fleet_profile && !p.is_empty() => (Some(p), true),
+        (None, Some(p)) if !p.is_empty() => (Some(p), true),
         _ => (None, false),
     }
 }
@@ -1833,14 +1825,17 @@ fn product_or_env(
 /// Apply `OPV_PRODUCT` to the commands that take a product (never `sync`), and say so on
 /// stderr.
 fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) {
-    let fleet_profile = loaded.is_ok();
+    // Without a loaded configuration there is no product to default to.
+    if loaded.is_err() {
+        return;
+    }
     let env = std::env::var("OPV_PRODUCT").ok();
     let used = match cmd {
         Cmd::Check { product, .. }
         | Cmd::Run { product, .. }
         | Cmd::Plan(PlanArgs { product, .. })
         | Cmd::Status { product, .. } => {
-            let (p, used) = product_or_env(product.take(), env, fleet_profile);
+            let (p, used) = product_or_env(product.take(), env);
             *product = p;
             used.then(|| product.clone()).flatten()
         }
@@ -1849,28 +1844,26 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
             product,
             ..
         } => {
-            let (p, used) = product_or_env(product.take(), env, fleet_profile);
+            let (p, used) = product_or_env(product.take(), env);
             *product = p;
             used.then(|| product.clone()).flatten()
         }
         Cmd::Explain {
             target: Some(t), ..
-        } if !t.contains('/') => match product_or_env(None, env, fleet_profile) {
+        } if !t.contains('/') => match product_or_env(None, env) {
             (Some(p), true) => {
                 *t = format!("{p}/{t}");
                 Some(p)
             }
             _ => None,
         },
-        Cmd::Open { target, .. } if !target.contains('/') => {
-            match product_or_env(None, env, fleet_profile) {
-                (Some(p), true) => {
-                    *target = format!("{p}/{target}");
-                    Some(p)
-                }
-                _ => None,
+        Cmd::Open { target, .. } if !target.contains('/') => match product_or_env(None, env) {
+            (Some(p), true) => {
+                *target = format!("{p}/{target}");
+                Some(p)
             }
-        }
+            _ => None,
+        },
         _ => None,
     };
     if let Some(p) = used {
@@ -2056,7 +2049,7 @@ fn run(
             ..
         } => {
             let (product, used) =
-                product_or_env(product.clone(), std::env::var("OPV_PRODUCT").ok(), true);
+                product_or_env(product.clone(), std::env::var("OPV_PRODUCT").ok());
             if used && let Some(p) = &product {
                 let _ = writeln!(io::stderr(), "product {p} (from OPV_PRODUCT)");
             }
@@ -2994,30 +2987,19 @@ mod tests {
 
     #[test]
     fn product_flag_wins_over_opv_product() {
-        let got = product_or_env(Some("api".into()), Some("web".into()), true);
+        let got = product_or_env(Some("api".into()), Some("web".into()));
         assert_eq!(got, (Some("api".into()), false));
     }
 
     #[test]
-    fn opv_product_applies_under_the_fleet_profile() {
-        let got = product_or_env(None, Some("web".into()), true);
+    fn opv_product_applies_when_no_flag_is_given() {
+        let got = product_or_env(None, Some("web".into()));
         assert_eq!(got, (Some("web".into()), true));
     }
 
     #[test]
-    fn opv_product_is_ignored_under_the_simple_profile() {
-        assert_eq!(
-            product_or_env(None, Some("web".into()), false),
-            (None, false)
-        );
-    }
-
-    #[test]
     fn empty_opv_product_is_ignored() {
-        assert_eq!(
-            product_or_env(None, Some(String::new()), true),
-            (None, false)
-        );
+        assert_eq!(product_or_env(None, Some(String::new())), (None, false));
     }
 
     /// FR-40: `session` was renamed to `login` with no alias; it is a usage error (exit 2).

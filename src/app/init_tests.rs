@@ -946,7 +946,7 @@ fn a_target_is_written_without_a_state_vault_id() {
 fn a_written_target_waits_for_bootstrap() {
     let (dir, _run) = init_with(&api_fields(), &with_target(Some("fly"), &fly_opts()));
     let e = config::load(dir.path().join(FILE_NAME)).unwrap_err();
-    assert!(e.to_string().contains("state_vault_missing"), "{e}");
+    assert_eq!(e.code(), crate::error::Code::StateVaultMissing);
 }
 
 #[test]
@@ -970,6 +970,7 @@ fn a_target_without_target_name_is_refused_naming_the_flag() {
     let mut a = with_target(Some("fly"), &fly_opts());
     a.target_name = None;
     let (_dir, run) = init_with(&api_fields(), &a);
+    assert_eq!(run.err().code(), crate::error::Code::TargetNameRequired);
     assert!(
         run.err().to_string().contains("needs --target-name <name>"),
         "{}",
@@ -990,6 +991,7 @@ fn a_target_inferred_from_its_options_needs_a_target_name() {
     let mut a = with_target(None, &fly_opts());
     a.target_name = None;
     let (_dir, run) = init_with(&api_fields(), &a);
+    assert_eq!(run.err().code(), crate::error::Code::TargetNameRequired);
     assert!(
         run.err().to_string().contains("--target-name"),
         "{}",

@@ -797,6 +797,7 @@ fn choose_target(args: &InitArgs) -> Result<Option<TargetChoice>, Error> {
             )
             .into(),
         )
+        .with_code(crate::error::Code::TargetNameRequired)
     })?;
     if !config::is_target_name(&name) {
         return Err(Error::Config(

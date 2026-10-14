@@ -530,8 +530,11 @@ fn duplicate_receipt_error() -> Error {
 }
 
 #[test]
-fn a_duplicate_scope_in_the_receipt_file_is_a_usage_error() {
-    assert_eq!(duplicate_receipt_error().code(), crate::error::Code::Usage);
+fn a_duplicate_scope_in_the_receipt_file_is_a_duplicate_scope_error() {
+    assert_eq!(
+        duplicate_receipt_error().code(),
+        crate::error::Code::DuplicateScope
+    );
 }
 
 #[test]

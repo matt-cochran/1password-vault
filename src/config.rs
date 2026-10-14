@@ -791,13 +791,13 @@ fn target(
         Some(r) => Some(deploy_credentials(env, name, r, config.as_ref(), doc)?),
     };
     let Some(state_vault_id) = raw.state_vault_id else {
-        return Err(doc.at_path(
-            &base,
-            format!(
-                "state_vault_missing: target {name} in {env} needs state_vault_id; next: opv \
-                 bootstrap (it creates the target's state vault and records it)"
-            ),
-        ));
+        return Err(doc
+            .at_path(
+                &base,
+                format!("target {name} in {env} needs state_vault_id"),
+            )
+            .with_code(crate::error::Code::StateVaultMissing)
+            .with_next("opv bootstrap"));
     };
     check_ident(
         env,
@@ -959,7 +959,7 @@ fn check_delivery_items(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
 /// sources (FR-59), named `<boundary> (<vault id>)` so boundaries of different environments
 /// never compare equal.
 fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
-    use crate::domain::placement::{STATE_VAULT_WIDER_THAN_VALUES, TargetReads, wider_than_values};
+    use crate::domain::placement::{TargetReads, wider_than_values};
     let mut reads: Vec<(&str, &str, &str, BTreeSet<String>)> = Vec::new();
     for (env_name, env) in &fleet.environments {
         for (name, target) in &env.targets {
@@ -995,10 +995,7 @@ fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
         })
         .collect();
     match wider_than_values(&targets).first() {
-        Some(w) => Err(cfg(format!(
-            "{STATE_VAULT_WIDER_THAN_VALUES}: {}",
-            w.sentence()
-        ))),
+        Some(w) => Err(cfg(w.sentence()).with_code(crate::error::Code::StateVaultWiderThanValues)),
         None => Ok(()),
     }
 }
@@ -1015,16 +1012,16 @@ fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
             .find(|(b, _)| !env.boundaries.contains_key(**b))
         {
             let msg = boundary_missing(env_name, needer, b);
-            return Err(
-                if doc
-                    .value(&["environments", env_name, "boundaries"])
-                    .is_some()
-                {
-                    doc.at(env_name, "boundaries", msg)
-                } else {
-                    doc.at_path(&["environments", env_name], msg)
-                },
-            );
+            return Err((if doc
+                .value(&["environments", env_name, "boundaries"])
+                .is_some()
+            {
+                doc.at(env_name, "boundaries", msg)
+            } else {
+                doc.at_path(&["environments", env_name], msg)
+            })
+            .with_code(crate::error::Code::BoundaryMissing)
+            .with_next("opv bootstrap"));
         }
         if let Some(b) = env
             .boundaries
@@ -1689,6 +1686,14 @@ mod tests {
         }
     }
 
+    /// The stable code of the configuration error `text` is refused with (A2).
+    fn config_code(text: &str) -> crate::error::Code {
+        match parse(text) {
+            Err(e @ Error::Config(_)) => e.code(),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
     /// One environment `prod` with boundary `web`, target `site` (Fly, `{KEY}`) and one key.
     const WEB: &str = r#"[environments.prod]
 boundaries.web = { vault_id = "vweb", item_id = "iweb" }
@@ -2271,13 +2276,12 @@ environments = ["prod"]
 
     #[test]
     fn a_target_without_state_vault_id_is_state_vault_missing() {
-        let m = config_err(&web("state_vault_id = \"sweb\"\n", ""));
+        let text = web("state_vault_id = \"sweb\"\n", "");
+        assert_eq!(config_code(&text), crate::error::Code::StateVaultMissing);
         assert!(
-            m.contains(
-                "state_vault_missing: target site in prod needs state_vault_id; next: opv \
-                 bootstrap (it creates the target's state vault and records it)"
-            ),
-            "{m}"
+            config_err(&text).contains("target site in prod needs state_vault_id"),
+            "{}",
+            config_err(&text)
         );
     }
 
@@ -2539,16 +2543,18 @@ environments = ["prod"]
 
     #[test]
     fn a_state_vault_shared_by_targets_reading_other_boundaries_is_refused() {
-        let m = config_err(&replaced(
+        let text = replaced(
             &shared_state_vault(),
             "fly.app = \"web-prod\"",
             "fly.app = \"web-prod\"\nproducts = [\"web\"]",
-        ));
+        );
+        assert_eq!(
+            config_code(&text),
+            crate::error::Code::StateVaultWiderThanValues
+        );
+        let m = config_err(&text);
         assert!(
-            m.starts_with(
-                "state_vault_wider_than_values: state vault sweb is shared by targets prod/other, \
-                 prod/site"
-            ),
+            m.starts_with("state vault sweb is shared by targets prod/other, prod/site"),
             "{m}"
         );
     }
@@ -2640,18 +2646,18 @@ environments = ["prod"]
         let f = parse(WEB).unwrap();
         assert!(matches!(
             f.boundary("prod", "api"),
-            Err(Error::Config(m)) if m.contains("boundary_missing: product api in prod needs boundary api")
+            Err(e) if e.code() == crate::error::Code::BoundaryMissing
         ));
     }
 
     #[test]
     fn a_product_without_its_boundary_is_boundary_missing() {
-        let m = config_err(&key(WEB, "api", "K", r#"["prod"]"#, ""));
+        let text = key(WEB, "api", "K", r#"["prod"]"#, "");
+        assert_eq!(config_code(&text), crate::error::Code::BoundaryMissing);
         assert!(
-            m.contains(
-                "boundary_missing: product api in prod needs boundary api; next: opv bootstrap"
-            ),
-            "{m}"
+            config_err(&text).contains("product api in prod needs boundary api"),
+            "{}",
+            config_err(&text)
         );
     }
 
@@ -2662,10 +2668,11 @@ environments = ["prod"]
              \"secret\"\nenvironments = [\"prod\"]\n[products.web.keys.TOKEN]\nkind = \
              \"secret\"\nenvironments = [\"prod\"]\nfrom = \"shared/TOKEN\"\n"
         );
-        let m = config_err(&text);
+        assert_eq!(config_code(&text), crate::error::Code::BoundaryMissing);
         assert!(
-            m.contains("boundary_missing: product shared in prod needs boundary shared"),
-            "{m}"
+            config_err(&text).contains("product shared in prod needs boundary shared"),
+            "{}",
+            config_err(&text)
         );
     }
 

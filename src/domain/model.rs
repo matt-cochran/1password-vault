@@ -283,12 +283,10 @@ pub fn key_label(product: &str, key: &str) -> String {
 }
 
 /// The configuration error text for `product`'s boundary `boundary` not being recorded in
-/// `env` (FR-57): its next step is `opv bootstrap`, which creates and records it.
+/// `env` (FR-57). The caller attaches the `boundary_missing` code and the next step
+/// `opv bootstrap`, which creates and records it.
 pub fn boundary_missing(env: &str, product: &str, boundary: &str) -> String {
-    format!(
-        "boundary_missing: product {product} in {env} needs boundary {boundary}; next: opv \
-         bootstrap"
-    )
+    format!("product {product} in {env} needs boundary {boundary}")
 }
 
 /// A validated configuration. Build it with `config::load` or `config::parse`. There is one
@@ -423,10 +421,11 @@ impl Fleet {
     /// desired in the environment, so only an undesired product reaches it).
     pub fn boundary(&self, env: &str, product: &str) -> Result<&Boundary, Error> {
         let name = self.boundary_of(product);
-        self.environment(env)?
-            .boundaries
-            .get(name)
-            .ok_or_else(|| Error::Config(boundary_missing(env, product, name).into()))
+        self.environment(env)?.boundaries.get(name).ok_or_else(|| {
+            Error::Config(boundary_missing(env, product, name).into())
+                .with_code(crate::error::Code::BoundaryMissing)
+                .with_next("opv bootstrap")
+        })
     }
 
     /// Target name (runtime env var name) for `product`/`key` on target `target` of `env`.

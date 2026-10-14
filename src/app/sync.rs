@@ -59,10 +59,10 @@ pub struct SyncOpts {
     pub deploy: bool,
     /// Unset managed names not desired in this environment (FR-8). Never implied.
     pub prune: bool,
-    /// `PRODUCT/KEY` entries (`KEY` under the simple profile, FR-20): immutable keys to
+    /// `PRODUCT/KEY` entries: immutable keys to
     /// stage even though present on the target (FR-16).
     pub rotate: Vec<String>,
-    /// `PRODUCT/KEY` entries (`KEY` under the simple profile): immutable keys `--prune` may
+    /// `PRODUCT/KEY` entries: immutable keys `--prune` may
     /// unset (FR-8, FR-16). Without an
     /// entry an immutable key is never pruned. Requires `prune`.
     pub prune_immutable: Vec<String>,
@@ -2307,7 +2307,7 @@ fn plan_changes(plan: &SyncPlan) -> &'static str {
     }
 }
 
-/// `product/KEY (TARGET_NAME)` (`KEY (TARGET_NAME)` under the simple profile) for every
+/// `product/KEY (TARGET_NAME)` for every
 /// immutable key held back from pruning.
 fn held_from_prune(plan: &SyncPlan) -> String {
     plan.held_from_prune

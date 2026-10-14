@@ -602,7 +602,7 @@ fn verify_target(
                 )
                 .into(),
             )
-            .with_code(crate::error::Code::Usage)
+            .with_code(crate::error::Code::DuplicateScope)
         })?;
         if let Some(kept) = kept
             && verification.revision.as_deref() != Some(kept.revision.as_str())

@@ -1,5 +1,5 @@
-//! `explain <product>/<key> [--env <env>]` (key form, FR-22); `explain <KEY>` under the
-//! simple profile (FR-20); and `explain --target <name> --env <env>` (target form, FR-56).
+//! `explain <product>/<key> [--env <env>]` (key form, FR-22; a bare `<KEY>` that one product
+//! declares also works) and `explain --target <name> --env <env>` (target form, FR-56).
 //!
 //! Reads only the configuration: it never reads a value, so it cannot emit one or a value
 //! fragment (SR-1, §5). It is not a `secret get`. The target form and the key form's
@@ -31,8 +31,8 @@ use crate::error::{Code, Error};
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
-/// The fleet profile takes `<product>/<key>`; the simple profile (FR-20) takes the bare
-/// `<KEY>` and resolves it to its implicit product in [`resolve`]. Everything after
+/// A key is named `<product>/<key>`, or a bare `<KEY>` that exactly one product declares,
+/// resolved in [`resolve`]. Everything after
 /// resolution is shared.
 struct Target<'a> {
     product: &'a str,
@@ -140,7 +140,7 @@ fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
     Ok(Target { product, key, spec })
 }
 
-/// A bare `<KEY>` under the fleet profile: the one product that declares it, or an error
+/// A bare `<KEY>`: the one product that declares it, or an error
 /// listing every candidate (ambiguous) or the closest declared keys (unknown).
 fn resolve_bare<'a>(fleet: &'a Fleet, key: &str) -> Result<Target<'a>, Error> {
     let found: Vec<(&'a str, &'a str, &'a KeySpec)> = fleet
@@ -392,7 +392,7 @@ fn explain_in(
         let mut doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
-            "product": super::json_product(product),
+            "product": Some(product.to_string()),
             "key": key,
             "kind": kind_label(spec.kind),
             "field": field,

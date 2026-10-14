@@ -30,6 +30,7 @@ pub(super) fn relocate(e: Error, text: &str, file: &Path) -> Error {
 /// (`<file>:<line>: <field>`); a manifest has no file, so it is named by its title
 /// (`manifest "opv · app": <field>`, FR-44).
 pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Error {
+    let code = e.code();
     let Error::Config(m) = &e else { return e };
     let next = m.next().map(str::to_string);
     let body = m.text().strip_prefix(INVALID).unwrap_or(m.text());
@@ -59,7 +60,7 @@ pub(super) fn relocate_at(e: Error, text: &str, source: super::Source<'_>) -> Er
         }
     };
     let (rewritten, fix) = rewritten;
-    let mut out = Error::Config(rewritten.into());
+    let mut out = Error::Config(rewritten.into()).with_code(code);
     if let Some(fix) = fix {
         out = out.with_do(fix);
     }

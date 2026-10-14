@@ -3,13 +3,16 @@
 
 use std::process::Command;
 
-fn schema_commands() -> Vec<String> {
+fn schema() -> serde_json::Value {
     let out = Command::new(env!("CARGO_BIN_EXE_opv"))
         .arg("schema")
         .output()
         .expect("opv schema runs");
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("schema is JSON");
-    v["commands"]
+    serde_json::from_slice(&out.stdout).expect("schema is JSON")
+}
+
+fn schema_commands() -> Vec<String> {
+    schema()["commands"]
         .as_array()
         .expect("commands")
         .iter()
@@ -52,4 +55,74 @@ fn the_skill_sends_a_session_to_the_guide_schema_and_receipt_first() {
 #[test]
 fn the_skill_carries_its_version_placeholder() {
     assert!(read("docs/agent-skill.md").contains("version: {{OPV_VERSION}}"));
+}
+
+/// The skill teaches the one configuration form (FR-60): no profile, boundaries and named
+/// targets; and the per-placement flows (FR-56, FR-58, FR-59).
+#[test]
+fn the_skill_describes_the_one_form_and_the_placement_flows() {
+    let skill = read("docs/agent-skill.md");
+    assert!(
+        !skill.contains("profile") && !skill.contains("simple"),
+        "docs/agent-skill.md still describes a profile: {skill}"
+    );
+    for needle in [
+        "[products.",
+        "opv target add",
+        "grants_missing",
+        "state_vault_wider_than_values",
+        "every placement",
+        "opv bootstrap",
+    ] {
+        assert!(
+            skill.contains(needle),
+            "docs/agent-skill.md does not name {needle:?}"
+        );
+    }
+}
+
+/// `opv schema` states the new commands' effects, describes the named commands' JSON
+/// documents and mentions no removed form (E6, FR-56 to FR-60).
+#[test]
+fn the_schema_is_current_for_named_targets_and_boundaries() {
+    let v = schema();
+    let command = |name: &str| {
+        v["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("schema has no command {name}"))
+            .clone()
+    };
+    assert_eq!(command("target add")["effect"], "writes_config");
+    assert_eq!(command("target add")["ask_user_first"], true);
+    assert_eq!(command("target list")["effect"], "reads");
+    for name in ["access", "bootstrap", "delivery verify", "config export"] {
+        assert!(
+            v["documents"].get(name).is_some(),
+            "schema documents must describe {name}"
+        );
+    }
+    assert!(
+        !serde_json::to_string(&v["documents"])
+            .unwrap()
+            .contains("simple"),
+        "schema documents still mention the simple profile"
+    );
+    let slugs: Vec<&str> = v["error_codes"]
+        .as_array()
+        .expect("error_codes")
+        .iter()
+        .filter_map(|c| c["code"].as_str())
+        .collect();
+    for slug in [
+        "boundary_missing",
+        "state_vault_missing",
+        "state_vault_wider_than_values",
+        "duplicate_scope",
+        "target_name_required",
+    ] {
+        assert!(slugs.contains(&slug), "error_codes is missing {slug}");
+    }
 }

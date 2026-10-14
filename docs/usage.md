@@ -657,8 +657,13 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `manifest_exists` | 2 | never | no | a manifest for this project already exists; change it with opv config edit |
 | `config_changed` | 2 | safe | no | the configuration changed while opv was editing it: nothing was written and re-running is safe, or (when the error says so) another edit landed with opv's and a person checks the manifest's history |
 | `config_invalid` | 2 | after_fix | no | secrets.toml or a flag value is not valid |
+| `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
+| `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
+| `state_vault_wider_than_values` | 2 | after_fix | yes | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
+| `duplicate_scope` | 2 | never | no | a receipt file holds more than one entry for the same environment, product and target |
+| `target_name_required` | 2 | after_fix | no | --target needs --target-name <name>, the target's name, chosen by a person |
 | `unknown_env` | 2 | never | no | the environment is not defined in secrets.toml |
-| `unknown_product` | 2 | never | no | the product is not declared in the configuration |
+| `unknown_product` | 2 | never | no | the product is not declared |
 | `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
 | `dependency_missing` | 3 | after_fix | no | op or the target CLI is missing or unusable |

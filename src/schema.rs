@@ -267,6 +267,22 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    // `target add` declares a target (writes_config) and, in the same confirmed step,
+    // creates its state vault (writes_1password): FR-56, FR-58. It always asks first.
+    Effect {
+        command: "target add",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "target list",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
 ];
 
 /// The commands whose item read tidies the 1Password layout when a signed-in person runs
@@ -565,11 +581,13 @@ fn documents() -> Value {
         "item skeleton": ["environment", "added: [{product, key, kind}]"],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
         "adopt": "{environment, applied, rows [{found, product, key, action (match|format_only|import|replace|differs|held_immutable|fails_rule|conflict|ambiguous|not_declared|not_applicable), rule}], writes, decisions_needed, next}: names, actions and findings only, never a value",
-        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only",
-        "bootstrap": "{environments [{environment, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}]}",
+        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only. A target whose deploy credentials, state vault or boundaries cannot be opened is `grants_missing` in the matrix, naming what could not be opened",
+        "access": "{environments: [{environment, report: {checks: [{grant: {principal: {kind (deploy|ci_reader), environment, target?}, service_account, vault_id, permission (read|read_write)}, state (present|missing|read_only_needed|not_visible)}], extra: [{vault_id, service_account}], checked, unclassified}, commands: [string]}]}: who needs each boundary and target and the owner's exact commands for the missing grants; --target narrows to one target; read-only, never says clean",
+        "bootstrap": "{environments: [{environment, boundaries: [{boundary, products, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}], state_vaults: [{target, action (ok|create|ids_not_in_account), vault_id?, vault?}]}]}: per environment, each needed boundary and each target's state vault with its action; no --state flag",
         "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
         "account use": "{account_id, path}: the .opv file written",
-        "config export": "with <ENV>: the config-kind values, {KEY: value} (simple profile) or {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
+        "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
+        "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery",
         "schema": "this document",
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
         "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
