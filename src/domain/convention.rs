@@ -92,7 +92,6 @@ impl Found {
             || self.label.is_empty()
             || !VALUE_TYPES.contains(&self.ty.as_str())
             || self.section_label() == Some(KEPT_SECTION)
-            || self.section_label() == Some(crate::domain::ledger::STATE_SECTION)
             || self.is_marker()
     }
 

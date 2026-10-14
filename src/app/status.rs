@@ -596,6 +596,7 @@ pub(crate) fn env_rows_keeping(
     if let Some(keep) = keep {
         keep.extend(read.fields.iter().map(copy_field));
     }
+    let ledgers = super::placement_ledgers(fleet, env_name, Some(target), Some(&ports), r);
     let (mut plan, _) = super::plan_item_with(
         fleet,
         env_name,
@@ -604,7 +605,7 @@ pub(crate) fn env_rows_keeping(
         Some(&ports),
         &none,
         &none,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);

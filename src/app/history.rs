@@ -1,11 +1,12 @@
 //! `opv history <env> [--json]` (#95): what opv last wrote to an environment's target, per
 //! key, from what is already recorded: the provenance stamp a pinned target keeps on each
 //! value (FR-42: opv version, UTC time, plan id) and the version ledger opv's own sync keeps
-//! for stores that hide values (FR-54). Read-only, as `status`: one item read (which holds
-//! the ledger) and one store listing (which holds the stamps). Names, versions, times and
+//! for stores that hide values (FR-54): each placement's delivery evidence (FR-58, D11).
+//! Read-only, as `status`: the item reads, each recorded delivery item, and one store
+//! listing (which holds the stamps). Names, versions, times and
 //! plan ids only, never a value or a fingerprint (SR-1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::write_err;
@@ -65,7 +66,8 @@ pub fn run(
     let r: &dyn CommandRunner = &signed_in;
     let (target, ports) = super::open_target(fleet, env_name, &name, r)?;
     let read = super::tidy::read(fleet, env_name, r)?;
-    let recorded = read.ledger.versions();
+    let ledgers = super::placement_ledgers(fleet, env_name, Some(&name), Some(&ports), r);
+    let recorded: BTreeMap<String, String> = ledgers.iter().flat_map(|l| l.versions()).collect();
     let none = BTreeSet::new();
     let (plan, listed) = super::plan_item_with(
         fleet,
@@ -75,7 +77,7 @@ pub fn run(
         Some(&ports),
         &none,
         &none,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     // Secrets only: config keys travel as variables, which the stores do not version.
     let names: Vec<(String, String, String)> = plan

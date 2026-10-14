@@ -12,7 +12,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv tidy <env> [--json]` | put the environment's 1Password item in opv's layout: one verified edit, nothing deleted ([store layout](configuration.md#store-layout)); a person signed in with their own session only | the 1Password item's layout |
 | `opv history <env> [--json]` | what opv last wrote to the target, per key: time, plan id, changed outside opv ([usage](#write-history-opv-history)) | nothing (read-only) |
 | `opv access [<env>] [--json]` | who can read each vault; the owner's command for a read-only CI reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
-| `opv delivery verify <env> [--product <p>] [--receipt <file>] [--json]` | does each product's target still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
+| `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | does each placement still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--json]` | create every environment's vault, item and empty fields in the selected account, recording their IDs | 1Password and `secrets.toml` |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -213,7 +213,7 @@ Next: opv plan prod
 
 ### Change detection on Fly
 
-Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. Without more, `plan` would show a desired key that is already on Fly as `unknown`; the version ledger closes that gap. After a sync you run yourself, opv records in the environment's item (section `opv · state`) each written name with the digest Fly gave it and a keyed fingerprint of the value (never the value). `plan` then compares exactly: a name Fly still holds at that digest is `same` when the 1Password value has not changed and `changed` when it has; a name whose digest changed since is reported as **changed outside opv** (someone set it on Fly; the next sync writes 1Password's value back). A name no person's sync has recorded yet (a new key, or only CI has synced it) stays `unknown`. The same ledger makes GitHub secrets exact: one that is unchanged is no longer rewritten by every sync. An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows `same` or `changed` instead.
+Fly digests cannot be computed locally, so opv cannot tell in advance whether a value changed. `sync` reads Fly's secret metadata, stages, reads it again and compares the digests. Fly's list can lag right after staging, so the second read is repeated (for up to 30 seconds, with a progress line on stderr) until every staged name shows a digest; a name still without one counts as changed. Without more, `plan` would show a desired key that is already on Fly as `unknown`; the version ledger closes that gap. After each confirmed write, the sync (yours or CI's) records in the placement's delivery item in the target's state vault each written name with the digest Fly gave it and a keyed fingerprint of the value (never the value). `plan` then compares exactly: a name Fly still holds at that digest is `same` when the 1Password value has not changed and `changed` when it has; a name whose digest changed since is reported as **changed outside opv** (someone set it on Fly; the next sync writes 1Password's value back). A name no sync has recorded yet, or a placement without a recorded delivery item, stays `unknown`. The same ledger makes GitHub secrets exact: one that is unchanged is no longer rewritten by every sync. An immutable key already on Fly is "held" and is not staged unless you pass `--rotate` for it. On Azure, opv reads each listed Key Vault secret and compares it exactly, so `plan` shows `same` or `changed` instead.
 
 Staging uses stage semantics, so it coexists with other tools that stage secrets on the same Fly app. A deploy happens only with `--deploy`, and only when a staged digest changed, a prune happened, or a managed name is still pending on Fly (status Staged or Partial) from an earlier run. An app with no machines skips the deploy with a notice ([checks before the first write](how-opv-handles-failures.md#checks-before-the-first-write)).
 
@@ -413,7 +413,7 @@ Every action is an `opv` command, shown before it runs and run in your terminal,
 
 ## Write history: `opv history`
 
-`opv history <env>` shows, per secret, what opv last wrote to the environment's target, from what is already recorded: on Key Vault and Kubernetes the stamp opv puts on each value it writes (UTC time, plan id, opv version); on Fly and GitHub the version opv's own sync recorded in the item's `opv · state` section (on Fly the version is a digest of the value, so it is compared in memory and never shown: only the state is). Each key is `written by opv` (stamped), `as opv's last sync left it`, `changed outside opv since its last sync` (then `Next: opv plan <env>`), `on the target; opv has no record of writing it`, or `not on the target`. It is read-only, as `opv status` (one item read and one store listing), and shows names, versions, times and plan ids, never a value or a fingerprint. `--json` gives `{schema_version, environment, target, latest: {written, plan, opv_version} | null, rows: [{product, key, name, on_target, version, pending, written, opv_version, plan, recorded_version, state}]}`. An environment without a target has no history. In `opv ui`, `h` on an environment opens the same.
+`opv history <env>` shows, per secret, what opv last wrote to the environment's target, from what is already recorded: on Key Vault and Kubernetes the stamp opv puts on each value it writes (UTC time, plan id, opv version); on Fly and GitHub the version opv's own sync recorded in each placement's delivery evidence (on Fly the version is a digest of the value, so it is compared in memory and never shown: only the state is). Each key is `written by opv` (stamped), `as opv's last sync left it`, `changed outside opv since its last sync` (then `Next: opv plan <env>`), `on the target; opv has no record of writing it`, or `not on the target`. It is read-only, as `opv status` (the item reads, each recorded delivery item and one store listing), and shows names, versions, times and plan ids, never a value or a fingerprint. `--json` gives `{schema_version, environment, target, latest: {written, plan, opv_version} | null, rows: [{product, key, name, on_target, version, pending, written, opv_version, plan, recorded_version, state}]}`. An environment without a target has no history. In `opv ui`, `h` on an environment opens the same.
 
 ## Who can read each vault: `opv access`
 
@@ -427,18 +427,19 @@ Every action is an `opv` command, shown before it runs and run in your terminal,
 
 ## Delivery receipts: `opv sync --receipt` and `opv delivery verify`
 
-When an environment has a state vault (`state_vault_id`, created by `opv bootstrap --state <env>`), every sync whose writes the target confirmed records, **per product**, a delivery receipt in that vault's item `opv · delivery · <product>`. Products on a shared host are promoted and checked independently.
+Every sync whose writes the target confirmed records, **per placement** (product and target), its evidence in the target's state vault, in the item `opv · delivery · <product> · <target>` that `opv bootstrap` creates and records (`delivery_items`). Products on a shared host, and one product on several targets, are promoted and checked independently.
 
 ```sh
 opv sync prod --product api --receipt api.receipt.json   # deliver; keep the receipt (names, ids, times)
-opv delivery verify prod --product api --json            # read-only: is api still exactly what was delivered?
+opv delivery verify prod --product api --json            # read-only: is api still exactly what was delivered, on each target?
+opv delivery verify prod --product api --target web      # one placement only
 opv delivery verify prod --receipt api.receipt.json      # is the receipt I kept still the current delivery?
 ```
 
-- **When a revision is minted.** Only when every secret in the product's binding set was written by this sync (confirmed by the provider) or proven identical. The revision (`drv-` and 26 random characters) is opaque and derived from nothing.
+- **When a revision is minted.** Only when every secret in the placement's binding set (exactly the secrets the target delivers for the product: a key a mode skips is not in it) was written by this sync (confirmed by the provider) or proven identical; each confirmed name's evidence line is recorded either way. The revision (`drv-` and 26 random characters) is opaque and derived from nothing.
   - A failed, partial or interrupted sync mints nothing. Its product stays as it was, and a retry mints once everything is confirmed.
   - An unchanged re-sync keeps the same revision, so an accepted record stays reusable.
-- **What verify reports**, per product. Exit 0 only when everything checked is `verified`; otherwise exit 8 with `Next: opv sync <env>`.
+- **What verify reports**, per placement: every target that delivers the product, each with its target and state; `--target` narrows. Exit 0 only when everything checked is `verified`; otherwise exit 8 with `Next: opv sync <env>`.
   - `verified`: every name holds what was delivered.
   - `changed`, with each name's state:
     - `source_changed`: the 1Password value was rotated, or a shared value it reads changed. A shared value invalidates every product that reads it.
@@ -453,8 +454,8 @@ opv delivery verify prod --receipt api.receipt.json      # is the receipt I kept
   - The receipt holds names, IDs, times, the plan id and the opv version.
   - The evidence (each name's store version and a keyed fingerprint of its 1Password value) stays in the state item and is compared in memory. Fly digests included, it is never printed, logged or written to a file.
   - Give the state vault only to identities that can also read the values.
-- **Least privilege.** The deploy identity reads the values vault and writes only the state vault. `opv bootstrap --state <env>` prints its exact `op service-account create … --vault <values>:read_items --vault <state>:read_items,write_items` command, which you run yourself (1Password shows the token once).
-- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. `opv delivery verify --json` returns `{schema_version, environment, products: [{product, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
+- **Least privilege.** The deploy identity reads the values vault and writes only the state vault. `opv access <env> --target <t>` prints its missing grants as the exact owner commands, which you run yourself (1Password shows the token once).
+- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "target", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. A receipt is selected by its full scope, in any order; two with the same full scope are refused (`duplicate_scope`). `opv delivery verify --json` returns `{schema_version, environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
 - **Capability check**: an installed opv supports this when `opv schema` lists the command `delivery verify`.
 
 The four kinds of evidence are kept apart:
@@ -758,7 +759,7 @@ CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped
 
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions); on Azure or Kubernetes, install `az` or `kubectl` instead of `flyctl` and sign the runner in to it (or use `deploy_credentials`). An environment with `confirm_env = true` also needs `--confirm <env>` in the job.
 
-**One product at a time on a shared Fly app, with delivery receipts.** With a `state_vault_id` and a deploy identity from `opv bootstrap --state prod` (read the values vault, write the state vault):
+**One product at a time on a shared Fly app, with delivery receipts.** With a `state_vault_id` and a deploy identity whose grants `opv access prod --target <t>` prints (read the values vault, write the state vault):
 
 ```yaml
       - name: Deliver api's secrets and keep the receipt
