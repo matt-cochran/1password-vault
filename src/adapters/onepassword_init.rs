@@ -43,11 +43,9 @@ pub struct Named {
 /// One item field without its value: what `init` needs to write a declared key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldShape {
-    /// The section label; `None` for a field outside any labelled section.
+    /// The section label; `None` for a field outside any labelled section (`init` gives
+    /// it to the product `--product` names).
     pub section: Option<String>,
-    /// True for a field inside a section object that has no label (or an empty one). The
-    /// fleet reader rejects such a field; the simple reader treats it as unsectioned.
-    pub unlabelled_section: bool,
     pub label: String,
     /// The 1Password field type (`CONCEALED`, `STRING`, `URL`, ...).
     pub ty: String,
@@ -206,10 +204,8 @@ pub fn read_field_shapes(
         .into_iter()
         .filter(|f| f.purpose.is_none())
         .map(|f| {
-            let in_section = f.section.is_some();
             let section = f.section.and_then(|s| s.label).filter(|l| !l.is_empty());
             FieldShape {
-                unlabelled_section: in_section && section.is_none(),
                 section,
                 label: f.label,
                 ty: f.ty,
@@ -580,7 +576,6 @@ mod tests {
             s[2].section, None,
             "a section without a label is unsectioned"
         );
-        assert!(s[2].unlabelled_section && !s[0].unlabelled_section && !s[1].unlabelled_section);
         let dbg = format!("{s:?}");
         assert!(!dbg.contains("MARKER"), "{dbg}");
     }

@@ -72,7 +72,7 @@ fn ok(value: &str) -> Output {
 }
 fn recipe(dir: &Path) -> PathBuf {
     let path = dir.join("opv.setup.toml");
-    fs::write(&path, "title='Local example'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='API_KEY'\ntitle='Provider login'\ndescription='Lets this API call its provider.'\nsource='Your provider dashboard.'\n").unwrap();
+    fs::write(&path, "title='Local example'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='API_KEY'\nproduct='api'\ntitle='Provider login'\ndescription='Lets this API call its provider.'\nsource='Your provider dashboard.'\n").unwrap();
     path
 }
 fn metadata() -> Vec<Output> {
@@ -132,7 +132,7 @@ fn repeated_setup_keeps_existing_value_and_makes_no_write_or_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(dir.path());
     let mut replies = metadata();
-    replies.extend([ok(r#"[{"id":"item-id","title":"api"}]"#),ok(r#"{"category":"SECURE_NOTE","sections":[],"fields":[{"id":"key","label":"API_KEY","type":"CONCEALED","value":"synthetic-existing"}]}"#)]);
+    replies.extend([ok(r#"[{"id":"item-id","title":"api"}]"#),ok(r#"{"category":"SECURE_NOTE","sections":[{"id":"api","label":"api"}],"fields":[{"id":"key","section":{"id":"api","label":"api"},"label":"API_KEY","type":"CONCEALED","value":"synthetic-existing"}]}"#)]);
     let mut backend = Fake::new(replies);
     let mut ui = Ui::new(vec![], &[]);
     assert_eq!(
@@ -191,7 +191,7 @@ fn wrong_kind_has_specific_repair_and_preserves_existing_item() {
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(dir.path());
     let mut replies = metadata();
-    replies.extend([ok(r#"[{"id":"item-id","title":"api"}]"#),ok(r#"{"category":"SECURE_NOTE","fields":[{"label":"API_KEY","type":"STRING","value":"synthetic-private"}]}"#)]);
+    replies.extend([ok(r#"[{"id":"item-id","title":"api"}]"#),ok(r#"{"category":"SECURE_NOTE","sections":[{"id":"api","label":"api"}],"fields":[{"section":{"id":"api","label":"api"},"label":"API_KEY","type":"STRING","value":"synthetic-private"}]}"#)]);
     let mut backend = Fake::new(replies);
     let mut ui = Ui::new(vec![], &[]);
     let error = run(&path, None, None, None, &mut backend, &mut ui).unwrap_err();
@@ -343,8 +343,8 @@ mod stateful {
         let op = Rc::new(FakeOp::default());
         let id = op.insert(
             VAULT,
-            json!({"title": "api", "category": "SECURE_NOTE", "sections": [], "fields": [
-                {"id": "key", "label": "API_KEY", "type": "CONCEALED", "value": ""},
+            json!({"title": "api", "category": "SECURE_NOTE", "sections": [{"id": "api", "label": "api"}], "fields": [
+                {"id": "key", "section": {"id": "api", "label": "api"}, "label": "API_KEY", "type": "CONCEALED", "value": ""},
                 {"id": "note", "label": "NOTE", "type": "STRING", "value": "first"},
             ]}),
         );
@@ -353,7 +353,7 @@ mod stateful {
 
     fn recipe_in(dir: &Path) -> PathBuf {
         let path = dir.join("opv.setup.toml");
-        fs::write(&path, "title='Local example'\nenvironment='dev'\nvault='myapp-dev'\nitem='api'\n[[fields]]\nkey='API_KEY'\ntitle='Provider login'\ndescription='Lets this API call its provider.'\nsource='Your provider dashboard.'\n").unwrap();
+        fs::write(&path, "title='Local example'\nenvironment='dev'\nvault='myapp-dev'\nitem='api'\n[[fields]]\nkey='API_KEY'\nproduct='api'\ntitle='Provider login'\ndescription='Lets this API call its provider.'\nsource='Your provider dashboard.'\n").unwrap();
         path
     }
 

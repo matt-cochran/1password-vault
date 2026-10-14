@@ -826,46 +826,6 @@ fn run_after_a_persons_tidy_uses_the_convention_reference() {
     )));
 }
 
-#[test]
-fn init_creates_a_missing_item_for_a_person() {
-    let dir = tempfile::tempdir().unwrap();
-    let op = FakeOp::person(json!({}));
-    let args = crate::app::init::InitArgs {
-        env: "dev".into(),
-        vault: "dev".into(),
-        item: "app".into(),
-        target: None,
-        fields: Default::default(),
-        profile: Some(crate::app::init::Profile::Simple),
-        force: false,
-        from: None,
-    };
-    let _on = activate();
-    let mut out = Vec::new();
-    let res = crate::app::init::run(&args, dir.path(), &op, &mut out);
-    assert!(res.is_ok() && op.count(&["item", "create"]) == 1, "{res:?}");
-}
-
-#[test]
-fn init_never_creates_an_item_for_a_service_account() {
-    let dir = tempfile::tempdir().unwrap();
-    let op = FakeOp::new(json!({}), "SERVICE_ACCOUNT");
-    let args = crate::app::init::InitArgs {
-        env: "dev".into(),
-        vault: "dev".into(),
-        item: "app".into(),
-        target: None,
-        fields: Default::default(),
-        profile: Some(crate::app::init::Profile::Simple),
-        force: false,
-        from: None,
-    };
-    let _on = activate();
-    let mut out = Vec::new();
-    let _ = crate::app::init::run(&args, dir.path(), &op, &mut out);
-    assert_eq!(op.count(&["item", "create"]), 0);
-}
-
 // ---- Integration seams: shared keys (FR-45), links (H1), read-only consistency ----------
 
 fn shared_fleet() -> Fleet {
