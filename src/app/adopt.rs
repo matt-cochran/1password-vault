@@ -83,8 +83,8 @@ fn read_source(
     match source {
         Source::Dotenv(path) => super::setup::read_legacy(path),
         Source::Target => {
-            // The environment's only target (several need --target, a later deliverable).
-            let target = super::resolve_target(fleet, env_name, &[], "adopt")?;
+            // The one target this command reads ([`super::sole_target`]).
+            let target = super::sole_target(fleet, env_name, "adopt")?;
             let (t, ports) = super::open_target(fleet, env_name, &target, r)?;
             let label = t.provider().label();
             match &ports {

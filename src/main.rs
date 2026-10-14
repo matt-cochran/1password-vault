@@ -570,8 +570,8 @@ enum Cmd {
         /// retried); a project that cannot be read is one line with its reason.
         #[arg(long, conflicts_with = "env")]
         all: bool,
-        /// Only this named target of the environment (repeatable; one per run for now).
-        /// Without it, the environment's only target.
+        /// Only this named target of the environment (repeatable). Without it, every
+        /// target, in name order.
         #[arg(long = "target", value_name = "NAME", requires = "env")]
         target: Vec<String>,
     },
@@ -966,8 +966,8 @@ struct PlanArgs {
     /// Print one machine-readable JSON document instead of the table.
     #[arg(long)]
     json: bool,
-    /// Only this named target of the environment (repeatable; one per run for now).
-    /// Without it, the environment's only target.
+    /// Only this named target of the environment (repeatable). Without it, every target,
+    /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
 }
@@ -1014,8 +1014,8 @@ struct SyncArgs {
     /// Let --prune unset this immutable key (repeatable).
     #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
     prune_immutable: Vec<String>,
-    /// Only this named target of the environment (repeatable; one per run for now).
-    /// Without it, the environment's only target.
+    /// Only this named target of the environment (repeatable). Without it, every target,
+    /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
 }
@@ -1696,8 +1696,9 @@ impl Cmd {
         }
     }
 
-    /// The `--target` the command names (FR-56), whose deploy credentials it signs in
-    /// with; `None`: the environment's only target.
+    /// The one `--target` the command names (FR-56), whose deploy credentials it signs in
+    /// with; `None`: the environment's only target, when it has one. A run over several
+    /// targets signs in per target itself (`app::target_runners`).
     fn target(&self) -> Option<&str> {
         let targets = match self {
             Cmd::Status { target, .. } => target,
@@ -1705,7 +1706,10 @@ impl Cmd {
             Cmd::Sync(a) => &a.target,
             _ => return None,
         };
-        targets.first().map(String::as_str)
+        match targets.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
     }
 
     /// `Some(raw)` when stdout is one JSON document (A1): `--json`, or a command that only

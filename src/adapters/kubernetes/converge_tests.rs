@@ -543,7 +543,8 @@ fn failed_collection_after_a_healthy_deploy_is_a_warning() {
     let text = String::from_utf8(out).unwrap();
     assert!(
         text.lines()
-            .any(|l| l.starts_with("warning: superseded versions of app/FLEET__API__DB_URL")),
+            .any(|l| l
+                .starts_with("dev/app: warning: superseded versions of app/FLEET__API__DB_URL")),
         "{text}"
     );
 }
@@ -628,7 +629,7 @@ fn kubernetes_sync_ends_with_the_shared_summary_line() {
     let text = String::from_utf8(out).unwrap();
     let last = text.lines().last().unwrap_or_default();
     let re = regex::Regex::new(
-        r"^summary: written \d+ · unchanged \d+ · held \d+ · deployed \S+( \(\d+ pending from an earlier run\))? · pending \d+ · pruned \d+ · kept \d+ · skipped \d+$",
+        r"^dev/app: summary: written \d+ · unchanged \d+ · held \d+ · deployed \S+( \(\d+ pending from an earlier run\))? · pending \d+ · pruned \d+ · kept \d+ · skipped \d+$",
     )
     .unwrap();
     assert!(re.is_match(last), "{text}");

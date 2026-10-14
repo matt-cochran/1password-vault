@@ -125,7 +125,10 @@ fn sync_with_pending_names_the_deploy_command_last() {
 #[test]
 fn sync_with_nothing_pending_ends_with_the_summary() {
     let (_, out) = sync_out(&fleet(), &unchanged(), &deploy());
-    assert!(last_line(&out).starts_with("summary: "), "{out}");
+    assert!(
+        last_line(&out).starts_with("prod/portfolio: summary: "),
+        "{out}"
+    );
 }
 
 #[test]
@@ -173,7 +176,7 @@ fn sync_json_names_the_next_command() {
 
 #[test]
 fn sync_json_names_the_provider() {
-    assert_eq!(json_doc(&new_secrets())["provider"], "fly");
+    assert_eq!(json_doc(&new_secrets())["targets"][0]["provider"], "fly");
 }
 
 #[test]
@@ -482,8 +485,8 @@ fn plan_starts_with_a_count_summary() {
     );
     assert_eq!(
         out.lines().next().unwrap(),
-        "prod: 4 keys · 0 findings · 2 to stage · 0 held (immutable) · 0 to prune · 0 \
-         unmanaged on Fly (never touched)",
+        "prod/portfolio: 4 keys · 0 findings · 2 to stage · 0 held (immutable) · 0 to \
+         prune · 0 unmanaged on Fly (never touched)",
         "{out}"
     );
 }
@@ -628,8 +631,8 @@ fn status_without_env_prints_one_line_per_environment() {
     let (_, out) = overview_out(&fleet(), &r);
     assert_eq!(
         out,
-        "prod: 4 keys · 3 saved · 1 skipped · 0 findings · 2 not yet on Fly\n\
-         staging: 3 keys · 2 saved · 0 skipped · 1 finding · 1 not yet on Fly\n",
+        "prod/portfolio: 4 keys · 3 saved · 1 skipped · 0 findings · 2 not yet on Fly\n\
+         staging/portfolio: 3 keys · 2 saved · 0 skipped · 1 finding · 1 not yet on Fly\n",
     );
 }
 

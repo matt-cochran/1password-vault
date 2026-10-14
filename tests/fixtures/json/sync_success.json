@@ -2,15 +2,24 @@
   "schema_version": 1,
   "ok": true,
   "environment": "prod",
-  "provider": "fly",
   "product": null,
+  "targets": [
+    {
+      "target": "portfolio",
+      "provider": "fly",
+      "deployed": false,
+      "revision": null
+    }
+  ],
   "written": [
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "INTEGRATION_ENC_KEY",
       "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY"
     },
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "OPENAI_API_KEY",
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY"
@@ -19,16 +28,17 @@
   "unchanged": [],
   "held": [],
   "deployed": false,
-  "revision": null,
   "deploy_reason": [],
   "deployed_names": [],
   "pending": [
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "INTEGRATION_ENC_KEY",
       "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY"
     },
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "OPENAI_API_KEY",
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY"
@@ -38,6 +48,7 @@
   "kept": [],
   "skipped": [
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "STRIPE_SECRET_KEY",
       "target_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY"
@@ -47,7 +58,7 @@
     "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
     "FLEET__ALLUMATA__OPENAI_API_KEY"
   ],
-  "plan_id": "4fe9a87d",
+  "plan_id": "b23ff43d",
   "delivery": {
     "minted": [],
     "not_minted": [
