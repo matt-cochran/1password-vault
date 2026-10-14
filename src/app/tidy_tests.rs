@@ -258,6 +258,32 @@ environments = ["dev"]
     .unwrap()
 }
 
+/// Two products in one boundary item that declare the same key, so an unsectioned field
+/// with that label cannot be assigned to either.
+fn ambiguous_fleet() -> Fleet {
+    config::parse(
+        r#"
+[environments.dev]
+boundaries.core = { vault_id = "vdev", item_id = "idev" }
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.SHARED_TOKEN]
+kind = "secret"
+environments = ["dev"]
+
+[products.web]
+boundary = "core"
+
+[products.web.keys.SHARED_TOKEN]
+kind = "secret"
+environments = ["dev"]
+"#,
+    )
+    .unwrap()
+}
+
 /// (section label or "" for top level, label, type, value).
 type F<'a> = (&'a str, &'a str, &'a str, &'a str);
 
@@ -361,6 +387,28 @@ fn a_misplaced_field_is_moved_home_and_renamed() {
         op.field(Some("api"), "LOG_LEVEL").unwrap()["value"],
         "debug"
     );
+}
+
+#[test]
+fn an_unsectioned_field_matching_two_products_is_named_with_both_in_one_note() {
+    let op = FakeOp::person(item(&[("", "SHARED_TOKEN", "CONCEALED", "x")]));
+    let _on = activate();
+    let _ = read(&ambiguous_fleet(), "dev", &op).unwrap();
+    assert!(
+        op.notes().lines().any(|l| l
+            == "1Password (dev): an unsectioned field matches keys of more than one product: \
+                SHARED_TOKEN (api, web); opv leaves it where it is. Move it into the right \
+                product's section in 1Password."),
+        "{}",
+        op.notes()
+    );
+}
+
+#[test]
+fn an_unsectioned_field_is_moved_into_its_products_section() {
+    let op = FakeOp::person(item(&[("", "LOG_LEVEL", "STRING", "info")]));
+    tidied(&op);
+    assert_eq!(op.field(Some("api"), "LOG_LEVEL").unwrap()["value"], "info");
 }
 
 #[test]

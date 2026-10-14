@@ -21,8 +21,10 @@
 //! case, spaces, `-` and `_`), unsectioned fields, and fields in sections whose label is not
 //! product-shaped (`^[a-z][a-z0-9_-]*$`, e.g. "Secrets" or "API keys"). A product-shaped
 //! section belongs to some product, possibly one another configuration manages in the same
-//! item, so its fields are never moved out of it. A field two declared keys could both claim
-//! is left alone.
+//! item, so its fields are never moved out of it. An unsectioned field (no section, or the
+//! unlabeled default section) whose label matches declared keys of exactly one product is
+//! moved home like any other misplaced field; one matching keys of more than one product is
+//! left alone and named in one note.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -124,12 +126,6 @@ fn product_shaped(s: &str) -> bool {
         && c.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
 }
 
-fn key_shaped(s: &str) -> bool {
-    let mut c = s.chars();
-    matches!(c.next(), Some('A'..='Z'))
-        && c.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-}
-
 /// (product, key) of a declared key.
 pub type KeyId = (String, String);
 
@@ -140,10 +136,9 @@ pub struct Resolution {
     pub chosen: BTreeMap<KeyId, usize>,
     /// The other fields claimed by each key, in item order.
     pub duplicates: BTreeMap<KeyId, Vec<usize>>,
-    /// Keys read from an unsectioned field (M1): unsectioned fields are not keys' homes
-    /// (FR-20 removed), so that field is read but never moved, relabelled or kept; the tidy
-    /// names these keys in one note.
-    pub foreign: BTreeSet<KeyId>,
+    /// Unsectioned fields whose label matches declared keys of more than one product: never
+    /// moved; the tidy names the candidate products in one note.
+    pub ambiguous: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Resolution {
@@ -159,12 +154,6 @@ impl Resolution {
 /// Whether `f` sits in `product`'s section, by label.
 fn in_home(f: &Found, product: &str) -> bool {
     f.section_label().is_some_and(|l| norm(l) == norm(product))
-}
-
-/// True when `f` is a key-shaped label at the top level (M1): such a field is still read,
-/// but the plan never moves, relabels, conceals, normalizes or keeps it.
-fn foreign_home(f: &Found) -> bool {
-    f.section_label().is_none() && key_shaped(&f.label)
 }
 
 /// Find each declared key's field (see the module docs). Pure and deterministic.
@@ -183,7 +172,7 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
         })
         .collect();
     let mut claims: BTreeMap<KeyId, Vec<usize>> = BTreeMap::new();
-    let mut foreign: BTreeSet<KeyId> = BTreeSet::new();
+    let mut ambiguous: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (i, f) in layout.fields.iter().enumerate() {
         if f.reserved() {
             continue;
@@ -210,18 +199,32 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
             };
             pick.map(|(p, k)| (p.to_string(), k.to_string()))
         };
+        // An unsectioned field (no section, or the unlabeled default section) is moved home
+        // only when exactly one product declares a matching key (FR-20 removed); with more
+        // than one it is left alone and named in one note.
+        if f.section_label().is_none() {
+            let products: BTreeSet<&str> = cands.iter().map(|(p, _)| *p).collect();
+            if products.len() > 1 {
+                ambiguous
+                    .entry(f.label.clone())
+                    .or_default()
+                    .extend(products.into_iter().map(str::to_string));
+                continue;
+            }
+            if let Some(id) = one(&cands) {
+                claims.entry(id).or_default().push(i);
+            }
+            continue;
+        }
         let home: Vec<(&str, &str)> = cands
             .iter()
             .copied()
             .filter(|(p, _)| in_home(f, p))
             .collect();
-        // M1: a product-shaped section belongs to some product.
+        // A product-shaped section belongs to some product.
         let raidable = f.section_label().is_none_or(|l| !product_shaped(l));
         let claim = one(&home).or_else(|| if raidable { one(&cands) } else { None });
         if let Some(id) = claim {
-            if foreign_home(f) {
-                foreign.insert(id.clone());
-            }
             claims.entry(id).or_default().push(i);
         }
     }
@@ -240,15 +243,7 @@ pub fn resolve(layout: &Layout, fleet: &Fleet) -> Resolution {
         }
         res.chosen.insert(id, best);
     }
-    // Keys read from a field the plan leaves where it is.
-    foreign.retain(|id| {
-        let left = |i: &usize| foreign_home(&layout.fields[*i]);
-        match res.chosen.get(id) {
-            None => false,
-            Some(c) => left(c) || res.duplicates.get(id).into_iter().flatten().any(left),
-        }
-    });
-    res.foreign = foreign;
+    res.ambiguous = ambiguous;
     res
 }
 
@@ -542,7 +537,7 @@ fn where_from(f: &Found) -> String {
     match (&f.section, f.section_label()) {
         (None, _) => "outside every section (hidden in the 1Password app)".to_string(),
         (Some(_), Some(l)) => l.to_string(),
-        (Some(_), None) => "top level".to_string(),
+        (Some(_), None) => "the default section".to_string(),
     }
 }
 
@@ -625,7 +620,7 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
     };
 
     for (product, prod) in &fleet.products {
-        let home = Some(product.clone());
+        let home = product.clone();
         // A shared key (FR-45) never gets a field: its source's field holds the value.
         // A personal key (FR-55) never gets a field in the team item: its value is each
         // person's own.
@@ -639,11 +634,9 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
             let here = spec.environments.iter().any(|e| e == env_name);
             let Some(&c) = res.chosen.get(&id) else {
                 if here {
-                    if let Some(h) = &home {
-                        ensure_section(&mut p, h);
-                    }
+                    ensure_section(&mut p, &home);
                     p.ops.push(Op::Add {
-                        section: home.clone(),
+                        section: Some(home.clone()),
                         label: key.clone(),
                         concealed: spec.kind == Kind::Secret,
                         value: None,
@@ -653,29 +646,17 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
                 continue;
             };
             let f = &layout.fields[c];
-            let left = |i: usize| foreign_home(&layout.fields[i]);
-            if left(c) {
-                // M1: read where it is; another configuration may keep it there.
-                continue;
-            }
-            let at_home = match &home {
-                // In the default section, never outside every section: no 1Password app
-                // shows a field that has none (found live).
-                None => f.section_label().is_none() && f.section.is_some(),
-                Some(h) => {
-                    let sid = f.section.as_ref().map(|s| s.id.clone());
-                    sid.is_some() && sid == home_id(h)
-                }
+            let at_home = {
+                let sid = f.section.as_ref().map(|s| s.id.clone());
+                sid.is_some() && sid == home_id(&home)
             };
             let renamed_label = f.label != *key;
             let conceal = spec.kind == Kind::Secret && f.ty != "CONCEALED";
             if !at_home || renamed_label || conceal {
-                if let Some(h) = &home {
-                    ensure_section(&mut p, h);
-                }
+                ensure_section(&mut p, &home);
                 p.ops.push(Op::Place {
                     index: c,
-                    section: home.clone(),
+                    section: Some(home.clone()),
                     label: key.clone(),
                     conceal,
                 });
@@ -722,9 +703,6 @@ pub fn plan(layout: &Layout, fleet: &Fleet, env_name: &str, date: &str) -> TidyP
                 p.kept = true;
             }
             for &d in res.duplicates.get(&id).into_iter().flatten() {
-                if left(d) {
-                    continue;
-                }
                 let dup = &layout.fields[d];
                 ensure_section(&mut p, KEPT_SECTION);
                 p.ops.push(Op::Place {

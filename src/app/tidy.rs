@@ -373,7 +373,7 @@ fn read_item_as(
     };
     let first = item.version;
     if active() {
-        foreign_note(r, &layout, fleet, env_name);
+        ambiguous_note(r, &layout, fleet, env_name);
     }
     if plan.is_empty() || !active() {
         return Ok(done(layout, Vec::new(), None, first, None));
@@ -464,19 +464,26 @@ fn unprovable_note(env_name: &str, what: &str) -> String {
     )
 }
 
-/// One note naming the keys read from a field at the top level of the item, outside any
-/// product section (M1): opv reads it there and never moves it.
-fn foreign_note(r: &dyn CommandRunner, layout: &Layout, fleet: &Fleet, env_name: &str) {
+/// One note naming each unsectioned field whose label matches keys of more than one product
+/// (opv cannot know which product it belongs to, so it never moves it). The candidate
+/// products are named so the person can place it.
+fn ambiguous_note(r: &dyn CommandRunner, layout: &Layout, fleet: &Fleet, env_name: &str) {
     let res = convention::resolve(layout, fleet);
-    if res.foreign.is_empty() {
+    if res.ambiguous.is_empty() {
         return;
     }
-    let names: Vec<String> = res.foreign.iter().map(|(p, k)| key_label(p, k)).collect();
+    let fields: Vec<String> = res
+        .ambiguous
+        .iter()
+        .map(|(label, products)| {
+            let names: Vec<&str> = products.iter().map(String::as_str).collect();
+            format!("{label} ({})", names.join(", "))
+        })
+        .collect();
     r.note(&format!(
-        "1Password ({env_name}): a field for {} is at the top level, outside its product's \
-         section; opv reads it there and never moves it. Move it into the product's section \
-         in 1Password.",
-        names.join(", ")
+        "1Password ({env_name}): an unsectioned field matches keys of more than one product: \
+         {}; opv leaves it where it is. Move it into the right product's section in 1Password.",
+        fields.join("; ")
     ));
 }
 
