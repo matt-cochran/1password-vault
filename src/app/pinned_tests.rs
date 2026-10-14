@@ -101,7 +101,7 @@ fn azure_status(mut responses: Vec<Output>) -> (Vec<(String, String)>, FakeRunne
         .map(|row| {
             (
                 row["key"].as_str().unwrap().to_string(),
-                row["target"].as_str().unwrap().to_string(),
+                row["target_state"].as_str().unwrap().to_string(),
             )
         })
         .collect();
@@ -277,7 +277,7 @@ fn azure_plan_shows_an_unchanged_secret_as_same() {
     assert!(
         text_of(&out).lines().any(|l| {
             l.split_whitespace().collect::<Vec<_>>()
-                == ["app", "API_KEY", "secret", "saved", "same"]
+                == ["app", "app", "API_KEY", "secret", "saved", "same"]
         }),
         "{}",
         text_of(&out)

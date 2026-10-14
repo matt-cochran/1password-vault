@@ -9,10 +9,10 @@ $ op whoami --format json
 $ op item get iprd --vault vprd --format json --cache=false
 $ flyctl secrets deploy --app myapp-production
 --- stdout
-delivery: app not recorded: not confirmed by this sync: JWT_KEY, STRIPE_SECRET_KEY; the target lists no version for: STRIPE_SECRET_KEY
-written: app/DATABASE_URL (DATABASE_URL)
-held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): app/JWT_KEY (JWT_KEY)
-deployed: app/DATABASE_URL (DATABASE_URL)
-summary: written 1 · unchanged 0 · held 1 · deployed yes · pending 0 · pruned 0 · kept 0 · skipped 1
+prod/app: delivery: app not recorded: not confirmed by this sync: JWT_KEY, STRIPE_SECRET_KEY; the target lists no version for: STRIPE_SECRET_KEY
+prod/app: written: app/DATABASE_URL (DATABASE_URL)
+prod/app: held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): app/JWT_KEY (JWT_KEY)
+prod/app: deployed: app/DATABASE_URL (DATABASE_URL)
+prod/app: summary: written 1 · unchanged 0 · held 1 · deployed yes · pending 0 · pruned 0 · kept 0 · skipped 1
 --- result
 Ok(())

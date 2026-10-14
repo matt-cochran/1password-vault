@@ -9,13 +9,13 @@ $ op whoami --format json
 $ op item get iprd --vault vprd --format json --cache=false
 $ flyctl secrets unset FLEET__ALLUMATA__OLD_ENC --app mcproductlabs-portfolio-production --stage
 --- stdout
-delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY, FLEET__ALLUMATA__STRIPE_SECRET_KEY; the target lists no version for: FLEET__ALLUMATA__STRIPE_SECRET_KEY
-unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
-will prune: allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
-pruned: allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
-held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
-pending deploy (pass --deploy): allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
-summary: written 0 · unchanged 1 · held 1 · deployed no · pending 1 · pruned 1 · kept 0 · skipped 1
+prod/portfolio: delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY, FLEET__ALLUMATA__STRIPE_SECRET_KEY; the target lists no version for: FLEET__ALLUMATA__STRIPE_SECRET_KEY
+prod/portfolio: unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+prod/portfolio: will prune: allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
+prod/portfolio: pruned: allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
+prod/portfolio: held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
+prod/portfolio: pending deploy (pass --deploy): allumata/OLD_ENC (FLEET__ALLUMATA__OLD_ENC)
+prod/portfolio: summary: written 0 · unchanged 1 · held 1 · deployed no · pending 1 · pruned 1 · kept 0 · skipped 1
 Next: opv sync prod --deploy --prune
 --- result
 Ok(())
