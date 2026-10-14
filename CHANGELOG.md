@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional `opv-mcp` stdio server using rmcp: readiness, configuration metadata,
+  and deployment previews. The server returns allowlisted metadata only and
+  refuses writes below orchestration; humans enter secrets and approve changes
+  outside MCP. Build from source with the `mcp` feature.
+- Opt-in Claude Code SessionStart readiness adapter with bounded execution,
+  fixed diagnostics, fake-only tests, and manual per-project configuration.
+- Architecture/review map linking security, recovery, and release evidence.
+
+### Fixed
+
+- Align front-page security claims with documented runtime, memory, local-state,
+  and Azure credential-cache boundaries; scope agent guidance appropriately.
+- Isolate independent Fly parser corpus cases and fake-host unit tests from
+  accumulated redaction values and the developer's installed tools respectively.
+
 ## [0.6.1] - 2026-10-14
 
 A safety fix for assistants working in a person's signed-in session: `opv doctor` and `opv ready` now never write 1Password, and the layout repair is an explicit command. No configuration change is required to upgrade.

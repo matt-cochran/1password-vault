@@ -1850,6 +1850,10 @@ mod tests {
     fn every_accepted_value_round_trips_through_the_parser() {
         let mut accepted = 0;
         for value in tricky_corpus() {
+            // Each case tests encoding/parser fidelity independently. Retaining all
+            // 20,000 prior marker values only exercises registry growth, not this
+            // assertion; keep the real SecretValue registration for the current case.
+            crate::scrub::reset_test_registry();
             let v = sv(&value);
             let batch = [("K".to_string(), &v)];
             if validate_import(&batch).is_ok() {
