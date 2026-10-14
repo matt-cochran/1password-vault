@@ -1,5 +1,11 @@
-//! The version ledger (FR-54, #36): exact change detection in `plan` for a store that
-//! cannot show its values (Fly digests, GitHub `updatedAt`), without staging or reading one.
+//! The version ledger (FR-54, FR-58, #36): exact change detection in `plan` for a store
+//! that cannot show its values (Fly digests, GitHub `updatedAt`), without staging or reading
+//! one.
+//!
+//! Since D11 a placement's ledger is built from its delivery evidence, under the placement's
+//! one evidence key: [`Ledger::from_evidence`] turns each evidence line into an entry, so the
+//! evidence lines *are* the ledger. [`Ledger::from_layout`] still reads the values item's
+//! `opv · state` section until another deliverable removes it.
 //!
 //! The comparison happens when it is allowed: right after `sync` writes a value, it knows
 //! both the value and the version the store gave it. It records, per name, that version and
@@ -89,6 +95,28 @@ impl Ledger {
             }
         }
         ledger
+    }
+
+    /// The ledger of one placement: each evidence line's store version and fingerprint,
+    /// under the placement's evidence key (FR-54, FR-58, D11). A line with an empty store
+    /// version or fingerprint is not an entry.
+    pub fn from_evidence(
+        key: Option<SecretValue>,
+        evidence: &[crate::domain::delivery::Evidence],
+    ) -> Ledger {
+        Ledger {
+            key,
+            entries: evidence
+                .iter()
+                .filter(|e| !e.store_version.is_empty() && !e.fingerprint.is_empty())
+                .map(|e| {
+                    (
+                        e.name.clone(),
+                        (e.store_version.clone(), e.fingerprint.clone()),
+                    )
+                })
+                .collect(),
+        }
     }
 
     /// Each recorded name with the store version opv's own sync left it at (#95). Never a
