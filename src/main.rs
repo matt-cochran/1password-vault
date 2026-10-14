@@ -280,11 +280,15 @@ const EXPLAIN_QUICK: &str = "\
 Examples:
   opv explain OPENAI_API_KEY                 # the one product that declares it
   opv explain api/OPENAI_API_KEY             # pick a product when several declare it
-  opv explain api/OPENAI_API_KEY --env prod  # when several environments exist";
+  opv explain api/OPENAI_API_KEY --env prod  # when several environments exist
+  opv explain --target web --env prod        # a target's provider, products and identity";
 
 const EXPLAIN_MORE: &str = "\
-Prints the op:// reference, kind, target name, rules, immutable and guidance, and the
-`op item get` command to inspect the item yourself. Makes no 1Password or target call.";
+Prints the op:// reference, kind, source, boundary (vault and item), every delivering
+named target, the deploy and CI service accounts, rules, immutable and guidance, and the
+`op item get` command to inspect the item yourself. `--target` prints a target's provider
+and locator, products, deploy credentials, state vault and deploy account. Makes no
+1Password or target call.";
 
 const INIT_QUICK: &str = "\
 Examples:
@@ -733,11 +737,18 @@ enum Cmd {
         /// The key. A bare KEY resolves to the one product that declares it (to
         /// OPV_PRODUCT/KEY when OPV_PRODUCT is set); when several do, they are listed.
         /// An unknown name suggests the closest declared ones.
-        #[arg(value_name = "[PRODUCT/]KEY")]
-        target: String,
+        #[arg(value_name = "[PRODUCT/]KEY", required_unless_present = "target_name")]
+        target: Option<String>,
+        /// Explain this named target (FR-56) instead of a key: its provider and locator,
+        /// products, deploy credentials, state vault and deploy service account.
+        #[arg(long = "target", value_name = "NAME", conflicts_with = "target")]
+        target_name: Option<String>,
         /// Environment name; may be omitted when only one environment is declared.
         #[arg(long)]
         env: Option<String>,
+        /// Project name for the service account names; defaults to the repository's name.
+        #[arg(long)]
+        project: Option<String>,
         /// Print the explanation as one JSON document.
         #[arg(long)]
         json: bool,
@@ -1665,10 +1676,22 @@ fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
             product,
             ..
         } => with_product("status", env, product),
-        Cmd::Explain { target, env, .. } => match env {
-            Some(e) => format!("explain {} --env {}", shell_word(target), shell_word(e)),
-            None => format!("explain {}", shell_word(target)),
-        },
+        Cmd::Explain {
+            target,
+            target_name,
+            env,
+            ..
+        } => {
+            let mut c = match (target, target_name) {
+                (Some(t), _) => format!("explain {}", shell_word(t)),
+                (None, Some(n)) => format!("explain --target {}", shell_word(n)),
+                _ => "explain".to_string(),
+            };
+            if let Some(e) = env {
+                c.push_str(&format!(" --env {}", shell_word(e)));
+            }
+            c
+        }
         Cmd::Item(ItemCmd::Skeleton { env, .. })
         | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             format!("doctor --env {}", shell_word(env))
@@ -1807,7 +1830,16 @@ fn apply_product_env(cmd: &mut Cmd, loaded: &Result<opv::domain::Fleet, Error>) 
             *product = p;
             used.then(|| product.clone()).flatten()
         }
-        Cmd::Explain { target, .. } | Cmd::Open { target, .. } if !target.contains('/') => {
+        Cmd::Explain {
+            target: Some(t), ..
+        } if !t.contains('/') => match product_or_env(None, env, fleet_profile) {
+            (Some(p), true) => {
+                *t = format!("{p}/{t}");
+                Some(p)
+            }
+            _ => None,
+        },
+        Cmd::Open { target, .. } if !target.contains('/') => {
             match product_or_env(None, env, fleet_profile) {
                 (Some(p), true) => {
                     *target = format!("{p}/{target}");
@@ -2472,8 +2504,25 @@ fn run_other(
         Cmd::Item(ItemCmd::Skeleton { env, json }) => {
             skeleton::run_as(&loaded?, &env, r, out, json)
         }
-        Cmd::Explain { target, env, json } => {
-            explain::run_as(&loaded?, &target, env.as_deref(), out, json)
+        Cmd::Explain {
+            target,
+            target_name,
+            env,
+            project,
+            json,
+        } => {
+            let asked = match &target_name {
+                Some(name) => explain::Asked::Target(name),
+                None => explain::Asked::Key(target.as_deref().unwrap_or_default()),
+            };
+            let project = match project {
+                Some(p) => p.clone(),
+                None => {
+                    let here = std::env::current_dir().unwrap_or_default();
+                    opv::app::personal::project_name(r, &here)
+                }
+            };
+            explain::run_request(&loaded?, &asked, env.as_deref(), &project, out, json)
         }
         Cmd::Open {
             target,
