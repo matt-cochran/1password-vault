@@ -657,3 +657,53 @@ fn the_team_item_never_gets_a_personal_field() {
             .any(|f| f["label"] == "OPENAI_API_KEY")
     );
 }
+
+#[test]
+fn bootstrap_records_each_placements_delivery_item() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let web = &fleet.environments["prod"].targets["web"];
+    assert_eq!(
+        op.item(&web.delivery_items["api"])["title"],
+        naming::delivery_item("api", "web")
+    );
+}
+
+#[test]
+fn a_created_delivery_item_lives_in_its_targets_state_vault() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let web = &fleet.environments["prod"].targets["web"];
+    assert_eq!(
+        op.item(&web.delivery_items["api"])["vault"]["id"],
+        web.state_vault_id.as_str()
+    );
+}
+
+#[test]
+fn a_created_delivery_item_carries_its_notes() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let item = op.item(&fleet.environments["prod"].targets["web"].delivery_items["api"]);
+    let notes = item["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "notesPlain")
+        .map(|f| f["value"].clone());
+    assert_eq!(
+        notes,
+        Some(serde_json::json!(naming::delivery_item_notes(
+            "api", "web", "prod"
+        )))
+    );
+}
+
+#[test]
+fn a_second_run_creates_no_delivery_item() {
+    let (_dir, path, op) = workspace();
+    bootstrap(&path, &op);
+    op.calls.borrow_mut().clear();
+    bootstrap(&path, &op);
+    assert_eq!(op.count(&["op", "item", "create"]), 0);
+}

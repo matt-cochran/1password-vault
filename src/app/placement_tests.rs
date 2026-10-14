@@ -171,11 +171,26 @@ fn world() -> World {
     }
 }
 
-/// One Fly target table.
-fn target_toml(name: &str, state: &str) -> String {
+/// One Fly target table, with api's delivery item in its state vault (FR-58), as
+/// `opv bootstrap` records it.
+fn target_toml(w: &World, name: &str, state: &str) -> String {
+    let title = crate::domain::naming::delivery_item("api", name);
+    let found =
+        w.op.items
+            .borrow()
+            .iter()
+            .find(|i| i["title"] == title.as_str() && i["vault"]["id"] == state)
+            .and_then(|i| i["id"].as_str().map(str::to_string));
+    let item = found.unwrap_or_else(|| {
+        w.op.insert(
+            state,
+            json!({"title": title, "category": "SECURE_NOTE", "fields": []}),
+        )
+    });
     format!(
         "[environments.prod.targets.{name}]\nfly.app = \"myapp-{name}\"\n\
-         fly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\nstate_vault_id = \"{state}\"\n\n"
+         fly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\nstate_vault_id = \"{state}\"\n\
+         delivery_items = {{ api = \"{item}\" }}\n\n"
     )
 }
 
@@ -186,7 +201,7 @@ fn fleet_of(w: &World, targets: &[(&str, &str)]) -> Fleet {
         w.item_id
     );
     for (name, state) in targets {
-        text.push_str(&target_toml(name, state));
+        text.push_str(&target_toml(w, name, state));
     }
     text.push_str("[products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n");
     crate::config::parse(&text).unwrap()

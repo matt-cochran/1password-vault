@@ -1067,8 +1067,8 @@ impl From<SyncArgs> for sync::SyncOpts {
 
 #[derive(Subcommand)]
 enum DeliveryCmd {
-    /// Check, read-only, that each product's target still holds the binding set opv
-    /// delivered, and name its revision (values never shown).
+    /// Check, read-only, that each placement (product and target) still holds the binding
+    /// set opv delivered, and name its revision (values never shown).
     #[command(before_help = DELIVERY_VERIFY_QUICK)]
     Verify {
         /// Environment name from the configuration (for example prod).
@@ -1076,6 +1076,9 @@ enum DeliveryCmd {
         /// Only this product.
         #[arg(long)]
         product: Option<String>,
+        /// Only this target (repeatable); default: every target that delivers the product.
+        #[arg(long)]
+        target: Vec<String>,
         /// A receipt kept from `opv sync --receipt`: it must be the current delivery.
         #[arg(long, value_name = "FILE")]
         receipt: Option<std::path::PathBuf>,
@@ -1088,7 +1091,8 @@ enum DeliveryCmd {
 const DELIVERY_VERIFY_QUICK: &str = "\
 Examples:
   opv sync prod --product api --receipt api.receipt.json       # deliver, and keep the receipt
-  opv delivery verify prod --product api                       # verified, changed, or not delivered
+  opv delivery verify prod --product api                       # each placement: verified, changed, or not delivered
+  opv delivery verify prod --product api --target web          # one placement
   opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
 
 #[derive(Subcommand)]
@@ -2466,12 +2470,14 @@ fn run_other(
         Cmd::Delivery(DeliveryCmd::Verify {
             env,
             product,
+            target,
             receipt,
             json,
         }) => opv::app::delivery::verify(
             &loaded?,
             &env,
             product.as_deref(),
+            &target,
             receipt.as_deref(),
             r,
             json,

@@ -216,8 +216,6 @@ pub(crate) struct Read {
     /// off): `run` words its warning by it (a person whose tidy failed is not told to sign
     /// in as themselves).
     pub identity: Option<Identity>,
-    /// The version ledger in the item's `opv · state` section (FR-54); empty when none.
-    pub ledger: crate::domain::ledger::Ledger,
 }
 
 /// The environment's boundary items (FR-57) `fleet` needs, each read once, tolerantly, and
@@ -296,7 +294,7 @@ pub(crate) fn in_boundary(fleet: &Fleet, b: &str) -> Fleet {
 
 /// [`read`] or [`inspect`], by `mode`: one read per boundary item needed, merged. The
 /// merged `version` is the sum of the items' versions (each only grows, so the sum changes
-/// whenever any item does: the plan id input, FR-41); the ledger is the first item's.
+/// whenever any item does: the plan id input, FR-41).
 pub(crate) fn read_as(
     fleet: &Fleet,
     env_name: &str,
@@ -332,7 +330,6 @@ fn read_in(
         version: None,
         needing_values: Vec::new(),
         identity: None,
-        ledger: crate::domain::ledger::Ledger::default(),
     }))
 }
 
@@ -668,7 +665,6 @@ fn finish(
         }
     }
     Read {
-        ledger: crate::domain::ledger::Ledger::from_layout(&layout),
         needing_values: needing_values(&layout, fleet, env_name, env),
         fields: convention::read_fields(&layout, fleet, env_name),
         changes,

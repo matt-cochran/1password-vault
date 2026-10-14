@@ -119,6 +119,7 @@ pub(crate) fn read_and_plan(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
+    let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
     let (mut plan, listed) = plan_item_with(
         fleet,
         env_name,
@@ -127,7 +128,7 @@ pub(crate) fn read_and_plan(
         ports,
         rotate,
         prune_immutable,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
@@ -148,6 +149,7 @@ pub(crate) fn read_and_plan_versioned(
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>, Option<u64>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
+    let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
     let (mut plan, listed) = plan_item_with(
         fleet,
         env_name,
@@ -156,7 +158,7 @@ pub(crate) fn read_and_plan_versioned(
         ports,
         rotate,
         prune_immutable,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
@@ -245,13 +247,31 @@ pub(crate) fn plan_item(
         ports,
         rotate,
         prune_immutable,
-        None,
+        &[],
     )
 }
 
-/// [`plan_item`] with the item's version ledger (FR-54): on a staged store that cannot show
-/// values, a name the store still holds at the version opv recorded is compared exactly
-/// through its fingerprint, and a name at another version is drift.
+/// The version ledgers of target `target`'s placements (FR-54, FR-58, D11): one per product
+/// whose delivery item is recorded, built from that item's evidence lines. Only a staged
+/// store needs one (a pinned store's values are read and compared exactly). A state item
+/// that cannot be read leaves its names unknown, with a note; it never fails the command.
+pub(crate) fn placement_ledgers(
+    fleet: &Fleet,
+    env_name: &str,
+    target: Option<&str>,
+    ports: Option<&Ports<'_>>,
+    r: &dyn CommandRunner,
+) -> Vec<crate::domain::ledger::Ledger> {
+    match (target, ports) {
+        (Some(t), Some(Ports::Staged { .. })) => delivery::ledgers(fleet, env_name, t, r),
+        _ => Vec::new(),
+    }
+}
+
+/// [`plan_item`] with the placements' version ledgers (FR-54, D11): on a staged store that
+/// cannot show values, a name the store still holds at the version opv recorded is compared
+/// exactly through its fingerprint, and a name at another version is drift. Each name is
+/// judged by its own placement's ledger.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_item_with(
     fleet: &Fleet,
@@ -261,7 +281,7 @@ pub(crate) fn plan_item_with(
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
-    ledger: Option<&crate::domain::ledger::Ledger>,
+    ledgers: &[crate::domain::ledger::Ledger],
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
     let mut on_target = match store {
@@ -299,9 +319,10 @@ pub(crate) fn plan_item_with(
         .iter()
         .filter_map(|e| e.version.clone().map(|v| (e.name.clone(), v)))
         .collect();
-    let by_ledger = match (pinned, ledger) {
-        (None, Some(l)) => Some(move |n: &str, v: &SecretValue| {
-            listed_versions.get(n).and_then(|now| l.check(n, now, v))
+    let by_ledger = match pinned {
+        None if !ledgers.is_empty() => Some(move |n: &str, v: &SecretValue| {
+            let now = listed_versions.get(n)?;
+            ledgers.iter().find_map(|l| l.check(n, now, v))
         }),
         _ => None,
     };
@@ -323,12 +344,15 @@ pub(crate) fn plan_item_with(
         },
     );
     let mut p = p;
-    if let (None, Some(l), Some(t)) = (pinned, ledger, target) {
+    if let (None, Some(t)) = (pinned, target)
+        && !ledgers.is_empty()
+    {
         let managed = managed_names(fleet, env_name, t).unwrap_or_default();
-        p.drift = l
-            .drift(&on_target)
-            .into_iter()
-            .filter(|n| managed.contains(n))
+        let drifted: BTreeSet<String> = ledgers.iter().flat_map(|l| l.drift(&on_target)).collect();
+        p.drift = on_target
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| drifted.contains(n) && managed.contains(n))
             .collect();
     }
     if let Some(e) = failed.into_inner() {
@@ -1574,26 +1598,6 @@ pub(crate) fn resolve_targets(
         .filter(|n| requested.is_empty() || requested.iter().any(|r| r == n))
         .map(str::to_string)
         .collect())
-}
-
-/// The one target of `env` for `verb`, a command that reads a single target and takes no
-/// `--target` (`adopt`, `history`, `delivery verify`): a usage error listing the targets
-/// when the environment has several.
-pub(crate) fn sole_target(fleet: &Fleet, env: &str, verb: &str) -> Result<String, Error> {
-    let names = resolve_targets(fleet, env, &[], verb)?;
-    match names.as_slice() {
-        [one] => Ok(one.clone()),
-        _ => Err(Error::Config(
-            format!(
-                "opv {verb} reads one target, and environment {env} has {} ({})",
-                names.len(),
-                names.join(", ")
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::Usage)
-        .with_next(format!("opv status {env}"))),
-    }
 }
 
 /// The runner for each of `names`, the targets of one run (FR-40, FR-56). A run over one

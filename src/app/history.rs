@@ -1,13 +1,14 @@
 //! `opv history <env> [--target <name>] [--json]` (#95): what opv last wrote to an
 //! environment's target, per key, from what is already recorded: the provenance stamp a
 //! pinned target keeps on each value (FR-42: opv version, UTC time, plan id) and the
-//! version ledger opv's own sync keeps for stores that hide values (FR-54). Read-only, as
-//! `status`: per target, one item read (which holds the ledger) and one store listing
-//! (which holds the stamps). Without `--target`, every target of the environment is shown,
-//! each labelled with its name (FR-56); with it, only that one. Names, versions, times and
+//! version ledger opv's own sync keeps for stores that hide values (FR-54): each
+//! placement's delivery evidence (FR-58, D11). Read-only, as `status`: per target, the
+//! item reads, each recorded delivery item and one store listing (which holds the stamps).
+//! Without `--target`, every target of the environment is shown, each labelled with its
+//! name (FR-56); with it, only that one. Names, versions, times and
 //! plan ids only, never a value or a fingerprint (SR-1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::write_err;
@@ -101,8 +102,8 @@ struct HistoryPart {
     rows: Vec<HistoryRow>,
 }
 
-/// Read target `name` of `env_name`: one store listing and the one item read holding the
-/// ledger.
+/// Read target `name` of `env_name`: one store listing, the item reads and each recorded
+/// delivery item (the placements' ledgers).
 fn history_part(
     fleet: &crate::domain::Fleet,
     env_name: &str,
@@ -111,7 +112,8 @@ fn history_part(
 ) -> Result<HistoryPart, Error> {
     let (target, ports) = super::open_target(fleet, env_name, name, r)?;
     let read = super::tidy::read(fleet, env_name, r)?;
-    let recorded = read.ledger.versions();
+    let ledgers = super::placement_ledgers(fleet, env_name, Some(name), Some(&ports), r);
+    let recorded: BTreeMap<String, String> = ledgers.iter().flat_map(|l| l.versions()).collect();
     let none = BTreeSet::new();
     let (plan, listed) = super::plan_item_with(
         fleet,
@@ -121,7 +123,7 @@ fn history_part(
         Some(&ports),
         &none,
         &none,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     // Secrets only: config keys travel as variables, which the stores do not version.
     let names: Vec<(String, String, String)> = plan

@@ -866,13 +866,8 @@ fn run_staged(
         done.push(format!("staged {} secret(s)", batch.len()));
         confirm(store, &batch, c.r, label, &done)?
     };
-    // FR-54: remember what was written and the version the store gave it, so `plan` can
-    // judge these names exactly later. Best effort: a run that cannot write 1Password
-    // (service account, CI) leaves the ledger as it is.
-    if !batch.is_empty() {
-        record_ledger(fleet, env_name, &batch, &list_b, c.r);
-    }
-    // #106: what this run wrote (confirmed above) or the plan proved identical.
+    // #106, FR-58, D11: what this run wrote (confirmed above) or the plan proved identical,
+    // recorded as each placement's evidence lines, which are also its version ledger.
     {
         let written: BTreeSet<String> = batch.iter().map(|(n, _)| n.clone()).collect();
         let identical: BTreeSet<String> = plan
@@ -997,69 +992,6 @@ fn run_staged(
         }
     }
     Ok(report)
-}
-
-/// Record `batch` (name, value written) with each name's version in `listed` in the
-/// environment's version ledger (FR-54): one item edit, only by a person's own session, never
-/// on the project's manifest. A failure is a note, never the sync's result.
-pub(crate) fn record_ledger(
-    fleet: &Fleet,
-    env_name: &str,
-    batch: &[(String, &SecretValue)],
-    listed: &[StoreEntry],
-    r: &dyn CommandRunner,
-) {
-    use crate::adapters::{onepassword, onepassword_tidy};
-    use crate::domain::convention::TidyPlan;
-    use crate::domain::ledger::{Ledger, random_key};
-    // The same gate as the tidy: opv writes to 1Password during a sync only in a real run
-    // by a person's own session.
-    if !super::tidy::active() || super::tidy::identity(r) != super::tidy::Identity::Person {
-        return;
-    }
-    let attempt = || -> Result<(), Error> {
-        let env = fleet.environment(env_name)?;
-        // The ledger lives in the first boundary item a read of the environment opens, the
-        // one `tidy::read` takes it from (FR-54; per-placement evidence replaces it, FR-58).
-        let Some((_, b)) = super::tidy::boundaries_needed(fleet, env_name)?
-            .into_iter()
-            .next()
-        else {
-            return Ok(());
-        };
-        let item = onepassword::read_whole_fresh(r, env, b)?;
-        if super::tidy::is_manifest(item.raw())
-            || onepassword_tidy::unprovable(item.raw()).is_some()
-        {
-            return Ok(());
-        }
-        let (layout, _) = onepassword_tidy::parse(item.raw())?;
-        let written: Vec<(String, String, &SecretValue)> = batch
-            .iter()
-            .filter_map(|(n, v)| {
-                let version = listed.iter().find(|e| &e.name == n)?.version.clone()?;
-                Some((n.clone(), version, *v))
-            })
-            .collect();
-        if written.is_empty() {
-            return Ok(());
-        }
-        let ops = Ledger::from_layout(&layout).ops(&layout, &written, &random_key);
-        let plan = TidyPlan {
-            ops,
-            changes: Vec::new(),
-            kept: false,
-        };
-        let template = onepassword_tidy::apply(item.raw(), &plan)?;
-        onepassword_tidy::write(r, env, b, &template)?;
-        Ok(())
-    };
-    if attempt().is_err() {
-        r.note(&format!(
-            "1Password ({env_name}): could not record what this sync wrote; the next plan \
-             shows those names as unknown until a sync records them"
-        ));
-    }
 }
 
 /// #106, FR-58: on target `c` (its own state vault, scope naming the target), a delivery

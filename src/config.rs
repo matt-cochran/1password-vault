@@ -505,6 +505,9 @@ struct RawTarget {
     /// The vault holding the target's delivery evidence (FR-58); required (D12).
     #[serde(default)]
     state_vault_id: Option<String>,
+    /// product → its delivery item's ID in the state vault (FR-58), recorded by bootstrap.
+    #[serde(default)]
+    delivery_items: Option<BTreeMap<String, String>>,
     /// Exactly one provider section (FR-28).
     #[serde(flatten)]
     sections: BTreeMap<String, toml::Value>,
@@ -804,12 +807,30 @@ fn target(
         "^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
     .map_err(|e| located_at(doc, &[&base[..], &["state_vault_id"]].concat(), e))?;
+    let delivery_items = raw.delivery_items.unwrap_or_default();
+    for (product, id) in &delivery_items {
+        check_ident(
+            env,
+            &format!("targets.{name}.delivery_items.{product}"),
+            id,
+            is_id,
+            "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        )
+        .map_err(|e| {
+            located_at(
+                doc,
+                &[&base[..], &["delivery_items", product.as_str()]].concat(),
+                e,
+            )
+        })?;
+    }
     Ok(Target {
         name: name.to_string(),
         config,
         products: raw.products,
         deploy_credentials,
         state_vault_id,
+        delivery_items,
     })
 }
 
@@ -899,7 +920,37 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     check_names(&fleet, doc)?;
     check_personal(&fleet)?;
     check_evidence_width(&fleet)?;
+    check_delivery_items(&fleet, doc)?;
     Ok(fleet)
+}
+
+/// FR-58: a recorded delivery item belongs to a product its target delivers; any other
+/// entry names evidence nothing writes or reads, and is refused (FR-60).
+fn check_delivery_items(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
+    for (env_name, env) in &fleet.environments {
+        for (name, target) in &env.targets {
+            for product in target.delivery_items.keys() {
+                if !fleet.delivers(env_name, name, product) {
+                    return Err(doc.at_path(
+                        &[
+                            "environments",
+                            env_name,
+                            "targets",
+                            name,
+                            "delivery_items",
+                            product,
+                        ],
+                        format!(
+                            "environment {env_name}: target {name} records a delivery item for \
+                             {product:?}, a product it does not deliver; remove \
+                             delivery_items.{product}"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// FR-58 (D12): a state vault shared by several targets is never readable more widely than
@@ -2234,6 +2285,45 @@ environments = ["prod"]
     fn state_vault_missing_points_at_the_target() {
         let m = config_err(&web("state_vault_id = \"sweb\"\n", ""));
         assert!(m.contains("TOML parse error at line 4, column 28"), "{m}");
+    }
+
+    #[test]
+    fn a_recorded_delivery_item_is_loaded_by_product() {
+        let f = parse(&web(
+            "state_vault_id = \"sweb\"\n",
+            "state_vault_id = \"sweb\"\ndelivery_items = { web = \"dweb\" }\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            f.environments["prod"].targets["site"].delivery_items["web"],
+            "dweb"
+        );
+    }
+
+    #[test]
+    fn a_delivery_item_for_a_product_the_target_does_not_deliver_is_refused() {
+        let m = config_err(&web(
+            "state_vault_id = \"sweb\"\n",
+            "state_vault_id = \"sweb\"\ndelivery_items = { api = \"dapi\" }\n",
+        ));
+        assert!(
+            m.contains(
+                "target site records a delivery item for \"api\", a product it does not deliver"
+            ),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_delivery_item_id_that_reads_as_a_flag() {
+        let m = config_err(&web(
+            "state_vault_id = \"sweb\"\n",
+            "state_vault_id = \"sweb\"\ndelivery_items = { web = \"-d\" }\n",
+        ));
+        assert!(
+            m.contains("targets.site.delivery_items.web \"-d\" must match"),
+            "{m}"
+        );
     }
 
     #[test]
