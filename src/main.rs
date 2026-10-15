@@ -2161,10 +2161,10 @@ fn run(
     );
     // FR-40, NR-7: the account recorded for this checkout (.opv) or OP_ACCOUNT; a manifest
     // found in another account replaces it below. Never op's default when one is known.
-    r.use_account(
-        config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
-            .or_else(config_store::account_env),
-    );
+    // FR-40, NR-7: one order everywhere (OP_ACCOUNT, else .opv), resolved to an account ID;
+    // never under a service-account or Connect credential.
+    let here = std::env::current_dir().unwrap_or_default();
+    r.use_account(config_store::selected_account_id(&r, &here)?);
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
@@ -2364,8 +2364,10 @@ fn run(
         Ok(config_store::Found::Manifest(m)) => m.account.clone(),
         _ => None,
     }
-    .or_else(|| config_store::pointer_account(&std::env::current_dir().unwrap_or_default()))
-    .or_else(config_store::account_env);
+    .or(config_store::selected_account_id(
+        &r,
+        &std::env::current_dir().unwrap_or_default(),
+    )?);
     r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
@@ -3132,7 +3134,9 @@ fn sign_in_here() -> Result<bool, Error> {
         return Ok(false);
     }
     let here = std::env::current_dir().unwrap_or_default();
-    let account = config_store::pointer_account(&here).or_else(config_store::account_env);
+    // The account of the op call that found no session (0.9.0), else the selected one.
+    let account =
+        opv::runner::signed_out_account().or_else(|| config_store::selected_account(&here));
     eprintln!(
         "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
          to go on; your password goes only to 1Password's prompt."

@@ -886,3 +886,60 @@ fn a_manifest_found_by_the_git_remote_is_named_only_with_verbose() {
 fn verbose_names_the_manifest_found_by_the_git_remote() {
     assert!(repo_manifest().announce(true).is_some());
 }
+
+// --- 0.9.0: one account order, IDs only, nothing beside a credential ---
+
+const ACCOUNT_A: &str = "AAAA0000000000000000000001";
+const ACCOUNT_B: &str = "BBBB0000000000000000000002";
+
+fn dot_opv(dir: &Path, account: &str) {
+    std::fs::write(dir.join(DOT_FILE), format!("account = \"{account}\"\n")).unwrap();
+}
+
+#[test]
+fn op_account_wins_over_the_checkouts_dot_opv() {
+    let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
+    let dir = tempfile::tempdir().unwrap();
+    dot_opv(dir.path(), ACCOUNT_A);
+    let mut r = req(dir.path());
+    r.account = Some(ACCOUNT_B.into());
+    let _ = locate(&r, &op);
+    assert!(op.saw(ACCOUNT_B) && !op.saw(ACCOUNT_A));
+}
+
+#[test]
+fn a_credential_decides_the_account_itself() {
+    let host = crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
+    );
+    let picked = crate::host::with_test_host(host, || {
+        pick_account(&FakeOp::default(), Some(ACCOUNT_A.into())).unwrap()
+    });
+    assert_eq!(picked, None);
+}
+
+#[test]
+fn an_email_in_dot_opv_is_resolved_to_its_account_id() {
+    use crate::runner::{Output, fake::FakeRunner};
+    let dir = tempfile::tempdir().unwrap();
+    dot_opv(dir.path(), "me@labs.example");
+    let r = FakeRunner::new([Output::success(format!(
+        r#"[{{"url":"https://my.1password.com","email":"me@labs.example","user_uuid":"USER0000000000000000000001","account_uuid":"{ACCOUNT_B}","shorthand":"labs"}},{{"url":"https://my.1password.com","email":"me@family.example","user_uuid":"USER0000000000000000000002","account_uuid":"{ACCOUNT_A}","shorthand":"my"}}]"#
+    ))]);
+    assert_eq!(
+        selected_account_id(&r, dir.path()).unwrap().as_deref(),
+        Some(ACCOUNT_B)
+    );
+}
+
+#[test]
+fn a_shared_sign_in_address_in_dot_opv_is_refused_as_ambiguous() {
+    use crate::runner::{Output, fake::FakeRunner};
+    let dir = tempfile::tempdir().unwrap();
+    dot_opv(dir.path(), "my.1password.com");
+    let r = FakeRunner::new([Output::success(format!(
+        r#"[{{"url":"https://my.1password.com","email":"a@x.example","account_uuid":"{ACCOUNT_A}"}},{{"url":"https://my.1password.com","email":"b@x.example","account_uuid":"{ACCOUNT_B}"}}]"#
+    ))]);
+    let e = selected_account_id(&r, dir.path()).unwrap_err();
+    assert_eq!(e.code().as_str(), "account_required");
+}
