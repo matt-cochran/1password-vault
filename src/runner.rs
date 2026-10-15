@@ -680,6 +680,9 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
             // Signed out is not transient either: refused at once, never retried.
             Attempt::Exited(o) if says_signed_out(call.program, &stderr.bytes) => {
                 failure::record(id, call.program, stderr);
+                if call.program == crate::host::OP_CLI.program {
+                    note_signed_out(call);
+                }
                 return Ok(Outcome::Refused(o));
             }
             Attempt::Exited(o) => {
@@ -940,6 +943,7 @@ pub struct ProcessRunner {
 impl ProcessRunner {
     /// Use `account` for every `op` call that names none (see the field).
     pub fn use_account(&self, account: Option<String>) {
+        lock(&DEFAULT_ACCOUNT).clone_from(&account);
         *lock(&self.account) = account;
     }
 
@@ -1125,6 +1129,42 @@ impl Default for ProcessRunner {
     }
 }
 
+/// The run's default 1Password account ([`ProcessRunner::use_account`]), and the account of
+/// the last `op` call that failed as signed out (its `--account` or `OP_ACCOUNT`, else the
+/// default). The automatic sign-in signs in to that account, never to another one that
+/// happens to be recorded somewhere (0.9.0: a sign-in to `.opv`'s account could not fix an
+/// environment that uses another).
+static DEFAULT_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
+static SIGNED_OUT_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
+
+/// The account an `op` call names: its `--account` value, else its `OP_ACCOUNT`.
+fn call_account(call: &Call) -> Option<String> {
+    call.args
+        .windows(2)
+        .find(|w| w[0] == "--account")
+        .map(|w| w[1].to_string())
+        .or_else(|| {
+            call.env
+                .iter()
+                .rev()
+                .find(|(k, _)| *k == "OP_ACCOUNT")
+                .map(|(_, v)| v.to_string())
+        })
+}
+
+fn note_signed_out(call: &Call) {
+    let account = call_account(call).or_else(|| lock(&DEFAULT_ACCOUNT).clone());
+    *lock(&SIGNED_OUT_ACCOUNT) = account;
+}
+
+/// The account to sign in to after a signed-out failure: that call's account, else the
+/// run's default. Taken once.
+pub fn signed_out_account() -> Option<String> {
+    lock(&SIGNED_OUT_ACCOUNT)
+        .take()
+        .or_else(|| lock(&DEFAULT_ACCOUNT).clone())
+}
+
 /// An `op` session opv itself started in this process: an interactive command that found
 /// no session signs the person in at op's own prompt and tries once more (found live: a
 /// session idle over 30 minutes stopped `opv check` with only "run opv login"). Passed to
@@ -1246,7 +1286,7 @@ impl Engine for ProcessRunner {
 }
 
 /// Read only the executable header, never any credential source.
-fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
+pub(crate) fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
     let mut header = [0u8; 2];
     match std::fs::File::open(path)?.read_exact(&mut header) {
         Ok(()) => Ok(header == *b"MZ"),
@@ -3022,5 +3062,24 @@ mod account_arg_tests {
     fn an_explicit_account_flag_is_kept_as_it_is() {
         let given = ["item", "list", "--account", "X"];
         assert_eq!(with_account("op", &given, &[("OP_ACCOUNT", "AID")]), given);
+    }
+}
+
+#[cfg(test)]
+mod signed_out_account_tests {
+    use super::*;
+
+    #[test]
+    fn a_signed_out_call_names_its_own_account() {
+        let call = Call::new("op", &["item", "get", "i", "--account", "ACCT"]);
+        assert_eq!(call_account(&call).as_deref(), Some("ACCT"));
+    }
+
+    #[test]
+    fn a_signed_out_call_names_its_op_account_variable() {
+        let mut call = Call::new("op", &["item", "get", "i"]);
+        let env = [("OP_ACCOUNT", "ENVACCT")];
+        call.env = &env;
+        assert_eq!(call_account(&call).as_deref(), Some("ENVACCT"));
     }
 }

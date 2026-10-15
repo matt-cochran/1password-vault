@@ -242,6 +242,10 @@ impl Provider for KubernetesProvider {
         &CHECKS
     }
 
+    fn ci_setup_step(&self) -> Option<&'static str> {
+        None
+    }
+
     fn deploy_credential_fields(
         &self,
     ) -> Result<&'static [crate::provider::CredentialField], String> {

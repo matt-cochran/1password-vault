@@ -89,6 +89,33 @@ pub fn child_env(
     out
 }
 
+/// The user-owned, RAM-backed `$XDG_RUNTIME_DIR` file delivery needs (#136), or why it is
+/// unavailable here. One check for the run's file step and for `run --preview`'s platform
+/// report: Linux and WSL on tmpfs/ramfs, never a disk fallback.
+pub fn runtime_dir_support() -> Result<std::path::PathBuf, String> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| {
+            "no absolute $XDG_RUNTIME_DIR (systemd logind sets it on Linux and WSL)".to_string()
+        })?;
+    use crate::ramdir::{owned_dir, ram_backed};
+    if !owned_dir(&runtime) {
+        return Err(format!(
+            "$XDG_RUNTIME_DIR {} is not a directory owned by this user",
+            runtime.display()
+        ));
+    }
+    if !ram_backed(&runtime).unwrap_or(false) {
+        return Err(format!(
+            "$XDG_RUNTIME_DIR {} is not on tmpfs or ramfs (RAM-backed)",
+            runtime.display()
+        ));
+    }
+    Ok(runtime)
+}
+
 fn ram_dir_error() -> Error {
     Error::Policy(
         "file delivery needs a private RAM-backed directory: a user-owned $XDG_RUNTIME_DIR on \
@@ -148,15 +175,8 @@ pub fn run(d: &Delivery) -> Result<i32, Error> {
     let inherited: Zeroizing<Vec<(String, String)>> = Zeroizing::new(std::env::vars().collect());
     let mut dir = None;
     if !d.files.is_empty() {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .ok_or_else(ram_dir_error)?;
-        use crate::ramdir::{PrivateDir, owned_dir, ram_backed, sweep};
-        if !owned_dir(&runtime) || !ram_backed(&runtime).unwrap_or(false) {
-            return Err(ram_dir_error());
-        }
+        use crate::ramdir::{PrivateDir, sweep};
+        let runtime = runtime_dir_support().map_err(|_| ram_dir_error())?;
         sweep(&runtime, DIR_PREFIX);
         let private = PrivateDir::create(&runtime, DIR_PREFIX).map_err(|_| ram_dir_error())?;
         let values: BTreeMap<&str, &str> = inherited

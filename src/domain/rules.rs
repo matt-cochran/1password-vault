@@ -436,6 +436,7 @@ mod tests {
             personal: false,
             allow_same_value: false,
             file: None,
+            roles: None,
         };
         let env = &f.environments["prod"];
         check(
@@ -678,6 +679,7 @@ mod tests {
             personal: false,
             allow_same_value: false,
             file: None,
+            roles: None,
         };
         let env = &f.environments["staging"];
         assert!(!applies(&spec, "staging", env, "allumata"));

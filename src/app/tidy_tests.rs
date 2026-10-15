@@ -1600,3 +1600,28 @@ fn status_still_tidies_a_persons_messy_item() {
     let _ = crate::app::status::env_rows(&fleet(), "dev", None, &op);
     assert_eq!(op.edits(), 1);
 }
+
+// --- #150: a write with nobody signed in asks for a sign-in, not a policy refusal ---
+
+#[test]
+fn a_write_with_nobody_signed_in_is_op_not_signed_in() {
+    let op = crate::adapters::fake_op::FakeOp::default();
+    op.signed_in.set(false);
+    let e = require_person(&op, "opv target add").unwrap_err();
+    assert_eq!(e.code().as_str(), "op_not_signed_in");
+}
+
+#[test]
+fn a_write_with_nobody_signed_in_says_an_earlier_sign_in_ended() {
+    let op = crate::adapters::fake_op::FakeOp::default();
+    op.signed_in.set(false);
+    let e = require_person(&op, "opv target add").unwrap_err();
+    assert!(e.text().contains("--dry-run"), "{}", e.text());
+}
+
+#[test]
+fn a_write_by_a_signed_in_person_is_allowed() {
+    let op = crate::adapters::fake_op::FakeOp::default();
+    op.signed_in.set(true);
+    assert!(require_person(&op, "opv target add").is_ok());
+}

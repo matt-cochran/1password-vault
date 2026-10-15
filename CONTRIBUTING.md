@@ -107,9 +107,18 @@ requirement updates `docs/design/requirements.md` in the same pull request.
 ## Releases
 
 Maintainers bump the version and `CHANGELOG.md` on `dev`, promote through `staging`
-to `main`, and push a `vX.Y.Z` tag; the release workflow builds, signs and publishes the
-GitHub release. npm is published by hand afterwards with
-`scripts/npm/publish-manual.sh vX.Y.Z`.
+to `main`, and push a `vX.Y.Z` tag on `main`. The release workflow then builds every
+target, publishes the signed GitHub release, and publishes all seven npm packages
+(`@matthew-cochran/opv` and its six platform packages) through npm trusted publishing:
+GitHub Actions' OIDC identity, no npm token, with SLSA provenance on each package. That
+job runs while the repository variable `NPM_PUBLISH` is `true`, and npm must list
+`matt-cochran/1password-vault`, workflow `release.yml`, as the trusted publisher of every
+package. A package added later needs its own trusted-publisher entry on npmjs.com before
+its first release.
+
+Only if that job fails, publish from a maintainer's machine (npm login and 2FA) with
+`scripts/npm/publish-manual.sh vX.Y.Z`; it verifies the release checksums and skips
+packages already published at that version.
 
 ## Security
 

@@ -220,3 +220,46 @@ fn approving_the_same_plan_again_after_use_makes_it_usable_once_more() {
     record_in(&dir, PLAN, "proj", "acct", NOW + 2).unwrap();
     assert!(consume_in(&dir, PLAN, "proj", "acct", NOW + 3).is_ok());
 }
+
+#[test]
+fn a_sync_approval_is_used_only_for_its_exact_scope() {
+    let t = tempdir();
+    let dir = approvals(&t);
+    record_scoped_in(&dir, "0a1b2c3d", "sync prod deploy", "proj", "acct", NOW).unwrap();
+    let e = consume_scoped_in(
+        &dir,
+        "0a1b2c3d",
+        "sync prod deploy prune",
+        "proj",
+        "acct",
+        NOW + 1,
+    )
+    .unwrap_err();
+    assert_eq!(e.code().as_str(), "approval_required");
+}
+
+#[test]
+fn a_sync_approval_is_used_for_its_scope() {
+    let t = tempdir();
+    let dir = approvals(&t);
+    record_scoped_in(&dir, "0a1b2c3d", "sync prod deploy", "proj", "acct", NOW).unwrap();
+    assert!(
+        consume_scoped_in(
+            &dir,
+            "0a1b2c3d",
+            "sync prod deploy",
+            "proj",
+            "acct",
+            NOW + 1
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_structural_approval_never_covers_a_sync() {
+    let t = tempdir();
+    let dir = approvals(&t);
+    record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
+    assert!(consume_scoped_in(&dir, PLAN, "sync prod", "proj", "acct", NOW + 1).is_err());
+}

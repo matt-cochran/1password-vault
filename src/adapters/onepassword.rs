@@ -345,6 +345,7 @@ pub fn session_error(
     let ci_token = "set OP_SERVICE_ACCOUNT_TOKEN to a service account token that can read \
                     the vault (as a CI secret, never in the repository)";
     let network = "if you are signed in, check network access to 1Password";
+    let mut next: Option<&str> = None;
     let m =
         match session {
             Session::SignedIn(_) | Session::Unknown => return None,
@@ -358,6 +359,12 @@ pub fn session_error(
             }
             Session::NotSignedIn => match host.signin_line("sign in", env) {
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+                Some(_) if host.op_is_windows_exe() => format!(
+                    "not signed in to 1Password ({ctx})\n  unlock the 1Password app on Windows \
+                     and turn on Settings > Developer > Integrate with 1Password CLI, then \
+                     retry\n  (a 1Password CLI session expires after 30 minutes idle)\n  \
+                     {network}"
+                ),
                 Some(step) => {
                     // op in WSL cannot use the Windows app, so only other platforms name it.
                     let app = if host.platform == Platform::Wsl {
@@ -373,6 +380,13 @@ pub fn session_error(
                 }
             },
             Session::NoAccount => match host.signin_line("then sign in", env) {
+                Some(_) if host.op_is_windows_exe() => format!(
+                    "no 1Password account is set up for op on this machine ({ctx} and op \
+                     account list is empty)\n  add the account in the Windows 1Password app \
+                     and turn on Settings > Developer > Integrate with 1Password CLI, then \
+                     retry\n  type the Secret Key and password only at the app's prompts, \
+                     never into chat, tickets or files"
+                ),
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
                 Some(step) => {
                     let wsl = if host.platform == Platform::Wsl {
@@ -380,17 +394,22 @@ pub fn session_error(
                     } else {
                         ""
                     };
+                    next = Some("opv login --add");
                     format!(
                         "no 1Password account is set up for op on this machine{wsl} ({ctx} \
-                     and op account list is empty)\n  add one: op account \
-                     add --address <sign-in address> --email <email>\n  {step}\n  \
+                     and op account list is empty)\n  add one: opv login --add\n  {step}\n  \
                      type the Secret Key and password only at op's prompts, never into chat, \
                      tickets or files"
                     )
                 }
             },
         };
-    Some(Error::Auth(format!("{m}\n  then run opv again").into()).with_code(Code::OpNotSignedIn))
+    let mut e =
+        Error::Auth(format!("{m}\n  then run opv again").into()).with_code(Code::OpNotSignedIn);
+    if let Some(n) = next {
+        e = e.with_next(n);
+    }
+    Some(e)
 }
 
 /// After a failed `op` call: diagnose the session and return the error to report. Not
@@ -438,16 +457,20 @@ fn failed_op_session_error(
         Err(e) => return e,
     };
     match session {
-        Session::SignedIn(t) if !write => item_unavailable(r, b, failed, t, grant),
+        Session::SignedIn(t) if !write => {
+            item_unavailable(r, b, env.account.as_deref(), failed, t, grant)
+        }
         Session::SignedIn(t) => Error::Source(not_available(b, failed, t, grant).into()),
         Session::Unknown if write => Error::Unknown(
             format!(
                 "{failed}; the item may or may not have been changed{}, then re-run",
-                rerun_hint(b)
+                rerun_hint(b, env.account.as_deref())
             )
             .into(),
         ),
-        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(b)).into()),
+        Session::Unknown => {
+            Error::Source(format!("{failed}{}", rerun_hint(b, env.account.as_deref())).into())
+        }
         s => session_error(s, &host(), Some(failed), Some(env.name.as_str()))
             .expect("every other session is an error"),
     }
@@ -459,11 +482,12 @@ fn failed_op_session_error(
 fn item_unavailable(
     r: &dyn CommandRunner,
     b: &Boundary,
+    account: Option<&str>,
     failed: &str,
     t: IdentityType,
     grant: &str,
 ) -> Error {
-    unavailable_for(b, failed, t, grant, vault_access(r, b))
+    unavailable_for(b, account, failed, t, grant, vault_access(r, b))
 }
 
 /// `op vault get <vault_id>`: `Some(true)` when the vault is readable, `Some(false)` when
@@ -484,6 +508,7 @@ fn vault_access(r: &dyn CommandRunner, b: &Boundary) -> Option<bool> {
 /// The signed-in item-read error for a known vault probe result (NR-26).
 fn unavailable_for(
     b: &Boundary,
+    account: Option<&str>,
     failed: &str,
     t: IdentityType,
     grant: &str,
@@ -499,13 +524,15 @@ fn unavailable_for(
         match vault_readable {
             Some(true) => format!(
                 "{failed}: signed in to 1Password as {t}; item {item} not found in vault {vault} \
-             (moved, archived or deleted?)\n  next: check item_id in secrets.toml, then \
-             `{OP} item get {item} --vault {vault}`"
+             (moved, archived or deleted?)\n  next: check item_id in the configuration, then \
+             `{OP} item get {item} --vault {vault}{}`",
+                account_suffix(account)
             ),
             Some(false) => format!(
                 "{failed}: signed in to 1Password as {t}, but this identity cannot access vault \
-             {vault}\n  next: {grant} (vault {vault}), or check vault_id in secrets.toml, \
-             then `{OP} vault get {vault}`"
+             {vault}\n  next: {grant} (vault {vault}), or check vault_id in the configuration, \
+             then `{OP} vault get {vault}{}`",
+                account_suffix(account)
             ),
             None => not_available(b, failed, t, grant),
         }
@@ -843,7 +870,12 @@ fn read_diagnosed(
             Session::SignedIn(t) => t,
             Session::Unknown => {
                 return Err(Error::Source(
-                    format!("{}{}", failed(status), rerun_hint(b)).into(),
+                    format!(
+                        "{}{}",
+                        failed(status),
+                        rerun_hint(b, env.account.as_deref())
+                    )
+                    .into(),
                 ));
             }
             s => {
@@ -855,10 +887,24 @@ fn read_diagnosed(
         };
         let readable = vault_access(r, b);
         if readable != Some(true) {
-            return Err(unavailable_for(b, &failed(status), t, GRANT, readable));
+            return Err(unavailable_for(
+                b,
+                env.account.as_deref(),
+                &failed(status),
+                t,
+                GRANT,
+                readable,
+            ));
         }
         if missing {
-            return Err(unavailable_for(b, &failed(status), t, GRANT, readable));
+            return Err(unavailable_for(
+                b,
+                env.account.as_deref(),
+                &failed(status),
+                t,
+                GRANT,
+                readable,
+            ));
         }
         Ok((t, readable))
     })?;
@@ -869,7 +915,14 @@ fn read_diagnosed(
     ));
     match read_op(r, args, host)? {
         Output { status: 0, stdout } => Ok(stdout),
-        Output { status, .. } => Err(unavailable_for(b, &failed(status), t, GRANT, readable)),
+        Output { status, .. } => Err(unavailable_for(
+            b,
+            env.account.as_deref(),
+            &failed(status),
+            t,
+            GRANT,
+            readable,
+        )),
     }
 }
 
@@ -965,14 +1018,22 @@ fn write_skeleton_on(
     Ok(None)
 }
 
+/// The ` --account <id>` suffix for an `op` command when the environment knows its
+/// account (I6); empty otherwise, so `op`'s own default is used.
+pub(crate) fn account_suffix(account: Option<&str>) -> String {
+    account.map_or_else(String::new, |a| format!(" --account {a}"))
+}
+
 /// Last resort (FR-26), used only when the session could not be diagnosed: a value-free
 /// command to re-run by hand (`op`'s stderr is shown only as a scrubbed excerpt). IDs only; without
 /// `--format json` and `--reveal`, `op` conceals secret fields. (`op item edit` cannot be
 /// re-run without its stdin, so the hint reads the item.)
-fn rerun_hint(b: &Boundary) -> String {
+fn rerun_hint(b: &Boundary, account: Option<&str>) -> String {
     format!(
-        "; run `{OP} item get {} --vault {}` to see why",
-        b.item_id, b.vault_id
+        "; run `{OP} item get {} --vault {}{}` to see why",
+        b.item_id,
+        b.vault_id,
+        account_suffix(account)
     )
 }
 
@@ -1298,6 +1359,14 @@ mod tests {
 
     fn linux() -> Host {
         Host::from_env(&FakeEnv::new("linux").shell("/bin/bash"))
+    }
+
+    fn wsl_windows_op() -> Host {
+        Host::from_env(
+            &FakeEnv::new("linux")
+                .var("WSL_DISTRO_NAME")
+                .op_windows_exe(),
+        )
     }
 
     fn accounts(n: usize) -> Output {
@@ -1790,6 +1859,79 @@ mod tests {
             matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
             "{e:?}"
         );
+    }
+
+    /// I6: a re-run hint for an environment that knows its account names it, so the
+    /// command cannot run against op's default account.
+    #[test]
+    fn a_rerun_hint_names_the_environment_account() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        r.push_unknown("timeout");
+        let env = Environment {
+            account: Some("AENV00000000000000000000AA".into()),
+            ..test_env()
+        };
+        let e = read_item_with(&r, &env, &test_at(), &linux()).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("`op item get istg --vault vstg --account AENV00000000000000000000AA`"),
+            "{e}"
+        );
+    }
+
+    /// I6: a moved-item hint for an environment that knows its account names it.
+    #[test]
+    fn a_missing_item_hint_names_the_environment_account() {
+        let r = signed_in_vault_ok_item_missing();
+        let env = Environment {
+            account: Some("AENV00000000000000000000AA".into()),
+            ..test_env()
+        };
+        let e = read_item_with(&r, &env, &test_at(), &linux()).unwrap_err();
+        assert_eq!(
+            e.next_step(),
+            Some(
+                "check item_id in the configuration, then `op item get istg --vault vstg \
+                 --account AENV00000000000000000000AA`"
+            )
+        );
+    }
+
+    /// I7: with no account on the machine, the read error's step is opv's own add
+    /// command, one command that runs as typed.
+    #[test]
+    fn a_no_account_read_error_steps_to_opv_login_add() {
+        let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(0)]);
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
+        assert_eq!(e.next_step(), Some("opv login --add"));
+    }
+
+    /// In WSL with the Windows `op.exe`, a signed-out session is fixed in the Windows app.
+    #[test]
+    fn wsl_windows_op_signed_out_names_the_windows_app() {
+        let e = session_error(Session::NotSignedIn, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert!(e.to_string().contains("1Password app on Windows"), "{e}");
+    }
+
+    /// In WSL with the Windows `op.exe`, the fix is never op's own add/sign-in prompt.
+    #[test]
+    fn wsl_windows_op_signed_out_never_offers_opv_login_add() {
+        let e = session_error(Session::NotSignedIn, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert!(!e.mentions("opv login --add"), "{e}");
+    }
+
+    /// With no account and the Windows `op.exe`, the account is added in the Windows app.
+    #[test]
+    fn wsl_windows_op_no_account_names_the_windows_app() {
+        let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert!(e.to_string().contains("Windows 1Password app"), "{e}");
+    }
+
+    /// With no account and the Windows `op.exe`, opv never steps to its own add command.
+    #[test]
+    fn wsl_windows_op_no_account_never_offers_opv_login_add() {
+        let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert_ne!(e.next_step(), Some("opv login --add"));
     }
 
     /// I6: child stdout (which can carry values, and whoami's identity) never reaches the

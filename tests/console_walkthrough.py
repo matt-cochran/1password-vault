@@ -68,12 +68,13 @@ else:
                     if not resume and not sent_save and "[y/N]" in text:
                         os.write(fd, b"y\n")
                         sent_save = True
-                # Prompt output can arrive before the password reader changes the
-                # terminal flags. Send input only once its hidden mode is active;
-                # keep polling the flag even when no further output is produced.
-                if not resume and not sent_value and b"Provider login (hidden; Enter to skip): " in transcript:
+                # Prompt output can arrive before the masked reader changes the terminal
+                # flags. Send input only once echo is off; keep polling the flag even
+                # when no further output is produced. Enter is a carriage return, as a
+                # real terminal sends it in raw mode.
+                if not resume and not sent_value and b"Provider login (masked; Enter to skip): " in transcript:
                     if not termios.tcgetattr(fd)[3] & termios.ECHO:
-                        os.write(fd, b"synthetic-private-value\n")
+                        os.write(fd, b"synthetic-private-value\r")
                         sent_value = True
                 done, child_status = os.waitpid(pid, os.WNOHANG)
                 if done:
@@ -82,6 +83,10 @@ else:
             assert status is not None, "Console walkthrough timed out"
             assert os.waitstatus_to_exitcode(status) == 0, transcript.decode(errors="replace")
             assert b"synthetic-private-value" not in transcript, "Secret echoed by console"
+            if not resume:
+                # The fixed mask shows the input landed, never its length.
+                assert b"********" in transcript, "No mask shown for the entered value"
+                assert b"*********" not in transcript, "Mask grew with the input"
             assert b"All settings are saved" in transcript
             if resume:
                 assert b"[y/N]" not in transcript, "Resume asked for unnecessary save"

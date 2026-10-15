@@ -50,6 +50,12 @@ pub trait Provider: Sync {
     /// What a person adds to deploy with this provider, e.g. `configure fly.app`. Only the
     /// default provider (`adapters::registry::DEFAULT`) is ever asked.
     fn setup_hint(&self) -> String;
+    /// The provider's CLI setup step for a GitHub Actions job, as YAML text indented under
+    /// `steps:` (one list entry), or `None` when CI needs no provider-specific setup. Core
+    /// code prints it through this trait, so it never names a provider (FR-37).
+    fn ci_setup_step(&self) -> Option<&'static str> {
+        None
+    }
     /// The fields `opv target add` takes for this provider (FR-56, H3), each as the option
     /// `--<section>-<field>` ([`init_flag`]). Empty when the provider does not support
     /// `target add`. A new provider adds its options here; core and the CLI need no change.
@@ -79,6 +85,32 @@ pub trait Provider: Sync {
         Err(Error::Config(
             format!("{} does not support deploy_credentials", self.label()).into(),
         ))
+    }
+    /// Mint the least-privilege deploy credential of `target` at the provider and return
+    /// its fields by label (FR-40), or `None` when this provider cannot mint one. Called
+    /// only after a person confirmed and [`Provider::mint_preflight`] passed. The token is
+    /// returned only as a [`SecretValue`], never printed and never put in argv (SR-3).
+    fn mint_deploy_credential(
+        &self,
+        target: &dyn TargetConfig,
+        name: &str,
+        r: &dyn CommandRunner,
+    ) -> Option<Result<BTreeMap<String, SecretValue>, Error>> {
+        let _ = (target, name, r);
+        None
+    }
+    /// Read-only checks before minting ([`Provider::mint_deploy_credential`]): `Some` when
+    /// this provider can mint, with the result of the preflight (a missing sign-in, a
+    /// missing CLI). `None` when it cannot mint at all.
+    fn mint_preflight(&self, r: &dyn CommandRunner) -> Option<Result<(), Error>> {
+        let _ = r;
+        None
+    }
+    /// How to revoke a credential [`Provider::mint_deploy_credential`] created, for the
+    /// error when the token could not be stored (SR-4), or `None` when the provider gives
+    /// no such instruction.
+    fn mint_cleanup_hint(&self) -> Option<&'static str> {
+        None
     }
     /// Store kinds this provider declares for `[stores.<name>]` tables (FR-39): the key that
     /// names the kind, e.g. `azure_key_vault = "kv-myapp-prod"`.

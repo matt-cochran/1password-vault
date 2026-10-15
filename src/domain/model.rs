@@ -109,6 +109,12 @@ pub struct KeySpec {
     /// ([`Local::secrets_dir_env`]) instead of a variable. Targets are unaffected.
     #[serde(default)]
     pub file: Option<String>,
+    /// Process roles (#136): under `opv run`, the key is delivered only when `--role`
+    /// names one of these (and never to a run without `--role`). Absent: delivered to
+    /// every role. An empty list fails at load; each name matches `^[a-z0-9-]{1,32}$`.
+    /// Roles apply to local `run` delivery only, never to sync or a target.
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
 }
 
 impl KeySpec {

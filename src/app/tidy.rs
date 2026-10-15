@@ -139,7 +139,20 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
         Identity::DeployCredentials => {
             "this run signed in with deploy credentials, for which 1Password is read-only"
         }
-        Identity::Unknown => "op whoami could not confirm a person signed in to 1Password",
+        Identity::Unknown => {
+            // #150: nobody is signed in here (an op session started inside an earlier opv
+            // command, such as a --dry-run, ends with that command). That is a sign-in,
+            // not a policy refusal: in a person's terminal opv signs them in at op's own
+            // prompt and runs the command again, which checks once more that a person is
+            // signed in. Elsewhere the step names the project's account.
+            if matches!(
+                onepassword::diagnose(r, &Host::detect),
+                Ok(Session::NotSignedIn)
+            ) {
+                return Err(not_signed_in(what));
+            }
+            "op whoami could not confirm a person signed in to 1Password"
+        }
     };
     Err(Error::Policy(
         format!(
@@ -149,6 +162,30 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
         .into(),
     )
     .with_next(crate::adapters::onepassword_manifest::LOGIN))
+}
+
+/// The sign-in a write needs (#150): `op_not_signed_in`, naming the project's account
+/// (`OP_ACCOUNT`, else `.opv`) so `opv login` cannot pick another account on a shared
+/// sign-in address.
+fn not_signed_in(what: &str) -> Error {
+    let account = crate::config_store::account_env().or_else(|| {
+        crate::config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
+    });
+    let next = match &account {
+        Some(a) => format!("opv login --account {a}"),
+        None => crate::adapters::onepassword_manifest::LOGIN.to_string(),
+    };
+    Error::Auth(
+        format!(
+            "{what} writes to 1Password and needs your own 1Password session, which this run \
+             does not have (a sign-in inside an earlier opv command, such as --dry-run, ends \
+             with it); nothing written"
+        )
+        .into(),
+    )
+    .with_code(Code::OpNotSignedIn)
+    .with_do("sign in at 1Password's prompt in your own terminal, then run the command again (or run it inside that login: opv login --account <ID> -- opv …)")
+    .with_next(next)
 }
 
 /// True when the item JSON carries the manifest tag (FR-44).

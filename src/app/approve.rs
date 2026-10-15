@@ -15,6 +15,9 @@ use crate::runner::CommandRunner;
 /// Stores one approval: plan id, project, account, now (unix seconds).
 pub type Record<'a> = dyn FnMut(&str, &str, &str, u64) -> Result<(), Error> + 'a;
 
+/// Stores or uses up one scoped approval: plan id, scope key, project, account, now.
+pub type Scoped<'a> = dyn FnMut(&str, &str, &str, &str, u64) -> Result<(), Error> + 'a;
+
 /// The person's side of the review.
 pub trait Review {
     fn show(&mut self, line: &str) -> Result<(), Error>;
@@ -91,6 +94,240 @@ pub fn run(
     ui.show(&format!(
         "approved {plan_id} (single use, 15 minutes); the assistant can apply it now"
     ))
+}
+
+/// What an approved sync may do (0.9.0): the environment, its targets, an optional
+/// product, the two flags and the `--rotate` set. Immutable pruning and anything else stay
+/// with the person's own `opv sync` in their terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncScope {
+    pub env: String,
+    /// Empty: every target of the environment.
+    pub targets: Vec<String>,
+    pub product: Option<String>,
+    pub deploy: bool,
+    pub prune: bool,
+    /// `PRODUCT/KEY` entries this sync rotates (FR-16). Part of the scope key, so an
+    /// approval recorded without rotation never covers a rotating sync (and the reverse).
+    pub rotate: Vec<String>,
+}
+
+impl SyncScope {
+    /// The approval's scope string; equal scopes give equal strings. The rotate set is
+    /// sorted, so its order never changes the key.
+    pub fn key(&self) -> String {
+        let mut targets = self.targets.clone();
+        targets.sort();
+        let mut rotate = self.rotate.clone();
+        rotate.sort();
+        let rot = if rotate.is_empty() {
+            String::new()
+        } else {
+            format!(" rotate={}", rotate.join(","))
+        };
+        format!(
+            "sync {} targets={} product={}{}{}{}",
+            self.env,
+            if targets.is_empty() {
+                "*".to_string()
+            } else {
+                targets.join(",")
+            },
+            self.product.as_deref().unwrap_or("*"),
+            if self.deploy { " deploy" } else { "" },
+            if self.prune { " prune" } else { "" },
+            rot,
+        )
+    }
+
+    /// The `opv approve` command a person runs for this scope and plan.
+    pub fn approve_command(&self, plan_id: &str) -> String {
+        let mut c = format!("opv approve {plan_id} --sync {}", self.env);
+        for t in &self.targets {
+            c.push_str(&format!(" --target {t}"));
+        }
+        if let Some(p) = &self.product {
+            c.push_str(&format!(" --product {p}"));
+        }
+        let mut rotate = self.rotate.clone();
+        rotate.sort();
+        for k in &rotate {
+            c.push_str(&format!(" --rotate {k}"));
+        }
+        if self.deploy {
+            c.push_str(" --deploy");
+        }
+        if self.prune {
+            c.push_str(" --prune");
+        }
+        c
+    }
+}
+
+/// The current sync plan of `scope` (`opv plan --json`): its id and its rows.
+pub fn sync_plan(
+    fleet: &crate::domain::Fleet,
+    scope: &SyncScope,
+    r: &dyn CommandRunner,
+) -> Result<(String, serde_json::Value), Error> {
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    // A plan with findings still prints its document; only the id matters here.
+    let res = super::sync::plan_rotating(
+        fleet,
+        &scope.env,
+        &scope.targets,
+        scope.product.as_deref(),
+        &scope.rotate,
+        r,
+        &mut *buf,
+        true,
+    );
+    let fail = |res: Result<(), Error>, why: &str| {
+        res.err()
+            .unwrap_or_else(|| Error::Config(why.to_string().into()))
+    };
+    let doc: serde_json::Value = match serde_json::from_slice(&buf) {
+        Ok(d) => d,
+        Err(_) => return Err(fail(res, "opv plan printed no plan")),
+    };
+    let Some(id) = doc["plan_id"].as_str().map(str::to_string) else {
+        return Err(fail(res, "the plan has no id"));
+    };
+    Ok((id, doc))
+}
+
+/// `opv approve <plan_id> --sync <env> …`: review the current sync plan of `scope` and
+/// approve exactly it, once, for 15 minutes.
+#[allow(clippy::too_many_arguments)]
+pub fn run_sync(
+    r: &dyn CommandRunner,
+    fleet: &crate::domain::Fleet,
+    project: &str,
+    account: &str,
+    scope: &SyncScope,
+    plan_id: &str,
+    now: u64,
+    ui: &mut dyn Review,
+    record: &mut Scoped<'_>,
+) -> Result<(), Error> {
+    let (current, doc) = sync_plan(fleet, scope, r)?;
+    if current != plan_id {
+        return Err(Error::Policy(
+            format!(
+                "plan {plan_id} is stale: the item, the target or the configuration changed (the \
+                 plan is now {current}); nothing was approved"
+            )
+            .into(),
+        )
+        .with_code(Code::StalePlan)
+        .with_do("ask the assistant to show the new plan, then approve the new id")
+        .with_next(scope.approve_command(&current)));
+    }
+    ui.show(&format!(
+        "sync plan {plan_id} for {} in project {project}{}{}:",
+        scope.env,
+        if scope.deploy { ", then deploy" } else { "" },
+        if scope.prune {
+            ", pruning managed names no longer declared"
+        } else {
+            ""
+        },
+    ))?;
+    let rows = doc["rows"].as_array().cloned().unwrap_or_default();
+    let changes: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| match r["action"].as_str() {
+            Some("would_stage") => true,
+            Some("would_prune") => scope.prune,
+            _ => false,
+        })
+        .collect();
+    if changes.is_empty() {
+        ui.show("  nothing to write: every managed name already matches")?;
+    }
+    for row in changes {
+        ui.show(&format!(
+            "  {} {}/{} on {}",
+            match row["action"].as_str() {
+                Some("would_prune") => "unset",
+                _ if row["rotate"].as_bool() == Some(true) => "rotate",
+                _ => "write",
+            },
+            row["product"].as_str().unwrap_or("-"),
+            row["key"].as_str().unwrap_or("?"),
+            row["target"].as_str().unwrap_or("-"),
+        ))?;
+    }
+    ui.show(
+        "Approving lets the assistant run exactly this sync once, within 15 minutes; any \
+         change to the item, the target or the configuration voids it. No value is shown.",
+    )?;
+    let answer = ui.ask(&format!(
+        "Type {plan_id} to approve it, or press Enter to cancel:"
+    ))?;
+    if answer != plan_id {
+        ui.show("not approved; nothing was recorded")?;
+        return Ok(());
+    }
+    record(plan_id, &scope.key(), project, account, now)?;
+    ui.show(&format!(
+        "approved sync plan {plan_id} (single use, 15 minutes)"
+    ))
+}
+
+/// The agent's side of an approved sync (0.9.0): run exactly the sync plan `plan_id` of
+/// `scope`, which a person approved with `opv approve <plan_id> --sync …` in their own
+/// terminal. A plan that changed since is refused before the approval is used (the person
+/// approves the new id); then the approval is used up, and the sync runs bound to the plan
+/// (`--expect-plan`), so nothing outside it is written. The scope's `--rotate` set is part
+/// of the plan id and of the approval key; immutable pruning is never part of an approved
+/// sync.
+#[allow(clippy::too_many_arguments)]
+pub fn run_approved_sync(
+    fleet: &crate::domain::Fleet,
+    scope: &SyncScope,
+    plan_id: &str,
+    project: &str,
+    account: &str,
+    now: u64,
+    r: &dyn CommandRunner,
+    out: &mut dyn std::io::Write,
+    json: bool,
+    receipt: Option<std::path::PathBuf>,
+    consume: &mut Scoped<'_>,
+) -> Result<(), Error> {
+    let (current, _) = sync_plan(fleet, scope, r)?;
+    if current != plan_id {
+        return Err(Error::Policy(
+            format!(
+                "plan {plan_id} is stale: the item, the target or the configuration changed (the \
+                 plan is now {current}); nothing was changed and the approval was not used"
+            )
+            .into(),
+        )
+        .with_code(Code::StalePlan)
+        .with_do(
+            "show the person the new plan and ask them to approve its id in their own terminal",
+        )
+        .with_next(scope.approve_command(&current)));
+    }
+    consume(plan_id, &scope.key(), project, account, now).map_err(|e| {
+        e.with_do("ask the person to approve this plan in their own terminal")
+            .with_next(scope.approve_command(plan_id))
+    })?;
+    let opts = super::sync::SyncOpts {
+        deploy: scope.deploy,
+        prune: scope.prune,
+        rotate: scope.rotate.clone(),
+        prune_immutable: Vec::new(),
+        product: scope.product.clone(),
+        confirm: None,
+        json,
+        expect_plan: Some(plan_id.to_string()),
+        receipt,
+        targets: scope.targets.clone(),
+    };
+    super::sync::run(fleet, &scope.env, r, out, &opts)
 }
 
 #[cfg(test)]

@@ -74,7 +74,7 @@ pub const PROGRAM: &str = "flyctl";
 pub const FLYCTL: Tool = Tool {
     program: PROGRAM,
     ci: "install flyctl in the CI job (GitHub Actions: \
-         uses: superfly/flyctl-actions/setup-flyctl@master)",
+         uses: superfly/flyctl-actions/setup-flyctl@1.6)",
     macos: "install: brew install flyctl",
     windows: "install: iwr https://fly.io/install.ps1 -useb | iex",
     linux: "install: curl -L https://fly.io/install.sh | sh",

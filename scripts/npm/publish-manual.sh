@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Manual npm publish of one opv release, from the maintainer's machine (npm login + 2FA).
-# Used while trusted publishing is off (the release workflow's npm job needs NPM_PUBLISH=true).
+# A fallback: releases publish to npm from the release workflow through trusted publishing
+# (NPM_PUBLISH=true). Use this only if that job fails.
 #
 #   scripts/npm/publish-manual.sh v0.5.0
 #

@@ -66,6 +66,9 @@ pub enum GrantState {
     Missing,
     ReadOnlyNeeded,
     NotVisible,
+    /// #153: the vault is not in the selected account, or this person cannot open it at
+    /// all (`op vault get` fails): no owner command for this principal can succeed here.
+    NotInAccount,
 }
 
 /// One required grant and its observed state.

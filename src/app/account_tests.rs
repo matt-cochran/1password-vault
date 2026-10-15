@@ -920,3 +920,8 @@ fn accounts_on_different_addresses_are_not_reported_as_shared() {
     });
     assert!(!codes(&r).contains(&"shared_sign_in_address"));
 }
+
+#[test]
+fn a_bare_op_session_variable_is_stale() {
+    assert!(codes(&shared(&["OP_SESSION"])).contains(&"stale_session_variable"));
+}

@@ -251,8 +251,19 @@ fn write(
     plan: &AdoptPlan,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
+    write_values(fleet, env, &plan.writes, r)
+}
+
+/// Write `writes` (product, key, value) into their boundary items, one verified edit per
+/// item (shared with `opv generate`, 0.9.0).
+pub(crate) fn write_values(
+    fleet: &Fleet,
+    env: &crate::domain::Environment,
+    writes: &[(String, String, SecretValue)],
+    r: &dyn CommandRunner,
+) -> Result<(), Error> {
     let mut by_boundary: BTreeMap<&str, Vec<&(String, String, SecretValue)>> = BTreeMap::new();
-    for w in &plan.writes {
+    for w in writes {
         by_boundary
             .entry(fleet.boundary_of(&w.0))
             .or_default()
