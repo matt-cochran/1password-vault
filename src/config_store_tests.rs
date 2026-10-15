@@ -848,7 +848,7 @@ fn recording_the_account_ignores_a_pointer_above_the_repository() {
 }
 
 /// Found live: in WSL, op keeps its own accounts, so the step for an email op does not
-/// know is `op account add` here, not the Windows app.
+/// know is `opv login --add --account` here, not the Windows app.
 #[test]
 fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
     let wsl = Host::from_env(&crate::host::FakeEnv::new("linux").var("WSL_DISTRO_NAME"));
@@ -861,7 +861,7 @@ fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
     });
     assert_eq!(
         e.next_step(),
-        Some("op account add --email new@labs.example")
+        Some("opv login --add --account new@labs.example")
     );
 }
 

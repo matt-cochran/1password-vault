@@ -25,7 +25,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::onepassword::{NO_CACHE, Session, diagnose, json_error, session_error};
+use super::onepassword::{NO_CACHE, Session, account_suffix, diagnose, json_error, session_error};
 use crate::error::Error;
 use crate::host::{Host, OP_CLI};
 use crate::runner::{Call, CommandRunner, Outcome, status_text};
@@ -266,7 +266,8 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
 
 /// `who` is not an account this `op` knows. On Linux and in WSL, `op` keeps its own
 /// accounts (in WSL it does not share the Windows app's: found live), so the step is
-/// `op account add` for that email in this terminal; elsewhere, add it in the 1Password app.
+/// `opv login --add --account` for that email in this terminal; elsewhere, add it in the
+/// 1Password app.
 fn not_known(accounts: &[Account], who: &str) -> Error {
     use crate::host::Platform;
     let host = Host::detect();
@@ -290,7 +291,7 @@ fn not_known(accounts: &[Account], who: &str) -> Error {
                 "add the account to op here{wsl}: type its sign-in address, Secret Key and \
                  password only at op's prompts, then re-run opv login"
             ))
-            .with_next(format!("op account add --email {who}"));
+            .with_next(format!("opv login --add --account {who}"));
     }
     e.with_do(
         "add the account in the 1Password app and turn on Settings > Developer > Integrate \
@@ -333,7 +334,7 @@ pub fn choose_error(accounts: &[Account]) -> Error {
     )
     .with_code(crate::error::Code::AccountRequired)
     .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
-    .with_next("opv login --account <email>")
+    .with_next("opv account list")
 }
 
 /// The accounts op knows (`op account list`, a free probe); empty when it fails. Callers
@@ -426,7 +427,10 @@ pub fn get(
         &args,
         account,
         host,
-        &format!("op item get {item_id} --vault {vault_id}"),
+        &format!(
+            "op item get {item_id} --vault {vault_id}{}",
+            account_suffix(account)
+        ),
         &format!("vault {vault_id}"),
     )?;
     let raw: Value = serde_json::from_slice(&out).map_err(|e| json_error(&e))?;
@@ -836,5 +840,50 @@ mod tests {
             argv(&["item", "list"], Some("team")),
             ["item", "list", "--account", "team"]
         );
+    }
+
+    fn account(id: &str) -> Account {
+        Account {
+            account_uuid: id.into(),
+            url: "my.1password.com".into(),
+            email: "owner@example.com".into(),
+            user_uuid: "USERUUID0000000000000000AA".into(),
+            shorthand: "team".into(),
+        }
+    }
+
+    /// I6: a failed manifest read hint names the account, so it cannot run against op's
+    /// default account.
+    #[test]
+    fn a_failed_manifest_read_hint_names_the_account() {
+        let mut responses: Vec<Output> = crate::runner::fake::failed_read(1).collect();
+        responses.push(Output::failure(1));
+        let r = FakeRunner::new(responses);
+        let e = get(
+            &r,
+            "v",
+            "i",
+            Some("ACCOUNTUUID000000000000AAA"),
+            false,
+            &Host::detect,
+        )
+        .unwrap_err();
+        assert!(
+            e.text()
+                .contains("op item get i --vault v --account ACCOUNTUUID000000000000AAA"),
+            "{}",
+            e.text()
+        );
+    }
+
+    /// I7: several accounts and no choice: the step is opv's own list command, one
+    /// command that runs as typed.
+    #[test]
+    fn choosing_among_several_accounts_steps_to_account_list() {
+        let e = choose_error(&[
+            account("ACCOUNTUUID000000000000AAA"),
+            account("ACCOUNTUUID000000000000BBB"),
+        ]);
+        assert_eq!(e.next_step(), Some("opv account list"));
     }
 }
