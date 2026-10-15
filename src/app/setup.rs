@@ -15,6 +15,11 @@ use zeroize::Zeroizing;
 pub trait Backend {
     fn native(&self) -> Result<(), Error>;
     fn call(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error>;
+    /// One read-only call, never retried: a status check whose failure is the answer
+    /// (`op whoami` before signing in, #142).
+    fn probe(&self, args: &[&str]) -> Result<Output, Error> {
+        self.call(args, None)
+    }
     fn sign_in(&mut self, account: Option<&str>, add_account: bool) -> Result<(), Error>;
     /// Add a 1Password account to this machine's `op` at op's own prompts and sign in to
     /// it in the same step (`opv login`, found in a fresh-account run-through: the person
@@ -126,7 +131,7 @@ pub fn prepare(
     ui.show(&format!("1Password CLI: ready ({})", version(backend)?))?;
     let mut vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
     if vaults.status != 0 {
-        let who = backend.call(&["whoami", "--format", "json"], None)?;
+        let who = backend.probe(&["whoami", "--format", "json"])?;
         if who.status == 0 {
             return Err(source_error(
                 "You are signed in, but vault access failed. Check your connection and account access to the setup vault, then rerun the command.",

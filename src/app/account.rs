@@ -29,6 +29,19 @@ pub struct Inputs<'a> {
     /// The project's recorded account (the manifest); `None` when there is none.
     pub manifest: Option<&'a str>,
     pub platform: Platform,
+    /// The names of the `OP_SESSION_*` variables in this environment (names only, never a
+    /// value; #142).
+    pub session_vars: Vec<String>,
+}
+
+/// The names of the `OP_SESSION_*` variables set in this process's environment (#142).
+pub fn session_var_names() -> Vec<String> {
+    let mut names: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| k.starts_with("OP_SESSION_"))
+        .collect();
+    names.sort();
+    names
 }
 
 /// The selected account: its ID, how it was chosen and where that choice came from.
@@ -199,6 +212,95 @@ fn signed_out_finding(account_id: &str) -> Finding {
     }
 }
 
+/// #142: several accounts on one sign-in address (`my.1password.com` for every individual
+/// and family account): naming the address picks one of them, often not the intended
+/// one. Each is named by shorthand and email so the person can name the right one.
+fn shared_address_findings(listed: &[Account], selected: Option<&str>) -> Vec<Finding> {
+    let mut by_host: std::collections::BTreeMap<String, Vec<&Account>> = Default::default();
+    for a in listed {
+        by_host
+            .entry(address(&a.url).to_ascii_lowercase())
+            .or_default()
+            .push(a);
+    }
+    by_host
+        .into_iter()
+        .filter(|(_, accounts)| accounts.len() > 1)
+        .map(|(host, accounts)| {
+            let named: Vec<String> = accounts
+                .iter()
+                .map(|a| {
+                    let short = if a.shorthand.is_empty() {
+                        "-"
+                    } else {
+                        &a.shorthand
+                    };
+                    let email = if a.email.is_empty() { "-" } else { &a.email };
+                    format!("{short} = {email} ({})", a.account_uuid)
+                })
+                .collect();
+            Finding {
+                code: "shared_sign_in_address".into(),
+                human_required: false,
+                message: format!(
+                    "{} accounts share the sign-in address {host}: {}. Naming {host} picks one \
+                     of them; name an account by its account ID with opv, or by its shorthand \
+                     with op (op signin --account <shorthand>)",
+                    accounts.len(),
+                    named.join("; ")
+                ),
+                next: selected.map(|id| format!("opv login --account {id}")),
+            }
+        })
+        .collect()
+}
+
+/// #142: an `OP_SESSION_<name>` variable in this shell that belongs to another listed
+/// account than the selected one, or to no listed account. op picks sessions by these
+/// variables, so a stale or foreign one can make a sign-in or a call use the wrong account
+/// or fail as "not signed in". Names only; a value is never read.
+fn session_var_findings(
+    vars: &[String],
+    listed: &[Account],
+    selected: Option<&str>,
+) -> Vec<Finding> {
+    let next = selected.map(|id| format!("opv login --account {id}"));
+    vars.iter()
+        .filter_map(|var| {
+            let name = var.strip_prefix("OP_SESSION_")?;
+            let owner = listed.iter().find(|a| {
+                [&a.shorthand, &a.user_uuid, &a.account_uuid]
+                    .iter()
+                    .any(|f| !f.is_empty() && f.eq_ignore_ascii_case(name))
+            });
+            match owner {
+                Some(a) if Some(a.account_uuid.as_str()) == selected => None,
+                Some(a) => Some(Finding {
+                    code: "session_for_other_account".into(),
+                    human_required: true,
+                    message: format!(
+                        "{var} in this shell is a session for another account ({}, {}); opv \
+                         ignores it when it signs in, but op and other tools may use it. Remove \
+                         it from this shell (unset {var}) unless you meant that account",
+                        if a.email.is_empty() { "-" } else { &a.email },
+                        a.account_uuid
+                    ),
+                    next: next.clone(),
+                }),
+                None => Some(Finding {
+                    code: "stale_session_variable".into(),
+                    human_required: true,
+                    message: format!(
+                        "{var} in this shell names no account this 1Password CLI knows (an old \
+                         eval of op signin?); remove it from this shell (unset {var})"
+                    ),
+                    next: next.clone(),
+                }),
+            }
+        })
+        .collect()
+}
+
 /// Build the FR-49 report. Pure: no `op` call, no filesystem, no prompt.
 pub fn report(inputs: &Inputs<'_>) -> Report {
     let listed: &[Account] = match &inputs.discovery {
@@ -276,6 +378,9 @@ pub fn report(inputs: &Inputs<'_>) -> Report {
         }
     }
 
+    let chosen = selected.as_ref().map(|s| s.account_id.as_str());
+    findings.extend(session_var_findings(&inputs.session_vars, listed, chosen));
+    findings.extend(shared_address_findings(listed, chosen));
     let next = findings.first().and_then(|f| f.next.clone());
     Report {
         discovery: discovery_str(&inputs.discovery).into(),
@@ -445,6 +550,7 @@ pub fn gather(r: &dyn crate::runner::CommandRunner, flag: Option<&str>) -> Repor
             .map(|a| (a, std::path::Path::new(".opv"))),
         manifest: None,
         platform: crate::host::Host::detect().platform,
+        session_vars: session_var_names(),
     })
 }
 

@@ -192,7 +192,7 @@ opv account list --json     # read-only: accounts, which is selected, findings, 
 opv account use <ID>        # record the user's chosen account in .opv (ask the user which)
 ```
 
-1. Read `findings`. `no_accounts` or `selected_account_absent`: the user runs `opv login --add --account <email>` in their own terminal (sign-in address, Secret Key and password go only to 1Password's prompt; you never see them). `account_ambiguous`: ask the user which account ID, then `opv account use <ID>`. `selected_signed_out`: the user runs the `next` command (`opv login --account <ID>`).
+1. Read `findings`. `no_accounts` or `selected_account_absent`: the user runs `opv login --add --account <email>` in their own terminal (sign-in address, Secret Key and password go only to 1Password's prompt; you never see them). `account_ambiguous`: ask the user which account ID, then `opv account use <ID>`. `selected_signed_out`: the user runs the `next` command (`opv login --account <ID>`). `session_for_other_account` or `stale_session_variable`: tell the user which variable (by name) to remove from their shell with `unset`; never read its value. `shared_sign_in_address` is advice: always name the account by ID with opv; never suggest `--account my.1password.com` to `op`, which picks one of the accounts on that address.
 2. After the user says they are done, run `opv account list --json` again and continue when `findings` is empty.
 
 - If the environments use different 1Password accounts, add `account = "<sign-in address>"` to each environment (ask the user which account holds which vault). The user then signs in with `opv login <env>`; every opv command uses that environment's account.

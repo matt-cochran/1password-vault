@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An approval is claimed by an exclusive create (`O_EXCL`, `CREATE_NEW` on Windows), which has exactly one winner on every platform; on Windows two concurrent claims could both be refused by a rename sharing violation. The record is spent whatever the verdict, and a new approval of the same plan replaces a used one (#133).
+- `opv login` on a machine with several accounts on one sign-in address (WSL, op 2.40) could fail after the password with "1Password did not start a session" (#142). `op signin` no longer inherits `OP_SESSION_*` variables from the shell. A refused sign-in now shows op's own message (scrubbed) on a `1Password said:` line. The status check before the prompt is one probe instead of three retries.
+- New advisory findings in `opv account list`, `opv ready` and before `opv login`'s prompt: `shared_sign_in_address`, `session_for_other_account` and `stale_session_variable`, each naming accounts by shorthand, email and ID and variables by name only (#142).
 
 - A structural apply that stops part-way keeps the IDs it already recorded; declarations work on a configuration that is not bootstrapped yet (#133).
 

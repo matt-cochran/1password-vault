@@ -457,7 +457,15 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 account: selected.clone(),
                 ..Scope::default()
             },
-            blocking: f.code != "discovery_unavailable",
+            // Advisory (#142): opv names accounts by ID and ignores other accounts'
+            // session variables when it signs in, so these never block readiness.
+            blocking: !matches!(
+                f.code.as_str(),
+                "discovery_unavailable"
+                    | "shared_sign_in_address"
+                    | "session_for_other_account"
+                    | "stale_session_variable"
+            ),
             actor: "owner".into(),
             effect: effect.into(),
             prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),
