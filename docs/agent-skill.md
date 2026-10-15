@@ -46,8 +46,9 @@ account or Connect credentials. If a tool is missing in this version, say so; us
 ## Self-made secrets
 
 For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
-then run `opv generate <env> <product/KEY>`: the value goes straight into 1Password and is
-never shown. Never suggest `openssl rand` or pasting generated values.
+then run `opv generate <env> <product/KEY>` (with the MCP server, the tool is `opv_generate`):
+the value goes straight into 1Password and is never shown. Never suggest `openssl rand` or
+pasting generated values.
 
 ## Local secret files and Workers
 

@@ -93,30 +93,7 @@ pub fn run(
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     // Everything is checked before anything is written.
-    let mut chosen: Vec<(String, String, Recipe)> = Vec::new();
-    for k in keys {
-        let (product, key) = k.split_once('/').ok_or_else(|| {
-            Error::Config(format!("{k:?} must be <product>/<KEY>").into()).with_code(Code::Usage)
-        })?;
-        let spec = fleet
-            .products
-            .get(product)
-            .and_then(|p| p.keys.get(key))
-            .ok_or_else(|| {
-                Error::Config(format!("{k} is not declared").into()).with_code(Code::UndeclaredKey)
-            })?;
-        if !spec.environments.iter().any(|e| e == env_name) {
-            return Err(
-                Error::Config(format!("{k} is not declared for {env_name}").into())
-                    .with_code(Code::UndeclaredKey),
-            );
-        }
-        chosen.push((
-            product.into(),
-            key.into(),
-            recipe(&key_label(product, key), spec)?,
-        ));
-    }
+    let chosen = plan(fleet, env_name, keys)?;
     super::tidy::require_person(r, "opv generate")?;
     // Never over a value: what 1Password holds now, read fresh.
     let read = super::tidy::read(fleet, env_name, r)?;
@@ -153,6 +130,42 @@ pub fn run(
         .map_err(write_err)?;
     }
     writeln!(out, "Next: opv status {env_name}").map_err(write_err)
+}
+
+/// The recipe chosen for each `product/KEY` in `env_name`, after every name and declaration
+/// is checked. Shared by [`run`] and the MCP `opv_generate` tool so both agree on what is
+/// generated; never reads or writes 1Password.
+pub fn plan(
+    fleet: &crate::domain::Fleet,
+    env_name: &str,
+    keys: &[String],
+) -> Result<Vec<(String, String, Recipe)>, Error> {
+    fleet.environment(env_name)?;
+    let mut chosen: Vec<(String, String, Recipe)> = Vec::new();
+    for k in keys {
+        let (product, key) = k.split_once('/').ok_or_else(|| {
+            Error::Config(format!("{k:?} must be <product>/<KEY>").into()).with_code(Code::Usage)
+        })?;
+        let spec = fleet
+            .products
+            .get(product)
+            .and_then(|p| p.keys.get(key))
+            .ok_or_else(|| {
+                Error::Config(format!("{k} is not declared").into()).with_code(Code::UndeclaredKey)
+            })?;
+        if !spec.environments.iter().any(|e| e == env_name) {
+            return Err(
+                Error::Config(format!("{k} is not declared for {env_name}").into())
+                    .with_code(Code::UndeclaredKey),
+            );
+        }
+        chosen.push((
+            product.into(),
+            key.into(),
+            recipe(&key_label(product, key), spec)?,
+        ));
+    }
+    Ok(chosen)
 }
 
 #[cfg(test)]

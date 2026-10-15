@@ -114,6 +114,16 @@ pub struct ReadyScope {
     environment: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateScope {
+    /// A declared environment whose empty fields receive the generated values.
+    environment: String,
+    /// One to twenty `product/KEY` names (never a value), each declared for the environment
+    /// with a `base64_bytes` or `hex_bytes` rule.
+    keys: Vec<String>,
+}
+
 impl Server {
     pub fn new(project: PathBuf) -> Self {
         Self {
@@ -296,6 +306,34 @@ impl Server {
                 products: args.products,
             };
             declared(project, |r, path| crate::app::declare::target(r, path, &t))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "opv_generate",
+        description = "Generate self-made secrets (keys whose rules give base64_bytes or hex_bytes) with the OS random source and write them straight into their empty 1Password fields. Writes only empty fields: never replaces an existing value, never deletes, and never returns a value. The 1Password app asks the person to authorize the writes, so the server refuses to run with an op session, service-account or Connect credential in its environment.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn generate(&self, Parameters(args): Parameters<GenerateScope>) -> String {
+        self.serialized(move |project| {
+            let r = ProcessRunner::new(Budget::starting_now(Duration::from_secs(300)), false);
+            let req = config_store::Request {
+                start: project.into(),
+                config: None,
+                project: None,
+                manifest_only: false,
+                account: config_store::account_env(),
+            };
+            let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
+                Ok(fleet) => fleet,
+                Err(e) => return generate_failure(&e),
+            };
+            generate(&fleet, &args.environment, &args.keys, &r, std::env::vars())
         })
         .await
     }
@@ -834,6 +872,102 @@ fn applied_projection(a: &crate::app::structure::Applied) -> Value {
     })
 }
 
+/// `opv_generate` as a value: generate each `product/KEY` and write it into its empty
+/// 1Password field, or a fixed error. `vars` are the process environment variables checked
+/// for a write credential (injected so a test need not set the process environment). The
+/// sink is discarded: no value and no length other than the recipe's byte count is returned.
+fn generate(
+    fleet: &crate::domain::Fleet,
+    env_name: &str,
+    keys: &[String],
+    r: &dyn CommandRunner,
+    vars: impl Iterator<Item = (String, String)>,
+) -> Value {
+    if let Some(var) = credential_in_environment(vars) {
+        return json!({
+            "ok": false,
+            "code": "credential_in_environment",
+            "variable": var,
+            "human_action": "Generating writes through the 1Password app, which asks the person to authorize them. Start the opv MCP server without op session tokens, service-account or Connect credentials in its environment, or run opv generate in your own terminal instead."
+        });
+    }
+    if keys.is_empty() || keys.len() > 20 {
+        return generate_error("invalid_name", generate_action("invalid_name"));
+    }
+    if keys.iter().any(|k| {
+        k.split_once('/')
+            .is_none_or(|(product, key)| !identifier(product) || !identifier(key))
+    }) {
+        return generate_error("invalid_name", generate_action("invalid_name"));
+    }
+    if !fleet.environments.contains_key(env_name) {
+        return generate_error(
+            "unknown_environment",
+            generate_action("unknown_environment"),
+        );
+    }
+    crate::scrub::clear_mcp_registry();
+    let _redaction_scope = RedactionScope;
+    // Every name and declaration is checked before anything is written.
+    let chosen = match crate::app::generate::plan(fleet, env_name, keys) {
+        Ok(chosen) => chosen,
+        Err(e) => return generate_failure(&e),
+    };
+    let mut sink = Vec::new();
+    if let Err(e) = crate::app::generate::run(fleet, env_name, keys, r, &mut sink) {
+        return generate_failure(&e);
+    }
+    let generated: Vec<Value> = chosen
+        .iter()
+        .map(|(product, key, recipe)| {
+            let (encoding, bytes) = match recipe {
+                crate::app::generate::Recipe::Base64(n) => ("base64", *n),
+                crate::app::generate::Recipe::Hex(n) => ("hex", *n),
+            };
+            json!({"product": product, "key": key, "encoding": encoding, "bytes": bytes})
+        })
+        .collect();
+    json!({
+        "ok": true,
+        "generated": generated,
+        "human_action": "The values went straight into 1Password and were never shown.",
+        "next": format!("opv status {env_name}"),
+    })
+}
+
+/// The fixed human action for an error code; never a message or a value from upstream.
+fn generate_action(code: &str) -> &'static str {
+    match code {
+        "policy_refused" => {
+            "opv generates only self-made secrets with base64_bytes or hex_bytes rules and never replaces a value; a provider-issued key is created by the person at the provider and typed in 1Password."
+        }
+        "undeclared_key" => {
+            "Declare the key with opv_declare_key, then create its empty 1Password field with opv_structure_plan and opv_structure_apply."
+        }
+        "unknown_environment" | "unknown_env" => {
+            "Name a declared environment; opv_configuration lists them."
+        }
+        "op_not_signed_in" => {
+            "The person signs in to 1Password (desktop app integration) and retries."
+        }
+        "invalid_name" => "Name 1 to 20 keys as <product>/<KEY>, using declared names only.",
+        _ => {
+            "Fix the cause, then call opv_generate again. A person runs opv generate in their own terminal for details."
+        }
+    }
+}
+
+/// A fixed `{ok:false, code, human_action}` answer for `code`.
+fn generate_error(code: &str, human_action: &str) -> Value {
+    json!({"ok": false, "code": code, "human_action": human_action})
+}
+
+/// `e`'s code with its fixed human action; never its text, which can quote upstream output.
+fn generate_failure(e: &crate::error::Error) -> Value {
+    let code = e.code().as_str();
+    generate_error(code, generate_action(code))
+}
+
 /// The next step an assistant may repeat for a finding: an `opv` command, or a 1Password
 /// item link, and nothing else. A raw `op` command, a value or any other text becomes null.
 fn ready_step(prerequisite: &str) -> Option<String> {
@@ -974,6 +1108,7 @@ fn project_receipt(doc: &Value, operation: Operation) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::fake_op::FakeOp;
     use crate::runner::fake::FakeRunner;
 
     #[test]
@@ -1310,5 +1445,168 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["environment", "name", "state", "evidence_write"]
         );
+    }
+
+    const GENERATE_FLEET: &str = r#"[environments.dev]
+boundaries.api = { vault_id = "vdev0000000000000000000001", item_id = "ITEM" }
+
+[products.api.keys.SESSION_KEY]
+kind = "secret"
+environments = ["dev"]
+rules = { base64_bytes = 32 }
+
+[products.api.keys.WEBHOOK_HEX]
+kind = "secret"
+environments = ["dev"]
+rules = { hex_bytes = 32 }
+
+[products.api.keys.STRIPE_KEY]
+kind = "secret"
+environments = ["dev"]
+rules = { prefix = "sk_" }
+"#;
+
+    /// A fake `op` whose dev item already holds `api/WEBHOOK_HEX` = `already-set`.
+    fn generate_world() -> (crate::domain::Fleet, FakeOp, String) {
+        let op = FakeOp::default();
+        op.signed_in.set(true);
+        let id = op.insert(
+            "vdev0000000000000000000001",
+            json!({
+                "title": "myapp · api · dev values", "category": "SECURE_NOTE",
+                "sections": [{"id": "api", "label": "api"}],
+                "fields": [{"id": "f1", "label": "WEBHOOK_HEX", "type": "CONCEALED",
+                            "section": {"id": "api", "label": "api"}, "value": "already-set"}],
+            }),
+        );
+        let fleet = crate::config::parse(&GENERATE_FLEET.replace("ITEM", &id)).unwrap();
+        (fleet, op, id)
+    }
+
+    fn generated_field(op: &FakeOp, id: &str, label: &str) -> Option<String> {
+        op.item(id)["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["label"] == label)
+            .and_then(|f| f["value"].as_str().map(str::to_string))
+    }
+
+    fn no_vars() -> impl Iterator<Item = (String, String)> {
+        std::iter::empty()
+    }
+
+    #[test]
+    fn opv_generate_writes_a_base64_value_into_an_empty_field() {
+        let (fleet, op, id) = generate_world();
+        let _ = generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars());
+        assert_eq!(
+            generated_field(&op, &id, "SESSION_KEY").map(|v| v.len()),
+            Some(44)
+        );
+    }
+
+    #[test]
+    fn opv_generate_never_returns_the_generated_value() {
+        let (fleet, op, id) = generate_world();
+        let answer = generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars());
+        let value = generated_field(&op, &id, "SESSION_KEY").unwrap();
+        assert!(!answer.to_string().contains(&value));
+    }
+
+    #[test]
+    fn opv_generate_reports_the_base64_recipe() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars());
+        assert_eq!(
+            answer["generated"][0],
+            json!({"product": "api", "key": "SESSION_KEY", "encoding": "base64", "bytes": 32})
+        );
+    }
+
+    #[test]
+    fn opv_generate_offers_the_status_command_next() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars());
+        assert_eq!(answer["next"], "opv status dev");
+    }
+
+    #[test]
+    fn opv_generate_refuses_a_prefix_rule_key_with_policy_refused() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(&fleet, "dev", &["api/STRIPE_KEY".into()], &op, no_vars());
+        assert_eq!(answer["code"], "policy_refused");
+    }
+
+    #[test]
+    fn opv_generate_writes_nothing_when_another_key_is_refused() {
+        let (fleet, op, id) = generate_world();
+        let _ = generate(
+            &fleet,
+            "dev",
+            &["api/SESSION_KEY".into(), "api/STRIPE_KEY".into()],
+            &op,
+            no_vars(),
+        );
+        assert_eq!(generated_field(&op, &id, "SESSION_KEY"), None);
+    }
+
+    #[test]
+    fn opv_generate_refuses_a_filled_field_with_policy_refused() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(&fleet, "dev", &["api/WEBHOOK_HEX".into()], &op, no_vars());
+        assert_eq!(answer["code"], "policy_refused");
+    }
+
+    #[test]
+    fn opv_generate_keeps_an_existing_value() {
+        let (fleet, op, id) = generate_world();
+        let _ = generate(&fleet, "dev", &["api/WEBHOOK_HEX".into()], &op, no_vars());
+        assert_eq!(
+            generated_field(&op, &id, "WEBHOOK_HEX").as_deref(),
+            Some("already-set")
+        );
+    }
+
+    #[test]
+    fn opv_generate_returns_invalid_name_for_a_bad_name() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(&fleet, "dev", &["api/NO PE".into()], &op, no_vars());
+        assert_eq!(answer["code"], "invalid_name");
+    }
+
+    #[test]
+    fn opv_generate_touches_no_1password_for_an_invalid_name() {
+        let (fleet, op, _) = generate_world();
+        let _ = generate(&fleet, "dev", &["api/NO PE".into()], &op, no_vars());
+        assert!(op.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn opv_generate_refuses_a_service_account_token_in_the_environment() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(
+            &fleet,
+            "dev",
+            &["api/SESSION_KEY".into()],
+            &op,
+            vars(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_x")]),
+        );
+        assert_eq!(answer["code"], "credential_in_environment");
+    }
+
+    #[test]
+    fn opv_generate_reports_when_nobody_is_signed_in() {
+        let (fleet, op, _) = generate_world();
+        op.signed_in.set(false);
+        let answer = generate(&fleet, "dev", &["api/SESSION_KEY".into()], &op, no_vars());
+        assert_eq!(answer["code"], "op_not_signed_in");
+    }
+
+    #[test]
+    fn opv_generate_returns_unknown_environment_for_an_undeclared_environment() {
+        let (fleet, op, _) = generate_world();
+        let answer = generate(&fleet, "prod", &["api/SESSION_KEY".into()], &op, no_vars());
+        assert_eq!(answer["code"], "unknown_environment");
     }
 }
