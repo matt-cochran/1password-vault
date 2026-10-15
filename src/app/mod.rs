@@ -14,6 +14,7 @@ pub mod access_create;
 pub mod account;
 pub mod add;
 pub mod adopt;
+pub mod agent_view;
 pub mod approve;
 #[cfg(test)]
 mod azure_tests;
@@ -77,6 +78,7 @@ mod skill_tests;
 mod staged_tests;
 pub mod status;
 pub mod structure;
+pub mod structure_cmd;
 pub(crate) mod suggest;
 pub mod sync;
 pub mod target_cmd;

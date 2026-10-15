@@ -10,6 +10,24 @@ use serde_json::{Value, json};
 use crate::error::Code;
 use crate::json::SCHEMA_VERSION;
 
+/// Every MCP tool mapped to the CLI command that gives the same guarantee, in tool order
+/// (j8). The parity test on the MCP server (src/mcp.rs) fails when a registered tool is
+/// missing here; the test below fails when a mapped command has no [`EFFECTS`] entry.
+/// `opv schema` exposes this as `mcp_tools`.
+pub const MCP_TOOLS: &[(&str, &str)] = &[
+    ("opv_ready", "ready"),
+    ("opv_configuration", "config describe"),
+    ("opv_access", "access"),
+    ("opv_deployment_plan", "plan"),
+    ("opv_declare_key", "add"),
+    ("opv_declare_environment", "env add"),
+    ("opv_declare_target", "target add"),
+    ("opv_structure_plan", "structure plan"),
+    ("opv_structure_apply", "structure apply"),
+    ("opv_generate", "generate"),
+    ("opv_sync", "sync"),
+];
+
 /// What running a command can change.
 #[derive(Debug, Clone, Copy)]
 pub struct Effect {
@@ -332,6 +350,36 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    Effect {
+        command: "env add",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "structure plan",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    // The person approves with `opv approve <plan_id>`; the apply itself writes 1Password
+    // through the app's own authorization and, like the MCP tool, asks first (#133).
+    Effect {
+        command: "structure apply",
+        effect: "writes_1password",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "config describe",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
 ];
 
 /// The commands whose item read tidies the 1Password layout when a signed-in person runs
@@ -407,6 +455,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         },
         "global_flags": global,
         "commands": commands,
+        "mcp_tools": MCP_TOOLS.iter().map(|(tool, cli)| json!({"tool": tool, "cli": cli})).collect::<Vec<_>>(),
         "exit_codes": exit_codes(),
         "error_codes": Code::ALL.iter().map(|c| json!({
             "code": c.as_str(),
@@ -679,5 +728,28 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), n);
+    }
+
+    #[test]
+    fn every_mcp_tool_cli_command_has_an_effect_entry() {
+        let names: Vec<&str> = EFFECTS.iter().map(|e| e.command).collect();
+        let missing: Vec<&str> = MCP_TOOLS
+            .iter()
+            .map(|(_, cli)| *cli)
+            .filter(|cli| !names.contains(cli))
+            .collect();
+        assert!(missing.is_empty(), "MCP tools without EFFECTS: {missing:?}");
+    }
+
+    #[test]
+    fn the_schema_lists_every_mcp_tool_with_its_cli_command() {
+        let doc = describe(&clap::Command::new("opv"), "test");
+        let tools: Vec<(&str, &str)> = doc["mcp_tools"]
+            .as_array()
+            .expect("mcp_tools array")
+            .iter()
+            .map(|e| (e["tool"].as_str().unwrap(), e["cli"].as_str().unwrap()))
+            .collect();
+        assert_eq!(tools.as_slice(), MCP_TOOLS);
     }
 }

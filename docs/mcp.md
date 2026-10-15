@@ -5,18 +5,23 @@ lets an assistant inspect a project, manage its declared structure, and prepare 
 1Password structure it needs. A person keeps three things: signing in, approving
 structural changes in their own terminal, and entering every secret value in 1Password.
 
-| Tool | Input | Changes | Response |
-|---|---|---|---|
-| `opv_ready` | optional declared environment | nothing | findings with their code, blocking flag, actor, effect and next step (an `opv` command or a 1Password item link), each target's state, and counts |
-| `opv_configuration` | none | nothing | environment names, confirmation flags, product/key names and kinds, and each target's provider, delivered products and whether its state vault and deploy identity are declared |
-| `opv_access` | optional environment and target | nothing | each CI or deploy identity's service-account name, vaults, permissions and state, findings with their next step, and for each identity missing a grant the person's `opv access … --create` command |
-| `opv_deployment_plan` | declared environment | nothing | action metadata, plan ID when available; no execution |
-| `opv_declare_key` | product, key, kind, environments, rules, guidance, immutable | local `secrets.toml` | `changed` |
-| `opv_declare_environment` | environment | local `secrets.toml` | `changed` |
-| `opv_declare_target` | environment, target, provider, public provider options, products | local `secrets.toml` | `changed` |
-| `opv_structure_plan` | none | nothing | the structural plan and its `plan_id` |
-| `opv_structure_apply` | `plan_id` | 1Password structure, then `secrets.toml` IDs | created public IDs, links for key entry, added field names |
-| `opv_generate` | declared environment and 1–20 `product/KEY` names | 1Password values (empty fields only) | each generated key's product, key, `encoding` (`base64` or `hex`) and recipe `bytes`; never a value (CLI: `opv generate <env> <product/KEY>…`) |
+| Tool | CLI | Input | Changes | Response |
+|---|---|---|---|---|
+| `opv_ready` | `opv ready` | optional declared environment | nothing | findings with their code, blocking flag, actor, effect and next step (an `opv` command or a 1Password item link), each target's state, and counts |
+| `opv_configuration` | `opv config describe` | none | nothing | environment names, confirmation flags, product/key names and kinds, and each target's provider, delivered products and whether its state vault and deploy identity are declared |
+| `opv_access` | `opv access` | optional environment and target | nothing | each CI or deploy identity's service-account name, vaults, permissions and state, findings with their next step, and for each identity missing a grant the person's `opv access … --create` command |
+| `opv_deployment_plan` | `opv plan --json` | declared environment | nothing | each row's target, product, key and action (`write`, `unset`, `hold`, `none`), the `plan_id`, and the `approve_command` a person runs to approve it; no execution |
+| `opv_declare_key` | `opv add` | product, key, kind, environments, rules, guidance, immutable | local `secrets.toml` | `changed` |
+| `opv_declare_environment` | `opv env add` | environment | local `secrets.toml` | `changed` |
+| `opv_declare_target` | `opv target add` | environment, target, provider, public provider options, products | local `secrets.toml` | `changed` |
+| `opv_structure_plan` | `opv structure plan` | none | nothing | the structural plan and its `plan_id` |
+| `opv_structure_apply` | `opv structure apply <PLAN_ID>` | `plan_id` | 1Password structure, then `secrets.toml` IDs | created public IDs, links for key entry, added field names |
+| `opv_generate` | `opv generate <env> <product/KEY>…` | declared environment and 1–20 `product/KEY` names | 1Password values (empty fields only) | each generated key's product, key, `encoding` (`base64` or `hex`) and recipe `bytes`; never a value |
+| `opv_sync` | `opv sync <env> --approved <PLAN_ID>` | environment, `plan_id`, optional targets and product, `deploy`, `prune` | the deployment target (exactly the approved plan, once) | names written, pruned, pending and held, and whether it deployed; on refusal the `approve_command` to show the person |
+
+Every tool has a CLI command with the same guarantee and the same `--json` document
+(the command is also listed by `opv schema` under `mcp_tools`). The CLI apply and sync
+still require the person's own `opv approve` first.
 
 No tool accepts or returns a secret value, an arbitrary command, a file path, an
 executable, or an approval boolean. Responses are built field by field from checked

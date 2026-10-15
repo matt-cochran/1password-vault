@@ -203,9 +203,9 @@ Examples:
   opv sync prod --deploy --confirm prod  # an environment with confirm_env = true";
 
 const SYNC_MORE: &str = "\
-Refuses (exit 6) and stages nothing when a key is missing or failing a rule, naming a
-missing --confirm too. Nothing is deployed or removed without --deploy/--prune.
-  opv sync prod --deploy --expect-plan 674d43e2  # exactly the plan opv plan showed
+Refuses (exit 6), staging nothing, on a missing or failing key or a missing --confirm.
+No deploy or removal without --deploy/--prune (--prune-immutable for an immutable key).
+  opv sync prod --expect-plan 674d43e2  # exactly the plan opv plan showed (meets confirm_env)
   opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set";
 
 const EXPORT_QUICK: &str = "\
@@ -417,6 +417,26 @@ const TARGET_LIST_QUICK: &str = "\
 Examples:
   opv target list                     # every declared target
   opv target list --env prod --json   # one environment as one document";
+
+const ENV_ADD_QUICK: &str = "\
+Examples:
+  opv env add staging           # declare the environment in secrets.toml
+  opv env add staging --json    # the same report an assistant gets over MCP";
+
+const STRUCTURE_PLAN_QUICK: &str = "\
+Examples:
+  opv structure plan           # names, states and the plan_id, to review
+  opv structure plan --json    # exactly the opv_structure_plan document";
+
+const STRUCTURE_APPLY_QUICK: &str = "\
+Examples:
+  opv structure apply sp-0123456789abcdef           # apply an approved plan
+  opv structure apply sp-0123456789abcdef --json    # the applied report";
+
+const CONFIG_DESCRIBE_QUICK: &str = "\
+Examples:
+  opv config describe           # environments, keys and targets, names only
+  opv config describe --json    # exactly the opv_configuration document";
 
 const ACCOUNT_LIST_QUICK: &str = "\
 Examples:
@@ -706,6 +726,12 @@ enum Cmd {
     /// Declare a named deployment target of an environment, or list the declared ones.
     #[command(subcommand)]
     Target(TargetCmd),
+    /// Declare an environment in secrets.toml, like the MCP `opv_declare_environment` tool.
+    #[command(subcommand)]
+    Env(EnvCmd),
+    /// Plan or apply this project's 1Password structure, like the MCP structure tools.
+    #[command(subcommand)]
+    Structure(StructureCmd),
     /// Bring values that exist elsewhere into the environment's 1Password item, after review.
     #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
     Adopt {
@@ -1149,8 +1175,7 @@ struct PlanArgs {
 struct SyncArgs {
     /// Environment name from the configuration (for example staging or prod).
     env: String,
-    /// Deploy when a staged digest changed, a prune happened, or a managed name is
-    /// still pending (Staged/Partial) on the target from an earlier run.
+    /// Deploy when something staged changed, was pruned, or is pending from an earlier run.
     #[arg(long)]
     deploy: bool,
     /// Unset managed names that are not desired in this environment. Immutable keys
@@ -1160,12 +1185,10 @@ struct SyncArgs {
     /// The environment's name again; required when it sets confirm_env = true.
     #[arg(long, value_name = "ENV")]
     confirm: Option<String>,
-    /// Write, prune and deploy only this product's names. A deploy
-    /// still restarts the whole app. OPV_PRODUCT is never used here.
+    /// Write, prune and deploy only this product's names (a deploy restarts the whole app).
     #[arg(long)]
     product: Option<String>,
-    /// Apply only the plan `opv plan` showed with this id; refused (exit 6) if anything
-    /// changed since. Also satisfies confirm_env.
+    /// Apply only the plan opv plan showed with this id (exit 6 if it changed since).
     #[arg(long, value_name = "PLAN_ID")]
     expect_plan: Option<String>,
     /// Write the delivery receipts this sync mints (names, ids and times) to FILE; needs
@@ -1184,15 +1207,18 @@ struct SyncArgs {
     #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
     rotate: Vec<String>,
     /// Let --prune unset this immutable key (repeatable).
-    #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "PRODUCT/KEY",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
     prune_immutable: Vec<String>,
     /// Only this named target of the environment (repeatable). Without it, every target,
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
-    /// Run exactly the sync plan a person approved with `opv approve <PLAN_ID> --sync
-    /// <env>` (same --target, --product, --deploy and --prune), once: for an assistant,
-    /// which needs no terminal for it. Refused when the plan changed or has no approval.
+    /// Run once the sync plan a person approved with opv approve <PLAN_ID> --sync <ENV>.
     #[arg(
         long,
         value_name = "PLAN_ID",
@@ -1313,6 +1339,43 @@ enum TargetCmd {
         #[arg(long)]
         env: Option<String>,
         /// Print one JSON array instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Declare an environment in secrets.toml; its vaults and items come from the approved
+    /// structure (same guarantee as the MCP `opv_declare_environment` tool).
+    #[command(before_help = ENV_ADD_QUICK)]
+    Add {
+        /// New environment name (^[a-z][a-z0-9-]*$).
+        environment: String,
+        /// Print the same report an assistant gets over MCP, instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StructureCmd {
+    /// Plan the 1Password structure this configuration declares (read-only): names and a
+    /// plan_id only, no value and no write.
+    #[command(before_help = STRUCTURE_PLAN_QUICK)]
+    Plan {
+        /// Print exactly the document the MCP `opv_structure_plan` tool returns.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply exactly the plan a person approved with `opv approve <plan_id>` in their own
+    /// terminal (single use); refuses an unapproved or stale plan, creating nothing.
+    #[command(before_help = STRUCTURE_APPLY_QUICK)]
+    Apply {
+        /// The plan id `opv structure plan` printed (sp- and 16 hex digits).
+        #[arg(value_name = "PLAN_ID")]
+        plan_id: String,
+        /// Print exactly the document the MCP `opv_structure_apply` tool returns.
         #[arg(long)]
         json: bool,
     },
@@ -1449,6 +1512,14 @@ enum ConfigCmd {
         /// The committed copy.
         #[arg(long, value_name = "PATH")]
         file: PathBuf,
+    },
+    /// Print the declared configuration metadata (environments, keys, targets), names only;
+    /// same document as the MCP `opv_configuration` tool.
+    #[command(before_help = CONFIG_DESCRIBE_QUICK)]
+    Describe {
+        /// Print exactly the document the MCP `opv_configuration` tool returns.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2094,6 +2165,10 @@ impl Cmd {
             Cmd::Config(ConfigCmd::Export { env, json, .. }) => {
                 return (env.is_some() || *json).then_some(true);
             }
+            Cmd::Env(EnvCmd::Add { json, .. })
+            | Cmd::Structure(StructureCmd::Plan { json })
+            | Cmd::Structure(StructureCmd::Apply { json, .. })
+            | Cmd::Config(ConfigCmd::Describe { json }) => return json.then_some(true),
             _ => false,
         };
         json.then_some(false)
@@ -2316,6 +2391,19 @@ fn run(
         return run_init(cli, config_source, &r, out).map(|()| 0);
     }
     match &cli.cmd {
+        Cmd::Env(EnvCmd::Add { environment, json }) => {
+            return opv::app::structure_cmd::env_add(&r, &here, environment, *json, out)
+                .map(|()| 0);
+        }
+        Cmd::Structure(StructureCmd::Plan { json }) => {
+            // Read and write the project's own 1Password account, never op's default.
+            r.use_account(Some(opv::app::structure::scope(&here, &r)?.account));
+            return opv::app::structure_cmd::plan(&r, &here, *json, out).map(|()| 0);
+        }
+        Cmd::Structure(StructureCmd::Apply { plan_id, json }) => {
+            r.use_account(Some(opv::app::structure::scope(&here, &r)?.account));
+            return opv::app::structure_cmd::apply(&r, &here, plan_id, *json, out).map(|()| 0);
+        }
         Cmd::Projects {
             account,
             long,
@@ -2800,6 +2888,8 @@ fn run_other(
         | Cmd::Version { .. }
         | Cmd::Mcp(_)
         | Cmd::Vault(_)
+        | Cmd::Env(_)
+        | Cmd::Structure(_)
         | Cmd::LocalDelivery { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
@@ -3031,6 +3121,9 @@ fn run_other(
         }
         Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             config_export::run(&loaded?, &env, r, out)
+        }
+        Cmd::Config(ConfigCmd::Describe { json }) => {
+            opv::app::structure_cmd::config_describe(&loaded?, json, out)
         }
         // Reached only when discovery failed: its error is the result.
         Cmd::Config(_) => loaded.map(|_| ()),

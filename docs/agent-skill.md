@@ -43,6 +43,18 @@ account or Connect credentials. If a tool is missing in this version, say so; us
 `opv bootstrap` in the user's terminal instead and never work around it. Details:
 `opv guide agent`, section "Optional MCP server".
 
+## CLI or MCP
+
+Every MCP tool has the same command on the CLI: `opv schema` lists each tool with its
+command under `mcp_tools`. Without an MCP client, run the structure flow yourself in the
+same order: declare with `opv env add`/`opv add`/`opv target add` (local `secrets.toml`
+only), then `opv structure plan --json` for the plan and its `plan_id`, ask the user to run
+`opv approve <plan_id>` in their own terminal, then `opv structure apply <plan_id> --json`.
+That document is exactly what `opv_structure_plan` / `opv_structure_apply` return, and
+`opv structure apply` refuses an unapproved or stale plan just the same. `opv config
+describe --json` reproduces the `opv_configuration` document, `opv ready --json` the
+readiness receipt, `opv access` and `opv plan` their tools.
+
 ## Self-made secrets
 
 For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,

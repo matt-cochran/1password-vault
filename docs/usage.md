@@ -23,6 +23,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv version [--json]` | opv's version and each CLI it runs (op, flyctl, az, kubectl, gh): installed with its version, missing or unknown, and which ones this project's configuration uses; no sign-in | nothing |
 | `opv approve <plan_id>` | in your own terminal: review the structural plan an assistant prepared through MCP and approve it once (15 minutes) | a local approval record |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` | create every missing boundary vault, item and state vault, record their IDs and add every declared field empty | 1Password and `secrets.toml` |
+| `opv structure plan [--json]` | plan the structure this configuration declares (the `opv_structure_plan` document): every vault, item, state vault, delivery item and empty field by name, and a `plan_id` | nothing (read-only) |
+| `opv structure apply <plan_id> [--json]` | apply exactly the plan a person approved with `opv approve <plan_id>` in their own terminal (single use); refuses an unapproved or stale plan, creating nothing | 1Password and `secrets.toml` |
 | `opv target add <env> <name> --<provider options> [--products <p>]... [--deploy-credentials <op://v/i>] [--dry-run] [--json]` | declare one named target, infer its provider from the options, create its state vault and record its ID ([usage](#add-a-target-opv-target-add)) | the configuration and 1Password |
 | `opv target list [--env <env>] [--json]` | the declared targets: provider, locator, products, deploy identity and state vault ([usage](#add-a-target-opv-target-add)) | nothing (read-only) |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
@@ -39,11 +41,13 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv init <env> [--vault <title>] [--item <title>] [--product <p>]` | configuration (boundaries and products) from an existing item; no target ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
 | `opv init <env> --from <file.env> [--config-key KEY]... [--secret-key KEY]... [--apply]` | start from an existing `.env`: declare every key, then import the values, verified ([configuration](configuration.md#start-from-an-existing-env-opv-init---from)) | with `--apply`: the configuration and the item's fields |
 | `opv add <[product/]KEY> --kind secret\|config [...]` | declare a key, or add environments to one | the configuration |
+| `opv env add <env> [--json]` | declare an environment in `secrets.toml` (the `opv_declare_environment` declaration); refuses a generated configuration | the configuration |
 | `opv item skeleton <env> [--json]` | add every missing declared field to the item, empty | the 1Password item |
 | `opv config export [<env>] [--toml\|--json]` | print the configuration, or an environment's config values | nothing |
 | `opv config import --vault <v> [--file <f>] [--project <p>] [--path <dir>]...` | save a `secrets.toml` as the project manifest | 1Password (a new manifest) |
 | `opv config edit` | edit, validate, diff and save the configuration | the configuration; needs your own terminal |
 | `opv config check --file <f>` | compare a committed copy with the manifest | nothing |
+| `opv config describe [--json]` | the declared metadata (the `opv_configuration` document): environment names, product/key names and kinds, each target's provider, products and declared state vault/deploy identity; names only | nothing (read-only) |
 | `opv projects [--account <a>] [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
 | `opv help states`, `opv help <command>` | what each state word means; a command's help | nothing |
 | `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
