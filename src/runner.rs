@@ -1286,7 +1286,7 @@ impl Engine for ProcessRunner {
 }
 
 /// Read only the executable header, never any credential source.
-fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
+pub(crate) fn windows_binary(path: &std::path::Path) -> io::Result<bool> {
     let mut header = [0u8; 2];
     match std::fs::File::open(path)?.read_exact(&mut header) {
         Ok(()) => Ok(header == *b"MZ"),
