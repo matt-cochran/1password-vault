@@ -768,3 +768,123 @@ fn approving_a_sync_lists_each_name_it_writes() {
         ui.0
     );
 }
+
+// --- opv_sync (0.9.0): the MCP side of an approved sync ---
+
+#[cfg(feature = "mcp")]
+fn mcp_sync(w: &World, fleet: &Fleet, dir: &std::path::Path, id: &str) -> Value {
+    let _person = tidy::activate();
+    let args = crate::mcp::SyncScopeArgs {
+        environment: "prod".into(),
+        plan_id: id.into(),
+        targets: targets(&["east"]),
+        product: None,
+        deploy: false,
+        prune: false,
+    };
+    crate::mcp::sync_approved(
+        fleet,
+        &args,
+        PROJECT,
+        ACCOUNT,
+        w,
+        1_010,
+        std::iter::empty(),
+        &mut |p, key, project, account, now| {
+            crate::approval::consume_scoped_in(
+                &dir.join("approvals"),
+                p,
+                key,
+                project,
+                account,
+                now,
+            )
+        },
+    )
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_writes_an_approved_plan() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    let answer = mcp_sync(&w, &fleet, dir.path(), &id);
+    assert_eq!(answer["written"], json!([NAME]), "{answer}");
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_never_returns_a_value() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    assert!(
+        !mcp_sync(&w, &fleet, dir.path(), &id)
+            .to_string()
+            .contains(MARK)
+    );
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_without_an_approval_returns_the_approve_command() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    assert_eq!(
+        mcp_sync(&w, &fleet, dir.path(), &id)["approve_command"],
+        json!(format!("opv approve {id} --sync prod --target east"))
+    );
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_without_an_approval_writes_nothing() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    let _ = mcp_sync(&w, &fleet, dir.path(), &id);
+    assert_eq!(w.imports.get(), 0);
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_refuses_an_op_credential_in_its_environment() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    let args = crate::mcp::SyncScopeArgs {
+        environment: "prod".into(),
+        plan_id: id,
+        targets: targets(&["east"]),
+        product: None,
+        deploy: false,
+        prune: false,
+    };
+    let answer = crate::mcp::sync_approved(
+        &fleet,
+        &args,
+        PROJECT,
+        ACCOUNT,
+        &w,
+        1_010,
+        std::iter::once(("OP_SERVICE_ACCOUNT_TOKEN".to_string(), "x".to_string())),
+        &mut |_, _, _, _, _| Ok(()),
+    );
+    assert_eq!(answer["code"], "credential_in_environment");
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_refuses_a_plan_id_that_is_not_one() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    assert_eq!(
+        mcp_sync(&w, &fleet, dir.path(), "../../etc")["code"],
+        "invalid_plan_id"
+    );
+}
