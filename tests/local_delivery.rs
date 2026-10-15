@@ -108,18 +108,24 @@ const MOUNT_ARGS: &[&str] = &[
     "--declared-only",
 ];
 
-fn mounted(script: &str) -> Option<(Option<i32>, String)> {
+fn mounted_with(
+    args: &[&str],
+    env: &[(&str, &str)],
+    script: &str,
+) -> Option<(Option<i32>, String)> {
     let runtime = runtime_dir()?;
     let r = runtime.to_str().unwrap().to_string();
-    Some(deliver(
+    let mut all = env.to_vec();
+    all.push(("XDG_RUNTIME_DIR", r.as_str()));
+    Some(deliver(args, &all, script))
+}
+
+fn mounted(script: &str) -> Option<(Option<i32>, String)> {
+    mounted_with(
         MOUNT_ARGS,
-        &[
-            ("GITHUB_APP_PRIVATE_KEY", MARKER),
-            ("EXPECTED", MARKER),
-            ("XDG_RUNTIME_DIR", &r),
-        ],
+        &[("GITHUB_APP_PRIVATE_KEY", MARKER), ("EXPECTED", MARKER)],
         script,
-    ))
+    )
 }
 
 #[test]
@@ -165,6 +171,52 @@ fn without_a_ram_directory_nothing_is_written_or_started() {
         &script,
     );
     assert!(!started.exists());
+}
+
+const BYTES_ARGS: &[&str] = &[
+    "--key",
+    "TEST_PEM",
+    "--file",
+    "TEST_PEM=github-app/private-key",
+    "--key",
+    "EXPECTED_FILE",
+    "--dir-env",
+    "JZ_SECRETS_DIR",
+    "--declared-only",
+];
+
+/// Deliver `value` as `github-app/private-key` and compare its bytes with a reference
+/// file; the child prints only `match` or `differ`.
+fn bytes_match(value: &str) -> Option<(Option<i32>, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("expected");
+    std::fs::write(&reference, value.as_bytes()).unwrap();
+    let reference = reference.to_str().unwrap().to_string();
+    mounted_with(
+        BYTES_ARGS,
+        &[("TEST_PEM", value), ("EXPECTED_FILE", &reference)],
+        r#"cmp -s "$JZ_SECRETS_DIR/github-app/private-key" "$EXPECTED_FILE" && echo match || echo differ"#,
+    )
+}
+
+#[test]
+fn a_multiline_value_with_a_trailing_newline_arrives_byte_for_byte() {
+    let pem = "-----BEGIN TEST KEY-----\nAAAA\nBBBB\n-----END TEST KEY-----\n";
+    let Some((_, out)) = bytes_match(pem) else {
+        eprintln!("skipped: no tmpfs runtime directory here");
+        return;
+    };
+    assert_eq!(out.trim(), "match");
+}
+
+#[test]
+fn a_value_without_a_trailing_newline_arrives_without_one() {
+    let pem = "-----BEGIN TEST KEY-----\nAAAA\nBBBB\n-----END TEST KEY-----";
+    let Some((_, out)) = bytes_match(pem) else {
+        eprintln!("skipped: no tmpfs runtime directory here");
+        return;
+    };
+    assert_eq!(out.trim(), "match");
 }
 
 #[test]
