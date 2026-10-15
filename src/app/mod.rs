@@ -27,6 +27,7 @@ pub mod config_cmd;
 pub mod config_export;
 pub mod declare;
 pub mod delivery;
+pub mod delivery_preview;
 pub mod doctor;
 pub mod explain;
 pub mod generate;
@@ -2046,6 +2047,40 @@ pub(crate) mod testutil {
     pub fn fleet_with(extra: &str) -> Fleet {
         let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
         config::parse(&format!("{text}\n{extra}")).unwrap()
+    }
+
+    /// Two prod keys scoped to the process roles `serve` and `migrate` (#136).
+    pub const ROLE_KEYS: &str = "\
+[products.allumata.keys.SERVE_TOKEN]
+kind = \"secret\"
+environments = [\"prod\"]
+roles = [\"serve\"]
+
+[products.allumata.keys.DATABASE_URL_UNPOOLED]
+kind = \"secret\"
+environments = [\"prod\"]
+roles = [\"migrate\"]
+";
+
+    /// The fixture fleet plus the two role-scoped keys.
+    pub fn role_fleet() -> Fleet {
+        fleet_with(ROLE_KEYS)
+    }
+
+    /// [`role_fleet`] plus a local delivery section and a `migrate`-scoped file key.
+    pub fn role_local_fleet() -> Fleet {
+        fleet_with(&format!(
+            "{ROLE_KEYS}\n[products.allumata.keys.MIGRATE_PEM]
+kind = \"secret\"
+environments = [\"prod\"]
+roles = [\"migrate\"]
+file = \"db/migrate-pem\"
+
+[products.allumata.local]
+environment = \"declared_only\"
+secrets_dir_env = \"APP_SECRETS_DIR\"
+"
+        ))
     }
 
     /// 32 bytes, base64. The bytes spell the marker, so a decoded leak is detectable too.

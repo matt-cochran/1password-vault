@@ -108,6 +108,19 @@ pub struct Environment {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DeliveryPreviewScope {
+    /// A declared environment name, not a path, command, credential, or value.
+    environment: String,
+    /// Only this declared product; omitted: the one product with keys desired here.
+    #[serde(default)]
+    product: Option<String>,
+    /// Only keys that declare this process role (and keys without roles).
+    #[serde(default)]
+    role: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReadyScope {
     /// A declared environment name; omitted: every declared environment.
     #[serde(default)]
@@ -193,6 +206,23 @@ impl Server {
     async fn access(&self, Parameters(args): Parameters<AccessScope>) -> String {
         self.serialized(move |project| {
             access_projection(project, args.environment.as_deref(), args.target.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "opv_delivery_preview",
+        description = "Preview which keys a local `opv run` would deliver for one environment, without reading any value: each key's product, name, source, destination (variable name or relative file path) and declared process roles; the key names a role withholds; the environment mode, the secrets-directory variable, whether RAM-backed file delivery is supported here, and whether the op CLI is present and signed in (unknown when it cannot be determined). Changes nothing; the person runs opv run to deliver values.",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn delivery_preview(&self, Parameters(args): Parameters<DeliveryPreviewScope>) -> String {
+        self.serialized(move |project| {
+            delivery_preview_doc(
+                project,
+                &args.environment,
+                args.product.as_deref(),
+                args.role.as_deref(),
+            )
         })
         .await
     }
@@ -669,6 +699,62 @@ fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Op
 
 fn structure_error(code: &str, human_action: &str) -> Value {
     json!({"ok": false, "code": code, "human_action": human_action})
+}
+
+/// `opv_delivery_preview`: validate the names with [`identifier`], load the project's
+/// configuration on a read-only runner, then answer with the shared preview document.
+fn delivery_preview_doc(
+    project: &std::path::Path,
+    environment: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+) -> Value {
+    if !identifier(environment)
+        || product.is_some_and(|p| !identifier(p))
+        || role.is_some_and(|r| !identifier(r))
+    {
+        return structure_error(
+            "invalid_name",
+            "Use declared names only (letters, digits, '.', '_', '/' and '-').",
+        );
+    }
+    let r = ReadOnly {
+        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(20)), false),
+        refused: AtomicBool::new(false),
+    };
+    let req = config_store::Request {
+        start: project.into(),
+        config: None,
+        project: None,
+        manifest_only: false,
+        account: config_store::account_env(),
+    };
+    let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
+        Ok(fleet) => fleet,
+        Err(e) => return inspection_error(e.code().as_str()),
+    };
+    delivery_preview_from_fleet(&fleet, environment, product, role, &r)
+}
+
+/// The MCP answer from an already-loaded fleet: the same document the CLI's
+/// `opv run --preview --json` prints ([`crate::app::delivery_preview::build`]).
+fn delivery_preview_from_fleet(
+    fleet: &crate::domain::Fleet,
+    environment: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+    runner: &dyn CommandRunner,
+) -> Value {
+    if !fleet.environments.contains_key(environment) {
+        return inspection_error("unknown_environment");
+    }
+    match crate::app::delivery_preview::build(fleet, environment, product, role, runner) {
+        Ok(doc) => doc,
+        Err(e) => structure_error(
+            e.code().as_str(),
+            "Name a role the product's keys declare (or fix the configuration), then ask again.",
+        ),
+    }
 }
 
 /// The error answer for `e`: its code, and the new plan id when it is `stale_plan`. Never
@@ -1671,5 +1757,29 @@ rules = { prefix = "sk_" }
             .collect();
         mapped.sort();
         assert_eq!(registered, mapped);
+    }
+
+    #[test]
+    fn opv_delivery_preview_returns_the_shared_document() {
+        let fleet = crate::app::testutil::role_fleet();
+        let sign_in = || Output::success(b"{\"user_type\":\"USER\"}".to_vec());
+        let r = FakeRunner::new([sign_in(), sign_in()]);
+        let via_tool =
+            delivery_preview_from_fleet(&fleet, "prod", Some("allumata"), Some("serve"), &r);
+        let via_builder = crate::app::delivery_preview::build(
+            &fleet,
+            "prod",
+            Some("allumata"),
+            Some("serve"),
+            &r,
+        )
+        .unwrap();
+        assert_eq!(via_tool, via_builder);
+    }
+
+    #[test]
+    fn opv_delivery_preview_refuses_a_non_identifier_name() {
+        let answer = delivery_preview_doc(std::path::Path::new("."), "prod!", None, None);
+        assert_eq!(answer["code"], "invalid_name");
     }
 }

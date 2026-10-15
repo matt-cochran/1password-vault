@@ -1256,6 +1256,29 @@ fn validate_key(
             return Err(cfg(format!("{owner}: undefined environment {env:?}")));
         }
     }
+    // Process roles (#136): an empty list is refused (it would silently deliver nothing),
+    // and every name is a lower-case word so a shell never has to quote it.
+    if let Some(roles) = &spec.roles {
+        if roles.is_empty() {
+            return Err(cfg(format!(
+                "{owner}: roles must name at least one role; remove it to deliver the key to \
+                 every role, or list roles like [\"serve\", \"migrate\"]"
+            )));
+        }
+        for role in roles {
+            let ok = !role.is_empty()
+                && role.len() <= 32
+                && role
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !ok {
+                return Err(cfg(format!(
+                    "{owner}: role {role:?} must match ^[a-z0-9-]{{1,32}}$ (lower-case letters, \
+                     digits and '-')"
+                )));
+            }
+        }
+    }
     for env in &spec.rules.refuse_in {
         if !environments.contains_key(env) {
             return Err(cfg(format!(

@@ -208,31 +208,31 @@ fn an_invisible_vault_lists_no_service_accounts() {
 
 #[test]
 fn an_invisible_environment_yields_only_access_not_visible() {
-    let found = findings("shop", &[invisible("prod")]);
+    let found = findings(&[invisible("prod")]);
     assert_eq!(codes(&found), ["access_not_visible"]);
 }
 
 #[test]
 fn access_not_visible_has_no_next_step() {
-    let found = findings("shop", &[invisible("prod")]);
+    let found = findings(&[invisible("prod")]);
     assert!(found[0].next.is_none());
 }
 
 #[test]
 fn access_not_visible_never_suggests_a_ci_reader() {
-    let found = findings("shop", &[invisible("prod")]);
+    let found = findings(&[invisible("prod")]);
     assert!(!codes(&found).contains(&"no_ci_reader"));
 }
 
 #[test]
 fn access_not_visible_message_names_the_environment() {
-    let found = findings("shop", &[invisible("prod")]);
+    let found = findings(&[invisible("prod")]);
     assert!(found[0].message.contains("prod"));
 }
 
 #[test]
 fn a_deployed_environment_without_a_ci_reader_yields_no_ci_reader() {
-    let found = findings("shop", &[visible("prod", true, Vec::new())]);
+    let found = findings(&[visible("prod", true, Vec::new())]);
     assert_eq!(codes(&found), ["no_ci_reader"]);
 }
 
@@ -242,7 +242,7 @@ fn a_local_environment_needs_no_ci_reader() {
         name: "dev-ci".into(),
         read_only: false,
     }];
-    let found = findings("shop", &[visible("dev", false, writers)]);
+    let found = findings(&[visible("dev", false, writers)]);
     assert_eq!(codes(&found), ["ci_reader_can_write"]);
 }
 
@@ -252,12 +252,12 @@ fn a_read_only_service_account_omits_no_ci_reader() {
         name: "prod-ci".into(),
         read_only: true,
     }];
-    assert!(findings("shop", &[visible("prod", true, readers)]).is_empty());
+    assert!(findings(&[visible("prod", true, readers)]).is_empty());
 }
 
 #[test]
 fn no_ci_reader_suggests_creating_the_reader_without_showing_its_token() {
-    let found = findings("shop", &[visible("prod", true, Vec::new())]);
+    let found = findings(&[visible("prod", true, Vec::new())]);
     assert_eq!(
         found[0].next.as_deref(),
         Some("opv access prod --create --github <owner/repo>")
@@ -266,7 +266,7 @@ fn no_ci_reader_suggests_creating_the_reader_without_showing_its_token() {
 
 #[test]
 fn no_ci_reader_message_names_the_environment() {
-    let found = findings("shop", &[visible("prod", true, Vec::new())]);
+    let found = findings(&[visible("prod", true, Vec::new())]);
     assert!(found[0].message.contains("prod"));
 }
 
@@ -276,7 +276,7 @@ fn a_writable_service_account_yields_ci_reader_can_write() {
         name: "prod-ci".into(),
         read_only: false,
     }];
-    let found = findings("shop", &[visible("prod", true, writers)]);
+    let found = findings(&[visible("prod", true, writers)]);
     assert!(codes(&found).contains(&"ci_reader_can_write"));
 }
 
@@ -286,7 +286,7 @@ fn a_read_only_service_account_yields_no_ci_reader_can_write() {
         name: "prod-ci".into(),
         read_only: true,
     }];
-    let found = findings("shop", &[visible("prod", true, readers)]);
+    let found = findings(&[visible("prod", true, readers)]);
     assert!(!codes(&found).contains(&"ci_reader_can_write"));
 }
 
@@ -302,7 +302,7 @@ fn each_writable_service_account_yields_its_own_finding() {
             read_only: false,
         },
     ];
-    let found = findings("shop", &[visible("prod", true, writers)]);
+    let found = findings(&[visible("prod", true, writers)]);
     let writable = found
         .iter()
         .filter(|f| f.code == "ci_reader_can_write")
@@ -316,7 +316,7 @@ fn ci_reader_can_write_message_names_the_service_account() {
         name: "prod-ci".into(),
         read_only: false,
     }];
-    let found = findings("shop", &[visible("prod", true, writers)]);
+    let found = findings(&[visible("prod", true, writers)]);
     let message = &found
         .iter()
         .find(|f| f.code == "ci_reader_can_write")
@@ -331,7 +331,7 @@ fn ci_reader_can_write_message_names_the_environment() {
         name: "prod-ci".into(),
         read_only: false,
     }];
-    let found = findings("shop", &[visible("prod", true, writers)]);
+    let found = findings(&[visible("prod", true, writers)]);
     let message = &found
         .iter()
         .find(|f| f.code == "ci_reader_can_write")
@@ -346,7 +346,7 @@ fn ci_reader_can_write_has_no_next_step() {
         name: "prod-ci".into(),
         read_only: false,
     }];
-    let found = findings("shop", &[visible("prod", true, writers)]);
+    let found = findings(&[visible("prod", true, writers)]);
     let finding = found
         .iter()
         .find(|f| f.code == "ci_reader_can_write")
@@ -363,7 +363,7 @@ fn findings_keep_environments_in_input_order() {
         name: "prod-ci".into(),
         read_only: false,
     });
-    let found = findings("shop", &[prod, invisible("staging")]);
+    let found = findings(&[prod, invisible("staging")]);
     let environments: Vec<&str> = found.iter().map(|f| f.environment.as_str()).collect();
     assert_eq!(environments, ["prod", "prod", "staging"]);
 }
@@ -374,7 +374,7 @@ fn findings_are_ordered_by_code_within_an_environment() {
         name: "prod-ci".into(),
         read_only: false,
     }];
-    let found = findings("shop", &[visible("prod", true, writers)]);
+    let found = findings(&[visible("prod", true, writers)]);
     assert_eq!(codes(&found), ["no_ci_reader", "ci_reader_can_write"]);
 }
 
@@ -398,7 +398,7 @@ fn analysis_serialises_no_guest_email() {
 fn findings_name_no_member() {
     let users = list(vec![entry("MEMBER", "ACTIVE", Some("Alice Smith"), &[])]);
     let env = analyse("prod", "v1", true, Some(&users));
-    let shown = serde_json::to_string(&findings("shop", &[env])).unwrap();
+    let shown = serde_json::to_string(&findings(&[env])).unwrap();
     assert!(!shown.contains("Alice"));
 }
 
@@ -414,7 +414,7 @@ fn two_service_accounts_with_one_name_yield_pending_revoke() {
             read_only: true,
         },
     ];
-    let found = findings("shop", &[visible("prod", true, twins)]);
+    let found = findings(&[visible("prod", true, twins)]);
     assert_eq!(codes(&found), ["pending_revoke"]);
 }
 
@@ -430,7 +430,7 @@ fn pending_revoke_steps_to_verifying_the_new_delivery() {
             read_only: true,
         },
     ];
-    let found = findings("shop", &[visible("prod", true, twins)]);
+    let found = findings(&[visible("prod", true, twins)]);
     assert_eq!(found[0].next.as_deref(), Some("opv delivery verify prod"));
 }
 
@@ -446,6 +446,6 @@ fn distinct_service_account_names_yield_no_pending_revoke() {
             read_only: true,
         },
     ];
-    let found = findings("shop", &[visible("prod", true, two)]);
+    let found = findings(&[visible("prod", true, two)]);
     assert!(!codes(&found).contains(&"pending_revoke"));
 }

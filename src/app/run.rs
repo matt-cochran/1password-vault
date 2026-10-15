@@ -15,7 +15,7 @@ use std::io;
 
 use super::personal;
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, KeySpec, rules};
+use crate::domain::{Fleet, KeySpec};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -28,6 +28,7 @@ pub fn run_for(
     fleet: &Fleet,
     env_name: &str,
     product: Option<&str>,
+    role: Option<&str>,
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
@@ -35,19 +36,34 @@ pub fn run_for(
         Some(p) => p.to_string(),
         None => super::pick_product(fleet, env_name, None, "run")?,
     };
-    run(fleet, env_name, &product, command, runner)
+    run_with_role(fleet, env_name, &product, role, command, runner)
 }
 
 /// Run `command` under `op run` with the product's references for `env_name` in its
 /// environment. Returns the child's exit code, which `main` uses as the process exit code.
 ///
 /// Keys passed: every key of `product` declared for `env_name` whose rules apply
-/// ([`rules::applies`]). Keys skipped by a mode (e.g. `payments = "off"`) are left out,
+/// ([`crate::domain::rules::applies`]). Keys skipped by a mode (e.g. `payments = "off"`) are left out,
 /// because their field may be empty and `op run` fails on an empty reference.
 pub fn run(
     fleet: &Fleet,
     env_name: &str,
     product: &str,
+    command: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
+    run_with_role(fleet, env_name, product, None, command, runner)
+}
+
+/// [`run`] with `--role` (#136): the keys are selected once, by
+/// [`crate::app::delivery_preview::select`],
+/// so a role withheld key is neither referenced on `op run`'s command line nor written by
+/// the local delivery step nor put in the child environment.
+pub fn run_with_role(
+    fleet: &Fleet,
+    env_name: &str,
+    product: &str,
+    role: Option<&str>,
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
@@ -66,11 +82,8 @@ pub fn run(
         .with_next("opv run --help"));
     }
 
-    let selected: Vec<(&String, &KeySpec)> = prod
-        .keys
-        .iter()
-        .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
-        .collect();
+    let selection = super::delivery_preview::select(env_name, env, product, prod, role)?;
+    let selected: Vec<(&String, &KeySpec)> = selection.delivered;
     // FR-55: a personal key's value is in the person's own item. Locate it before the read
     // and before `op run`, so a missing personal item stops the run and names the keys.
     let personal_env = if selected
@@ -499,7 +512,7 @@ environments = ["ci"]
     #[test]
     fn run_without_product_uses_the_only_non_source_only_product() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
-        run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap();
+        run_for(&source_only_fleet(), "ci", None, None, &cmd(&["env"]), &r).unwrap();
         assert_eq!(argvs(&r), vec!["op run -- env"]);
     }
 }

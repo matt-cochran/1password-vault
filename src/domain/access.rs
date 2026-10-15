@@ -111,9 +111,8 @@ fn reader(user: &serde_json::Map<String, Value>) -> Reader {
 }
 
 /// Findings for the analysed environments, in input order, then by code order:
-/// access_not_visible, no_ci_reader, ci_reader_can_write, pending_revoke. `project` names
-/// the suggested service account.
-pub fn findings(project: &str, envs: &[EnvAccess]) -> Vec<AccessFinding> {
+/// access_not_visible, no_ci_reader, ci_reader_can_write, pending_revoke.
+pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
     let mut out = Vec::new();
     for access in envs {
         if !access.visible {

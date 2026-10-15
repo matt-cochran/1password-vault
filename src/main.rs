@@ -685,8 +685,21 @@ enum Cmd {
         /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
+        /// Deliver only keys that declare this process role (and keys without roles).
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// Print what this run would deliver; reads no value and runs nothing.
+        #[arg(long)]
+        preview: bool,
+        /// With --preview: print one JSON document.
+        #[arg(long, requires = "preview")]
+        json: bool,
         /// Command and arguments, after `--`.
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            required_unless_present = "preview",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         command: Vec<String>,
     },
     /// Preview deployment changes without changing anything.
@@ -1981,7 +1994,7 @@ fn rerun_command(cmd: &Cmd) -> String {
 
 /// `opv run ... --json -- cmd`: clap takes an unknown opv flag before `--` as the start
 /// of the child command. A COMMAND whose first word starts with `-` and did not come right
-/// after `--` is refused (M8): opv's flags go before `--`, and `run` has no `--json`.
+/// after `--` is refused (M8): opv's flags go before `--`.
 fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
     let first = command.first().filter(|w| w.starts_with('-'))?;
     let after_dashes = argv
@@ -2008,7 +2021,7 @@ fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
         words.extend(child.iter().map(|a| shell_word(a)));
     }
     let hint = if first == "--json" {
-        "run takes no --json (the command's own output is passed through)"
+        "run's --json needs --preview; opv's options go before --"
     } else {
         "opv's options go before --"
     };
@@ -2177,6 +2190,12 @@ impl Cmd {
             | Cmd::Structure(StructureCmd::Plan { json })
             | Cmd::Structure(StructureCmd::Apply { json, .. })
             | Cmd::Config(ConfigCmd::Describe { json }) => return json.then_some(true),
+            // `run --preview --json` prints exactly the builder's document (no framing).
+            Cmd::Run {
+                preview: true,
+                json: true,
+                ..
+            } => return Some(true),
             _ => false,
         };
         json.then_some(false)
@@ -2650,10 +2669,40 @@ fn run(
     if let Cmd::Run {
         env,
         product,
+        role,
+        preview,
+        json,
         command,
     } = &cmd
     {
-        return run_cmd::run_for(&loaded?, env, product.as_deref(), command, runner);
+        if *preview {
+            if !command.is_empty() {
+                return Err(Error::Config(
+                    "--preview takes no command: it reads no value and runs nothing; drop the \
+                     words after --"
+                        .into(),
+                )
+                .with_code(opv::error::Code::Usage));
+            }
+            opv::app::delivery_preview::preview_for(
+                &loaded?,
+                env,
+                product.as_deref(),
+                role.as_deref(),
+                *json,
+                runner,
+                out,
+            )?;
+            return Ok(0);
+        }
+        return run_cmd::run_for(
+            &loaded?,
+            env,
+            product.as_deref(),
+            role.as_deref(),
+            command,
+            runner,
+        );
     }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
 }

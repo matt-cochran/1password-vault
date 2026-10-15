@@ -134,6 +134,11 @@ A `pending_revoke` finding means an old identity still reads the vault: once
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go
   `opv plan <env>` then `opv sync <env> --expect-plan <id>` (add `--deploy` only when the user
   wants to deploy). CI secrets in GitHub Actions use a `github` environment and the same sync.
+- **Which keys a local run would deliver, and their roles**: `opv run <env> --preview --json`
+  (or MCP `opv_delivery_preview`) reports each key's source, destination and roles, the keys a
+  role withholds, the environment mode, the secrets-directory variable, file-delivery support
+  and the `op`/signed-in prerequisites, without reading a value. Use it to check delivery
+  (including `--role`) before the user runs the command.
 - **"Is product P still what was delivered?"** (targets with a state vault): run
   `opv delivery verify <env> --product <P> --json`. It reports every placement of P, each with
   its target and state; `--target <name>` narrows to one placement. Only `verified` is proof.

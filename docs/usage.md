@@ -35,7 +35,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>]` | 1Password and every target side by side, names only | nothing |
 | `opv plan <env> [--product <p>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
 | `opv sync <env> [--deploy] [--prune] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
-| `opv run <env> [--product <p>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)) | nothing |
+| `opv run <env> [--product <p>] [--role <r>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
 | `opv init <env> [--vault <title>] [--item <title>] [--product <p>]` | configuration (boundaries and products) from an existing item; no target ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
@@ -397,7 +397,17 @@ api/OPENAI_API_KEY: saved
 no findings; no deployment target checked
 ```
 
-`run <env> [--product <p>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` takes no `--json` and exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
+
+### Process roles: `--role`
+
+A key may declare the processes it belongs to: `roles = ["serve", "migrate"]` in its key table (one or more names, each lower-case letters, digits and `-`, at most 32 characters; an empty list is refused at load). A key without `roles` reaches every role and a run without `--role`. A key with `roles` reaches a run only when `--role` names one of them, so migration-owner material in `DATABASE_URL_UNPOOLED` never enters a `--role serve` run's environment or secrets directory.
+
+All refusals are fail-closed, before anything is read from 1Password: a product with any role-scoped key and no `--role` is refused (exit 2) naming the declared roles; a `--role` no key declares is refused naming them too, never delivering everything. Roles apply to `opv run` only; `sync` and targets ignore them.
+
+### Delivery preview: `--preview`
+
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 1); the text form prints one line per key plus the summary lines.
 
 ## Doctor
 

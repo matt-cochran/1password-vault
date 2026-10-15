@@ -349,7 +349,7 @@ fn build(
             false,
             observations.get(*vault).and_then(|o| o.as_ref()),
         );
-        for finding in findings(project, &[access]) {
+        for finding in findings(&[access]) {
             // A deploy identity writes its own state vault by design (FR-59); the CI-reader
             // warning is about writing values, so it applies to the boundary vaults only.
             if finding.code == "ci_reader_can_write" && !boundary.contains(*vault) {
