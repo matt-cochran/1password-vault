@@ -121,6 +121,20 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "mcp serve",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "mcp install",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
         command: "version",
         effect: "reads",
         needs_terminal: false,

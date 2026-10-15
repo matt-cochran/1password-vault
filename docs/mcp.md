@@ -1,6 +1,6 @@
 # MCP interface
 
-The optional `opv-mcp` binary uses the official Rust MCP SDK (`rmcp`) over stdio. It
+opv's MCP server, `opv mcp serve`, uses the official Rust MCP SDK (`rmcp`) over stdio. It
 lets an assistant inspect a project, manage its declared structure, and prepare the
 1Password structure it needs. A person keeps three things: signing in, approving
 structural changes in their own terminal, and entering every secret value in 1Password.
@@ -78,32 +78,42 @@ finish (objects already created are found again by title, never duplicated).
 For a generated configuration, apply records nothing in the file and returns
 `generator_ids`, the lines to add to the generator's input.
 
-## Build and configure
+## Set up
+
+The server is part of every released `opv` (npm, `install.sh`, the GitHub release); there
+is nothing else to install. Register it for a project with your assistant (ask the person
+first: it writes the assistant's configuration):
 
 ```sh
-cargo build --locked --features mcp --bin opv-mcp
+opv mcp install                      # this project (git top level), for Claude Code and Codex
+opv mcp install --client claude      # only the project's .mcp.json
+opv mcp install --client codex       # only ~/.codex/config.toml ($CODEX_HOME)
 ```
 
-The default CLI build does not enable MCP. Launch the server with an absolute trusted
-project directory chosen by the person. Sign in to 1Password in the desktop app (with
-Settings > Developer > Integrate with 1Password CLI on); do not start the server from a
-terminal that holds an `op signin` session.
+It registers `<absolute path of opv> mcp serve --project <absolute project path>` under the
+name `opv` (`--name` for another). Each file is merged, never replaced: other servers and
+settings are kept, a second run reports `unchanged`, and an existing `opv` entry that runs
+something else is refused unless `--force`. No value, credential or environment variable
+is written. For opv installed with npm it registers the shared copy (`~/.local/bin/opv`),
+which upgrades keep in place. Restart the assistant to load it.
 
-Example Claude Code configuration (merge with existing MCP servers):
+Sign in to 1Password in the desktop app (with Settings > Developer > Integrate with
+1Password CLI on), and do not start the assistant from a terminal that holds an
+`op signin` session. The server cannot switch projects at an assistant's request; use
+trusted absolute paths and review the project configuration before connecting.
+
+Any other client runs the same command, for example:
 
 ```json
 {
   "mcpServers": {
     "opv": {
-      "command": "/absolute/path/to/opv-mcp",
-      "args": ["--project", "/absolute/path/to/project"]
+      "command": "/absolute/path/to/opv",
+      "args": ["mcp", "serve", "--project", "/absolute/path/to/project"]
     }
   }
 }
 ```
-
-Use trusted absolute executable paths and review the project configuration before
-connecting. The server cannot switch projects at an assistant's request.
 
 ## Read-only inspection
 
@@ -115,7 +125,7 @@ hints, not the enforcement mechanism.
 
 ## Without structural MCP (CLI fallback)
 
-An opv older than this release, or a client without MCP, uses the owner-terminal
+An opv older than 0.8.1 (whose MCP server was a separate `opv-mcp` binary built from source), or a client without MCP, uses the owner-terminal
 commands: the person runs `opv bootstrap --dry-run`, then `opv bootstrap`, and
 `opv target add` for each target. The assistant declares with `opv add` and
 `opv init --add-env` once the configuration is bootstrapped. Report a missing MCP tool
@@ -140,7 +150,7 @@ deployment or prevents a separate unrestricted shell from reading secrets.
 ```sh
 cargo test --locked --features fake,mcp
 cargo clippy --all-targets --features fake,mcp -- -D warnings
-python3 tests/mcp_protocol.py target/debug/opv-mcp
+python3 tests/mcp_protocol.py target/debug/opv
 ```
 
 Tests cover refusal before vendor writes, value-field suppression on success and on

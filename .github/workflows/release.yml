@@ -86,6 +86,8 @@ jobs:
           bin="target/${{ matrix.target }}/release/opv"
           if [[ "${{ matrix.target }}" == *windows* ]]; then bin="$bin.exe"; fi
           "$bin" --version
+          # The MCP server ships in the same binary (0.8.1): it must be there.
+          "$bin" mcp serve --help >/dev/null
       - name: Rename binary
         shell: bash
         run: |

@@ -1,4 +1,4 @@
-"""Credential-free smoke test of the actual rmcp stdio server."""
+"""Credential-free smoke test of the actual rmcp stdio server (`opv mcp serve`)."""
 import json
 import pathlib
 import queue
@@ -13,7 +13,7 @@ binary = pathlib.Path(sys.argv[1]).resolve()
 with tempfile.TemporaryDirectory() as directory:
     project = pathlib.Path(directory)
     shutil.copyfile(root / 'tests/fixtures/secrets.toml', project / 'secrets.toml')
-    process = subprocess.Popen([str(binary), '--project', str(project)],
+    process = subprocess.Popen([str(binary), 'mcp', 'serve', '--project', str(project)],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, text=True)
     messages = queue.Queue()
