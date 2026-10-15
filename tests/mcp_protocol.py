@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory() as directory:
         send('notifications/initialized', {})
         tools = send('tools/list', {}, 2)['result']['tools']
         assert {tool['name'] for tool in tools} == {
-            'opv_ready', 'opv_configuration', 'opv_deployment_plan',
+            'opv_ready', 'opv_configuration', 'opv_deployment_plan', 'opv_access',
             'opv_structure_plan', 'opv_structure_apply', 'opv_declare_key',
             'opv_declare_environment', 'opv_declare_target'}
         # The inspection tools and the plan are read-only; declarations edit the local

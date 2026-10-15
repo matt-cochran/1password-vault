@@ -4,6 +4,7 @@
 //! through the plug-in contract in `crate::provider`, via [`registry`] (FR-37).
 
 pub mod azure;
+pub mod ci_secrets;
 /// Stateful fake `op` for manifest tests.
 #[cfg(any(test, feature = "fake"))]
 pub mod fake_op;

@@ -28,6 +28,17 @@ use std::{
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct AccessScope {
+    /// A declared environment; omitted: every environment.
+    #[serde(default)]
+    environment: Option<String>,
+    /// A declared target of that environment: only its deploy identity.
+    #[serde(default)]
+    target: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlanId {
     /// The plan id opv_structure_plan returned and a person approved with opv approve.
     plan_id: String,
@@ -154,6 +165,18 @@ impl Server {
     )]
     async fn deployment_plan(&self, Parameters(args): Parameters<Environment>) -> String {
         self.inspect(Operation::Plan, Some(args.environment)).await
+    }
+
+    #[tool(
+        name = "opv_access",
+        description = "Who needs which 1Password vault for CI and deploys, and who can read it now: each identity (a target's deploy identity, an environment's CI reader) with its service-account name, vaults, permissions and state (present, missing, read-only needed, not visible, not in this account), findings with their next step, and for each identity missing a grant the exact owner command that creates it and stores its token as a GitHub secret without showing it (`opv access <env> [--target <t>] --create --github <owner/repo> --github-env <env>`; the person runs it, filling in the repository and GitHub environment the CI job uses). Never a token or value. Changes nothing.",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn access(&self, Parameters(args): Parameters<AccessScope>) -> String {
+        self.serialized(move |project| {
+            access_projection(project, args.environment.as_deref(), args.target.as_deref())
+        })
+        .await
     }
 
     #[tool(
@@ -511,6 +534,135 @@ fn declared(
     }
 }
 
+/// `opv access` as checked identifiers: what each CI or deploy identity needs, its state,
+/// and the owner's `opv access … --create` command for each identity missing a grant.
+fn access_projection(project: &std::path::Path, env: Option<&str>, target: Option<&str>) -> Value {
+    if env.is_some_and(|e| !identifier(e)) || target.is_some_and(|t| !identifier(t)) {
+        return inspection_error("invalid_environment");
+    }
+    if target.is_some() && env.is_none() {
+        return structure_error(
+            "environment_required",
+            "Name the environment of the target.",
+        );
+    }
+    crate::scrub::clear_mcp_registry();
+    let _redaction_scope = RedactionScope;
+    let r = ReadOnly {
+        inner: ProcessRunner::new(Budget::starting_now(Duration::from_secs(60)), false),
+        refused: AtomicBool::new(false),
+    };
+    let req = config_store::Request {
+        start: project.into(),
+        config: None,
+        project: None,
+        manifest_only: false,
+        account: config_store::account_env(),
+    };
+    let fleet = match config_store::locate(&req, &r).and_then(|found| found.load(&r)) {
+        Ok(fleet) => fleet,
+        Err(e) => return inspection_error(e.code().as_str()),
+    };
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    let result = crate::app::access::run(&fleet, env, target, None, &r, true, &mut *bytes);
+    if r.refused.load(Ordering::Relaxed) {
+        return inspection_error("human_approval_required");
+    }
+    let Ok(doc) = serde_json::from_slice::<Value>(&bytes) else {
+        return structure_failure(
+            &result
+                .err()
+                .unwrap_or_else(|| crate::error::Error::Config("no report".into())),
+        );
+    };
+    access_answer(&doc)
+}
+
+/// The `opv access --json` document as the MCP answer, field by field (pure).
+fn access_answer(doc: &Value) -> Value {
+    let id_ok = |s: &str| crate::config::is_id(s) && s.len() <= 64;
+    let mut envs = Vec::new();
+    for e in doc["environments"].as_array().into_iter().flatten() {
+        let Some(env_name) = e["environment"].as_str().filter(|n| identifier(n)) else {
+            continue;
+        };
+        let mut identities: Vec<Value> = Vec::new();
+        for c in e["report"]["checks"].as_array().into_iter().flatten() {
+            let g = &c["grant"];
+            let (Some(account), Some(vault)) = (
+                g["service_account"].as_str().filter(|n| identifier(n)),
+                g["vault_id"].as_str().filter(|v| id_ok(v)),
+            ) else {
+                continue;
+            };
+            let kind = g["principal"]["kind"]
+                .as_str()
+                .filter(|k| ["deploy", "ci_reader"].contains(k));
+            let tgt = g["principal"]["target"].as_str().filter(|t| identifier(t));
+            let permission = g["permission"]
+                .as_str()
+                .filter(|p| ["read", "read_write"].contains(p));
+            let state = c["state"].as_str().filter(|s| {
+                [
+                    "present",
+                    "missing",
+                    "read_only_needed",
+                    "not_visible",
+                    "not_in_account",
+                ]
+                .contains(s)
+            });
+            let grant = json!({"vault_id": vault, "permission": permission, "state": state});
+            match identities
+                .iter_mut()
+                .find(|i| i["service_account"] == account)
+            {
+                Some(i) => i["grants"].as_array_mut().expect("array").push(grant),
+                None => identities.push(json!({
+                    "service_account": account, "kind": kind, "target": tgt, "grants": [grant],
+                })),
+            }
+        }
+        for i in &mut identities {
+            let grants = i["grants"].as_array().cloned().unwrap_or_default();
+            let blocked = grants.iter().any(|g| g["state"] == "not_in_account");
+            let needs = grants
+                .iter()
+                .any(|g| g["state"] == "missing" || g["state"] == "read_only_needed");
+            let target_flag = i["target"]
+                .as_str()
+                .map(|t| format!(" --target {t}"))
+                .unwrap_or_default();
+            i["owner_command"] = if needs && !blocked {
+                json!(format!(
+                    "opv access {env_name}{target_flag} --create --github <owner/repo> --github-env <github environment>"
+                ))
+            } else {
+                Value::Null
+            };
+        }
+        let findings: Vec<Value> = e["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| {
+                let code = f["code"].as_str().filter(|c| identifier(c))?;
+                let next = f["next"]
+                    .as_str()
+                    .filter(|n| n.starts_with("opv ") && n.len() <= 200 && !n.contains('\n'));
+                Some(json!({"code": code, "next": next}))
+            })
+            .collect();
+        envs.push(json!({"environment": env_name, "identities": identities, "findings": findings}));
+    }
+    json!({
+        "ok": true,
+        "environments": envs,
+        "changes_available": false,
+        "human_action": "Creating an identity is the person's: they run its owner_command in their own terminal, with the GitHub repository and environment their CI job uses. The token goes to GitHub without being shown; never ask for it.",
+    })
+}
+
 fn structure_plan(project: &std::path::Path) -> Value {
     crate::scrub::clear_mcp_registry();
     let _redaction_scope = RedactionScope;
@@ -855,6 +1007,60 @@ mod tests {
     fn the_apply_answer_drops_a_generator_line_with_a_newline() {
         let v = applied_projection(&hostile_applied());
         assert!(!v.to_string().contains("injected"));
+    }
+
+    fn access_doc(state: &str, value_in_message: &str) -> Value {
+        json!({"environments": [{
+            "environment": "staging",
+            "report": {"checks": [
+                {"grant": {"principal": {"kind": "deploy", "environment": "staging", "target": "fleet"},
+                           "service_account": "shop-staging-fleet-deploy", "vault_id": "vweb", "permission": "read"},
+                 "state": state},
+                {"grant": {"principal": {"kind": "deploy", "environment": "staging", "target": "fleet"},
+                           "service_account": "shop-staging-fleet-deploy", "vault_id": "vstate", "permission": "read_write"},
+                 "state": "missing"}
+            ]},
+            "commands": ["op service-account create x --vault v:read_items"],
+            "findings": [{"code": "access_not_visible", "message": value_in_message, "next": "op something raw"}]
+        }]})
+    }
+
+    #[test]
+    fn access_groups_grants_by_identity() {
+        let v = access_answer(&access_doc("missing", "m"));
+        assert_eq!(
+            v["environments"][0]["identities"][0]["grants"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn access_names_the_opv_owner_command_for_a_missing_grant() {
+        let v = access_answer(&access_doc("missing", "m"));
+        assert_eq!(
+            v["environments"][0]["identities"][0]["owner_command"],
+            "opv access staging --target fleet --create --github <owner/repo> --github-env <github environment>"
+        );
+    }
+
+    #[test]
+    fn access_offers_no_command_when_a_vault_is_not_in_the_account() {
+        let v = access_answer(&access_doc("not_in_account", "m"));
+        assert!(v["environments"][0]["identities"][0]["owner_command"].is_null());
+    }
+
+    #[test]
+    fn access_never_forwards_messages_or_raw_op_commands() {
+        let v = access_answer(&access_doc("missing", "SECRET_MARKER"));
+        let text = v.to_string();
+        assert!(
+            !text.contains("SECRET_MARKER")
+                && !text.contains("op service-account")
+                && !text.contains("op something")
+        );
     }
 
     #[test]

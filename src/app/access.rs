@@ -97,6 +97,88 @@ pub fn run(
     report(out, &envs, json)
 }
 
+/// One principal's identity (0.9.0, `opv access --create`): its service-account name, every
+/// grant it needs (1Password fixes a service account's vaults at creation), whether such an
+/// account already reads them all, and the vaults the selected account cannot find (then
+/// no account can be created here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub service_account: String,
+    pub grants: Vec<Grant>,
+    pub already_present: bool,
+    pub not_in_account: Vec<String>,
+}
+
+/// The identity of `target`'s deploy principal in `env`, or of `env`'s CI reader when
+/// `target` is `None`. Reads only: one `op vault user list` per needed vault, and `op vault
+/// get` for each unreadable one.
+pub fn identity(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    target: Option<&str>,
+    project: &str,
+    r: &dyn CommandRunner,
+) -> Result<Identity, Error> {
+    let environment = fleet.environment(env)?;
+    if let Some(t) = target
+        && !environment.targets.contains_key(t)
+    {
+        return Err(
+            Error::Config(format!("environment {env} has no target {t:?}").into())
+                .with_code(crate::error::Code::Usage)
+                .with_next(format!("opv access {env}")),
+        );
+    }
+    let name = fleet
+        .environments
+        .keys()
+        .find(|n| n.as_str() == env)
+        .expect("checked above");
+    let ordered = [(name, environment)];
+    let needs = plan_needs(fleet, &ordered, target)?;
+    let need = &needs[0];
+    let all = required(project, &need.targets, &need.ci);
+    let wanted = match target {
+        Some(t) => Principal::Deploy {
+            environment: env.to_string(),
+            target: t.to_string(),
+        },
+        None => Principal::CiReader {
+            environment: env.to_string(),
+        },
+    };
+    let grants: Vec<Grant> = all.into_iter().filter(|g| g.principal == wanted).collect();
+    let Some(first) = grants.first() else {
+        return Err(Error::Config(
+            format!("{env} needs no vault for this identity; there is nothing to create").into(),
+        )
+        .with_next(format!("opv access {env}")));
+    };
+    let service_account = first.service_account.clone();
+    let (_, readers) = observe(r, &needs)?;
+    let missing = missing_vaults(r, &readers);
+    let observed: Vec<ObservedVault> = grants
+        .iter()
+        .map(|g| ObservedVault {
+            vault_id: &g.vault_id,
+            readers: readers.get(&g.vault_id).and_then(|r| r.as_deref()),
+        })
+        .collect();
+    let report = compare(&grants, &observed);
+    let already_present = report.checks.iter().all(|c| c.state == GrantState::Present);
+    let not_in_account: Vec<String> = grants
+        .iter()
+        .filter(|g| missing.contains(&g.vault_id))
+        .map(|g| g.vault_id.clone())
+        .collect();
+    Ok(Identity {
+        service_account,
+        grants,
+        already_present,
+        not_in_account,
+    })
+}
+
 /// Build each environment's needs from the configuration (FR-59): a target reads exactly
 /// the boundaries of the products it delivers and of the `from` sources its keys name,
 /// plus its own state vault; the CI reader reads every boundary of the environment.
@@ -333,6 +415,9 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
                     "environment": env.name,
                     "report": env.report,
                     "commands": env.commands,
+                    "findings": env.findings.iter().map(|f| serde_json::json!({
+                        "code": f.code, "message": f.message, "next": f.next,
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect();

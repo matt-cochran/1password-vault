@@ -740,6 +740,26 @@ enum Cmd {
         /// Project name for the service accounts; defaults to the repository's name.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
+        /// Create the identity (the target's deploy identity, or without --target the CI
+        /// reader) and store its token as a GitHub secret; your own terminal only. The
+        /// token is never shown, typed or written to a file.
+        #[arg(long, requires_all = ["env", "github"])]
+        create: bool,
+        /// With --create: the GitHub repository (owner/repo) whose secret receives the token.
+        #[arg(long, value_name = "OWNER/REPO", requires = "create")]
+        github: Option<String>,
+        /// With --create: the GitHub environment the CI job declares (created if missing);
+        /// without it, a repository secret.
+        #[arg(long, value_name = "NAME", requires = "create")]
+        github_env: Option<String>,
+        /// With --create: the secret's name.
+        #[arg(
+            long,
+            value_name = "NAME",
+            default_value = "OP_SERVICE_ACCOUNT_TOKEN",
+            requires = "create"
+        )]
+        secret_name: String,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -2740,10 +2760,48 @@ fn run_other(
         }
         Cmd::Tidy { env, json } => opv::app::repair::run(&loaded?, &env, r, json, out),
         Cmd::Access {
+            env: Some(env),
+            target,
+            project,
+            create: true,
+            github: Some(repo),
+            github_env,
+            secret_name,
+            ..
+        } => {
+            opv::app::setup_runtime::Console::require_terminal(
+                "access --create",
+                &std::env::args().collect::<Vec<_>>().join(" "),
+            )?;
+            let dir = std::env::current_dir().unwrap_or_default();
+            let project = match project.as_deref() {
+                Some(name) => config_store::default_project(Some(name), None, &dir)?,
+                None => opv::app::personal::project_name(r, &dir),
+            };
+            let req = opv::app::access_create::Request {
+                env: &env,
+                target: target.as_deref(),
+                project: &project,
+                github: opv::app::access_create::GitHub {
+                    repo,
+                    environment: github_env,
+                    secret: secret_name,
+                },
+            };
+            opv::app::access_create::run(
+                &loaded?,
+                &req,
+                r,
+                &mut opv::app::setup_runtime::Console,
+                out,
+            )
+        }
+        Cmd::Access {
             env,
             target,
             project,
             json,
+            ..
         } => opv::app::access::run(
             &loaded?,
             env.as_deref(),

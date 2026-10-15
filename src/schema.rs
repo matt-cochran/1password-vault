@@ -342,7 +342,7 @@ pub const TIDIES_1PASSWORD: [&str; 12] = [
 
 /// What a flag adds to its command's effect: (command, long flag, effect). Every one of
 /// these needs the user's yes for the run.
-pub const FLAG_EFFECTS: [(&str, &str, &str); 10] = [
+pub const FLAG_EFFECTS: [(&str, &str, &str); 11] = [
     ("sync", "deploy", "deploys"),
     ("sync", "prune", "deletes"),
     ("sync", "rotate", "replaces_immutable"),
@@ -353,6 +353,9 @@ pub const FLAG_EFFECTS: [(&str, &str, &str); 10] = [
     ("adopt", "apply", "writes_1password"),
     ("adopt", "replace", "replaces_value"),
     ("adopt", "rotate", "replaces_immutable"),
+    // 0.9.0: creates a service account and stores its token as a GitHub secret (the owner,
+    // in their own terminal; the token is never shown).
+    ("access", "create", "creates_credential"),
 ];
 
 /// Commands whose only output is JSON, with or without `--json`.

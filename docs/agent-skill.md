@@ -53,6 +53,12 @@ exports values. For a secret-store app or a Cloudflare Worker, declare
 
 ## CI identities
 
+Never build `op service-account create` commands by hand. Ask the user for the GitHub
+repository and environment their CI job uses, then hand them
+`opv access <env> --target <name> --create --github <owner/repo> --github-env <env>`
+(from `opv_access` or `opv access --json`): it creates the identity and stores its token as
+a GitHub secret without showing it.
+
 A validation job (`check`, `plan`, `ready`) uses the read-only reader from
 `opv bootstrap --ci-reader <env>`. A job that syncs uses the target's deploy identity from
 `opv access <env> --target <name>`: boundary read plus read and write on its own state vault,
