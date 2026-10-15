@@ -50,6 +50,12 @@ pub trait Provider: Sync {
     /// What a person adds to deploy with this provider, e.g. `configure fly.app`. Only the
     /// default provider (`adapters::registry::DEFAULT`) is ever asked.
     fn setup_hint(&self) -> String;
+    /// The provider's CLI setup step for a GitHub Actions job, as YAML text indented under
+    /// `steps:` (one list entry), or `None` when CI needs no provider-specific setup. Core
+    /// code prints it through this trait, so it never names a provider (FR-37).
+    fn ci_setup_step(&self) -> Option<&'static str> {
+        None
+    }
     /// The fields `opv target add` takes for this provider (FR-56, H3), each as the option
     /// `--<section>-<field>` ([`init_flag`]). Empty when the provider does not support
     /// `target add`. A new provider adds its options here; core and the CLI need no change.

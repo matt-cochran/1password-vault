@@ -21,6 +21,7 @@ pub mod bootstrap;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;
+pub mod ci_workflow;
 pub mod config_cmd;
 pub mod config_export;
 pub mod declare;
