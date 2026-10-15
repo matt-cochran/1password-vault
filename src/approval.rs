@@ -19,6 +19,11 @@ pub const TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Approval {
     pub plan_id: String,
+    /// What the approval covers beyond the plan id (0.9.0): empty for a structural plan,
+    /// else e.g. `sync prod targets=web product=- deploy prune`. It must match exactly when
+    /// the approval is used, so an approval never stretches to another scope or flag.
+    #[serde(default)]
+    pub scope: String,
     pub project: String,
     pub account: String,
     pub expires_at: u64,
@@ -59,12 +64,26 @@ pub fn record_in(
     account: &str,
     now: u64,
 ) -> Result<(), Error> {
+    record_scoped_in(dir, plan_id, "", project, account, now)
+}
+
+/// [`record_in`] for an approval that covers `scope` too (a sync plan's environment,
+/// targets, product and flags).
+pub fn record_scoped_in(
+    dir: &Path,
+    plan_id: &str,
+    scope: &str,
+    project: &str,
+    account: &str,
+    now: u64,
+) -> Result<(), Error> {
     validate_plan_id(plan_id)?;
     ensure_dir(dir)?;
     // A new approval of this plan replaces any earlier one, used or not.
     let _ = std::fs::remove_file(dir.join(format!("{plan_id}.claim")));
     let approval = Approval {
         plan_id: plan_id.to_string(),
+        scope: scope.to_string(),
         project: project.to_string(),
         account: account.to_string(),
         expires_at: now.saturating_add(TTL.as_secs()),
@@ -84,6 +103,18 @@ pub fn record_in(
 pub fn consume_in(
     dir: &Path,
     plan_id: &str,
+    project: &str,
+    account: &str,
+    now: u64,
+) -> Result<(), Error> {
+    consume_scoped_in(dir, plan_id, "", project, account, now)
+}
+
+/// [`consume_in`] for an approval of `scope`, which must equal the recorded scope exactly.
+pub fn consume_scoped_in(
+    dir: &Path,
+    plan_id: &str,
+    scope: &str,
     project: &str,
     account: &str,
     now: u64,
@@ -108,7 +139,9 @@ pub fn consume_in(
         Err(e) => return Err(refusal(plan_id, format_args!("cannot claim record: {e}"))),
     }
     let outcome = match std::fs::symlink_metadata(&source) {
-        Ok(m) if m.file_type().is_file() => read_claimed(&source, plan_id, project, account, now),
+        Ok(m) if m.file_type().is_file() => {
+            read_claimed(&source, plan_id, scope, project, account, now)
+        }
         Ok(_) => Err(refusal(plan_id, "malformed record")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(refusal(plan_id, "no approval recorded"))
@@ -119,6 +152,28 @@ pub fn consume_in(
     // never be claimed again until a new approval replaces it.
     let _ = std::fs::remove_file(&source);
     outcome
+}
+
+/// [`record_scoped_in`] in [`dir`].
+pub fn record_scoped(
+    plan_id: &str,
+    scope: &str,
+    project: &str,
+    account: &str,
+    now: u64,
+) -> Result<(), Error> {
+    record_scoped_in(&dir()?, plan_id, scope, project, account, now)
+}
+
+/// [`consume_scoped_in`] in [`dir`].
+pub fn consume_scoped(
+    plan_id: &str,
+    scope: &str,
+    project: &str,
+    account: &str,
+    now: u64,
+) -> Result<(), Error> {
+    consume_scoped_in(&dir()?, plan_id, scope, project, account, now)
 }
 
 /// [`record_in`] in [`dir`].
@@ -133,7 +188,11 @@ pub fn consume(plan_id: &str, project: &str, account: &str, now: u64) -> Result<
 
 /// A plan id is `sp-` followed by exactly sixteen lowercase hex digits.
 fn validate_plan_id(plan_id: &str) -> Result<(), Error> {
-    if crate::app::structure::is_plan_id(plan_id) {
+    let sync_id = plan_id.len() == crate::domain::provenance::PLAN_ID_LEN
+        && plan_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if crate::app::structure::is_plan_id(plan_id) || sync_id {
         Ok(())
     } else {
         Err(Error::Config(
@@ -273,6 +332,7 @@ fn temp_seq() -> u64 {
 fn read_claimed(
     path: &Path,
     plan_id: &str,
+    scope: &str,
     project: &str,
     account: &str,
     now: u64,
@@ -283,6 +343,9 @@ fn read_claimed(
         serde_json::from_slice(&bytes).map_err(|_| refusal(plan_id, "malformed record"))?;
     if approval.plan_id != plan_id {
         return Err(refusal(plan_id, "record names another plan"));
+    }
+    if approval.scope != scope {
+        return Err(refusal(plan_id, "approved for another scope"));
     }
     if approval.expires_at <= now {
         return Err(refusal(plan_id, "expired"));
