@@ -368,7 +368,9 @@ Examples:
 
 const APPROVE_QUICK: &str = "\
 Examples:
-  opv approve sp-3f9c0a1b2c3d4e5f   # review the assistant's structural plan, then type its id";
+  opv approve sp-3f9c0a1b2c3d4e5f                    # review the assistant's structural plan
+  opv approve 3f9c0a1b --sync prod --target web      # review and approve one sync plan
+  opv approve 3f9c0a1b --sync prod --deploy          # ... that also deploys";
 
 const APPROVE_MORE: &str = "\
 An assistant prepares a structural plan with the opv MCP tool opv_structure_plan (vaults,
@@ -376,7 +378,14 @@ items, empty fields, delivery items; never a value). Review it here and type its
 approve it; opv_structure_apply then creates exactly that, once, within 15 minutes. A plan
 that changed since it was prepared is refused (stale_plan). The approval is a local file
 in your state directory: it is a gate for assistants that only use MCP, not a secret, and
-the 1Password app's own prompt on each write remains the control that matters.";
+the 1Password app's own prompt on each write remains the control that matters.
+
+With --sync <env> (and the same --target, --product, --deploy and --prune the assistant
+named), it re-plans that sync, lists each name it would write or unset (never a value),
+and asks you to type the plan id. The assistant may then run exactly that sync once within
+15 minutes, bound to the plan: any change to the item, the target or the configuration
+voids it. Rotation and pruning immutable keys are never approved this way; run those
+yourself with opv sync.";
 
 const BOOTSTRAP_QUICK: &str = "\
 Examples:
@@ -830,9 +839,28 @@ enum Cmd {
     /// each change. Needs an interactive terminal; there is no flag that skips the question.
     #[command(before_help = APPROVE_QUICK, after_help = APPROVE_MORE)]
     Approve {
-        /// The plan id the assistant showed (sp- and 16 hex digits).
+        /// The plan id the assistant showed (sp- and 16 hex digits, or a sync plan's id
+        /// with --sync).
         #[arg(value_name = "PLAN_ID")]
         plan_id: String,
+        /// Approve this environment's deployment (sync) plan instead of a structural plan:
+        /// the assistant may then run exactly that sync once (`opv sync <env> --approved
+        /// <plan_id>` or the MCP tool opv_sync).
+        #[arg(long, value_name = "ENV")]
+        sync: Option<String>,
+        /// With --sync: only this named target (repeatable), as the assistant's plan.
+        #[arg(long = "target", value_name = "NAME", requires = "sync")]
+        target: Vec<String>,
+        /// With --sync: only this product, as the assistant's plan.
+        #[arg(long, requires = "sync")]
+        product: Option<String>,
+        /// With --sync: the approved sync also deploys.
+        #[arg(long, requires = "sync")]
+        deploy: bool,
+        /// With --sync: the approved sync also unsets managed names no longer declared
+        /// (never an immutable key).
+        #[arg(long, requires = "sync")]
+        prune: bool,
     },
     /// Create every missing boundary vault, item and state vault, record their IDs, and add
     /// the empty fields.
@@ -1162,6 +1190,15 @@ struct SyncArgs {
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
+    /// Run exactly the sync plan a person approved with `opv approve <PLAN_ID> --sync
+    /// <env>` (same --target, --product, --deploy and --prune), once: for an assistant,
+    /// which needs no terminal for it. Refused when the plan changed or has no approval.
+    #[arg(
+        long,
+        value_name = "PLAN_ID",
+        conflicts_with_all = ["expect_plan", "confirm", "rotate", "prune_immutable"]
+    )]
+    approved: Option<String>,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -1980,6 +2017,9 @@ impl Cmd {
             }
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
+            Cmd::Approve {
+                sync: Some(env), ..
+            } => Some((env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
             Cmd::Adopt { env, from, .. } if from == "target" || from.starts_with("target:") => {
                 Some((env, Reach::Target))
@@ -2004,6 +2044,11 @@ impl Cmd {
             Cmd::Status { target, .. } => target,
             Cmd::Plan(a) => &a.target,
             Cmd::Sync(a) => &a.target,
+            Cmd::Approve {
+                sync: Some(_),
+                target,
+                ..
+            } => target,
             _ => return None,
         };
         match targets.as_slice() {
@@ -2365,7 +2410,11 @@ fn run(
             return opv::app::version::run(&r, cli.config.as_deref(), &here, *json, out)
                 .map(|()| 0);
         }
-        Cmd::Approve { plan_id } => {
+        Cmd::Approve {
+            plan_id,
+            sync: None,
+            ..
+        } => {
             opv::app::setup_runtime::Console::require_terminal(
                 "approve",
                 &format!("opv approve {plan_id}"),
@@ -2747,7 +2796,7 @@ fn run_other(
         | Cmd::Projects { .. }
         | Cmd::Account(_)
         | Cmd::Bootstrap { .. }
-        | Cmd::Approve { .. }
+        | Cmd::Approve { sync: None, .. }
         | Cmd::Version { .. }
         | Cmd::Mcp(_)
         | Cmd::Vault(_)
@@ -2914,6 +2963,68 @@ fn run_other(
             out,
             a.json,
         ),
+        Cmd::Approve {
+            plan_id,
+            sync: Some(env),
+            target,
+            product,
+            deploy,
+            prune,
+        } => {
+            opv::app::setup_runtime::Console::require_terminal(
+                "approve",
+                &format!("opv approve {plan_id} --sync {env}"),
+            )?;
+            let here = std::env::current_dir().unwrap_or_default();
+            let (project, account) = opv::app::structure::binding(&here, r)?;
+            let scope = opv::app::approve::SyncScope {
+                env,
+                targets: target,
+                product,
+                deploy,
+                prune,
+            };
+            opv::app::approve::run_sync(
+                r,
+                &loaded?,
+                &project,
+                &account,
+                &scope,
+                &plan_id,
+                unix_now(),
+                &mut TerminalReview,
+                &mut |p, key, project, account, now| {
+                    opv::approval::record_scoped(p, key, project, account, now)
+                },
+            )
+        }
+        Cmd::Sync(a) if a.approved.is_some() => {
+            let plan_id = a.approved.clone().unwrap_or_default();
+            let here = std::env::current_dir().unwrap_or_default();
+            let (project, account) = opv::app::structure::binding(&here, r)?;
+            let scope = opv::app::approve::SyncScope {
+                env: a.env.clone(),
+                targets: a.target.clone(),
+                product: a.product.clone(),
+                deploy: a.deploy,
+                prune: a.prune,
+            };
+            opv::app::approve::run_approved_sync(
+                &loaded?,
+                &scope,
+                &plan_id,
+                &project,
+                &account,
+                unix_now(),
+                r,
+                out,
+                a.json,
+                a.receipt.clone(),
+                &mut |p, key, project, account, now| {
+                    opv::approval::consume_scoped(p, key, project, account, now)
+                },
+            )
+        }
         Cmd::Sync(a) => {
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())
@@ -3431,6 +3542,14 @@ fn mcp_install(
 }
 
 /// `opv approve`'s review on the person's own terminal (checked before it runs).
+/// Seconds since the Unix epoch (0 if the clock is before it).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
 struct TerminalReview;
 
 impl opv::app::approve::Review for TerminalReview {

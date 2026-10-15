@@ -530,3 +530,241 @@ fn no_output_carries_a_value() {
     let (_, out) = sync_with(&w, &both(&w), opts);
     assert!(!out.contains(MARK), "{out}");
 }
+
+// --- approved sync (0.9.0): a person approves one sync plan, the assistant runs it once ---
+
+use crate::app::approve::{self as approve_cmd, SyncScope};
+
+const PROJECT: &str = "myapp";
+const ACCOUNT: &str = "ACCOUNTAAA000000000000AAAA";
+
+fn east_scope() -> SyncScope {
+    SyncScope {
+        env: "prod".into(),
+        targets: targets(&["east"]),
+        product: None,
+        deploy: false,
+        prune: false,
+    }
+}
+
+/// A person's `opv approve <id> --sync prod --target east` typed back, recorded in `dir`.
+fn approve_in(dir: &std::path::Path, w: &World, fleet: &Fleet, scope: &SyncScope, id: &str) {
+    struct Typed(String);
+    impl approve_cmd::Review for Typed {
+        fn show(&mut self, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+        fn ask(&mut self, _: &str) -> Result<String, Error> {
+            Ok(self.0.clone())
+        }
+    }
+    approve_cmd::run_sync(
+        w,
+        fleet,
+        PROJECT,
+        ACCOUNT,
+        scope,
+        id,
+        1_000,
+        &mut Typed(id.to_string()),
+        &mut |p, key, project, account, now| {
+            crate::approval::record_scoped_in(&dir.join("approvals"), p, key, project, account, now)
+        },
+    )
+    .unwrap();
+}
+
+/// The assistant's approved sync of `scope` with plan `id`, consuming from `dir`.
+fn approved_sync(
+    dir: &std::path::Path,
+    w: &World,
+    fleet: &Fleet,
+    scope: &SyncScope,
+    id: &str,
+) -> Result<(), Error> {
+    let _person = tidy::activate();
+    approve_cmd::run_approved_sync(
+        fleet,
+        scope,
+        id,
+        PROJECT,
+        ACCOUNT,
+        1_010,
+        w,
+        &mut Vec::new(),
+        true,
+        None,
+        &mut |p, key, project, account, now| {
+            crate::approval::consume_scoped_in(
+                &dir.join("approvals"),
+                p,
+                key,
+                project,
+                account,
+                now,
+            )
+        },
+    )
+}
+
+#[test]
+fn an_approved_sync_writes_the_approved_target() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap();
+    assert_eq!(w.names_on("myapp-east"), [NAME]);
+}
+
+#[test]
+fn an_approved_sync_never_writes_another_target() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap();
+    assert!(w.names_on("myapp-west").is_empty());
+}
+
+#[test]
+fn a_sync_without_an_approval_writes_nothing() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    let _ = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id);
+    assert_eq!(w.imports.get(), 0);
+}
+
+#[test]
+fn a_sync_without_an_approval_names_the_approve_command() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
+    assert_eq!(
+        e.next_step().map(str::to_string),
+        Some(format!("opv approve {id} --sync prod --target east"))
+    );
+}
+
+#[test]
+fn an_approval_is_used_once() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap();
+    // The plan after a sync is "nothing to do" with a new id; replay the old one.
+    let again = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id);
+    assert!(again.is_err());
+}
+
+#[test]
+fn an_approval_without_deploy_does_not_cover_a_deploying_sync() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    let deploying = SyncScope {
+        deploy: true,
+        ..east_scope()
+    };
+    let e = approved_sync(dir.path(), &w, &fleet, &deploying, &id).unwrap_err();
+    assert_eq!(e.code(), Code::ApprovalRequired);
+}
+
+#[test]
+fn a_stale_plan_is_refused_before_the_approval_is_used() {
+    let (w, dir) = (world(), tempfile::tempdir().unwrap());
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
+    // Someone declares and fills a second key meanwhile: the plan now writes two names.
+    let item = w.op.item(&w.item_id);
+    let mut fields = item["fields"].as_array().cloned().unwrap_or_default();
+    fields.push(
+        json!({"id": "api-OTHER", "section": {"id": "api", "label": "api"},
+                       "type": "CONCEALED", "label": "OTHER", "value": "other"}),
+    );
+    for i in w.op.items.borrow_mut().iter_mut() {
+        if i["id"] == w.item_id.as_str() {
+            i["fields"] = json!(fields);
+        }
+    }
+    let mut fleet = fleet;
+    let other = fleet.products["api"].keys["TOKEN"].clone();
+    fleet
+        .products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .insert("OTHER".into(), other);
+    let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
+    assert_eq!(e.code(), Code::StalePlan);
+}
+
+#[test]
+fn approving_a_sync_never_shows_a_value() {
+    struct Seen(Vec<String>, String);
+    impl approve_cmd::Review for Seen {
+        fn show(&mut self, line: &str) -> Result<(), Error> {
+            self.0.push(line.to_string());
+            Ok(())
+        }
+        fn ask(&mut self, _: &str) -> Result<String, Error> {
+            Ok(self.1.clone())
+        }
+    }
+    let w = world();
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    let mut ui = Seen(Vec::new(), id.clone());
+    let _ = approve_cmd::run_sync(
+        &w,
+        &fleet,
+        PROJECT,
+        ACCOUNT,
+        &east_scope(),
+        &id,
+        1_000,
+        &mut ui,
+        &mut |_, _, _, _, _| Ok(()),
+    );
+    assert!(!ui.0.join("\n").contains(MARK));
+}
+
+#[test]
+fn approving_a_sync_lists_each_name_it_writes() {
+    struct Seen(Vec<String>, String);
+    impl approve_cmd::Review for Seen {
+        fn show(&mut self, line: &str) -> Result<(), Error> {
+            self.0.push(line.to_string());
+            Ok(())
+        }
+        fn ask(&mut self, _: &str) -> Result<String, Error> {
+            Ok(self.1.clone())
+        }
+    }
+    let w = world();
+    let fleet = both(&w);
+    let id = plan_id(&w, &fleet, &["east"]);
+    let mut ui = Seen(Vec::new(), id.clone());
+    let _ = approve_cmd::run_sync(
+        &w,
+        &fleet,
+        PROJECT,
+        ACCOUNT,
+        &east_scope(),
+        &id,
+        1_000,
+        &mut ui,
+        &mut |_, _, _, _, _| Ok(()),
+    );
+    assert!(
+        ui.0.iter().any(|l| l.contains("write api/TOKEN on east")),
+        "{:?}",
+        ui.0
+    );
+}

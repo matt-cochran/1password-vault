@@ -390,6 +390,27 @@ pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
     })
 }
 
+/// The project and 1Password account an approval of a sync plan names (0.9.0): resolved
+/// like [`scope`], from the checkout at `start`, but without needing a local
+/// `secrets.toml` (a sync may use a configuration kept in 1Password). `opv approve --sync`
+/// and the agent's approved sync resolve it the same way, so an approval made in one
+/// always names what the other consumes.
+pub fn binding(start: &Path, r: &dyn CommandRunner) -> Result<(String, String), Error> {
+    use crate::config_store;
+    let dir = config_store::walk_up(start, "secrets.toml")
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| start.to_path_buf());
+    let project = config_store::default_project(None, config_store::git_repo(r).as_deref(), &dir)?;
+    let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
+    let account = config_store::pick_account(r, given)?.ok_or_else(|| {
+        Error::Config("the project has no 1Password account chosen".into())
+            .with_code(Code::AccountRequired)
+            .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
+            .with_next("opv account list")
+    })?;
+    Ok((project, account))
+}
+
 /// One line per step of `p`, names and titles only, for a person to review.
 pub fn describe(p: &Plan) -> Vec<String> {
     let mut out = Vec::new();
