@@ -26,6 +26,7 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ("opv_structure_apply", "structure apply"),
     ("opv_generate", "generate"),
     ("opv_sync", "sync"),
+    ("opv_delivery_preview", "run --preview"),
 ];
 
 /// What running a command can change.
@@ -214,6 +215,13 @@ pub const EFFECTS: &[Effect] = &[
         needs_terminal: false,
         handles_values: true,
         ask_user_first: true,
+    },
+    Effect {
+        command: "run --preview",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
     },
     Effect {
         command: "plan",
