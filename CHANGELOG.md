@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `opv access` reports `pending_revoke` when several service accounts with one name read a vault (after `opv access --create` replaced an identity): keep the newest until `opv delivery verify` shows its delivery, then remove the older ones. `no_ci_reader` now steps to `opv access <env> --create --github <owner/repo>`.
 - CLI parity with the MCP server (j8): `opv env add <env>` declares an environment (the `opv_declare_environment` work and refusals), `opv structure plan [--json]` prints the `opv_structure_plan` document and its `plan_id`, `opv structure apply <plan_id> [--json]` applies an approved plan through the same single-use `opv approve` and returns the `opv_structure_apply` document, and `opv config describe [--json]` prints the `opv_configuration` metadata; docs/mcp.md lists each tool's command and `opv schema` exposes them under `mcp_tools`.
 - `opv access <env> [--target <name>] --create --github <owner/repo> [--github-env <env>]`: create a CI or deploy identity with exactly its grants and store its token as a GitHub secret on stdin, never shown; one confirmation, GitHub checked first. The MCP tool `opv_access` gives assistants each identity, its state and this command (0.9.0).
 - `opv generate <env> <product/KEY>…`: self-made secrets (keys with `base64_bytes` or `hex_bytes`) generated with the OS CSPRNG straight into their empty 1Password field, read back and verified; never shown, never over a value, provider-issued keys refused (0.9.0).

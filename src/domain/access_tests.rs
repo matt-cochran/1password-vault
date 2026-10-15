@@ -256,11 +256,11 @@ fn a_read_only_service_account_omits_no_ci_reader() {
 }
 
 #[test]
-fn no_ci_reader_suggests_a_scoped_read_only_service_account() {
+fn no_ci_reader_suggests_creating_the_reader_without_showing_its_token() {
     let found = findings("shop", &[visible("prod", true, Vec::new())]);
     assert_eq!(
         found[0].next.as_deref(),
-        Some("op service-account create \"shop-prod-ci\" --vault v1:read_items --expires-in 90d")
+        Some("opv access prod --create --github <owner/repo>")
     );
 }
 
@@ -400,4 +400,52 @@ fn findings_name_no_member() {
     let env = analyse("prod", "v1", true, Some(&users));
     let shown = serde_json::to_string(&findings("shop", &[env])).unwrap();
     assert!(!shown.contains("Alice"));
+}
+
+#[test]
+fn two_service_accounts_with_one_name_yield_pending_revoke() {
+    let twins = vec![
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+    ];
+    let found = findings("shop", &[visible("prod", true, twins)]);
+    assert_eq!(codes(&found), ["pending_revoke"]);
+}
+
+#[test]
+fn pending_revoke_steps_to_verifying_the_new_delivery() {
+    let twins = vec![
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+    ];
+    let found = findings("shop", &[visible("prod", true, twins)]);
+    assert_eq!(found[0].next.as_deref(), Some("opv delivery verify prod"));
+}
+
+#[test]
+fn distinct_service_account_names_yield_no_pending_revoke() {
+    let two = vec![
+        Reader {
+            name: "shop-prod-ci".into(),
+            read_only: true,
+        },
+        Reader {
+            name: "shop-prod-web-deploy".into(),
+            read_only: true,
+        },
+    ];
+    let found = findings("shop", &[visible("prod", true, two)]);
+    assert!(!codes(&found).contains(&"pending_revoke"));
 }
