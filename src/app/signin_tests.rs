@@ -13,12 +13,14 @@ const TOKEN: &str = "fo1_FIXTUREVALUE_deploy_token";
 /// The fixture with prod in `ACCOUNT`, signing in to Fly with `op://deploy-prd/fly`.
 fn fleet_with_credentials() -> Fleet {
     let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = text.replacen(
+        "[environments.prod]\n",
+        &format!("[environments.prod]\naccount = \"{ACCOUNT}\"\n"),
+        1,
+    );
     config::parse(&text.replacen(
-        "item_id = \"iprd\"\n",
-        &format!(
-            "item_id = \"iprd\"\naccount = \"{ACCOUNT}\"\ndeploy_credentials = \
-             \"op://deploy-prd/fly\"\n"
-        ),
+        "state_vault_id = \"sprd\"\n",
+        "state_vault_id = \"sprd\"\ndeploy_credentials = \"op://deploy-prd/fly\"\n",
         1,
     ))
     .unwrap()
@@ -69,7 +71,13 @@ fn account_is_not_added_under_a_service_account() {
     let r = FakeRunner::new([complete_item()]);
     let ci = Host::from_env(&FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"));
     let env_runner = open_on(&fl, "prod", &r, Reach::Store, &|| ci).unwrap();
-    crate::adapters::onepassword::read_item(&env_runner, fl.environment("prod").unwrap()).unwrap();
+    let prod = fl.environment("prod").unwrap();
+    crate::adapters::onepassword::read_item(
+        &env_runner,
+        prod,
+        prod.boundaries.values().next().unwrap(),
+    )
+    .unwrap();
     assert_eq!(env_of(&r.calls.borrow()[0], "OP_ACCOUNT"), None);
 }
 
@@ -160,56 +168,43 @@ fn token_of_the_wrong_type_is_refused() {
     assert!(e.contains("must be a Password (concealed) field"), "{e}");
 }
 
-/// Owner ruling: `doctor --env` gets the failed deploy sign-in back instead of stopping.
-#[test]
-fn doctor_gets_a_failed_deploy_sign_in_back() {
-    let fl = fleet_with_credentials();
-    let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)])]);
-    let (_, failed) = open_for_doctor_on(&fl, "prod", &r, &linux);
-    assert!(failed.is_some_and(|f| {
-        f.error
-            .to_string()
-            .contains("field FLY_API_TOKEN is missing")
-    }));
-}
-
-/// After a failed deploy sign-in, doctor's `op` calls still carry the account.
-#[test]
-fn doctor_runner_keeps_the_account_after_a_failed_deploy_sign_in() {
-    let fl = fleet_with_credentials();
-    let r = FakeRunner::new([item(&[secret("", "OTHER", TOKEN)]), complete_item()]);
-    let (runner, _) = open_for_doctor_on(&fl, "prod", &r, &linux);
-    crate::adapters::onepassword::read_item(&runner, fl.environment("prod").unwrap()).unwrap();
-    assert_eq!(env_of(&r.calls.borrow()[1], "OP_ACCOUNT"), Some(ACCOUNT));
-}
-
 /// A Kubernetes runtime keeping its secrets in a Key Vault (`secrets_in`) signs `az` in
 /// with the deploy credentials: `az` writes the secrets, kubectl uses the kubeconfig.
 #[test]
 fn key_vault_behind_kubernetes_signs_in_to_azure() {
     let fl = config::parse(
         r#"
-[profile]
-kind = "simple"
 [stores.kv]
 azure_key_vault = "kv-opv-fixture"
 subscription = "00000000-0000-0000-0000-000000000000"
+
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
+boundaries.app = { vault_id = "vdev", item_id = "idev" }
+[environments.dev.targets.app]
+state_vault_id = "sdev"
 deploy_credentials = "op://deploy/azure"
-[environments.dev.kubernetes]
+[environments.dev.targets.app.kubernetes]
 context = "kind-opv"
 namespace = "opv"
 deployment = "api"
+env_name = "{KEY}"
 secrets_in = "kv"
-[keys.API_KEY]
+
+[products.app.keys.API_KEY]
 kind = "secret"
 environments = ["dev"]
 "#,
     )
     .unwrap();
-    let target = fl.environment("dev").unwrap().target().unwrap();
+    let target = fl
+        .environment("dev")
+        .unwrap()
+        .targets
+        .values()
+        .next()
+        .unwrap()
+        .config
+        .as_ref();
     assert_eq!(crate::provider::deploy_provider(target).section(), "azure");
 }
 
@@ -240,9 +235,9 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
 /// (NR-31, UX1), for the text output only.
 #[test]
 fn doctor_deploy_failure_keeps_the_excerpt_beside_the_error() {
-    let f = doctor_signed_out_failure();
+    let (_, excerpt) = doctor_signed_out_failure();
     assert_eq!(
-        f.excerpt.map(|x| x.render()).as_deref(),
+        excerpt.map(|x| x.render()).as_deref(),
         Some("  op said: [ERROR] not signed in\n"),
     );
 }
@@ -266,10 +261,12 @@ fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
 }
 
 fn doctor_signed_out_deploy_failure() -> Error {
-    doctor_signed_out_failure().error
+    doctor_signed_out_failure().0
 }
 
-fn doctor_signed_out_failure() -> super::DeployFailure {
+/// What `doctor --env` gets from a failed per-target deploy sign-in: the error, and the
+/// failed call's scrubbed excerpt taken right away, as doctor takes it (NR-31, M2).
+fn doctor_signed_out_failure() -> (Error, Option<crate::scrub::Excerpt>) {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([]);
     r.push_with_stderr(crate::runner::Output::failure(1), "[ERROR] not signed in");
@@ -282,8 +279,12 @@ fn doctor_signed_out_failure() -> super::DeployFailure {
             br#"[{"url":"x"}]"#.to_vec(),
         )));
     let tty = Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").tty());
-    crate::host::with_test_host(tty, || open_for_doctor_on(&fl, "prod", &r, &linux).1)
-        .expect("signed out")
+    let e = crate::host::with_test_host(tty, || {
+        open_targeted(&fl, "prod", None, &r, Reach::Target).err()
+    })
+    .expect("signed out");
+    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
+    (e, excerpt)
 }
 
 // ---- FR-41 plan ids on deploy-credential runs and manifest configurations ----

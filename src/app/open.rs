@@ -78,8 +78,8 @@ pub fn run(
 }
 
 /// [`run`], or with `json` one document and no opener (A5):
-/// `{schema_version, environment, product, key, section, field, open_url}`; `section` is
-/// null under the simple profile. IDs and names only.
+/// `{schema_version, environment, product, key, section, field, open_url}`. IDs and names
+/// only.
 pub fn run_as(
     fleet: &Fleet,
     target: &str,
@@ -97,38 +97,43 @@ pub fn run_as(
     } else {
         ""
     };
-    let (product, key, env_name) = explain::locate(fleet, target, env).map_err(|e| {
-        match e.next_step().filter(|n| n.starts_with("opv open ")) {
-            Some(n) => {
-                let next = format!("{n}{flag}");
-                e.with_next(next)
-            }
-            None => e,
+    let with_flag = |e: Error| match e.next_step().filter(|n| n.starts_with("opv open ")) {
+        Some(n) => {
+            let next = format!("{n}{flag}");
+            e.with_next(next)
         }
-    })?;
+        None => e,
+    };
+    // D10/FR-34: a bare `KEY` uses the one product with keys desired in the environment,
+    // the same rule as `check` and `run`; a `<product>/KEY` names its product. Resolve the
+    // environment from the bare key first (as `explain` does), then pick.
+    let resolved = if target.contains('/') {
+        target.to_string()
+    } else {
+        let (_, _, env_name) = explain::locate(fleet, target, env).map_err(with_flag)?;
+        let product = super::pick_product(fleet, env_name, None, "open")?;
+        format!("{product}/{target}")
+    };
+    let (product, key, env_name) = explain::locate(fleet, &resolved, env).map_err(with_flag)?;
     // A shared key (FR-45) has no field of its own: open its source's field.
     let (product, key) = match fleet.products[&product].keys[&key].source() {
         Some((p, k)) => (p.to_string(), k.to_string()),
         None => (product, key),
     };
-    let url = item_url(fleet, env_name, r)?;
+    let url = item_url(fleet, env_name, &product, r)?;
     if json {
         let doc = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,
             "environment": env_name,
-            "product": super::json_product(&product),
+            "product": Some(&product.to_string()),
             "key": key,
-            "section": (!fleet.is_simple()).then_some(product.as_str()),
+            "section": product.as_str(),
             "field": key,
             "open_url": url,
         });
         return writeln!(out, "{doc}").map_err(write_err);
     }
-    let place = if fleet.is_simple() {
-        format!("field {key}")
-    } else {
-        format!("section {product}, field {key}")
-    };
+    let place = format!("section {product}, field {key}");
     let mut line = |s: String| writeln!(out, "{s}").map_err(write_err);
     line(format!(
         "{} in {env_name}: {place}",

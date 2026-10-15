@@ -148,7 +148,7 @@ Only explicitly managed secrets may be deleted.
 
 # 3. Functional Requirements
 
-Requirements are numbered in the order they were adopted: FR-1 to FR-19 in v0.1, FR-20 to FR-27 in v0.2 (single-app adopters, diagnostics, install script), FR-28 to FR-33 in v0.3 (multi-cloud targets, adopted after an FMECA review; deferred items in §8), FR-34 to FR-36 in v0.4 (local development, issues #52 to #54), and FR-37 to FR-45 in v0.5 (plug-in providers, Kubernetes, named stores, sign-in and deploy credentials, plan ids, provenance, self-healing conventions, configuration in 1Password, shared keys). Each later group keeps every FR and SR before it.
+Requirements are numbered in the order they were adopted: FR-1 to FR-19 in v0.1, FR-20 to FR-27 in v0.2 (single-app adopters, diagnostics, install script), FR-28 to FR-33 in v0.3 (multi-cloud targets, adopted after an FMECA review; deferred items in §8), FR-34 to FR-36 in v0.4 (local development, issues #52 to #54), and FR-37 to FR-45 in v0.5 (plug-in providers, Kubernetes, named stores, sign-in and deploy credentials, plan ids, provenance, self-healing conventions, configuration in 1Password, shared keys). FR-56 to FR-60 (v0.7: named targets, access boundaries, per-placement evidence, access per boundary, one way only) were adopted on 2026-10-14 with no backward compatibility: where they change an earlier requirement, that requirement's text is amended in place and the old behaviour is removed, not kept beside the new one (FR-60). Each later group keeps every FR and SR before it, as amended.
 
 ## FR-1 — Configuration
 
@@ -161,7 +161,7 @@ The configuration shall support:
 - Fly application name;
 - optional managed-secret ownership;
 - products, per-key kind, rules, guidance and immutability (fleet profile, §10);
-- a flat key map with no products (simple profile, v0.2, FR-20);
+- one or more products, each with its keys (the simple profile of v0.2, FR-20, was removed in 0.7.0);
 - future extension to additional secret sources and targets.
 
 Since v0.2: when `--config` is not given, the file is found by walking up parent directories (FR-25). Since 0.5.0 the file is optional: discovery also finds the project's manifest in 1Password (FR-25, FR-44).
@@ -441,49 +441,28 @@ The CLI shall provide:
 opv item skeleton <environment>
 ```
 
-It creates or completes the environment's item: every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5. Since 0.5.0 every command run by a signed-in person tidies the layout itself (FR-43), so `item skeleton` is rarely needed; under a service account or in CI, `sync`, `plan`, `status` and `config export` stay read-only.
+It creates or completes each of the environment's boundary items (FR-57): every declared section and field, with the right type and empty value, without changing existing values. This noninteractive command writes empty fields and needs a write-capable identity; owner-guided `setup` is the separate explicitly interactive write path described in FR-9 and SR-5. Since 0.5.0 every command run by a signed-in person tidies the layout itself (FR-43), so `item skeleton` is rarely needed; under a service account or in CI, `sync`, `plan`, `status` and `config export` stay read-only.
 
-## FR-20 — Simple Profile
+## FR-20 — Simple Profile (removed in 0.7.0)
 
-The CLI shall accept `profile.kind = "simple"`, a flat key map for one app per environment with no products:
+Removed by owner ruling 2026-10-14 (FR-60, one way only). A project with one app is a configuration with one product, written exactly like any other: `[products.<name>.keys.<KEY>]`, a boundary per environment (FR-57) and a named target (FR-56) whose template is `{KEY}` when the app expects bare names:
 
 ```toml
-[profile]
-kind = "simple"
+[environments.prod.targets.web]
+# deploy target; added by opv target add
+fly.app = "myapp-production"
+fly.secret_name = "{KEY}"          # the app reads DATABASE_URL, not FLEET__WEB__DATABASE_URL
 
-[environments.prod]
-vault_id = "…"
-item_id  = "…"
-fly.app  = "myapp-production"
-
-[keys.DATABASE_URL]
+[products.web.keys.DATABASE_URL]
 kind = "secret"
 environments = ["prod"]
-
-[keys.JWT_KEY]
-kind = "secret"
-environments = ["prod"]
-immutable = true
-rules = { base64_bytes = 32 }
 ```
 
-The 1Password field name is the Fly name: `[keys.JWT_KEY]` reads field `JWT_KEY` of the environment's item and stages it as `JWT_KEY`. There is no naming template and no `[products]` table; a file that mixes `[keys]` and `[products]`, or sets `fly.secret_name` under the simple profile, is a configuration error. Per-key kind, rules, guidance and `immutable` work as in the fleet profile (FR-14 to FR-16). `run <environment> -- <command>` takes no `--product`. Fleet stays as it is (§10.2).
-
-Acceptance:
-
-- The managed set is exactly the declared keys. Prune scope is the declared keys that are not desired in this environment (FR-8); prune never touches an undeclared name on the Fly app.
-- `fly sync`, `fly plan` and `status` read one whole item per environment, by vault ID and item ID (FR-13); the request budget of §8.11 applies.
-- The same key name declared twice, or a key name that does not match `^[A-Z][A-Z0-9_]*$`, is a configuration error.
-- Every command behaves the same for a fleet file as in v0.1.0.
-
-Constraints kept: FR-8, FR-13, SR-1, SR-3, SR-6. No new 1Password or Fly call path.
-
-Decisions (implementation):
-
-- Simple keys are unsectioned item fields: a field with no section, or a section without a label. Under the simple profile, sectioned fields, built-in fields (with a `purpose`) and fields whose label cannot be a key name are ignored; an unsectioned key-named field of another type is an error (FR-14). Fields opv writes go in the unnamed default section (id `add more`, as the 1Password apps do), never outside every section: such a field is readable by `op` but shown by no 1Password app, even in edit mode (found in a live onboarding run), and a person's tidy moves one into the default section (FR-43). `item skeleton`, `setup` and the tidy add missing keys there. `run` references them as `op://<vault_id>/<item_id>/<KEY>`.
-- Two environments may not share a Fly app under the simple profile: both would manage the same names (FR-8).
-- Environment `modes` are flat (`modes.payments = "test"`).
-- Output never shows a product: no PRODUCT column in `status` and `fly plan` tables, `"product": null` in their `--json` rows, extras and held entries (FR-21), the bare `KEY` in messages, `--rotate KEY` and `--prune-immutable KEY`, and a flat `{"KEY": "value"}` from `config export`.
+- `[profile]` and `profile.kind` no longer exist; a configuration that sets them, or a top-level `[keys]` table, fails at load with a configuration error that shows the `[products.<name>.keys.<KEY>]` form (FR-60). There is no conversion.
+- Keys live in their product's section of the boundary item (FR-43); unsectioned fields are not keys. `modes` are per product. `from` always names `<product>/<KEY>`.
+- Output always carries the product (PRODUCT column, JSON `product` never null).
+- The managed set was and stays the declared keys' rendered names (FR-8), so a `{KEY}` template never claims another tool's names; adding a second product to a `{KEY}` target is a name collision at load (FR-30) that names both keys and the two ways out: a `{PRODUCT}` template, or a target of its own for the new product.
+- Product names describe the app's role (`web`, `api`, `worker`); `opv init` asks for one and does not suggest the project name, so titles read `myapp-web-prod`, not `myapp-myapp-prod`.
 
 ## FR-21 — Machine-Readable Status and Plan
 
@@ -514,7 +493,7 @@ The CLI shall provide:
 opv explain <product>/<key> [--env <environment>]
 ```
 
-(`opv explain <key>` under the simple profile.) `--env` may be omitted when the configuration declares exactly one environment. For each environment the key is declared for, or only the one named by `--env`, it prints the `op://` reference, the field kind, the Fly name, the declared rules, `immutable`, and `guidance`, plus the `op` command a person can run to inspect the field in their own terminal: `op item get <item_id> --vault <vault_id>`, without `--reveal`.
+`--env` may be omitted when the configuration declares exactly one environment. For each environment the key is declared for, or only the one named by `--env`, it prints the `op://` reference, the field kind, the Fly name, the declared rules, `immutable`, and `guidance`, plus the `op` command a person can run to inspect the field in their own terminal: `op item get <item_id> --vault <vault_id>`, without `--reveal`.
 
 Acceptance:
 
@@ -552,7 +531,7 @@ Acceptance:
 The CLI shall provide:
 
 ```bash
-opv init <environment> [--vault <name>] [--item <name>] [--target <provider> --<provider>-<field> <value> …] [--profile simple|fleet] [--force]
+opv init <environment> [--vault <name>] [--item <name>] [--target <provider> --<provider>-<field> <value> …] [--force]
 opv init <environment> [--vault <name>] [--item <name>] --add-env [--target …]
 opv add <[product/]KEY> --kind secret|config [--env <env> …] [--rule <name>[=<value>] …] [--guidance <text>] [--immutable]
 ```
@@ -561,7 +540,7 @@ Since 0.5.0: `--vault` defaults to `<project>-<env>` and `--item` to `<project> 
 
 Since 0.5.0 (H2, H3): the target section is written for every provider from its own `init` fields (`Provider::init_fields` and `Provider::init_section`), so a new provider adds its options without core or CLI changes; `--target` may be omitted when the options name one provider, and `--fly-app` is the Fly provider's `app` option. Nothing is looked up. `--add-env` adds one environment to an existing file (found like every other command's), and adds it to every declared key whose field the item has; an existing environment is refused. `add` declares a key (or adds environments to a declared one) without a 1Password call. Both edit the file in place, keeping comments and order, validate the edited text with the same loader before writing (a name colliding on any target is refused), and write atomically (temporary file in the same directory, then a rename).
 
-It is a dev-time helper that writes a starter `secrets.toml`. It resolves the vault and item titles to IDs (exact title match; zero or several matches is an error), reads the item once, and writes the configuration: the environment with `vault_id`, `item_id` and `fly.app`, and one declared key per field, with its kind taken from the field type (concealed = secret, text = config, FR-14). A sectioned item produces a fleet file (section = product, with the default template `FLEET__{PRODUCT}__{KEY}`); an unsectioned item produces a simple file (FR-20), whose fields are unsectioned. `--profile simple|fleet` overrides this detection. Without `--profile`, an item that mixes sectioned and unsectioned fields is an error that names both shapes; `init` never guesses. Rules and guidance are left for the person to add.
+It is a dev-time helper that writes a starter `secrets.toml`. It resolves the vault and item titles to IDs (exact title match; zero or several matches is an error), reads the item once, and writes the configuration: the environment with `vault_id`, `item_id` and `fly.app`, and one declared key per field, with its kind taken from the field type (concealed = secret, text = config, FR-14). Since 0.7.0 (FR-20 removed, FR-60) each section becomes a product and unsectioned fields become keys of the one product `--product <name>` names (required when the item has unsectioned fields); a target gets the template the person passes, `{KEY}` included; an item that mixes sectioned and unsectioned fields is an error that names both shapes; `init` never guesses. Rules and guidance are left for the person to add.
 
 `init` is the second 1Password-adjacent command after `item skeleton` (FR-19). It reads by title only to resolve IDs; since 0.5.0 (FR-43), for a signed-in person it creates a missing vault or item and tidies the item it declared.
 
@@ -596,7 +575,7 @@ Constraints kept: FR-15 (generic, data-driven; no product-specific code), SR-1, 
 
 - `regex` is checked against the value opv would stage: after `ensure_prefix` normalisation when the key has one, the value as stored otherwise. Compatible with every file that worked before: the local tidy (FR-43) already writes the prefixed form back to 1Password, so a `regex` that accepted stored values accepts the staged one.
 - `regex` may now be combined with `ensure_prefix`. A value that is only the prefix still fails as `ensure_prefix` (checked first).
-- `pattern` stays accepted, with its exact behaviour and failure rule name (`pattern`), as a deprecated alias. Loading a configuration that uses it prints one note per key on stderr naming the key and the equivalent rule, `regex = '<regex-escaped prefix>(?:<pattern>)'` written as a TOML string that pastes as is, never a value. `opv schema` marks it deprecated. A key that sets both `pattern` and `regex` is a configuration error naming the key.
+- **Since 0.7.0 (FR-60): `pattern` is removed.** A configuration that sets it fails at load with a configuration error naming the key, its line and column, and the equivalent rule to write instead, `regex = '<regex-escaped prefix>(?:<pattern>)'`, as a TOML string that pastes as is (never a value). The deprecation notes and `opv schema`'s `deprecated` list are removed with it.
 
 ## FR-25 — Config Discovery
 
@@ -714,7 +693,7 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 
 ## FR-30 — Store Naming and Limits
 
-- The env name comes from the naming template (fleet) or the field name (simple). Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged; Kubernetes: lower case, `_` becomes `-`) and validates it when the configuration loads, first and last characters included (a Kubernetes name cannot end in `-`, so a key ending in `_` is refused at load with the key and its line, never at sync).
+- The env name comes from the target's naming template. Each store maps it to a store name with a fixed rule (Key Vault: `_` becomes `-`; Secrets Manager: `secret_prefix` plus the name; Secret Manager: unchanged; Kubernetes: lower case, `_` becomes `-`) and validates it when the configuration loads, first and last characters included (a Kubernetes name cannot end in `-`, so a key ending in `_` is refused at load with the key and its line, never at sync).
 - Two keys that map to one store name are a configuration error naming both keys.
 - Each store and runtime declares its value-size limits. They are checked with the rules, before any call, and a failure names the key and the limit, never the value (FR-15).
 
@@ -747,10 +726,10 @@ Every secret reference on a cloud runtime binds an explicit store version (Key V
 opv check <environment> [--product <product>] [--json]
 ```
 
-- Reads the environment's item once, by IDs (FR-13), and reports each selected key as saved, missing, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
+- Reads each boundary item it needs once, by IDs (FR-13, FR-57), and reports each selected key as saved, missing, failing a rule or skipped, by name only (SR-1). Exit 8 when any key blocks (FR-10).
 - Never lists, stages or deploys on a target, even when the environment has one; `--json` carries `target_checked: false`.
 - With `--product`, fields in other products' sections are skipped before they are validated, so they can neither block nor fail the check.
-- `--product` is required under the fleet profile and refused under the simple profile.
+- `--product` names one product. It may be omitted when exactly one product has keys desired in the environment, and that product is used; with several, a missing `--product` is a usage error listing them (exit 2). The same rule applies to `run`, `config export` and `open`.
 
 ## FR-35 — Managed-Key Isolation in `run`
 
@@ -803,7 +782,7 @@ Adopted by the owner on 2026-10-08 for 0.5.0. Goal: a user does not think about 
 - **An ended session is renewed in place** (owner decision 2026-10-11, found in a live onboarding run: a session idle over 30 minutes stopped `opv check` with only "run opv login"): when a command at an interactive terminal fails with `op_not_signed_in`, opv says the session ended, runs `op signin` for the checkout's account at op's own prompt, keeps the new session in its process memory for every later `op` call of that process, and runs the command once more. Never under `--json`, without a terminal, in CI, or with a service-account or Connect credential (the error stands), and never for `login` and `setup`, which sign in themselves. A failed sign-in leaves the original error. op's signed-out answers (`You are not currently signed in`, `could not find session token`, `session expired`, …) are never retried (NR-3): they are not transient.
 - **One account per project, never op's default by accident** (owner decision 2026-10-09, found in a fresh-account run-through: with several accounts the 1Password app could only approve the default one, and manifest discovery searched every account): the account is the one recorded in `.opv` (`opv login --account` / `opv init --account`, resolved from an email, user ID or sign-in address to the account ID) or `OP_ACCOUNT`, else the only account op knows. With several and none chosen, commands stop with `account_required` listing them; `opv login` asks. opv never searches accounts it was not pointed at. Every `op` call carries `--account` (an environment variable does not reach a Windows `op.exe` started from WSL); `op --version` and `op account` calls carry none.
 - **`account = "<account ID>"`** (optional, per environment): every `op` call for that environment carries it (`OP_ACCOUNT` in the child's environment and `--account`), so `run`, `check`, `status`, `plan`, `sync`, `config export`, `item skeleton` and `doctor --env` act in the right account. Not added when a service-account or Connect credential is set (the credential decides). An invalid value is a configuration error with line and column (FR-2).
-- **`deploy_credentials = "op://<vault>/<item>"`** (optional, per environment): an item holding only that environment's least-privilege deploy identity (SR-5), read once by IDs or names (an `op://` reference with exactly a vault and an item; a field, a query or another form is a configuration error with line and column). Read only by commands that reach the target (`status`, `plan`, `sync`, `doctor --env`). Fields by convention: Fly `FLY_API_TOKEN` (concealed), set only in each `flyctl` call's environment (`FLY_API_TOKEN` and `FLY_ACCESS_TOKEN`); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed), signed in once with `az login --service-principal -u <client> -t <tenant> -p @<hand-off> --only-show-errors -o none` in a private per-run `AZURE_CONFIG_DIR` that every `az` call of the run uses and that is removed on every exit path, Ctrl-C, SIGTERM, SIGHUP and SIGQUIT included, and on Windows on Ctrl-C, Ctrl-Break and closing the console (stale directories of killed runs are swept at the start of every Azure run). Kubernetes: a configuration error (`kubectl` uses the kubeconfig), except a Kubernetes runtime whose secrets are in a Key Vault store (`secrets_in`, FR-39): its item holds the Azure fields and signs in the `az` that writes that store, with the same private `AZURE_CONFIG_DIR`. `doctor --env` never stops on a failed deploy sign-in: it prints one failing `deploy credentials` check with its next step (also in `--json`), runs the other checks and marks the checks that use the deploy identity's CLI (all but its version check) `skip … (deploy credentials failed)`. A failed `az login` shows its scrubbed `az said:` excerpt on stderr only, never in a `--json` document (NR-31); the credential values are registered with the scrubber when the item is read. On Windows the value pipe serves only the `az` process opv started or its descendants (`GetNamedPipeClientProcessId`); any other client is refused unread and fails the call. A missing, duplicate, empty or wrongly typed field is a source error naming the field, never a value. Values are `SecretValue`s and never reach argv, files (except az's own private directory, SR-4), logs or `Debug`.
+- **`deploy_credentials = "op://<vault>/<item>"`** (optional, per target since 0.7.0, FR-56; there is no environment-level form and no fallback): an item holding only that target's least-privilege deploy identity (SR-5), read once by IDs or names (an `op://` reference with exactly a vault and an item; a field, a query or another form is a configuration error with line and column). Read only by commands that reach the target (`status`, `plan`, `sync`, `doctor --env`). Fields by convention: Fly `FLY_API_TOKEN` (concealed), set only in each `flyctl` call's environment (`FLY_API_TOKEN` and `FLY_ACCESS_TOKEN`); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed), signed in once with `az login --service-principal -u <client> -t <tenant> -p @<hand-off> --only-show-errors -o none` in a private per-run `AZURE_CONFIG_DIR` that every `az` call of the run uses and that is removed on every exit path, Ctrl-C, SIGTERM, SIGHUP and SIGQUIT included, and on Windows on Ctrl-C, Ctrl-Break and closing the console (stale directories of killed runs are swept at the start of every Azure run). Kubernetes: a configuration error (`kubectl` uses the kubeconfig), except a Kubernetes runtime whose secrets are in a Key Vault store (`secrets_in`, FR-39): its item holds the Azure fields and signs in the `az` that writes that store, with the same private `AZURE_CONFIG_DIR`. `doctor --env` never stops on a failed deploy sign-in: it prints one failing `deploy credentials` check with its next step (also in `--json`), runs the other checks and marks the checks that use the deploy identity's CLI (all but its version check) `skip … (deploy credentials failed)`. A failed `az login` shows its scrubbed `az said:` excerpt on stderr only, never in a `--json` document (NR-31); the credential values are registered with the scrubber when the item is read. On Windows the value pipe serves only the `az` process opv started or its descendants (`GetNamedPipeClientProcessId`); any other client is refused unread and fails the call. A missing, duplicate, empty or wrongly typed field is a source error naming the field, never a value. Values are `SecretValue`s and never reach argv, files (except az's own private directory, SR-4), logs or `Debug`.
 - **Azure per OS.** Linux/WSL: `$XDG_RUNTIME_DIR` must be RAM-backed (statfs `TMPFS_MAGIC`/`RAMFS_MAGIC`) and owned by the user; otherwise opv refuses before reading the credential ("deploy credentials for Azure need a private RAM directory ($XDG_RUNTIME_DIR on tmpfs), which this machine doesn't have; nothing was read or changed", next: `az login` and remove `deploy_credentials`, or OIDC in CI); the run directory is `opv-az.<pid>-<random>`, mode 0700. Windows: `%LOCALAPPDATA%\Temp\opv-az-<pid>-<random>` with a protected user-only ACL; az stores the secret DPAPI-encrypted (`service_principal_entries.bin`; `AZURE_CORE_ENCRYPT_TOKEN_CACHE=true` is set), and a plaintext `service_principal_entries.json` makes opv delete the directory and refuse; removal is retried for up to about 10 s because az's helper processes hold files briefly. macOS: refused with the same next step (no RAM directory, no verified encrypted store).
 - **Windows value hand-off (SR-3).** On native Windows, a value for `az` (the service-principal secret, Key Vault values, the Container App update) goes through a named pipe `\\.\pipe\opv-<random>` whose DACL grants only the current user and which rejects remote clients: opv waits for the connection, writes the bytes and closes the handle (never a disconnect, which corrupts the reader inside az), serving up to 3 connections; a call that succeeds without az ever reading the pipe is an error. Elsewhere values go on stdin (`/dev/stdin`). This replaces the earlier "use WSL for Key Vault writes" refusal.
 - **Sign-in advice.** Every sign-in hint in `doctor`, errors and `Next` lines is `opv login <env>` (`opv login` when no environment is known), the same in every shell.
@@ -827,7 +806,7 @@ Adopted by the owner on 2026-10-08 for 0.5.0. Goal: a user does not think about 
 
 Decided 2026-10-08 for 0.5.0. Users never get an error because 1Password is not laid out to opv's convention (§10.1). opv fixes the layout itself, never deletes information, and hides the convention. Design: `docs/design/self-healing-conventions.md`.
 
-- **Tolerant reads, every identity (CI included).** Each declared key's field is found wherever it is: labels match ignoring case, spaces, `-` and `_`; a field in the wrong section, at the top level or in a human-named section is found; of several candidates the choice is deterministic (a filled field in the right section, then any filled field, then an empty one; ties go to the field later in the item). A secret stored as text and config stored as concealed are read, not refused. Fields in product-shaped sections (`^[a-z][a-z0-9_-]*$`) are never claimed for another product, nor by the simple profile. A simple and a fleet configuration may share one item: the fleet profile reads a key-shaped field at the top level (the simple profile's home) but never moves, relabels, conceals, normalizes or keeps it, so the two never move a field back and forth; a key left that way is named in one note. Layout problems never block a read-only command.
+- **Tolerant reads, every identity (CI included).** Each declared key's field is found wherever it is: labels match ignoring case, spaces, `-` and `_`; a field in the wrong section, at the top level or in a human-named section is found; of several candidates the choice is deterministic (a filled field in the right section, then any filled field, then an empty one; ties go to the field later in the item). A secret stored as text and config stored as concealed are read, not refused. Fields in product-shaped sections (`^[a-z][a-z0-9_-]*$`) are never claimed for another product. Since 0.7.0 (FR-20 removed) an unsectioned field (where the 1Password app puts a field added outside any section) whose label matches a declared key of exactly one product in the boundary item is moved into that product's section, like any other misplaced field; one that matches keys of several products is never moved; a key left that way is named in one note. Layout problems never block a read-only command.
 - **Auto-tidy for a signed-in person** (`setup`, `init`, `check`, `run`, `status`, `plan`, `sync`, `config export`, `history`, `adopt`, `projects`, and `ui` through them; `opv schema`'s `tidies_1password`): when `op whoami` reports `USER` and no `OP_SERVICE_ACCOUNT_TOKEN`, Connect token or CI is set. A service account, Connect or CI only reads tolerantly and prints one note that the next local run will tidy.
 - **The tidy plan (pure, `domain::convention`).** Create missing product sections and missing fields, empty and of the right kind; conceal a secret stored as text (never the reverse); rename labels to the key; move fields home; resolve duplicates. Normalize a value only when its rules make the intended form unambiguous: a trailing newline/CR/space is removed when the value fails its rules and the trimmed one passes; a missing `ensure_prefix` is added. Everything displaced or replaced goes to section `opv · kept`, labelled `<original label> (from <section>, <UTC date>)`; a normalized value's original is kept there as a concealed field, a renamed label as an empty breadcrumb. Nothing is ever deleted. A text field `opv/convention = 1` records the convention version, written only together with another fix.
 - **Missing items or vaults.** For a person running `setup` or `init`, opv creates the item (and the vault, when the account allows it) and writes its IDs into `secrets.toml`. Other commands report it with one `Next:`.
@@ -860,7 +839,7 @@ Acceptance: an existing `secrets.toml` still wins (the fleet's infra repo is unc
 
 ## FR-45 — Shared Keys
 
-- A key may declare `from = "<product>/<KEY>"` (`"<KEY>"` under the simple profile) instead of having a field of its own. Its value is read from the source's field in the same environment's item, within the one item read (FR-13). References to another item or environment are refused at load with a configuration error.
+- A key may declare `from = "<product>/<KEY>"` instead of having a field of its own. Its value is read from the source's field in the source product's boundary item in the same environment (FR-57); each distinct item is read once per command (FR-13). A source the reader cannot open is `source_not_accessible`, naming the boundary and its `audience`. References to another environment are refused at load with a configuration error. No fallback or precedence exists: a key has exactly one source (FR-57).
 - Validated at load, with the line and column of `from` (FR-2): the source is declared; it is not itself a `from` (no chains, no cycles); it has the same `kind`; it is declared for every environment the referencing key uses; the referencing key sets neither `immutable` (it follows the source) nor a `refuse_in` environment where the source is declared.
 - The source's rules apply first; the referencing key's own rules are then checked against the value the source would stage. Failures name the key and rule only (FR-15, FR-22).
 - `run` exports the value under the referencing key's own name, as an `op://` reference to the source's field (FR-4, SR-3). `sync` writes it under the referencing key's own target name; each name is its own store entry or binding, so the managed set and prune are unchanged (FR-8). Changing the source changes every referencing target in the same sync; `--rotate` of an immutable source rotates its referencing keys too (FR-16).
@@ -888,13 +867,13 @@ Design: `docs/design/github-actions-target.md`; spike: `docs/design/spike-github
 - `[products.<name>] source_only = true` declares a product whose keys hold canonical values only. Its keys have fields like any other (tidy, `item skeleton`, missing-value lines, rules, `immutable`, `--rotate`), and other keys point at them with `from` (FR-45).
 - A source-only product's keys render no target name in any environment: they are never written, never part of the managed set, never pruned, and exempt from the name collision check (FR-8, FR-30). `run --product <name>` of a source-only product is refused with a configuration error.
 - `check`, `status` and `plan` warn once (`unreferenced-source`) for a key of a source-only product that no `from` references. A source-only product without keys is a configuration error.
-- `source_only` is a boolean (default `false`); it is not allowed under the simple profile.
+- `source_only` is a boolean (default `false`).
 
 ## FR-48 — Target Product Scope
 
-- A target may deliver only some products' keys (`products = [...]` on `github`). For a product the target does not serve, the product's keys render no name for that target: never written, never in its managed set, never pruned, and exempt from its collision check. They are still read and checked when declared for the environment, and a key of a served product may point at them with `from`.
+- A target may deliver only some products' keys (`products = [...]`, on every provider's target since 0.7.0, FR-56; GitHub's provider-specific option is removed). For a product the target does not serve, the product's keys render no name for that target: never written, never in its managed set, never pruned, and exempt from its collision check. They are still read and checked when declared for the environment, and a key of a served product may point at them with `from`.
 - Each listed product must be declared and not source-only; an empty list is a configuration error.
-- `plan` and `status` list the declared keys that the environment's target does not deliver as `not delivered here` (JSON `undelivered`), so a missing product in `products` never passes silently.
+- `plan` and `status` list the declared keys that no target of the environment delivers as `not delivered here` (JSON `undelivered`), so a missing product in `products` never passes silently.
 
 ## FR-49 — Account Discovery for Machines
 
@@ -927,18 +906,18 @@ Design: `docs/design/accounts-and-readiness.md` §4 (#81).
 
 Design: `docs/design/fleet-bootstrap-and-adoption.md` §1 (#77).
 
-- `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` (owner terminal) takes the configuration's environments from declared to ready in the selected account (FR-49, FR-50; never op's default): per environment it checks the recorded vault and item in that account, creates a missing vault (`<project>-<env>`) and item (`<project> · <env> values`) as `init` does, records their IDs where the configuration lives, adds every product's section and empty fields (`item skeleton`), and ends with the readiness receipt (FR-51). Every step is idempotent; an interrupted run resumes.
+- `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` (owner terminal) takes the configuration's environments from declared to ready in the selected account (FR-49, FR-50; never op's default): per environment and boundary (FR-57) it checks the recorded vault and item in that account, creates a missing vault (`<project>-<boundary>-<env>`) and item (`<project> · <boundary> · <env> values`), with notes saying what each holds and which configuration owns it, records their IDs where the configuration lives, adds every product's section and empty fields (`item skeleton`), and ends with the readiness receipt (FR-51). Every step is idempotent; an interrupted run resumes.
 - IDs the selected account cannot see stop that environment with `ids_not_in_account`, naming the account and environment, with two explicit choices: `--rebind <env>` (new IDs in the selected account; values are not moved) or selecting the owning account. Nothing falls back to another account.
 - A generated declaration (a `# generated` first line, or a manifest marked so) is never rewritten; the IDs to record are printed for the generator instead (`ids_for_generator`).
-- `--ci-reader <env>` prints the owner's command to create a read-only service account for the environment's vault and where to store its token; opv does not create it.
+- `--ci-reader <env>` prints the owner's command to create a read-only service account for the boundary vaults that environment's CI jobs read (FR-59) and where to store its token; opv does not create it. Bootstrap also creates and records the state vault of every target that has none (FR-58); there is no separate flag.
 - It never syncs, deploys or writes a value. `--dry-run` changes nothing.
 
 ## FR-53 — Adopting Existing Settings
 
 Design: `docs/design/fleet-bootstrap-and-adoption.md` §2 (#78).
 
-- `opv adopt <env> --from <dotenv file>|target [--replace <product/KEY>]... [--apply] [--json]` plans, and with `--apply` writes, values found elsewhere into the environment's item. Without `--apply` it is read-only.
-- Sources: a dotenv file (literal assignments; the `legacy_env` parser and limits) or the environment's target through its ports where values can be read back (pinned stores; variable channels for config). Fly secrets and GitHub secrets cannot be read and are refused with the manual alternative.
+- `opv adopt <env> --from <dotenv file>|target [--replace <product/KEY>]... [--apply] [--json]` plans, and with `--apply` writes, values found elsewhere into the environment's boundary items (each value into its key's boundary, FR-57). Without `--apply` it is read-only.
+- Sources: a dotenv file (literal assignments; the `legacy_env` parser and limits) or one of the environment's targets (`--from target:<name>`) through its ports where values can be read back (pinned stores; variable channels for config). Fly secrets and GitHub secrets cannot be read and are refused with the manual alternative.
 - Each found name maps to one declared key (target name, else bare key name; ambiguity is a finding). A shared key's value goes to its source's field once; equal copies add nothing, differing copies are a conflict.
 - Each key's rules and transforms normalise both sides before comparing: `match`, `format only`, `import` (1Password empty), `differs` (decision needed), `not declared`. A non-empty field is never replaced, and an immutable key never, unless named with `--replace` (immutable also needs `--rotate`); a replaced value is kept in `opv · kept`.
 - `--apply` writes in one verified item edit (values on stdin only), re-reads and verifies, needs a person's own session, and is resumable. It never syncs, deploys, prunes, revokes or deletes the source.
@@ -948,7 +927,7 @@ Design: `docs/design/fleet-bootstrap-and-adoption.md` §2 (#78).
 
 Resolves #36 (TRIZ: separation in time; preliminary action, copying, intermediary).
 
-- After a staged sync writes values and lists the store again, a person's own session records in the environment's item, section `opv · state`, per written name: the store's version of it (Fly digest, GitHub `updatedAt`) and `HMAC-SHA256(key, value)`, as a text field `v1:<version>:<fingerprint>`; the key is 32 random bytes, a concealed field `ledger key` in the same section, created on first use. One fresh item read and one item edit, through the tidy writer and under the tidy's gate (FR-43): never a service account, Connect, CI, deploy credentials or the project manifest. A failure to record is a note, never the sync's result.
+- **Since 0.7.0 (FR-58, D11) the ledger is the placement's delivery evidence: one line per name in the placement's state item, in the target's state vault, written by whoever delivers (the deploy identity in CI, or a person) under the item's evidence key. The values item's `opv · state` section, its `ledger key` and its writer are removed. The rest of this requirement describes how entries are judged.** After a staged sync writes values and lists the store again, the deliverer records, per written name and placement: the store's version of it (Fly digest, GitHub `updatedAt`) and `HMAC-SHA256(key, value)`, as a text field `v1:<version>:<fingerprint>`; the key is 32 random bytes, a concealed field `ledger key` in the same section, created on first use. One fresh item read and one item edit, through the tidy writer and under the tidy's gate (FR-43): never a service account, Connect, CI, deploy credentials or the project manifest. A failure to record is a note, never the sync's result.
 - `plan`, `status` and `sync` (staged flow) judge a listed name by the ledger when the store still holds it at the recorded version: the same fingerprint is `same` (not staged again), another is `would_change`. A name listed at another version is reported as changed outside opv (`drift`, text and JSON). No ledger entry: `unknown`, as before.
 - The section is reserved: never a product, never tidied, never an extra field. Fingerprints are compared in constant time and never printed; the key and entries never appear in output, errors or `Debug`.
 ## FR-55 — Personal Keys and Environment Presentation
@@ -960,6 +939,70 @@ Issue #86. Owner rulings 2026-10-13: personal keys are per product, and shared p
 - Shared personal values: a personal key in a source-only product (FR-47) holds one value per person that other personal keys point at with `from`. A personal key's source must be personal and a team key's source must not be: personal and team values never mix (configuration errors).
 - `run`, `check`, `ready` and `opv ui` read the team item for team keys and the signed-in person's own item for personal keys; a personal key never falls back to a team value. No one's personal item is read except the signed-in person's. `opv bootstrap` creates the signed-in person's personal item with empty fields (idempotent).
 - Presentation: each environment may set `title` (display name; default its key), `audience` (free text: a person who cannot open the environment's vault is told it is not available to them, non-blocking, instead of a `vault_no_access` problem) and `order` (display order; default configuration order). The key stays the identifier for commands, IDs and links. `opv bootstrap` tags each item it creates `opv-env:<project>/<env>`.
+
+## FR-56 — Named Targets
+
+Issue #114. Design: `docs/design/placements-and-access-boundaries.md` §5. Owner decisions 2026-10-14 (D1, D3).
+
+- An environment declares its deployment targets only as `[environments.<env>.targets.<name>]`, one table per target, also when there is one. A target holds one provider's options (`fly.*`, `azure.*`, `kubernetes.*`, `github.*`, as in FR-28 to FR-39 and FR-46), and `products`, `deploy_credentials` (FR-40) and `state_vault_id` (FR-58). None of these exists at the environment level: a provider table, `deploy_credentials` or `state_vault_id` directly under an environment is a configuration error with line and column that shows the `targets.<name>` form to write (FR-60). An environment with no target is run-only, as before.
+- Target names match `^[a-z][a-z0-9-]*$` and are chosen by a person (`opv target add` asks; there is no generated or default name).
+- `products = [...]` (FR-48) applies to every provider. Without it, a target delivers every non-source-only product with a key desired in the environment.
+- Within one environment a `(provider, locator)` belongs to one target (the provider's `same_target` check runs between targets). Across environments today's rule stands. Name collisions inside a target are FR-30's.
+- `opv target add <env> <name> --<provider options> [--products …] [--deploy-credentials …]` and `opv target list [--env] [--json]` write and show targets through the configuration editor (comments kept, validation, concurrency refusal). Each written table gets a one-line comment saying what it is and that `opv target add` wrote it. In the same confirmed step (owner's session), `target add` creates the target's state vault (`naming::state_vault`, or reuses the one with that title) and records its `state_vault_id`, so the configuration never names a target without one; it ends with `Next: opv access <env> --target <name>`.
+- `plan` and `sync` without `--target` cover every target of the environment under one plan id that names the targets it covers (FR-41); `--target <name>` (repeatable) narrows them. `status`, `plan` and `sync` rows always carry the target (column `TARGET`, JSON `target`). `ready` reports a target as `grants_missing` until its deploy credentials, state vault and every boundary it reads can be opened.
+- `opv explain` answers for a target: its provider and locator, products, deploy identity and state vault.
+
+Acceptance: P delivered to targets A and B in one environment keeps two independent placements (FR-58); a configuration in the removed environment-level form fails at load and shows the replacement; `sync` without `--target` covers every target and `--target` narrows.
+
+## FR-57 — Access Boundaries
+
+Design: `docs/design/placements-and-access-boundaries.md` §4. Owner decisions 2026-10-14 (D5, D6).
+
+- An environment's values live in one vault per access boundary, each holding exactly one opv values item: by default one boundary per product (vault `<project>-<product>-<env>`, item `<project> · <product> · <env> values`); a source-only product (FR-47) is its own boundary (conventionally `shared`); products that set `boundary = "<group>"` share the group's boundary (`<project>-<group>-<env>`). 1Password grants per vault, so a boundary is the smallest unit anyone can be given.
+- Only team keys need a boundary: a product whose keys desired in an environment are all personal (FR-55) needs none there, since each person's values live in their own item.
+- The configuration records `boundaries.<name> = { vault_id, item_id }` per environment (written by `opv bootstrap`, FR-52). Environment-level `vault_id`/`item_id` do not exist (FR-60). A product with a key desired in an environment whose boundary is not recorded is `boundary_missing` at load, next step `opv bootstrap`.
+- Inside a boundary item each product keeps its `<product>` section; the convention (FR-43), field labels and `item skeleton` are unchanged per item.
+- Every value has exactly one source: its key's own field, or the field named by `from` (FR-45). Nothing falls back, shadows or takes precedence. A field present under a referencing key is FR-45's extra-field finding.
+- Commands read each boundary item they need once, by IDs (FR-13), and only the boundaries their products and `from` sources need.
+- Account-wide boundaries shared by several projects are deferred until the implicit tidy never writes an item holding sections this configuration does not declare.
+- Every vault and item opv creates carries notes saying what it holds, which configuration owns it, and what must not be done to it by hand.
+
+Acceptance: a reader of one product's boundary cannot be required to read another product's values by any command scoped to the first product; `run --product p` reads only p's boundary and its sources; a missing boundary fails at load with its next step.
+
+## FR-58 — Delivery Evidence per Placement
+
+Design: `docs/design/placements-and-access-boundaries.md` §5.3, §6.3 and `delivery-receipts.md`. Owner decision 2026-10-14 (D4).
+
+- A placement is `(account, environment, product, target)`. Its receipt scope is `(account_id, environment, product, target, provider, locator)`; a changed locator is `not_delivered`.
+- Evidence for a placement is one item, `opv · delivery · <product> · <target>`, in the target's state vault (`state_vault_id` on the target, created by `opv target add` with the target, or by `opv bootstrap` for any target missing one), with notes saying what it is and that only its deploy identity writes it. Its ID is recorded in the configuration as `delivery_items.<product>` on the target, by `opv bootstrap` (any placement without one) and by `opv target add` (the new target's placements, in the same step); `sync` reads state items only by that ID and never looks them up by title (FR-13). A placement with no recorded item is reported as not recorded, with `Next: opv bootstrap`; the loader refuses an entry for a product the target does not deliver. Writing one placement's evidence never reads or changes another's.
+- The item holds one evidence line per name (`v1|version|fingerprint|item_id|field`) under one evidence key, recorded by the deliverer after each confirmed write; these lines are also the version ledger (FR-54), so there is one store, not two (D11). A revision is minted once every name of the binding set has a line. Staged versus deployed, drift and revisions are computed per placement.
+- `state_vault_id` is required on every target (D12): a target without one fails at load with `state_vault_missing`, next step `opv bootstrap`, which creates the target's state vault and records it.
+- A state vault may be shared by several targets only when they deliver products from the same set of boundaries; otherwise the configuration fails at load with `state_vault_wider_than_values`, naming the vault, the targets as `<env>/<target>` and the boundary one of them cannot read, and the fix: delete that target's `state_vault_id` and run `opv bootstrap` (evidence lets its reader test guesses against values, so it is never readable more widely than the values).
+- Receipt files: an entry is selected by its full scope, independent of order; two entries with the same full scope are refused with `duplicate_scope`.
+- `opv delivery verify <env> --product <p> [--target <t>]` returns every placement of the product, each with its target and state; `--target` narrows and is never required.
+
+Acceptance (synthetic fixtures): P recorded on A then B stays independently `verified` on both; a stale revision on B leaves A `verified`; staged/deployed, drift and ledger entries are per placement; receipt selection is order-independent and refuses a duplicate full scope; no value, digest or fingerprint appears in any output, receipt, error or argv.
+
+## FR-59 — Access per Boundary and Target
+
+Design: `docs/design/placements-and-access-boundaries.md` §6. Extends `opv access` (FR-52, #96).
+
+- `opv access [<env>] [--target <t>] [--json]` computes from the configuration who needs what: each target's deploy identity reads exactly its products' boundaries and their `from` sources and reads and writes its state vault; a CI reader reads the boundaries its jobs need; no identity reads another environment. It prints only the missing grants, as the owner's exact commands (`op service-account create …`, `op vault user|group grant …`); opv never runs them.
+- It compares the vaults' users (`op vault user list`, owner session) with that table and reports extra readers. Every result states what was checked and what could not be classified, never "clean".
+- Measuring access under a service account (`cross_environment_access`, a problem; `overbroad_access`, a note) and group listing follow a recorded spike of `op`'s behaviour; until then they are not built.
+- `opv ui` and `opv ready` show, per product, environment and target, readiness, each value's source and missing grants. `opv explain <key>` names the key's vault and item, its targets and who can read it.
+
+## FR-60 — One Way Only (no backward compatibility)
+
+Owner ruling 2026-10-14: opv is greenfield until declared live; there is one way to do each thing.
+
+- Each concept has one runtime model and one configuration form. opv keeps no shorthand, alias, deprecated name or field, legacy reader, fallback or compatibility shim for its own earlier forms, in configuration, commands, flags, JSON documents, 1Password layouts or receipts.
+- A change that replaces a form removes the old one in the same change: code, tests, docs, `opv schema`, `opv guide agent` and the agent skill. No release carries both.
+- Input in a removed form fails fast: a configuration error with line and column (FR-2), or a usage error (exit 2), that names the replacement exactly (pasteable where it is configuration). Nothing reads or converts it.
+- Nothing is migrated automatically. Data opv wrote in an earlier form (items, evidence) is reported as not matching the current form with the command that recreates it.
+- Not covered: tolerance of the shapes external tools emit (`op`, `flyctl`, `az`, `kubectl`, `gh` field casing or optional fields) and importing values from other formats (FR-53); these are inputs from outside opv, not earlier forms of opv.
+- Removed by this ruling in 0.7.0, besides FR-56 to FR-58's replacements: the simple profile and `[profile]` (FR-20; one product is a configuration with one product), the `pattern` rule (FR-24), the `fly_name` JSON field (use `target_name`), and `opv schema`'s `deprecated` list.
+- The ruling is revisited when opv is declared live; until then this requirement wins over any earlier text that keeps a deprecated form.
 
 # 4. Security Requirements
 
@@ -1112,7 +1155,7 @@ opv explain <[product/]KEY> [--env <env>] [--json]
 opv open <[product/]KEY> [--env <env>] [--print] [--json]
 opv help [states | <command>]
 opv init <env> --vault <title> --item <title> [--target <provider>] [--<provider>-<field> <v>]...
-         [--add-env] [--profile simple|fleet] [--force] [--file] [--project <p>] [--json]
+         [--add-env] [--force] [--file] [--project <p>] [--json]
 opv add <[product/]KEY> [--kind secret|config] [--env <env>]... [--rule <name[=value]>]...
         [--guidance <text>] [--immutable] [--json]
 opv completions <bash|zsh|fish|powershell>
@@ -1408,7 +1451,7 @@ Version 0.1 is acceptable when:
 
 Version 0.2 is acceptable when, in addition to 1–14:
 
-15. A simple-profile file (FR-20) passes `status`, `fly plan` and `fly sync` against one item per environment, within the request budget of item 11, and `--prune` touches only declared keys.
+15. (Removed in 0.7.0 with the simple profile, FR-20.) A simple-profile file (FR-20) passed `status`, `fly plan` and `fly sync` against one item per environment, within the request budget of item 11, and `--prune` touches only declared keys.
 16. Every fleet file accepted by v0.1.0 behaves the same in v0.2.
 17. `status --json` and `fly plan --json` carry `schema_version`, contain no value (checked by a test that plants known values and searches the output), and exit with the same codes as the text output.
 18. `opv explain` prints the reference, kind, Fly name, rules and guidance, and an `op item get` command without `--reveal`; it makes no 1Password or Fly call and emits no value or value fragment.
@@ -1429,7 +1472,7 @@ Rejected or deferred from the 2026-10-07 ergonomics review:
 - **Rotation epoch** (rotate immutable keys by bumping a counter): rejected, because rotation must stay a per-key explicit act (FR-16, SR-6).
 - **Generic target trait** (formal `SecretTarget` for many targets): deferred until a second target is funded. Funded in v0.3 as the `SecretStore` and `Runtime` ports (FR-28).
 - **Exact change detection in `fly plan`**: done in 0.6.0 by the version ledger (FR-54, #36): a person's sync records each written name's digest and a keyed fingerprint, so `plan` compares exactly without staging.
-- **Merging `pattern` into `regex`**: done in 0.6.0 (FR-24, #37): `regex` checks the staged value, `pattern` is a deprecated alias.
+- **Merging `pattern` into `regex`**: done in 0.6.0 (FR-24, #37): `regex` checks the staged value. `pattern` is removed in 0.7.0 (FR-60).
 
 Version 0.3 is acceptable, per phase, when in addition to 1–26:
 
@@ -1532,7 +1575,7 @@ The consumer may generate this file from its own catalog; opv reads only this fi
 
 The `fly` section is optional per environment: an environment used only for `run`, `config export` and `item skeleton` (for example `dev`) omits it, and `status` and the `fly` commands refuse it with a configuration error. `vault_id`, `item_id` and `fly.app` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
-Since v0.2: fleet stays the default profile and is unchanged; every v0.1.0 fleet file keeps working. A second profile, `kind = "simple"` (FR-20), serves one app per environment with a flat `[keys]` map: no products, no template, and the field name is the Fly name. `profile.kind` stays required, so a file always says which profile it uses. Both profiles share the environment table, the rules, the one-item read (FR-13) and the managed-set rule (FR-8).
+Since 0.7.0 there is one configuration form (FR-60): the simple profile below was removed (FR-20). Historical note: since v0.2: fleet stays the default profile and is unchanged; every v0.1.0 fleet file keeps working. A second profile, `kind = "simple"` (FR-20), serves one app per environment with a flat `[keys]` map: no products, no template, and the field name is the Fly name. `profile.kind` stays required, so a file always says which profile it uses. Both profiles share the environment table, the rules, the one-item read (FR-13) and the managed-set rule (FR-8).
 
 ## 10.3 Coexistence with other automation
 

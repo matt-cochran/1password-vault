@@ -30,8 +30,8 @@ pub struct AddEnvForm {
 }
 
 /// `["add", label, "--kind", "secret"|"config"]` where label is "product/KEY" when product is Some, else "KEY"; then "--env" and the environments joined with "," when not empty; then "--guidance" and the trimmed guidance when it is not empty; then "--personal" when personal; then "--allow-same-value" when allow_same_value.
-/// Err(one English sentence) when: key is not ^[A-Z][A-Z0-9_]*$; product is Some and not ^[a-z][a-z0-9_-]*$; fleet is true and product is None; fleet is false and product is Some; personal and allow_same_value are both set; personal and kind is Config.
-pub fn add_key_command(form: &AddKeyForm, fleet: bool) -> Result<Vec<String>, String> {
+/// Err(one English sentence) when: key is not ^[A-Z][A-Z0-9_]*$; product is None, or not ^[a-z][a-z0-9_-]*$; personal and allow_same_value are both set; personal and kind is Config.
+pub fn add_key_command(form: &AddKeyForm) -> Result<Vec<String>, String> {
     if !is_key_name(&form.key) {
         return Err(format!("key {:?} must match ^[A-Z][A-Z0-9_]*$.", form.key));
     }
@@ -42,16 +42,8 @@ pub fn add_key_command(form: &AddKeyForm, fleet: bool) -> Result<Vec<String>, St
             "product {product:?} must match ^[a-z][a-z0-9_-]*$."
         ));
     }
-    match (fleet, form.product.is_some()) {
-        (true, false) => {
-            return Err(
-                "the fleet profile declares keys per product: use PRODUCT/KEY.".to_string(),
-            );
-        }
-        (false, true) => {
-            return Err("the simple profile has no products: use KEY.".to_string());
-        }
-        _ => {}
+    if form.product.is_none() {
+        return Err("keys are declared per product: use PRODUCT/KEY.".to_string());
     }
     if form.personal && form.allow_same_value {
         return Err("personal and allow_same_value cannot both be set.".to_string());

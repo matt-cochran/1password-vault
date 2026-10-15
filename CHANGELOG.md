@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
+Named deployment targets and one vault per access boundary, with **no backward compatibility**. opv is not yet declared live, so 0.7.0 keeps one way to do each thing (FR-60). Nothing is migrated: a configuration in a removed form fails at load, and the error shows the exact current form to write. See [docs/configuration.md](docs/configuration.md) ("Removed forms") and [docs/design/placements-and-access-boundaries.md](docs/design/placements-and-access-boundaries.md).
+
 ### Added
+
+- **Named targets** ([#114](https://github.com/matt-cochran/1password-vault/issues/114)): an environment declares `[environments.<env>.targets.<name>]`, also when it has one. One product can run on a shared app and on a dedicated overflow app in the same environment, reading the same values. `plan`, `status` and `sync` cover every target under one plan id, and `--target` narrows them. Rows carry `TARGET`; the target-state column is `ON TARGET` (JSON `target_state`).
+- **`opv target add` / `opv target list`**: add a target in one confirmed step. The provider comes from its options, and the command creates the target's state vault and its placements' delivery items, then ends with `Next: opv access`.
+- **One vault per access boundary** ([#120](https://github.com/matt-cochran/1password-vault/issues/120)): each product's values live in their own vault (`<project>-<product>-<env>`), recorded as `boundaries.<name>`. `boundary = "<group>"` lets products share one vault as an explicit, opt-in trade. `from` reads a source in another boundary, and a key always has exactly one source.
+- **Delivery evidence per placement**: each product on each target has its own evidence item in that target's state vault (`state_vault_id`, required). The evidence is also the version ledger. `opv delivery verify` reports every placement.
+- **`opv access` per boundary and target**: who needs which vault, compared with each vault's readers. It prints one owner `op service-account create` command per principal and never reports "clean".
+- **`opv explain`** names a key's source, boundary, delivering targets and readers. `opv explain --target` describes a target.
+- **`opv ready`** lists every target, and reports `grants_missing` with its reason. `opv doctor --env` checks each target. `opv adopt --from target:<name>` and `opv history --target` work per target.
+- **`--product` may be omitted** when exactly one product has keys desired in the environment (`check`, `run`, `config export`, `open`).
+- **Self-explaining vaults and items**: every vault and item opv creates carries notes saying what it holds and what not to do by hand.
+- **New error codes**: `boundary_missing`, `state_vault_missing`, `state_vault_wider_than_values` and `duplicate_scope`.
 
 - Optional `opv-mcp` stdio server using rmcp: readiness, configuration metadata,
   and deployment previews. The server returns allowlisted metadata only and
@@ -17,8 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed diagnostics, fake-only tests, and manual per-project configuration.
 - Architecture/review map linking security, recovery, and release evidence.
 
+### Removed
+
+- **The simple profile and `[profile]`**: a single-app project is one product with a `{KEY}` target template.
+- **Environment-level forms**: `vault_id`/`item_id`, provider tables, `deploy_credentials` and `state_vault_id`. Use `boundaries.<name>` and `targets.<name>`.
+- **GitHub's provider-level `products`**: use the target's `products`.
+- **Deprecated forms**: the `pattern` rule (use `regex`), the `fly_name` JSON field (use `target_name`) and `opv schema`'s `deprecated` list.
+- **Retired ledger and flags**: the values item's `opv · state` ledger section, `opv bootstrap --state` (bootstrap records every missing ID), and `opv init --profile`.
+- **`opv init --target`, `--target-name` and the provider options**: `opv init` writes products and boundaries, and `opv target add` is the one way to add a target. Passing a removed option fails with the exact `opv target add` command.
+- **The `required_with_target` schema field**: it is now `required_for_provider`.
+
 ### Fixed
 
+- **Skipped keys and delivery revisions:** a key skipped by a mode (or otherwise not delivered) no longer stays in a placement's binding set, so such a product now mints a delivery revision.
 - Align front-page security claims with documented runtime, memory, local-state,
   and Azure credential-cache boundaries; scope agent guidance appropriately.
 - Isolate independent Fly parser corpus cases and fake-host unit tests from

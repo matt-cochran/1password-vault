@@ -1,6 +1,7 @@
 //! Pure domain types. Nothing here knows about a vendor CLI or subprocesses (FR-12).
 
 pub mod access;
+pub mod access_plan;
 pub mod adopt;
 pub mod convention;
 pub mod delivery;
@@ -9,11 +10,13 @@ pub mod history;
 pub mod kind_guess;
 pub mod ledger;
 pub mod model;
+pub mod naming;
+pub mod placement;
 pub mod secret;
 
 pub use model::{
-    Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product, Profile,
-    Rules, SIMPLE_PRODUCT, SIMPLE_TEMPLATE, key_label,
+    Boundary, Environment, Fleet, ItemRef, KeySpec, Kind, OneOrMany, Origin, PrefixByMode, Product,
+    Rules, Target, boundary_missing, key_label,
 };
 pub use secret::SecretValue;
 pub mod plan;

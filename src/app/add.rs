@@ -51,7 +51,7 @@ pub struct AddArgs {
 #[allow(clippy::too_many_arguments)]
 fn write_json(
     out: &mut dyn Write,
-    product: Option<&str>,
+    product: &str,
     key: &str,
     kind: &str,
     envs: &[String],
@@ -106,20 +106,16 @@ fn run_inner(
             .or_next(|| "opv config edit".into()),
         other => other,
     })?;
-    let fleet_profile = !fleet.is_simple();
-    let (product, key) = split_name(&args.name, fleet_profile, &fleet)?;
+    let (product, key) = split_name(&args.name, &fleet)?;
     let mut doc = ConfigDoc::parse(original)?;
     let envs = environments(&args.envs, &doc, &fleet)?;
-    let label = match product {
-        Some(p) => format!("{p}/{key}"),
-        None => key.to_string(),
-    };
+    let label = format!("{product}/{key}");
 
     let summary = if doc.has_key(product, key) {
         let existing = doc.key_environments(product, key);
         let declared = fleet
             .products
-            .get(product.unwrap_or(crate::domain::SIMPLE_PRODUCT))
+            .get(product)
             .and_then(|p| p.keys.get(key))
             .map(|k| kind_word(k.kind))
             .unwrap_or("secret");
@@ -265,11 +261,8 @@ fn run_inner(
     w(out, format!("Next: {}", check_command(first, product)))
 }
 
-fn check_command(env: &str, product: Option<&str>) -> String {
-    match product {
-        Some(p) => format!("opv check {env} --product {p}"),
-        None => format!("opv check {env}"),
-    }
+fn check_command(env: &str, product: &str) -> String {
+    format!("opv check {env} --product {product}")
 }
 
 fn kind_word(k: crate::domain::Kind) -> &'static str {
@@ -279,42 +272,29 @@ fn kind_word(k: crate::domain::Kind) -> &'static str {
     }
 }
 
-/// `product/KEY` under the fleet profile, `KEY` under the simple one; both names checked
-/// like the loader checks them.
+/// `product/KEY`, both names checked like the loader checks them. A bare `KEY` is refused
+/// naming `opv add <product>/<KEY>` and the declared products.
 fn split_name<'a>(
     name: &'a str,
-    fleet_profile: bool,
     fleet: &crate::domain::Fleet,
-) -> Result<(Option<&'a str>, &'a str), Error> {
-    let (product, key) = match name.split_once('/') {
-        Some((p, k)) => (Some(p), k),
-        None => (None, name),
+) -> Result<(&'a str, &'a str), Error> {
+    let Some((product, key)) = name.split_once('/') else {
+        let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
+        let example = known.first().copied().unwrap_or("api");
+        return Err(cfg(format!(
+            "keys are declared per product: opv add {example}/{name} \
+             (products: {})",
+            if known.is_empty() {
+                "none yet".to_string()
+            } else {
+                known.join(", ")
+            }
+        )));
     };
-    match (fleet_profile, product) {
-        (true, None) => {
-            let known: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
-            let example = known.first().copied().unwrap_or("api");
-            return Err(cfg(format!(
-                "the fleet profile declares keys per product: opv add {example}/{key} \
-                 (products: {})",
-                if known.is_empty() {
-                    "none yet".to_string()
-                } else {
-                    known.join(", ")
-                }
-            )));
-        }
-        (false, Some(_)) => {
-            return Err(cfg(format!(
-                "the simple profile has no products: opv add {key}"
-            )));
-        }
-        _ => {}
-    }
-    if let Some(p) = product
-        && !config::is_product_name(p)
-    {
-        return Err(cfg(format!("product {p:?} must match ^[a-z][a-z0-9_-]*$")));
+    if !config::is_product_name(product) {
+        return Err(cfg(format!(
+            "product {product:?} must match ^[a-z][a-z0-9_-]*$"
+        )));
     }
     if !config::is_env_name(key) {
         return Err(cfg(format!("key {key:?} must match ^[A-Z][A-Z0-9_]*$")));

@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
 
 fn fleet() -> Fleet {
@@ -21,15 +22,71 @@ fn a_fleet_replace_needs_a_product() {
 #[test]
 fn a_target_that_hides_values_is_refused_with_the_manual_way() {
     let r = FakeRunner::default();
-    let e = read_source(&fleet(), "staging", &Source::Target, &r).unwrap_err();
+    let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
     assert_eq!(e.next_step(), Some("opv adopt staging --from <file.env>"));
 }
 
 #[test]
 fn the_refusal_names_no_value_and_reads_nothing() {
     let r = FakeRunner::default();
-    let _ = read_source(&fleet(), "staging", &Source::Target, &r);
+    let _ = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r);
     assert!(r.calls.borrow().is_empty());
+}
+
+// The `--from` value (FR-53, FR-60) -------------------------------------------------------
+
+/// The bare `--from target` form was removed: it is a usage error.
+#[test]
+fn the_bare_target_form_is_a_usage_error() {
+    let e = source_from(&fleet(), "staging", "target").unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::Usage);
+}
+
+/// The refusal names the environment's targets and the one working form.
+#[test]
+fn the_bare_target_error_names_the_targets_and_the_named_form() {
+    let e = source_from(&fleet(), "staging", "target").unwrap_err();
+    assert!(
+        e.mentions("target:portfolio") && e.mentions("portfolio"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_named_target_is_read_from_that_target() {
+    let source = source_from(&fleet(), "staging", "target:portfolio").unwrap();
+    assert_eq!(source, Source::Target("portfolio".into()));
+}
+
+#[test]
+fn an_unknown_target_name_is_a_usage_error() {
+    let e = source_from(&fleet(), "staging", "target:nope").unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::Usage);
+}
+
+/// A dotenv path (anything not the `target:` form) stays a file source.
+#[test]
+fn a_file_path_is_a_dotenv_source() {
+    let source = source_from(&fleet(), "staging", ".env.staging").unwrap();
+    assert_eq!(source, Source::Dotenv(PathBuf::from(".env.staging")));
+}
+
+/// A GitHub target reads back its config variables, so adopting from it lists that
+/// target's store (FR-53, FR-46).
+#[test]
+fn a_named_target_reads_that_targets_store() {
+    let fleet = crate::config::parse(
+        "[environments.ci]\nboundaries.app = { vault_id = \"v\", item_id = \"i\" }\n\
+         [environments.ci.targets.gh]\nstate_vault_id = \"s\"\n\
+         github.repo = \"example-org/example-repo\"\n\
+         [products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"ci\"]\n",
+    )
+    .unwrap();
+    let r = FakeRunner::new([Output::success(
+        br#"[{"name":"LOG_LEVEL","value":"info"}]"#.to_vec(),
+    )]);
+    let found = read_source(&fleet, "ci", &Source::Target("gh".into()), &r).unwrap();
+    assert_eq!(found["LOG_LEVEL"].expose(), "info");
 }
 
 // End to end through the stateful fake op ------------------------------------------------
@@ -56,8 +113,8 @@ fn world(empty: bool) -> (FakeOp, Fleet, tempfile::TempDir) {
         }),
     );
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{id}\"\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\n\
+        "[environments.dev]\nboundaries.api = {{ vault_id = \"vdev0000000000000000000001\", \
+         item_id = \"{id}\" }}\n[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\n\
          environments = [\"dev\"]\nrules = {{ prefix = \"sk-\" }}\n\
          [products.api.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"dev\"]\n"
     ))
@@ -77,6 +134,86 @@ fn world(empty: bool) -> (FakeOp, Fleet, tempfile::TempDir) {
     (op, fleet, dir)
 }
 
+/// Two products, each in its own boundary item, on the fake's two vaults.
+const MARK_API: &str = "sk-proj-ADOPTMARKER-api";
+const MARK_WEB: &str = "sk-proj-ADOPTMARKER-web";
+
+fn two_boundary_world() -> (FakeOp, Fleet, tempfile::TempDir) {
+    let op = FakeOp::default();
+    let id_a = op.insert(
+        "vdev0000000000000000000001",
+        serde_json::json!({
+            "title": "myapp · dev api", "category": "SECURE_NOTE",
+            "sections": [{"id": "api", "label": "api"}],
+            "fields": [
+                {"id": "fa", "section": {"id": "api", "label": "api"}, "type": "CONCEALED", "label": "API_TOKEN", "value": ""}
+            ]
+        }),
+    );
+    let id_b = op.insert(
+        "vshr0000000000000000000002",
+        serde_json::json!({
+            "title": "myapp · dev web", "category": "SECURE_NOTE",
+            "sections": [{"id": "web", "label": "web"}],
+            "fields": [
+                {"id": "fb", "section": {"id": "web", "label": "web"}, "type": "CONCEALED", "label": "WEB_TOKEN", "value": ""}
+            ]
+        }),
+    );
+    let fleet = crate::config::parse(&format!(
+        "[environments.dev]\n\
+         boundaries.api = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{id_a}\" }}\n\
+         boundaries.web = {{ vault_id = \"vshr0000000000000000000002\", item_id = \"{id_b}\" }}\n\
+         [products.api.keys.API_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n\
+         [products.web.keys.WEB_TOKEN]\nkind = \"secret\"\nenvironments = [\"dev\"]\n"
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let env_file = dir.path().join("dev.env");
+    std::fs::write(
+        &env_file,
+        format!("API_TOKEN={MARK_API}\nWEB_TOKEN={MARK_WEB}\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&env_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (op, fleet, dir)
+}
+
+fn boundary_item(fleet: &Fleet, name: &str) -> String {
+    fleet.environments["dev"].boundaries[name].item_id.clone()
+}
+
+fn field_in(op: &FakeOp, id: &str, label: &str) -> String {
+    op.item(id)["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["label"] == label)
+        .and_then(|f| f["value"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn apply_writes_a_value_to_its_own_boundary_item() {
+    let (op, fleet, dir) = two_boundary_world();
+    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    let id = boundary_item(&fleet, "api");
+    assert_eq!(field_in(&op, &id, "API_TOKEN"), MARK_API);
+}
+
+#[test]
+fn apply_leaves_the_other_boundary_item_alone() {
+    let (op, fleet, dir) = two_boundary_world();
+    run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap();
+    let id = boundary_item(&fleet, "web");
+    assert_eq!(field_in(&op, &id, "API_TOKEN"), "");
+}
+
 fn opts(dir: &tempfile::TempDir, apply: bool, replace: &[&str]) -> Opts {
     Opts {
         source: Source::Dotenv(dir.path().join("dev.env")),
@@ -89,7 +226,14 @@ fn opts(dir: &tempfile::TempDir, apply: bool, replace: &[&str]) -> Opts {
 }
 
 fn value_of(op: &FakeOp, fleet: &Fleet, label: &str) -> String {
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     item["fields"]
         .as_array()
         .unwrap()
@@ -153,7 +297,14 @@ fn replace_keeps_the_old_value_in_the_kept_section() {
         &mut Vec::new(),
     )
     .unwrap();
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     assert!(
         item["fields"]
             .as_array()

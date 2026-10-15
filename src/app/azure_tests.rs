@@ -27,33 +27,37 @@ const VAULT: &str = "kv-opv-fixture";
 /// `OLD_KEY` is desired in prod under [`fleet_a`] and only in staging under [`fleet_b`], so
 /// a sync of prod with `fleet_b` prunes it.
 fn toml(old_key_envs: &str, config_route: &str) -> String {
+    let staging_boundary = if old_key_envs.contains("staging") {
+        "boundaries.app = { vault_id = \"vstg\", item_id = \"istg\" }"
+    } else {
+        ""
+    };
     format!(
         r#"
-[profile]
-kind = "simple"
 [environments.prod]
-vault_id = "vprd"
-item_id = "iprd"
-[environments.prod.azure]
+boundaries.app = {{ vault_id = "vprd", item_id = "iprd" }}
+[environments.prod.targets.app]
+state_vault_id = "sprod"
+[environments.prod.targets.app.azure]
 subscription = "00000000-0000-0000-0000-000000000000"
 key_vault = "{VAULT}"
 resource_group = "opv-fixture-rg"
 container_app = "{APP}"
 identity = "system"
+env_name = "{{KEY}}"
 {config_route}
 [environments.staging]
-vault_id = "vstg"
-item_id = "istg"
-[keys.API_KEY]
+{staging_boundary}
+[products.app.keys.API_KEY]
 kind = "secret"
 environments = ["prod"]
-[keys.DB_URL]
+[products.app.keys.DB_URL]
 kind = "secret"
 environments = ["prod"]
-[keys.LOG_LEVEL]
+[products.app.keys.LOG_LEVEL]
 kind = "config"
 environments = ["prod"]
-[keys.OLD_KEY]
+[products.app.keys.OLD_KEY]
 kind = "secret"
 environments = {old_key_envs}
 "#
@@ -82,10 +86,10 @@ const OLD: &str = "old-FIXTUREVALUE";
 /// The 1Password item: API_KEY = `api`, LOG_LEVEL = `log`, plus DB_URL and OLD_KEY.
 fn item_with(api: &str, log: &str) -> Vec<u8> {
     item(&[
-        secret("", "API_KEY", api),
-        secret("", "DB_URL", DB),
-        text("", "LOG_LEVEL", log),
-        secret("", "OLD_KEY", OLD),
+        secret("app", "API_KEY", api),
+        secret("app", "DB_URL", DB),
+        text("app", "LOG_LEVEL", log),
+        secret("app", "OLD_KEY", OLD),
     ])
     .stdout
     .to_vec()
@@ -634,7 +638,7 @@ fn changed_secret_writes_new_version_and_reports_pending_without_deploy() {
     let (_, out) = sync_on(&sim, &fleet_a(), &SyncOpts::default());
     assert!(
         out.lines()
-            .any(|l| l == "pending deploy (pass --deploy): API_KEY"),
+            .any(|l| l == "prod/app: pending deploy (pass --deploy): app/API_KEY (API_KEY)"),
         "{out}"
     );
 }
@@ -703,9 +707,11 @@ fn drift_is_reported_by_status() {
     let mut out = Vec::new();
     super::status::run(&fleet_a(), "prod", &sim, &mut out).unwrap();
     assert!(
-        text_of(&out)
-            .lines()
-            .any(|l| l == sync::drift_line("prod", "API_KEY")),
+        text_of(&out).lines().any(|l| l
+            == format!(
+                "prod/app: {}",
+                sync::drift_line("prod", "app/API_KEY (API_KEY)")
+            )),
         "{}",
         text_of(&out)
     );
@@ -802,7 +808,11 @@ fn prune_with_deploy_unbinds_and_deletes_the_entry() {
 fn will_prune_lists_each_key_once() {
     let sim = converged();
     let (_, out) = sync_on(&sim, &fleet_b(), &deploy_prune());
-    assert!(out.lines().any(|l| l == "will prune: OLD_KEY"), "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l == "prod/app: will prune: app/OLD_KEY (OLD_KEY)"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -818,7 +828,7 @@ fn prune_without_deploy_only_reports() {
     );
     assert!(
         out.lines()
-            .any(|l| l == "not pruned without --deploy: OLD_KEY"),
+            .any(|l| l == "prod/app: not pruned without --deploy: app/OLD_KEY (OLD_KEY)"),
         "{out}"
     );
 }
@@ -829,7 +839,8 @@ fn not_desired_without_prune_is_extra_not_pruned() {
     let (_, out) = sync_on(&sim, &fleet_b(), &deploy());
     assert!(
         out.lines()
-            .any(|l| l == "extra, not pruned (pass --prune to remove): OLD_KEY"),
+            .any(|l| l
+                == "prod/app: extra, not pruned (pass --prune to remove): app/OLD_KEY (OLD_KEY)"),
         "{out}"
     );
 }
@@ -837,9 +848,12 @@ fn not_desired_without_prune_is_extra_not_pruned() {
 #[test]
 fn refused_sync_makes_no_az_calls() {
     let sim = Sim::new(
-        item(&[secret("", "API_KEY", API_V1), text("", "LOG_LEVEL", LOG_V1)])
-            .stdout
-            .to_vec(),
+        item(&[
+            secret("app", "API_KEY", API_V1),
+            text("app", "LOG_LEVEL", LOG_V1),
+        ])
+        .stdout
+        .to_vec(),
     );
     let _ = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
@@ -852,13 +866,16 @@ fn refused_sync_makes_no_az_calls() {
 #[test]
 fn refused_sync_names_the_missing_key() {
     let sim = Sim::new(
-        item(&[secret("", "API_KEY", API_V1), text("", "LOG_LEVEL", LOG_V1)])
-            .stdout
-            .to_vec(),
+        item(&[
+            secret("app", "API_KEY", API_V1),
+            text("app", "LOG_LEVEL", LOG_V1),
+        ])
+        .stdout
+        .to_vec(),
     );
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        matches!(&res, Err(Error::Policy(m)) if m.starts_with("sync refused, nothing staged: DB_URL")),
+        matches!(&res, Err(Error::Policy(m)) if m.starts_with("sync refused, nothing staged: app/DB_URL (missing)")),
         "{res:?}"
     );
 }
@@ -1032,9 +1049,10 @@ fn env_routed_config_is_named_with_its_reader() {
     let sim = converged();
     let (_, out) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        out.lines()
-            .any(|l| l
-                == format!("env-routed (visible to readers of container app {APP}): LOG_LEVEL")),
+        out.lines().any(|l| l
+            == format!(
+                "prod/app: env-routed (visible to readers of container app {APP}): app/LOG_LEVEL (LOG_LEVEL)"
+            )),
         "{out}"
     );
 }
@@ -1089,11 +1107,16 @@ fn no_change_deploy_with_failed_latest_revision_says_opv_changed_nothing() {
 /// A world synced with config in the store, whose LOG_LEVEL key is then withdrawn.
 fn config_withdrawn() -> (Sim, Fleet) {
     let sim = converged_with(&fleet_store());
-    let fleet = config::parse(&toml(r#"["prod"]"#, r#"config = "store""#).replace(
-        "[keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"prod\"]",
-        "[keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"staging\"]",
-    ))
-    .unwrap();
+    let text = toml(r#"["prod"]"#, r#"config = "store""#)
+        .replace(
+            "[products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"prod\"]",
+            "[products.app.keys.LOG_LEVEL]\nkind = \"config\"\nenvironments = [\"staging\"]",
+        )
+        .replace(
+            "[environments.staging]\n",
+            "[environments.staging]\nboundaries.app = { vault_id = \"vstg\", item_id = \"istg\" }\n",
+        );
+    let fleet = config::parse(&text).unwrap();
     (sim, fleet)
 }
 
@@ -1126,9 +1149,9 @@ fn azure_sync_summary_names_the_deployed_revision() {
     let sim = api_changed();
     let (_, out) = sync_on(&sim, &fleet_a(), &deploy());
     assert!(
-        out.lines().any(|l| l
-            .starts_with("summary: written 1 · unchanged 2 · held 0 · deployed opv-fixture-app--")
-            && l.ends_with(" · pending 0 · pruned 0 · kept 0 · skipped 0")),
+        out.lines().any(|l| l.starts_with(
+            "prod/app: summary: written 1 · unchanged 2 · held 0 · deployed opv-fixture-app--"
+        ) && l.ends_with(" · pending 0 · pruned 0 · kept 0 · skipped 0")),
         "{out}"
     );
 }

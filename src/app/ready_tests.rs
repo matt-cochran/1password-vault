@@ -4,8 +4,8 @@
 use super::*;
 use crate::adapters::onepassword_manifest::{Account, Discovery};
 use crate::app::account;
+use crate::domain::Kind;
 use crate::domain::rules::Reason;
-use crate::domain::{Kind, SIMPLE_PRODUCT};
 use crate::error::Code;
 use crate::host::Platform;
 
@@ -57,12 +57,27 @@ fn row(product: &str, key: &str, state: KeyState, target: TargetState) -> Row {
 }
 
 fn env(name: &str, target: Option<&str>, rows: Vec<Row>) -> EnvInput {
-    EnvInput {
-        name: name.into(),
-        target: target.map(str::to_string),
-        rows: Ok(rows),
-        title: None,
-        audience: None,
+    match target {
+        Some(provider) => EnvInput {
+            name: name.into(),
+            target: Some(vec![TargetInput {
+                name: format!("{name}-target"),
+                provider: provider.into(),
+                locator: format!("{name}-locator"),
+                grants_missing: None,
+                rows: Ok(rows),
+            }]),
+            rows: Ok(Vec::new()),
+            title: None,
+            audience: None,
+        },
+        None => EnvInput {
+            name: name.into(),
+            target: None,
+            rows: Ok(rows),
+            title: None,
+            audience: None,
+        },
     }
 }
 
@@ -71,7 +86,6 @@ fn inputs<'a>(report: &'a account::Report, envs: Vec<EnvInput>) -> Inputs<'a> {
         config_source: Some("secrets.toml".into()),
         account: report,
         envs,
-        simple: false,
         personal: Default::default(),
         health: Vec::new(),
     }
@@ -106,12 +120,27 @@ fn unavailable_report() -> account::Report {
 }
 
 fn env_err(name: &str, target: Option<&str>, error: Error) -> EnvInput {
-    EnvInput {
-        name: name.into(),
-        target: target.map(str::to_string),
-        rows: Err(error),
-        title: None,
-        audience: None,
+    match target {
+        Some(provider) => EnvInput {
+            name: name.into(),
+            target: Some(vec![TargetInput {
+                name: format!("{name}-target"),
+                provider: provider.into(),
+                locator: format!("{name}-locator"),
+                grants_missing: None,
+                rows: Err(error),
+            }]),
+            rows: Ok(Vec::new()),
+            title: None,
+            audience: None,
+        },
+        None => EnvInput {
+            name: name.into(),
+            target: None,
+            rows: Err(error),
+            title: None,
+            audience: None,
+        },
     }
 }
 
@@ -320,47 +349,6 @@ fn row_finding_effect_writes_1password() {
 }
 
 #[test]
-fn simple_profile_finding_label_omits_product() {
-    let report = account_report();
-    let envs = vec![env(
-        "staging",
-        None,
-        vec![row(
-            SIMPLE_PRODUCT,
-            "STRIPE_KEY",
-            KeyState::Missing,
-            TargetState::Absent,
-        )],
-    )];
-    let mut i = inputs(&report, envs);
-    i.simple = true;
-    let r = receipt(&i, "0.6.0");
-    assert_eq!(
-        r.findings[0].prerequisite,
-        "opv open STRIPE_KEY --env staging"
-    );
-}
-
-#[test]
-fn simple_profile_finding_scope_omits_product() {
-    let report = account_report();
-    let envs = vec![env(
-        "staging",
-        None,
-        vec![row(
-            SIMPLE_PRODUCT,
-            "STRIPE_KEY",
-            KeyState::Missing,
-            TargetState::Absent,
-        )],
-    )];
-    let mut i = inputs(&report, envs);
-    i.simple = true;
-    let r = receipt(&i, "0.6.0");
-    assert_eq!(r.findings[0].scope.product, None);
-}
-
-#[test]
 fn selected_signed_out_account_finding_scopes_the_selected_account() {
     let report = signed_out_report();
     let r = receipt(&inputs(&report, vec![]), "0.6.0");
@@ -401,33 +389,20 @@ fn discovery_unavailable_account_finding_is_not_blocking() {
 }
 
 #[test]
-fn errored_environment_finding_uses_the_error_code_and_next() {
+fn an_unreadable_targets_rows_name_that_reason_in_grants_missing() {
     let report = account_report();
-    let error = Error::Auth("not signed in".into())
-        .with_code(Code::OpNotSignedIn)
-        .with_next("opv login --account AAAA");
+    let error = Error::Source("the deploy credentials item is unreadable".into())
+        .with_code(Code::ItemNotFound);
     let envs = vec![env_err("staging", Some("Fly"), error)];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert_eq!(
-        (
-            r.findings[0].code.as_str(),
-            r.findings[0].prerequisite.as_str()
-        ),
-        ("op_not_signed_in", "opv login --account AAAA")
+        r.findings[0].message.as_deref(),
+        Some("the deploy credentials item is unreadable")
     );
 }
 
 #[test]
-fn errored_environment_finding_signs_in_for_an_auth_code() {
-    let report = account_report();
-    let error = Error::Auth("not signed in".into()).with_code(Code::OpNotSignedIn);
-    let envs = vec![env_err("staging", Some("Fly"), error)];
-    let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert_eq!(r.findings[0].effect, "signs_in");
-}
-
-#[test]
-fn errored_environment_finding_uses_agent_when_human_not_required() {
+fn a_grants_missing_finding_next_is_access_with_the_target() {
     let report = account_report();
     let envs = vec![env_err(
         "staging",
@@ -435,11 +410,14 @@ fn errored_environment_finding_uses_agent_when_human_not_required() {
         Error::Source("unreadable".into()),
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert_eq!(r.findings[0].actor, "agent");
+    assert_eq!(
+        r.findings[0].prerequisite,
+        "opv access staging --target staging-target"
+    );
 }
 
 #[test]
-fn errored_environment_finding_falls_back_to_status_command() {
+fn a_grants_missing_finding_blocks_with_the_owner() {
     let report = account_report();
     let envs = vec![env_err(
         "staging",
@@ -447,7 +425,28 @@ fn errored_environment_finding_falls_back_to_status_command() {
         Error::Source("unreadable".into()),
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
-    assert_eq!(r.findings[0].prerequisite, "opv status staging");
+    let f = &r.findings[0];
+    assert_eq!(
+        (
+            f.code.as_str(),
+            f.blocking,
+            f.effect.as_str(),
+            f.actor.as_str()
+        ),
+        ("grants_missing", true, "none", "owner")
+    );
+}
+
+#[test]
+fn a_target_that_could_not_be_read_is_reported_grants_missing() {
+    let report = account_report();
+    let envs = vec![env_err(
+        "staging",
+        Some("Fly"),
+        Error::Source("unreadable".into()),
+    )];
+    let r = receipt(&inputs(&report, envs), "0.6.0");
+    assert_eq!(r.targets[0].state, "grants_missing");
 }
 
 #[test]
@@ -611,7 +610,7 @@ fn text_lists_a_finding_line() {
     )];
     let r = receipt(&inputs(&report, envs), "0.6.0");
     assert!(text(&r).contains(
-        "  [owner] key_missing staging api/STRIPE_KEY → opv open api/STRIPE_KEY --env staging"
+        "  [owner] key_missing staging staging-target api/STRIPE_KEY → opv open api/STRIPE_KEY --env staging"
     ));
 }
 
@@ -701,7 +700,6 @@ fn the_grid_shows_an_environments_display_name() {
             config_source: None,
             account: &account,
             envs: vec![env],
-            simple: false,
             personal: Default::default(),
             health: Vec::new(),
         },
@@ -724,7 +722,6 @@ fn an_environment_for_another_audience_is_not_a_blocking_problem() {
             config_source: None,
             account: &account,
             envs: vec![env],
-            simple: false,
             personal: Default::default(),
             health: Vec::new(),
         },
@@ -756,7 +753,6 @@ fn a_missing_personal_key_is_named_as_yours() {
             config_source: None,
             account: &account,
             envs: vec![env],
-            simple: false,
             personal: [("api".to_string(), "OPENAI_API_KEY".to_string())].into(),
             health: Vec::new(),
         },
@@ -842,15 +838,19 @@ fn ready_on_two_items(dev: &str, ci: &str) -> serde_json::Value {
     let item = |value: &str| {
         serde_json::json!({
             "title": "t", "category": "SECURE_NOTE",
-            "fields": [{"id": "f1", "type": "CONCEALED", "label": "DATABASE_URL", "value": value}]
+            "sections": [{"id": "app", "label": "app"}],
+            "fields": [{"id": "f1", "type": "CONCEALED", "section": {"id": "app", "label": "app"},
+                        "label": "DATABASE_URL", "value": value}]
         })
     };
     let dev_id = op.insert("vdev0000000000000000000001", item(dev));
     let ci_id = op.insert("vdev0000000000000000000001", item(ci));
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{dev_id}\"\n[environments.ci]\nvault_id = \"vdev0000000000000000000001\"\n\
-         item_id = \"{ci_id}\"\n[keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"ci\"]\n"
+        "[environments.dev]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{dev_id}\" }}\n\
+         [environments.ci]\n\
+         boundaries.app = {{ vault_id = \"vdev0000000000000000000001\", item_id = \"{ci_id}\" }}\n\
+         [products.app.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"ci\"]\n"
     ))
     .unwrap();
     let mut out = Vec::new();
@@ -885,5 +885,176 @@ fn ready_is_quiet_when_the_environments_differ() {
             .unwrap()
             .iter()
             .any(|f| f["code"] == "same_value_across_environments")
+    );
+}
+
+// FR-56: every target ----------------------------------------------------------------
+
+/// A target whose rows were read, with no missing grant.
+fn target(name: &str, provider: &str, locator: &str) -> TargetInput {
+    TargetInput {
+        name: name.into(),
+        provider: provider.into(),
+        locator: locator.into(),
+        grants_missing: None,
+        rows: Ok(vec![]),
+    }
+}
+
+fn target_env(name: &str, targets: Vec<TargetInput>) -> EnvInput {
+    EnvInput {
+        name: name.into(),
+        target: Some(targets),
+        rows: Ok(vec![]),
+        title: None,
+        audience: None,
+    }
+}
+
+#[test]
+fn receipt_lists_every_target_of_an_environment_with_provider_and_locator() {
+    let report = account_report();
+    let envs = vec![target_env(
+        "staging",
+        vec![
+            target("web", "Fly", "web-app"),
+            target("jobs", "Fly", "jobs-app"),
+        ],
+    )];
+    let r = receipt(&inputs(&report, envs), "0.6.0");
+    let listed: Vec<(&str, &str, &str)> = r
+        .targets
+        .iter()
+        .map(|t| (t.name.as_str(), t.provider.as_str(), t.locator.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [("web", "Fly", "web-app"), ("jobs", "Fly", "jobs-app")]
+    );
+}
+
+#[test]
+fn a_target_whose_state_vault_cannot_be_opened_is_grants_missing() {
+    let report = account_report();
+    let mut t = target("web", "Fly", "web-app");
+    t.grants_missing = Some("state vault vsprd cannot be opened".into());
+    let r = receipt(
+        &inputs(&report, vec![target_env("staging", vec![t])]),
+        "0.6.0",
+    );
+    assert_eq!(r.targets[0].state, "grants_missing");
+}
+
+#[test]
+fn a_state_vault_grants_missing_next_is_access_with_the_target() {
+    let report = account_report();
+    let mut t = target("web", "Fly", "web-app");
+    t.grants_missing = Some("state vault vsprd cannot be opened".into());
+    let r = receipt(
+        &inputs(&report, vec![target_env("staging", vec![t])]),
+        "0.6.0",
+    );
+    assert_eq!(
+        r.next.as_ref().map(|n| n.command.as_str()),
+        Some("opv access staging --target web")
+    );
+}
+
+#[test]
+fn a_target_whose_every_vault_is_visible_is_ready() {
+    let report = account_report();
+    let r = receipt(
+        &inputs(
+            &report,
+            vec![target_env("staging", vec![target("web", "Fly", "web-app")])],
+        ),
+        "0.6.0",
+    );
+    assert_eq!(r.targets[0].state, "ready");
+}
+
+#[test]
+fn a_state_vault_the_person_can_see_needs_no_grant() {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    op.vault_users
+        .borrow_mut()
+        .insert("vsprd".into(), serde_json::json!([]));
+    assert!(state_vault_grants(&op, "vsprd").is_none());
+}
+
+#[test]
+fn a_state_vault_the_person_cannot_see_names_grants_missing() {
+    use crate::adapters::fake_op::FakeOp;
+    let op = FakeOp::default();
+    assert_eq!(
+        state_vault_grants(&op, "vsprd").as_deref(),
+        Some("state vault vsprd cannot be opened")
+    );
+}
+
+/// `opv ready --json` over `fleet`, with `responses` answering the probe calls in order.
+fn ready_doc(
+    fleet: &crate::domain::Fleet,
+    only: Option<&str>,
+    responses: impl IntoIterator<Item = crate::runner::Output>,
+) -> serde_json::Value {
+    use crate::runner::fake::FakeRunner;
+    let r = FakeRunner::new(responses);
+    let mut out = Vec::new();
+    run(fleet, None, only, &r, true, None, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn ready_run_reports_a_target_with_every_vault_visible_as_ready() {
+    use crate::app::testutil::{complete_item, fly_empty};
+    use crate::runner::Output;
+    let doc = ready_doc(
+        &crate::app::testutil::fleet(),
+        Some("prod"),
+        [
+            Output::success(Vec::new()),
+            complete_item(),
+            fly_empty(),
+            Output::success(b"[]".to_vec()),
+        ],
+    );
+    assert_eq!(doc["targets"][0]["state"], "ready");
+}
+
+#[test]
+fn ready_run_reports_a_target_whose_state_vault_cannot_be_opened_as_grants_missing() {
+    use crate::app::testutil::{complete_item, fly_empty, whoami};
+    use crate::runner::Output;
+    let mut responses = vec![Output::success(Vec::new()), complete_item(), fly_empty()];
+    responses.extend(crate::runner::fake::failed_read(1));
+    responses.push(whoami());
+    let doc = ready_doc(&crate::app::testutil::fleet(), Some("prod"), responses);
+    assert_eq!(doc["targets"][0]["state"], "grants_missing");
+}
+
+#[test]
+fn ready_run_lists_every_target_of_an_environment_with_provider_and_locator() {
+    use crate::app::testutil::{complete_item, fly_empty};
+    use crate::runner::Output;
+    let fleet = crate::app::testutil::fleet_with(
+        "[environments.prod.targets.secondary]\nfly.app = \"secondary-app\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\nstate_vault_id = \"sprd2\"\n",
+    );
+    let mut responses = vec![Output::success(Vec::new())];
+    for _ in 0..2 {
+        responses.push(complete_item());
+        responses.push(fly_empty());
+        responses.push(Output::success(b"[]".to_vec()));
+    }
+    let doc = ready_doc(&fleet, Some("prod"), responses);
+    assert_eq!(
+        doc["targets"],
+        serde_json::json!([
+            {"environment": "prod", "name": "portfolio", "provider": "Fly",
+             "locator": "app mcproductlabs-portfolio-production", "state": "ready"},
+            {"environment": "prod", "name": "secondary", "provider": "Fly",
+             "locator": "app secondary-app", "state": "ready"},
+        ])
     );
 }

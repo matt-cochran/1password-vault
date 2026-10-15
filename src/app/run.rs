@@ -15,16 +15,15 @@ use std::io;
 
 use super::personal;
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, KeySpec, SIMPLE_PRODUCT, rules};
+use crate::domain::{Fleet, KeySpec, rules};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
 const OP: &str = "op";
 
-/// `run <env> [--product <p>] -- <cmd>`: the fleet profile needs `--product`; the simple
-/// profile (FR-20) takes none and passes every declared key, referenced as an unsectioned
-/// field (`KEY=op://<vault_id>/<item_id>/<KEY>`). Both errors happen before any call.
+/// `run <env> --product <p> -- <cmd>`: without `--product`, the one product with keys
+/// desired in `env_name` is used (D10/FR-34); a named product is validated by [`run`].
 pub fn run_for(
     fleet: &Fleet,
     env_name: &str,
@@ -32,32 +31,11 @@ pub fn run_for(
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
-    match (fleet.is_simple(), product) {
-        (false, Some(p)) => run(fleet, env_name, p, command, runner),
-        (false, None) => {
-            // FR-47: a source-only product is never run on its own, so it is not offered.
-            let available: Vec<&str> = fleet
-                .products
-                .iter()
-                .filter(|(_, p)| !p.source_only)
-                .map(|(n, _)| n.as_str())
-                .collect();
-            Err(Error::Config(format!(
-                "--product is required. Choose one of: {}. Usage: opv run {env_name} --product <name> -- <command>",
-                available.join(", ")
-            ).into())
-            .with_next(super::check_command(
-                fleet,
-                Some(env_name),
-                available.first().copied(),
-            )))
-        }
-        (true, None) => run(fleet, env_name, SIMPLE_PRODUCT, command, runner),
-        (true, Some(_)) => Err(Error::Config(
-            "--product is not used under the simple profile (usage: run <env> -- <cmd>...)".into(),
-        )
-        .with_next(super::check_command(fleet, Some(env_name), None))),
-    }
+    let product = match product {
+        Some(p) => p.to_string(),
+        None => super::pick_product(fleet, env_name, None, "run")?,
+    };
+    run(fleet, env_name, &product, command, runner)
 }
 
 /// Run `command` under `op run` with the product's references for `env_name` in its
@@ -138,20 +116,17 @@ pub fn run(
     }
     let refs: Vec<(&str, String)> = selected
         .iter()
-        .map(|(key, spec)| {
+        .map(|(key, spec)| -> Result<(&str, String), Error> {
             // FR-55: a personal key references the person's own item, never the team item.
             if personal::is_personal(fleet, spec) {
                 let pe = personal_env.as_ref().expect("located above");
-                return (key.as_str(), personal::reference(pe, product, key, spec));
+                return Ok((key.as_str(), personal::reference(pe, product, key, spec)));
             }
             // A shared key (FR-45) is exported under its own name, referencing its source's
-            // field in the same item.
+            // field in the source's boundary item (FR-57).
             let (fp, fk) = spec.source().unwrap_or((product, key));
-            let field = if fp == SIMPLE_PRODUCT {
-                fk.to_string()
-            } else {
-                format!("{fp}/{fk}")
-            };
+            let field = format!("{fp}/{fk}");
+            let b = fleet.boundary(env_name, fp)?;
             // The field's key: the source's for a shared key (FR-45).
             let id = (fp.to_string(), fk.to_string());
             // Read-only and not yet normalized in 1Password (FR-43): still the reference, so
@@ -179,10 +154,10 @@ pub fn run(
             let reference = by_id
                 .and_then(|m| m.get(&id))
                 .cloned()
-                .unwrap_or_else(|| format!("op://{}/{}/{field}", env.vault_id, env.item_id));
-            (key.as_str(), reference)
+                .unwrap_or_else(|| format!("op://{}/{}/{field}", b.vault_id, b.item_id));
+            Ok((key.as_str(), reference))
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
     let mut args: Vec<&str> = vec!["run", "--"];
@@ -324,7 +299,7 @@ mod tests {
     #[test]
     fn works_without_fly_section() {
         let fl = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
              [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([Output::success(Vec::new())]);
@@ -371,7 +346,7 @@ mod tests {
     #[test]
     fn clears_another_products_managed_keys() {
         let f = fleet_with(
-            "[products.other.keys.OTHER_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
+            "[products.other]\nboundary = \"allumata\"\n[products.other.keys.OTHER_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
         );
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run(&f, "prod", "allumata", &cmd(&["true"]), &r).unwrap();
@@ -395,18 +370,20 @@ mod tests {
     fn source_only_fleet() -> Fleet {
         crate::config::parse(
             r#"
-[profile]
-kind = "fleet"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.core = { vault_id = "vci", item_id = "ici" }
+[environments.ci.targets.app]
 fly.app = "app"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sci"
 [products.shared]
 source_only = true
+boundary = "core"
 [products.shared.keys.TOKEN]
 kind = "secret"
 environments = ["ci"]
+[products.api]
+boundary = "core"
 [products.api.keys.TOKEN]
 kind = "secret"
 from = "shared/TOKEN"
@@ -424,9 +401,9 @@ environments = ["ci"]
     }
 
     #[test]
-    fn run_for_offers_only_non_source_only_products() {
-        let r = FakeRunner::new([]);
-        let e = run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap_err();
-        assert!(matches!(e, Error::Config(m) if m.contains("Choose one of: api.")));
+    fn run_without_product_uses_the_only_non_source_only_product() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap();
+        assert_eq!(argvs(&r), vec!["op run -- env"]);
     }
 }

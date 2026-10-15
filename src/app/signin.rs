@@ -61,13 +61,37 @@ pub fn open<'a>(
     r: &'a dyn CommandRunner,
     reach: Reach,
 ) -> Result<EnvRunner<'a>, Error> {
-    open_on(fleet, env_name, r, reach, &Host::detect)
+    open_targeted(fleet, env_name, None, r, reach)
+}
+
+/// [`open`] for target `target` of the environment (FR-56): with [`Reach::Target`], it signs
+/// in with that target's `deploy_credentials`. `None`: the environment's only target, when
+/// it has exactly one.
+pub fn open_targeted<'a>(
+    fleet: &Fleet,
+    env_name: &str,
+    target: Option<&str>,
+    r: &'a dyn CommandRunner,
+    reach: Reach,
+) -> Result<EnvRunner<'a>, Error> {
+    open_at(fleet, env_name, target, r, reach, &Host::detect)
 }
 
 /// [`open`] on a given host (tests).
 pub fn open_on<'a>(
     fleet: &Fleet,
     env_name: &str,
+    r: &'a dyn CommandRunner,
+    reach: Reach,
+    host: &dyn Fn() -> Host,
+) -> Result<EnvRunner<'a>, Error> {
+    open_at(fleet, env_name, None, r, reach, host)
+}
+
+fn open_at<'a>(
+    fleet: &Fleet,
+    env_name: &str,
+    target: Option<&str>,
     r: &'a dyn CommandRunner,
     reach: Reach,
     host: &dyn Fn() -> Host,
@@ -82,54 +106,9 @@ pub fn open_on<'a>(
         .filter(|_| host().op_credential.is_none());
     let mut runner = EnvRunner::new(r, account);
     if reach == Reach::Target {
-        runner.deploy_sign_in(fleet, env_name)?;
+        runner.deploy_sign_in(fleet, env_name, target)?;
     }
     Ok(runner)
-}
-
-/// `doctor --env` (owner ruling): like [`open`] for a command that reaches the target, but
-/// a deploy sign-in that fails does not stop the run. The runner comes back without a
-/// deploy identity, beside the error, so doctor reports it as one check and skips only
-/// the target checks that need those credentials.
-pub fn open_for_doctor<'a>(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &'a dyn CommandRunner,
-) -> (EnvRunner<'a>, Option<DeployFailure>) {
-    open_for_doctor_on(fleet, env_name, r, &Host::detect)
-}
-
-/// A failed deploy sign-in for `doctor --env` (FR-40): the error, and beside it the failed
-/// call's scrubbed stderr excerpt (`  az said: …`, NR-31). The excerpt is never part of the
-/// error's text, so it reaches stderr only and never a JSON document (M2, SR-1).
-#[derive(Debug)]
-pub struct DeployFailure {
-    pub error: Error,
-    pub excerpt: Option<crate::scrub::Excerpt>,
-}
-
-/// [`open_for_doctor`] on a given host (tests).
-pub fn open_for_doctor_on<'a>(
-    fleet: &Fleet,
-    env_name: &str,
-    r: &'a dyn CommandRunner,
-    host: &dyn Fn() -> Host,
-) -> (EnvRunner<'a>, Option<DeployFailure>) {
-    let mut runner = match open_on(fleet, env_name, r, Reach::Store, host) {
-        Ok(runner) => runner,
-        Err(e) => {
-            let failure = DeployFailure {
-                error: e,
-                excerpt: None,
-            };
-            return (EnvRunner::new(r, None), Some(failure));
-        }
-    };
-    let failed = runner
-        .deploy_sign_in(fleet, env_name)
-        .err()
-        .map(with_excerpt);
-    (runner, failed)
 }
 
 /// A deploy sign-in error (FR-40) with its stable code: a credential the target rejected is
@@ -140,15 +119,6 @@ fn deploy_failed(e: Error) -> Error {
         e @ Error::Auth(_) => e.with_code(crate::error::Code::DeployCredentialsFailed),
         e => e,
     }
-}
-
-/// `e` with the failed call's scrubbed stderr excerpt (`  az said: …`, NR-31) taken now,
-/// as doctor runs more calls before it prints and the excerpt would otherwise be dropped.
-/// It is kept beside the error, never in its text: doctor prints it under the FAIL line in
-/// text output only (M2).
-fn with_excerpt(e: Error) -> DeployFailure {
-    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
-    DeployFailure { error: e, excerpt }
 }
 
 impl<'a> EnvRunner<'a> {
@@ -195,16 +165,28 @@ impl<'a> EnvRunner<'a> {
         Ok(())
     }
 
-    /// Sign in with `env_name`'s `deploy_credentials`, when it has them and a target.
-    fn deploy_sign_in(&mut self, fleet: &Fleet, env_name: &str) -> Result<(), Error> {
+    /// Sign in with the `deploy_credentials` of target `target` of `env_name` (FR-40,
+    /// FR-56), when it has them. `None`: the environment's only target, when it has exactly
+    /// one. An unknown target signs nothing in: the command reports it.
+    fn deploy_sign_in(
+        &mut self,
+        fleet: &Fleet,
+        env_name: &str,
+        target: Option<&str>,
+    ) -> Result<(), Error> {
         let Some(env) = fleet.environments.get(env_name) else {
             return Ok(());
         };
-        let (Some(t), Some(reference)) = (env.target(), &env.deploy_credentials) else {
+        let t = match target {
+            Some(name) => env.targets.get(name),
+            None if env.targets.len() == 1 => env.targets.values().next(),
+            None => None,
+        };
+        let Some((t, reference)) = t.and_then(|t| Some((t, t.deploy_credentials.as_ref()?))) else {
             return Ok(());
         };
         // A Key Vault behind a Kubernetes runtime signs `az` in (FR-39, FR-40).
-        let provider = crate::provider::deploy_provider(t);
+        let provider = crate::provider::deploy_provider(t.config.as_ref());
         let fields = provider
             .deploy_credential_fields()
             .map_err(|why| Error::Config(format!("environment {env_name}: {why}").into()))?;

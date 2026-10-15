@@ -36,7 +36,7 @@ else:
     vendor.chmod(0o700)
     (root / "opv.setup.toml").write_text(
         "title='Local example'\nenvironment='dev'\nvault='Development'\nitem='api'\n"
-        "[[fields]]\nkey='API_KEY'\ntitle='Provider login'\n"
+        "[[fields]]\nproduct='api'\nkey='API_KEY'\ntitle='Provider login'\n"
         "description='Lets this API call its provider.'\nsource='Provider dashboard.'\n"
     )
     env = os.environ.copy()

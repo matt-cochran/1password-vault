@@ -182,7 +182,7 @@ fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, E
                     .and_then(|s| s.get("label"))
                     .and_then(Value::as_str);
                 field.get("label").and_then(Value::as_str) == Some(&definition.key)
-                    && section == definition.product.as_deref()
+                    && section == Some(definition.product.as_str())
             })
             .map(|(i, _)| i)
             .collect();
@@ -215,30 +215,20 @@ fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, E
         } else {
             let field_id = unique_id(&doc["fields"], &format!("opv_{}", definition.key));
             let mut field = json!({"id":field_id,"label":definition.key,"type":match definition.kind {Kind::Secret=>"CONCEALED",Kind::Config=>"STRING"},"value":""});
-            if let Some(product) = &definition.product {
-                let sections = doc["sections"].as_array_mut().expect("sections");
-                let section = if let Some(section) = sections
-                    .iter()
-                    .find(|s| s.get("label").and_then(Value::as_str) == Some(product))
-                {
-                    section.clone()
-                } else {
-                    let section = json!({"id":unique_id(&Value::Array(sections.clone()), &format!("opv_{product}")),"label":product});
-                    sections.push(section.clone());
-                    section
-                };
-                field["section"] = section;
+            // Each product's fields live in its own section (FR-43).
+            let product = &definition.product;
+            let sections = doc["sections"].as_array_mut().expect("sections");
+            let section = if let Some(section) = sections
+                .iter()
+                .find(|s| s.get("label").and_then(Value::as_str) == Some(product))
+            {
+                section.clone()
             } else {
-                // Outside a named section: the default one the 1Password apps show.
-                let sections = doc["sections"].as_array_mut().expect("sections");
-                if !sections
-                    .iter()
-                    .any(|s| s["id"] == crate::adapters::onepassword::DEFAULT_SECTION_ID)
-                {
-                    sections.push(crate::adapters::onepassword::default_section());
-                }
-                field["section"] = crate::adapters::onepassword::default_section();
-            }
+                let section = json!({"id":unique_id(&Value::Array(sections.clone()), &format!("opv_{product}")),"label":product});
+                sections.push(section.clone());
+                section
+            };
+            field["section"] = section;
             let fields = doc["fields"].as_array_mut().expect("fields");
             indices.push(fields.len());
             fields.push(field);
@@ -325,31 +315,25 @@ pub fn run(
     let products: Vec<_> = recipe
         .fields
         .iter()
-        .filter_map(|f| f.product.clone())
+        .map(|f| f.product.clone())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let selected = match (products.len(), product) {
-        (0, None) => None,
-        (0, Some(_)) => {
-            return Err(settings_error(
-                "This recipe is for one app. Omit --product.",
-            ));
-        }
-        (_, Some(p)) if products.iter().any(|v| v == p) => Some(p.to_owned()),
+    let selected = match (products.as_slice(), product) {
+        (_, Some(p)) if products.iter().any(|v| v == p) => p.to_owned(),
         (_, Some(_)) => {
             return Err(settings_error(&format!(
                 "Unknown product. Choose one of: {}.",
                 products.join(", ")
             )));
         }
-        (1, None) => Some(products[0].clone()),
-        (_, None) => Some(ui.choose("Which product are you working on?", &products)?),
+        ([one], None) => one.clone(),
+        (_, None) => ui.choose("Which product are you working on?", &products)?,
     };
     let active: Vec<_> = recipe
         .fields
         .iter()
-        .filter(|f| f.product.as_deref() == selected.as_deref())
+        .filter(|f| f.product == selected)
         .cloned()
         .collect();
     let parent = recipe_path.parent().unwrap_or_else(|| Path::new("."));
@@ -359,7 +343,18 @@ pub fn run(
     if output.exists() {
         let existing = config::load(&output)?;
         let env = existing.environment(&recipe.environment)?;
-        config_compatible(&output, &recipe.manifest(&env.vault_id, &env.item_id)?)?;
+        // The recipe writes one item (its one boundary); compare against the first recorded.
+        let at = env.boundaries.values().next().ok_or_else(|| {
+            Error::Config(
+                format!(
+                    "environment {} in {} records no boundary; next: opv bootstrap",
+                    recipe.environment,
+                    output.display()
+                )
+                .into(),
+            )
+        })?;
+        config_compatible(&output, &recipe.manifest(&at.vault_id, &at.item_id)?)?;
     }
     ui.show(&format!("\n{}\nWe will save your existing settings in 1Password and prepare local commands.\nNo infrastructure will be applied or deployed.\n", recipe.title))?;
     let vaults = prepare(account, backend, ui)?;
@@ -564,10 +559,7 @@ pub fn run(
             "All settings are saved. Next: opv --config {} check {}{}",
             quoted(&output),
             recipe.environment,
-            active
-                .first()
-                .and_then(|f| f.product.as_ref())
-                .map_or(String::new(), |p| format!(" --product {p}"))
+            format_args!(" --product {selected}")
         ))?;
         // Actual value/rule validation is deliberately explicit; never claim the
         // external provider credentials work merely because their fields are filled.

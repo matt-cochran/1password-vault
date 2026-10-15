@@ -22,7 +22,7 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
    - `opv bootstrap` (creates vaults, items and empty fields in 1Password), `opv adopt --apply` (writes values into the item), `opv account use` (writes `.opv`) and `opv skill install` (writes the skill files).
    `doctor`, `ready`, `account list`, `status` (also `status --all`), `plan`, `check`, `explain`, `guide`, `projects`, `skill status`, `adopt` without `--apply`, `config export` and `config check` change nothing on your targets (run in the user's own signed-in session, a command with `tidies_1password: true` may tidy its 1Password layout once; nothing is deleted). `doctor` and `ready` never write anything, whoever is signed in: use `opv ready --json` or `opv doctor --env <env> --json` as the read-only readiness check. `setup`, `login` and `config edit` need the user's own terminal: hand those commands to the user.
 5. **Sign-in is the user's, at 1Password's own prompts.** When opv says `sign in: opv login <env>`, ask the user to run exactly that in their own terminal (it needs one, and the password goes only to op's prompt). Never ask for a password, token or Secret Key, and never script `op signin` or `eval`.
-6. **Never point opv at a break-glass credential.** `deploy_credentials` names an item holding only that environment's least-privilege deploy identity, created by the user; owner or admin credentials stay with people.
+6. **Never point opv at a break-glass credential.** `deploy_credentials` names an item holding only that target's least-privilege deploy identity, created by the user; owner or admin credentials stay with people.
 7. **Use the machine contract, not guesses.** Run `opv schema` once: it describes the installed opv (commands, flags, which commands change something and which to ask about first, exit codes, error codes and JSON shapes). Prefer `--json`: stdout is then one document on success and on failure. On failure read `error.code`, not the message text. Re-run the same command only when `error.retry` is `safe` (now) or `after_fix` (once `do` is done); never when it is `never`, then run `next` instead. When `error.human_required` is `true`, or a text failure has a `Do:` line, hand that step to the user (it is something only they can do: sign in, fill a value in 1Password, approve a guarded environment, type in their own terminal) and wait; do not try to do it yourself. `next` and the `Next:` line are always one command that runs as typed; run it (if rule 4 allows) or show it to the user. Do not invent workarounds. A configuration error names the file, line and field, and its `Do:` line is the edit to make.
 
 ## 1. Check the tools
@@ -37,34 +37,40 @@ kubectl version --client   # Kubernetes target
 
 If a tool the target needs is missing, `opv doctor` (step 3) prints the install command for the user's OS.
 
-## 2. Choose the profile
+## 2. Choose the products
 
-Ask the user how their secrets are organised, or look at the 1Password item's shape (field names and types only):
+Ask the user what the app's parts are, or look at the 1Password item's shape (field names and types only). Name each product after its role: `web`, `api` or `worker`. A single-app project is a configuration with one product, not a separate form.
 
-- **simple**: one app per environment, fields directly in the item (no sections). Most projects.
-- **fleet**: several products on one app, one section per product, names built from a template such as `FLEET__{PRODUCT}__{KEY}`.
+Products that must share one vault set `boundary = "<group>"` on each. That is an opt-in with a cost: anyone who can read the group's vault can read every product in it. By default each product gets its own boundary vault.
 
-A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own vault and item. Do not ask the user to rearrange 1Password: opv finds fields wherever they are, and the user's own runs tidy the layout (see [configuration.md](configuration.md#store-layout)).
+A concealed field is a **secret**; a text field is **config**. Each environment (staging, prod, ...) has its own boundary vaults. Do not ask the user to rearrange 1Password: opv finds fields wherever they are, and the user's own runs tidy the layout (see [configuration.md](configuration.md#store-layout)).
 
 ## 3. Create the configuration
 
 **Which 1Password account.** Run `opv account list --json` (read-only). If no account is selected, or `opv doctor` reports `account_required`, ask the user which account holds this project (show the IDs and addresses from the document), then record it with `opv account use <ID>`; commit `.opv`. If their account is not listed, the user runs `opv login --add --account <email>` in their own terminal (1Password's own prompt; you never see what they type). Never pick an account for the user.
 
-**A fleet from scratch (no vaults yet).** Write `secrets.toml` with the environments, products and keys the user describes, leaving out `vault_id` and `item_id`, and show it to the user. Then ask, and have them run `opv bootstrap --dry-run` and `opv bootstrap` (it creates each environment's vault and item in the selected account, records the IDs and adds every field, empty). If it stops with `ids_not_in_account`, the recorded IDs belong to another account: ask whether to select that account (`opv account use <ID>`) or rebind (`opv bootstrap --rebind <env>`). Never rewrite a configuration whose first line says it is generated: hand the IDs bootstrap prints to its generator. A full walk-through is [examples/fleet-fly](../examples/fleet-fly/).
+**A project from scratch (no vaults yet).** Write `secrets.toml` with the environments, products and keys the user describes, leaving out the boundary vault and item IDs, and show it to the user. Then ask, and have them run `opv bootstrap --dry-run` and `opv bootstrap` (it creates a vault and item for each product's boundary in the selected account, records the IDs and adds every field, empty). If it stops with `ids_not_in_account`, the recorded IDs belong to another account: ask whether to select that account (`opv account use <ID>`) or rebind (`opv bootstrap --rebind <env>`). Never rewrite a configuration whose first line says it is generated: hand the IDs bootstrap prints to its generator. The schema and a complete single-app example are in [configuration.md](configuration.md#a-single-app-project-one-product).
 
 **Values that already exist elsewhere** (a `.env` file, a Key Vault, a cluster): `opv adopt <env> --from <file.env>` (or `--from target`) shows what would come in, names and actions only. Ask before `--apply`; a `differs` row is the user's decision (`--replace product/KEY`). Fly and GitHub secrets cannot be read back: the user enters those in 1Password.
 
-First check whether the project already has one: `opv doctor` names it on its `config` line (a `secrets.toml`, or a manifest in 1Password found by the git remote). If it has none and the 1Password item already exists, let opv write it. `init` looks the vault and item up by title once and writes their IDs, the field names and kinds, never values. In a new project it saves a manifest in 1Password (ask first; it needs the user's own signed-in session), or with `--file` a `secrets.toml`:
+First check whether the project already has one: `opv doctor` names it on its `config` line (a `secrets.toml`, or a manifest in 1Password found by the git remote). If it has none and the 1Password item already exists, let opv write it. `init` looks the vault and item up by title once and writes their IDs and the field names and kinds, never values. `--product <name>` names the product that unsectioned fields belong to; sectioned fields become products named by their section. In a new project it saves a manifest in 1Password (ask first; it needs the user's own signed-in session), or with `--file` a `secrets.toml`:
 
 ```sh
-opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging
+opv init staging --vault myapp-staging --item myapp --product web
 ```
 
-Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same configuration (comments kept) and includes it in every declared key the item has; give a target only for an environment that deploys (a local-only `dev` environment has none):
+`init` writes boundaries and products, never a target, and ends with `Next: opv bootstrap`, which records any boundary still missing its IDs and adds each declared field, empty. Repeat per environment with `--add-env`, which adds the next `[environments.<env>]` to the same configuration (comments kept) and includes it in every declared key the item has; pass the same `--product`:
 
 ```sh
-opv init dev --vault myapp-dev --item myapp --add-env
-opv init prod --vault myapp-prod --item myapp --add-env --fly-app myapp-production
+opv init dev --vault myapp-dev --item myapp --product web --add-env
+opv init prod --vault myapp-prod --item myapp --product web --add-env
+```
+
+Give an environment that deploys a named target with `opv target add`, the one way to add a target. It validates the target, writes `[environments.<env>.targets.<name>]`, creates the target's state vault and records `state_vault_id`, so the configuration never names a target without one; `opv target list [--env <env>]` shows the declared targets. A local-only environment (`dev`) has no target:
+
+```sh
+opv target add staging shared --fly-app myapp-staging
+opv target add prod shared --fly-app myapp-production
 ```
 
 Declare a key the item does not have yet with `opv add` instead of editing TOML, adding rules where the user knows the format of a value (see [configuration.md](configuration.md#rules-reference)) and `--immutable` for keys that must never change once set (encryption keys):
@@ -88,11 +94,11 @@ Then:
 opv doctor
 ```
 
-It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`). When a check fails it ends with a `Do:` line (the user's part, such as signing in) and a `Next:` command on stderr; when all pass, the last line is `all clear: nothing pending`. Do what those lines say before continuing. For local-only work, `opv doctor --env dev` (fleet: add `--product <p>`) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks, `do` and `next` as JSON.
+It checks the file, `op` and its sign-in, `flyctl` and its sign-in, and whether `op` can start local commands (`op local run`). When a check fails it ends with a `Do:` line (the user's part, such as signing in) and a `Next:` command on stderr; when all pass, the last line is `all clear: nothing pending`. Do what those lines say before continuing. For local-only work, `opv doctor --env dev` (add `--product <p>` when more than one product has keys there) checks only what local runs need, and reads the item once to confirm that every declared key is ready (the same result `opv check` would give). `opv doctor --json` gives the checks, `do` and `next` as JSON.
 
 ### Azure or Kubernetes instead of Fly
 
-Give `opv init` (or `opv init --add-env`) the target instead of `--fly-app`: `--target azure --azure-subscription <guid> --azure-key-vault <vault> --azure-resource-group <rg> --azure-container-app <app>` (`--azure-identity` defaults to `system`), or `--target kubernetes --kubernetes-context <ctx> --kubernetes-namespace <ns> --kubernetes-deployment <deployment>`. `opv init --help` lists every option; [configuration.md](configuration.md#targets) explains each field. Ask the user for those names; they are not secrets. Nothing is looked up, and a bad value is refused before any 1Password call.
+Give `opv target add <env> <name>` the provider's options: `--azure-subscription <guid> --azure-key-vault <vault> --azure-resource-group <rg> --azure-container-app <app>` (`--azure-identity` defaults to `system`), or `--kubernetes-context <ctx> --kubernetes-namespace <ns> --kubernetes-deployment <deployment>`. `opv target add --help` lists every option; [configuration.md](configuration.md#targets-by-provider) explains each field. Ask the user for those names; they are not secrets. Nothing is looked up, and a bad value is refused before any 1Password call.
 
 - **Azure.** The user runs `az login`. The app's identity must be able to read the vault. If `opv doctor` warns about it, show the user the grant command it prints, which looks like `az role assignment create --assignee <principal> --role "Key Vault Secrets User" --scope <vault id>`. Run it only with their yes. The person running opv needs rights to write secrets to the vault and to update the Container App.
 - **Kubernetes.** The user's kubeconfig must contain the named `context`. `opv doctor` checks with `kubectl auth can-i` that they may manage Secrets and update the Deployment; if not, tell the user which right is missing.
@@ -132,7 +138,7 @@ opv history prod --json    # what opv last wrote to a target: time, plan id, cha
 
 Problem rows come first. Each row's STATE is `saved`, `missing`, `failed <rule> (<reason>)`, `skipped` (not wanted in this environment) or `blocked by source` (fixed with the key it shares); `opv help states` defines every word. A config key stored in a concealed field is still `saved`: opv delivers it as a plain value, never prints it, and `status` warns once. For each missing or failed row:
 
-- tell the user which key it is, in which environment, the `guidance` line printed under it, and the `open:` link under that (the 1Password item, with the section and field to fix; it holds IDs only, never a value). `opv open <KEY> --env staging --print` (fleet: `<product>/<KEY>`) prints the same link;
+- tell the user which key it is, in which environment, the `guidance` line printed under it, and the `open:` link under that (the 1Password item, with the section and field to fix; it holds IDs only, never a value). `opv open <product>/<KEY> --env staging --print` prints the same link;
 - run `opv explain <KEY> --env staging` to show the field reference and its rules;
 - the user fills or fixes the field in 1Password; you re-run `status`.
 
@@ -164,14 +170,14 @@ If anything changed since the plan (the item, the target or the configuration), 
 When the user wants environment variables for local work, use `opv run`. Do not create a `.env` file, an `export` script or a shell profile entry with values, even if the user's existing setup uses one.
 
 ```sh
-opv run dev -- npm run dev                   # simple profile: every key desired in dev
-opv run dev --product api -- cargo run       # fleet profile: one product's keys
+opv run dev -- npm run dev                   # one product, or every key desired in dev
+opv run dev --product api -- cargo run       # one product's keys when several products exist
 opv run dev -- $SHELL                        # a shell with every variable set, gone on exit
 opv run dev -- docker compose up             # Compose reads ${VAR} from this environment
 ```
 
-- Make sure the keys the app needs are declared for that environment (`environments = ["dev", ...]`). A local-only environment needs only `vault_id` and `item_id`, no target section.
-- Before the first run, `opv check dev` (fleet: `opv check dev --product <p>`) reports each key as saved, missing or failing a rule, by name only, and exits 8 if anything needs fixing. It never touches a deployment target.
+- Make sure the keys the app needs are declared for that environment (`environments = ["dev", ...]`). A local-only environment needs only its `boundaries.<product>` tables, no target.
+- Before the first run, `opv check dev` (add `--product <p>` when several products have keys there) reports each key as saved, missing or failing a rule, by name only, and exits 8 if anything needs fixing. It never touches a deployment target.
 - `opv run` removes every key name declared in the configuration from the inherited environment before adding the selected product's references, so switching products in one shell does not leak the previous product's keys. Other variables (PATH, tool settings, 1Password sign-in) are kept: it is not a sandbox.
 - If a script or framework reads a `.env` file, change it to read the process environment, or replace Compose `env_file:` with `environment:` entries without values, and run it under `opv run`. Then delete the `.env` file from the workflow (ask before deleting the user's files) and make sure `.env` is in `.gitignore`.
 - Update the project's README or `package.json` scripts to call `opv run`, for example `"dev": "opv run dev -- next dev"`, so everyone uses the same entry point.
@@ -192,11 +198,11 @@ opv account use <ID>        # record the user's chosen account in .opv (ask the 
 2. After the user says they are done, run `opv account list --json` again and continue when `findings` is empty.
 
 - If the environments use different 1Password accounts, add `account = "<sign-in address>"` to each environment (ask the user which account holds which vault). The user then signs in with `opv login <env>`; every opv command uses that environment's account.
-- To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that environment's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Kubernetes uses the user's kubeconfig instead (Azure fields only when its secrets are in a Key Vault through `secrets_in`); Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
+- To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that target's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Kubernetes uses the user's kubeconfig instead (Azure fields only when its secrets are in a Key Vault through `secrets_in`); Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
 
 ## 7. CI
 
-- CI uses one 1Password service account with **read-only** access to each environment's vault (`OP_SERVICE_ACCOUNT_TOKEN`). `opv bootstrap --ci-reader <env>` prints the commands the user runs to create one limited to that vault. The target credential is either a `deploy_credentials` item in that vault (no separate CI secret) or the CI provider's OIDC federation (for example `azure/login` with a federated credential). Without either, the user stores a Fly deploy token as `FLY_API_TOKEN`. The user creates every credential; you never see them.
+- CI uses one 1Password service account with **read-only** access to each environment's boundary vaults (`OP_SERVICE_ACCOUNT_TOKEN`). `opv bootstrap --ci-reader <env>` prints the commands the user runs to create one limited to those vaults. The target credential is either a `deploy_credentials` item in that vault (no separate CI secret) or the CI provider's OIDC federation (for example `azure/login` with a federated credential). Without either, the user stores a Fly deploy token as `FLY_API_TOKEN`. The user creates every credential; you never see them.
 - Add `opv sync <env>` (and `--deploy` only if the user wants CI to deploy) to the workflow. A ready-made GitHub Actions job is in [usage.md](usage.md#github-actions-example).
 - To manage the CI secrets themselves (the ones workflows read as `secrets.NAME`), add an environment with a `github` target ([configuration](configuration.md#github-actions-repository-and-environment-secrets)); `opv sync ci` then sets them from 1Password. Shared values (one deploy token for many repositories) go in a `source_only` product that the other keys point at with `from` ([shared values](configuration.md#one-home-for-shared-values-source_only-products)). The user creates the GitHub environment and the fine-grained token; you never create either.
 - `item skeleton` needs a write-capable identity; never give one to CI. Under a service account opv never writes to 1Password; it reads the item as it is and notes that the next local run will tidy it.

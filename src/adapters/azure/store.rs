@@ -214,13 +214,9 @@ mod tests {
     fn toml(store: &str) -> String {
         format!(
             r#"
-[profile]
-kind = "simple"
 [stores.prod-vault]
 {store}
 [environments.prod]
-vault_id = "v"
-item_id = "i"
 "#
         )
     }
@@ -245,7 +241,7 @@ subscription = "00000000-0000-0000-0000-000000000000""#;
     #[test]
     fn store_with_a_bad_subscription_points_at_its_line() {
         let e = err(&OK.replace("00000000-0000-0000-0000-000000000000", "prod"));
-        assert!(e.contains("line 6, column 16"), "{e}");
+        assert!(e.contains("line 4, column 16"), "{e}");
     }
 
     #[test]

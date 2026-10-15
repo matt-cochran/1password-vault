@@ -13,48 +13,20 @@ pub fn select(
     required: bool,
 ) -> Result<Fleet, Error> {
     fleet.environment(env)?;
-    if fleet.is_simple() && product.is_some() {
-        return Err(Error::Config(
-            "--product is not used under the simple profile; run the command without it".into(),
-        )
-        .with_next(super::check_command(fleet, Some(env), None)));
-    }
-    // FR-47: a source-only product is never run on its own, so it is not offered by the
-    // "one product needs no choosing" shortcut or the available list.
-    let available: Vec<&str> = fleet
-        .products
-        .iter()
-        .filter(|(_, p)| !p.source_only)
-        .map(|(n, _)| n.as_str())
-        .collect();
-    // One product needs no choosing.
-    let only = (available.len() == 1).then(|| available[0]);
-    let product = if fleet.is_simple() {
-        product
-    } else {
-        product.or(only)
+    // D10/FR-34: one product with keys desired in `env` needs no `--product`; the rule
+    // lives in `super::pick_product`. `doctor` (required = false) keeps the whole
+    // environment when the choice is ambiguous instead of failing.
+    let chosen = match product {
+        Some(p) => Some(super::pick_product(fleet, env, Some(p), "check")?),
+        None => match super::pick_product(fleet, env, None, "check") {
+            Ok(p) => Some(p),
+            Err(_) if !required => None,
+            Err(e) => return Err(e),
+        },
     };
-    if !fleet.is_simple() && required && product.is_none() {
-        let first = available.first().copied();
-        return Err(Error::Config(format!(
-            "--product is required because this configuration contains multiple products. Choose --product <name> (available: {}).",
-            available.join(", ")
-        ).into())
-        .with_next(super::check_command(fleet, Some(env), first)));
-    }
-    if let Some(p) = product
-        && !fleet.products.contains_key(p)
-    {
-        return Err(super::undefined_product(fleet, p, Some(env)));
-    }
-    if let Some(p) = product
-        && fleet.products[p].source_only
-    {
-        return Err(source_only_error(fleet, env, p));
-    }
     let mut selected = fleet.clone();
     selected.environments.retain(|name, _| name == env);
-    if let Some(p) = product {
+    if let Some(p) = chosen.as_deref() {
         // The sources of the product's shared keys (FR-45) stay, alone: the read then
         // covers their sections too, and their findings are reported once, on them.
         let sources = fleet.sources_of(p);
@@ -69,16 +41,6 @@ pub fn select(
     Ok(selected)
 }
 
-/// FR-47: `product` holds canonical values for other products' keys and is never run on
-/// its own. The `Next:` step names a product that reads it, when one does.
-fn source_only_error(fleet: &Fleet, env: &str, product: &str) -> Error {
-    let e = super::source_only_message(product);
-    match fleet.referencing_product(product) {
-        Some(q) => e.with_next(format!("opv check {env} --product {q}")),
-        None => e.with_next(super::check_command(fleet, Some(env), None)),
-    }
-}
-
 pub fn check(
     fleet: &Fleet,
     env: &str,
@@ -87,21 +49,17 @@ pub fn check(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    let mut selected = select(fleet, env, product, true)?;
-    selected
-        .environments
-        .get_mut(env)
-        .expect("selected env")
-        .target = None;
+    let selected = select(fleet, env, product, true)?;
     // FR-55: a targetless environment's personal keys live in the person's own item. Merge
     // its fields (never a team fallback) before planning, so they appear as ordinary rows;
     // environments without personal keys keep the exact read path they had.
     let mut plan = if personal::declared(fleet, env) {
         let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
-        let read = super::tidy::read(fleet, env, runner)?;
+        let read = super::tidy::read_for(&selected, fleet, env, runner)?;
         let fields = personal::merged_fields(runner, fleet, env, read.fields, &project)?;
         let none = std::collections::BTreeSet::new();
-        let mut plan = super::plan_item(&selected, env, fields, None, &none, &none)?.0;
+        // Planned without a target: check never reaches one.
+        let mut plan = super::plan_item(&selected, env, None, fields, None, &none, &none)?.0;
         plan.tidy = read.changes;
         plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
         plan
@@ -112,18 +70,24 @@ pub fn check(
     let findings = plan.blocking();
     // The 1Password link for the rows to fix (H1): one free `op whoami`, only when needed.
     let link = if findings > 0 {
-        Some(super::item_url(&selected, env, runner)?)
+        super::rows_item_url(&selected, env, &plan.rows, runner)?
     } else {
         None
     };
     if json {
-        // The shared row shape (A6); no target is read, so `target` and `action` are null.
+        // The shared row shape (A6); no target is read, so `target`, `target_state` and
+        // `action` are null.
         let declared = fleet.environment(env)?;
         let rows: Vec<_> = plan
             .rows
             .iter()
             .map(|row| {
-                let name = declared.target_name(&row.product, &row.key);
+                // The environment's first target by name renders the row's name.
+                let name = declared
+                    .targets
+                    .values()
+                    .next()
+                    .map(|t| t.config.env_name(&row.product, &row.key));
                 super::JsonRow {
                     // H1: the item link to fix a blocking row in; IDs only.
                     open_url: link.as_ref().filter(|_| super::is_blocking(row)).cloned(),
@@ -149,7 +113,7 @@ pub fn check(
         }
         writeln!(out, "{doc}").map_err(write_err)?;
     } else {
-        for row in super::problems_first(&plan.rows) {
+        for row in super::problems_first(&plan.rows, |r| r) {
             let label = crate::domain::key_label(&row.product, &row.key);
             writeln!(
                 out,
@@ -199,7 +163,7 @@ mod tests {
     #[test]
     fn targetless_check_reports_missing_without_values() {
         let f = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([item(&[])]);
         let mut out = Vec::new();
@@ -212,7 +176,7 @@ mod tests {
     #[test]
     fn a_missing_key_tells_the_person_to_click_edit() {
         let f = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+            "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([item(&[])]);
         let e = check(&f, "dev", Some("allumata"), &r, &mut Vec::new(), true).unwrap_err();
@@ -255,9 +219,13 @@ mod tests {
     }
 
     #[test]
-    fn simple_check_accepts_no_product_selection() {
-        let f = crate::config::parse("[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n[keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n").unwrap();
-        let r = FakeRunner::new([item(&[secret("", "DEV_KEY", "FIXTUREVALUE")])]);
+    fn a_single_product_check_accepts_no_product_selection() {
+        let f = crate::config::parse(
+            "[environments.dev]\nboundaries.app = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+             [products.app.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+        )
+        .unwrap();
+        let r = FakeRunner::new([item(&[secret("app", "DEV_KEY", "FIXTUREVALUE")])]);
         let mut out = Vec::new();
         assert!(check(&f, "dev", None, &r, &mut out, true).is_ok());
     }
@@ -275,7 +243,7 @@ mod tests {
     #[test]
     fn malformed_field_in_another_products_section_does_not_fail_the_check() {
         let f = fleet_with(
-            "[products.other.keys.SITE]\nkind = \"config\"\nenvironments = [\"prod\"]\n",
+            "[products.other]\nboundary = \"allumata\"\n[products.other.keys.SITE]\nkind = \"config\"\nenvironments = [\"prod\"]\n",
         );
         let mut doc: serde_json::Value =
             serde_json::from_slice(&item_json(&complete_fields())).unwrap();
@@ -298,18 +266,20 @@ mod tests {
     fn select_ignores_a_source_only_product_for_the_single_product_shortcut() {
         let f = crate::config::parse(
             r#"
-[profile]
-kind = "fleet"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.core = { vault_id = "vci", item_id = "ici" }
+[environments.ci.targets.app]
 fly.app = "app"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sci"
 [products.shared]
 source_only = true
+boundary = "core"
 [products.shared.keys.TOKEN]
 kind = "secret"
 environments = ["ci"]
+[products.api]
+boundary = "core"
 [products.api.keys.TOKEN]
 kind = "secret"
 environments = ["ci"]

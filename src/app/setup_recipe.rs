@@ -26,8 +26,9 @@ pub struct Recipe {
 #[serde(deny_unknown_fields)]
 pub struct Field {
     pub key: String,
+    /// The product the setting belongs to (FR-60: every key is a product's); required.
     #[serde(default)]
-    pub product: Option<String>,
+    pub product: String,
     pub title: String,
     pub description: String,
     pub source: String,
@@ -88,12 +89,17 @@ impl Recipe {
                 "Give the recipe a title, vault, item, and at least one setting.".into(),
             ));
         }
-        let fleet = recipe.fields.iter().any(|f| f.product.is_some());
+        if recipe.fields.iter().any(|f| f.product.trim().is_empty()) {
+            return Err(Error::Config(
+                "Give every setting its product, as product = \"api\" (the app it belongs to)."
+                    .into(),
+            ));
+        }
         if recipe.legacy_env.is_some()
             && recipe
                 .fields
                 .iter()
-                .filter_map(|f| f.product.as_ref())
+                .map(|f| &f.product)
                 .collect::<BTreeSet<_>>()
                 .len()
                 > 1
@@ -105,10 +111,9 @@ impl Recipe {
             if f.title.trim().is_empty()
                 || f.description.trim().is_empty()
                 || f.source.trim().is_empty()
-                || f.product.is_some() != fleet
                 || !seen.insert((f.product.clone(), f.key.clone()))
             {
-                return Err(Error::Config("Each setting needs a unique key, a plain-language title, a reason and a source. Use product names on every setting or none.".into()));
+                return Err(Error::Config("Each setting needs a unique key, a plain-language title, a reason and a source.".into()));
             }
         }
         // Reuse all normal name, rules, context-key and configuration validation.
@@ -116,29 +121,11 @@ impl Recipe {
         Ok(recipe)
     }
 
+    /// The configuration for the recipe's one item (FR-57): one boundary,
+    /// `boundaries.<product>` for one product, else `boundary = "core"` on each product and
+    /// `boundaries.core`. No target: `opv target add` adds one.
     pub fn manifest(&self, vault: &str, item: &str) -> Result<String, Error> {
-        let mut root = toml::Table::new();
-        let fleet = self.fields.iter().any(|f| f.product.is_some());
-        root.insert(
-            "profile".into(),
-            toml::Value::Table(toml::Table::from_iter([(
-                "kind".into(),
-                toml::Value::String(if fleet { "fleet" } else { "simple" }.into()),
-            )])),
-        );
-        let env = toml::Table::from_iter([
-            ("vault_id".into(), toml::Value::String(vault.into())),
-            ("item_id".into(), toml::Value::String(item.into())),
-        ]);
-        root.insert(
-            "environments".into(),
-            toml::Value::Table(toml::Table::from_iter([(
-                self.environment.clone(),
-                toml::Value::Table(env),
-            )])),
-        );
         let mut products = toml::Table::new();
-        let mut flat = toml::Table::new();
         for f in &self.fields {
             let mut key = toml::Table::new();
             key.insert(
@@ -168,26 +155,49 @@ impl Recipe {
                 toml::Value::try_from(&f.rules)
                     .map_err(|_| Error::Config("Could not render setup rules.".into()))?,
             );
-            if let Some(product) = &f.product {
-                let p = products
-                    .entry(product.clone())
-                    .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-                    .as_table_mut()
-                    .expect("product table");
-                let keys = p
-                    .entry("keys")
-                    .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-                    .as_table_mut()
-                    .expect("key table");
-                keys.insert(f.key.clone(), toml::Value::Table(key));
-            } else {
-                flat.insert(f.key.clone(), toml::Value::Table(key));
+            let p = products
+                .entry(f.product.clone())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .expect("product table");
+            let keys = p
+                .entry("keys")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .expect("key table");
+            keys.insert(f.key.clone(), toml::Value::Table(key));
+        }
+        let boundary = super::init::item_boundary(products.keys().map(String::as_str))
+            .ok_or_else(|| Error::Config("Give the recipe at least one setting.".into()))?
+            .to_string();
+        if products.len() > 1 {
+            for (_, p) in products.iter_mut() {
+                p.as_table_mut()
+                    .expect("product table")
+                    .insert("boundary".into(), toml::Value::String(boundary.clone()));
             }
         }
-        root.insert(
-            if fleet { "products" } else { "keys" }.into(),
-            toml::Value::Table(if fleet { products } else { flat }),
-        );
+        let ids = toml::Table::from_iter([
+            ("vault_id".into(), toml::Value::String(vault.into())),
+            ("item_id".into(), toml::Value::String(item.into())),
+        ]);
+        let env = toml::Table::from_iter([(
+            "boundaries".into(),
+            toml::Value::Table(toml::Table::from_iter([(
+                boundary,
+                toml::Value::Table(ids),
+            )])),
+        )]);
+        let root = toml::Table::from_iter([
+            (
+                "environments".into(),
+                toml::Value::Table(toml::Table::from_iter([(
+                    self.environment.clone(),
+                    toml::Value::Table(env),
+                )])),
+            ),
+            ("products".into(), toml::Value::Table(products)),
+        ]);
         toml::to_string_pretty(&root)
             .map_err(|_| Error::Config("Could not render setup declarations.".into()))
     }
@@ -197,18 +207,60 @@ impl Recipe {
 mod tests {
     use super::*;
     fn text() -> String {
-        "title='Example'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='API_KEY'\ntitle='API login'\ndescription='Lets the API call the provider.'\nsource='Your provider account.'\n".into()
+        "title='Example'\nenvironment='dev'\nvault='Development'\nitem='api'\n[[fields]]\nkey='API_KEY'\nproduct='api'\ntitle='API login'\ndescription='Lets the API call the provider.'\nsource='Your provider account.'\n".into()
+    }
+    fn two_products() -> String {
+        text()
+            + "[[fields]]\nkey='SESSION_KEY'\nproduct='web'\ntitle='Sessions'\ndescription='Signs sessions.'\nsource='Generate one.'\n"
+    }
+    fn loaded(text: &str) -> crate::domain::Fleet {
+        let recipe = Recipe::parse(text).unwrap();
+        config::parse(&recipe.manifest("vault-id", "item-id").unwrap()).unwrap()
     }
     #[test]
-    fn recipe_creates_valid_targetless_manifest_with_guidance() {
-        let recipe = Recipe::parse(&text()).unwrap();
-        let config = config::parse(&recipe.manifest("vault-id", "item-id").unwrap()).unwrap();
-        assert!(config.environment("dev").unwrap().target().is_none());
+    fn one_product_records_its_own_boundary() {
+        let boundaries: Vec<String> = loaded(&text()).environments["dev"]
+            .boundaries
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(boundaries, ["api"]);
+    }
+    #[test]
+    fn several_products_record_the_core_boundary() {
+        let boundaries: Vec<String> = loaded(&two_products()).environments["dev"]
+            .boundaries
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(boundaries, ["core"]);
+    }
+    #[test]
+    fn several_products_each_name_the_core_boundary() {
+        let fleet = loaded(&two_products());
+        assert_eq!(
+            [fleet.boundary_of("api"), fleet.boundary_of("web")],
+            ["core", "core"]
+        );
+    }
+    #[test]
+    fn the_manifest_has_no_target() {
+        assert!(loaded(&text()).environments["dev"].targets.is_empty());
+    }
+    #[test]
+    fn the_manifest_keeps_the_guidance() {
         assert!(
-            config.products[""].keys["API_KEY"]
+            loaded(&text()).products["api"].keys["API_KEY"]
                 .guidance
                 .contains("API login")
         );
+    }
+    #[test]
+    fn a_setting_without_a_product_is_refused_naming_product() {
+        let error = Recipe::parse(&text().replace("product='api'\n", ""))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("product = \"api\""), "{error}");
     }
     #[test]
     fn invalid_recipe_does_not_quote_input() {

@@ -28,7 +28,7 @@ use super::onepassword::{
 use crate::domain::convention::{
     Found, KEPT_SECTION, Layout, MARKER_SECTION, Op, Section, TidyPlan,
 };
-use crate::domain::model::Environment;
+use crate::domain::model::{Boundary, Environment};
 use crate::domain::secret::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
@@ -351,15 +351,16 @@ pub fn apply(raw: &[u8], plan: &TidyPlan) -> Result<Zeroizing<Vec<u8>>, Error> {
 pub fn write(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     template: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     let host = &Host::detect;
     let args = [
         "item",
         "edit",
-        env.item_id.as_str(),
+        b.item_id.as_str(),
         "--vault",
-        env.vault_id.as_str(),
+        b.vault_id.as_str(),
         "--format",
         "json",
     ];
@@ -389,6 +390,7 @@ pub fn write(
     Err(failed_op_error_as(
         r,
         env,
+        b,
         host,
         &format!("op item edit failed ({})", status_text(status)),
         "grant this identity write access to the vault",

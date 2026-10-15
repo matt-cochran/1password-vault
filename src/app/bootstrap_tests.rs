@@ -1,87 +1,179 @@
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
 
-/// A fleet with a recorded `dev` (vault `myapp-dev`, known to the fake) and a fresh
-/// `staging` with no IDs yet.
+/// `dev` records its `api` boundary (vault `myapp-dev`, known to the fake); `prod` records
+/// nothing and has a target without `state_vault_id`.
 const FLEET: &str = r#"# the portfolio's environments
-[profile]
-kind = "fleet"
-
 [environments.dev]
-vault_id = "vdev0000000000000000000001"
-item_id = "idev0000000000000000000001"
+boundaries.api = { vault_id = "vdev0000000000000000000001", item_id = "idev0000000000000000000001" }
 
-[environments.staging]
-fly.app = "myapp-staging"
+[environments.prod]
+
+[environments.prod.targets.web]
+fly.app = "myapp-prod"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
 
 [products.api.keys.API_TOKEN]
 kind = "secret"
-environments = ["dev", "staging"]
+environments = ["dev", "prod"]
 "#;
+
+/// `web` and `api` share the `core` boundary; `llm`'s only key is personal.
+const CORE: &str = r#"[environments.local]
+
+[products.web]
+boundary = "core"
+
+[products.web.keys.SESSION_KEY]
+kind = "secret"
+environments = ["local"]
+
+[products.api]
+boundary = "core"
+
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+environments = ["local"]
+
+[products.llm.keys.OPENAI_API_KEY]
+kind = "secret"
+environments = ["local"]
+personal = true
+"#;
+
+/// `worker` reads its only key from `shared`, whose own key is desired elsewhere.
+const FROM: &str = r#"[environments.prod]
+
+[products.shared]
+source_only = true
+
+[products.shared.keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging"]
+
+[products.worker.keys.DATABASE_URL]
+kind = "secret"
+environments = ["prod"]
+from = "shared/DATABASE_URL"
+"#;
+
+/// Two products, each its own boundary, in one environment.
+const TWO: &str = r#"[environments.prod]
+
+[products.api.keys.API_TOKEN]
+kind = "secret"
+environments = ["prod"]
+
+[products.web.keys.SESSION_KEY]
+kind = "secret"
+environments = ["prod"]
+"#;
+
+const OTHER_ACCOUNT: &str = "vother000000000000000000001";
 
 fn none() -> BTreeSet<String> {
     BTreeSet::new()
 }
 
-fn step_of(plans: &[EnvPlan], env: &str) -> Step {
-    plans
-        .iter()
+fn env_plan(text: &str, env: &str, rebind: &BTreeSet<String>) -> EnvPlan {
+    plan(&FakeOp::default(), text, "myapp", rebind)
+        .unwrap()
+        .into_iter()
         .find(|p| p.environment == env)
-        .map(|p| p.step.clone())
         .unwrap()
 }
 
+fn boundary_names(text: &str, env: &str) -> Vec<String> {
+    env_plan(text, env, &none())
+        .boundaries
+        .into_iter()
+        .map(|b| b.boundary)
+        .collect()
+}
+
+fn first_boundary_step(text: &str, env: &str, rebind: &BTreeSet<String>) -> BoundaryStep {
+    env_plan(text, env, rebind).boundaries[0].step.clone()
+}
+
+// The plan ---------------------------------------------------------------------------------
+
 #[test]
-fn an_environment_without_ids_is_created_with_inits_titles() {
-    let plans = plan(&FakeOp::default(), FLEET, "myapp", &none()).unwrap();
+fn an_unrecorded_boundary_is_planned_with_the_conventional_titles() {
     assert_eq!(
-        step_of(&plans, "staging"),
-        Step::Create {
-            vault: "myapp-staging".into(),
-            item: "myapp · staging values".into()
+        first_boundary_step(FLEET, "prod", &none()),
+        BoundaryStep::Create {
+            vault: "myapp-api-prod".into(),
+            item: "myapp · api · prod values".into()
         }
     );
 }
 
 #[test]
-fn recorded_ids_in_the_selected_account_are_ok() {
-    let plans = plan(&FakeOp::default(), FLEET, "myapp", &none()).unwrap();
-    assert!(matches!(step_of(&plans, "dev"), Step::Ok { .. }));
+fn products_in_one_boundary_group_share_one_planned_boundary() {
+    assert_eq!(
+        env_plan(CORE, "local", &none()).boundaries[0].products,
+        ["api", "web"]
+    );
 }
 
 #[test]
-fn recorded_ids_from_another_account_are_stale() {
-    let text = FLEET.replace("vdev0000000000000000000001", "vother000000000000000000001");
-    let plans = plan(&FakeOp::default(), &text, "myapp", &none()).unwrap();
+fn a_product_whose_keys_are_all_personal_needs_no_boundary() {
+    assert_eq!(boundary_names(CORE, "local"), ["core"]);
+}
+
+#[test]
+fn a_from_source_needs_its_boundary() {
+    assert_eq!(boundary_names(FROM, "prod"), ["shared", "worker"]);
+}
+
+#[test]
+fn a_recorded_boundary_in_the_selected_account_is_ok() {
     assert!(matches!(
-        step_of(&plans, "dev"),
-        Step::IdsNotInAccount { .. }
+        first_boundary_step(FLEET, "dev", &none()),
+        BoundaryStep::Ok { .. }
     ));
 }
 
 #[test]
-fn rebind_replaces_recorded_ids_with_new_ones() {
-    let text = FLEET.replace("vdev0000000000000000000001", "vother000000000000000000001");
-    let rebind = BTreeSet::from(["dev".to_string()]);
-    let plans = plan(&FakeOp::default(), &text, "myapp", &rebind).unwrap();
-    assert!(matches!(step_of(&plans, "dev"), Step::Create { .. }));
+fn a_recorded_boundary_from_another_account_is_ids_not_in_account() {
+    let text = FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT);
+    assert!(matches!(
+        first_boundary_step(&text, "dev", &none()),
+        BoundaryStep::IdsNotInAccount { .. }
+    ));
 }
 
 #[test]
-fn half_recorded_ids_are_a_configuration_error() {
-    let text = FLEET.replace("item_id = \"idev0000000000000000000001\"\n", "");
-    let e = plan(&FakeOp::default(), &text, "myapp", &none()).unwrap_err();
-    assert!(e.mentions("give both vault_id and item_id"), "{e}");
+fn rebind_plans_a_new_boundary_in_place_of_a_recorded_one() {
+    let rebind = BTreeSet::from(["dev".to_string()]);
+    assert!(matches!(
+        first_boundary_step(FLEET, "dev", &rebind),
+        BoundaryStep::Create { .. }
+    ));
+}
+
+#[test]
+fn rebind_of_an_undeclared_environment_is_refused() {
+    let rebind = BTreeSet::from(["qa".to_string()]);
+    assert!(plan(&FakeOp::default(), FLEET, "myapp", &rebind).is_err());
+}
+
+#[test]
+fn a_target_without_state_vault_id_is_planned_with_the_conventional_title() {
+    assert_eq!(
+        env_plan(FLEET, "prod", &none()).state_vaults[0].step,
+        StateStep::Create {
+            vault: "myapp-prod-web-state".into()
+        }
+    );
 }
 
 #[test]
 fn a_generated_file_is_recognised_by_its_first_line() {
-    assert!(is_generated(
-        "# Generated by fleetgen; do not edit\n[profile]\n"
-    ));
+    assert!(is_generated("# Generated by fleetgen; do not edit\n"));
 }
 
 #[test]
@@ -89,19 +181,51 @@ fn a_hand_written_file_is_not_generated() {
     assert!(!is_generated(FLEET));
 }
 
-/// A working directory with the fleet as secrets.toml, and a fake whose dev item exists.
-fn workspace() -> (tempfile::TempDir, std::path::PathBuf, FakeOp) {
+// A run ------------------------------------------------------------------------------------
+
+/// A working directory with `text` as secrets.toml, and a fake holding dev's recorded item
+/// and a Private vault for personal items.
+fn workspace_with(text: &str) -> (tempfile::TempDir, PathBuf, FakeOp) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secrets.toml");
-    std::fs::write(&path, FLEET).unwrap();
     let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vprivate0000000000000001".into(), "Private".into()));
     let id = op.insert(
         "vdev0000000000000000000001",
-        serde_json::json!({"title": "myapp · dev values", "category": "SECURE_NOTE", "fields": [], "sections": []}),
+        serde_json::json!({"title": "myapp · api · dev values", "category": "SECURE_NOTE", "fields": [], "sections": []}),
     );
-    let text = FLEET.replace("idev0000000000000000000001", &id);
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, text.replace("idev0000000000000000000001", &id)).unwrap();
     (dir, path, op)
+}
+
+fn workspace() -> (tempfile::TempDir, PathBuf, FakeOp) {
+    workspace_with(FLEET)
+}
+
+fn run_with(path: &Path, op: &FakeOp, opts: &Opts) -> Result<String, Error> {
+    let mut out = Vec::new();
+    run(path, "myapp", opts, op, &mut out)?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+fn bootstrap(path: &Path, op: &FakeOp) -> crate::domain::Fleet {
+    run_with(path, op, &Opts::default()).unwrap();
+    crate::config::load(path).unwrap()
+}
+
+fn vault_title(op: &FakeOp, id: &str) -> String {
+    op.vaults
+        .borrow()
+        .iter()
+        .find(|(v, _)| v == id)
+        .map(|(_, name)| name.clone())
+        .unwrap()
+}
+
+fn boundary(fleet: &crate::domain::Fleet, env: &str, b: &str) -> crate::domain::Boundary {
+    fleet.environments[env].boundaries[b].clone()
 }
 
 fn wrote_to_1password(op: &FakeOp) -> bool {
@@ -117,14 +241,175 @@ fn wrote_to_1password(op: &FakeOp) -> bool {
     })
 }
 
+fn dry_run() -> Opts {
+    Opts {
+        dry_run: true,
+        ..Opts::default()
+    }
+}
+
+#[test]
+fn bootstrap_records_the_boundary_vault_by_its_conventional_title() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    assert_eq!(
+        vault_title(&op, &boundary(&fleet, "prod", "api").vault_id),
+        "myapp-api-prod"
+    );
+}
+
+#[test]
+fn bootstrap_records_the_boundary_item_by_its_conventional_title() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    assert_eq!(
+        op.item(&boundary(&fleet, "prod", "api").item_id)["title"],
+        "myapp · api · prod values"
+    );
+}
+
+#[test]
+fn a_file_with_products_but_no_boundaries_loads_after_bootstrap() {
+    let (_dir, path, op) = workspace_with(TWO);
+    run_with(&path, &op, &Opts::default()).unwrap();
+    assert!(crate::config::load(&path).is_ok());
+}
+
+#[test]
+fn products_in_one_boundary_group_record_one_boundary() {
+    // Without llm: item skeleton (tidy::boundaries_needed) still asks a boundary of a
+    // product whose keys are all personal.
+    let team_only = &CORE[..CORE.find("[products.llm").unwrap()];
+    let (_dir, path, op) = workspace_with(team_only);
+    let fleet = bootstrap(&path, &op);
+    assert_eq!(
+        fleet.environments["local"]
+            .boundaries
+            .keys()
+            .collect::<Vec<_>>(),
+        ["core"]
+    );
+}
+
+#[test]
+fn a_target_without_state_vault_id_records_the_conventional_state_vault() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    assert_eq!(
+        vault_title(
+            &op,
+            &fleet.environments["prod"].targets["web"].state_vault_id
+        ),
+        "myapp-prod-web-state"
+    );
+}
+
+#[test]
+fn a_created_boundary_item_carries_its_notes() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let item = op.item(&boundary(&fleet, "prod", "api").item_id);
+    let notes = item["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "notesPlain")
+        .map(|f| f["value"].clone());
+    assert_eq!(
+        notes,
+        Some(serde_json::json!(naming::boundary_notes(
+            "myapp",
+            "prod",
+            &["api"]
+        )))
+    );
+}
+
+#[test]
+fn a_created_state_vault_carries_its_notes() {
+    let (_dir, path, op) = workspace();
+    bootstrap(&path, &op);
+    assert!(op.saw(&naming::state_vault_notes("myapp", "prod", "web")));
+}
+
+#[test]
+fn a_created_boundary_item_is_tagged_with_its_environment() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    assert_eq!(
+        op.item(&boundary(&fleet, "prod", "api").item_id)["tags"],
+        serde_json::json!(["opv-env:myapp/prod"])
+    );
+}
+
+#[test]
+fn a_recorded_boundary_is_left_unchanged() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    assert_eq!(
+        boundary(&fleet, "dev", "api").vault_id,
+        "vdev0000000000000000000001"
+    );
+}
+
+#[test]
+fn rebind_records_a_new_boundary_in_the_selected_account() {
+    let (_dir, path, op) =
+        workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
+    let opts = Opts {
+        rebind: BTreeSet::from(["dev".to_string()]),
+        ..Opts::default()
+    };
+    run_with(&path, &op, &opts).unwrap();
+    let fleet = crate::config::load(&path).unwrap();
+    assert_eq!(
+        vault_title(&op, &boundary(&fleet, "dev", "api").vault_id),
+        "myapp-api-dev"
+    );
+}
+
+#[test]
+fn a_boundary_from_another_account_stops_with_ids_not_in_account() {
+    let (_dir, path, op) =
+        workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
+    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+}
+
+#[test]
+fn ids_from_another_account_stop_before_anything_is_created() {
+    let (_dir, path, op) =
+        workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
+    let _ = run_with(&path, &op, &Opts::default());
+    assert!(!wrote_to_1password(&op));
+}
+
+#[test]
+fn a_state_vault_from_another_account_stops_with_ids_not_in_account() {
+    let text = FLEET.replace(
+        "fly.app = \"myapp-prod\"",
+        &format!("fly.app = \"myapp-prod\"\nstate_vault_id = \"{OTHER_ACCOUNT}\""),
+    );
+    let (_dir, path, op) = workspace_with(&text);
+    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+}
+
+#[test]
+fn a_result_the_loader_refuses_creates_nothing() {
+    let text = FLEET.replace(
+        "[environments.prod]\n",
+        "[environments.prod]\nvault_id = \"vdev0000000000000000000001\"\n",
+    );
+    let (_dir, path, op) = workspace_with(&text);
+    let _ = run_with(&path, &op, &Opts::default());
+    assert!(!wrote_to_1password(&op));
+}
+
 #[test]
 fn a_dry_run_writes_nothing_to_1password() {
     let (_dir, path, op) = workspace();
-    let opts = Opts {
-        dry_run: true,
-        ..Opts::default()
-    };
-    run(&path, "myapp", &opts, &op, &mut Vec::new()).unwrap();
+    run_with(&path, &op, &dry_run()).unwrap();
     assert!(!wrote_to_1password(&op));
 }
 
@@ -132,26 +417,77 @@ fn a_dry_run_writes_nothing_to_1password() {
 fn a_dry_run_leaves_the_file_unchanged() {
     let (_dir, path, op) = workspace();
     let before = std::fs::read_to_string(&path).unwrap();
-    let opts = Opts {
-        dry_run: true,
-        ..Opts::default()
-    };
-    run(&path, "myapp", &opts, &op, &mut Vec::new()).unwrap();
+    run_with(&path, &op, &dry_run()).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
 
 #[test]
-fn bootstrap_records_the_created_ids_in_the_file() {
+fn a_dry_run_lists_each_boundary_with_its_action() {
     let (_dir, path, op) = workspace();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    let out = run_with(&path, &op, &dry_run()).unwrap();
+    assert!(out.contains(
+        "  boundary api: would create vault \"myapp-api-prod\" and item \"myapp · api · prod \
+         values\""
+    ));
+}
+
+#[test]
+fn a_dry_run_lists_each_state_vault_with_its_action() {
+    let (_dir, path, op) = workspace();
+    let out = run_with(&path, &op, &dry_run()).unwrap();
+    assert!(out.contains("  target web state vault: would create vault \"myapp-prod-web-state\""));
+}
+
+#[test]
+fn a_json_dry_run_lists_each_state_vault_with_its_action() {
+    let (_dir, path, op) = workspace();
+    let opts = Opts {
+        json: true,
+        ..dry_run()
+    };
+    let out: serde_json::Value =
+        serde_json::from_str(&run_with(&path, &op, &opts).unwrap()).unwrap();
+    assert_eq!(
+        out["environments"][1]["state_vaults"][0]["action"],
+        "create"
+    );
+}
+
+#[test]
+fn ci_reader_prints_one_create_command_naming_every_boundary_vault() {
+    let (_dir, path, op) = workspace_with(TWO);
+    let opts = Opts {
+        ci_reader: Some("prod".into()),
+        ..Opts::default()
+    };
+    let out = run_with(&path, &op, &opts).unwrap();
     let fleet = crate::config::load(&path).unwrap();
-    assert!(fleet.environments["staging"].vault_id.starts_with("vnew"));
+    let mut vaults = [
+        boundary(&fleet, "prod", "api").vault_id,
+        boundary(&fleet, "prod", "web").vault_id,
+    ];
+    vaults.sort();
+    assert!(out.contains(&format!(
+        "  op service-account create \"myapp-prod-ci\" --vault {}:read_items --vault \
+         {}:read_items --expires-in 90d\n",
+        vaults[0], vaults[1]
+    )));
+}
+
+#[test]
+fn ci_reader_for_an_undeclared_environment_is_refused() {
+    let (_dir, path, op) = workspace();
+    let opts = Opts {
+        ci_reader: Some("qa".into()),
+        ..Opts::default()
+    };
+    assert!(run_with(&path, &op, &opts).is_err());
 }
 
 #[test]
 fn bootstrap_keeps_the_files_comments() {
     let (_dir, path, op) = workspace();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    bootstrap(&path, &op);
     assert!(
         std::fs::read_to_string(&path)
             .unwrap()
@@ -160,11 +496,10 @@ fn bootstrap_keeps_the_files_comments() {
 }
 
 #[test]
-fn bootstrap_adds_the_declared_fields_to_every_item() {
+fn bootstrap_adds_the_declared_fields_to_every_boundary_item() {
     let (_dir, path, op) = workspace();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    let fleet = crate::config::load(&path).unwrap();
-    let item = op.item(&fleet.environments["staging"].item_id);
+    let fleet = bootstrap(&path, &op);
+    let item = op.item(&boundary(&fleet, "prod", "api").item_id);
     assert!(
         item["fields"]
             .as_array()
@@ -175,41 +510,21 @@ fn bootstrap_adds_the_declared_fields_to_every_item() {
 }
 
 #[test]
-fn a_second_run_creates_nothing_more() {
+fn a_second_run_creates_no_vault() {
     let (_dir, path, op) = workspace();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
+    bootstrap(&path, &op);
     op.calls.borrow_mut().clear();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    assert!(
-        !op.calls
-            .borrow()
-            .iter()
-            .any(|c| c.args.first().map(String::as_str) == Some("vault")
-                && c.args.get(1).map(String::as_str) == Some("create"))
-    );
-}
-
-#[test]
-fn stale_ids_stop_with_ids_not_in_account() {
-    let (_dir, path, op) = workspace();
-    let text = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("vdev0000000000000000000001", "vother000000000000000000001");
-    std::fs::write(&path, text).unwrap();
-    let e = run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+    bootstrap(&path, &op);
+    assert_eq!(op.count(&["op", "vault", "create"]), 0);
 }
 
 #[test]
 fn a_generated_file_is_never_rewritten() {
-    let (_dir, path, op) = workspace();
-    let text = format!(
-        "# generated by fleetgen\n{}",
-        std::fs::read_to_string(&path).unwrap()
-    );
-    std::fs::write(&path, &text).unwrap();
-    let _ = run(&path, "myapp", &Opts::default(), &op, &mut Vec::new());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    let text = format!("# generated by fleetgen\n{FLEET}");
+    let (_dir, path, op) = workspace_with(&text);
+    let before = std::fs::read_to_string(&path).unwrap();
+    let _ = run_with(&path, &op, &Opts::default());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
 
 #[test]
@@ -219,51 +534,15 @@ fn a_service_account_cannot_bootstrap() {
         crate::host::Host::from_env(
             &crate::host::FakeEnv::new("linux").var("OP_SERVICE_ACCOUNT_TOKEN"),
         ),
-        || run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap_err(),
+        || run_with(&path, &op, &Opts::default()).unwrap_err(),
     );
     assert_eq!(e.exit_code(), 6);
-}
-
-#[test]
-fn ci_reader_steps_scope_the_service_account_to_the_environments_vault_read_only() {
-    let (_dir, path, op) = workspace();
-    let opts = Opts {
-        ci_reader: Some("dev".into()),
-        ..Opts::default()
-    };
-    let mut out = Vec::new();
-    run(&path, "myapp", &opts, &op, &mut out).unwrap();
-    assert!(String::from_utf8(out).unwrap().contains(
-        "op service-account create \"myapp-dev-ci\" --vault vdev0000000000000000000001:read_items"
-    ));
 }
 
 // A fresh account, end to end (#77): nothing exists; bootstrap, then the receipt says what
 // the owner fills; once filled, nothing is left.
 
-const FRESH: &str = r#"[profile]
-kind = "fleet"
-
-[environments.dev]
-
-[environments.prod]
-fly.app = "myapp-prod"
-fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
-
-[products.api.keys.API_TOKEN]
-kind = "secret"
-environments = ["dev", "prod"]
-"#;
-
-fn fresh() -> (tempfile::TempDir, std::path::PathBuf, FakeOp) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("secrets.toml");
-    std::fs::write(&path, FRESH).unwrap();
-    (dir, path, FakeOp::default())
-}
-
-/// The receipt's finding codes for the store side (`check`-like: dev is run-only, so both
-/// environments are read for their item only).
+/// The receipt's finding codes for the store side.
 fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
     let envs = fleet
         .environments
@@ -282,7 +561,6 @@ fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
             config_source: None,
             account: &account,
             envs,
-            simple: false,
             personal: Default::default(),
             health: Vec::new(),
         },
@@ -293,48 +571,34 @@ fn store_findings(fleet: &crate::domain::Fleet, op: &FakeOp) -> Vec<String> {
 
 #[test]
 fn a_fresh_account_ends_with_every_value_to_fill_named() {
-    let (_dir, path, op) = fresh();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    let fleet = crate::config::load(&path).unwrap();
+    let (_dir, path, op) = workspace_with(TWO);
+    let fleet = bootstrap(&path, &op);
     assert_eq!(store_findings(&fleet, &op), ["key_empty", "key_empty"]);
 }
 
 #[test]
 fn once_the_owner_fills_the_values_nothing_is_left() {
-    let (_dir, path, op) = fresh();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    let fleet = crate::config::load(&path).unwrap();
-    for env in fleet.environments.values() {
-        let mut item = op.item(&env.item_id);
+    let (_dir, path, op) = workspace_with(TWO);
+    let fleet = bootstrap(&path, &op);
+    for b in fleet.environments["prod"].boundaries.values() {
+        let mut item = op.item(&b.item_id);
         for f in item["fields"].as_array_mut().unwrap() {
-            if f["label"] == "API_TOKEN" {
+            if f["label"] == "API_TOKEN" || f["label"] == "SESSION_KEY" {
                 f["value"] = serde_json::json!("FIXTUREVALUE-token");
             }
         }
         op.items
             .borrow_mut()
-            .retain(|i| i["id"] != env.item_id.as_str());
+            .retain(|i| i["id"] != b.item_id.as_str());
         op.items.borrow_mut().push(item);
-        op.cache.borrow_mut().clear();
     }
+    op.cache.borrow_mut().clear();
     assert!(store_findings(&fleet, &op).is_empty());
-}
-
-#[test]
-fn a_created_item_is_tagged_with_its_environment() {
-    let (_dir, path, op) = workspace();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    let fleet = crate::config::load(&path).unwrap();
-    let item = op.item(&fleet.environments["staging"].item_id);
-    assert_eq!(item["tags"], serde_json::json!(["opv-env:myapp/staging"]));
 }
 
 // FR-55: personal keys ----------------------------------------------------------------
 
-const TEAM: &str = r#"[profile]
-kind = "fleet"
-
-[environments.local]
+const TEAM: &str = r#"[environments.local]
 
 [products.api.keys.DATABASE_URL]
 kind = "secret"
@@ -346,51 +610,45 @@ environments = ["local"]
 personal = true
 "#;
 
-fn team() -> (tempfile::TempDir, std::path::PathBuf, FakeOp) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("secrets.toml");
-    std::fs::write(&path, TEAM).unwrap();
-    let op = FakeOp::default();
-    op.vaults
-        .borrow_mut()
-        .push(("vprivate0000000000000001".into(), "Private".into()));
-    (dir, path, op)
+fn personal_item(op: &FakeOp) -> serde_json::Value {
+    op.items
+        .borrow()
+        .iter()
+        .find(|i| i["title"] == "myapp · local (personal)")
+        .cloned()
+        .unwrap()
 }
 
 #[test]
 fn bootstrap_creates_your_personal_item_in_your_private_vault() {
-    let (_dir, path, op) = team();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    assert!(op.items.borrow().iter().any(|i| {
-        i["title"] == "myapp · local (personal)" && i["vault"]["id"] == "vprivate0000000000000001"
-    }));
+    let (_dir, path, op) = workspace_with(TEAM);
+    bootstrap(&path, &op);
+    assert_eq!(
+        personal_item(&op)["vault"]["id"],
+        "vprivate0000000000000001"
+    );
 }
 
 #[test]
 fn your_personal_item_gets_only_the_personal_fields() {
-    let (_dir, path, op) = team();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    let items = op.items.borrow();
-    let mine = items
-        .iter()
-        .find(|i| i["title"] == "myapp · local (personal)")
-        .unwrap();
-    let labels: Vec<&str> = mine["fields"]
+    let (_dir, path, op) = workspace_with(TEAM);
+    bootstrap(&path, &op);
+    let labels: Vec<String> = personal_item(&op)["fields"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|f| f["label"].as_str())
         .filter(|l| *l == "OPENAI_API_KEY" || *l == "DATABASE_URL")
+        .map(str::to_string)
         .collect();
     assert_eq!(labels, ["OPENAI_API_KEY"]);
 }
 
 #[test]
 fn the_team_item_never_gets_a_personal_field() {
-    let (_dir, path, op) = team();
-    run(&path, "myapp", &Opts::default(), &op, &mut Vec::new()).unwrap();
-    let fleet = crate::config::load(&path).unwrap();
-    let item = op.item(&fleet.environments["local"].item_id);
+    let (_dir, path, op) = workspace_with(TEAM);
+    let fleet = bootstrap(&path, &op);
+    let item = op.item(&boundary(&fleet, "local", "api").item_id);
     assert!(
         !item["fields"]
             .as_array()
@@ -400,34 +658,52 @@ fn the_team_item_never_gets_a_personal_field() {
     );
 }
 
-// #106: --state ---------------------------------------------------------------------------
-
-fn with_state() -> (tempfile::TempDir, std::path::PathBuf, FakeOp, String) {
-    let (dir, path, op) = team();
-    let opts = Opts {
-        state: ["local".to_string()].into(),
-        ..Opts::default()
-    };
-    let mut out = Vec::new();
-    run(&path, "myapp", &opts, &op, &mut out).unwrap();
-    (dir, path, op, String::from_utf8(out).unwrap())
+#[test]
+fn bootstrap_records_each_placements_delivery_item() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let web = &fleet.environments["prod"].targets["web"];
+    assert_eq!(
+        op.item(&web.delivery_items["api"])["title"],
+        naming::delivery_item("api", "web")
+    );
 }
 
 #[test]
-fn state_records_the_state_vault() {
-    let (_dir, path, _op, _) = with_state();
-    let fleet = crate::config::load(&path).unwrap();
-    assert!(fleet.environments["local"].state_vault_id.is_some());
+fn a_created_delivery_item_lives_in_its_targets_state_vault() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let web = &fleet.environments["prod"].targets["web"];
+    assert_eq!(
+        op.item(&web.delivery_items["api"])["vault"]["id"],
+        web.state_vault_id.as_str()
+    );
 }
 
 #[test]
-fn state_prints_the_least_privilege_deploy_identity() {
-    let (_dir, path, _op, out) = with_state();
-    let fleet = crate::config::load(&path).unwrap();
-    let e = &fleet.environments["local"];
-    assert!(out.contains(&format!(
-        "--vault {}:read_items --vault {}:read_items,write_items",
-        e.vault_id,
-        e.state_vault_id.as_deref().unwrap()
-    )));
+fn a_created_delivery_item_carries_its_notes() {
+    let (_dir, path, op) = workspace();
+    let fleet = bootstrap(&path, &op);
+    let item = op.item(&fleet.environments["prod"].targets["web"].delivery_items["api"]);
+    let notes = item["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "notesPlain")
+        .map(|f| f["value"].clone());
+    assert_eq!(
+        notes,
+        Some(serde_json::json!(naming::delivery_item_notes(
+            "api", "web", "prod"
+        )))
+    );
+}
+
+#[test]
+fn a_second_run_creates_no_delivery_item() {
+    let (_dir, path, op) = workspace();
+    bootstrap(&path, &op);
+    op.calls.borrow_mut().clear();
+    bootstrap(&path, &op);
+    assert_eq!(op.count(&["op", "item", "create"]), 0);
 }

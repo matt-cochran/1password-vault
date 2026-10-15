@@ -1,125 +1,436 @@
-//! `opv access` (#96): who can read each environment's vault, end to end on the stateful
-//! fake `op`. People are counted, never named.
+//! `opv access` (FR-52, FR-59): who needs which vault, per boundary and per target, end to
+//! end on the stateful fake `op`. People are counted, never named.
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
-use serde_json::json;
+use serde_json::{Value, json};
 
-const DEV: &str = "vdev0000000000000000000001";
-const PROD: &str = "vshr0000000000000000000002";
+const VSHARED: &str = "vshared";
+const VWEB: &str = "vweb";
+const VWORKER: &str = "vworker";
+const VWEB_STATE: &str = "vwebstate";
+const VWORKER_STATE: &str = "vworkerstate";
 
+/// One environment `prod` with two targets: `web` (delivering `web`, whose `SHARED_COPY`
+/// key reads `api/SHARED` from the `shared` boundary) and `worker` (delivering `worker`).
 fn fleet() -> crate::domain::Fleet {
-    crate::config::parse(&format!(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"{DEV}\"\nitem_id = \"i1\"\n\
-         [environments.prod]\nvault_id = \"{PROD}\"\nitem_id = \"i2\"\nfly.app = \"myapp\"\n\
-         [keys.A]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n"
-    ))
+    crate::config::parse(
+        r#"[environments.prod]
+boundaries.shared = { vault_id = "vshared", item_id = "ishared" }
+boundaries.web = { vault_id = "vweb", item_id = "iweb" }
+boundaries.worker = { vault_id = "vworker", item_id = "iworker" }
+
+[environments.prod.targets.web]
+fly.app = "shop-prod-web"
+fly.secret_name = "{KEY}"
+products = ["web"]
+state_vault_id = "vwebstate"
+
+[environments.prod.targets.worker]
+fly.app = "shop-prod-worker"
+fly.secret_name = "WORKER__{KEY}"
+products = ["worker"]
+state_vault_id = "vworkerstate"
+
+[products.api]
+boundary = "shared"
+[products.api.keys.SHARED]
+kind = "secret"
+environments = ["prod"]
+
+[products.web.keys.WEB_KEY]
+kind = "secret"
+environments = ["prod"]
+
+[products.web.keys.SHARED_COPY]
+kind = "secret"
+environments = ["prod"]
+from = "api/SHARED"
+
+[products.worker.keys.WORKER_KEY]
+kind = "secret"
+environments = ["prod"]
+"#,
+    )
     .unwrap()
 }
 
-fn member() -> serde_json::Value {
+fn member() -> Value {
     json!({"type": "MEMBER", "state": "ACTIVE", "name": "Alice Example",
-           "email": "alice@example.com", "permissions": ["allow_viewing", "allow_editing", "allow_managing"]})
+           "email": "alice@example.com",
+           "permissions": ["allow_viewing", "allow_editing", "allow_managing"]})
 }
 
-fn service_account(perms: &[&str]) -> serde_json::Value {
-    json!({"type": "SERVICE_ACCOUNT", "state": "ACTIVE", "name": "myapp-prod-ci", "permissions": perms})
+fn account(name: &str, permissions: &[&str]) -> Value {
+    json!({"type": "SERVICE_ACCOUNT", "state": "ACTIVE", "name": name,
+           "permissions": permissions})
 }
 
-/// `opv access --json` with `prod`'s users (dev: one member).
-fn access(prod: Option<serde_json::Value>) -> serde_json::Value {
+/// A fake where every vault is readable and every required grant is present: the deploy
+/// identities and the CI reader are read-only on the boundaries, the deploy identities
+/// read-write on their own state vaults.
+fn visible() -> FakeOp {
     let op = FakeOp::default();
-    op.vault_users
-        .borrow_mut()
-        .insert(DEV.into(), json!([member()]));
-    if let Some(p) = prod {
-        op.vault_users.borrow_mut().insert(PROD.into(), p);
+    {
+        let mut users = op.vault_users.borrow_mut();
+        users.insert(
+            VSHARED.into(),
+            json!([
+                member(),
+                account("shop-prod-web-deploy", &["allow_viewing"]),
+                account("shop-prod-ci", &["allow_viewing"]),
+            ]),
+        );
+        users.insert(
+            VWEB.into(),
+            json!([
+                member(),
+                account("shop-prod-web-deploy", &["allow_viewing"]),
+                account("shop-prod-ci", &["allow_viewing"]),
+            ]),
+        );
+        users.insert(
+            VWORKER.into(),
+            json!([
+                member(),
+                account("shop-prod-worker-deploy", &["allow_viewing"]),
+                account("shop-prod-ci", &["allow_viewing"]),
+            ]),
+        );
+        users.insert(
+            VWEB_STATE.into(),
+            json!([account(
+                "shop-prod-web-deploy",
+                &["allow_viewing", "allow_editing"]
+            )]),
+        );
+        users.insert(
+            VWORKER_STATE.into(),
+            json!([account(
+                "shop-prod-worker-deploy",
+                &["allow_viewing", "allow_editing"]
+            )]),
+        );
     }
+    op
+}
+
+/// A fake where every vault is readable but names no service account: every required grant
+/// is missing.
+fn members_only() -> FakeOp {
+    let op = FakeOp::default();
+    {
+        let mut users = op.vault_users.borrow_mut();
+        for vault in [VSHARED, VWEB, VWORKER, VWEB_STATE, VWORKER_STATE] {
+            users.insert(vault.into(), json!([member()]));
+        }
+    }
+    op
+}
+
+fn run_json(op: &FakeOp, env: Option<&str>, target: Option<&str>) -> Value {
     let mut out = Vec::new();
-    run(&fleet(), None, &op, true, &mut out).unwrap();
+    run(&fleet(), env, target, Some("shop"), op, true, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
-fn codes(doc: &serde_json::Value) -> Vec<String> {
-    doc["findings"]
+fn run_text(op: &FakeOp, env: Option<&str>, target: Option<&str>) -> String {
+    let mut out = Vec::new();
+    run(&fleet(), env, target, Some("shop"), op, false, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+/// The `(vault, permission)` of every check for one principal, in report order.
+fn grants(doc: &Value, kind: &str, target: Option<&str>) -> Vec<(String, String)> {
+    doc["environments"][0]["report"]["checks"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| f["code"].as_str().unwrap().to_string())
+        .filter(|c| c["grant"]["principal"]["kind"] == kind)
+        .filter(|c| target.is_none_or(|t| c["grant"]["principal"]["target"] == t))
+        .map(|c| {
+            (
+                c["grant"]["vault_id"].as_str().unwrap().to_string(),
+                c["grant"]["permission"].as_str().unwrap().to_string(),
+            )
+        })
         .collect()
 }
 
-#[test]
-fn a_deployed_environment_without_a_ci_reader_gets_one_finding() {
-    assert_eq!(codes(&access(Some(json!([member()])))), ["no_ci_reader"]);
+/// The state of the one check on `vault`.
+fn state_of(doc: &Value, vault: &str) -> String {
+    doc["environments"][0]["report"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["grant"]["vault_id"] == vault)
+        .unwrap()["state"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
-#[test]
-fn the_finding_carries_the_read_only_create_command() {
-    let doc = access(Some(json!([member()])));
-    assert!(
-        doc["findings"][0]["next"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("--vault {PROD}:read_items"))
-    );
+fn commands(doc: &Value) -> Vec<String> {
+    doc["environments"][0]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect()
 }
 
-#[test]
-fn a_read_only_service_account_satisfies_prod() {
-    assert!(
-        codes(&access(Some(json!([
-            member(),
-            service_account(&["allow_viewing"])
-        ]))))
-        .is_empty()
-    );
-}
+// --- required access per principal -------------------------------------------------
 
 #[test]
-fn a_service_account_that_can_write_is_flagged() {
-    assert!(
-        codes(&access(Some(json!([service_account(&[
-            "allow_viewing",
-            "allow_editing"
-        ])]))))
-        .contains(&"ci_reader_can_write".to_string())
-    );
-}
-
-#[test]
-fn a_vault_you_cannot_manage_is_not_visible() {
-    assert_eq!(codes(&access(None)), ["access_not_visible"]);
-}
-
-#[test]
-fn people_are_counted() {
+fn a_target_deploy_identity_reads_its_boundaries_and_writes_its_state_vault() {
+    let doc = run_json(&visible(), Some("prod"), None);
     assert_eq!(
-        access(Some(json!([member()])))["environments"][1]["people"],
-        1
+        grants(&doc, "deploy", Some("web")),
+        [
+            ("vshared".to_string(), "read".to_string()),
+            ("vweb".to_string(), "read".to_string()),
+            ("vwebstate".to_string(), "read_write".to_string()),
+        ]
     );
+}
+
+#[test]
+fn a_second_target_gets_its_own_deploy_grants() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert_eq!(
+        grants(&doc, "deploy", Some("worker")),
+        [
+            ("vworker".to_string(), "read".to_string()),
+            ("vworkerstate".to_string(), "read_write".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn the_ci_reader_reads_every_boundary_vault() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert_eq!(
+        grants(&doc, "ci_reader", None),
+        [
+            ("vshared".to_string(), "read".to_string()),
+            ("vweb".to_string(), "read".to_string()),
+            ("vworker".to_string(), "read".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_present_grant_is_reported_present() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert!(
+        doc["environments"][0]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["state"] == "present")
+    );
+}
+
+// --- owner commands -----------------------------------------------------------------
+
+#[test]
+fn each_principal_with_a_missing_grant_gets_exactly_one_owner_command() {
+    assert_eq!(
+        commands(&run_json(&members_only(), Some("prod"), None)).len(),
+        3
+    );
+}
+
+#[test]
+fn one_owner_command_covers_every_vault_of_its_principal() {
+    let command = commands(&run_json(&members_only(), Some("prod"), None))
+        .into_iter()
+        .find(|c| c.contains("shop-prod-web-deploy"))
+        .unwrap();
+    assert_eq!(
+        command,
+        "op service-account create \"shop-prod-web-deploy\" --vault vshared:read_items \
+         --vault vweb:read_items --vault vwebstate:read_items,write_items --expires-in 90d"
+    );
+}
+
+/// A reader that can write where it should only read is fixed by recreating its service
+/// account (its vaults and permissions are fixed at creation), so it gets an owner command.
+#[test]
+fn a_reader_that_can_write_a_boundary_gets_an_owner_command() {
+    let op = visible();
+    op.vault_users.borrow_mut().insert(
+        VWEB.into(),
+        json!([
+            member(),
+            account("shop-prod-web-deploy", &["allow_viewing", "allow_editing"]),
+            account("shop-prod-ci", &["allow_viewing"]),
+        ]),
+    );
+    let commands = commands(&run_json(&op, Some("prod"), None));
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| c.contains("shop-prod-web-deploy"))
+            .count(),
+        1,
+        "{commands:?}"
+    );
+}
+
+#[test]
+fn the_text_prefixes_each_owner_command() {
+    assert!(
+        run_text(&members_only(), Some("prod"), None)
+            .contains("Owner runs: op service-account create")
+    );
+}
+
+// --- narrowing ----------------------------------------------------------------------
+
+#[test]
+fn target_narrowing_keeps_only_that_deploy_principal() {
+    let doc = run_json(&visible(), Some("prod"), Some("web"));
+    let principals: Vec<&str> = doc["environments"][0]["report"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["grant"]["principal"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(principals, ["deploy", "deploy", "deploy"]);
+}
+
+#[test]
+fn target_narrowing_omits_the_ci_reader() {
+    let doc = run_json(&visible(), Some("prod"), Some("web"));
+    assert!(grants(&doc, "ci_reader", None).is_empty());
+}
+
+// --- unreadable vaults --------------------------------------------------------------
+
+#[test]
+fn an_unreadable_vault_is_reported_not_visible() {
+    let doc = run_json(&FakeOp::default(), Some("prod"), None);
+    assert_eq!(state_of(&doc, VWEB_STATE), "not_visible");
+}
+
+#[test]
+fn an_unreadable_vault_is_counted_unclassified() {
+    let doc = run_json(&FakeOp::default(), Some("prod"), None);
+    assert_eq!(doc["environments"][0]["report"]["unclassified"], 8);
+}
+
+#[test]
+fn the_text_reports_an_unreadable_vault_as_not_visible() {
+    assert!(run_text(&FakeOp::default(), Some("prod"), None).contains("not visible"));
+}
+
+#[test]
+fn the_output_never_says_clean() {
+    assert!(
+        !run_text(&FakeOp::default(), Some("prod"), None)
+            .to_lowercase()
+            .contains("clean")
+    );
+}
+
+#[test]
+fn an_unreadable_vault_keeps_its_finding() {
+    assert!(run_text(&FakeOp::default(), Some("prod"), None).contains("access_not_visible"));
+}
+
+#[test]
+fn a_finding_names_the_vault_it_is_about() {
+    assert!(run_text(&FakeOp::default(), Some("prod"), None).contains("the vwebstate vault"));
+}
+
+// --- readers and privacy ------------------------------------------------------------
+
+#[test]
+fn a_writable_boundary_reader_is_flagged() {
+    let op = visible();
+    op.vault_users.borrow_mut().insert(
+        VWEB.into(),
+        json!([account("stranger", &["allow_viewing", "allow_editing"])]),
+    );
+    assert!(run_text(&op, Some("prod"), None).contains("ci_reader_can_write"));
 }
 
 #[test]
 fn no_person_is_ever_named() {
-    let doc = access(Some(json!([member(), service_account(&["allow_viewing"])]))).to_string();
-    assert!(!doc.contains("Alice") && !doc.contains("alice@example.com"));
+    let text = run_text(&visible(), Some("prod"), None);
+    assert!(!text.contains("Alice") && !text.contains("alice@example.com"));
+}
+
+// --- observation and read-only ------------------------------------------------------
+
+#[test]
+fn each_needed_vault_is_listed_once() {
+    let op = visible();
+    let _ = run_json(&op, Some("prod"), None);
+    let calls = op
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| {
+            c.args.starts_with(&[
+                "vault".to_string(),
+                "user".to_string(),
+                "list".to_string(),
+                VSHARED.to_string(),
+            ])
+        })
+        .count();
+    assert_eq!(calls, 1);
 }
 
 #[test]
-fn the_text_names_the_service_account_and_its_access() {
+fn access_never_runs_a_create_command() {
     let op = FakeOp::default();
-    op.vault_users
-        .borrow_mut()
-        .insert(DEV.into(), json!([member()]));
-    op.vault_users
-        .borrow_mut()
-        .insert(PROD.into(), json!([service_account(&["allow_viewing"])]));
+    let _ = run_json(&op, Some("prod"), None);
+    assert!(!op.calls.borrow().iter().any(|c| {
+        c.args
+            .starts_with(&["service-account".to_string(), "create".to_string()])
+    }));
+}
+
+// --- project and json document ------------------------------------------------------
+
+#[test]
+fn the_project_option_names_the_service_accounts() {
     let mut out = Vec::new();
-    run(&fleet(), Some("prod"), &op, false, &mut out).unwrap();
+    run(
+        &fleet(),
+        Some("prod"),
+        None,
+        Some("acme"),
+        &members_only(),
+        true,
+        &mut out,
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
     assert!(
-        String::from_utf8(out)
-            .unwrap()
-            .contains("myapp-prod-ci (read-only)")
+        commands(&doc)
+            .iter()
+            .any(|c| c.contains("acme-prod-web-deploy"))
     );
+}
+
+#[test]
+fn the_json_document_wraps_each_environment() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert_eq!(doc["environments"][0]["environment"], "prod");
+}
+
+#[test]
+fn the_json_document_carries_the_report() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert!(doc["environments"][0]["report"].is_object());
+}
+
+#[test]
+fn the_json_document_carries_the_commands() {
+    let doc = run_json(&visible(), Some("prod"), None);
+    assert!(doc["environments"][0]["commands"].is_array());
 }

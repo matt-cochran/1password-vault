@@ -1,28 +1,38 @@
-//! `explain <product>/<key> [--env <env>]` use case (FR-22); `explain <KEY>` under the
-//! simple profile (FR-20).
+//! `explain <product>/<key> [--env <env>]` (key form, FR-22; a bare `<KEY>` that one product
+//! declares also works) and `explain --target <name> --env <env>` (target form, FR-56).
 //!
-//! Reads only the configuration: no 1Password or target call, so it takes no runner at all
-//! and cannot emit a value or a value fragment (SR-1, §5). It is not a `secret get`.
+//! Reads only the configuration: it never reads a value, so it cannot emit one or a value
+//! fragment (SR-1, §5). It is not a `secret get`. The target form and the key form's
+//! account names resolve the project (`--project`, else the repository's name) before this
+//! module runs; no runner is used here.
 //!
-//! For the environment named by `--env` (or the only one declared, when `--env` is
-//! omitted) it prints the `op://` reference, the field kind, the target's names, the declared
+//! The key form names, for the environment `--env` selects (or the only one declared):
+//! the value's source (its own field, or `from <product>/<KEY>`), the access boundary and
+//! its vault and item IDs (FR-57), every target of that environment that delivers the key
+//! (FR-48, FR-56) with its name, provider and rendered name, and who can read it: each
+//! delivering target's deploy service account and the environment's CI reader (FR-59). A
+//! personal key (FR-55) says it lives in each person's own item. It also prints the declared
 //! rules, `immutable` and `guidance`, plus the `op item get <item_id> --vault <vault_id>`
 //! command a person can run to inspect the field in their own terminal. That command never
 //! contains `--reveal`.
 //!
-//! An undeclared product, key or environment is `Error::Config` (exit 2).
+//! The target form names the target's provider and locator, its products, its deploy
+//! credentials (or `none`), its state vault ID and its deploy service account.
+//!
+//! An undeclared product, key, target or environment is `Error::Config` (exit 2).
 
 use std::io::Write;
 
 use super::{kind_label, suggest, write_err};
-use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, SIMPLE_PRODUCT, key_label};
+use crate::domain::access_plan::{ci_account, deploy_account};
+use crate::domain::model::{KeySpec, Kind, OneOrMany, Rules, key_label};
 use crate::domain::{Fleet, rules};
 use crate::error::{Code, Error};
 
 /// The key `explain` was asked about, resolved against the configuration.
 ///
-/// The fleet profile takes `<product>/<key>`; the simple profile (FR-20) takes the bare
-/// `<KEY>` and resolves it to its implicit product in [`resolve`]. Everything after
+/// A key is named `<product>/<key>`, or a bare `<KEY>` that exactly one product declares,
+/// resolved in [`resolve`]. Everything after
 /// resolution is shared.
 struct Target<'a> {
     product: &'a str,
@@ -30,28 +40,36 @@ struct Target<'a> {
     spec: &'a KeySpec,
 }
 
-pub fn run(
-    fleet: &Fleet,
-    target: &str,
-    env: Option<&str>,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    run_as(fleet, target, env, out, false)
+/// What `opv explain` was asked about (FR-56): a declared key, or a declared target.
+pub enum Asked<'a> {
+    /// `[PRODUCT/]KEY`: the key form.
+    Key(&'a str),
+    /// `--target NAME`: the target form.
+    Target(&'a str),
 }
 
-/// [`run`], printing one JSON document instead of lines when `json` (A5): `{environment,
-/// product, key, reference, kind, field, target: [{label, value}], rules, immutable,
-/// guidance, required_here, inspect}`. Configuration only, never a value.
-pub fn run_as(
+/// Both forms, for `opv explain` itself (FR-56, FR-59): `project` names the service
+/// accounts and was resolved by the caller (`--project`, else the repository's name).
+/// Configuration only, never a value.
+pub fn run_request(
     fleet: &Fleet,
-    target: &str,
+    asked: &Asked<'_>,
     env: Option<&str>,
+    project: &str,
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    let t = resolve(fleet, target).map_err(|e| runnable_next(fleet, env, e))?;
-    let env_name = environment(fleet, &t, env)?;
-    explain_in(fleet, &t, env_name, out, json)
+    match asked {
+        Asked::Key(key) => {
+            let t = resolve(fleet, key).map_err(|e| runnable_next(fleet, env, e))?;
+            let env_name = environment(fleet, &t, env)?;
+            explain_in(fleet, &t, env_name, project, out, json)
+        }
+        Asked::Target(name) => {
+            let env_name = target_environment(fleet, name, env)?;
+            explain_target_in(fleet, name, env_name, project, out, json)
+        }
+    }
 }
 
 /// The declared key and environment `opv open` names (H1), resolved exactly as `explain`
@@ -74,38 +92,10 @@ pub(crate) fn locate<'a>(
     Ok((t.product.to_string(), t.key.to_string(), env_name))
 }
 
-/// Resolve the target to a declared key: `<product>/<key>` under the fleet profile, `<KEY>`
-/// under the simple profile (FR-20). P8: a bare `<KEY>` under the fleet profile resolves to
-/// the one product that declares it, or lists every product that does; a `<product>/<KEY>`
-/// under the simple profile names the bare key; an unknown name suggests close declared
-/// names. Configuration only: names, never values.
+/// Resolve the target to a declared key: `<product>/<key>`. P8: a bare `<KEY>` resolves to
+/// the one product that declares it, or lists every product that does; an unknown name
+/// suggests close declared names. Configuration only: names, never values.
 fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
-    if fleet.is_simple() {
-        let keys = fleet.products.get(SIMPLE_PRODUCT).map(|p| &p.keys);
-        let names = || keys.into_iter().flat_map(|k| k.keys().map(String::as_str));
-        if let Some((_, key)) = target.split_once('/') {
-            let close: Vec<&str> = if keys.is_some_and(|k| k.contains_key(key)) {
-                vec![key]
-            } else {
-                suggest::close(key, names())
-            };
-            return Err(did_you_mean(
-                format!("explain expects <KEY> under the simple profile, got {target:?}"),
-                &close,
-            ));
-        }
-        let Some((key, spec)) = keys.and_then(|k| k.get_key_value(target)) else {
-            return Err(did_you_mean(
-                format!("undeclared key {target:?}"),
-                &suggest::close(target, names()),
-            ));
-        };
-        return Ok(Target {
-            product: SIMPLE_PRODUCT,
-            key,
-            spec,
-        });
-    }
     let Some((product, key)) = target.split_once('/') else {
         return resolve_bare(fleet, target);
     };
@@ -150,7 +140,7 @@ fn resolve<'a>(fleet: &'a Fleet, target: &str) -> Result<Target<'a>, Error> {
     Ok(Target { product, key, spec })
 }
 
-/// A bare `<KEY>` under the fleet profile: the one product that declares it, or an error
+/// A bare `<KEY>`: the one product that declares it, or an error
 /// listing every candidate (ambiguous) or the closest declared keys (unknown).
 fn resolve_bare<'a>(fleet: &'a Fleet, key: &str) -> Result<Target<'a>, Error> {
     let found: Vec<(&'a str, &'a str, &'a KeySpec)> = fleet
@@ -245,14 +235,9 @@ fn explain_command(fleet: &Fleet, label: &str, env: Option<&str>) -> String {
     if fleet.environments.len() <= 1 {
         return format!("opv explain {label}");
     }
-    let (product, key) = match label.split_once('/') {
-        Some((p, k)) => (p, k),
-        None => (SIMPLE_PRODUCT, label),
-    };
-    let declared = fleet
-        .products
-        .get(product)
-        .and_then(|p| p.keys.get(key))
+    let declared = label
+        .split_once('/')
+        .and_then(|(product, key)| fleet.products.get(product)?.keys.get(key))
         .and_then(|spec| spec.environments.first());
     match declared.or_else(|| fleet.environments.keys().next()) {
         Some(e) => format!("opv explain {label} --env {e}"),
@@ -323,6 +308,7 @@ fn explain_in(
     fleet: &Fleet,
     t: &Target<'_>,
     env_name: &str,
+    project: &str,
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
@@ -332,111 +318,147 @@ fn explain_in(
         Kind::Secret => "concealed field",
         Kind::Config => "text field",
     };
-    let config_lines = env.target().and_then(|t| t.explain_config(product, key));
-    let delivered = fleet.delivers(env_name, product);
-    let target_lines: Vec<(String, String)> = match (spec.kind, env.target()) {
-        // A run-only environment names no provider (P4).
-        (_, None) => vec![("target".into(), "none (run-only)".into())],
-        // FR-47, FR-48: read and checked, never written to the target.
-        (_, Some(t)) if !delivered => {
-            let why = if fleet.products.get(product).is_some_and(|p| p.source_only) {
-                "source-only: holds the value the keys sharing it deliver".to_string()
-            } else {
-                format!(
-                    "the {} target's products list leaves {product} out",
-                    t.provider().label()
-                )
-            };
-            vec![("delivered".into(), format!("no ({why})"))]
-        }
-        (Kind::Config, Some(_)) if config_lines.is_some() => config_lines
-            .into_iter()
-            .flatten()
-            .map(|(l, v)| (l.to_string(), v))
-            .collect(),
-        (Kind::Config, Some(t)) => {
-            let label = t.provider().label();
-            vec![(
-                format!("{} name", label.to_lowercase()),
-                format!("- (config: not a {label} secret)"),
-            )]
-        }
-        (Kind::Secret, Some(t)) => t
-            .explain(product, key)
-            .into_iter()
-            .map(|(l, v)| (l.to_string(), v))
-            .collect(),
-    };
-    let rules = describe_rules(&spec.rules);
-    let guidance = if spec.guidance.is_empty() {
-        "-"
-    } else {
-        spec.guidance.as_str()
-    };
-    // Simple-profile fields are unsectioned: `op://<vault>/<item>/<KEY>`.
     let label = key_label(product, key);
+    let rules = describe_rules(&spec.rules);
     let required_here = rules::applies(spec, env_name, env, product);
-    // A shared key (FR-45) has no field: its reference is its source's field.
+    // A shared key (FR-45) has no field: its value lives in its source's field.
     let source = spec
         .source()
         .map(|(p, k)| (p, k, &fleet.products[p].keys[k]));
     let field_label = source.map_or_else(|| label.clone(), |(p, k, _)| key_label(p, k));
+    let source_field = match source {
+        Some(_) => format!("from {field_label}"),
+        None => "own field".to_string(),
+    };
     let shared_by: Vec<String> = fleet
         .shared_by(env_name, product, key)
         .iter()
         .map(|(p, k)| key_label(p, k))
         .collect();
-    if json {
-        let doc = serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "environment": env_name,
-            "product": super::json_product(product),
-            "key": key,
-            "reference": format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
-            "kind": kind_label(spec.kind),
-            "field": field,
-            // The same `target_name` as a status/plan/check row; the provider's lines are
-            // `target_details`, since a row's `target` is a state word (A6).
-            "target_name": env.target_name(product, key),
-            "target_details": target_lines
+    // The boundary item holding the field (FR-57): the source's, for a shared key. Personal
+    // keys (FR-55) live in each person's own item, never in a boundary.
+    let boundary_name = fleet.boundary_of(source.map_or(product, |(p, _, _)| p));
+    let item = if spec.personal {
+        None
+    } else {
+        Some(fleet.boundary(env_name, source.map_or(product, |(p, _, _)| p))?)
+    };
+    // Every target of this environment that delivers the key (FR-48, FR-56), in name order.
+    let mut target_rows: Vec<(String, String)> = Vec::new();
+    let mut targets: Vec<serde_json::Value> = Vec::new();
+    let mut deploy_accounts: Vec<String> = Vec::new();
+    let mut undelivered: Vec<String> = Vec::new();
+    for (name, tc) in &env.targets {
+        if !fleet.delivers(env_name, name, product) {
+            undelivered.push(no_delivery(
+                fleet,
+                name,
+                tc.config.provider().label(),
+                product,
+            ));
+            continue;
+        }
+        let rendered = fleet.target_name(env_name, name, product, key);
+        let details = provider_lines(tc.config.as_ref(), spec.kind, product, key);
+        target_rows.push((
+            "target".into(),
+            format!("{name} ({}) {rendered}", tc.config.provider().label()),
+        ));
+        target_rows.extend(details.iter().cloned());
+        targets.push(serde_json::json!({
+            "name": name,
+            "provider": tc.config.provider().section(),
+            "rendered_name": rendered,
+            "details": details
                 .iter()
                 .map(|(l, v)| serde_json::json!({"label": l, "value": v}))
                 .collect::<Vec<_>>(),
+        }));
+        deploy_accounts.push(deploy_account(project, env_name, name));
+    }
+    if env.targets.is_empty() {
+        // A run-only environment names no provider (P4).
+        target_rows.push(("target".into(), "none (run-only)".into()));
+    } else if target_rows.is_empty() {
+        target_rows.push((
+            "delivered".into(),
+            format!("no ({})", undelivered.join("; ")),
+        ));
+    }
+    // FR-59: the CI reader reads every boundary the environment records; a personal key
+    // lives outside them.
+    let ci = (!spec.personal).then(|| ci_account(project, env_name));
+    if json {
+        let mut doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env_name,
+            "product": Some(product.to_string()),
+            "key": key,
+            "kind": kind_label(spec.kind),
+            "field": field,
+            "source": source_field.clone(),
+            "personal": spec.personal,
+            "boundary": item.map(|b| serde_json::json!({
+                "name": boundary_name,
+                "vault_id": &b.vault_id,
+                "item_id": &b.item_id,
+            })),
+            "targets": targets,
             "rules": rules,
             "immutable": spec.immutable,
             "guidance": (!spec.guidance.is_empty()).then_some(spec.guidance.as_str()),
             "required_here": required_here,
-            "inspect": inspect_command(&env.item_id, &env.vault_id),
-            // FR-45: the key whose field holds this one's value, and the keys reading this one.
             "shared_from": source.map(|_| field_label.clone()),
             "shared_by": shared_by,
         });
+        if let Some(b) = item {
+            doc["reference"] =
+                serde_json::json!(format!("op://{}/{}/{field_label}", b.vault_id, b.item_id));
+            doc["inspect"] = serde_json::json!(inspect_command(&b.item_id, &b.vault_id));
+        }
+        if let Some(ci) = &ci {
+            doc["readers"] = serde_json::json!({
+                "deploy": deploy_accounts.clone(),
+                "ci": ci,
+            });
+        }
         return writeln!(out, "{doc}").map_err(write_err);
     }
-    let mut rows: Vec<(String, String)> = vec![
-        (
-            "reference".into(),
-            format!("op://{}/{}/{field_label}", env.vault_id, env.item_id),
-        ),
-        (
-            "kind".into(),
-            format!("{} ({field})", kind_label(spec.kind)),
-        ),
-    ];
-    if let Some((_, _, src)) = source {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if let Some(b) = item {
         rows.push((
-            "shared from".into(),
-            format!("{field_label} (its field holds the value; {label} has none)"),
+            "reference".into(),
+            format!("op://{}/{}/{field_label}", b.vault_id, b.item_id),
         ));
-        let src_rules = describe_rules(&src.rules);
-        if !src_rules.is_empty() {
-            rows.push(("source rules".into(), src_rules.join(", ")));
+    }
+    rows.push((
+        "kind".into(),
+        format!("{} ({field})", kind_label(spec.kind)),
+    ));
+    rows.push(("source".into(), source_field));
+    if let Some(b) = item {
+        rows.push((
+            "boundary".into(),
+            format!("{boundary_name} (vault {}, item {})", b.vault_id, b.item_id),
+        ));
+        // FR-45: the source's own rules, for a key that has no field of its own.
+        if let Some((_, _, src)) = source {
+            let src_rules = describe_rules(&src.rules);
+            if !src_rules.is_empty() {
+                rows.push(("source rules".into(), src_rules.join(", ")));
+            }
         }
+    }
+    if spec.personal {
+        rows.push(("personal".into(), "each person's own item".into()));
+    }
+    rows.extend(target_rows);
+    if let Some(ci) = &ci {
+        rows.push(("readers".into(), readers_line(&deploy_accounts, ci)));
     }
     if !shared_by.is_empty() {
         rows.push(("shared by".into(), shared_by.join(", ")));
     }
-    rows.extend(target_lines);
     rows.extend([
         (
             "rules".into(),
@@ -455,7 +477,14 @@ fn explain_in(
                 (false, None) => "no".into(),
             },
         ),
-        ("guidance".into(), guidance.to_string()),
+        (
+            "guidance".into(),
+            if spec.guidance.is_empty() {
+                "-".to_string()
+            } else {
+                spec.guidance.clone()
+            },
+        ),
     ]);
     if !required_here {
         rows.push((
@@ -463,10 +492,9 @@ fn explain_in(
             "not required here (its prefix_by_mode mode is skipped)".into(),
         ));
     }
-    rows.push((
-        "inspect".into(),
-        inspect_command(&env.item_id, &env.vault_id),
-    ));
+    if let Some(b) = item {
+        rows.push(("inspect".into(), inspect_command(&b.item_id, &b.vault_id)));
+    }
     // H1: the command that opens the item in 1Password, where the value is typed.
     rows.push(("open".into(), format!("opv open {label} --env {env_name}")));
     // One value column, however long a provider's label is (P4).
@@ -485,6 +513,173 @@ fn explain_in(
         writeln!(out, "{l}").map_err(write_err)?;
     }
     Ok(())
+}
+
+/// The environment of target `name` (FR-56): `--env` when given, otherwise the only
+/// environment that declares a target with that name.
+fn target_environment<'a>(
+    fleet: &'a Fleet,
+    name: &str,
+    env: Option<&'a str>,
+) -> Result<&'a str, Error> {
+    if let Some(e) = env {
+        let environment = fleet.environment(e)?;
+        if !environment.targets.contains_key(name) {
+            return Err(no_such_target(e, name, environment.targets.keys()));
+        }
+        return Ok(e);
+    }
+    let found: Vec<&str> = fleet
+        .environments
+        .iter()
+        .filter(|(_, e)| e.targets.contains_key(name))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    match found.as_slice() {
+        [only] => Ok(only),
+        [] => Err(Error::Config(
+            format!("no target {name:?} is declared in any environment").into(),
+        )
+        .with_code(Code::Usage)
+        .with_next("opv target list")),
+        many => Err(Error::Config(
+            format!(
+                "target {name:?} is declared in several environments ({}): pass --env \
+                 <environment>",
+                many.join(", ")
+            )
+            .into(),
+        )
+        .with_code(Code::Usage)
+        .with_next(format!("opv explain --target {name} --env {}", many[0]))),
+    }
+}
+
+/// The refusal for a target an environment does not declare, naming the ones it does.
+fn no_such_target<'a>(
+    env_name: &str,
+    name: &str,
+    known: impl Iterator<Item = &'a String>,
+) -> Error {
+    let known: Vec<&str> = known.map(String::as_str).collect();
+    let text = if known.is_empty() {
+        format!("environment {env_name} declares no target; it is run-only")
+    } else {
+        format!(
+            "environment {env_name} declares no target {name:?} (declared: {})",
+            known.join(", ")
+        )
+    };
+    Error::Config(text.into())
+        .with_code(Code::Usage)
+        .with_next(format!("opv target list --env {env_name}"))
+}
+
+/// The target form (FR-56): provider, locator, products, deploy credentials, state vault
+/// and deploy service account. Configuration only.
+fn explain_target_in(
+    fleet: &Fleet,
+    name: &str,
+    env_name: &str,
+    project: &str,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
+    let env = fleet.environment(env_name)?;
+    let t = env
+        .targets
+        .get(name)
+        .ok_or_else(|| no_such_target(env_name, name, env.targets.keys()))?;
+    let provider = t.config.provider();
+    let locator = t.config.target_locator();
+    // FR-48: a named list, or every non-source-only product with a key in this environment.
+    let products = match &t.products {
+        Some(list) => list.join(", "),
+        None => format!("every product with keys in {env_name}"),
+    };
+    let credentials = t.deploy_credentials.as_ref();
+    let account = deploy_account(project, env_name, name);
+    if json {
+        let doc = serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "environment": env_name,
+            "target": name,
+            "provider": provider.section(),
+            "locator": locator,
+            "products": products,
+            "deploy_credentials": credentials.map(|c| c.to_string()),
+            "state_vault_id": &t.state_vault_id,
+            "deploy_account": account,
+        });
+        return writeln!(out, "{doc}").map_err(write_err);
+    }
+    let rows: Vec<(&str, String)> = vec![
+        ("provider", provider.label().to_string()),
+        ("locator", locator),
+        ("products", products),
+        (
+            "deploy credentials",
+            credentials.map_or_else(|| "none".to_string(), ToString::to_string),
+        ),
+        ("state vault", t.state_vault_id.clone()),
+        ("deploy account", account),
+    ];
+    let width = rows
+        .iter()
+        .map(|(l, _)| l.len() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(11);
+    writeln!(out, "target {name} in {env_name}").map_err(write_err)?;
+    for (l, v) in rows {
+        writeln!(out, "  {:<width$} {v}", format!("{l}:")).map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// A target's `explain` lines for a secret (the provider's own), or for a config key: its
+/// config routing when it has one, else the `- (config: not a <provider> secret)` line.
+fn provider_lines(
+    config: &dyn crate::provider::TargetConfig,
+    kind: Kind,
+    product: &str,
+    key: &str,
+) -> Vec<(String, String)> {
+    match kind {
+        Kind::Secret => config
+            .explain(product, key)
+            .into_iter()
+            .map(|(l, v)| (l.to_string(), v))
+            .collect(),
+        Kind::Config => match config.explain_config(product, key) {
+            Some(lines) => lines.into_iter().map(|(l, v)| (l.to_string(), v)).collect(),
+            None => {
+                let provider = config.provider().label();
+                vec![(
+                    format!("{} name", provider.to_lowercase()),
+                    format!("- (config: not a {provider} secret)"),
+                )]
+            }
+        },
+    }
+}
+
+/// Why a target does not deliver `product` (FR-47, FR-48): a source-only product is never
+/// written anywhere, and a products list may leave the product out.
+fn no_delivery(fleet: &Fleet, name: &str, provider: &str, product: &str) -> String {
+    if fleet.products.get(product).is_some_and(|p| p.source_only) {
+        format!("{name} ({provider}) source-only product, delivered through its sharers")
+    } else {
+        format!("{name} ({provider}): its products list leaves {product} out")
+    }
+}
+
+/// The readers of a key (FR-59), one line: each delivering target's deploy service account
+/// and the environment's CI reader.
+fn readers_line(deploy: &[String], ci: &str) -> String {
+    let mut parts: Vec<String> = deploy.iter().map(|a| format!("deploy {a}")).collect();
+    parts.push(format!("ci {ci}"));
+    parts.join(", ")
 }
 
 /// The `op` command a person can run to look at the item themselves. Never `--reveal`.
@@ -507,7 +702,6 @@ fn describe_rules(r: &Rules) -> Vec<String> {
         prefix,
         not_prefix,
         ensure_prefix,
-        pattern,
         regex,
         r#enum,
         base64_bytes,
@@ -545,9 +739,6 @@ fn describe_rules(r: &Rules) -> Vec<String> {
     if let Some(p) = ensure_prefix {
         out.push(format!("ensure_prefix = {p:?}"));
     }
-    if let Some(p) = pattern {
-        out.push(format!("pattern = {p:?}"));
-    }
     if let Some(p) = regex {
         out.push(format!("regex = {p:?}"));
     }
@@ -582,17 +773,62 @@ mod tests {
 
     fn explain(fleet: &Fleet, target: &str, env: Option<&str>) -> Result<String, Error> {
         let mut out = Vec::new();
-        run(fleet, target, env, &mut out).map(|()| text_of(&out))
+        crate::app::testutil::explain(fleet, target, env, &mut out, false).map(|()| text_of(&out))
     }
 
     fn openai_prod() -> String {
         explain(&fleet(), "allumata/OPENAI_API_KEY", Some("prod")).unwrap()
     }
 
+    /// The fixture plus `extra`, recording a boundary for every product `extra`
+    /// introduces under the fixture's shared vault and item.
+    fn fleet_with(extra: &str) -> Fleet {
+        let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        let doc: toml::Table = toml::from_str(&format!("{base}\n{extra}")).unwrap();
+        let ids = |env: &str| match env {
+            "prod" => ("vprd", "iprd"),
+            _ => ("vstg", "istg"),
+        };
+        let envs = doc["environments"].as_table().unwrap();
+        let mut out = format!("{base}\n{extra}");
+        let mut seen = std::collections::BTreeSet::new();
+        for (product, p) in doc["products"].as_table().unwrap() {
+            let Some(keys) = p.get("keys").and_then(|v| v.as_table()) else {
+                continue;
+            };
+            for spec in keys.values() {
+                let Some(list) = spec.get("environments").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                for env in list.iter().filter_map(|v| v.as_str()) {
+                    let already = envs
+                        .get(env)
+                        .and_then(|e| e.get("boundaries"))
+                        .and_then(|b| b.as_table())
+                        .is_some_and(|b| b.contains_key(product));
+                    if already || !seen.insert((product.clone(), env.to_string())) {
+                        continue;
+                    }
+                    let (vault_id, item_id) = ids(env);
+                    let header = format!("[environments.{env}]\n");
+                    out = out.replacen(
+                        &header,
+                        &format!(
+                            "{header}boundaries.{product} = {{ vault_id = \"{vault_id}\", \
+                             item_id = \"{item_id}\" }}\n"
+                        ),
+                        1,
+                    );
+                }
+            }
+        }
+        crate::config::parse(&out).unwrap()
+    }
+
     fn single_env() -> Fleet {
         crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
              fly.app = \"a\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
              [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
         )
@@ -618,9 +854,9 @@ mod tests {
     #[test]
     fn prints_the_key_vault_name_of_an_azure_target() {
         let fleet = crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+             [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
              key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
@@ -636,9 +872,9 @@ mod tests {
 
     fn azure_fleet() -> Fleet {
         crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+             [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
              key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
@@ -658,7 +894,7 @@ mod tests {
     #[test]
     fn run_only_environment_says_run_only() {
         let f = fleet_with(
-            "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+            "[environments.dev]\n\
              [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let out = explain(&f, "allumata/DEV_KEY", Some("dev")).unwrap();
@@ -669,9 +905,9 @@ mod tests {
     #[test]
     fn prints_the_routing_of_a_config_key_on_an_azure_target() {
         let fleet = crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n\
-             [environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n\
-             [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+            "[environments.prod]\nboundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+             [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
              key_vault = \"kv\"\nresource_group = \"rg\"\n\
              container_app = \"ca\"\nidentity = \"system\"\n\
              env_name = \"FLEET__{PRODUCT}__{KEY}\"\n\
@@ -683,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn prints_the_fly_name() {
+    fn prints_the_target_name() {
         assert!(openai_prod().contains("fly name:   FLEET__ALLUMATA__OPENAI_API_KEY"));
     }
 
@@ -708,10 +944,10 @@ mod tests {
     }
 
     #[test]
-    fn prints_ensure_prefix_and_pattern() {
+    fn prints_ensure_prefix_and_regex() {
         assert_eq!(
-            rules_line(r#"ensure_prefix = "sk-", pattern = "[a-z]+""#),
-            r#"ensure_prefix = "sk-", pattern = "[a-z]+""#
+            rules_line(r#"ensure_prefix = "sk-", regex = "sk-[a-z]+""#),
+            r#"ensure_prefix = "sk-", regex = "sk-[a-z]+""#
         );
     }
 
@@ -778,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn config_key_has_no_fly_name() {
+    fn config_key_has_no_target_name() {
         let out = explain(&fleet(), "allumata/SIGNUP_POLICY", Some("prod")).unwrap();
         assert!(
             out.contains("fly name:   - (config: not a Fly secret)"),
@@ -848,75 +1084,6 @@ mod tests {
         );
     }
 
-    fn simple() -> Fleet {
-        crate::config::load("tests/fixtures/simple.toml").unwrap()
-    }
-
-    #[test]
-    fn simple_form_prints_the_key_alone() {
-        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
-        assert!(out.starts_with("DATABASE_URL in prod\n"), "{out}");
-    }
-
-    #[test]
-    fn simple_form_reference_is_an_unsectioned_field() {
-        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
-        assert!(
-            out.contains("reference:  op://vprd/iprd/DATABASE_URL\n"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn simple_form_fly_name_is_the_key() {
-        let out = explain(&simple(), "DATABASE_URL", Some("prod")).unwrap();
-        assert!(out.contains("fly name:   DATABASE_URL\n"), "{out}");
-    }
-
-    #[test]
-    fn simple_form_prints_op_item_get_without_reveal() {
-        let out = explain(&simple(), "JWT_KEY", Some("staging")).unwrap();
-        assert!(
-            out.contains("inspect:    op item get istg --vault vstg") && !out.contains("--reveal"),
-            "{out}"
-        );
-    }
-
-    /// The hidden implicit product never shows: no empty `//` section and no leading `/`.
-    #[test]
-    fn simple_form_never_shows_the_hidden_product() {
-        let out = explain(&simple(), "JWT_KEY", Some("staging")).unwrap();
-        assert!(!out.contains("istg//") && !out.starts_with('/'), "{out}");
-    }
-
-    #[test]
-    fn simple_undeclared_key_is_config_error() {
-        let e = explain(&simple(), "NOPE", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("NOPE")),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn product_form_under_simple_is_config_error() {
-        let e = explain(&simple(), "api/DATABASE_URL", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.contains("<KEY>")),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn simple_key_not_declared_for_env_names_the_key_alone() {
-        let e = explain(&simple(), "STAGING_DEBUG_TOKEN", Some("prod")).unwrap_err();
-        assert!(
-            matches!(e, Error::Config(ref m) if m.starts_with("STAGING_DEBUG_TOKEN is not declared")),
-            "{e}"
-        );
-    }
-
-    /// P8: a bare key declared by one product resolves to that product.
     #[test]
     fn bare_key_unique_across_products_resolves() {
         let out = explain(&fleet(), "OPENAI_API_KEY", Some("prod")).unwrap();
@@ -971,16 +1138,8 @@ mod tests {
             "{e}"
         );
     }
-
-    #[test]
-    fn simple_product_form_suggests_the_bare_key() {
-        let e = explain(&simple(), "api/DATABASE_URL", Some("prod")).unwrap_err();
-        assert!(e.to_string().contains("did you mean DATABASE_URL?"), "{e}");
-    }
-
-    #[test]
-    fn simple_misspelt_key_suggests_the_declared_key() {
-        let e = explain(&simple(), "DATABASE_UR", Some("prod")).unwrap_err();
-        assert!(e.to_string().contains("did you mean DATABASE_URL?"), "{e}");
-    }
 }
+
+#[cfg(test)]
+#[path = "explain_tests.rs"]
+mod explain_tests;

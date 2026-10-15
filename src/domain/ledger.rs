@@ -1,33 +1,25 @@
-//! The version ledger (FR-54, #36): exact change detection in `plan` for a store that
-//! cannot show its values (Fly digests, GitHub `updatedAt`), without staging or reading one.
+//! The version ledger (FR-54, FR-58, #36): exact change detection in `plan` for a store
+//! that cannot show its values (Fly digests, GitHub `updatedAt`), without staging or reading
+//! one.
 //!
-//! The comparison happens when it is allowed: right after `sync` writes a value, it knows
-//! both the value and the version the store gave it. It records, per name, that version and
-//! a keyed fingerprint of the value (HMAC-SHA256 with a random key) in the environment's own
-//! item, section [`STATE_SECTION`]. Later, `plan` lists the store (read-only) and fingerprints
-//! the current 1Password value: the same version with the same fingerprint is exactly
-//! unchanged, the same version with another fingerprint exactly changed, another version
-//! changed outside opv (drift). The key lives in the same item, so whoever can read a
-//! fingerprint can already read the value: nothing new is exposed, and a ledger read on its
-//! own cannot be used to test guesses.
+//! The ledger is a placement's delivery evidence (D11): after each confirmed write the
+//! deliverer records, in the placement's state item, that name's store version and a keyed
+//! fingerprint of the value (HMAC-SHA256 under the item's evidence key).
+//! [`Ledger::from_evidence`] turns those lines into a ledger. Later, `plan` lists the store
+//! (read-only) and fingerprints the current 1Password value: the same version with the same
+//! fingerprint is exactly unchanged, the same version with another fingerprint exactly
+//! changed, another version changed outside opv (drift). One store per placement, never a
+//! second copy in the values item.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::domain::convention::{Layout, Op};
 use crate::domain::plan::{CurrentState, StoreEntry};
 use crate::domain::secret::SecretValue;
 
-/// The item section that holds the ledger. Reserved: never a product, never tidied.
-pub const STATE_SECTION: &str = "opv · state";
-/// The field holding the ledger's key (concealed, 32 random bytes, base64).
-pub const KEY_FIELD: &str = "ledger key";
-/// The format tag of an entry's value: `v1:<version>:<fingerprint>`.
-const FORMAT: &str = "v1";
-
-/// The ledger read from an item. `Debug` prints names only.
+/// One placement's ledger. `Debug` prints names only.
 #[derive(Default)]
 pub struct Ledger {
     key: Option<SecretValue>,
@@ -65,30 +57,26 @@ pub fn hmac_hex(key: &[u8], message: &[u8]) -> String {
 }
 
 impl Ledger {
-    /// The ledger in `layout`'s [`STATE_SECTION`]; empty when there is none.
-    pub fn from_layout(layout: &Layout) -> Ledger {
-        let mut ledger = Ledger::default();
-        for f in layout
-            .fields
-            .iter()
-            .filter(|f| f.section_label() == Some(STATE_SECTION))
-        {
-            if f.label == KEY_FIELD {
-                if !f.value.expose().is_empty() {
-                    ledger.key = Some(SecretValue::new(f.value.expose().to_string()));
-                }
-                continue;
-            }
-            let mut parts = f.value.expose().splitn(3, ':');
-            if let (Some(FORMAT), Some(version), Some(fp)) =
-                (parts.next(), parts.next(), parts.next())
-            {
-                ledger
-                    .entries
-                    .insert(f.label.clone(), (version.to_string(), fp.to_string()));
-            }
+    /// The ledger of one placement: each evidence line's store version and fingerprint,
+    /// under the placement's evidence key (FR-54, FR-58, D11). A line with an empty store
+    /// version or fingerprint is not an entry.
+    pub fn from_evidence(
+        key: Option<SecretValue>,
+        evidence: &[crate::domain::delivery::Evidence],
+    ) -> Ledger {
+        Ledger {
+            key,
+            entries: evidence
+                .iter()
+                .filter(|e| !e.store_version.is_empty() && !e.fingerprint.is_empty())
+                .map(|e| {
+                    (
+                        e.name.clone(),
+                        (e.store_version.clone(), e.fingerprint.clone()),
+                    )
+                })
+                .collect(),
         }
-        ledger
     }
 
     /// Each recorded name with the store version opv's own sync left it at (#95). Never a
@@ -137,58 +125,6 @@ impl Ledger {
                 (e.version.as_deref().is_some_and(|v| v != version)).then(|| e.name.clone())
             })
             .collect()
-    }
-
-    /// The item edits that record `written` (name, the store's version after the write, the
-    /// value written): a key is created when the ledger has none (`new_key` supplies 32
-    /// random bytes as base64), each entry added or updated. Fields are found by label in
-    /// `layout`'s [`STATE_SECTION`].
-    pub fn ops(
-        &self,
-        layout: &Layout,
-        written: &[(String, String, &SecretValue)],
-        new_key: &dyn Fn() -> String,
-    ) -> Vec<Op> {
-        let mut ops = Vec::new();
-        // Zeroized on drop: the HMAC key is as secret as the values it fingerprints.
-        let key = match &self.key {
-            Some(k) => zeroize::Zeroizing::new(k.expose().to_string()),
-            None => {
-                let k = zeroize::Zeroizing::new(new_key());
-                ops.push(set_or_add(layout, KEY_FIELD, true, &k));
-                k
-            }
-        };
-        for (name, version, value) in written {
-            let fp = hmac_hex(key.as_bytes(), value.expose().as_bytes());
-            ops.push(set_or_add(
-                layout,
-                name,
-                false,
-                &format!("{FORMAT}:{version}:{fp}"),
-            ));
-        }
-        ops
-    }
-}
-
-/// `SetValue` on the [`STATE_SECTION`] field labelled `label`, or `Add` it.
-fn set_or_add(layout: &Layout, label: &str, concealed: bool, value: &str) -> Op {
-    match layout
-        .fields
-        .iter()
-        .position(|f| f.section_label() == Some(STATE_SECTION) && f.label == label)
-    {
-        Some(index) => Op::SetValue {
-            index,
-            value: SecretValue::new(value.to_string()),
-        },
-        None => Op::Add {
-            section: Some(STATE_SECTION.to_string()),
-            label: label.to_string(),
-            concealed,
-            value: Some(SecretValue::new(value.to_string())),
-        },
     }
 }
 

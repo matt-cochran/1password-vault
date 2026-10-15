@@ -12,7 +12,7 @@ opv check dev --product api                  # every key saved and valid? names 
 opv run dev --product api -- npm run dev
 ```
 
-Under the simple profile there is no `--product`: `opv check dev`, then `opv run dev -- npm run dev`.
+Every project uses products: a project with one app is a configuration with one product (FR-60). When exactly one product has keys desired in the environment, `--product` may be omitted (D10), so this also works: `opv check dev`, then `opv run dev -- npm run dev`. With several products it is a usage error that lists them; name the product.
 
 Requirements: the 1Password CLI `op` 2.40.0 or newer, signed in (`opv login dev`, or the 1Password desktop app integration). No deployment CLI is needed. `opv doctor --env dev` checks exactly what local work needs (configuration, `op`, its sign-in, whether `op` can start a local command) and reads the item once, as `check` does.
 

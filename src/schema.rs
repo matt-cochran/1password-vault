@@ -267,6 +267,22 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    // `target add` declares a target (writes_config) and, in the same confirmed step,
+    // creates its state vault (writes_1password): FR-56, FR-58. It always asks first.
+    Effect {
+        command: "target add",
+        effect: "writes_config",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: true,
+    },
+    Effect {
+        command: "target list",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
 ];
 
 /// The commands whose item read tidies the 1Password layout when a signed-in person runs
@@ -331,7 +347,8 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
             "text": "every failure ends with an optional `Do: <action>` line and exactly one `Next: <command>` line, the last line on stderr",
             "values": "no document ever contains a secret value; config export prints config-kind values only",
             "tidy": "a command with tidies_1password true, run by a signed-in person (opv login), may tidy the item's layout in one non-destructive edit (nothing deleted; listed in `tidy`); service accounts, Connect, CI, runs under deploy credentials and the project manifest item are never written. doctor and ready never write 1Password, whoever runs them: they are the safe readiness checks (doctor --env <env> --json, ready --json). opv tidy <env> is the explicit repair (writes_1password, a signed-in person only)",
-            "plan_id": "plan --json prints plan_id when the plan is clean; sync --expect-plan <plan_id> applies exactly that plan or fails with stale_plan (exit 6) and changes nothing",
+            "plan_id": "plan --json prints plan_id when the plan is clean; it covers exactly the targets planned (every target of the environment, or those --target names); sync --expect-plan <plan_id> applies exactly that plan to the same targets or fails with stale_plan (exit 6) and changes nothing",
+            "targets": "status, plan and sync cover every target of the environment in name order, or only those --target names (repeatable); every row and key reference names its target",
             "run": "run always passes op:// references to op run, so op run masks values in the child's output; a value needing a fix a person's tidy would make is warned about on stderr, never injected",
             "schema_version": "stays 1 while fields are only added; changes when a field changes meaning",
         },
@@ -348,7 +365,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "states": {
             "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
-            "row_target": ["present", "absent", "would_change", null],
+            "row_target_state": ["present", "absent", "would_change", null],
             "row_action": ["would_stage", "would_prune", "held", null],
             "row_binding": ["current", "stale", "unbound"],
             "doctor_status": ["ok", "warn", "fail", "skip"],
@@ -358,13 +375,9 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
                 "created_section", "renamed_section", "created_field", "made_concealed",
                 "renamed_field", "moved_field", "kept_duplicate", "normalized_value"
             ],
-            "text_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
+            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
         },
         "documents": documents(),
-        "deprecated": [
-            {"field": "fly_name", "in": ["status", "plan", "check"], "use": "target_name"},
-            {"field": "pattern", "in": ["rules"], "use": "regex"},
-        ],
     })
 }
 
@@ -396,8 +409,9 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
             })
         })
         .collect();
-    // `init`'s provider options are hidden from --help (one summary line per provider)
-    // but listed here, each with its provider and whether that --target needs it (I6).
+    // `target add`'s provider options are hidden from --help (one summary line per
+    // provider) but listed here, each with its provider and whether that provider's target
+    // needs it (I6).
     let flags: Vec<Value> = cmd
         .get_arguments()
         .filter(|a| !a.is_positional() && !a.is_global_set())
@@ -408,7 +422,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
             let long = a.get_long().unwrap_or_default();
             if let Some((provider, required)) = provider_option(long) {
                 f["provider"] = Value::from(provider);
-                f["required_with_target"] = Value::from(required);
+                f["required_for_provider"] = Value::from(required);
             }
             f["effect"] = FLAG_EFFECTS
                 .iter()
@@ -434,7 +448,7 @@ fn leaf_commands(cmd: &clap::Command, prefix: String, out: &mut Vec<Value>) {
     }));
 }
 
-/// `(provider section, required)` when `long` is a provider's `init` option
+/// `(provider section, required)` when `long` is a provider's `opv target add` option
 /// (`azure-key-vault`).
 fn provider_option(long: &str) -> Option<(&'static str, bool)> {
     crate::adapters::registry::PROVIDERS.iter().find_map(|p| {
@@ -487,6 +501,7 @@ fn exit_codes() -> Value {
 /// (`schema_version`, `ok`, `exit_code` on failure) and last (`next`, `do`, `error`).
 fn documents() -> Value {
     let row = json!([
+        "target",
         "product",
         "key",
         "kind",
@@ -494,8 +509,7 @@ fn documents() -> Value {
         "rule",
         "reason",
         "target_name",
-        "fly_name",
-        "target",
+        "target_state",
         "action",
         "binding?",
         "pending_deploy?",
@@ -504,7 +518,7 @@ fn documents() -> Value {
         "open_url?",
         "shared_from?"
     ]);
-    let key_ref = json!(["product", "key", "target_name"]);
+    let key_ref = json!(["target", "product", "key", "target_name"]);
     json!({
         "frame": {
             "head": ["schema_version", "ok", "exit_code (failure only)"],
@@ -533,22 +547,26 @@ fn documents() -> Value {
             "tidy_error?"
         ],
         "sync": [
-            "environment", "provider", "product", "written", "unchanged", "held", "deployed",
-            "revision", "deploy_reason", "deployed_names", "pruned", "kept", "pending",
-            "skipped", "written_names", "plan_id"
+            "environment", "product", "targets: [{target, provider, deployed, revision}]",
+            "written", "unchanged", "held", "deployed", "deploy_reason", "deployed_names",
+            "pending", "pruned", "kept", "skipped", "written_names", "plan_id",
+            "delivery? ({minted: [{target, product, revision}], not_minted: [{target, product, reason}]})"
         ],
         "doctor": ["config_source", "checks: [{name, status, detail, next, do}]"],
         "explain": [
-            "environment", "product", "key", "reference", "kind", "field", "target_name",
-            "target_details: [{label, value}]",
-            "rules", "immutable", "guidance", "required_here", "inspect", "shared_from", "shared_by"
+            "environment", "product", "key", "kind", "field", "source", "personal",
+            "boundary: {name, vault_id, item_id}",
+            "targets: [{name, provider, rendered_name, details: [{label, value}]}]",
+            "rules", "immutable", "guidance", "required_here", "shared_from", "shared_by",
+            "reference", "inspect", "readers: {deploy: [service account], ci}",
+            "explain --target: {environment, target, provider, locator, products, deploy_credentials, state_vault_id, deploy_account}"
         ],
         "init": [
-            "path", "manifest", "environment", "profile", "target", "vault_id", "item_id",
-            "created", "keys: [{product, key, kind}]", "skipped"
+            "path", "manifest", "environment", "boundary", "vault_id", "item_id", "created",
+            "keys: [{product, key, kind}]", "skipped"
         ],
         "init --add-env": [
-            "environment", "target", "saved_in", "vault_id", "item_id", "added", "absent",
+            "environment", "saved_in", "boundary", "vault_id", "item_id", "added", "absent",
             "undeclared"
         ],
         "add": ["product", "key", "kind", "environments", "saved_in", "changed"],
@@ -563,11 +581,13 @@ fn documents() -> Value {
         "item skeleton": ["environment", "added: [{product, key, kind}]"],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
         "adopt": "{environment, applied, rows [{found, product, key, action (match|format_only|import|replace|differs|held_immutable|fails_rule|conflict|ambiguous|not_declared|not_applicable), rule}], writes, decisions_needed, next}: names, actions and findings only, never a value",
-        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only",
-        "bootstrap": "{environments [{environment, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}]}",
+        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only. A target whose deploy credentials, state vault or boundaries cannot be opened is `grants_missing` in the matrix, naming what could not be opened",
+        "access": "{environments: [{environment, report: {checks: [{grant: {principal: {kind (deploy|ci_reader), environment, target?}, service_account, vault_id, permission (read|read_write)}, state (present|missing|read_only_needed|not_visible)}], extra: [{vault_id, service_account}], checked, unclassified}, commands: [string]}]}: who needs each boundary and target and the owner's exact commands for the missing grants; --target narrows to one target; read-only, never says clean",
+        "bootstrap": "{environments: [{environment, boundaries: [{boundary, products, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}], state_vaults: [{target, action (ok|create|ids_not_in_account), vault_id?, vault?}]}]}: per environment, each needed boundary and each target's state vault with its action; no --state flag",
         "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",
         "account use": "{account_id, path}: the .opv file written",
-        "config export": "with <ENV>: the config-kind values, {KEY: value} (simple profile) or {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
+        "config export": "with <ENV>: the config-kind values, always {product: {KEY: value}}; with --json and no <ENV>: the configuration itself (IDs, names, kinds, rules); no frame on success",
+        "delivery verify": "{environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}: every placement of the product, each with its target and state; --target narrows to one placement; a receipt kept from sync --receipt must be the current delivery",
         "schema": "this document",
         "skill install": "{written: [{target, path}], kept: [{target, path, reason}]}",
         "skill status": "{copies: [{scope, target, path, version, edited, current}]}",
