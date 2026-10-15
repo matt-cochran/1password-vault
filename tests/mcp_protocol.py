@@ -46,19 +46,28 @@ with tempfile.TemporaryDirectory() as directory:
         assert {tool['name'] for tool in tools} == {
             'opv_ready', 'opv_configuration', 'opv_deployment_plan', 'opv_access',
             'opv_structure_plan', 'opv_structure_apply', 'opv_declare_key',
-            'opv_declare_environment', 'opv_declare_target'}
-        # The inspection tools and the plan are read-only; declarations edit the local
-        # file and apply needs a person's terminal approval.
+            'opv_declare_environment', 'opv_declare_target', 'opv_generate', 'opv_sync',
+            'opv_delivery_preview'}
+        # The inspection tools, the plans and the delivery preview are read-only;
+        # declarations edit the local file, generate fills empty 1Password fields, and
+        # structure apply and sync need a person's terminal approval.
         writers = {'opv_structure_apply', 'opv_declare_key', 'opv_declare_environment',
-                   'opv_declare_target'}
+                   'opv_declare_target', 'opv_generate', 'opv_sync'}
         assert all(tool['annotations']['readOnlyHint'] for tool in tools
                    if tool['name'] not in writers)
-        assert not any(tool['annotations'].get('destructiveHint') for tool in tools)
+        assert not any(tool['annotations'].get('readOnlyHint') for tool in tools
+                       if tool['name'] in writers)
+        # Only an approved sync can remove anything (an approved --prune), and says so.
+        assert {tool['name'] for tool in tools
+                if tool['annotations'].get('destructiveHint')} == {'opv_sync'}
         for tool in tools:
             props = set(tool.get('inputSchema', {}).get('properties', {}) or {})
             assert not props & {'value', 'secret', 'password', 'token', 'approved'}, tool
         apply_tool = next(t for t in tools if t['name'] == 'opv_structure_apply')
         assert set(apply_tool['inputSchema']['properties']) == {'plan_id'}, apply_tool
+        sync_tool = next(t for t in tools if t['name'] == 'opv_sync')
+        assert set(sync_tool['inputSchema']['properties']) == {
+            'environment', 'plan_id', 'targets', 'product', 'deploy', 'prune', 'rotate'}, sync_tool
         reply = send('tools/call', {'name': 'opv_configuration', 'arguments': {}}, 3)
         text = reply['result']['content'][0]['text']
         config = json.loads(text)
@@ -69,7 +78,10 @@ with tempfile.TemporaryDirectory() as directory:
                               'state_vault_recorded', 'deploy_credentials_declared'}
                    for t in config['targets']), config['targets']
         assert 'vault_id' not in text and 'item_id' not in text and 'rules' not in text
-        refused = send('tools/call', {'name': 'opv_sync', 'arguments': {'approved': True}}, 4)
+        # An agent cannot approve its own sync: no approval argument exists, and a plan id
+        # nobody approved is refused before any target is touched.
+        refused = send('tools/call', {'name': 'opv_sync', 'arguments': {
+            'environment': 'prod', 'plan_id': '00000000', 'approved': True}}, 4)
         assert 'error' in refused or refused['result'].get('isError'), refused
         extra = send('tools/call', {'name': 'opv_ready', 'arguments': {
             'environment': 'prod', 'approved': True, 'value': 'SECRET_MARKER'}}, 5)
