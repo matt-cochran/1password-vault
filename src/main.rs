@@ -2011,6 +2011,22 @@ fn run(
             &mut runtime,
             &mut setup_runtime::Console,
         )?;
+        // #142: before 1Password's prompt, say what in this machine's setup can make a
+        // sign-in go to the wrong account (names only; never a value).
+        for f in opv::app::account::gather(&probe, account.as_deref())
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.code.as_str(),
+                    "shared_sign_in_address"
+                        | "session_for_other_account"
+                        | "stale_session_variable"
+                )
+            })
+        {
+            let _ = writeln!(io::stderr(), "note ({}): {}", f.code, f.message);
+        }
         let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
             Some(f) => Some(f),
             None => manifest_for_login(&cli, config_source),

@@ -91,6 +91,7 @@ Names and IDs stay readable. A CLI's stdout and what opv sends on stdin are neve
 
 ## Sign-in and access problems
 
+- A sign-in that 1Password refuses ends with opv's code and step and, on the next line, `1Password said:` with op's own message (scrubbed), so the cause is never hidden. Before the prompt, `opv login` notes what can send a sign-in to the wrong account: several accounts on one sign-in address (`shared_sign_in_address`), or an `OP_SESSION_<name>` variable left in the shell for another account or none (`session_for_other_account`, `stale_session_variable`; opv ignores it when it signs in). `opv account list` shows the same checks without signing in.
 - Not signed in to 1Password on a person's machine is exit 7 with `opv login <env>` (the same in every shell). Under CI (`CI` or `GITHUB_ACTIONS` set and not `false`) it says to set `OP_SERVICE_ACCOUNT_TOKEN` instead. A machine with no 1Password account gets the `op account add` command first.
 - With a service-account or Connect token set, a failing `op whoami` cannot tell a rejected token from a lost network, so it is a 1Password error (exit 4) that names the variable to check.
 - Signed in, but the read still failed: exit 4, naming the vault and item IDs and the identity type (never the identity), and telling removed vault access from a moved, archived or deleted item.
