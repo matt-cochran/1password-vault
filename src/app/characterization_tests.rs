@@ -20,9 +20,9 @@ fn transcript(r: &FakeRunner, out: &[u8], res: &Result<(), Error>) -> String {
         s.push_str(&format!("$ {} {}\n", c.program, c.args.join(" ")));
         if let Some(i) = &c.stdin {
             s.push_str(&format!(
-                "<stdin {} bytes sha256={:x}>\n",
+                "<stdin {} bytes sha256={}>\n",
                 i.len(),
-                Sha256::digest(i)
+                hex::encode(Sha256::digest(i))
             ));
         }
     }

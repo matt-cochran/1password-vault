@@ -251,7 +251,7 @@ fn receipt_id(
         findings,
     };
     let bytes = serde_json::to_vec(&input).expect("the receipt id input serializes");
-    let hex = format!("{:x}", Sha256::digest(&bytes));
+    let hex = hex::encode(Sha256::digest(&bytes));
     format!("rcpt-{}", &hex[..12])
 }
 

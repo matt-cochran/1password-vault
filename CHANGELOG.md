@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - 2026-10-15
 
+### Dependencies
+
+- `sha2` 0.11 (digests are hex-encoded explicitly; output unchanged), `signal-hook` 0.4, `serde_json` 1.0.154. Release workflow: `actions/upload-artifact` 7.0.2, `actions/download-artifact` 8.0.2 (a download whose hash does not match now fails the release), `actions/setup-node` 7.1.0, `taiki-e/install-action` 2.87.27.
+
 ### Changed
 
 - CI guidance separates the read-only validation reader (`opv bootstrap --ci-reader`) from each target's deploy identity (`opv access <env> --target <name>`: boundary read, its own state vault read and write), which a syncing job needs to record delivery evidence. `bootstrap --ci-reader` says so, and `opv ready` marks each target `evidence_write: "not_verified"` instead of implying that a visible state vault can be written (#134).
