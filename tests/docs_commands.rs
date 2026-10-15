@@ -269,6 +269,43 @@ fn every_documented_opv_command_parses() {
     );
 }
 
+/// Every target a shell block in the fleet-fly example names with `--target` is declared as
+/// `[environments.<env>.targets.<name>]` in that example's `secrets.toml`.
+#[test]
+fn fleet_fly_readme_targets_are_declared_in_its_secrets() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let readme =
+        std::fs::read_to_string(root.join("examples/fleet-fly/README.md")).expect("read README");
+    let secrets = std::fs::read_to_string(root.join("examples/fleet-fly/secrets.toml"))
+        .expect("read secrets.toml");
+
+    let declared: std::collections::BTreeSet<String> = secrets
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("[environments."))
+        .filter_map(|rest| rest.split_once(".targets."))
+        .filter_map(|(_, name)| name.strip_suffix(']'))
+        .map(str::trim)
+        .map(str::to_string)
+        .collect();
+    let used: std::collections::BTreeSet<String> = extract("examples/fleet-fly/README.md", &readme)
+        .commands
+        .iter()
+        .flat_map(|cmd| {
+            cmd.args
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.as_str() == "--target")
+                .filter_map(|(i, _)| cmd.args.get(i + 1).cloned())
+        })
+        .collect();
+
+    let undeclared: Vec<&String> = used.difference(&declared).collect();
+    assert!(
+        undeclared.is_empty(),
+        "examples/fleet-fly/README.md names targets missing from secrets.toml: {undeclared:?}"
+    );
+}
+
 #[test]
 fn extractor_joins_continuations() {
     let got = extract(

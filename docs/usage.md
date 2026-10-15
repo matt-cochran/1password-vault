@@ -824,7 +824,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       OP_CACHE: "false"
       OPV_VERSION: v0.8.1   # pin the release you tested; bump it deliberately
     steps:
@@ -844,7 +843,7 @@ jobs:
         run: opv sync prod
 ```
 
-CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes either from `deploy_credentials` in that vault (opv reads it and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own) or from the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
+CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes from the target's `deploy_credentials` item, whose least-privilege deploy identity the owner creates with the command from `opv access <env> --target <name>`; opv reads the item and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own. Otherwise use the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
 
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions); on Azure or Kubernetes, install `az` or `kubectl` instead of `flyctl` and sign the runner in to it (or use `deploy_credentials`). An environment with `confirm_env = true` also needs `--confirm <env>` in the job.
 
@@ -852,7 +851,7 @@ This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`
 
 ```yaml
       - name: Deliver api's secrets and keep the receipt
-        run: opv sync prod --product api --expect-plan "$PLAN_ID" --receipt api.receipt.json
+        run: opv sync prod --product api --receipt api.receipt.json
       - uses: actions/upload-artifact@v4
         with: { name: api-delivery, path: api.receipt.json }
       # Later, before reusing an accepted record (read-only; exit 8 unless verified):
@@ -860,7 +859,7 @@ This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`
         run: opv delivery verify prod --product api --receipt api.receipt.json --json
 ```
 
-The receipt names `api`'s revision and binding set, never a value or digest. Another product's later sync leaves `api` verified, and a rotation of `api`'s values or of a shared value it reads does not. See [delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
+There is no `--expect-plan` here: CI has no one to review a plan, so the job syncs what the item and the target hold at run time; `--expect-plan` guards a plan a person reviewed. The receipt names `api`'s revision and binding set, never a value or digest. Another product's later sync leaves `api` verified, and a rotation of `api`'s values or of a shared value it reads does not. See [delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
 
 **Job summary.** When `$GITHUB_STEP_SUMMARY` is set (GitHub Actions sets it for every step), `status`, `plan` and `sync` append a Markdown section to the job's summary page: for `status` and `plan`, the count line, `changes` (plan) and one table row per key, problems first, with target, product, key, kind, state word (`failed <rule>`, without the reason) and on-target word; for `sync`, its summary line and the written, pruned, pending, held, extra and unchanged names. It holds names and state words only: no value, no rule reason and no 1Password link (the link names your account). Nothing to configure; outside GitHub Actions nothing is written. For a nightly drift check, run `opv plan prod --json` and alert when `changes` is `some`.
 
