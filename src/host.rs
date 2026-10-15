@@ -42,6 +42,12 @@ pub trait HostEnv {
     fn shell(&self) -> Option<String>;
     /// Contents of `/proc/sys/kernel/osrelease`, if readable.
     fn kernel_osrelease(&self) -> Option<String>;
+    /// True when the first `op` on `PATH` is a Windows executable (`MZ` header), as in WSL
+    /// with `op` linked to the Windows `op.exe`. Implementations never run `op`; only the
+    /// file found on `PATH` is inspected. Default false.
+    fn op_is_windows_exe(&self) -> bool {
+        false
+    }
     /// True when stdin and stdout are both a terminal (a person at the keyboard).
     fn interactive(&self) -> bool {
         false
@@ -73,6 +79,10 @@ impl HostEnv for ProcessEnv {
         std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()
     }
 
+    fn op_is_windows_exe(&self) -> bool {
+        std::env::var_os("PATH").is_some_and(|paths| op_on_path_is_windows_exe(&paths))
+    }
+
     fn interactive(&self) -> bool {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
@@ -88,6 +98,8 @@ pub struct FakeEnv {
     pub set: Vec<(String, String)>,
     pub shell: Option<String>,
     pub osrelease: Option<String>,
+    /// The first `op` on `PATH` is a Windows executable (WSL with `op.exe`).
+    pub op_windows_exe: bool,
     /// Stdin and stdout are a terminal.
     pub tty: bool,
 }
@@ -122,6 +134,12 @@ impl FakeEnv {
         self
     }
 
+    /// The `op` on `PATH` is a Windows executable (WSL with `op.exe`).
+    pub fn op_windows_exe(mut self) -> Self {
+        self.op_windows_exe = true;
+        self
+    }
+
     /// Stdin and stdout are a terminal.
     pub fn tty(mut self) -> Self {
         self.tty = true;
@@ -148,6 +166,9 @@ impl HostEnv for FakeEnv {
     }
     fn kernel_osrelease(&self) -> Option<String> {
         self.osrelease.clone()
+    }
+    fn op_is_windows_exe(&self) -> bool {
+        self.op_windows_exe
     }
     fn interactive(&self) -> bool {
         self.tty
@@ -357,6 +378,8 @@ pub struct Host {
     /// Which of [`registry::credential_vars`] are set, one bit each (by name; values are
     /// never read). Read with [`Host::token`].
     tokens: u64,
+    /// The `op` found on `PATH` is a Windows executable (WSL with `op.exe`).
+    op_windows_exe: bool,
 }
 
 impl Host {
@@ -436,6 +459,7 @@ impl Host {
             .enumerate()
             .filter(|(_, n)| env.is_set(n))
             .fold(0, |bits, (i, _)| bits | 1 << i);
+        let op_windows_exe = platform == Platform::Wsl && env.op_is_windows_exe();
         Host {
             platform,
             shell,
@@ -443,7 +467,16 @@ impl Host {
             op_credential,
             interactive: env.interactive(),
             tokens,
+            op_windows_exe,
         }
+    }
+
+    /// True when the `op` on `PATH` is the Windows `op.exe` (WSL with `op` linked to it).
+    /// Reads then go through the Windows 1Password app, which is where the session and the
+    /// accounts live, so opv must not tell the person to add an account at op's own prompt.
+    /// Never true off WSL.
+    pub fn op_is_windows_exe(&self) -> bool {
+        self.op_windows_exe
     }
 
     /// The first of a provider's `vars` that is set, by name (FR-26).
@@ -510,6 +543,19 @@ impl Host {
         };
         line.into()
     }
+}
+
+/// True when the first `op` on `paths` (a `PATH` value) is a Windows executable. Shares
+/// [`crate::runner::windows_binary`] with the WSL `local_run_supported` check; never runs
+/// `op`.
+fn op_on_path_is_windows_exe(paths: &std::ffi::OsStr) -> bool {
+    for dir in std::env::split_paths(paths) {
+        let path = dir.join("op");
+        if path.is_file() {
+            return crate::runner::windows_binary(&path).unwrap_or(false);
+        }
+    }
+    false
 }
 
 /// The places a CLI is commonly installed outside a default PATH, per platform.
@@ -985,5 +1031,36 @@ mod tests {
             hints,
             [OP_CLI.macos, OP_CLI.windows, OP_CLI.linux, OP_CLI.ci]
         );
+    }
+
+    /// The Windows `op.exe` is named only in WSL, where reads go through the Windows app.
+    #[test]
+    fn op_is_windows_exe_is_named_only_in_wsl() {
+        let wsl = host(
+            FakeEnv::new("linux")
+                .var("WSL_DISTRO_NAME")
+                .op_windows_exe(),
+        );
+        assert!(wsl.op_is_windows_exe());
+    }
+
+    #[test]
+    fn plain_wsl_linux_op_is_not_windows_exe() {
+        let wsl = host(FakeEnv::new("linux").var("WSL_DISTRO_NAME"));
+        assert!(!wsl.op_is_windows_exe());
+    }
+
+    #[test]
+    fn plain_linux_is_never_a_windows_exe() {
+        let linux = host(FakeEnv::new("linux").op_windows_exe());
+        assert!(!linux.op_is_windows_exe());
+    }
+
+    /// The detection reads the `MZ` header of the `op` found on `PATH`, never running it.
+    #[test]
+    fn op_on_path_is_windows_exe_reads_the_mz_header() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("op"), b"MZ\x90\x00").unwrap();
+        assert!(op_on_path_is_windows_exe(dir.path().as_os_str()));
     }
 }

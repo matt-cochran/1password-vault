@@ -464,3 +464,30 @@ fn login_add_where_the_app_holds_the_accounts_explains_where_to_add() {
     });
     assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
 }
+
+fn wsl_windows_op() -> crate::host::Host {
+    crate::host::Host::from_env(
+        &crate::host::FakeEnv::new("linux")
+            .var("WSL_DISTRO_NAME")
+            .op_windows_exe(),
+    )
+}
+
+/// In WSL with the Windows `op.exe`, `opv login --add` sends the person to the Windows app,
+/// never to op's own prompt.
+#[test]
+fn login_add_in_wsl_with_windows_op_directs_to_the_windows_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = crate::host::with_test_host(wsl_windows_op(), || {
+        choose_account(
+            &lists(&[ONE]),
+            None,
+            true,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut Ui::default(),
+        )
+        .unwrap_err()
+    });
+    assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
+}

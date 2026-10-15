@@ -359,6 +359,12 @@ pub fn session_error(
             }
             Session::NotSignedIn => match host.signin_line("sign in", env) {
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
+                Some(_) if host.op_is_windows_exe() => format!(
+                    "not signed in to 1Password ({ctx})\n  unlock the 1Password app on Windows \
+                     and turn on Settings > Developer > Integrate with 1Password CLI, then \
+                     retry\n  (a 1Password CLI session expires after 30 minutes idle)\n  \
+                     {network}"
+                ),
                 Some(step) => {
                     // op in WSL cannot use the Windows app, so only other platforms name it.
                     let app = if host.platform == Platform::Wsl {
@@ -374,6 +380,13 @@ pub fn session_error(
                 }
             },
             Session::NoAccount => match host.signin_line("then sign in", env) {
+                Some(_) if host.op_is_windows_exe() => format!(
+                    "no 1Password account is set up for op on this machine ({ctx} and op \
+                     account list is empty)\n  add the account in the Windows 1Password app \
+                     and turn on Settings > Developer > Integrate with 1Password CLI, then \
+                     retry\n  type the Secret Key and password only at the app's prompts, \
+                     never into chat, tickets or files"
+                ),
                 None => format!("not signed in to 1Password ({ctx})\n  next: {ci_token}"),
                 Some(step) => {
                     let wsl = if host.platform == Platform::Wsl {
@@ -1348,6 +1361,14 @@ mod tests {
         Host::from_env(&FakeEnv::new("linux").shell("/bin/bash"))
     }
 
+    fn wsl_windows_op() -> Host {
+        Host::from_env(
+            &FakeEnv::new("linux")
+                .var("WSL_DISTRO_NAME")
+                .op_windows_exe(),
+        )
+    }
+
     fn accounts(n: usize) -> Output {
         let one = r#"{"url":"my.1password.com","email":"a@example.com"}"#;
         Output::success(format!("[{}]", vec![one; n].join(",")))
@@ -1883,6 +1904,34 @@ mod tests {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(0)]);
         let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert_eq!(e.next_step(), Some("opv login --add"));
+    }
+
+    /// In WSL with the Windows `op.exe`, a signed-out session is fixed in the Windows app.
+    #[test]
+    fn wsl_windows_op_signed_out_names_the_windows_app() {
+        let e = session_error(Session::NotSignedIn, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert!(e.to_string().contains("1Password app on Windows"), "{e}");
+    }
+
+    /// In WSL with the Windows `op.exe`, the fix is never op's own add/sign-in prompt.
+    #[test]
+    fn wsl_windows_op_signed_out_never_offers_opv_login_add() {
+        let e = session_error(Session::NotSignedIn, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert!(!e.mentions("opv login --add"), "{e}");
+    }
+
+    /// With no account and the Windows `op.exe`, the account is added in the Windows app.
+    #[test]
+    fn wsl_windows_op_no_account_names_the_windows_app() {
+        let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert!(e.to_string().contains("Windows 1Password app"), "{e}");
+    }
+
+    /// With no account and the Windows `op.exe`, opv never steps to its own add command.
+    #[test]
+    fn wsl_windows_op_no_account_never_offers_opv_login_add() {
+        let e = session_error(Session::NoAccount, &wsl_windows_op(), None, Some("dev")).unwrap();
+        assert_ne!(e.next_step(), Some("opv login --add"));
     }
 
     /// I6: child stdout (which can carry values, and whoami's identity) never reaches the

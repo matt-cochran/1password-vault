@@ -264,10 +264,11 @@ pub fn resolve(accounts: &[Account], who: &str) -> Result<String, Error> {
     }
 }
 
-/// `who` is not an account this `op` knows. On Linux and in WSL, `op` keeps its own
-/// accounts (in WSL it does not share the Windows app's: found live), so the step is
-/// `opv login --add --account` for that email in this terminal; elsewhere, add it in the
-/// 1Password app.
+/// `who` is not an account this `op` knows. On Linux and in WSL with a native `op`, `op`
+/// keeps its own accounts (in WSL it does not share the Windows app's: found live), so the
+/// step is `opv login --add --account` for that email in this terminal. In WSL with the
+/// Windows `op.exe`, the account is added in the Windows 1Password app (the one `op.exe`
+/// reads); elsewhere, in the 1Password app.
 fn not_known(accounts: &[Account], who: &str) -> Error {
     use crate::host::Platform;
     let host = Host::detect();
@@ -279,7 +280,8 @@ fn not_known(accounts: &[Account], who: &str) -> Error {
         .into(),
     )
     .with_code(crate::error::Code::AccountRequired);
-    let own_op = matches!(host.platform, Platform::Linux | Platform::Wsl);
+    let windows_op = host.op_is_windows_exe();
+    let own_op = matches!(host.platform, Platform::Linux | Platform::Wsl) && !windows_op;
     if own_op && who.contains('@') && crate::config::is_account(who) {
         let wsl = if host.platform == Platform::Wsl {
             " (op in WSL does not see the Windows app's accounts)"
@@ -292,6 +294,14 @@ fn not_known(accounts: &[Account], who: &str) -> Error {
                  password only at op's prompts, then re-run opv login"
             ))
             .with_next(format!("opv login --add --account {who}"));
+    }
+    if windows_op {
+        return e
+            .with_do(
+                "add the account in the Windows 1Password app and turn on Settings > Developer \
+                 > Integrate with 1Password CLI, then re-run",
+            )
+            .with_next(format!("opv login --account {who}"));
     }
     e.with_do(
         "add the account in the 1Password app and turn on Settings > Developer > Integrate \
@@ -885,5 +895,38 @@ mod tests {
             account("ACCOUNTUUID000000000000BBB"),
         ]);
         assert_eq!(e.next_step(), Some("opv account list"));
+    }
+
+    fn wsl_windows_op() -> Host {
+        Host::from_env(
+            &crate::host::FakeEnv::new("linux")
+                .var("WSL_DISTRO_NAME")
+                .op_windows_exe(),
+        )
+    }
+
+    /// In WSL with the Windows `op.exe`, an unknown account is added in the Windows app.
+    #[test]
+    fn wsl_windows_op_unknown_account_names_the_windows_app() {
+        let e = crate::host::with_test_host(wsl_windows_op(), || {
+            resolve(&[], "new@labs.example").unwrap_err()
+        });
+        assert!(
+            e.action()
+                .is_some_and(|a| a.contains("Windows 1Password app")),
+            "{e:?}"
+        );
+    }
+
+    /// In WSL with the Windows `op.exe`, opv never steps to adding the account at op's prompt.
+    #[test]
+    fn wsl_windows_op_unknown_account_never_adds_at_ops_prompt() {
+        let e = crate::host::with_test_host(wsl_windows_op(), || {
+            resolve(&[], "new@labs.example").unwrap_err()
+        });
+        assert_ne!(
+            e.next_step(),
+            Some("opv login --add --account new@labs.example")
+        );
     }
 }
