@@ -65,6 +65,9 @@ with tempfile.TemporaryDirectory() as directory:
         assert config['ok'], config
         assert config['keys'] and config['environments']
         assert all(set(key) == {'product', 'key', 'kind'} for key in config['keys'])
+        assert all(set(t) == {'environment', 'name', 'provider', 'products',
+                              'state_vault_recorded', 'deploy_credentials_declared'}
+                   for t in config['targets']), config['targets']
         assert 'vault_id' not in text and 'item_id' not in text and 'rules' not in text
         refused = send('tools/call', {'name': 'opv_sync', 'arguments': {'approved': True}}, 4)
         assert 'error' in refused or refused['result'].get('isError'), refused

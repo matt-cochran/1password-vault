@@ -2,6 +2,8 @@
 
 opv talks to 1Password and to a deployment target through their own CLIs (`op`, `flyctl`, `az`, `kubectl`), over networks that drop, time out and lag. This page says what opv does when something goes wrong and what you see. The exit codes and error codes themselves are listed in [usage](usage.md#exit-codes).
 
+When you report a problem, include the output of `opv version` (or `opv version --json`): opv's version and each CLI it runs, with their versions, from local probes only, with no sign-in and no value.
+
 ## What a failure looks like
 
 Every failure ends the same way on stderr: opv's error line, then (when an external call failed) what that program said, then at most one `Do:` line and exactly one `Next:` line, always last.

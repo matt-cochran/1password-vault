@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
 ### Changed
 
 - CI guidance separates the read-only validation reader (`opv bootstrap --ci-reader`) from each target's deploy identity (`opv access <env> --target <name>`: boundary read, its own state vault read and write), which a syncing job needs to record delivery evidence. `bootstrap --ci-reader` says so, and `opv ready` marks each target `evidence_write: "not_verified"` instead of implying that a visible state vault can be written (#134).
 
 ### Fixed
+
+- On Windows, two concurrent claims of one structural approval could both be refused by a rename sharing violation; a claim is now unique per attempt and a sharing violation is retried briefly, so exactly one wins (#133).
 
 - A structural apply that stops part-way keeps the IDs it already recorded; declarations work on a configuration that is not bootstrapped yet (#133).
 
@@ -22,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Assistant-managed structure through MCP, approved by a person (#133, FR-61). New tools `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml` only; never a value), `opv_structure_plan` (read-only; returns a `plan_id` bound to the project, account and configuration) and `opv_structure_apply` (creates exactly an approved plan through the 1Password app's authorization; refuses stale or unapproved plans and credential-bearing environments; returns public IDs and 1Password links for key entry). New command `opv approve <plan_id>`: the person reviews the plan in their own terminal and approves it once (15 minutes). New error codes `approval_required` and, from MCP, `credential_in_environment`.
 - Local delivery for secret-store apps and Cloudflare Workers (#136, #137, FR-62). `[products.<p>.local]` with `environment = "declared_only"` gives the app only its declared keys and a fixed set of non-secret basics. `file = "<path>"` on a key, with `secrets_dir_env`, delivers that key as a 0400 file in a private RAM directory (Linux and WSL; refused, never written to disk, elsewhere), removed when the app exits. Under `local`, no `OP_*` credential reaches the app. Products without `local` are unchanged. Recipes in local development; guarantees and limits in `docs/design/local-delivery.md`.
+- `opv_configuration` (MCP) also lists each declared target: its provider, the products it delivers, and whether its state vault and deploy identity are declared; never a locator, vault ID or credential reference (#133).
 - `opv version [--json]`: opv's version and every CLI it runs (1Password, then each provider's), each `installed` with its version, `missing` or `unknown` with a reason, and whether this project's configuration uses it, from one bounded local version probe per CLI (no sign-in, no service call). `opv --version` is unchanged (#131).
 - `opv projects --account <a>` lists one account; without it, `OP_ACCOUNT` (set by `opv login --account <a> -- <command>`) selects it (#135).
 
