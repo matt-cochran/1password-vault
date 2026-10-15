@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::plan::ItemField;
-use crate::domain::{Fleet, KeySpec, Kind, SIMPLE_PRODUCT};
+use crate::domain::{Fleet, KeySpec, Kind};
 
 /// One environment's values, as the caller read them (the team item; never a personal one).
 pub struct EnvValues<'a> {
@@ -107,13 +107,9 @@ fn in_scope<'a>(
     })
 }
 
-/// `product/KEY`, or `KEY` under the simple profile.
+/// `product/KEY`.
 fn label(product: &str, key: &str) -> String {
-    if product == SIMPLE_PRODUCT {
-        key.to_string()
-    } else {
-        format!("{product}/{key}")
-    }
+    crate::domain::key_label(product, key)
 }
 
 fn finding(

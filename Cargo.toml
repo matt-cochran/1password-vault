@@ -1,6 +1,7 @@
 [package]
 name = "opv"
-version = "0.6.1"
+default-run = "opv"
+version = "0.7.0"
 edition = "2024"
 # let-chains (`if let ... && let ...`) are stable from 1.88.
 rust-version = "1.88"
@@ -13,8 +14,14 @@ keywords = ["1password", "secrets", "secrets-management", "fly", "devops"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["spike/", ".delivery/", ".github/", "packaging/", "docs/assets/"]
 
+[[bin]]
+name = "opv-mcp"
+path = "src/bin/opv-mcp.rs"
+required-features = ["mcp"]
+
 [features]
 default = ["ui"]
+mcp = ["dep:rmcp", "dep:tokio"]
 # Exposes `runner::fake::FakeRunner` to integration tests and downstream test code.
 fake = []
 # `opv ui`, the terminal user interface (#82). On by default; `--no-default-features`
@@ -22,6 +29,8 @@ fake = []
 ui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
+rmcp = { version = "3.5.1", optional = true, default-features = false, features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 clap = { version = "4.6", features = ["derive", "env", "string"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

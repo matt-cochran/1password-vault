@@ -41,9 +41,11 @@ pub(crate) struct VarPlan {
 /// docs). `in_scope` limits writes and prunes to a product's names (`--product`, P20).
 /// Every name is the target's own rendering; a product the environment does not deliver
 /// (source-only, FR-47, or outside the target's scope, FR-48) is neither written nor pruned.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     t: &dyn TargetConfig,
     plan: &mut SyncPlan,
     vars: &dyn VariableStore,
@@ -56,7 +58,7 @@ pub(crate) fn plan(
     // pruned, so a failing rule never removes the value the app runs with.
     let mut claimed: BTreeSet<String> = BTreeSet::new();
     for row in &mut plan.rows {
-        if row.kind != Kind::Config || !fleet.delivers(env_name, &row.product) {
+        if row.kind != Kind::Config || !fleet.delivers(env_name, target, &row.product) {
             continue;
         }
         let name = t.env_name(&row.product, &row.key);
@@ -98,7 +100,7 @@ pub(crate) fn plan(
     let managed: BTreeSet<String> = fleet
         .products
         .iter()
-        .filter(|(p, _)| fleet.delivers(env_name, p))
+        .filter(|(p, _)| fleet.delivers(env_name, target, p))
         .flat_map(|(p, prod)| {
             prod.keys
                 .iter()

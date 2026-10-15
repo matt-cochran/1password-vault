@@ -2,8 +2,8 @@ use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::adapters::onepassword_manifest::template;
 
-/// A run-only simple configuration: no value, no target.
-pub(crate) const TOML: &str = "[profile]\nkind = \"simple\"\n\n[environments.dev]\nvault_id = \"vdev0000000000000000000001\"\nitem_id = \"app\"\n\n[keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+/// A run-only configuration: no value, no target.
+pub(crate) const TOML: &str = "[environments.dev]\nboundaries.app = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\n[products.app.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
 
 const REPO: &str = "github.com/acme/myapp";
 
@@ -501,7 +501,7 @@ fn myapp(op: &FakeOp) -> (String, Found) {
 
 /// TOML with one more key: an edit someone made in the 1Password app.
 fn edited() -> String {
-    format!("{TOML}\n[keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n")
+    format!("{TOML}\n[products.app.keys.ROTATED]\nkind = \"secret\"\nenvironments = [\"dev\"]\n")
 }
 
 fn under<T>(env: crate::host::FakeEnv, f: impl FnOnce() -> T) -> T {
@@ -726,8 +726,8 @@ fn a_manifest_in_another_account_passes_it_to_its_environments() {
 #[test]
 fn an_environments_own_account_wins_over_the_manifests() {
     let text = TOML.replace(
-        "item_id = \"app\"\n",
-        "item_id = \"app\"\naccount = \"home\"\n",
+        "[environments.dev]\n",
+        "[environments.dev]\naccount = \"home\"\n",
     );
     let fleet = in_account(&FakeOp::default(), &text);
     assert_eq!(fleet.environments["dev"].account.as_deref(), Some("home"));

@@ -17,7 +17,7 @@ use crate::adapters::onepassword_tidy;
 use crate::config_store;
 use crate::domain::convention;
 use crate::domain::plan::ItemField;
-use crate::domain::{Environment, Fleet, KeySpec, SIMPLE_PRODUCT};
+use crate::domain::{Boundary, Environment, Fleet, KeySpec};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
@@ -54,8 +54,8 @@ pub fn item_title(env: &Environment, project: &str) -> String {
 ///
 /// `Ok(None)` when no personal key is declared for the environment. Otherwise the vault
 /// titled `personal_vault`, or the first of `Private`, `Employee`, `Personal` that exists;
-/// then the item titled [`item_title`] in it. The returned environment is the team one with
-/// `vault_id` and `item_id` replaced by that item's, so every existing reader works on it.
+/// then the item titled [`item_title`] in it. Returned as the vault and item an item read
+/// addresses, so every existing reader works on it.
 /// A missing vault or item is the setup error [`not_set_up`]; the caller turns it into
 /// findings (`check`) or a configuration error naming the keys (`run`).
 pub fn locate(
@@ -63,7 +63,7 @@ pub fn locate(
     fleet: &Fleet,
     env_name: &str,
     project: &str,
-) -> Result<Option<Environment>, Error> {
+) -> Result<Option<Boundary>, Error> {
     if !declared(fleet, env_name) {
         return Ok(None);
     }
@@ -78,10 +78,10 @@ pub fn locate(
             Lookup::Found(i) => i,
             Lookup::Missing(_) => return Err(not_set_up(env_name)),
         };
-    let mut personal = team.clone();
-    personal.vault_id = vault.id;
-    personal.item_id = item.id;
-    Ok(Some(personal))
+    Ok(Some(Boundary {
+        vault_id: vault.id,
+        item_id: item.id,
+    }))
 }
 
 /// The vault holding `team`'s personal items: `personal_vault`, or the person's own
@@ -130,10 +130,11 @@ pub fn merged_fields(
         .into_iter()
         .filter(|f| !claimed.contains(&(f.section.clone(), f.label.clone())))
         .collect();
-    let Ok(Some(env)) = locate(r, fleet, env_name, project) else {
+    let Ok(Some(at)) = locate(r, fleet, env_name, project) else {
         return Ok(out);
     };
-    let Ok(item) = onepassword::read_whole(r, &env) else {
+    let team = fleet.environment(env_name)?;
+    let Ok(item) = onepassword::read_whole(r, team, &at) else {
         return Ok(out);
     };
     let Ok((layout, _)) = onepassword_tidy::parse(item.raw()) else {
@@ -162,16 +163,11 @@ pub fn is_personal(fleet: &Fleet, spec: &KeySpec) -> bool {
 }
 
 /// The `op run` reference for a personal `product`/`key` (FR-55): its value lives in
-/// `env`'s personal item, addressed by the personal item's IDs, never the team item's.
-/// A shared key points at its source's field, exactly as its team counterpart would.
-pub fn reference(env: &Environment, product: &str, key: &str, spec: &KeySpec) -> String {
+/// the personal item `at`, addressed by its IDs, never a team item's. A shared key points
+/// at its source's field, exactly as its team counterpart would.
+pub fn reference(at: &Boundary, product: &str, key: &str, spec: &KeySpec) -> String {
     let (p, k) = spec.source().unwrap_or((product, key));
-    let field = if p == SIMPLE_PRODUCT {
-        k.to_string()
-    } else {
-        format!("{p}/{k}")
-    };
-    format!("op://{}/{}/{field}", env.vault_id, env.item_id)
+    format!("op://{}/{}/{p}/{k}", at.vault_id, at.item_id)
 }
 
 /// Every `(section, label)` field a personal key claims: its source's when it is shared

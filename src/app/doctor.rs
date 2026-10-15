@@ -7,6 +7,13 @@
 //! checks (`TargetConfig::doctor`, FR-37). Environments without a target are listed as
 //! skipped. Returns the error of the first failing check.
 //!
+//! With `--env` (FR-40, FR-56) the provider checks run per target of the environment, or
+//! per `--target`: each target's CLI checks under its own deploy credentials, and whether
+//! its state vault is visible. Every such line is `<target>: <check>` (JSON `target`). A
+//! target whose deploy sign-in fails gets one failing `deploy credentials` check, and only
+//! its own checks that use the deploy identity's CLI are skipped. The checks that run once
+//! (configuration, op, its sign-in, the item) carry no target.
+//!
 //! A tool version opv was not tested with (op older than 2.40.0, or a provider CLI outside
 //! its tested range) is a `warn` line, never a failure.
 //!
@@ -22,7 +29,7 @@
 //! never all clear when `check` would fail.
 //!
 //! `--json` (P18) prints one document instead of the lines: `{schema_version: 1, checks:
-//! [{name, status: ok|warn|fail|skip, detail, next}], next}`; `detail` is the line's first
+//! [{name, target, status: ok|warn|fail|skip, detail, next}], next}`; `detail` is the line's first
 //! line, `next` its remediation (or null), the top-level `next` the first failure's.
 //!
 //! A failing check prints the next command for the detected platform and shell (FR-26):
@@ -43,7 +50,7 @@ use crate::domain::{Fleet, KeyState};
 use crate::error::Error;
 use crate::host::{Host, OP_CLI};
 use crate::provider::{TargetConfig, Verdict as Check};
-use crate::runner::CommandRunner;
+use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
 /// Oldest `op` release opv is tested with.
 pub const OP_TESTED_MIN: (u64, u64, u64) = (2, 40, 0);
@@ -86,7 +93,7 @@ pub fn run_scoped_as(
         product,
         json,
         source: None,
-        deploy_failure: None,
+        targets: &[],
         settings: false,
     };
     run_request(config, request, r, out)
@@ -104,10 +111,9 @@ pub struct Request<'a> {
     /// Where the configuration came from, for the config line (`source: ./secrets.toml`,
     /// `source: manifest "opv · app" in vault V (matched …)`, FR-44).
     pub source: Option<&'a str>,
-    /// The environment's deploy sign-in failed before doctor ran (FR-40). Doctor reports
-    /// it as one failing check, runs the other checks and skips the target checks that
-    /// need those credentials (owner ruling: doctor never aborts on it).
-    pub deploy_failure: Option<super::signin::DeployFailure>,
+    /// `--target` (with `--env`, FR-56): check only these targets. Empty checks every
+    /// target of the environment.
+    pub targets: &'a [String],
     /// `--settings`: also run the settings health check (#92), which reads every
     /// environment's item. Without it doctor reads at most the `--env` item (P6).
     pub settings: bool,
@@ -135,7 +141,7 @@ fn run_request_on(
         product,
         json,
         source,
-        deploy_failure,
+        targets,
         settings,
     } = request;
     let config =
@@ -150,16 +156,17 @@ fn run_request_on(
     let local_only = env.is_some()
         && config
             .as_ref()
-            .is_ok_and(|f| f.environments.values().all(|e| e.target().is_none()));
+            .is_ok_and(|f| f.environments.values().all(|e| e.targets.is_empty()));
     let scope = Scope {
         env,
         product,
         local_only,
         json,
         source,
+        targets,
         settings,
     };
-    run_on_with(config, r, host, scope, deploy_failure, out)
+    run_on_with(config, r, host, scope, out)
 }
 
 pub fn run(
@@ -193,6 +200,8 @@ struct Scope<'a> {
     json: bool,
     /// Where the configuration came from (FR-44).
     source: Option<&'a str>,
+    /// `--target` (FR-56): only these targets of `env`.
+    targets: &'a [String],
     /// `--settings` (#92).
     settings: bool,
 }
@@ -232,6 +241,8 @@ impl State {
 /// or tool output; the first line is the detail, indented lines are remediation).
 struct Row {
     name: String,
+    /// The target this check is about (FR-56), `None` for a check that runs once.
+    target: Option<String>,
     state: State,
     text: String,
     /// The failure's own next step (NR-19), printed as `  fix: <step>` under the line.
@@ -242,6 +253,14 @@ struct Row {
 }
 
 impl Row {
+    /// The check as the text output names it: `<target>: <check>` for a target's check.
+    fn label(&self) -> String {
+        match &self.target {
+            Some(t) => format!("{t}: {}", self.name),
+            None => self.name.clone(),
+        }
+    }
+
     /// The remediation for this row: the fixed configuration step, the failure's own next
     /// step, or its first indented line (the install, sign-in, `op account add` or log-in
     /// command the failure already prints, FR-26). `None` for a row with nothing to do.
@@ -270,33 +289,54 @@ impl Row {
 
     /// The `Next:` step for this row when it is the first failure (NR-19).
     fn step(&self) -> String {
-        self.next().unwrap_or_else(|| rerun(&self.name))
+        self.next().unwrap_or_else(|| rerun(&self.label()))
     }
 }
 
-/// The rows collected so far, and the first failure (returned as the run's error).
+/// The rows collected so far, and the first failure (returned as the run's error): the
+/// index of its row and its error.
 #[derive(Default)]
 struct Report {
     rows: Vec<Row>,
-    first: Option<(String, Error)>,
+    first: Option<(usize, Error)>,
+    /// The target the checks pushed now are about (FR-56); `None` outside a target.
+    target: Option<String>,
 }
 
 impl Report {
     fn push(&mut self, name: &str, res: Result<Check, Error>) {
-        let (state, text, fix) = match res {
-            Ok(Check::Ok(t)) => (State::Ok, t, None),
-            Ok(Check::Warn(t)) => (State::Warn, t, None),
+        match res {
+            Ok(Check::Ok(t)) => self.row(name, State::Ok, t, None),
+            Ok(Check::Warn(t)) => self.row(name, State::Warn, t, None),
             Err(e) => {
                 let t = e.to_string();
-                let fix = e.next_step().map(str::to_string);
-                if self.first.is_none() {
-                    self.first = Some((name.to_string(), e));
-                }
-                (State::Fail, t, fix)
+                self.fail(name, t, e);
             }
-        };
+        }
+    }
+
+    /// A failing check whose line text differs from its error (the item check, P6).
+    fn fail(&mut self, name: &str, text: String, e: Error) {
+        let fix = e.next_step().map(str::to_string);
+        if self.first.is_none() {
+            self.first = Some((self.rows.len(), e));
+        }
+        self.row(name, State::Fail, text, fix);
+    }
+
+    /// A warning with its own next step (the settings check, #92).
+    fn warn(&mut self, name: &str, text: String, fix: String) {
+        self.row(name, State::Warn, text, Some(fix));
+    }
+
+    fn skip(&mut self, name: &str, text: String) {
+        self.row(name, State::Skip, text, None);
+    }
+
+    fn row(&mut self, name: &str, state: State, text: String, fix: Option<String>) {
         self.rows.push(Row {
             name: name.to_string(),
+            target: self.target.clone(),
             state,
             text,
             fix,
@@ -304,45 +344,11 @@ impl Report {
         });
     }
 
-    /// A failing check whose line text differs from its error (the item check, P6).
-    fn fail(&mut self, name: &str, text: String, e: Error) {
-        let fix = e.next_step().map(str::to_string);
-        if self.first.is_none() {
-            self.first = Some((name.to_string(), e));
-        }
-        self.rows.push(Row {
-            name: name.to_string(),
-            state: State::Fail,
-            text,
-            fix,
-            excerpt: None,
-        });
-    }
-
-    /// A warning with its own next step (the settings check, #92).
-    fn warn(&mut self, name: &str, text: String, fix: String) {
-        self.rows.push(Row {
-            name: name.to_string(),
-            state: State::Warn,
-            text,
-            fix: Some(fix),
-            excerpt: None,
-        });
-    }
-    fn skip(&mut self, name: &str, text: String) {
-        self.rows.push(Row {
-            name: name.to_string(),
-            state: State::Skip,
-            text,
-            fix: None,
-            excerpt: None,
-        });
-    }
-
+    /// Whether the check `name` that runs once (not a target's) passed.
     fn passed(&self, name: &str) -> bool {
-        self.rows
-            .iter()
-            .any(|r| r.name == name && matches!(r.state, State::Ok | State::Warn))
+        self.rows.iter().any(|r| {
+            r.name == name && r.target.is_none() && matches!(r.state, State::Ok | State::Warn)
+        })
     }
 }
 
@@ -354,7 +360,7 @@ fn run_on(
     scope: Scope<'_>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    run_on_with(config, r, host, scope, None, out)
+    run_on_with(config, r, host, scope, out)
 }
 
 /// The check that reports a failed deploy sign-in (FR-40).
@@ -363,13 +369,12 @@ const DEPLOY_CHECK: &str = "deploy credentials";
 /// Why a target check was not run after a failed deploy sign-in.
 const DEPLOY_SKIP: &str = "not checked (deploy credentials failed)";
 
-/// [`run_on`], with the environment's failed deploy sign-in, if any.
+/// [`run_on`] on the given scope.
 fn run_on_with(
     config: Result<Fleet, Error>,
     r: &dyn CommandRunner,
     host: &dyn Fn() -> Host,
     scope: Scope<'_>,
-    deploy_failure: Option<super::signin::DeployFailure>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let mut report = Report::default();
@@ -387,17 +392,6 @@ fn run_on_with(
     // op's default account, which this project was never pointed at (found live).
     let no_account =
         matches!(&config_line, Err(e) if e.code() == crate::error::Code::AccountRequired);
-    // (one target per provider in use, environments without a target)
-    let targets = fleet.as_ref().map(|f| {
-        (
-            providers_in_use(f),
-            f.environments
-                .iter()
-                .filter(|(_, e)| e.target().is_none())
-                .map(|(n, _)| n.clone())
-                .collect::<Vec<_>>(),
-        )
-    });
     report.push(CONFIG_CHECK, config_line);
     let op_check = op_version(r, host);
     let op_present = op_check.is_ok();
@@ -437,63 +431,58 @@ fn run_on_with(
             None => report.skip(ITEM_CHECK, "not checked (configuration invalid)".into()),
         }
     }
-    // The checks that run the deploy identity's CLI, when its sign-in failed: every check
-    // of that provider but the first (its tool version).
-    let mut needs_deploy: Vec<&str> = Vec::new();
-    if let Some(failure) = deploy_failure {
-        report.push(DEPLOY_CHECK, Err(failure.error));
-        // Text output only, under the FAIL line; never in `--json` (M2, NR-31).
-        if let Some(row) = report.rows.last_mut() {
-            row.excerpt = failure.excerpt.map(|x| x.render());
-        }
-        if let Some(f) = &fleet {
-            for t in f.environments.values().filter_map(|e| e.target()) {
-                let checks = crate::provider::deploy_provider(t).doctor_checks();
-                needs_deploy.extend(checks.iter().skip(1));
-            }
-        }
-    }
     let default = registry::DEFAULT;
-    match targets {
-        Some((used, without)) if !used.is_empty() => {
-            for t in &used {
-                for c in t.doctor(r, host) {
-                    if needs_deploy.iter().any(|n| *n == c.name) {
-                        report.skip(&c.name, DEPLOY_SKIP.into());
-                    } else {
+    match (&fleet, scope.env) {
+        // Scoped to one environment (FR-56): every target of it (or each `--target`), each
+        // with its own deploy sign-in and state vault, every row labelled with its target.
+        (Some(f), Some(env_name)) => {
+            target_checks(f, env_name, scope.targets, r, host, &mut report);
+        }
+        // Unscoped: one check set per provider and named store some environment uses
+        // (FR-37, FR-39), plus one skip naming the environments without a target.
+        (Some(f), None) => {
+            let used = providers_in_use(f);
+            if used.is_empty() {
+                for check in default.doctor_checks() {
+                    report.skip(
+                        check,
+                        format!("no environment has a {} section", default.section()),
+                    );
+                }
+            } else {
+                for t in &used {
+                    for c in t.doctor(r, host) {
                         report.push(&c.name, c.outcome);
                     }
                 }
-            }
-            if !without.is_empty() {
-                // One provider in use: its section name; several: "target".
-                let section = match used.as_slice() {
-                    [only] => only.provider().section(),
-                    _ => "target",
-                };
-                report.skip(
-                    section,
-                    format!(
-                        "no {section} section in {} {} (run, config export and item skeleton only)",
-                        if without.len() == 1 {
-                            "environment"
-                        } else {
-                            "environments"
-                        },
-                        without.join(", ")
-                    ),
-                );
-            }
-        }
-        Some(_) => {
-            for check in default.doctor_checks() {
-                report.skip(
-                    check,
-                    format!("no environment has a {} section", default.section()),
-                );
+                let without: Vec<String> = f
+                    .environments
+                    .iter()
+                    .filter(|(_, e)| e.targets.is_empty())
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                if !without.is_empty() {
+                    // One provider in use: its section name; several: "target".
+                    let section = match used.as_slice() {
+                        [only] => only.provider().section(),
+                        _ => "target",
+                    };
+                    report.skip(
+                        section,
+                        format!(
+                            "no {section} section in {} {} (run, config export and item skeleton only)",
+                            if without.len() == 1 {
+                                "environment"
+                            } else {
+                                "environments"
+                            },
+                            without.join(", ")
+                        ),
+                    );
+                }
             }
         }
-        None => {
+        (None, _) => {
             for check in default.doctor_checks() {
                 report.skip(check, "not checked (configuration invalid)".into());
             }
@@ -519,12 +508,9 @@ fn run_on_with(
     // names the check only, and its next step is that check's remediation (NR-19). The
     // `Next:` line is printed once, last, by the error report on stderr.
     match report.first {
-        Some((check, e)) => {
-            let next = report
-                .rows
-                .iter()
-                .find(|r| r.name == check && r.state == State::Fail)
-                .map_or_else(|| rerun(&check), Row::step);
+        Some((index, e)) => {
+            let row = &report.rows[index];
+            let (check, next) = (row.label(), row.step());
             Err(e
                 .map_text(|_| format!("{check} check failed (see the FAIL line above)"))
                 .with_next(next))
@@ -544,7 +530,7 @@ fn run_on_with(
 /// right after its FAIL line, never to stdout or a JSON document (M2, NR-31).
 fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Error> {
     for row in &report.rows {
-        writeln!(out, "{}  {}: {}", row.state.word(), row.name, row.text).map_err(write_err)?;
+        writeln!(out, "{}  {}: {}", row.state.word(), row.label(), row.text).map_err(write_err)?;
         if let Some(x) = &row.excerpt {
             out.flush().map_err(write_err)?;
             let _ = write!(err, "{x}");
@@ -565,11 +551,15 @@ fn doctor_command(scope: &Scope<'_>) -> String {
     if let Some(p) = scope.product {
         c.push_str(&format!(" --product {p}"));
     }
+    for t in scope.targets {
+        c.push_str(&format!(" --target {t}"));
+    }
     c
 }
 
-/// P18, A3: `{schema_version: 1, config_source, checks: [{name, status, detail, next, do}],
-/// next, do}`. `config_source` is where the configuration was found (FR-44), or null.
+/// P18, A3: `{schema_version: 1, config_source, checks: [{name, target, status, detail,
+/// next, do}], next, do}`. `config_source` is where the configuration was found (FR-44), or
+/// null; `target` is the target a check is about (FR-56), null for a check that runs once.
 /// `detail` is the first line of the check's text (names, versions and commands only);
 /// a check with something to do has `do` (the action only a person can take, or null)
 /// and `next` (a command that runs as typed), both null otherwise; the top-level pair is
@@ -588,6 +578,7 @@ fn print_json(
             let step = split(row);
             serde_json::json!({
                 "name": row.name,
+                "target": row.target,
                 "status": row.state.json(),
                 "detail": row.text.lines().next().unwrap_or(""),
                 "next": step.as_ref().map(|s| s.next.clone()),
@@ -620,9 +611,9 @@ fn item_check(
     r: &dyn CommandRunner,
     report: &mut Report,
 ) {
-    let Ok(env) = fleet.environment(env_name) else {
+    if fleet.environment(env_name).is_err() {
         return report.skip(ITEM_CHECK, "not checked (undefined environment)".into());
-    };
+    }
     let sections: BTreeSet<String> = fleet.products.keys().cloned().collect();
     // Tolerant and never written, whoever runs doctor (#113): a layout a person's run would
     // tidy is noted with the explicit `opv tidy <env>`.
@@ -630,9 +621,7 @@ fn item_check(
         Ok(i) => i,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
-    let where_ = if fleet.is_simple() {
-        String::new()
-    } else if sections.len() == 1 {
+    let where_ = if sections.len() == 1 {
         format!(" in section {}", sections.iter().next().expect("one"))
     } else {
         format!(
@@ -640,18 +629,22 @@ fn item_check(
             sections.iter().cloned().collect::<Vec<_>>().join(", ")
         )
     };
+    // Every boundary item the environment's products need (FR-57), `vault/item` each.
+    let items: Vec<String> = match super::tidy::boundaries_needed(fleet, env_name) {
+        Ok(b) => b
+            .values()
+            .map(|b| format!("{}/{}", b.vault_id, b.item_id))
+            .collect(),
+        Err(e) => return report.push(ITEM_CHECK, Err(e)),
+    };
     let readable = format!(
-        "{}/{} readable ({}{where_})",
-        env.vault_id,
-        env.item_id,
+        "{} readable ({}{where_})",
+        items.join(", "),
         super::plural(item.fields.len(), "field", "fields")
     );
-    let mut selected = fleet.clone();
-    for e in selected.environments.values_mut() {
-        e.target = None;
-    }
     let none = BTreeSet::new();
-    let plan = match super::plan_item(&selected, env_name, item.fields, None, &none, &none) {
+    // Planned without a target: the item check never reaches one.
+    let plan = match super::plan_item(fleet, env_name, None, item.fields, None, &none, &none) {
         Ok((plan, _)) => plan,
         Err(e) => return report.push(ITEM_CHECK, Err(e)),
     };
@@ -673,7 +666,6 @@ fn item_check(
     }
     let check = match product {
         Some(p) => format!("opv check {env_name} --product {p}"),
-        None if fleet.is_simple() => format!("opv check {env_name}"),
         None => {
             let first = plan
                 .rows
@@ -718,7 +710,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
         .map(|(name, env, fields)| EnvValues {
             name,
             title: env.title.as_deref(),
-            deployed: env.target().is_some(),
+            deployed: !env.targets.is_empty(),
             fields,
         })
         .collect();
@@ -745,11 +737,7 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
     for h in &findings {
         text.push_str(&format!("\n  {}: {}", h.code, h.message));
     }
-    let label = if fleet.is_simple() {
-        first.key.clone()
-    } else {
-        key_label(&first.product, &first.key)
-    };
+    let label = key_label(&first.product, &first.key);
     let env = first.environments.first().map_or("<env>", String::as_str);
     report.warn(
         SETTINGS_CHECK,
@@ -758,13 +746,138 @@ fn settings_check(fleet: &Fleet, only: Option<&str>, r: &dyn CommandRunner, repo
     );
 }
 
+/// The per-target checks of one environment (FR-40, FR-56), for every target or only
+/// `only` (`--target`): each target's provider CLI checks ([`TargetConfig::doctor`]), its
+/// own deploy credentials sign-in and whether its state vault is visible. Every row carries
+/// its target (`<target>: <check>`, JSON `target`). A failed sign-in is one failing
+/// `deploy credentials` check for that target, and skips only that target's checks that
+/// use the deploy identity's CLI; the other targets are checked as usual. Read-only: the
+/// deploy item is read, never written (#113).
+fn target_checks(
+    fleet: &Fleet,
+    env_name: &str,
+    only: &[String],
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    report: &mut Report,
+) {
+    let Ok(env) = fleet.environment(env_name) else {
+        return;
+    };
+    if env.targets.is_empty() && only.is_empty() {
+        // A run-only environment uses no provider (the item check already ran).
+        let default = registry::DEFAULT;
+        for check in default.doctor_checks() {
+            report.skip(
+                check,
+                format!("no environment has a {} section", default.section()),
+            );
+        }
+        return;
+    }
+    let names = match super::resolve_targets(fleet, env_name, only, "doctor") {
+        Ok(names) => names,
+        Err(e) => {
+            // The step to retry is doctor's own form (`--env`), not `opv doctor <env>`.
+            let e = match env.targets.keys().next() {
+                Some(first) => e.with_next(format!("opv doctor --env {env_name} --target {first}")),
+                None => e,
+            };
+            return report.push("target", Err(e));
+        }
+    };
+    for name in names {
+        let Some(target) = env.targets.get(&name) else {
+            continue;
+        };
+        report.target = Some(name.clone());
+        let signin = super::signin::Reach::Target;
+        match super::signin::open_targeted(fleet, env_name, Some(&name), r, signin) {
+            Ok(runner) => {
+                for c in target.config.doctor(&runner, host) {
+                    report.push(&c.name, c.outcome);
+                }
+            }
+            Err(e) => {
+                // Taken now, before more calls run: the failed call's scrubbed excerpt, for
+                // the text output only, under the FAIL line; never in `--json` (M2, NR-31).
+                let excerpt = crate::runner::take_failure_excerpt()
+                    .filter(|_| e.from_external_call())
+                    .map(|x| x.render());
+                report.push(DEPLOY_CHECK, Err(e));
+                if let Some(row) = report.rows.last_mut() {
+                    row.excerpt = excerpt;
+                }
+                // The deploy identity's CLI version needs no sign-in and still runs; its
+                // other checks are skipped (FR-40).
+                let provider = crate::provider::deploy_provider(target.config.as_ref());
+                let needs = provider.doctor_checks().get(1..).unwrap_or_default();
+                for c in target.config.doctor(r, host) {
+                    if needs.contains(&c.name.as_ref()) {
+                        report.skip(&c.name, DEPLOY_SKIP.into());
+                    } else {
+                        report.push(&c.name, c.outcome);
+                    }
+                }
+            }
+        }
+        // Read with the environment's account, never the deploy identity, so it is checked
+        // even after a failed sign-in.
+        if report.passed("op auth") {
+            report.push(
+                STATE_VAULT_CHECK,
+                state_vault(r, env_name, &name, &target.state_vault_id),
+            );
+        } else {
+            report.skip(
+                STATE_VAULT_CHECK,
+                "not checked (see the op auth line above)".into(),
+            );
+        }
+        report.target = None;
+    }
+}
+
+/// The check that a target's state vault is visible (FR-56).
+const STATE_VAULT_CHECK: &str = "state vault";
+
+/// Whether target `target`'s state vault `vault_id` is visible to the environment's
+/// account: one `op vault get`, exit status only (its output names the vault and is
+/// dropped unread, SR-1). A probe that could not run is a warning: doctor cannot tell.
+fn state_vault(
+    r: &dyn CommandRunner,
+    env: &str,
+    target: &str,
+    vault_id: &str,
+) -> Result<Check, Error> {
+    match r.probe(
+        &Call::new("op", &["vault", "get", vault_id, "--format", "json"]),
+        PROBE_TIMEOUT,
+    ) {
+        Ok(o) if o.status == 0 => Ok(Check::Ok(format!("vault {vault_id} visible"))),
+        Ok(_) => Err(Error::Source(
+            format!("vault {vault_id} is not visible to the signed-in account").into(),
+        )
+        .with_code(crate::error::Code::VaultNoAccess)
+        .with_next(format!("opv access {env} --target {target}"))),
+        Err(e) => Ok(Check::Warn(format!(
+            "vault {vault_id} not checked (op vault get did not finish: {e})"
+        ))),
+    }
+}
+
 /// One target per provider and named store some environment uses, in registry order
 /// (FR-37, FR-39): a target that keeps its secrets in a named store also checks that store
 /// and its binding.
 fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     let mut used: Vec<&dyn TargetConfig> = Vec::new();
     let store_of = |t: &dyn TargetConfig| t.secrets_in().map(|s| s.name().to_string());
-    for t in f.environments.values().filter_map(|e| e.target()) {
+    for t in f
+        .environments
+        .values()
+        .flat_map(|e| e.targets.values())
+        .map(|t| t.config.as_ref())
+    {
         if !used.iter().any(|u| {
             u.provider().section() == t.provider().section() && store_of(*u) == store_of(t)
         }) {
@@ -779,19 +892,13 @@ fn providers_in_use(f: &Fleet) -> Vec<&dyn TargetConfig> {
     used
 }
 
-/// `valid (N environments, M products)`, or under the simple profile, whose one product
-/// is hidden (FR-20), `valid (N environments, M keys)`.
+/// `valid (N environments, M products)`.
 fn config_summary(f: &Fleet) -> String {
     let envs = super::plural(f.environments.len(), "environment", "environments");
-    if f.is_simple() {
-        let keys: usize = f.products.values().map(|p| p.keys.len()).sum();
-        format!("valid ({envs}, {})", super::plural(keys, "key", "keys"))
-    } else {
-        format!(
-            "valid ({envs}, {})",
-            super::plural(f.products.len(), "product", "products")
-        )
-    }
+    format!(
+        "valid ({envs}, {})",
+        super::plural(f.products.len(), "product", "products")
+    )
 }
 
 /// The fix-and-re-run step for a failing check without a remediation of its own.
@@ -1357,10 +1464,7 @@ mod tests {
     /// without one are named when others have it.
     #[test]
     fn fly_checks_follow_fly_sections() {
-        let no_fly = crate::config::parse(
-            "[profile]\nkind = \"fleet\"\n[environments.dev]\nvault_id = \"v\"\nitem_id = \"i\"\n",
-        )
-        .unwrap();
+        let no_fly = crate::config::parse("[environments.dev]\n").unwrap();
         let r = FakeRunner::new(good().into_iter().take(2));
         let (res, out) = doctor(Ok(no_fly), &r);
         res.unwrap();
@@ -1370,7 +1474,7 @@ mod tests {
         );
         assert_eq!(r.calls.borrow().len(), 2, "{:?}", argvs(&r));
 
-        let mixed = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+        let mixed = fleet_with("[environments.dev]\n");
         let r = FakeRunner::new(good());
         let (res, out) = doctor(Ok(mixed), &r);
         res.unwrap();
@@ -1381,10 +1485,11 @@ mod tests {
         );
     }
 
-    const AZURE: &str = "[profile]\nkind = \"simple\"\n\
-        [environments.prod]\nvault_id = \"v\"\nitem_id = \"i\"\n\
-        [environments.prod.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
-        key_vault = \"kv\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\n";
+    const AZURE: &str = "[environments.prod]\n\
+        [environments.prod.targets.app]\nstate_vault_id = \"sprod\"\n\
+        [environments.prod.targets.app.azure]\nsubscription = \"00000000-0000-0000-0000-000000000000\"\n\
+        key_vault = \"kv\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\n\
+        env_name = \"{KEY}\"\n";
 
     /// FR-37: az is only checked when an environment has an azure section.
     #[test]
@@ -1416,13 +1521,13 @@ mod tests {
     }
 
     #[test]
-    fn simple_profile_config_line_counts_keys_not_products() {
-        let simple = crate::config::load("tests/fixtures/simple.toml").unwrap();
+    fn a_simple_profile_config_line_shows_the_current_form() {
+        let removed = crate::config::parse("[profile]\nkind = \"simple\"\n");
         let r = FakeRunner::new(good());
-        let (_, out) = doctor(Ok(simple), &r);
-        assert_eq!(
-            checks(&out)[0],
-            "ok    config: valid (2 environments, 5 keys)",
+        let (_, out) = doctor(removed, &r);
+        assert!(
+            checks(&out)[0].starts_with("FAIL  config: ")
+                && out.contains("[products.<name>.keys.<KEY>]"),
             "{out}"
         );
     }
@@ -1609,7 +1714,7 @@ mod tests {
     fn scoped_development_doctor_never_queries_fly_in_mixed_file() {
         let mut f = fleet();
         let mut env = f.environments["staging"].clone();
-        env.target = None;
+        env.targets.clear();
         f.environments.insert("dev".into(), env);
         let r = FakeRunner::new(good().into_iter().take(2).chain([item(&complete_fields())]));
         let mut out = Vec::new();
@@ -1751,10 +1856,12 @@ mod tests {
         assert!(!out.contains("fail"), "{out}");
     }
 
-    /// `doctor --env prod --product allumata` with `item` answering the one item read.
+    /// `doctor --env prod --product allumata` with `item` answering the one item read
+    /// (and the state vault visible).
     fn doctor_scoped(item: Output, json: bool) -> (Result<(), Error>, String, FakeRunner) {
         let mut g = good();
         g.insert(2, item);
+        g.push(Output::success(Vec::new()));
         let r = FakeRunner::new(g);
         let mut out = Vec::new();
         let res = run_scoped_as(
@@ -1768,30 +1875,49 @@ mod tests {
         (res, text_of(&out), r)
     }
 
-    /// `doctor --env prod` after the environment's deploy sign-in failed (FR-40).
+    /// The fixture with prod's target signing in to Fly with `op://deploy-prd/fly`.
+    fn fleet_with_deploy_credentials() -> Fleet {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+        crate::config::parse(&text.replacen(
+            "state_vault_id = \"sprd\"\n",
+            "state_vault_id = \"sprd\"\ndeploy_credentials = \"op://deploy-prd/fly\"\n",
+            1,
+        ))
+        .unwrap()
+    }
+
+    /// `doctor --env prod` whose target's deploy sign-in fails: 1Password is signed out
+    /// when the deploy item is read (FR-40).
     fn doctor_deploy_failed(json: bool) -> (Result<(), Error>, String) {
         let mut g = good();
         g.insert(2, complete_item());
-        let r = FakeRunner::new(g);
+        let r = FakeRunner::new(g.drain(..3));
+        r.push_with_stderr(Output::failure(1), "[ERROR] not signed in");
+        r.responses.borrow_mut().extend([
+            Ok(Output::failure(1)),
+            Ok(Output::success(br#"[{"url":"x"}]"#.to_vec())),
+        ]);
+        r.responses.borrow_mut().extend(g.into_iter().map(Ok));
+        r.responses
+            .borrow_mut()
+            .push_back(Ok(Output::success(Vec::new())));
         let mut out = Vec::new();
         let request = Request {
             env: Some("prod"),
             product: Some("allumata"),
             json,
-            source: None,
-            deploy_failure: Some(crate::app::signin::DeployFailure {
-                error: Error::Auth(
-                    "deploy credentials: az login failed\n  next: check the item".into(),
-                ),
-                excerpt: crate::scrub::Excerpt::from_stderr(
-                    "az",
-                    b"ERROR: AADSTS7000215 invalid client secret\n",
-                    false,
-                ),
-            }),
-            settings: false,
+            ..Request::default()
         };
-        let res = run_request_on(Ok(fleet()), request, &r, &|| linux(), &mut out);
+        let tty = Host::from_env(&crate::host::FakeEnv::new("linux").shell("/bin/bash").tty());
+        let res = crate::host::with_test_host(tty, || {
+            run_request_on(
+                Ok(fleet_with_deploy_credentials()),
+                request,
+                &r,
+                &|| linux(),
+                &mut out,
+            )
+        });
         (res, text_of(&out))
     }
 
@@ -1800,7 +1926,9 @@ mod tests {
     fn deploy_failure_is_one_fail_line() {
         let (_, out) = doctor_deploy_failed(false);
         assert!(
-            checks(&out).contains(&"FAIL  deploy credentials: authentication error: deploy credentials: az login failed"),
+            checks(&out).iter().any(|l| l.starts_with(
+                "FAIL  portfolio: deploy credentials: authentication error: not signed in"
+            )),
             "{out}"
         );
     }
@@ -1810,14 +1938,17 @@ mod tests {
     fn deploy_failure_names_its_fix() {
         let (res, out) = doctor_deploy_failed(false);
         let t = terminal(&res, out.as_bytes());
-        assert_eq!(do_line(&t), "Do: check the item", "{t}");
+        assert_eq!(do_line(&t), "Do: sign in: opv login prod", "{t}");
     }
 
-    /// UX1: the failing line carries its fix under it, like every other check.
+    /// UX1: the failing line carries its step under it, like every other check.
     #[test]
-    fn deploy_failure_prints_its_fix_under_the_fail_line() {
+    fn deploy_failure_prints_its_step_under_the_fail_line() {
         let (_, out) = doctor_deploy_failed(false);
-        assert!(out.contains("\n  fix: check the item\n"), "{out}");
+        assert!(
+            out.contains("op whoami failed)\n  sign in: opv login prod\n"),
+            "{out}"
+        );
     }
 
     /// The target checks that use the deploy identity are skipped, saying why.
@@ -1825,7 +1956,8 @@ mod tests {
     fn deploy_failure_skips_the_target_sign_in_check() {
         let (_, out) = doctor_deploy_failed(false);
         assert!(
-            checks(&out).contains(&"skip  fly auth: not checked (deploy credentials failed)"),
+            checks(&out)
+                .contains(&"skip  portfolio: fly auth: not checked (deploy credentials failed)"),
             "{out}"
         );
     }
@@ -1835,7 +1967,7 @@ mod tests {
     fn deploy_failure_still_checks_the_target_tool() {
         let (_, out) = doctor_deploy_failed(false);
         assert!(
-            checks(&out).contains(&"ok    flyctl: version v0.4.112"),
+            checks(&out).contains(&"ok    portfolio: flyctl: version v0.4.112"),
             "{out}"
         );
     }
@@ -1871,7 +2003,7 @@ mod tests {
             .clone();
         assert_eq!(
             (check["status"].clone(), check["do"].clone()),
-            ("fail".into(), "check the item".into()),
+            ("fail".into(), "sign in: opv login prod".into()),
             "{out}"
         );
     }
@@ -1977,6 +2109,7 @@ mod tests {
                 Output::failure(1),
             ],
         );
+        g.push(Output::success(Vec::new()));
         let r = FakeRunner::new(g);
         let mut out = Vec::new();
         let _ = run_scoped(Ok(fleet()), Some("prod"), None, &r, &mut out);
@@ -2152,6 +2285,177 @@ mod tests {
         let missing = crate::config::not_found(std::path::Path::new("/nowhere"));
         let (_, out) = doctor(Err(missing), &r);
         assert!(out.ends_with("Next: opv init dev\n"), "{out}");
+    }
+    // ---- FR-40, FR-56: every target of the environment, each with its own checks ----
+
+    /// The fixture with a second target `api` in prod; with `api_signs_in`, `api` signs in
+    /// with `op://deploy-api/fly`.
+    fn two_targets(api_signs_in: bool) -> Fleet {
+        let creds = if api_signs_in {
+            "deploy_credentials = \"op://deploy-api/fly\"\n"
+        } else {
+            ""
+        };
+        fleet_with(&format!(
+            "[environments.prod.targets.api]\nfly.app = \"api-production\"\n\
+             fly.secret_name = \"{{KEY}}\"\nstate_vault_id = \"sapi\"\n{creds}"
+        ))
+    }
+
+    /// `doctor --env prod --product allumata [--target …]` on [`two_targets`]: when `api`
+    /// signs in, its deploy item lacks its token, so its sign-in fails.
+    fn doctor_targets(
+        only: &[&str],
+        api_signs_in: bool,
+        json: bool,
+    ) -> (Result<(), Error>, String) {
+        let r = FakeRunner::new([]);
+        let op_answers = good().into_iter().take(2);
+        r.responses
+            .borrow_mut()
+            .extend(op_answers.chain([complete_item()]).map(Ok));
+        for name in ["api", "portfolio"] {
+            if !only.is_empty() && !only.contains(&name) {
+                continue;
+            }
+            if name == "api" && api_signs_in {
+                r.responses.borrow_mut().push_back(Ok(item(&[secret(
+                    "",
+                    "OTHER",
+                    "x-FIXTUREVALUE",
+                )])));
+            }
+            // flyctl version, flyctl auth whoami, then the state vault probe.
+            let vault = Output::success(Vec::new());
+            let answers = good().into_iter().skip(2).chain([vault]);
+            r.responses.borrow_mut().extend(answers.map(Ok));
+        }
+        let only: Vec<String> = only.iter().map(|t| t.to_string()).collect();
+        let request = Request {
+            env: Some("prod"),
+            product: Some("allumata"),
+            json,
+            targets: &only,
+            ..Request::default()
+        };
+        let mut out = Vec::new();
+        let res = run_request_on(
+            Ok(two_targets(api_signs_in)),
+            request,
+            &r,
+            &|| linux(),
+            &mut out,
+        );
+        (res, text_of(&out))
+    }
+
+    /// The target of each JSON check named `name`, in order.
+    fn json_targets_of(out: &str, name: &str) -> Vec<serde_json::Value> {
+        json_doc(out)["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["name"] == name)
+            .map(|c| c["target"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn every_target_gets_its_own_labelled_checks() {
+        let (_, out) = doctor_targets(&[], false, false);
+        assert!(
+            ["api", "portfolio"]
+                .iter()
+                .all(|t| checks(&out).contains(&format!("ok    {t}: fly auth: signed in").as_str())),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn target_flag_checks_only_that_target() {
+        let (_, out) = doctor_targets(&["portfolio"], false, false);
+        assert!(!out.contains("  api: "), "{out}");
+    }
+
+    #[test]
+    fn a_failed_sign_in_is_that_targets_deploy_credentials_check() {
+        let (_, out) = doctor_targets(&[], true, false);
+        assert!(
+            checks(&out)
+                .iter()
+                .any(|l| l.starts_with("FAIL  api: deploy credentials: ")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_failed_sign_in_skips_that_targets_dependent_check() {
+        let (_, out) = doctor_targets(&[], true, false);
+        assert!(
+            checks(&out).contains(&"skip  api: fly auth: not checked (deploy credentials failed)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_failed_sign_in_leaves_the_other_targets_checks_running() {
+        let (_, out) = doctor_targets(&[], true, false);
+        assert!(
+            checks(&out).contains(&"ok    portfolio: fly auth: signed in"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn every_target_gets_a_state_vault_check() {
+        let (_, out) = doctor_targets(&[], false, false);
+        assert_eq!(
+            checks(&out)
+                .iter()
+                .filter(|l| l.contains(": state vault: vault s"))
+                .count(),
+            2,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn json_checks_carry_their_target() {
+        let (_, out) = doctor_targets(&[], false, true);
+        assert_eq!(
+            json_targets_of(&out, "state vault"),
+            vec!["api", "portfolio"],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn json_checks_that_run_once_carry_a_null_target() {
+        let (_, out) = doctor_targets(&[], false, true);
+        assert_eq!(
+            json_targets_of(&out, "op auth"),
+            vec![serde_json::Value::Null]
+        );
+    }
+
+    #[test]
+    fn a_state_vault_the_account_cannot_see_names_opv_access() {
+        let mut report = Report::default();
+        let r = FakeRunner::new([Output::failure(1)]);
+        report.push("state vault", state_vault(&r, "prod", "api", "sapi"));
+        assert_eq!(
+            report.rows[0].fix.as_deref(),
+            Some("opv access prod --target api")
+        );
+    }
+
+    #[test]
+    fn an_unknown_target_names_doctors_own_retry() {
+        let (res, _) = doctor_targets(&["nope"], false, false);
+        assert_eq!(
+            res.unwrap_err().next_step(),
+            Some("opv doctor --env prod --target api")
+        );
     }
 }
 

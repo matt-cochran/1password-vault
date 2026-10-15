@@ -217,7 +217,7 @@ fn product_flag_is_not_reported_as_from_opv_product() {
 }
 
 #[test]
-fn opv_product_is_ignored_under_the_simple_profile() {
+fn opv_product_applies_under_the_single_product_form() {
     let (code, _, err) = opv_with(
         &[("OPV_PRODUCT", "app")],
         &[
@@ -230,6 +230,7 @@ fn opv_product_is_ignored_under_the_simple_profile() {
         ],
     );
     assert_eq!(code, 0, "{err}");
+    assert!(err.contains("product app (from OPV_PRODUCT)\n"), "{err}");
 }
 
 #[test]

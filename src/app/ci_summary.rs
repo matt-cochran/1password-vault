@@ -10,38 +10,34 @@
 use super::{is_blocking, kind_label, problems_first};
 use crate::domain::{KeyState, Row};
 
-/// A `status` or `plan` section: a heading, the count line, `changes` when known, and one
-/// table row per key (problems first), with `target` rendering the TARGET word.
+/// A `status` or `plan` section for one target (FR-56): a heading, the count line,
+/// `changes` when known, and one table row per key (problems first), each naming `target`,
+/// with `word` rendering the ON TARGET word.
 pub(crate) fn table(
     heading: &str,
     count_line: &str,
     changes: Option<&str>,
+    target: &str,
     rows: &[Row],
-    simple: bool,
-    target: impl Fn(&Row) -> String,
+    word: impl Fn(&Row) -> String,
 ) -> String {
     let mut md = format!("### {}\n\n{}\n", cell(heading), cell(count_line));
     if let Some(c) = changes {
         md.push_str(&format!("\nchanges: **{c}**\n"));
     }
     md.push('\n');
-    let mut head = vec!["Product", "Key", "Kind", "State", "Target"];
-    if simple {
-        head.remove(0);
-    }
+    let head = ["Target", "Product", "Key", "Kind", "State", "On target"];
     md.push_str(&format!("| {} |\n", head.join(" | ")));
     md.push_str(&format!("|{}\n", "---|".repeat(head.len())));
-    for r in problems_first(rows) {
-        let mut cells = vec![
+    for r in problems_first(rows, |r| r) {
+        let cells = [
+            target.to_string(),
             r.product.clone(),
             r.key.clone(),
             kind_label(r.kind).to_string(),
             state_word(r),
-            target(r),
+            word(r),
         ];
-        if simple {
-            cells.remove(0);
-        }
         let cells: Vec<String> = cells.iter().map(|c| cell(c)).collect();
         md.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
@@ -108,10 +104,10 @@ mod tests {
     fn md(rows: &[Row]) -> String {
         table(
             "opv plan prod",
-            "prod: 2 keys",
+            "prod/app: 2 keys",
             Some("some"),
+            "app",
             rows,
-            false,
             |_| "new".into(),
         )
     }

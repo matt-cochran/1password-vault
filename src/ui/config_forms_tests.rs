@@ -41,7 +41,7 @@ fn add_key_builds_the_full_fleet_command_in_order() {
         allow_same_value: false,
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Ok(v(&[
             "add",
             "api/TOKEN",
@@ -57,25 +57,13 @@ fn add_key_builds_the_full_fleet_command_in_order() {
 }
 
 #[test]
-fn add_key_builds_the_minimal_simple_command() {
-    let form = AddKeyForm {
-        product: None,
-        ..key_form()
-    };
-    assert_eq!(
-        add_key_command(&form, false),
-        Ok(v(&["add", "TOKEN", "--kind", "secret"]))
-    );
-}
-
-#[test]
 fn add_key_writes_the_config_kind_choice() {
     let form = AddKeyForm {
         kind: KindChoice::Config,
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Ok(v(&["add", "api/TOKEN", "--kind", "config"]))
     );
 }
@@ -87,7 +75,7 @@ fn add_key_adds_allow_same_value_when_set() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Ok(v(&[
             "add",
             "api/TOKEN",
@@ -107,7 +95,7 @@ fn add_key_rejects_a_key_that_is_not_uppercase() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Err("key \"token\" must match ^[A-Z][A-Z0-9_]*$.".to_string())
     );
 }
@@ -119,7 +107,7 @@ fn add_key_rejects_an_empty_key() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Err("key \"\" must match ^[A-Z][A-Z0-9_]*$.".to_string())
     );
 }
@@ -131,7 +119,7 @@ fn add_key_rejects_a_product_that_is_not_lowercase() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Err("product \"API\" must match ^[a-z][a-z0-9_-]*$.".to_string())
     );
 }
@@ -143,29 +131,20 @@ fn add_key_rejects_an_empty_product() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Err("product \"\" must match ^[a-z][a-z0-9_-]*$.".to_string())
     );
 }
 
 #[test]
-fn add_key_rejects_a_fleet_profile_without_a_product() {
+fn add_key_without_a_product_is_refused() {
     let form = AddKeyForm {
         product: None,
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
-        Err("the fleet profile declares keys per product: use PRODUCT/KEY.".to_string())
-    );
-}
-
-#[test]
-fn add_key_rejects_a_simple_profile_with_a_product() {
-    let form = key_form();
-    assert_eq!(
-        add_key_command(&form, false),
-        Err("the simple profile has no products: use KEY.".to_string())
+        add_key_command(&form),
+        Err("keys are declared per product: use PRODUCT/KEY.".to_string())
     );
 }
 
@@ -177,7 +156,7 @@ fn add_key_rejects_personal_with_allow_same_value() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Err("personal and allow_same_value cannot both be set.".to_string())
     );
 }
@@ -190,7 +169,7 @@ fn add_key_rejects_personal_with_a_config_key() {
         ..key_form()
     };
     assert_eq!(
-        add_key_command(&form, true),
+        add_key_command(&form),
         Err("personal keys must be secret, not config.".to_string())
     );
 }

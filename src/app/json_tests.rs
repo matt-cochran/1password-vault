@@ -5,7 +5,7 @@
 
 use super::sync::{self, SyncOpts};
 use super::testutil::*;
-use super::{explain, local, skeleton, status};
+use super::{local, skeleton, status};
 use crate::error::Error;
 use crate::runner::fake::FakeRunner;
 
@@ -114,10 +114,10 @@ fn status_unknown_environment() {
 
 #[test]
 fn status_overview_run_only_environment() {
-    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
-    // dev (run-only) is read too (H11): item only; then prod and staging, item and list.
+    let f = fleet_with("[environments.dev]\n");
+    // dev (run-only) declares no key, so it has no boundary to read (FR-57); then prod and
+    // staging, item and list.
     let r = FakeRunner::new([
-        complete_item(),
         complete_item(),
         fly(&[(OPENAI_FLY, "d1")]),
         complete_item(),
@@ -189,6 +189,9 @@ fn sync_success() {
         ok(),
         fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
     ]);
+    r.responses
+        .borrow_mut()
+        .extend(delivery_not_recorded(complete_item()).map(Ok));
     golden("sync_success", &sync_json(&r));
 }
 
@@ -219,7 +222,7 @@ fn sync_confirm_required() {
 
 fn explain_json(key: &str) -> String {
     let mut out = Vec::new();
-    let res = explain::run_as(&fleet(), key, Some("prod"), &mut out, true);
+    let res = crate::app::testutil::explain(&fleet(), key, Some("prod"), &mut out, true);
     framed(&out, &res, "opv explain --json")
 }
 

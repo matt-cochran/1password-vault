@@ -555,6 +555,16 @@ fn known_locations(
 
 /// Where `program` is installed when it is not on PATH: the first known location holding a
 /// file of that name. `None` when it is on PATH or found nowhere.
+// Like Host::detect, fake-host unit tests must not inspect the developer's
+// installed tools. The discovery algorithm is covered with explicit temporary
+// homes and PATHs by off_path_tests below; binaries/integration tests use the real
+// wrapper unchanged.
+#[cfg(test)]
+pub fn installed_off_path(_program: &str, _platform: Platform) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(test))]
 pub fn installed_off_path(program: &str, platform: Platform) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

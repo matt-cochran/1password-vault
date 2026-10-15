@@ -42,15 +42,13 @@ fn args(path: &Path, apply: bool) -> InitArgs {
         env: "dev".into(),
         vault: "myapp-dev".into(),
         item: "myapp · dev values".into(),
-        target: None,
-        fields: BTreeMap::new(),
-        profile: None,
-        force: false,
+        product: Some("api".into()),
         from: Some(from(path, apply)),
+        ..Default::default()
     }
 }
 
-/// `init --from … --apply` into `dir` (the file profile) on a fresh fake.
+/// `init --from … --apply` into `dir` (a `secrets.toml`) on a fresh fake.
 fn apply(dir: &Path, path: &Path) -> (FakeOp, Result<(), Error>, String) {
     // A person signed in with their own account: init may create, adopt may write.
     let _person = crate::app::tidy::activate();
@@ -64,10 +62,17 @@ fn written(dir: &Path) -> crate::domain::Fleet {
     crate::config::load(dir.join(FILE_NAME)).unwrap()
 }
 
-/// The value of the unsectioned field `label` in the item the configuration names.
+/// The value of the field `label` in the item the configuration names.
 fn value_of(op: &FakeOp, dir: &Path, label: &str) -> Option<String> {
     let fleet = written(dir);
-    let item = op.item(&fleet.environments["dev"].item_id);
+    let item = op.item(
+        &fleet.environments["dev"]
+            .boundaries
+            .values()
+            .next()
+            .unwrap()
+            .item_id,
+    );
     item["fields"]
         .as_array()?
         .iter()
@@ -192,12 +197,7 @@ fn apply_succeeds_on_a_new_project() {
 fn apply_declares_the_keys_in_the_configuration() {
     let (d, path) = standard();
     let _ = apply(d.path(), &path);
-    assert_eq!(
-        written(d.path()).products[crate::domain::SIMPLE_PRODUCT]
-            .keys
-            .len(),
-        3
-    );
+    assert_eq!(written(d.path()).products["api"].keys.len(), 3);
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn apply_declares_the_override_kind() {
     let _ = apply(d.path(), &path);
     let fleet = written(d.path());
     assert_eq!(
-        fleet.products[crate::domain::SIMPLE_PRODUCT].keys["SIGNUP_POLICY"].kind,
+        fleet.products["api"].keys["SIGNUP_POLICY"].kind,
         Kind::Config
     );
 }
@@ -287,15 +287,15 @@ fn a_value_already_in_1password_is_kept() {
 }
 
 #[test]
-fn a_fleet_shaped_item_is_refused() {
+fn an_item_holding_another_products_section_is_refused() {
     let (d, path) = standard();
     let op = FakeOp::default();
     op.insert(
         "vdev0000000000000000000001",
         serde_json::json!({
             "title": "myapp · dev values", "category": "SECURE_NOTE",
-            "sections": [{"id": "api", "label": "api"}],
-            "fields": [{"id": "f1", "section": {"id": "api", "label": "api"}, "type": "CONCEALED", "label": "X", "value": ""}]
+            "sections": [{"id": "worker", "label": "worker"}],
+            "fields": [{"id": "f1", "section": {"id": "worker", "label": "worker"}, "type": "CONCEALED", "label": "X", "value": ""}]
         }),
     );
     let _person = crate::app::tidy::activate();

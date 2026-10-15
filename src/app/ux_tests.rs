@@ -29,11 +29,22 @@ fn guarded() -> Fleet {
 }
 
 /// The fixture plus a second product, `web`: TOKEN (prod) and OLD (staging only).
+///
+/// The old environment item held both products, so it stays one opt-in boundary group.
 fn two_products() -> Fleet {
-    fleet_with(
-        "[products.web.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
+    let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let text = text
+        .replace("boundaries.allumata =", "boundaries.core =")
+        .replace(
+            "[products.allumata.keys.OPENAI_API_KEY]",
+            "[products.allumata]\nboundary = \"core\"\n\n[products.allumata.keys.OPENAI_API_KEY]",
+        );
+    config::parse(&format!(
+        "{text}\n[products.web]\nboundary = \"core\"\n\n\
+         [products.web.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
          [products.web.keys.OLD]\nkind = \"secret\"\nenvironments = [\"staging\"]\n",
-    )
+    ))
+    .unwrap()
 }
 
 fn with_web_token() -> Output {
@@ -114,7 +125,10 @@ fn sync_with_pending_names_the_deploy_command_last() {
 #[test]
 fn sync_with_nothing_pending_ends_with_the_summary() {
     let (_, out) = sync_out(&fleet(), &unchanged(), &deploy());
-    assert!(last_line(&out).starts_with("summary: "), "{out}");
+    assert!(
+        last_line(&out).starts_with("prod/portfolio: summary: "),
+        "{out}"
+    );
 }
 
 #[test]
@@ -162,7 +176,7 @@ fn sync_json_names_the_next_command() {
 
 #[test]
 fn sync_json_names_the_provider() {
-    assert_eq!(json_doc(&new_secrets())["provider"], "fly");
+    assert_eq!(json_doc(&new_secrets())["targets"][0]["provider"], "fly");
 }
 
 #[test]
@@ -282,8 +296,14 @@ fn prune_immutable_without_prune_next_is_plan() {
 
 #[test]
 fn explain_of_an_unknown_key_next_carries_the_env() {
-    let e =
-        super::explain::run(&fleet(), "allumata/OPENAI_KEY", None, &mut Vec::new()).unwrap_err();
+    let e = crate::app::testutil::explain(
+        &fleet(),
+        "allumata/OPENAI_KEY",
+        None,
+        &mut Vec::new(),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(
         e.next_step(),
         Some("opv explain allumata/OPENAI_API_KEY --env prod")
@@ -292,8 +312,14 @@ fn explain_of_an_unknown_key_next_carries_the_env() {
 
 #[test]
 fn explain_with_several_environments_next_names_one() {
-    let e =
-        super::explain::run(&fleet(), "allumata/SIGNUP_POLICY", None, &mut Vec::new()).unwrap_err();
+    let e = crate::app::testutil::explain(
+        &fleet(),
+        "allumata/SIGNUP_POLICY",
+        None,
+        &mut Vec::new(),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(
         e.next_step(),
         Some("opv explain allumata/SIGNUP_POLICY --env staging")
@@ -445,20 +471,6 @@ fn sync_product_next_step_keeps_the_product() {
 }
 
 #[test]
-fn sync_product_under_the_simple_profile_is_a_config_error() {
-    let simple = config::load("tests/fixtures/simple.toml").unwrap();
-    let mut out = Vec::new();
-    let res = sync::run(
-        &simple,
-        "prod",
-        &FakeRunner::new([]),
-        &mut out,
-        &product("x"),
-    );
-    assert!(matches!(res, Err(Error::Config(m)) if m.contains("simple profile")));
-}
-
-#[test]
 fn undefined_product_is_a_config_error_naming_the_choices() {
     let (res, _) = sync_out(&fleet(), &FakeRunner::new([]), &product("nope"));
     assert!(matches!(res, Err(Error::Config(m)) if m.contains("choose one of: allumata")));
@@ -485,8 +497,8 @@ fn plan_starts_with_a_count_summary() {
     );
     assert_eq!(
         out.lines().next().unwrap(),
-        "prod: 4 keys · 0 findings · 2 to stage · 0 held (immutable) · 0 to prune · 0 \
-         unmanaged on Fly (never touched)",
+        "prod/portfolio: 4 keys · 0 findings · 2 to stage · 0 held (immutable) · 0 to \
+         prune · 0 unmanaged on Fly (never touched)",
         "{out}"
     );
 }
@@ -609,13 +621,6 @@ fn status_json_names_its_product() {
     assert_eq!(doc["product"], "web");
 }
 
-#[test]
-fn status_product_under_the_simple_profile_is_a_config_error() {
-    let simple = config::load("tests/fixtures/simple.toml").unwrap();
-    let (res, _) = status_out(&simple, &FakeRunner::new([]), Some("x"));
-    assert!(matches!(res, Err(Error::Config(_))), "{res:?}");
-}
-
 // ---- P22: status without an environment ---------------------------------------------
 
 /// Staging's and prod's items and lists, in environment name order (prod first).
@@ -638,14 +643,17 @@ fn status_without_env_prints_one_line_per_environment() {
     let (_, out) = overview_out(&fleet(), &r);
     assert_eq!(
         out,
-        "prod: 4 keys · 3 saved · 1 skipped · 0 findings · 2 not yet on Fly\n\
-         staging: 3 keys · 2 saved · 0 skipped · 1 finding · 1 not yet on Fly\n",
+        "prod/portfolio: 4 keys · 3 saved · 1 skipped · 0 findings · 2 not yet on Fly\n\
+         staging/portfolio: 3 keys · 2 saved · 0 skipped · 1 finding · 1 not yet on Fly\n",
     );
 }
 
 #[test]
 fn status_without_env_reads_a_run_only_environment() {
-    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    let f = fleet_with(
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+         [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
     let r = FakeRunner::new([
         item_without("allumata", "OPENAI_API_KEY"),
         complete_item(),
@@ -661,7 +669,7 @@ fn status_without_env_reads_a_run_only_environment() {
 #[test]
 fn status_without_env_counts_run_only_findings() {
     let f = fleet_with(
-        "[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n\
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
          [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
     );
     let r = FakeRunner::new([
@@ -684,7 +692,7 @@ fn status_without_env_scopes_to_a_product() {
     let mut out = Vec::new();
     let _ = status::overview(&two_products(), Some("web"), &r, &mut out, false);
     assert!(
-        text_of(&out).starts_with("prod: 1 key · "),
+        text_of(&out).starts_with("prod/portfolio: 1 key · "),
         "{}",
         text_of(&out)
     );
@@ -692,7 +700,10 @@ fn status_without_env_scopes_to_a_product() {
 
 #[test]
 fn status_without_env_json_lists_every_environment() {
-    let f = fleet_with("[environments.dev]\nvault_id = \"vdev\"\nitem_id = \"idev\"\n");
+    let f = fleet_with(
+        "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n\
+         [products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
+    );
     let r = FakeRunner::new([
         complete_item(),
         complete_item(),
@@ -874,7 +885,7 @@ fn staged_not_deployed() -> FakeRunner {
 fn expect_plan_rerun_after_an_interrupted_deploy_succeeds() {
     let id = fly_plan_id(&fleet());
     let first = new_secrets();
-    first.responses.borrow_mut().truncate(6);
+    first.responses.borrow_mut().truncate(8);
     first.push_unknown("timeout");
     let o = SyncOpts {
         deploy: true,

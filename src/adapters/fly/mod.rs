@@ -1430,11 +1430,12 @@ mod tests {
         assert_eq!(list(&r, "app").unwrap_err().exit_code(), 9);
     }
 
-    /// A Fly target as configured (simple profile, app `app`).
+    /// A Fly target as configured (target `web`, app `app`).
     fn fly_target() -> crate::domain::Fleet {
         crate::config::parse(
-            "[profile]\nkind = \"simple\"\n[environments.prod]\nvault_id = \"v\"\n\
-             item_id = \"i\"\n[environments.prod.fly]\napp = \"app\"\n[keys.K]\n\
+            "[environments.prod]\nboundaries.web = { vault_id = \"v\", item_id = \"i\" }\n\
+             [environments.prod.targets.web]\nfly.app = \"app\"\nfly.secret_name = \"{KEY}\"\n\
+             state_vault_id = \"s\"\n[products.web.keys.K]\n\
              kind = \"secret\"\nenvironments = [\"prod\"]\n",
         )
         .unwrap()
@@ -1445,7 +1446,7 @@ mod tests {
     fn read_mode_preflight_makes_no_call() {
         let fleet = fly_target();
         let r = FakeRunner::new(Vec::<Output>::new());
-        let t = fleet.environments["prod"].target().unwrap();
+        let t = fleet.environments["prod"].targets["web"].config.as_ref();
         t.preflight(&r, crate::provider::PreflightMode::Read)
             .unwrap();
         assert!(r.calls.borrow().is_empty());
@@ -1464,7 +1465,7 @@ mod tests {
             Output::success(RUNNING),
             Output::success(COMPLETE),
         ]);
-        let t = fleet.environments["prod"].target().unwrap();
+        let t = fleet.environments["prod"].targets["web"].config.as_ref();
         assert!(
             t.preflight(&r, crate::provider::PreflightMode::Mutate)
                 .is_ok()
@@ -1850,6 +1851,10 @@ mod tests {
     fn every_accepted_value_round_trips_through_the_parser() {
         let mut accepted = 0;
         for value in tricky_corpus() {
+            // Each case tests encoding/parser fidelity independently. Retaining all
+            // 20,000 prior marker values only exercises registry growth, not this
+            // assertion; keep the real SecretValue registration for the current case.
+            crate::scrub::reset_test_registry();
             let v = sv(&value);
             let batch = [("K".to_string(), &v)];
             if validate_import(&batch).is_ok() {

@@ -31,11 +31,21 @@ on message text.
 
 ## Pick the flow from `opv ready --json`
 
-- **No configuration yet** (`config_not_found`): ask which profile (one app: simple; several
-  products: fleet), write `secrets.toml` without IDs, then the user runs `opv bootstrap` (it
-  creates vaults and items in the selected account and records the IDs). Never create a second
-  configuration beside one that exists, and never edit a file whose first line says it is
-  generated: hand the printed IDs to its generator.
+- **No configuration yet** (`config_not_found`): there is one form (FR-60). Let
+  `opv init`/`opv add` write `[products.<name>.keys.<KEY>]` (one product for one app, more
+  for a fleet) and a boundary per environment; `opv init` writes no target. Then the user
+  runs `opv bootstrap`, which creates each boundary's vault and item in the selected account
+  and records their IDs, and adds each deploying environment's target with
+  `opv target add <env> <name> --<provider options>`, the one way to add a target (it
+  validates it, creates its state vault and records its placements). Never create a second configuration beside
+  one that exists, and never edit a file whose first line says it is generated: hand the
+  printed IDs to its generator.
+- **Adding a placement** (a product on another target): `opv ready --json` names a target as
+  `grants_missing` until its deploy credentials, state vault and every boundary it reads can
+  be opened. Declare one with `opv target add <env> <name> --<provider options>` (it asks
+  first and creates the target's state vault). A `state_vault_wider_than_values` load error
+  means a target shares a state vault it cannot read; give it its own by deleting its
+  `state_vault_id` and running `opv bootstrap`.
 - **Account findings** (`no_accounts`, `selected_account_absent`, `account_ambiguous`,
   `selected_signed_out`): run `opv account list --json`; ask the user which account; record it
   with `opv account use <ID>`; hand `opv login --add --account <email>` or
@@ -49,11 +59,13 @@ on message text.
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go
   `opv plan <env>` then `opv sync <env> --expect-plan <id>` (add `--deploy` only when the user
   wants to deploy). CI secrets in GitHub Actions use a `github` environment and the same sync.
-- **"Is product P still what was delivered?"** (environments with `state_vault_id`): run
-  `opv delivery verify <env> --product <P> --json`. Only `verified` is proof. Report `changed`
-  names with their state (`source_changed`, `drifted_on_target`, `missing_on_target`),
-  `not_delivered` and `unverifiable` with their reason, and `deployed` separately. Never
-  present a revision as proof without `verified`; a re-sync of P mints the new revision.
+- **"Is product P still what was delivered?"** (targets with a state vault): run
+  `opv delivery verify <env> --product <P> --json`. It reports every placement of P, each with
+  its target and state; `--target <name>` narrows to one placement. Only `verified` is proof.
+  Report `changed` names with their state (`source_changed`, `drifted_on_target`,
+  `missing_on_target`), `not_delivered` and `unverifiable` with their reason, and `deployed`
+  separately. Never present a revision as proof without `verified`; a re-sync of P mints the
+  new revision.
 
 Resume after any interruption by running `opv ready --json` again: every step is safe to
 repeat, and the receipt says what is left.

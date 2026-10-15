@@ -123,7 +123,14 @@ fn plan_prints_no_item_link_under_a_finding() {
 #[test]
 fn explain_names_the_open_command() {
     let mut out = Vec::new();
-    super::explain::run(&fleet(), "allumata/OPENAI_API_KEY", Some("prod"), &mut out).unwrap();
+    crate::app::testutil::explain(
+        &fleet(),
+        "allumata/OPENAI_API_KEY",
+        Some("prod"),
+        &mut out,
+        false,
+    )
+    .unwrap();
     assert!(
         text_of(&out).contains("open:       opv open allumata/OPENAI_API_KEY --env prod"),
         "{}",
@@ -252,6 +259,9 @@ fn sync_writes_its_summary_line_to_the_step_summary() {
         rel,
         ok(),
         fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")]),
+        ok(),
+        ok(),
+        ok(),
     ]);
     let _ = sync::run(&fleet(), "prod", &r, &mut Vec::new(), &SyncOpts::default());
     assert!(

@@ -67,8 +67,13 @@ fn planned(field: Option<ItemField>, vars: &FakeVars) -> (SyncPlan, VarPlan) {
         &BTreeSet::new(),
         &|_| None,
     );
-    let t = f.environments["staging"].target().unwrap();
-    let v = super::plan(&f, "staging", t, &mut p, vars, &|_| true).unwrap();
+    let (name, t) = f.environments["staging"]
+        .targets
+        .iter()
+        .next()
+        .map(|(n, t)| (n.clone(), t.config.as_ref()))
+        .unwrap();
+    let v = super::plan(&f, "staging", &name, t, &mut p, vars, &|_| true).unwrap();
     (p, v)
 }
 
@@ -167,8 +172,13 @@ fn a_store_refusal_fails_the_row() {
         &BTreeSet::new(),
         &|_| None,
     );
-    let t = f.environments["staging"].target().unwrap();
-    super::plan(&f, "staging", t, &mut p, &RefuseAll, &|_| true).unwrap();
+    let (name, t) = f.environments["staging"]
+        .targets
+        .iter()
+        .next()
+        .map(|(n, t)| (n.clone(), t.config.as_ref()))
+        .unwrap();
+    super::plan(&f, "staging", &name, t, &mut p, &RefuseAll, &|_| true).unwrap();
     assert_eq!(
         row_state(&p),
         &KeyState::RuleFailed("fake-rule", Reason::Fixed("fake reason"))
@@ -197,9 +207,14 @@ fn a_managed_variable_no_key_wants_is_pruned() {
         .environments
         .retain(|e| e != "staging");
     let mut p = plan::build(&f2, "staging", vec![], &[], &BTreeSet::new(), &|_| None);
-    let t = f2.environments["staging"].target().unwrap();
+    let (name, t) = f2.environments["staging"]
+        .targets
+        .iter()
+        .next()
+        .map(|(n, t)| (n.clone(), t.config.as_ref()))
+        .unwrap();
     let vars = FakeVars::with(&[(NAME, "open")]);
-    let v = super::plan(&f2, "staging", t, &mut p, &vars, &|_| true).unwrap();
+    let v = super::plan(&f2, "staging", &name, t, &mut p, &vars, &|_| true).unwrap();
     assert_eq!(v.prune, [NAME]);
 }
 
@@ -221,8 +236,22 @@ fn an_out_of_scope_name_is_neither_set_nor_pruned() {
         &BTreeSet::new(),
         &|_| None,
     );
-    let t = f.environments["staging"].target().unwrap();
-    let v = super::plan(&f, "staging", t, &mut p, &FakeVars::with(&[]), &|_| false).unwrap();
+    let (name, t) = f.environments["staging"]
+        .targets
+        .iter()
+        .next()
+        .map(|(n, t)| (n.clone(), t.config.as_ref()))
+        .unwrap();
+    let v = super::plan(
+        &f,
+        "staging",
+        &name,
+        t,
+        &mut p,
+        &FakeVars::with(&[]),
+        &|_| false,
+    )
+    .unwrap();
     assert_eq!(v, VarPlan::default());
 }
 

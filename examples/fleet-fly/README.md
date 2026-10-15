@@ -19,7 +19,7 @@ Copy [secrets.toml](secrets.toml) into your repository, change the Fly app names
 
 ```sh
 opv bootstrap --dry-run    # per environment: what will be created or checked
-opv bootstrap              # vaults <project>-<env>, items, every declared field (empty); records the IDs
+opv bootstrap              # vaults <project>-<env>, items, every declared field (empty); records the boundary and state vault IDs
 ```
 
 If an environment's IDs belong to another account, bootstrap stops (`ids_not_in_account`) and names both fixes: `opv account use <ID>` for the owning account, or `opv bootstrap --rebind <env>` to start that environment in this account.

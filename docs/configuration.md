@@ -42,117 +42,216 @@ git rm secrets.toml                                     # opv never deletes it f
 
 ## The `secrets.toml` schema
 
-A configuration has a profile, environments and keys. The **fleet** profile has several products per environment (one 1Password section each, target names from a template); the **simple** profile has one app per environment and a flat list of keys ([below](#simple-profile-one-app-per-environment)).
+There is one schema. A configuration names environments, the products and keys that live in them, the boundaries (1Password vaults) that hold the values, and the targets that deploy them. There are no profiles: a single-app project is a configuration with one product.
 
-### Fleet profile
+### Boundaries: where values live
+
+A **boundary** is one 1Password vault holding the values for one set of products in one environment. 1Password grants access per vault, so a boundary is the smallest set of values you can give a person or an identity. An environment records a boundary with `boundaries.<name> = { vault_id, item_id }`; `opv bootstrap` creates the vault and item and writes the IDs. Every command reads the IDs, never the names.
+
+By default each product is its own boundary:
+
+| Boundary | Vault | Item |
+|---|---|---|
+| product (default) | `<project>-<product>-<env>` | `<project> · <product> · <env> values` |
+| project shared | `<project>-shared-<env>` | `<project> · shared · <env> values` |
+| group (opt-in) | `<project>-<group>-<env>` | `<project> · <group> · <env> values` |
 
 ```toml
-[profile]
-kind = "fleet"                       # or "simple" (one app per environment, below)
-
-[environments.staging]
-vault_id = "vstg1234example"         # IDs, not names; [A-Za-z0-9][A-Za-z0-9._-]*
-item_id  = "istg1234example"
-fly.app  = "example-portfolio-staging"
-fly.secret_name = "FLEET__{PRODUCT}__{KEY}"   # naming template; defines the managed set
-modes.allumata.payments = "test"     # input to prefix_by_mode rules
-
+# Values vaults, one per boundary; opv bootstrap records the IDs here.
 [environments.prod]
-vault_id = "vprd1234example"
-item_id  = "iprd1234example"
-fly.app  = "example-portfolio-production"
-fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
-modes.allumata.payments = "off"
+boundaries.web = { vault_id = "vprd-web", item_id = "iprd-web" }
+boundaries.api = { vault_id = "vprd-api", item_id = "iprd-api" }
+```
 
-# Run-only environment: no target section. check, run, config export and item
-# skeleton work; plan and sync refuse it (status counts it, as run-only).
-[environments.dev]
-vault_id = "vdev1234example"
-item_id  = "idev1234example"
+Only team keys need a boundary. A product whose keys desired in an environment are all personal needs none there, because each person's values live in their own item ([personal keys](#personal-keys-each-developers-own-values)).
 
-[products.allumata.keys.OPENAI_API_KEY]
-kind = "secret"                      # "secret" (concealed) or "config" (text)
-environments = ["prod"]              # where the key is desired
-rules = { prefix = "sk-", not_prefix = "sk-or-" }
-guidance = "OpenAI platform / API keys"       # printed by status for a missing key
+#### Sharing one boundary: `boundary = "<group>"`
 
-[products.allumata.keys.INTEGRATION_ENC_KEY]
+Products that must share one vault set `boundary` to the same group name. This is an opt-in with an explicit trade: 1Password grants access per vault, so anyone who can read the group's boundary can read every product in it. Use it only when the same people or identity must read those products together.
+
+```toml
+[products.web]
+boundary = "core"          # web and api share the "core" boundary
+
+[products.api]
+boundary = "core"
+```
+
+The group's vault is `<project>-core-<env>` and its item `<project> · core · <env> values`.
+
+#### Missing and unused boundaries
+
+Two load errors protect the boundaries:
+
+- `boundary_missing`: a product has a team key desired in an environment whose boundary is not recorded. Its next step is `opv bootstrap`.
+- A recorded boundary that no product with a key in that environment lives in is refused; remove it, or declare that product's keys for the environment. The configuration never names a vault nothing reads.
+
+### Products and keys
+
+A **product** is a set of keys with one role, named `web`, `api` or `worker`. A **key** is one value with a kind, the environments that want it, and optional rules and guidance. Keys live in their product's section of the boundary item.
+
+```toml
+[products.shared]
+source_only = true                           # holds values other products read with from
+
+[products.shared.keys.FLY_API_TOKEN]
 kind = "secret"
 environments = ["staging", "prod"]
-immutable = true                     # written only when absent on the target; see --rotate
-rules = { base64_bytes = 32 }
-allow_same_value = true              # the same value in staging and prod is intended (see settings health)
+guidance = "Fly org deploy token"
 
-[products.allumata.keys.STRIPE_SECRET_KEY]
+[products.api.keys.OPENAI_API_KEY]
+kind = "secret"                              # "secret" (concealed) or "config" (text)
+environments = ["prod"]                      # where the key is desired
+rules = { prefix = "sk-", not_prefix = "sk-or-" }
+guidance = "OpenAI platform / API keys"      # printed by status for a missing key
+
+[products.api.keys.INTEGRATION_ENC_KEY]
+kind = "secret"
+environments = ["staging", "prod"]
+immutable = true                             # written only when absent on the target; see --rotate
+rules = { base64_bytes = 32 }
+allow_same_value = true                      # the same value in staging and prod is intended (see settings health)
+
+[products.api.keys.STRIPE_SECRET_KEY]
 kind = "secret"
 environments = ["staging", "prod"]
 rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_", live = "sk_live_" }, skip = ["off", "external"] } }
 
-[products.allumata.keys.SIGNUP_POLICY]
+[products.api.keys.SIGNUP_POLICY]
 kind = "config"
 environments = ["dev", "staging", "prod"]
 rules = { enum = ["open", "invite_only"] }
+
+[products.api.keys.DATABASE_URL]
+kind = "secret"
+environments = ["staging", "prod"]
+guidance = "Neon / connection string"
+
+[products.worker.keys.DATABASE_URL]
+kind = "secret"
+from = "api/DATABASE_URL"                    # one source: api's field in api's boundary item
+environments = ["prod"]
 ```
 
-Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A product name is upper-cased into the template (`allumata` becomes `ALLUMATA`), so `OPENAI_API_KEY` is staged on Fly as `FLEET__ALLUMATA__OPENAI_API_KEY`. The template must contain `{PRODUCT}` and `{KEY}`.
+Product names match `^[a-z][a-z0-9_-]*$` and key names `^[A-Z][A-Z0-9_]*$`. A product name is upper-cased into a target's template (`api` becomes `API`), so with `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"` the key `OPENAI_API_KEY` is staged as `FLEET__API__OPENAI_API_KEY`. The template must contain `{PRODUCT}` and `{KEY}`, and it defines the target's managed set.
 
-### Simple profile (one app per environment)
+`kind` is `secret` (a concealed field) or `config` (a text field). `environments` lists where the key is desired. `rules`, `guidance`, `immutable`, `personal`, `allow_same_value` and `from` work as described below and in the [rules reference](#rules-reference). Modes are per product on the environment (`modes.<product>.<mode>`), an input to `prefix_by_mode`.
 
-For one app per environment with no products, use `kind = "simple"` and a flat `[keys]` map. Each key is an unsectioned field of the environment's item: a field in the item's unnamed default section, where the 1Password app puts a field added outside any named section. (A field with no section at all is readable by `op` but hidden in every 1Password app, so opv moves one it finds into the default section.) and is staged on Fly under its own name: `[keys.JWT_KEY]` reads field `JWT_KEY` and stages `JWT_KEY`. There is no `[products]` table and no `fly.secret_name`; either one under the simple profile is a configuration error.
+#### A single-app project: one product
 
-```text
-vault myapp-prod   item myapp   field DATABASE_URL   (concealed)
-                                field JWT_KEY        (concealed)
-                                field LOG_LEVEL      (text)
-```
+A single-app project is a configuration with one product, written exactly like any other. Name the product after its role. When the app expects bare variable names, use `secret_name = "{KEY}"` on the target, so no product prefix is added.
 
 ```toml
-[profile]
-kind = "simple"
-
+# Values vault for the one product; opv bootstrap records the IDs here.
 [environments.prod]
-vault_id = "vprd1234example"
-item_id  = "iprd1234example"
-fly.app  = "myapp-production"        # one app per environment; two environments may not share it
-modes.payments = "live"              # input to prefix_by_mode rules; flat, no product level
+boundaries.web = { vault_id = "vprd1234example", item_id = "iprd1234example" }
 
-[keys.DATABASE_URL]
+[environments.prod.targets.web]
+fly.app = "myapp-production"
+fly.secret_name = "{KEY}"                    # the app reads bare names: no product prefix
+state_vault_id = "vstate1234example"         # created by opv target add
+
+[products.web.keys.DATABASE_URL]
 kind = "secret"
 environments = ["prod"]
 
-[keys.JWT_KEY]
+[products.web.keys.JWT_KEY]
 kind = "secret"
 environments = ["prod"]
 immutable = true
 rules = { base64_bytes = 32 }
 
-[keys.LOG_LEVEL]
+[products.web.keys.LOG_LEVEL]
 kind = "config"
 environments = ["prod"]
 rules = { enum = ["debug", "info", "warn"] }
 ```
 
-Kinds, rules, guidance, modes and `immutable` work as in the fleet profile. Key names match `^[A-Z][A-Z0-9_]*$`. The managed set is exactly the declared keys: `--prune` unsets only a declared key that is not desired in the environment, and any other name on the Fly app is reported as unmanaged and never touched. Every command reads the item once, by vault ID and item ID.
+### Targets: where products deploy
 
-Under the simple profile, commands name a key by its name alone: `status` and `plan` print no PRODUCT column, their `--json` rows carry `"product": null`, `--rotate` and `--prune-immutable` take `KEY`, `config export` prints a flat `{"KEY": "value"}` object, and `run <ENV> -- <cmd>` takes no `--product` and passes every key desired in the environment.
+A **target** is one named placement in one environment: one provider's options, the products it serves, its deploy identity and its delivery evidence. An environment declares its targets only as `[environments.<env>.targets.<name>]`, also when there is just one. An environment with no target is run-only: `check`, `run`, `config export` and `item skeleton` work; `plan` and `sync` refuse it.
 
-`run` under the simple profile hands `op run` references of the form `op://<vault>/<item>/KEY`. It reads the item first, so a key whose field is not yet where the convention puts it (in a section, or given twice, before your next local run tidies it) is referenced by its field ID instead, and `op` never sees an ambiguous reference.
+A target holds:
+
+- exactly one provider section, `fly`, `azure`, `kubernetes` or `github` ([targets by provider](#targets-by-provider));
+- `products = ["..."]`, optional: without it the target delivers every non-source-only product with a key desired in the environment;
+- `deploy_credentials = "op://<vault>/<item>"`, optional: the item holding only this target's least-privilege deploy identity ([account and deploy credentials](#account-and-deploy-credentials));
+- `state_vault_id`, required: the vault that holds this target's delivery evidence ([delivery evidence](#delivery-evidence-state_vault_id)).
+
+```toml
+[environments.prod.targets.shared]
+fly.app = "portfolio-prod"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+deploy_credentials = "op://infra-prod/fly-deploy-shared"
+state_vault_id = "vprd-state-shared"
+```
+
+Target names match `^[a-z][a-z0-9-]*$` and are chosen by a person. There is no generated or default name.
+
+#### Adding a target
+
+`opv target add <env> <name> --<provider options> [--products …] [--deploy-credentials …]` writes the target through the configuration editor (comments kept, the result validated, a concurrent change refused). In the same confirmed step it creates the target's state vault and records `state_vault_id`, so the configuration never names a target without one. It ends with `Next: opv access <env> --target <name>`. If you write the target by hand, leave `state_vault_id` out and run `opv bootstrap`: it creates the state vault and records it.
+
+#### One provider locator per target
+
+Within one environment a `(provider, locator)` belongs to one target: the same Fly app, the same Key Vault and Container App, or the same context, namespace and Deployment cannot appear on two targets. Across environments one Fly app is allowed when the name templates differ, because the environment is part of the evidence scope.
+
+#### One baseline plus a dedicated overflow
+
+One product can run on a shared app and also on a dedicated overflow app in the same environment. Both targets read the same boundary items, so no value is entered twice, and each keeps its own delivery evidence:
+
+```toml
+[environments.prod.targets.shared]
+fly.app = "portfolio-prod"                   # every product, p included
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "vprd-state-shared"
+
+[environments.prod.targets.p-overflow]
+fly.app = "p-overflow-prod"                  # p only
+fly.secret_name = "{KEY}"
+products = ["p"]
+state_vault_id = "vprd-state-p"
+```
+
+`shared` has no `products` list, so it delivers every product, `p` included; `p-overflow` delivers only `p`. Both read `p`'s boundary item, so `p`'s values exist once, and `opv delivery verify prod --product p` reports each placement separately.
+
+### One source per key: `from`
+
+Every value has exactly one source: a key's own field, or the field named by `from = "<product>/<KEY>"`. The source is in the source product's boundary item in the same environment. There is no precedence and no fallback: a key never reads a local value, then a wider one, then a default. That is deliberate. A missing value must not silently fall back to another vault, and a value's source is decided by the configuration, not by what happens to exist. [Shared keys](#shared-keys-from) shows the full rule.
+
+### Delivery evidence: `state_vault_id`
+
+Every target needs a state vault for its delivery evidence. `state_vault_id` records it; `opv target add` creates it, and `opv bootstrap` creates and records any that is missing. A target without one fails at load with `state_vault_missing`.
+
+Each placement (a product the target delivers) keeps its evidence in one item of that vault, `opv · delivery · <product> · <target>`. `opv bootstrap` creates it and records its ID under the target, so no command ever looks a state item up by title:
+
+```toml
+[environments.prod.targets.shared]
+state_vault_id = "vprd-state-shared"
+delivery_items = { api = "dapi0000000000000000000001", p = "dp00000000000000000000001" }   # recorded by opv bootstrap
+```
+
+A placement without a recorded item gets no evidence (its sync says `opv bootstrap creates it`), and an entry for a product the target does not deliver fails at load. The item's evidence lines (store version and keyed fingerprint per name) are also the version ledger `plan` and `status` judge Fly and GitHub secrets by.
+
+The state item holds the evidence key, the keyed fingerprints and, for Fly, digests, so its reader can test guesses against values. A state vault must therefore never be readable more widely than the values it covers. Several targets may share one state vault only when they deliver products from the same set of boundaries. Otherwise the configuration fails at load with `state_vault_wider_than_values`, naming the vault, the targets as `<env>/<target>` and a boundary one of them cannot read. One state vault per target is the safe choice.
 
 ### Account and deploy credentials
 
-Two optional settings per environment:
+`account` is the one connection setting that sits on the environment, not on a target. `deploy_credentials` sits on a target, with no environment-level form and no fallback.
 
 ```toml
 [environments.prod]
-vault_id = "vprd1234example"
-item_id  = "iprd1234example"
-account  = "ACCOUNTID0000000000000000"          # account ID (opv login --account records it)
+account = "ACCOUNTID0000000000000000"            # account ID (opv login --account records it)
+boundaries.api = { vault_id = "vprd-api", item_id = "iprd-api" }
+
+[environments.prod.targets.api]
+fly.app = "example-portfolio-production"
 deploy_credentials = "op://infra-prod/fly-deploy" # the deploy identity's item, by ID or name
-fly.app  = "example-portfolio-production"
+state_vault_id = "vprd-state"
 ```
 
 - `account`: every `op` call for this environment uses this 1Password account (passed as `--account`), and `opv login prod` signs in to it. Set it only when your environments live in different accounts; otherwise the project's account (above) applies. Use the account ID (`op account list` shows it): op takes no email, and a sign-in address may be shared by several accounts. A bad value is a configuration error pointing at its line and column. Under a service-account token in CI the token decides the account.
-- `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this environment's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on Kubernetes, or on an environment without a target, is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials.
+- `deploy_credentials`: an `op://<vault>/<item>` reference to a whole item (never a field) holding only this target's least-privilege deploy identity. `status`, `plan`, `sync` and `doctor --env` read it and sign the target CLI in for that run only. The fields are fixed per provider: Fly `FLY_API_TOKEN` (concealed); Azure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` (text) and `AZURE_CLIENT_SECRET` (concealed). Kubernetes takes none (`kubectl` uses your kubeconfig), except when its secrets live in a Key Vault (`secrets_in`): then the item holds the Azure fields and signs in the `az` that writes that Key Vault. Otherwise `deploy_credentials` on a Kubernetes target is a configuration error. If the sign-in fails, `doctor --env` shows one `FAIL deploy credentials:` line, runs its other checks and skips the target checks that need those credentials.
 
 Give the deploy identity only what a sync needs: a Fly deploy token for that one app, or an Azure service principal with Key Vault Secrets Officer on that vault and Contributor on that Container App. Break-glass (owner or admin) credentials are for people and are never referenced by `deploy_credentials`.
 
@@ -180,16 +279,31 @@ On native Windows, values reach `az` (the service-principal secret, Key Vault va
 
 ```toml
 [environments.prod]
-vault_id = "vprd1234example"
-item_id  = "iprd1234example"
 confirm_env = true
 ```
 
-With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the item and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `check`, `run`) and `item skeleton` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
+With `confirm_env = true`, `sync` must be given the environment name again: `opv sync prod --deploy --confirm prod`. Without it, opv reads the boundary items and the target and validates every key first, then refuses before the first write (exit 6), so one refusal also names any blocking keys; its `Next:` line is the exact command to re-run, with every flag you gave plus `--confirm prod`. A `--confirm` naming another environment is refused for every environment, before any call. Only `sync` changes the target, so only `sync` needs it: reading commands (`status`, `plan`, `check`, `run`) and `item skeleton` (which writes to 1Password, not the target) are unaffected. `plan` suggests the sync command with `--confirm prod` already in it. CI jobs that sync a guarded environment must pass the flag. `confirm_env` is a boolean (default `false`); any other value is a configuration error.
+
+### Removed forms
+
+There is one configuration form. Input in a removed form fails at load with its line, its column and the exact current form to write; nothing reads or converts it. This table lists every form removed in 0.7.0 and what replaces it.
+
+| Removed form | Current form |
+|---|---|
+| environment-level `vault_id` / `item_id` | `boundaries.<product> = { vault_id = "…", item_id = "…" }`, recorded by `opv bootstrap` |
+| an environment-level provider table (`fly.app = "…"`, `[environments.<env>.azure]`, …) | `[environments.<env>.targets.<name>]` with that provider section under it |
+| environment-level `deploy_credentials` / `state_vault_id` | the same keys on the target, under `[environments.<env>.targets.<name>]` |
+| `[profile]` and `profile.kind` | none: one form; declare each key under `[products.<name>.keys.<KEY>]` |
+| top-level `[keys]` | `[products.<name>.keys.<KEY>]` |
+| `from = "<KEY>"` (a bare key) | `from = "<product>/<KEY>"` |
+| `products` inside a provider section (`github.products`, …) | the target's `products = ["…"]`, beside the provider section, on every provider |
+| the `pattern` rule | `regex = "<regex-escaped prefix>(?:<pattern>)"` |
+
+There is no conversion. Every removed form's load error shows the replacement to paste.
 
 ## Store layout
 
-One vault per environment (`<name>-<env>`), one item in it, one section per product, one field per key. A concealed field is a secret; a text field is config.
+One vault per access boundary, one values item in it, one section per product, one field per key. A concealed field is a secret; a text field is config.
 
 You don't need to lay out 1Password by hand. opv finds each declared key wherever its field is (a label spelled `openai api key`, a field in the wrong section or at the top level, a secret saved as text, a duplicate), so a layout difference never stops a command. When you run opv yourself (signed in to `op` as a person), it also tidies the item to this layout (every command that reads the item except `opv doctor` and `opv ready`, which never write; `opv tidy <env>` does it on its own): it creates missing sections and empty fields, conceals secrets saved as text, renames and moves fields, and sets duplicates aside. It deletes nothing: anything it displaces or replaces goes to a section named `opv · kept`, labelled with where it came from and the date. It prints one line saying what it changed:
 
@@ -197,18 +311,18 @@ You don't need to lay out 1Password by hand. opv finds each declared key whereve
 tidied 1Password (dev): created section api; made api/OPENAI_API_KEY concealed; kept old copies in "opv · kept"
 ```
 
-A sync you run yourself also keeps a small ledger in the section `opv · state`: one text field per target name it wrote (the target's version of it and a fingerprint of the value, keyed with a random key stored concealed in the same section, so it reveals nothing to anyone who cannot already read the item), which lets `plan` tell exactly whether a Fly or GitHub secret matches 1Password. Leave the section alone; deleting it only makes those names `unknown` until the next sync.
+A sync records its delivery evidence in the target's state vault, not in the values item: one evidence line per written name, with the store's version and a keyed fingerprint. That lets `plan` tell exactly whether a Fly or GitHub secret matches 1Password. See [delivery evidence](#delivery-evidence-state_vault_id).
 
 Under a service account, Connect or in CI, opv never writes to 1Password: it reads the item as it is and prints one note that your next local run will tidy it. A value it can fix unambiguously from the key's rules (a trailing newline, a missing `ensure_prefix`) is used in its fixed form, and the tidy writes it back, keeping the original in `opv · kept`. Filling in a missing value is always up to you; opv names the keys that still need one. Design: [self-healing conventions](design/self-healing-conventions.md).
 
 ```text
-vault portfolio-prod   item portfolio   section allumata   field OPENAI_API_KEY   (concealed)
-                                                           field SIGNUP_POLICY    (text)
+vault portfolio-api-prod   item portfolio · api · prod values   section api   field OPENAI_API_KEY   (concealed)
+                                                                              field SIGNUP_POLICY    (text)
 ```
 
-## Targets
+## Targets by provider
 
-Each environment names at most one target: `fly`, `azure`, `kubernetes` or `github`. Two target sections in one environment is a configuration error, and an environment with none is run-only. Two environments may not share one target (the same Fly app, Key Vault and Container App, or context, namespace and Deployment).
+Each target's one provider section uses the fields below. The target also carries `products`, `deploy_credentials` and `state_vault_id` ([above](#targets-where-products-deploy)).
 
 How the values travel depends on the field kind:
 
@@ -220,27 +334,28 @@ How the values travel depends on the field kind:
 ### Fly
 
 ```toml
-[environments.prod]
-vault_id = "vprd1234example"
-item_id  = "iprd1234example"
+[environments.prod.targets.shared]
 fly.app  = "myapp-production"                  # required; passed as --app on every flyctl call
-fly.secret_name = "FLEET__{PRODUCT}__{KEY}"    # fleet profile only; defines the managed set
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"    # optional; defines target names; one product may use "{KEY}"
+deploy_credentials = "op://infra-prod/fly-deploy"
+state_vault_id = "vprd-state"
 ```
 
-Secrets are staged with `flyctl secrets import --stage` (values on stdin) and deployed with `flyctl secrets deploy` only under `sync --deploy`. Fly does not reveal stored values, so opv compares digests after staging ([change detection](usage.md#change-detection-on-fly)). Under the simple profile the Fly name is the key and `fly.secret_name` is not allowed; two environments may not share an app. `deploy_credentials` can hold a `FLY_API_TOKEN` for the app ([below](#account-and-deploy-credentials)).
+Secrets are staged with `flyctl secrets import --stage` (values on stdin) and deployed with `flyctl secrets deploy` only under `sync --deploy`. Fly does not reveal stored values, so opv compares digests after staging ([change detection](usage.md#change-detection-on-fly)). With one product, `secret_name = "{KEY}"` delivers bare names, and two targets may not share an app within one environment. `deploy_credentials` can hold a `FLY_API_TOKEN` for the app ([above](#account-and-deploy-credentials)).
 
 ### Azure: Key Vault + Container Apps
 
 ```toml
-[environments.prod.azure]
-subscription   = "00000000-0000-0000-0000-000000000000"   # id or name; required
-key_vault      = "kv-myapp-prod"
-resource_group = "rg-myapp"
-container_app  = "ca-myapp"
-container      = "api"                       # only if the app has more than one container
-identity       = "system"                    # or the resource id of a user-assigned identity
-env_name       = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
-config         = "env"                       # default; "store" keeps config in Key Vault too
+[environments.prod.targets.api]
+azure.subscription   = "00000000-0000-0000-0000-000000000000"   # id or name; required
+azure.key_vault      = "kv-myapp-prod"
+azure.resource_group = "rg-myapp"
+azure.container_app  = "ca-myapp"
+azure.container      = "api"                       # only if the app has more than one container
+azure.identity       = "system"                    # or the resource id of a user-assigned identity
+azure.env_name       = "FLEET__{PRODUCT}__{KEY}"   # optional; defines target names
+azure.config         = "env"                       # default; "store" keeps config in Key Vault too
+state_vault_id = "vprd-state"
 ```
 
 | Field | Meaning |
@@ -251,12 +366,12 @@ config         = "env"                       # default; "store" keeps config in 
 | `container_app` | The app that receives the variables. |
 | `container` | Optional. Required only when the app runs more than one container; opv then lists the names. |
 | `identity` | `system`, or the resource id of the user-assigned identity the app uses to read Key Vault. |
-| `env_name` | Template for the variable name; must contain `{PRODUCT}` and `{KEY}`. It defines the managed set. Not allowed under the simple profile, where the field name is the variable name. |
+| `env_name` | Template for the variable name; must contain `{PRODUCT}` and `{KEY}`. It defines the managed set. With one product, a `{KEY}` template delivers bare names. |
 | `config` | `env` (default) or `store`. |
 
 Names and limits are checked when the file loads, before any call:
 
-- The Key Vault name is the variable name with `_` changed to `-`, and must match `^[0-9A-Za-z-]{1,127}$`. `FLEET__ALLUMATA__OPENAI_API_KEY` is stored as `FLEET--ALLUMATA--OPENAI-API-KEY`.
+- The Key Vault name is the variable name with `_` changed to `-`, and must match `^[0-9A-Za-z-]{1,127}$`. `FLEET__API__OPENAI_API_KEY` is stored as `FLEET--API--OPENAI-API-KEY`.
 - Key Vault names ignore case, so two keys that map to the same name, even in different case, are an error naming both.
 - A Key Vault value may be at most 25 KB (25,600 bytes) and cannot be empty. A longer or empty value blocks the sync like a failed rule: `failed store_limit (longer than the Key Vault limit of 25 KB)`.
 - Every identifier is checked like `fly.app` (no leading `-`, no shell metacharacters).
@@ -266,13 +381,14 @@ opv tags every secret it writes `opv-managed=<env>` and only ever deletes tagged
 ### Kubernetes: Secrets + Deployment
 
 ```toml
-[environments.dev.kubernetes]
-context    = "kind-opv"                  # required; passed to every kubectl call
-namespace  = "myapp"                     # required
-deployment = "api"                       # required
-container  = "api"                       # optional when the pod has one container
-env_name   = "FLEET__{PRODUCT}__{KEY}"   # fleet profile only
-config     = "env"                       # or "store"
+[environments.dev.targets.api]
+kubernetes.context    = "kind-opv"                  # required; passed to every kubectl call
+kubernetes.namespace  = "myapp"                     # required
+kubernetes.deployment = "api"                       # required
+kubernetes.container  = "api"                       # optional when the pod has one container
+kubernetes.env_name   = "FLEET__{PRODUCT}__{KEY}"   # optional; defines target names
+kubernetes.config     = "env"                       # or "store"
+state_vault_id = "vdev-state"
 ```
 
 opv always passes `--context` and `--namespace`, so it never acts on whatever context your shell has selected. Each secret value becomes an immutable Kubernetes Secret named `opv-<name>-<random id>` (the id says nothing about the value), labelled `opv-managed=<env>`, and the Deployment's variable points at it with `secretKeyRef`. An unchanged value writes nothing (opv compares it with the bound Secret); a changed value is a new Secret. After a healthy rollout opv deletes the older Secrets that neither the Deployment nor any ReplicaSet references, and `--prune` removes a key that is no longer declared. The Secret name is the variable name lower-cased with `_` changed to `-`; that part is also the `opv-key` label value, so it must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with at most 63 characters, and collisions are an error. A longer name is refused when the configuration loads (`renders Kubernetes name of N characters, which must match …`). A key whose variable name starts or ends with `_` (a Secret name starting or ending in `-`) is refused the same way, naming the key and its line.
@@ -282,22 +398,19 @@ opv always passes `--context` and `--namespace`, so it never acts on whatever co
 Keep CI secrets in 1Password and let `opv sync ci` set them, instead of running `gh secret set` by hand.
 
 ```toml
-[environments.ci]
-vault_id = "vci1234example"
-item_id  = "ici1234example"
-
-[environments.ci.github]
-repo        = "my-org/my-app"       # or repos = ["my-org/api", "my-org/web"]: the same values in each
-environment = "staging"             # optional: that GitHub environment's secrets and variables
-products    = ["api"]               # optional (fleet): only these products' keys go here
-secret_name = "{KEY}"               # optional; default {KEY}, so workflows read secrets.FLY_API_TOKEN
+[environments.ci.targets.actions]
+github.repo        = "my-org/my-app"       # or repos = ["my-org/api", "my-org/web"]: the same values in each
+github.environment = "staging"             # optional: that GitHub environment's secrets and variables
+github.secret_name = "{KEY}"               # optional; default {KEY}, so workflows read secrets.FLY_API_TOKEN
+products           = ["api"]               # optional: only these products' keys go here
+state_vault_id     = "vci-state"
 ```
 
 | Field | Meaning |
 |---|---|
 | `repo` / `repos` | Exactly one of them. `owner/name`; each listed repository gets every value. |
 | `environment` | A GitHub environment that must already exist in every listed repository. opv never creates one, because its protection rules and reviewers are your decision; `sync` stops before any write and prints the `gh api -X PUT repos/<repo>/environments/<name>` command. |
-| `products` | Fleet profile. Keys of other products are not delivered here (they are still read, and keys here may point at them with `from`). `plan` lists declared keys it does not deliver. |
+| `products` | Keys of other products are not delivered here (they are still read, and keys here may point at them with `from`). `plan` lists declared keys it does not deliver. |
 | `secret_name` | Name template with `{KEY}` and optionally `{PRODUCT}`. Names must match `^[A-Z][A-Z0-9_]*$` and may not start with `GITHUB_`. |
 
 What happens on each command:
@@ -312,7 +425,7 @@ Sign-in: your `gh auth login` session, or `GH_TOKEN` / `GITHUB_TOKEN`. For CI, p
 
 ### Secrets in a named store: `[stores.<name>]` and `secrets_in`
 
-A runtime can keep its secrets in a store from another provider. Declare the store once and point the runtime at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).
+A runtime can keep its secrets in a store from another provider. Declare the store once and point the target at it with one line; the commands do not change. In 0.5.0 the one supported pair is **Azure Key Vault → Kubernetes Deployment**, through the [External Secrets Operator](https://external-secrets.io) (ESO).
 
 ```toml
 [stores.prod-vault]                        # any name: lower-case letters, digits and -
@@ -320,11 +433,12 @@ azure_key_vault = "kv-myapp-prod"          # the store kind is the key; its valu
 subscription    = "00000000-0000-0000-0000-000000000000"   # required
 # secret_store  = "prod-vault"             # the in-cluster ClusterSecretStore; default: the store name
 
-[environments.prod.kubernetes]
-context    = "aks-prod"
-namespace  = "api"
-deployment = "api"
-secrets_in = "prod-vault"                  # optional; without it, opv's own Kubernetes Secrets
+[environments.prod.targets.api]
+kubernetes.context    = "aks-prod"
+kubernetes.namespace  = "api"
+kubernetes.deployment = "api"
+kubernetes.secrets_in = "prod-vault"       # optional; without it, opv's own Kubernetes Secrets
+state_vault_id        = "vprd-state"
 ```
 
 | Field | Meaning |
@@ -332,7 +446,7 @@ secrets_in = "prod-vault"                  # optional; without it, opv's own Kub
 | `azure_key_vault` | The vault that holds the values (3 to 24 letters, digits and `-`). |
 | `subscription` | Required subscription id. opv passes it on every `az` call. |
 | `secret_store` | Optional. The `ClusterSecretStore` that reads this vault in the cluster. Defaults to the store's name. |
-| `secrets_in` | On a runtime section: the store its secrets live in. |
+| `secrets_in` | On a target's provider section: the store its secrets live in. |
 
 - **What opv does.** Each secret is written to Key Vault as a new version (as for an Azure target). With `--deploy`, opv creates an `ExternalSecret` named `opv-<name>-<first 10 characters of the version id>` that fetches exactly that version once (`refreshInterval: "0"`), waits until it is `Ready` (its Secret exists), and only then points the Deployment's variable at that Secret. The version id is random, so no name or label says anything about the value.
 - **Names.** Key Vault rules apply (`_` becomes `-`, names ignore case), and the name must also fit a Kubernetes name of at most 63 characters, starting and ending with a letter or digit. Two environments that keep the same Key Vault name in one store are an error naming both, because each would overwrite and prune the other's value.
@@ -344,7 +458,7 @@ secrets_in = "prod-vault"                  # optional; without it, opv's own Kub
 
 ## Shared keys: `from`
 
-When two products need the same value (both `api` and `worker` read `DATABASE_URL`), keep one field in 1Password and point the second key at it with `from`:
+When two products need the same value (both `api` and `worker` read `DATABASE_URL`), keep one field in 1Password and point the second key at it with `from`. The source is the source product's boundary item in the same environment; there is no other source and no precedence.
 
 ```toml
 [products.api.keys.DATABASE_URL]
@@ -359,13 +473,11 @@ environments = ["prod"]
 rules = { prefix = "postgres://" }   # optional: checked as well as api's own rules
 ```
 
-- The value comes from the source's field in the **same environment's item**. References to another item or environment (`op://...`, `staging/api/KEY`) are refused at load.
+- The value comes from the source's field in the same environment's boundary item. References to another item or environment (`op://...`, `staging/api/KEY`) are refused at load.
 - Each key keeps its own target name: `sync` writes `FLEET__API__DATABASE_URL` and `FLEET__WORKER__DATABASE_URL` from the one field, and `run --product worker` exports `DATABASE_URL` from `op://<vault>/<item>/api/DATABASE_URL`. Change the source and every key sharing it changes in the same sync.
 - Checked at load, with the line of the `from`: the source is declared, has its own field (no chains or cycles), has the same `kind`, and is declared for every environment the sharing key uses.
 - The source's rules apply first, then the sharing key's own `rules` on the same value. `immutable` follows the source and may not be set on the sharing key; `--rotate api/DATABASE_URL` rotates both.
 - `item skeleton` never adds a field for a sharing key. A leftover field from before the switch (`worker/DATABASE_URL`) is reported as an extra field; delete it in 1Password.
-
-Under the simple profile, `from` names a bare key: `from = "DATABASE_URL"`.
 
 ### One home for shared values: `source_only` products
 
@@ -391,11 +503,11 @@ from = "shared/FLY_API_TOKEN"
 environments = ["ci"]
 ```
 
-- The value lives once, in section `shared` of each environment's item. Change it there and every key pointing at it changes in the next sync; `--rotate shared/FLY_API_TOKEN` rotates them all.
+- The value lives once, in section `shared` of each environment's boundary item. Change it there and every key pointing at it changes in the next sync; `--rotate shared/FLY_API_TOKEN` rotates them all.
 - A source-only product's keys get fields, rules, `immutable` and the missing-value lines like any key, but they are never written to a target, never pruned, and their names never collide with a delivered key's.
 - `check`, `status` and `plan` warn about a source-only key that nothing points at. `opv run --product shared` is refused: run the product that uses the value.
-- Values never cross environments: `ci` reads the `shared` section of the `ci` item only.
-- The name `shared` is a convention; any product name works. `source_only` is not available under the simple profile, where there is one product.
+- Values never cross environments: `ci` reads the `shared` section of the `ci` boundary item only.
+- The name `shared` is a convention; any product name works.
 
 ## Settings health: likely-wrong values
 
@@ -427,22 +539,15 @@ guidance = "create your own key (billed to you)"
 ```
 
 - The value lives in each person's own item: in their own Private (or Employee, or Personal) vault, titled `<project> · <env> (personal)`. Set `personal_vault` and `personal_item` on the environment to use other titles. `opv bootstrap` creates your item with an empty field for each personal key; `opv ready` and `opv check` name the ones you still need to fill as yours.
-- `opv run` reads team keys from the team item and your personal keys from your own item, never the other way round: a personal key never falls back to a team value, and nobody else's item is ever read.
+- `opv run` reads team keys from the team boundary items and your personal keys from your own item, never the other way round: a personal key never falls back to a team value, and nobody else's item is ever read.
 - One personal value for several products: put it in a source-only product (`[products.shared] source_only = true`, the key `personal = true`) and point each product's personal key at it with `from = "shared/OPENAI_API_KEY"`. A personal key may only point at a personal value, and a team key never at one.
-- Personal keys are for local environments only: declaring one for an environment with a target is a configuration error, and `sync` never reads a personal item. Deployed environments use the service's own value.
+- Personal keys are for local environments only: declaring one for an environment with a target is a configuration error, and `sync` never reads a personal item. Deployed environments use the service's own value. A product whose keys in an environment are all personal needs no boundary there.
 
 Example: [examples/team-personal](../examples/team-personal/).
 
-### Delivery receipts: `state_vault_id`
+## Environment display name, order and audience
 
-```toml
-[environments.prod]
-state_vault_id = "vstate1234example"   # where delivery receipts are kept (opv bootstrap --state prod creates it)
-```
-
-A separate vault, so the deploy identity can write delivery evidence without write access to the values. Give it only to identities that can also read the values vault. See [delivery receipts](usage.md#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
-
-### Environment display name, order and audience
+Besides its key, an environment can carry a display name, an order and an audience for people.
 
 ```toml
 [environments.prod-us]
@@ -451,7 +556,7 @@ order = 30                    # grid and column order; defaults to the keys' ord
 audience = "devops"           # who it is for
 ```
 
-The key (`prod-us`) stays the name in every command. Who can open an environment is 1Password's decision (share its vault with a group); `audience` only tells opv what to say to everyone else: someone who cannot open `prod-us` sees "not available to you (audience: devops)" in `opv ready`, as a note, not a problem to fix. `opv bootstrap` tags each item it creates `opv-env:<project>/<env>`.
+The key (`prod-us`) stays the name in every command. Who can open an environment is 1Password's decision (share its boundary vaults with a group); `audience` only tells opv what to say to everyone else: someone who cannot open `prod-us` sees "not available to you (audience: devops)" in `opv ready`, as a note, not a problem to fix. `opv bootstrap` tags each item it creates `opv-env:<project>/<env>`.
 
 ## Writing the configuration with commands
 
@@ -462,45 +567,39 @@ The key (`prod-us`) stays the name in every command. Who can open an environment
 If the 1Password item already exists, `init` writes the configuration from it instead of writing one by hand. In a new project it saves it as a manifest in 1Password ([configuration in 1Password](#configuration-in-1password)); `--file` writes `./secrets.toml` instead:
 
 ```sh
-opv init staging --vault myapp-staging --item myapp --fly-app myapp-staging [--profile simple|fleet] [--force]
+opv init staging --vault myapp-staging --item myapp --product api
 ```
 
-- Without `--vault` and `--item` it uses vault `<project>-<env>` and item `<project> · <env> values` (the project name is `--project`, else the repository's, else the directory's), so the values item reads apart from the manifest `opv · <project>`. `opv init dev` alone is enough for a new project.
-- It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs. No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
+- Without `--vault` and `--item` it uses the boundary titles `<project>-<product>-<env>` and `<project> · <product> · <env> values` (the project name is `--project`, else the repository's, else the directory's), so the values item reads apart from the manifest `opv · <project>`. `opv init dev --product api` alone is enough for a new project.
+- `--product <name>` names the product that unsectioned fields belong to; it is required when the item has unsectioned fields. Sectioned fields become products named by their section. An item with both shapes is an error naming both, and `init` never guesses. Product names describe the app's role (`web`, `api`, `worker`); `init` asks for one and does not suggest the project name.
+- **One item is one boundary.** The item lives in one vault, so the products it declares share one boundary. One product records `boundaries.<product>`; several record `boundary = "core"` on each product and one `boundaries.core`.
+- It looks the vault and the item up **by title**, once (exact, case-sensitive match), and writes their IDs into that boundary (`boundaries.<product>`, or `boundaries.<group>` when several products share it). No match, or more than one, is an error (exit 2) that lists the candidates by name and ID. This is the only title lookup in opv and only `init` can make it: every other command reads the item by vault ID and item ID.
 - It reads the item once and writes **IDs, key names and kinds only**. A concealed field becomes `kind = "secret"`, a text field `kind = "config"`, each with `environments = ["<env>"]`. Values are never read into opv, written or printed. Rules, guidance, modes and other environments are left for you to add.
-- The profile follows the item's shape: only unsectioned fields gives a simple file, only sectioned fields gives a fleet file (one product per section, `fly.secret_name = "FLEET__{PRODUCT}__{KEY}"`). An item with both is an error naming both shapes; `--profile` then decides, and the fields of the other shape are ignored with a note.
 - A field whose label is not a valid key name (`^[A-Z][A-Z0-9_]*$`), a section whose label is not a valid product name, and a field of another type (URL, email, ...) are skipped with a note naming them. Nothing is renamed by `init` itself: rename the field in 1Password and run `init --force` again. A label given twice is declared once. When you run `init` yourself and the vault or item does not exist yet, it creates them (the vault only if your account allows it) and writes their IDs; under a service account or in CI it stops and names the next step.
-- The target is optional; omitting it creates a run-only environment. `--target fly|azure|kubernetes` picks the provider and its options are `--<provider>-<field>`, one per field of that provider's section below. Nothing is looked up (no flyctl, az or kubectl call); the section is validated like a hand-written one before any 1Password call, so a bad value or a missing required option is refused first. `--target` can be left out when the options name one provider, and `--fly-app` alone still means a Fly target. Under the fleet profile the name template (`fly.secret_name`, `azure.env_name`, `kubernetes.env_name`) defaults to `FLEET__{PRODUCT}__{KEY}`; `azure.identity` defaults to `system`. `opv init --help` lists every option.
-
-  | Target | Required | Optional |
-  |---|---|---|
-  | `fly` | `--fly-app` | `--fly-secret-name` |
-  | `azure` | `--azure-subscription`, `--azure-key-vault`, `--azure-resource-group`, `--azure-container-app` | `--azure-container`, `--azure-identity`, `--azure-env-name`, `--azure-config` |
-  | `kubernetes` | `--kubernetes-context`, `--kubernetes-namespace`, `--kubernetes-deployment` | `--kubernetes-container`, `--kubernetes-env-name`, `--kubernetes-config` |
-
-  ```sh
-  opv init prod --vault myapp-prod --item app --target azure \
-    --azure-subscription 00000000-0000-0000-0000-000000000000 --azure-key-vault kv-myapp-prod \
-    --azure-resource-group rg-myapp --azure-container-app myapp
-  opv init prod --vault myapp-prod --item app --target kubernetes \
-    --kubernetes-context prod-cluster --kubernetes-namespace myapp --kubernetes-deployment web
-  ```
-
-  A `secrets_in` store (`[stores.<name>]`) is still written by hand.
+- **It writes no target.** It writes boundaries and products only; `opv target add` is the one way to add a deployment target ([below](#add-a-target-opv-target-add)), and a run-only environment needs none.
 - **Where it writes.** In a new project (no `secrets.toml` here or in a parent) it saves a manifest `opv · <project>` in the item's vault, tagged with the git remote (`--project <name>` names it; default: the repository's name). This is a 1Password write, so it needs a person signed in with their own session; under a service account or CI it refuses with `Next: opv login`. An existing manifest for the project is never overwritten: change it with `opv config edit`. With `--file`, or when a `secrets.toml` is already found, it writes `./secrets.toml` in the current directory instead (`--config` and `OPV_CONFIG` are refused; use `--add-env` to extend a file elsewhere). An existing file is refused (exit 2) unless `--force` is given; it never merges. The text is validated like a hand-written one and written atomically.
 - It reads three things from 1Password: `op vault list`, `op item list` and one `op item get`.
 
 It ends with what it wrote and the next command:
 
 ```text
-$ opv init prod --vault myapp-prod --item app --fly-app myapp-prod --file
+$ opv init prod --vault myapp-prod --item app --product api --file
 vault "myapp-prod" is vprd, item "app" is iprd
-wrote /home/me/myapp/secrets.toml (fleet profile, fly target): 1 secret, 1 config, skipped 0
-add keys with opv add, rules and guidance by hand; see https://github.com/matt-cochran/1password-vault/blob/main/docs/configuration.md#rules-reference
-Next: opv plan prod
+wrote /home/me/myapp/secrets.toml (product api): 1 secret, 1 config, skipped 0
+add a deploy target: opv target add prod <name> --<provider options> (opv target add --help); a run-only environment needs none
+Next: opv bootstrap
 ```
 
-Without a target the last line is `Next: opv check <env>`.
+`opv bootstrap` is runnable as printed for every environment: it records any boundary still missing its IDs and adds each declared field, empty. Give an environment that deploys its target with `opv target add`.
+
+### Add a target: `opv target add`
+
+`opv target add <env> <name> --<provider options> [--products …] [--deploy-credentials …]` writes a named target through the configuration editor (comments kept, the result validated, a concurrent change refused); in the same confirmed step it creates the target's state vault and records `state_vault_id` ([adding a target](#adding-a-target)). It ends with `Next: opv access <env> --target <name>`. Target names match `^[a-z][a-z0-9-]*$` and are chosen by a person; opv generates no name. `opv target list [--env <env>] [--json]` shows the declared targets, and the provider's fields are in [targets by provider](#targets-by-provider).
+
+```sh
+opv target add prod shared --fly-app myapp-production
+opv target add ci actions --github-repo my-org/my-app --products api
+```
 
 ### Start from an existing `.env`: `opv init --from`
 
@@ -508,39 +607,38 @@ A project that already runs from a `.env` file gets into opv in one step, withou
 
 ```sh
 chmod 600 .env
-opv init dev --from .env                 # every key and its kind; nothing written anywhere
-opv init dev --from .env --apply         # create the vault and item, declare, import
+opv init dev --product api --from .env   # every key and its kind; nothing written anywhere
+opv init dev --product api --from .env --apply  # create the vault and item, declare, import
 ```
 
-- Every `KEY=value` line becomes a declared key for `dev` (the simple profile), next to any field the item already has. A field the item already has keeps its kind and its value: a differing value in the file is reported, never written (`opv adopt dev --from .env --replace KEY --apply` takes it).
+- Every `KEY=value` line becomes a declared key for `dev`, in the product `--product` names, next to any field the item already has. A field the item already has keeps its kind and its value: a differing value in the file is reported, never written (`opv adopt dev --from .env --replace KEY --apply` takes it).
 - The kind comes from the name only, never the value, and is secret when unsure: config for names like `*_ENABLED`, `*_MODEL`, `PORT`, `*_ORIGIN`, `*_CLIENT_ID`, `*_REDIRECT_URI`; secret for everything else, including `*_URL` (a database or webhook URL carries credentials) and any name with `SECRET`, `TOKEN`, `PASSWORD`, `PRIVATE` or `CREDENTIAL`. Change one with `--config-key KEY` or `--secret-key KEY` (repeatable); the plan shows every kind before anything is written.
 - `--apply` imports the values the way `opv adopt --apply` does: one item edit, read back and checked. An empty value is declared but not imported, so `opv ready` lists it as missing. Values go to 1Password on stdin only, never in arguments, files or output.
 - The file must be a private regular file (`chmod 600`) under 1 MiB; it is read as literal assignments, never executed, and left as it is. Delete it yourself once `opv run dev -- …` works.
-- One product's keys: an item already in the fleet shape (sections per product) is refused; declare there with `opv add`, then `opv adopt`. `--from` does not combine with `--add-env` or `--profile`.
+- Multi-product items: an item already in the multi-product shape (sections per product) is refused by `--from`; declare there with `opv add`, then `opv adopt`. `--from` does not combine with `--add-env`.
 
 ### Add an environment: `opv init --add-env`
 
 ```sh
-opv init staging --vault myapp-staging --item myapp --add-env [--target … | --fly-app …]
+opv init staging --vault myapp-staging --item myapp --product api --add-env
 ```
 
-Adds one `[environments.<env>]` to the existing configuration (found like every other command's: `--config`, `OPV_CONFIG`, the nearest `secrets.toml`, or the project's manifest in 1Password) instead of writing a new one, with `opv add`'s validation, atomic write and concurrency refusal. It looks up and reads the item the same way, writes the IDs and the target options above, and adds the environment to each declared key whose field the item has (the profile is the file's). It prints the keys left out because the item lacks them and the item's fields that are not declared, each with the `opv add` command that includes or declares one. It refuses an environment that already exists and never changes anything else. `--force` and `--profile` do not apply.
+Adds one `[environments.<env>]` to the existing configuration (found like every other command's: `--config`, `OPV_CONFIG`, the nearest `secrets.toml`, or the project's manifest in 1Password) instead of writing a new one, with `opv add`'s validation, atomic write and concurrency refusal. It looks up and reads the item the same way, writes the IDs into the product's `boundaries.<product>` table, and adds the environment to each declared key whose field the item has. It writes no target; add one with `opv target add`. It prints the keys left out because the item lacks them and the item's fields that are not declared, each with the `opv add` command that includes or declares one. It refuses an environment that already exists and never changes anything else. `--force` does not apply.
 
 ### Declare a key: `opv add`
 
 ```sh
 opv add api/STRIPE_KEY --kind secret --env dev,prod --rule prefix=sk_ --guidance "Stripe › Developers › API keys"
-opv add LOG_LEVEL --kind config --rule enum=debug,info,warn      # simple profile: no product
 opv add api/JWT_KEY --kind secret --rule base64_bytes=32 --immutable
 opv add api/STRIPE_KEY --env staging                             # a declared key, one more environment
 opv add web/DATABASE_URL --kind secret --from api/DATABASE_URL   # read another key's value
 opv add shared/OPENAI_API_KEY --kind secret --env dev --personal # each developer's own value
 ```
 
-- The name is `PRODUCT/KEY` under the fleet profile and `KEY` under the simple one; `--kind secret|config` is required for a new key. `--env` (repeat it or separate with commas) defaults to every declared environment.
+- The name is always `PRODUCT/KEY`; `--kind secret|config` is required for a new key. `--env` (repeat it or separate with commas) defaults to every declared environment.
 - `--rule NAME=VALUE` is repeatable and uses the [rules reference](#rules-reference) names. The value is read as a TOML value when the rule takes one (`base64_bytes=32`, `enum=["a","b"]`), else as text (`prefix=sk_`), else as a comma-separated list (`enum=debug,info`). A flag rule is given by name alone (`--rule https_url`). `--guidance` and `--immutable` set those fields; `--from PRODUCT/KEY` makes a [shared key](#shared-keys-from), `--personal` a [personal key](#personal-keys-each-developers-own-values), and `--allow-same-value` marks a repeat across environments as intended ([settings health](#settings-health-likely-wrong-values)). In `opv ui`, `+` fills in the same through a form.
 - On a key that is already declared, `opv add` only adds the environments it lacks; a different `--kind`, or any rule, guidance, `--immutable`, `--from`, `--personal` or `--allow-same-value`, is refused (change those by hand, or with `opv config edit`). When nothing is missing it says so and changes nothing (exit 0).
-- The configuration is edited where it lives, a `secrets.toml` or the project's [manifest in 1Password](#configuration-in-1password): its comments, blank lines and order are kept, and the new key goes after its product's last key. The edited text is validated like a hand-written one before anything is written, so a name that would collide on any environment's target, an unknown rule, a bad rule value or an unknown environment is refused (exit 2) and nothing changes. The write is atomic (a file: a temporary file in the same directory, then a rename; a manifest: one item edit) and refused when someone changed the configuration since opv read it (run the command again).
+- The configuration is edited where it lives, a `secrets.toml` or the project's [manifest in 1Password](#configuration-in-1password): its comments, blank lines and order are kept, and the new key goes after its product's last key. The edited text is validated like a hand-written one before anything is written, so a name that would collide on any target, an unknown rule, a bad rule value or an unknown environment is refused (exit 2) and nothing changes. The write is atomic (a file: a temporary file in the same directory, then a rename; a manifest: one item edit) and refused when someone changed the configuration since opv read it (run the command again).
 - It reads no item and makes no target call (on a manifest it reads and edits only the manifest). It ends with `Next: opv item skeleton <env>`, which adds the empty field to that environment's item; type the value in 1Password, then run `opv check <env>`.
 
 ## Rules reference
@@ -555,7 +653,6 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `not_prefix = "sk-or-"` or a list | value starts with none of them |
 | `regex = "..."` | the whole value **as staged** matches (full match): after `ensure_prefix` normalisation when the key has one, otherwise the stored value |
 | `ensure_prefix = "sk-"` | accepts the value with or without the prefix and stages it with exactly one `sk-`; a value that is only the prefix fails |
-| `pattern = "..."` | deprecated alias for `regex`: only with `ensure_prefix`, the text after the prefix fully matches (full match). Loading a key that uses it prints one note naming the equivalent `regex = "<regex-escaped prefix>(?:<pattern>)"`; set both and the configuration is refused |
 | `enum = ["a", "b"]` | value is one of the listed strings |
 | `base64_bytes = N` | valid base64 that decodes to N bytes |
 | `hex_bytes = N` | valid hex that decodes to N bytes |
@@ -564,6 +661,8 @@ Always on, for every key (after a `pem_private_key` transform, see below): `none
 | `prefix_by_mode = { mode, values, skip }` | prefix chosen by the environment's declared mode for the product (`modes.<product>.<mode>`); a mode listed in `skip` disables the check and the key is not required |
 | `refuse_in = ["prod"]` | the key must not exist in those environments: a non-empty field there is a blocking failure even though the key is not otherwise expected. The environments must be defined and not also appear in `environments` |
 | `transform = "pem_private_key"` | accepts one PEM private key block (label ending `PRIVATE KEY`, not encrypted, matching BEGIN/END, no headers, base64 of a DER SEQUENCE) pasted multi-line into a concealed field or already on one line, and stages it as one line `-----BEGIN <label>-----<base64>-----END <label>-----`. It runs before the always-on rules, which then see the one-line value. Only whitespace is removed, so RFC 7468 parsers that skip body whitespace (Rust `pem` 3.x) read the same key |
+
+The `pattern` rule was removed in 0.7.0; a key that still sets it fails at load. Write `regex = "<regex-escaped prefix>(?:<pattern>)"` instead ([removed forms](#removed-forms)).
 
 Fly import refusals are checked for every ready secret by `status` and `plan` as well as `sync`, so a green status means sync will not refuse the value:
 
@@ -603,7 +702,6 @@ The rule name is the stable identifier to match on; a reason may be added or rew
 | `email_list` | `not a comma-separated list of email addresses` |
 | `https_url` | `not an https:// URL`, `URL contains whitespace` |
 | `ensure_prefix` | `nothing after the prefix` |
-| `pattern` | `text after the prefix does not match the pattern` |
 | `transform` (`pem_private_key`) | `no BEGIN/END markers`, `BEGIN/END labels differ`, `not a private key`, `encrypted key`, `more than one PEM block`, `body is not base64`, `not a key structure` |
 | `transform` (other name) | `unknown transform` |
 | Fly import rules | `not a valid Fly secret name`, `contains a line break`, `a # follows an odd number of double quotes`, `too long for one Fly import line`, `not valid UTF-8`, `name occurs twice in one import` |

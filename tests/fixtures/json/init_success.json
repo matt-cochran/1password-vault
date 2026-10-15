@@ -4,8 +4,7 @@
   "path": "<dir>/secrets.toml",
   "manifest": null,
   "environment": "staging",
-  "profile": "fleet",
-  "target": "fly",
+  "boundary": "core",
   "vault_id": "vaultid01",
   "item_id": "itemid01",
   "created": [],
@@ -27,6 +26,6 @@
     }
   ],
   "skipped": 0,
-  "next": "opv plan staging",
+  "next": "opv bootstrap",
   "do": null
 }

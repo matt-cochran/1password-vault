@@ -35,15 +35,14 @@ const CONFIG: (&str, &str) = ("LOG_LEVEL", "opv-k8s-config-2");
 fn fleet() -> Fleet {
     let mut toml = String::from(
         r#"
-[profile]
-kind = "simple"
 [environments.dev]
-vault_id = "vdev"
-item_id = "idev"
-[environments.dev.kubernetes]
-context = "kind-opv"
-namespace = "opv-spike"
-deployment = "api"
+boundaries.app = { vault_id = "vdev", item_id = "idev" }
+[environments.dev.targets.app]
+kubernetes.context = "kind-opv"
+kubernetes.namespace = "opv-spike"
+kubernetes.deployment = "api"
+kubernetes.env_name = "{KEY}"
+state_vault_id = "sdev"
 "#,
     );
     for (key, kind) in [
@@ -52,7 +51,7 @@ deployment = "api"
         (CONFIG.0, "config"),
     ] {
         toml.push_str(&format!(
-            "[keys.{key}]\nkind = \"{kind}\"\nenvironments = [\"dev\"]\n"
+            "[products.app.keys.{key}]\nkind = \"{kind}\"\nenvironments = [\"dev\"]\n"
         ));
     }
     config::parse(&toml).unwrap()
@@ -61,9 +60,9 @@ deployment = "api"
 /// The 1Password item holding the desired values.
 fn item() -> String {
     let fields = [
-        secret("", DESIRED[0].0, DESIRED[0].1),
-        secret("", DESIRED[1].0, DESIRED[1].1),
-        text("", CONFIG.0, CONFIG.1),
+        secret("app", DESIRED[0].0, DESIRED[0].1),
+        secret("app", DESIRED[1].0, DESIRED[1].1),
+        text("app", CONFIG.0, CONFIG.1),
     ];
     String::from_utf8(item_json(&fields)).unwrap()
 }
@@ -97,6 +96,9 @@ struct Cluster {
     /// A Deployment template referenced a Secret that did not exist.
     dangling: Cell<bool>,
     argv: RefCell<Vec<Vec<String>>>,
+    /// `op` items opv created or edited (the delivery state item), by ID.
+    op_items: RefCell<BTreeMap<String, Vec<u8>>>,
+    op_serial: Cell<u32>,
 }
 
 impl Cluster {
@@ -128,6 +130,8 @@ impl Cluster {
             killed: Cell::new(false),
             dangling: Cell::new(false),
             argv: RefCell::new(Vec::new()),
+            op_items: RefCell::new(BTreeMap::new()),
+            op_serial: Cell::new(0),
         }
     }
 
@@ -185,7 +189,7 @@ impl Cluster {
     /// Run one `op` or `kubectl` call against the state: (exit status, stdout).
     fn exec(&self, program: &str, args: &[String], stdin: Option<&[u8]>) -> (i32, String) {
         if program == "op" {
-            return (0, item());
+            return (0, self.op(args, stdin));
         }
         assert_eq!(args[0], "--context", "unscoped call: {args:?}");
         assert_eq!(args[2], "--namespace", "unscoped call: {args:?}");
@@ -274,6 +278,63 @@ impl Cluster {
             other => panic!("fake cluster: unexpected kubectl {other:?}"),
         };
         (0, out)
+    }
+
+    /// `op`'s answers for delivery recording: state list/create/edit/get, and the values
+    /// item for everything else.
+    fn op(&self, args: &[String], stdin: Option<&[u8]>) -> String {
+        let starts = |p: &[&str]| args.len() >= p.len() && args.iter().zip(p).all(|(a, b)| a == b);
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str)
+        };
+        if starts(&["whoami"]) {
+            return json!({"account_uuid": "A000000000000000000000000"}).to_string();
+        }
+        if starts(&["item", "list"]) {
+            if flag("--vault") == Some("sdev") {
+                let rows: Vec<Value> = self
+                    .op_items
+                    .borrow()
+                    .iter()
+                    .map(|(id, raw)| {
+                        let doc: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
+                        json!({"id": id, "title": doc["title"]})
+                    })
+                    .collect();
+                return json!(rows).to_string();
+            }
+            return "[]".into();
+        }
+        if starts(&["item", "create"]) {
+            let n = self.op_serial.get() + 1;
+            self.op_serial.set(n);
+            let id = format!("stateitem{n:018}");
+            let title = flag("--title").unwrap_or_default().to_string();
+            let doc = json!({"id": id, "title": title, "fields": []});
+            self.op_items
+                .borrow_mut()
+                .insert(id.clone(), serde_json::to_vec(&doc).unwrap());
+            return json!({"id": id}).to_string();
+        }
+        if starts(&["item", "edit"]) {
+            let id = args.get(2).cloned().unwrap_or_default();
+            let mut doc: Value = serde_json::from_slice(stdin.unwrap()).unwrap();
+            doc["id"] = json!(id);
+            self.op_items
+                .borrow_mut()
+                .insert(id, serde_json::to_vec(&doc).unwrap());
+            return doc.to_string();
+        }
+        if starts(&["item", "get"]) {
+            let id = args.get(2).cloned().unwrap_or_default();
+            if let Some(raw) = self.op_items.borrow().get(&id) {
+                return String::from_utf8(raw.clone()).unwrap();
+            }
+        }
+        item()
     }
 
     fn replace(&self, stdin: &[u8]) -> (i32, String) {
@@ -482,7 +543,8 @@ fn failed_collection_after_a_healthy_deploy_is_a_warning() {
     let text = String::from_utf8(out).unwrap();
     assert!(
         text.lines()
-            .any(|l| l.starts_with("warning: superseded versions of FLEET__API__DB_URL")),
+            .any(|l| l
+                .starts_with("dev/app: warning: superseded versions of app/FLEET__API__DB_URL")),
         "{text}"
     );
 }
@@ -499,7 +561,10 @@ fn missing_deploy_right_refuses_before_any_write() {
         .argv
         .borrow()
         .iter()
-        .filter(|a| ["apply", "replace", "delete"].contains(&a[5].as_str()))
+        .filter(|a| {
+            a.get(5)
+                .is_some_and(|s| ["apply", "replace", "delete"].contains(&s.as_str()))
+        })
         .count();
     assert_eq!(writes, 0);
 }
@@ -511,7 +576,10 @@ fn second_sync_changes_nothing() {
         c.argv
             .borrow()
             .iter()
-            .filter(|a| ["apply", "replace", "delete"].contains(&a[5].as_str()))
+            .filter(|a| {
+                a.get(5)
+                    .is_some_and(|s| ["apply", "replace", "delete"].contains(&s.as_str()))
+            })
             .count()
     };
     let before = writes(&c);
@@ -561,7 +629,7 @@ fn kubernetes_sync_ends_with_the_shared_summary_line() {
     let text = String::from_utf8(out).unwrap();
     let last = text.lines().last().unwrap_or_default();
     let re = regex::Regex::new(
-        r"^summary: written \d+ · unchanged \d+ · held \d+ · deployed \S+( \(\d+ pending from an earlier run\))? · pending \d+ · pruned \d+ · kept \d+ · skipped \d+$",
+        r"^dev/app: summary: written \d+ · unchanged \d+ · held \d+ · deployed \S+( \(\d+ pending from an earlier run\))? · pending \d+ · pruned \d+ · kept \d+ · skipped \d+$",
     )
     .unwrap();
     assert!(re.is_match(last), "{text}");
@@ -578,7 +646,7 @@ fn lost_write_then_rerun_leaves_one_bound_version() {
         .argv
         .borrow()
         .iter()
-        .rposition(|a| a[5] == "apply")
+        .rposition(|a| a.get(5).is_some_and(|s| s == "apply"))
         .unwrap();
     let c = Cluster::new();
     c.cut.set(Some((new_key_apply, Cut::AfterEffect)));

@@ -118,8 +118,7 @@ impl Interaction for Ui {
 fn fleet(dev_account: Option<&str>, prod_account: Option<&str>) -> Fleet {
     let line = |a: Option<&str>| a.map_or(String::new(), |a| format!("account = \"{a}\"\n"));
     config::parse(&format!(
-        "[profile]\nkind = \"simple\"\n[environments.dev]\nvault_id = \"vdev\"\nitem_id = \
-         \"idev\"\n{}[environments.prod]\nvault_id = \"vprd\"\nitem_id = \"iprd\"\n{}",
+        "[environments.dev]\n{}[environments.prod]\n{}",
         line(dev_account),
         line(prod_account)
     ))

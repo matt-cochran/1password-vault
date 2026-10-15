@@ -1,4 +1,7 @@
 //! Fleet configuration model (§10.2). Holds names, IDs and rules; never values (FR-1).
+//!
+//! Since 0.7.0 (FR-24, FR-60) there is one way to write each rule: the `pattern` rule is
+//! removed and a file that sets it fails at load (see `crate::config`).
 
 use std::collections::BTreeMap;
 
@@ -24,8 +27,6 @@ pub struct Rules {
     pub not_prefix: Option<OneOrMany>,
     /// Accept the value with or without this prefix and stage exactly one occurrence (FR-24).
     pub ensure_prefix: Option<String>,
-    /// Full match required of the text after `ensure_prefix`; valid only with it (FR-24).
-    pub pattern: Option<String>,
     pub regex: Option<String>,
     #[serde(rename = "enum")]
     pub r#enum: Option<Vec<String>>,
@@ -90,8 +91,8 @@ pub struct KeySpec {
     pub immutable: bool,
     #[serde(default)]
     pub guidance: String,
-    /// Shared key (FR-45): `"<product>/<KEY>"` (`"<KEY>"` under the simple profile) names
-    /// the key whose field holds the value, in the same environment's item. The key then has
+    /// Shared key (FR-45): `"<product>/<KEY>"` names the key whose field holds the value, in
+    /// the source product's boundary item of the same environment (FR-57). The key then has
     /// no field of its own. Validated at load: see [`KeySpec::source`].
     #[serde(default)]
     pub from: Option<String>,
@@ -107,11 +108,10 @@ pub struct KeySpec {
 
 impl KeySpec {
     /// The source `(product, key)` of a shared key (FR-45), or `None` for a key with its
-    /// own field. `"<KEY>"` (no `/`) is the simple profile's implicit product. Only
-    /// meaningful after `config` validated the reference.
+    /// own field. `from` is always `"<product>/<KEY>"` (FR-60: a bare `"<KEY>"` fails at
+    /// load). Only meaningful after `config` validated the reference.
     pub fn source(&self) -> Option<(&str, &str)> {
-        let from = self.from.as_deref()?;
-        Some(from.split_once('/').unwrap_or((SIMPLE_PRODUCT, from)))
+        self.from.as_deref()?.split_once('/')
     }
 }
 
@@ -122,22 +122,86 @@ pub struct Product {
     /// written, managed or pruned, and `run --product <name>` refuses it. Default `false`.
     #[serde(default)]
     pub source_only: bool,
+    /// The access boundary this product's values live in (FR-57): a group name shared by
+    /// several products (`boundary = "<group>"`). `None`: the product is its own boundary.
+    /// See [`Fleet::boundary_of`].
+    #[serde(default)]
+    pub boundary: Option<String>,
     /// Declared keys. Defaulted so a source-only product without keys reaches validation's
     /// own error (FR-47) instead of a bare serde `missing field` message.
     #[serde(default)]
     pub keys: BTreeMap<String, KeySpec>,
 }
 
-/// One deployment environment: one 1Password item (by IDs, FR-13) and, optionally, one
-/// deployment target.
+/// One recorded access boundary of an environment (FR-57): the vault holding exactly one
+/// opv values item, and that item, by IDs (FR-13). Written by `opv bootstrap`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Boundary {
+    pub vault_id: String,
+    pub item_id: String,
+}
+
+/// One named deployment target of an environment (FR-56): one provider's options, the
+/// products it delivers, its deploy identity and its state vault.
+#[derive(Debug)]
+pub struct Target {
+    /// The target's name in the configuration (`^[a-z][a-z0-9-]*$`, chosen by a person).
+    pub name: String,
+    /// The provider's validated section (FR-28, FR-37).
+    pub config: Box<dyn TargetConfig>,
+    /// The products this target delivers (FR-48); `None`: every non-source-only product
+    /// with a key desired in the environment. See [`Fleet::delivers`].
+    pub products: Option<Vec<String>>,
+    /// The item holding this target's least-privilege deploy identity (FR-40), read by
+    /// `status`, `plan` and `sync` to sign the target CLI in for the run only.
+    pub deploy_credentials: Option<ItemRef>,
+    /// The vault holding this target's delivery evidence (FR-58, D12): one item per
+    /// placement, written by the deploy identity after a confirmed sync. Required.
+    pub state_vault_id: String,
+    /// product → the ID of its placement's delivery item in the state vault
+    /// (`delivery_items`, FR-58), recorded by `opv bootstrap` when it creates the item, so
+    /// nothing looks a state item up by title (FR-13). A product with none has no evidence.
+    pub delivery_items: BTreeMap<String, String>,
+}
+
+// By hand: a derive compares and clones `Box<dyn TargetConfig>` through the box's
+// contents, which a trait object cannot be moved out of.
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.config.eq_dyn(other.config.as_ref())
+            && self.products == other.products
+            && self.deploy_credentials == other.deploy_credentials
+            && self.state_vault_id == other.state_vault_id
+            && self.delivery_items == other.delivery_items
+    }
+}
+
+impl Eq for Target {}
+
+impl Clone for Target {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            config: self.config.clone_box(),
+            products: self.products.clone(),
+            deploy_credentials: self.deploy_credentials.clone(),
+            state_vault_id: self.state_vault_id.clone(),
+            delivery_items: self.delivery_items.clone(),
+        }
+    }
+}
+
+/// One deployment environment: its access boundaries (FR-57) and its named targets
+/// (FR-56). An environment with no target is run-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environment {
     /// The environment's name in the configuration (for messages: `opv login <name>`).
     pub name: String,
-    pub vault_id: String,
-    pub item_id: String,
-    /// The deployment target (FR-28, FR-37): `None` when the environment declares none.
-    pub target: Option<Box<dyn TargetConfig>>,
+    /// boundary name → recorded vault and item (FR-57); see [`Fleet::boundary`].
+    pub boundaries: BTreeMap<String, Boundary>,
+    /// target name → target (FR-56), in name order.
+    pub targets: BTreeMap<String, Target>,
     /// product → mode name → mode value, e.g. `allumata.payments = "off"`.
     pub modes: BTreeMap<String, BTreeMap<String, String>>,
     /// `confirm_env = true`: `sync` refuses without `--confirm <env>` (NR-20).
@@ -145,9 +209,6 @@ pub struct Environment {
     /// The 1Password account every `op` call for this environment uses (FR-40): a sign-in
     /// address or account ID. `None`: op's default (or the service account in CI).
     pub account: Option<String>,
-    /// The item holding this environment's least-privilege deploy identity (FR-40), read
-    /// by `status`, `plan` and `sync` to sign the target CLI in for the run only.
-    pub deploy_credentials: Option<ItemRef>,
     /// Display name for people (`opv ui`, `ready`); the key stays `name` (FR-55).
     pub title: Option<String>,
     /// Who the environment is for (free text, e.g. `devops`): a person who cannot open it is
@@ -161,10 +222,6 @@ pub struct Environment {
     /// Title of each person's personal item (FR-55); `None`: the shared item's title plus
     /// ` (personal)`.
     pub personal_item: Option<String>,
-    /// The vault holding this environment's delivery evidence (#106): one item per product,
-    /// written by the deploy identity after a confirmed sync. The values vault stays
-    /// read-only to CI; only identities that can read the values should read this vault.
-    pub state_vault_id: Option<String>,
 }
 
 impl Environment {
@@ -220,59 +277,24 @@ impl ItemRef {
     }
 }
 
-impl Environment {
-    /// The environment's deployment target, or `None` when it has none.
-    pub fn target(&self) -> Option<&dyn TargetConfig> {
-        self.target.as_deref()
-    }
-
-    /// Target name (the runtime env var name) for `product`/`key`, or `None` when the
-    /// environment has no target.
-    pub fn target_name(&self, product: &str, key: &str) -> Option<String> {
-        self.target().map(|t| t.env_name(product, key))
-    }
-}
-
-/// Which `profile.kind` the configuration declared (§10.2, FR-20).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Profile {
-    /// Products with sections in the item and a target name template (§10.2). The default.
-    #[default]
-    Fleet,
-    /// A flat `[keys]` map (FR-20): unsectioned item fields, target name = key name.
-    Simple,
-}
-
-/// Name of the one implicit product a simple-profile file desugars into (FR-20). Empty, so
-/// it can never collide with a fleet product name (`^[a-z][a-z0-9_-]*$`) or a 1Password
-/// section label (always non-empty), and it is never shown to the user: see
-/// [`key_label`].
-pub const SIMPLE_PRODUCT: &str = "";
-
-/// Target name template of a simple-profile environment: the key name itself (FR-20).
-pub const SIMPLE_TEMPLATE: &str = "{KEY}";
-
-/// The user-facing name of `product`/`key`: `product/KEY` under the fleet profile, `KEY`
-/// under the simple profile (whose implicit product is [`SIMPLE_PRODUCT`]).
+/// The user-facing name of `product`/`key`: `product/KEY` (FR-20 removed, FR-60).
 pub fn key_label(product: &str, key: &str) -> String {
-    if product == SIMPLE_PRODUCT {
-        key.to_string()
-    } else {
-        format!("{product}/{key}")
-    }
+    format!("{product}/{key}")
 }
 
-/// A validated configuration. Build it with `config::load` or `config::parse`.
-///
-/// A simple-profile file (FR-20) is desugared into the same model: one product named
-/// [`SIMPLE_PRODUCT`] holding every key, unsectioned item fields (section
-/// [`SIMPLE_PRODUCT`]), and a target name template of [`SIMPLE_TEMPLATE`], so the planner, rules,
-/// stage-and-compare and prune logic are shared unchanged.
+/// The configuration error text for `product`'s boundary `boundary` not being recorded in
+/// `env` (FR-57). The caller attaches the `boundary_missing` code and the next step
+/// `opv bootstrap`, which creates and records it.
+pub fn boundary_missing(env: &str, product: &str, boundary: &str) -> String {
+    format!("product {product} in {env} needs boundary {boundary}")
+}
+
+/// A validated configuration. Build it with `config::load` or `config::parse`. There is one
+/// form (FR-60): products, boundaries and named targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fleet {
     pub environments: BTreeMap<String, Environment>,
     pub products: BTreeMap<String, Product>,
-    pub profile: Profile,
     /// Where the configuration was read from, for wording only (FR-44).
     pub origin: Origin,
 }
@@ -299,36 +321,6 @@ impl Origin {
 }
 
 impl Fleet {
-    /// True for a `profile.kind = "simple"` file (FR-20).
-    pub fn is_simple(&self) -> bool {
-        self.profile == Profile::Simple
-    }
-
-    /// Load-time deprecation notes, one per affected key (FR-24, 0.6.0): a key that still
-    /// uses `pattern` names the equivalent `regex` rule, built only from configuration
-    /// (the prefix and the pattern), never a value. The CLI prints each on stderr once per
-    /// load. Empty when no key uses a deprecated rule.
-    pub fn notes(&self) -> Vec<String> {
-        let mut notes = Vec::new();
-        for (product, p) in &self.products {
-            for (key, spec) in &p.keys {
-                let Some(pattern) = &spec.rules.pattern else {
-                    continue;
-                };
-                let prefix = spec.rules.ensure_prefix.as_deref().unwrap_or_default();
-                let regex = format!("{}(?:{pattern})", regex::escape(prefix));
-                // A TOML string the user can paste as is (a regex escape such as `\-` is
-                // not a valid escape in a basic string, so this is usually a literal one).
-                let toml_value = toml::Value::String(regex);
-                notes.push(format!(
-                    "{}: pattern is deprecated; use regex = {toml_value} instead of pattern",
-                    key_label(product, key)
-                ));
-            }
-        }
-        notes
-    }
-
     /// Look up an environment by a (possibly user-supplied) name.
     ///
     /// An unknown name suggests the closest defined one, and the `Next:` step is a read-only
@@ -341,9 +333,13 @@ impl Fleet {
             let (hint, next) = match close.first() {
                 Some(c) => (
                     format!("; did you mean {c}?"),
-                    match self.environments.get(*c).and_then(|e| e.target()) {
-                        Some(_) => format!("opv status {c}"),
-                        None => format!("opv doctor --env {c}"),
+                    match self
+                        .environments
+                        .get(*c)
+                        .is_some_and(|e| !e.targets.is_empty())
+                    {
+                        true => format!("opv status {c}"),
+                        false => format!("opv doctor --env {c}"),
                     },
                 ),
                 None => (String::new(), "opv status".to_string()),
@@ -386,32 +382,93 @@ impl Fleet {
             .collect()
     }
 
-    /// Target name (runtime env var name) for `product`/`key` in `env`.
+    /// The access boundary `product`'s values live in (FR-57): its `boundary`, else its own
+    /// name.
+    pub fn boundary_of<'a>(&'a self, product: &'a str) -> &'a str {
+        self.products
+            .get(product)
+            .and_then(|p| p.boundary.as_deref())
+            .unwrap_or(product)
+    }
+
+    /// Every boundary `env` needs (FR-57, FR-55), each with the product that first needs it:
+    /// the boundary of each product with a team (non-personal) key desired in `env`, and of
+    /// every source such a key reads with `from`. Personal keys live in each person's own
+    /// item, so a product whose keys in `env` are all personal needs none. The one rule the
+    /// loader, the tidy and every reader use.
+    pub fn needed_boundaries<'a>(&'a self, env: &str) -> BTreeMap<&'a str, &'a str> {
+        let mut out = BTreeMap::new();
+        for (product, p) in &self.products {
+            let team: Vec<&KeySpec> = p
+                .keys
+                .values()
+                .filter(|k| !k.personal && k.environments.iter().any(|e| e == env))
+                .collect();
+            if team.is_empty() {
+                continue;
+            }
+            let sources = team.iter().filter_map(|k| k.source()).map(|(sp, _)| sp);
+            for needer in std::iter::once(product.as_str()).chain(sources) {
+                out.entry(self.boundary_of(needer)).or_insert(needer);
+            }
+        }
+        out
+    }
+
+    /// The recorded boundary of `product` in `env` (FR-57): the vault and item its values
+    /// live in. An undefined environment is [`Fleet::environment`]'s error; a boundary not
+    /// recorded is `boundary_missing` (load refuses that for every product with a key
+    /// desired in the environment, so only an undesired product reaches it).
+    pub fn boundary(&self, env: &str, product: &str) -> Result<&Boundary, Error> {
+        let name = self.boundary_of(product);
+        self.environment(env)?.boundaries.get(name).ok_or_else(|| {
+            Error::Config(boundary_missing(env, product, name).into())
+                .with_code(crate::error::Code::BoundaryMissing)
+                .with_next("opv bootstrap")
+        })
+    }
+
+    /// Target name (runtime env var name) for `product`/`key` on target `target` of `env`.
     ///
     /// # Panics
-    /// If `env` is not a defined environment with a target. Callers resolve it first.
-    pub fn target_name(&self, env: &str, product: &str, key: &str) -> String {
-        match self.environments.get(env).and_then(|e| e.target()) {
-            Some(t) => t.env_name(product, key),
-            None => panic!("target_name: environment {env:?} undefined or without a target"),
+    /// If `env` is not a defined environment with that target. Callers resolve it first.
+    pub fn target_name(&self, env: &str, target: &str, product: &str, key: &str) -> String {
+        match self
+            .environments
+            .get(env)
+            .and_then(|e| e.targets.get(target))
+        {
+            Some(t) => t.config.env_name(product, key),
+            None => panic!("target_name: environment {env:?} has no target {target:?}"),
         }
     }
 
-    /// Whether `env_name` delivers keys of `product` (FR-47, FR-48): true only when the
-    /// environment has a target, the product is not source-only, and the target serves the
-    /// product. An undelivered product's keys render no target name here: never written,
-    /// never in the managed set, never pruned and exempt from the name collision check.
-    pub fn delivers(&self, env_name: &str, product: &str) -> bool {
-        let Some(env) = self.environments.get(env_name) else {
+    /// Whether target `target` of `env` delivers keys of `product` (FR-47, FR-48, FR-56):
+    /// never a source-only or undeclared product; a target with `products` delivers exactly
+    /// those; one without delivers every product with a key desired in `env`. An
+    /// undelivered product's keys render no target name there: never written, never in the
+    /// managed set, never pruned and exempt from the name collision check.
+    pub fn delivers(&self, env: &str, target: &str, product: &str) -> bool {
+        let Some(t) = self
+            .environments
+            .get(env)
+            .and_then(|e| e.targets.get(target))
+        else {
             return false;
         };
-        let Some(t) = env.target() else {
+        let Some(p) = self.products.get(product) else {
             return false;
         };
-        if self.products.get(product).is_some_and(|p| p.source_only) {
+        if p.source_only {
             return false;
         }
-        t.serves(product)
+        match &t.products {
+            Some(listed) => listed.iter().any(|l| l == product),
+            None => p
+                .keys
+                .values()
+                .any(|k| k.environments.iter().any(|e| e == env)),
+        }
     }
 
     /// The first product (by name) that reads any key of `product` with `from` (FR-45), or
@@ -431,8 +488,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_label_hides_the_implicit_product() {
-        assert_eq!(key_label(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+    fn key_label_always_names_the_product() {
         assert_eq!(key_label("api", "JWT_KEY"), "api/JWT_KEY");
     }
 }

@@ -170,6 +170,26 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
     hex::encode(h.finalize())[..PLAN_ID_LEN].to_string()
 }
 
+/// The plan id of one run over several targets (FR-41, FR-56, D1 "every target, one plan
+/// id"): [`PLAN_ID_LEN`] hex digits of SHA-256 over each planned target's name and its
+/// [`plan_id`], in target-name order. It covers exactly the targets planned: the same
+/// configuration and state give the same id, and a plan made for other targets (one more,
+/// one fewer, another one) never matches. Names and ids only (SR-1).
+pub fn run_plan_id<'a>(targets: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let sorted: BTreeMap<&str, &str> = targets.into_iter().collect();
+    let mut h = Sha256::new();
+    let mut put = |s: &str| {
+        h.update((s.len() as u64).to_be_bytes());
+        h.update(s.as_bytes());
+    };
+    put("opv-run-plan-v1");
+    for (name, id) in sorted {
+        put(name);
+        put(id);
+    }
+    hex::encode(h.finalize())[..PLAN_ID_LEN].to_string()
+}
+
 /// Tag and annotation keys of a [`Stamp`] (FR-42).
 pub const STAMP_VERSION: &str = "opv-version";
 pub const STAMP_WRITTEN: &str = "opv-written";

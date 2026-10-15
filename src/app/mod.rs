@@ -41,7 +41,13 @@ pub mod open;
 pub mod personal;
 #[cfg(test)]
 mod pinned_tests;
+#[cfg(test)]
+#[path = "placement_tests.rs"]
+mod placement_tests;
 pub(crate) mod preflight;
+#[cfg(test)]
+#[path = "product_flag_tests.rs"]
+mod product_flag_tests;
 pub mod ready;
 pub mod repair;
 pub mod run;
@@ -64,6 +70,7 @@ mod staged_tests;
 pub mod status;
 pub(crate) mod suggest;
 pub mod sync;
+pub mod target_cmd;
 pub(crate) mod tidy;
 #[cfg(test)]
 mod ux2_tests;
@@ -78,8 +85,8 @@ use std::io::{self, Write};
 use crate::adapters::{onepassword, registry};
 use crate::domain::plan;
 use crate::domain::{
-    Environment, Fleet, KeyState, Kind, Row, SIMPLE_PRODUCT, SecretValue, StoreEntry, SyncPlan,
-    TargetState, key_label,
+    Environment, Fleet, KeyState, Kind, Row, SecretValue, StoreEntry, SyncPlan, TargetState,
+    key_label,
 };
 use crate::error::Error;
 use crate::ports::{PinnedStore, Ports, Store};
@@ -92,31 +99,36 @@ fn no_digest(_: &SecretValue) -> Option<String> {
     None
 }
 
-/// Read the environment's item once (FR-13), list the target's store once when `ports` are
-/// given, and build the plan. `env_name` must already be resolved, and the target opened,
-/// by the caller (so a missing target is `Error::Config` before any call).
+/// Read the environment's boundary items once each (FR-13, FR-57), list the store of target
+/// `target` once when `ports` are given, and build the plan for that target (`None`: no
+/// target). `env_name` must already be resolved, and the target opened, by the caller (so a
+/// missing target is `Error::Config` before any call).
 ///
 /// With a store, every ready secret is also checked against the store's own rules
 /// ([`Store::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
 /// failing rule naming product/KEY. A pinned store is also read once per ready secret it
 /// lists, and the value compared exactly (FR-31); a staged store (Fly) is never read.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_and_plan(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     r: &dyn CommandRunner,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
+    let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
     let (mut plan, listed) = plan_item_with(
         fleet,
         env_name,
+        target,
         read.fields,
         ports,
         rotate,
         prune_immutable,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
@@ -126,23 +138,27 @@ pub(crate) fn read_and_plan(
 /// [`read_and_plan`] that also returns the item's `version` integer, for the plan id
 /// (FR-41). Still one item read (FR-13), plus a person's tidy (FR-43): the version is the
 /// tidied item's, so a plan that tidied and the sync after it agree.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_and_plan_versioned(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     r: &dyn CommandRunner,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
 ) -> Result<(SyncPlan, Vec<StoreEntry>, Option<u64>), Error> {
     let read = tidy::read(fleet, env_name, r)?;
+    let ledgers = placement_ledgers(fleet, env_name, target, ports, r);
     let (mut plan, listed) = plan_item_with(
         fleet,
         env_name,
+        target,
         read.fields,
         ports,
         rotate,
         prune_immutable,
-        Some(&read.ledger),
+        &ledgers,
     )?;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
@@ -160,13 +176,14 @@ pub(crate) fn read_item_fields(
     Ok((read.fields, read.version))
 }
 
-/// The plan id (FR-41) of `plan`, built against `listed` on the target behind `ports`
+/// The plan id (FR-41) of `plan`, built against `listed` on target `target` behind `ports`
 /// from item version `item_version`. A staged store's versions are value digests (Fly), so
 /// only a pinned store's version ids go in (SR-1).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_id_of(
     fleet: &Fleet,
     env_name: &str,
+    target: &str,
     product: Option<&str>,
     item_version: Option<u64>,
     plan: &SyncPlan,
@@ -174,8 +191,10 @@ pub(crate) fn plan_id_of(
     ports: &Ports<'_>,
     own_plan: Option<&str>,
 ) -> String {
-    let env = fleet.environments.get(env_name);
-    let name_of = |p: &str, k: &str| env.and_then(|e| e.target_name(p, k));
+    let name_of = |p: &str, k: &str| {
+        let t = fleet.environments.get(env_name)?.targets.get(target)?;
+        Some(t.config.env_name(p, k))
+    };
     crate::domain::provenance::plan_id(
         &crate::domain::provenance::PlanIdInput {
             env: env_name,
@@ -201,17 +220,20 @@ pub(crate) fn read_and_plan_products(
     r: &dyn CommandRunner,
 ) -> Result<SyncPlan, Error> {
     fleet.environment(env_name)?;
-    let read = tidy::read(full, env_name, r)?;
+    let read = tidy::read_for(fleet, full, env_name, r)?;
     let none = BTreeSet::new();
-    let mut plan = plan_item(fleet, env_name, read.fields, None, &none, &none)?.0;
+    let mut plan = plan_item(fleet, env_name, None, read.fields, None, &none, &none)?.0;
     plan.tidy = read.changes;
     plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
     Ok(plan)
 }
 
+/// The plan of `fields` for target `target` of `env_name` (`None`: no target).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_item(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     fields: Vec<plan::ItemField>,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
@@ -220,25 +242,46 @@ pub(crate) fn plan_item(
     plan_item_with(
         fleet,
         env_name,
+        target,
         fields,
         ports,
         rotate,
         prune_immutable,
-        None,
+        &[],
     )
 }
 
-/// [`plan_item`] with the item's version ledger (FR-54): on a staged store that cannot show
-/// values, a name the store still holds at the version opv recorded is compared exactly
-/// through its fingerprint, and a name at another version is drift.
+/// The version ledgers of target `target`'s placements (FR-54, FR-58, D11): one per product
+/// whose delivery item is recorded, built from that item's evidence lines. Only a staged
+/// store needs one (a pinned store's values are read and compared exactly). A state item
+/// that cannot be read leaves its names unknown, with a note; it never fails the command.
+pub(crate) fn placement_ledgers(
+    fleet: &Fleet,
+    env_name: &str,
+    target: Option<&str>,
+    ports: Option<&Ports<'_>>,
+    r: &dyn CommandRunner,
+) -> Vec<crate::domain::ledger::Ledger> {
+    match (target, ports) {
+        (Some(t), Some(Ports::Staged { .. })) => delivery::ledgers(fleet, env_name, t, r),
+        _ => Vec::new(),
+    }
+}
+
+/// [`plan_item`] with the placements' version ledgers (FR-54, D11): on a staged store that
+/// cannot show values, a name the store still holds at the version opv recorded is compared
+/// exactly through its fingerprint, and a name at another version is drift. Each name is
+/// judged by its own placement's ledger.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_item_with(
     fleet: &Fleet,
     env_name: &str,
+    target: Option<&str>,
     fields: Vec<plan::ItemField>,
     ports: Option<&Ports<'_>>,
     rotate: &BTreeSet<(String, String)>,
     prune_immutable: &BTreeSet<(String, String)>,
-    ledger: Option<&crate::domain::ledger::Ledger>,
+    ledgers: &[crate::domain::ledger::Ledger],
 ) -> Result<(SyncPlan, Vec<StoreEntry>), Error> {
     let store: Option<&dyn Store> = ports.map(Ports::store);
     let mut on_target = match store {
@@ -276,9 +319,10 @@ pub(crate) fn plan_item_with(
         .iter()
         .filter_map(|e| e.version.clone().map(|v| (e.name.clone(), v)))
         .collect();
-    let by_ledger = match (pinned, ledger) {
-        (None, Some(l)) => Some(move |n: &str, v: &SecretValue| {
-            listed_versions.get(n).and_then(|now| l.check(n, now, v))
+    let by_ledger = match pinned {
+        None if !ledgers.is_empty() => Some(move |n: &str, v: &SecretValue| {
+            let now = listed_versions.get(n)?;
+            ledgers.iter().find_map(|l| l.check(n, now, v))
         }),
         _ => None,
     };
@@ -288,6 +332,7 @@ pub(crate) fn plan_item_with(
         fields,
         &on_target,
         &plan::PlanOptions {
+            target,
             rotate,
             prune_immutable,
             digest: &no_digest,
@@ -299,12 +344,15 @@ pub(crate) fn plan_item_with(
         },
     );
     let mut p = p;
-    if let (None, Some(l)) = (pinned, ledger) {
-        let managed = managed_names(fleet, env_name).unwrap_or_default();
-        p.drift = l
-            .drift(&on_target)
-            .into_iter()
-            .filter(|n| managed.contains(n))
+    if let (None, Some(t)) = (pinned, target)
+        && !ledgers.is_empty()
+    {
+        let managed = managed_names(fleet, env_name, t).unwrap_or_default();
+        let drifted: BTreeSet<String> = ledgers.iter().flat_map(|l| l.drift(&on_target)).collect();
+        p.drift = on_target
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| drifted.contains(n) && managed.contains(n))
             .collect();
     }
     if let Some(e) = failed.into_inner() {
@@ -349,12 +397,6 @@ pub(crate) fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()).into())
 }
 
-/// The `product` of a JSON row: `None` (JSON `null`) for the simple profile's implicit
-/// product, which is never shown (FR-20).
-pub(crate) fn json_product(product: &str) -> Option<String> {
-    (product != SIMPLE_PRODUCT).then(|| product.to_string())
-}
-
 /// Additive fields of the FR-21 document.
 #[derive(Default)]
 pub(crate) struct JsonExtra<'a> {
@@ -368,20 +410,30 @@ pub(crate) struct JsonExtra<'a> {
     pub link: Option<&'a str>,
 }
 
-/// FR-21: one names-only JSON document for `status --json` and `plan --json`.
-///
-/// Under the simple profile (FR-20) `product` is `null` in rows, extras and held entries,
-/// matching the text table, which has no PRODUCT column there.
+/// One target's part of a `status` or `plan` document (FR-56).
+pub(crate) struct JsonPart<'a> {
+    /// The target's name.
+    pub target: &'a str,
+    pub plan: &'a SyncPlan,
+    /// A pinned target's bindings (R5), keyed by name on the target.
+    pub pinned: Option<&'a BTreeMap<String, PinnedRow>>,
+}
+
+/// FR-21: one names-only JSON document for `status --json` and `plan --json`. Every row
+/// names its product (FR-20 removed).
 ///
 /// `schema_version` is 1; adding a field keeps the version. Rows carry names, states and
 /// counts only (SR-1): no value, value fragment, value length or guidance text. Errors
 /// before this point leave stdout empty, so a caller only gets a document on success.
 ///
-/// `pinned` adds the per-row binding fields of a pinned target (R5): `binding`,
-/// `pending_deploy` and `drift`, keyed by env name. They are absent for a staged target.
+/// `parts` holds one part per target of the run, in name order (FR-56): every row and
+/// held entry names its `target`; `stage`, `prune`, `drift` and `totals` add up the
+/// targets; `undelivered` lists the keys none of them delivers. A pinned part adds the
+/// per-row binding fields (R5): `binding`, `pending_deploy` and `drift`, keyed by env name.
+/// They are absent for a staged target.
 ///
-/// `target_name` is the row's name on the target for every provider; `fly_name` holds the
-/// same value and is kept for scripts written before 0.5.0 (deprecated, P4). `product` is
+/// `target_name` is the row's name on its target for every provider, and `target_state`
+/// its presence there. `product` is
 /// set when `--product` scoped the document (NR-16). `extra` adds `plan_id` (`plan`) and
 /// `provenance` (`status`), each left out when unset, and `next`.
 ///
@@ -393,12 +445,117 @@ pub(crate) fn write_json(
     out: &mut dyn Write,
     fleet: &Fleet,
     env_name: &str,
-    plan: &SyncPlan,
-    pinned: Option<&BTreeMap<String, PinnedRow>>,
+    parts: &[JsonPart<'_>],
     product: Option<&str>,
     extra: &JsonExtra<'_>,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
+    let mut rows: Vec<JsonRow> = Vec::new();
+    let mut held: Vec<JsonHeld> = Vec::new();
+    let mut extras: Vec<JsonName> = Vec::new();
+    let mut unreferenced: Vec<JsonName> = Vec::new();
+    let mut undelivered: Option<Vec<JsonName>> = None;
+    let mut drift = Vec::new();
+    let mut tidy = Vec::new();
+    let mut tidy_error = None;
+    let mut stage = Vec::new();
+    let mut prune = Vec::new();
+    let mut totals = JsonTotals {
+        rows: 0,
+        findings: 0,
+        extras: 0,
+        to_stage: 0,
+        held: 0,
+        to_prune: 0,
+    };
+    let mut changed = "none";
+    for part in parts {
+        let plan = part.plan;
+        let on = env.targets.get(part.target);
+        let name_of = |p: &str, k: &str| on.map(|t| t.config.env_name(p, k));
+        let part_rows = json_rows(part, &name_of, extra.link);
+        changed = match (changed, changes(plan, &part_rows, part.pinned)) {
+            ("some", _) | (_, "some") => "some",
+            ("unknown", _) | (_, "unknown") => "unknown",
+            _ => "none",
+        };
+        rows.extend(part_rows);
+        held.extend(plan.held_immutable.iter().map(|(product, key)| JsonHeld {
+            target: part.target.to_string(),
+            product: Some(String::from(product)),
+            key: key.clone(),
+            target_name: name_of(product, key),
+        }));
+        for (product, key) in &plan.extras {
+            if !extras.iter().any(|e| e.is(product, key)) {
+                extras.push(JsonName::new(product, key));
+            }
+        }
+        for (product, key) in &plan.unreferenced_sources {
+            if !unreferenced.iter().any(|e| e.is(product, key)) {
+                unreferenced.push(JsonName::new(product, key));
+            }
+        }
+        // Undelivered: declared here, and delivered by none of the targets.
+        let mine = json_names(&plan.undelivered);
+        undelivered = Some(match undelivered {
+            None => mine,
+            Some(before) => before
+                .into_iter()
+                .filter(|n| {
+                    mine.iter()
+                        .any(|m| m.product == n.product && m.key == n.key)
+                })
+                .collect(),
+        });
+        drift.extend(plan.drift.iter().cloned());
+        tidy.extend(json_tidy(&plan.tidy));
+        tidy_error = tidy_error.or(plan.tidy_error);
+        stage.extend(plan.stage.iter().map(|(n, _)| n.clone()));
+        prune.extend(plan.prune.iter().cloned());
+        totals.rows += plan.rows.len();
+        totals.findings += plan.blocking();
+        totals.to_stage += plan.stage.len();
+        totals.held += plan.held_immutable.len();
+        totals.to_prune += plan.prune.len();
+    }
+    totals.extras = extras.len();
+    let doc = JsonDoc {
+        schema_version: crate::json::SCHEMA_VERSION,
+        environment: env_name.to_string(),
+        product: product.map(str::to_string),
+        changes: changed,
+        rows,
+        extras,
+        undelivered: undelivered.unwrap_or_default(),
+        unreferenced_sources: unreferenced,
+        drift,
+        tidy,
+        tidy_error,
+        stage,
+        held,
+        prune,
+        totals,
+        plan_id: extra.plan_id.map(str::to_string),
+        provenance: extra.provenance.map(|s| JsonStamp {
+            opv_version: s.opv_version.clone(),
+            written: s.written.clone(),
+            plan_id: s.plan.clone(),
+        }),
+        next: extra.next.map(str::to_string),
+    };
+    let text = serde_json::to_string(&doc)
+        .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
+    writeln!(out, "{text}").map_err(write_err)
+}
+
+/// The JSON rows of one target's part, each naming the target (FR-56).
+fn json_rows(
+    part: &JsonPart<'_>,
+    name_of: &dyn Fn(&str, &str) -> Option<String>,
+    link: Option<&str>,
+) -> Vec<JsonRow> {
+    let plan = part.plan;
     let staged: HashSet<&str> = plan.stage.iter().map(|(n, _)| n.as_str()).collect();
     let pruned: HashSet<&str> = plan.prune.iter().map(String::as_str).collect();
     let held_keys: HashSet<(&str, &str)> = plan
@@ -411,12 +568,10 @@ pub(crate) fn write_json(
         .iter()
         .map(|(_, _, n)| n.as_str())
         .collect();
-
-    let rows: Vec<JsonRow> = plan
-        .rows
+    plan.rows
         .iter()
         .map(|r| {
-            let target_name = env.target_name(&r.product, &r.key);
+            let target_name = name_of(&r.product, &r.key);
             let action = row_action(
                 r,
                 target_name.as_deref(),
@@ -427,69 +582,18 @@ pub(crate) fn write_json(
             );
             let bound = target_name
                 .as_deref()
-                .and_then(|n| pinned.and_then(|m| m.get(n)));
+                .and_then(|n| part.pinned.and_then(|m| m.get(n)));
             JsonRow {
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
                 drift: bound.map(|b| b.drift),
                 chain: bound.and_then(|b| b.chain.clone()),
-                open_url: extra.link.filter(|_| is_blocking(r)).map(str::to_string),
+                open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
+                target: Some(part.target.to_string()),
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
-        .collect();
-
-    let changes = changes(plan, &rows, pinned);
-    let doc = JsonDoc {
-        schema_version: crate::json::SCHEMA_VERSION,
-        environment: env_name.to_string(),
-        product: product.map(str::to_string),
-        changes,
-        rows,
-        extras: plan
-            .extras
-            .iter()
-            .map(|(product, key)| JsonName {
-                product: json_product(product),
-                key: key.clone(),
-            })
-            .collect(),
-        undelivered: json_names(&plan.undelivered),
-        unreferenced_sources: json_names(&plan.unreferenced_sources),
-        drift: plan.drift.clone(),
-        tidy: json_tidy(&plan.tidy),
-        tidy_error: plan.tidy_error,
-        stage: plan.stage.iter().map(|(n, _)| n.clone()).collect(),
-        held: plan
-            .held_immutable
-            .iter()
-            .map(|(product, key)| JsonHeld {
-                product: json_product(product),
-                key: key.clone(),
-                target_name: env.target_name(product, key),
-                fly_name: env.target_name(product, key),
-            })
-            .collect(),
-        prune: plan.prune.clone(),
-        totals: JsonTotals {
-            rows: plan.rows.len(),
-            findings: plan.blocking(),
-            extras: plan.extras.len(),
-            to_stage: plan.stage.len(),
-            held: plan.held_immutable.len(),
-            to_prune: plan.prune.len(),
-        },
-        plan_id: extra.plan_id.map(str::to_string),
-        provenance: extra.provenance.map(|s| JsonStamp {
-            opv_version: s.opv_version.clone(),
-            written: s.written.clone(),
-            plan_id: s.plan.clone(),
-        }),
-        next: extra.next.map(str::to_string),
-    };
-    let text = serde_json::to_string(&doc)
-        .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
-    writeln!(out, "{text}").map_err(write_err)
+        .collect()
 }
 
 /// Whether a sync would change the target (H8): `some` when a key is new or certainly
@@ -504,7 +608,7 @@ fn changes(
         .iter()
         .filter(|r| r.action == Some("would_stage"))
         .collect();
-    let certain = staged.iter().any(|r| r.target != Some("present"))
+    let certain = staged.iter().any(|r| r.target_state != Some("present"))
         || !plan.prune.is_empty()
         || pinned.is_some_and(|m| m.values().any(|b| b.pending_deploy));
     if certain {
@@ -569,6 +673,8 @@ struct JsonStamp {
 /// The one row shape of every names-only document: `status`, `plan` and `check` (A6).
 #[derive(serde::Serialize)]
 pub(crate) struct JsonRow {
+    /// The name of the row's target (FR-56); null where no target is read (`check`).
+    target: Option<String>,
     product: Option<String>,
     key: String,
     kind: &'static str,
@@ -577,9 +683,8 @@ pub(crate) struct JsonRow {
     /// Why `rule` failed (FR-22): from the rule's fixed set or the configuration only.
     reason: Option<String>,
     target_name: Option<String>,
-    /// Deprecated alias of `target_name` (P4).
-    fly_name: Option<String>,
-    target: Option<&'static str>,
+    /// The row's state on its target: `present`, `absent`, `would_change` or null.
+    target_state: Option<&'static str>,
     action: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     binding: Option<&'static str>,
@@ -592,29 +697,30 @@ pub(crate) struct JsonRow {
     /// The 1Password item link to fix a blocking row in (H1); IDs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     open_url: Option<String>,
-    /// A shared key's source, `product/KEY` (`KEY` under the simple profile) (FR-45).
+    /// A shared key's source, `product/KEY` (FR-45).
     #[serde(skip_serializing_if = "Option::is_none")]
     shared_from: Option<String>,
 }
 
 impl JsonRow {
-    /// `r` with its name on the target, its target presence and the plan's action.
+    /// `r` with its name on the target, its presence there and the plan's action; no
+    /// target named (`check`; [`json_rows`] sets it for `status` and `plan`).
     pub(crate) fn new(
         r: &Row,
         target_name: Option<String>,
-        target: Option<&'static str>,
+        target_state: Option<&'static str>,
         action: Option<&'static str>,
     ) -> JsonRow {
         JsonRow {
-            product: json_product(&r.product),
+            target: None,
+            product: Some(String::from(&r.product)),
             key: r.key.clone(),
             kind: kind_label(r.kind),
             state: json_state(&r.state),
             rule: json_rule(&r.state),
             reason: json_reason(&r.state),
-            fly_name: target_name.clone(),
             target_name,
-            target,
+            target_state,
             action,
             binding: None,
             pending_deploy: None,
@@ -666,13 +772,25 @@ struct JsonName {
     key: String,
 }
 
+impl JsonName {
+    fn new(product: &str, key: &str) -> JsonName {
+        JsonName {
+            product: Some(String::from(product)),
+            key: key.to_string(),
+        }
+    }
+
+    fn is(&self, product: &str, key: &str) -> bool {
+        self.product.as_deref() == Some(product) && self.key == key
+    }
+}
+
 #[derive(serde::Serialize)]
 struct JsonHeld {
+    target: String,
     product: Option<String>,
     key: String,
     target_name: Option<String>,
-    /// Deprecated alias of `target_name` (P4).
-    fly_name: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -784,7 +902,7 @@ pub(crate) fn row_state_label(r: &Row) -> String {
     }
 }
 
-/// The TARGET word of a row (H5), from one closed set on every provider and in both
+/// The ON TARGET word of a row (H5), from one closed set on every provider and in both
 /// `status` and `plan`: `new`, `same`, `changed`, `unknown`, `pending`, `held`, `extra`,
 /// `drift` or `n/a`. `held` marks an immutable key kept as it is; `binding` is the row's
 /// binding on a pinned target, when known. `opv help states` defines each word.
@@ -810,7 +928,7 @@ pub(crate) fn target_word(r: &Row, held: bool, binding: Option<&PinnedRow>) -> &
 }
 
 /// The source and target words and what each means, one line per word (`opv help states`,
-/// H5). The JSON `state` and `target` fields keep their own stable spellings.
+/// H5). The JSON `state` and `target_state` fields keep their own stable spellings.
 pub const STATES_HELP: &str = "\
 SOURCE: the key in 1Password
   saved       stored and passes every rule. Either field type is accepted: a config key
@@ -823,7 +941,7 @@ SOURCE: the key in 1Password
               shares another key's value (shared from <product>/<KEY>) and that key has a
               finding; fixed with it, not counted again
 
-TARGET: the key on the deployment target
+ON TARGET: the key on its deployment target (the TARGET column names the target)
   new         not on the target yet; the next sync writes it
   same        on the target with the same value; nothing to write
   changed     on the target with another value; the next sync writes it
@@ -839,7 +957,7 @@ TARGET: the key on the deployment target
 Missing and failed are findings: status, plan and check exit 8 and print an
 open: link to the item in 1Password (opv open <[product/]KEY> --env <env>).";
 
-/// `product/KEY` (`KEY` under the simple profile) of every row in `rows` matching `pred`,
+/// `product/KEY` of every row in `rows` matching `pred`,
 /// for names-only messages.
 pub(crate) fn row_names(rows: &[Row], pred: impl Fn(&Row) -> bool) -> Vec<String> {
     rows.iter()
@@ -884,36 +1002,34 @@ fn wants_guidance(r: &Row) -> bool {
     matches!(r.state, KeyState::Missing | KeyState::RuleFailed(..)) && !r.guidance.is_empty()
 }
 
-/// Print `rows` as a table `PRODUCT KEY KIND STATE TARGET`, problems first (H4): the
-/// blocking rows (missing, wrong kind, failed), then the rest, each group in declared
-/// order. Under each missing or failing row its guidance; the way to the field is the
-/// findings' `Next: opv open …` (H1). `target` renders the last column. Rows hold names only. Under the simple profile
-/// (FR-20) there is no PRODUCT column: the table is `KEY KIND STATE TARGET`.
+/// Print `rows`, each with the name of its target, as a table `TARGET PRODUCT KEY KIND
+/// STATE ON TARGET` (FR-56), problems first (H4): the blocking rows (missing, wrong kind,
+/// failed), then the rest, each group in the given order (targets in name order, keys in
+/// declared order). Under each missing or failing row its guidance; the way to the field
+/// is the findings' `Next: opv open …` (H1). `word` renders the last column, the row's
+/// state on its target. Rows hold names only.
 pub(crate) fn print_rows(
     out: &mut dyn Write,
-    fleet: &Fleet,
-    rows: &[Row],
-    target: impl Fn(&Row) -> String,
+    rows: &[(&str, &Row)],
+    word: impl Fn(&str, &Row) -> String,
 ) -> Result<(), Error> {
-    let skip = usize::from(fleet.is_simple());
-    let header: Vec<String> = ["PRODUCT", "KEY", "KIND", "STATE", "TARGET"]
+    let header: Vec<String> = ["TARGET", "PRODUCT", "KEY", "KIND", "STATE", "ON TARGET"]
         .iter()
-        .skip(skip)
         .map(|s| s.to_string())
         .collect();
-    let ordered = problems_first(rows);
+    let ordered = problems_first(rows, |(_, r)| r);
     let cells: Vec<Vec<String>> = ordered
         .iter()
-        .map(|r| {
+        .map(|(t, r)| {
             [
+                t.to_string(),
                 r.product.clone(),
                 r.key.clone(),
                 kind_label(r.kind).to_string(),
                 row_state_label(r),
-                target(r),
+                word(t, r),
             ]
             .into_iter()
-            .skip(skip)
             .collect()
         })
         .collect();
@@ -933,7 +1049,7 @@ pub(crate) fn print_rows(
         s.trim_end().to_string()
     };
     writeln!(out, "{}", line(&header)).map_err(write_err)?;
-    for (r, c) in ordered.iter().zip(&cells) {
+    for ((_, r), c) in ordered.iter().zip(&cells) {
         writeln!(out, "{}", line(c)).map_err(write_err)?;
         if let Some(t) = shared_text(r) {
             writeln!(out, "    {t}").map_err(write_err)?;
@@ -947,30 +1063,47 @@ pub(crate) fn print_rows(
 }
 
 /// The blocking rows (and keys blocked by their source) first, then the others, each in
-/// their original order (H4, FR-45).
-pub(crate) fn problems_first(rows: &[Row]) -> Vec<&Row> {
+/// their original order (H4, FR-45). `row` gives each entry's row.
+pub(crate) fn problems_first<T>(rows: &[T], row: impl Fn(&T) -> &Row) -> Vec<&T> {
     // A key blocked by its source (FR-45) is a problem too, fixed at the source.
-    let (mut bad, good): (Vec<&Row>, Vec<&Row>) = rows
-        .iter()
-        .partition(|r| is_blocking(r) || r.state == KeyState::SourceBlocked);
+    let (mut bad, good): (Vec<&T>, Vec<&T>) = rows.iter().partition(|e| {
+        let r = row(e);
+        is_blocking(r) || r.state == KeyState::SourceBlocked
+    });
     bad.extend(good);
     bad
 }
 
-/// The 1Password private link to `env_name`'s item (H1), with the signed-in account from
-/// one free `op whoami` probe when it answers. IDs only, never a value.
+/// The 1Password private link to the boundary item holding `product`'s values in
+/// `env_name` (H1, FR-57), with the signed-in account from one free `op whoami` probe when
+/// it answers. IDs only, never a value.
 pub(crate) fn item_url(
     fleet: &Fleet,
     env_name: &str,
+    product: &str,
     r: &dyn CommandRunner,
 ) -> Result<String, Error> {
-    let env = fleet.environment(env_name)?;
+    let b = fleet.boundary(env_name, product)?;
     let account = onepassword::account(r);
     Ok(onepassword::item_link(
         account.as_ref(),
-        &env.vault_id,
-        &env.item_id,
+        &b.vault_id,
+        &b.item_id,
     ))
+}
+
+/// [`item_url`] of the first blocking row's product (else the first row's), for the plan
+/// and status link (H1); `None` when there are no rows.
+pub(crate) fn rows_item_url(
+    fleet: &Fleet,
+    env_name: &str,
+    rows: &[Row],
+    r: &dyn CommandRunner,
+) -> Result<Option<String>, Error> {
+    let Some(row) = rows.iter().find(|r| is_blocking(r)).or(rows.first()) else {
+        return Ok(None);
+    };
+    item_url(fleet, env_name, &row.product, r).map(Some)
 }
 
 /// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
@@ -1085,7 +1218,7 @@ fn json_names(pairs: &[(String, String)]) -> Vec<JsonName> {
     pairs
         .iter()
         .map(|(product, key)| JsonName {
-            product: json_product(product),
+            product: Some(String::from(product)),
             key: key.clone(),
         })
         .collect()
@@ -1104,8 +1237,8 @@ pub(crate) fn source_only_message(product: &str) -> Error {
     )
 }
 
-/// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused under the simple
-/// profile, which has no products (FR-20), and for an undeclared product. Before any call.
+/// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused for an undeclared
+/// product, before any call.
 /// `--product` (or `OPV_PRODUCT`) of `opv <verb> [<env>]`: an undeclared one ends with the
 /// same read-only command on the closest declared product (I4).
 pub(crate) fn check_product(
@@ -1127,13 +1260,6 @@ pub(crate) fn check_product(
         }
         c
     };
-    if fleet.is_simple() {
-        return Err(Error::Config(
-            "--product is not used under the simple profile; run the command without it".into(),
-        )
-        .with_code(crate::error::Code::UnknownProduct)
-        .with_next(command(None)));
-    }
     if !fleet.products.contains_key(p) {
         let all: Vec<&str> = fleet.products.keys().map(String::as_str).collect();
         let pick = suggest::close(p, all.iter().copied())
@@ -1147,6 +1273,92 @@ pub(crate) fn check_product(
         return Err(source_only_message(p).with_next(command(pick)));
     }
     Ok(())
+}
+
+/// D10/FR-34: the product a command acts on in `env`. `given` (a `--product` value, or
+/// the product part of `open`'s target) is validated when present. Without it, exactly one
+/// product that is not source-only and has a key desired in `env` is used; several is a
+/// usage error listing them, with a `Next:` naming the first. `verb` names the command in
+/// the error, e.g. `check`, `run`, `config export`.
+pub(crate) fn pick_product(
+    fleet: &Fleet,
+    env: &str,
+    given: Option<&str>,
+    verb: &str,
+) -> Result<String, Error> {
+    if let Some(p) = given {
+        check_product(fleet, Some(p), verb, Some(env))?;
+        return Ok(p.to_string());
+    }
+    let env_def = fleet.environment(env)?;
+    // FR-47: a source-only product holds shared values for other products' keys and is
+    // never run on its own, so it never qualifies. FR-15: a key refused here is not desired.
+    let mut candidates: Vec<&str> = Vec::new();
+    for (name, product) in &fleet.products {
+        if !product.source_only
+            && product.keys.values().any(|spec| {
+                crate::domain::rules::applies(spec, env, env_def, name)
+                    && !crate::domain::rules::refused_in(spec, env)
+            })
+        {
+            candidates.push(name.as_str());
+        }
+    }
+    match candidates.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(product_choice_error(
+            fleet,
+            env,
+            verb,
+            &[],
+            &non_source_only(fleet),
+        )),
+        many => Err(product_choice_error(fleet, env, verb, many, many)),
+    }
+}
+
+/// The one product-choice error: `--product is required`, the products it lists, and a
+/// `Next:` naming the first of them. `candidates` are the products with keys desired here;
+/// when there are none, `all` names the runnable products for context.
+fn product_choice_error(
+    fleet: &Fleet,
+    env: &str,
+    verb: &str,
+    candidates: &[&str],
+    all: &[&str],
+) -> Error {
+    let reason = if candidates.is_empty() {
+        format!("no product has keys desired in environment {env}")
+    } else {
+        format!("several products have keys desired in environment {env}")
+    };
+    let listed = if candidates.is_empty() {
+        all
+    } else {
+        candidates
+    };
+    let mut error = Error::Config(
+        format!(
+            "--product is required for opv {verb}: {reason}. Choose one of: {}.",
+            listed.join(", ")
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::Usage);
+    if let Some(first) = listed.first() {
+        error = error.with_next(check_command(fleet, Some(env), Some(first)));
+    }
+    error
+}
+
+/// The products that can be run or checked on their own: every non-source-only one (FR-47).
+fn non_source_only(fleet: &Fleet) -> Vec<&str> {
+    fleet
+        .products
+        .iter()
+        .filter(|(_, p)| !p.source_only)
+        .map(|(name, _)| name.as_str())
+        .collect()
 }
 
 /// An undeclared `--product`: the declared ones, the closest named, and a `Next:` step that
@@ -1181,7 +1393,7 @@ pub(crate) fn list_keys_command(fleet: &Fleet) -> String {
     if let Some((name, _)) = fleet
         .environments
         .iter()
-        .find(|(_, e)| e.target().is_some())
+        .find(|(_, e)| !e.targets.is_empty())
     {
         return format!("opv status {name}");
     }
@@ -1196,21 +1408,22 @@ pub(crate) fn check_command(fleet: &Fleet, env: Option<&str>, product: Option<&s
         .filter(|e| fleet.environments.contains_key(*e))
         .or_else(|| fleet.environments.keys().next().map(String::as_str))
         .unwrap_or("<env>");
-    match product.filter(|_| !fleet.is_simple()) {
+    match product {
         Some(p) => format!("opv check {env} --product {p}"),
         None => format!("opv check {env}"),
     }
 }
 
-/// The target names `product`'s declared keys render in `env_name` (its share of the managed
-/// set, FR-8).
+/// The target names `product`'s declared keys render on target `target_name` of `env_name`
+/// (its share of the managed set, FR-8).
 pub(crate) fn product_names(
     fleet: &Fleet,
     env_name: &str,
+    target_name: &str,
     product: &str,
 ) -> Result<HashSet<String>, Error> {
-    let (_, t) = target(fleet, env_name)?;
-    if !fleet.delivers(env_name, product) {
+    let (_, t) = target(fleet, env_name, target_name)?;
+    if !fleet.delivers(env_name, target_name, product) {
         return Ok(HashSet::new());
     }
     Ok(fleet
@@ -1247,43 +1460,52 @@ pub(crate) fn scope_plan(plan: &mut SyncPlan, product: &str, names: &HashSet<Str
 
 /// Target name → `product/KEY` of every declared key, so output names a key the way the
 /// configuration does, with the target's name second: `product/KEY (TARGET_NAME)` (P19).
-pub(crate) struct KeyNames(BTreeMap<String, String>);
+pub(crate) struct KeyNames {
+    /// The target's name (FR-56).
+    target: String,
+    labels: BTreeMap<String, String>,
+}
 
 impl KeyNames {
-    pub(crate) fn new(fleet: &Fleet, env_name: &str) -> Result<KeyNames, Error> {
-        let (_, t) = target(fleet, env_name)?;
-        Ok(KeyNames(
-            fleet
+    pub(crate) fn new(fleet: &Fleet, env_name: &str, target_name: &str) -> Result<KeyNames, Error> {
+        let (_, t) = target(fleet, env_name, target_name)?;
+        Ok(KeyNames {
+            target: target_name.to_string(),
+            labels: fleet
                 .products
                 .iter()
-                .filter(|(p, _)| fleet.delivers(env_name, p))
+                .filter(|(p, _)| fleet.delivers(env_name, target_name, p))
                 .flat_map(|(p, prod)| {
                     prod.keys
                         .keys()
                         .map(move |k| (t.env_name(p, k), key_label(p, k)))
                 })
                 .collect(),
-        ))
+        })
     }
 
-    /// `product/KEY (NAME)`; the bare name when it is no declared key's, or when the label
-    /// is the name itself (simple profile).
+    /// `product/KEY (NAME)`; the bare name when it is no declared key's.
     pub(crate) fn label(&self, name: &str) -> String {
-        match self.0.get(name) {
+        match self.labels.get(name) {
             Some(key) if key != name => format!("{key} ({name})"),
             _ => name.to_string(),
         }
     }
 
-    /// `{product, key, target_name}` for a target name (A6); `product` is null under the
-    /// simple profile, `product` and `key` for a name no declared key renders.
+    /// `{target, product, key, target_name}` for a name on the target (A6, FR-56);
+    /// `product` and `key` are null for a name no declared key renders.
     pub(crate) fn json_ref(&self, name: &str) -> serde_json::Value {
-        let (product, key) = match self.0.get(name).map(|l| (l, l.split_once('/'))) {
+        let (product, key) = match self.labels.get(name).map(|l| (l, l.split_once('/'))) {
             Some((_, Some((p, k)))) => (Some(p), Some(k)),
             Some((l, None)) => (None, Some(l.as_str())),
             None => (None, None),
         };
-        serde_json::json!({"product": product, "key": key, "target_name": name})
+        serde_json::json!({
+            "target": self.target,
+            "product": product,
+            "key": key,
+            "target_name": name,
+        })
     }
 
     /// [`KeyNames::json_ref`] of each name.
@@ -1316,10 +1538,10 @@ pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-/// The one-line count summary `status` prints first, and `status` without an environment
-/// prints per environment (NR-16, P22): `prod: 4 keys · 3 saved · 1 skipped · 0 findings ·
-/// 1 not yet on Fly`. Names and counts only.
-pub(crate) fn count_line(env_name: &str, rows: &[Row], target_label: &str) -> String {
+/// The one-line count summary `status` prints first for each target, and `status` without
+/// an environment prints per target of each environment (NR-16, P22, FR-56): `prod/web: 4
+/// keys · 3 saved · 1 skipped · 0 findings · 1 not yet on Fly`. Names and counts only.
+pub(crate) fn count_line(env_name: &str, target: &str, rows: &[Row], target_label: &str) -> String {
     let saved = rows.iter().filter(|r| r.state == KeyState::Ready);
     let absent = saved
         .clone()
@@ -1328,73 +1550,187 @@ pub(crate) fn count_line(env_name: &str, rows: &[Row], target_label: &str) -> St
     let skipped = rows.iter().filter(|r| r.state == KeyState::Skipped).count();
     let findings = rows.iter().filter(|r| is_blocking(r)).count();
     format!(
-        "{env_name}: {} · {} saved · {skipped} skipped · {} · {absent} not yet on {target_label}",
+        "{}: {} · {} saved · {skipped} skipped · {} · {absent} not yet on {target_label}",
+        placement(env_name, target),
         plural(rows.len(), "key", "keys"),
         saved.count(),
         plural(findings, "finding", "findings"),
     )
 }
 
-/// The environment and its target; `Error::Config` naming the environment when it is
-/// undefined or has no target section (status, plan and sync need one). The hint names
-/// what the default provider needs (FR-37).
+/// The targets a run of `verb` covers in `env` (FR-56): every target of the environment,
+/// or only those `--target` names (repeatable), in name order without repeats. An unknown
+/// name is a usage error that lists the environment's targets; an environment without a
+/// target is [`no_target`]'s error.
+pub(crate) fn resolve_targets(
+    fleet: &Fleet,
+    env: &str,
+    requested: &[String],
+    verb: &str,
+) -> Result<Vec<String>, Error> {
+    let e = fleet.environment(env)?;
+    if e.targets.is_empty() {
+        return Err(no_target(fleet, env));
+    }
+    let names: Vec<&str> = e.targets.keys().map(String::as_str).collect();
+    if let Some(unknown) = requested.iter().find(|n| !e.targets.contains_key(*n)) {
+        return Err(Error::Config(
+            format!(
+                "environment {env} has no target {unknown:?} (targets: {})",
+                names.join(", ")
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::Usage)
+        .with_next(format!("opv {verb} {env} --target {}", names[0])));
+    }
+    Ok(names
+        .into_iter()
+        .filter(|n| requested.is_empty() || requested.iter().any(|r| r == n))
+        .map(str::to_string)
+        .collect())
+}
+
+/// The runner for each of `names`, the targets of one run (FR-40, FR-56). A run over one
+/// target uses `r`, which the CLI signed in with that target's deploy credentials; a run
+/// over several signs in here, once per target, so each target's calls carry its own
+/// deploy identity and never another's. `None`: use `r`.
+pub(crate) fn target_runners<'a>(
+    fleet: &Fleet,
+    env: &str,
+    names: &[String],
+    r: &'a dyn CommandRunner,
+) -> Result<Vec<Option<signin::EnvRunner<'a>>>, Error> {
+    if names.len() < 2 {
+        return Ok(names.iter().map(|_| None).collect());
+    }
+    names
+        .iter()
+        .map(|n| signin::open_targeted(fleet, env, Some(n), r, signin::Reach::Target).map(Some))
+        .collect()
+}
+
+/// `w` with every line it writes prefixed by `prefix`: the detail lines of one target in a
+/// run over several (`prod/web: would stage: …`, FR-56).
+pub(crate) struct Prefixed<'w> {
+    inner: &'w mut dyn Write,
+    prefix: String,
+    at_start: bool,
+}
+
+impl<'w> Prefixed<'w> {
+    pub(crate) fn new(inner: &'w mut dyn Write, prefix: String) -> Self {
+        Prefixed {
+            inner,
+            prefix,
+            at_start: true,
+        }
+    }
+}
+
+impl Write for Prefixed<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for line in buf.split_inclusive(|b| *b == b'\n') {
+            if self.at_start {
+                self.inner.write_all(self.prefix.as_bytes())?;
+            }
+            self.inner.write_all(line)?;
+            self.at_start = line.ends_with(b"\n");
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// `<env>/<target>`: how output names one target of a run (FR-56).
+pub(crate) fn placement(env: &str, target: &str) -> String {
+    format!("{env}/{target}")
+}
+
+/// The environment and its target `name` (FR-56); `Error::Config` naming the environment
+/// when it is undefined or has no target (status, plan and sync need one), and a usage
+/// error listing the targets when it has none of that name. The hint names what the
+/// default provider needs (FR-37).
 pub(crate) fn target<'f>(
     fleet: &'f Fleet,
     env: &str,
+    name: &str,
 ) -> Result<(&'f Environment, &'f dyn TargetConfig), Error> {
     let e = fleet.environment(env)?;
-    if let Some(t) = e.target() {
-        return Ok((e, t));
+    if e.targets.is_empty() {
+        return Err(no_target(fleet, env));
     }
-    let local = if fleet.is_simple() {
-        format!("opv check {env} and opv run {env} -- <command>")
-    } else {
-        format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>")
-    };
+    match e.targets.get(name) {
+        Some(t) => Ok((e, t.config.as_ref())),
+        None => {
+            let names: Vec<&str> = e.targets.keys().map(String::as_str).collect();
+            Err(Error::Config(
+                format!(
+                    "environment {env} has no target {name:?} (targets: {})",
+                    names.join(", ")
+                )
+                .into(),
+            )
+            .with_code(crate::error::Code::Usage)
+            .with_next(format!("opv status {env} --target {}", names[0])))
+        }
+    }
+}
+
+/// The error for an environment without a target (run-only, FR-56).
+fn no_target(fleet: &Fleet, env: &str) -> Error {
+    let local =
+        format!("opv check {env} --product <name> and opv run {env} --product <name> -- <command>");
     let sections: Vec<&str> = registry::PROVIDERS.iter().map(|p| p.section()).collect();
-    Err(Error::Config(
+    Error::Config(
         format!(
             "environment {env:?} has no deployment target. For local settings use {local}. To \
-             deploy, add one target section ({}) to environment {env} in the configuration \
-             first: secrets.toml, or opv config edit for a manifest ({DOCS}/configuration.md).",
+             deploy, add a named target first with opv target add {env} <name> and one \
+             provider's options ({}; opv target add --help).",
             sections.join(", ")
         )
         .into(),
     )
     .with_code(crate::error::Code::NoTarget)
     .with_do(format!(
-        "to deploy, add a {} section to environment {env} in the configuration (secrets.toml, or opv config edit) ({DOCS}/configuration.md)",
+        "to deploy, add a target with opv target add {env} <name> and one provider's options ({})",
         sections.join(", ")
     ))
     .with_next(check_command(
         fleet,
         Some(env),
         fleet.products.keys().next().map(String::as_str),
-    )))
+    ))
 }
 
-/// Where the user documentation lives (for next steps that are a page to read).
-pub(crate) const DOCS: &str = "https://github.com/matt-cochran/1password-vault/blob/main/docs";
-
-/// Resolve the environment's target and open its ports, before any call. Mutating
-/// commands run [`preflight`] before their first write.
+/// Resolve target `name` of the environment and open its ports, before any call.
+/// Mutating commands run [`preflight`] before their first write.
 pub(crate) fn open_target<'a>(
     fleet: &'a Fleet,
     env_name: &'a str,
+    name: &str,
     r: &'a dyn CommandRunner,
 ) -> Result<(&'a dyn TargetConfig, Ports<'a>), Error> {
-    let (_, t) = target(fleet, env_name)?;
-    let managed = managed_names(fleet, env_name)?.into_iter().collect();
+    let (_, t) = target(fleet, env_name, name)?;
+    let managed = managed_names(fleet, env_name, name)?.into_iter().collect();
     Ok((t, t.open(env_name, managed, r)?))
 }
 
-/// Every name the target renders for a declared key: the managed set (FR-8, §10).
-pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<String>, Error> {
-    let (_, t) = target(fleet, env_name)?;
+/// Every name target `name` renders for a declared key of a product it delivers: its
+/// managed set (FR-8, §10).
+pub(crate) fn managed_names(
+    fleet: &Fleet,
+    env_name: &str,
+    name: &str,
+) -> Result<HashSet<String>, Error> {
+    let (_, t) = target(fleet, env_name, name)?;
     Ok(fleet
         .products
         .iter()
-        .filter(|(p, _)| fleet.delivers(env_name, p))
+        .filter(|(p, _)| fleet.delivers(env_name, name, p))
         .flat_map(|(p, prod)| prod.keys.keys().map(move |k| t.env_name(p, k)))
         .collect())
 }
@@ -1404,9 +1740,10 @@ pub(crate) fn managed_names(fleet: &Fleet, env_name: &str) -> Result<HashSet<Str
 pub(crate) fn unmanaged_on_target<'a>(
     fleet: &Fleet,
     env_name: &str,
+    name: &str,
     on_target: &'a [StoreEntry],
 ) -> Result<Vec<&'a str>, Error> {
-    let managed = managed_names(fleet, env_name)?;
+    let managed = managed_names(fleet, env_name, name)?;
     Ok(on_target
         .iter()
         .map(|s| s.name.as_str())
@@ -1675,6 +2012,19 @@ pub(crate) mod testutil {
     pub const ENC_FLY: &str = "FLEET__ALLUMATA__INTEGRATION_ENC_KEY";
     pub const STRIPE_FLY: &str = "FLEET__ALLUMATA__STRIPE_SECRET_KEY";
 
+    /// `opv explain <key>` as the CLI runs it, with a fixed project, so the service
+    /// account names in the output never depend on the checkout's directory.
+    pub fn explain(
+        fleet: &Fleet,
+        key: &str,
+        env: Option<&str>,
+        out: &mut dyn std::io::Write,
+        json: bool,
+    ) -> Result<(), crate::error::Error> {
+        let asked = crate::app::explain::Asked::Key(key);
+        crate::app::explain::run_request(fleet, &asked, env, "myapp", out, json)
+    }
+
     pub fn fleet() -> Fleet {
         config::load("tests/fixtures/secrets.toml").unwrap()
     }
@@ -1718,7 +2068,7 @@ pub(crate) mod testutil {
             "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain"
         })];
         for (s, l, ty, v) in fields {
-            // An empty section is an unsectioned field (simple profile, FR-20).
+            // An empty section is an unsectioned field (FR-43).
             let mut f = if s.is_empty() {
                 json!({"id": l.to_lowercase(), "type": ty, "label": l})
             } else {
@@ -1846,6 +2196,20 @@ pub(crate) mod testutil {
         [fly_app_ok(), fly_releases("complete")]
     }
 
+    /// `op whoami --format json` of a person: the account delivery evidence is bound to.
+    pub fn whoami() -> Output {
+        Output::success(
+            r#"{"url":"https://my.1password.com","email":"dev@example.com","user_uuid":"UFIXTURE","account_uuid":"AFIXTURE","user_type":"HUMAN"}"#,
+        )
+    }
+
+    /// What a sync's delivery recording asks `op` when no product gets a revision (a name
+    /// this run did not confirm, or the target lists no version for it): `op whoami` and
+    /// the boundary item read fresh (`boundary`).
+    pub fn delivery_not_recorded(boundary: Output) -> [Output; 2] {
+        [whoami(), boundary]
+    }
+
     pub fn op_calls(r: &FakeRunner) -> usize {
         r.calls
             .borrow()
@@ -1908,13 +2272,13 @@ mod source_only_tests {
     use super::*;
 
     const CFG: &str = r#"
-[profile]
-kind = "fleet"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.shared = { vault_id = "vci", item_id = "ici" }
+boundaries.api = { vault_id = "vci", item_id = "ici" }
+[environments.ci.targets.app]
 fly.app = "app"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sci"
 [products.shared]
 source_only = true
 [products.shared.keys.SHARED_TOKEN]
@@ -1931,19 +2295,19 @@ environments = ["ci"]
 
     #[test]
     fn managed_names_skip_a_source_only_product() {
-        let names = managed_names(&fleet(), "ci").unwrap();
+        let names = managed_names(&fleet(), "ci", "app").unwrap();
         assert_eq!(names, HashSet::from(["FLEET__API__API_TOKEN".to_string()]));
     }
 
     #[test]
     fn product_names_is_empty_for_a_source_only_product() {
-        let names = product_names(&fleet(), "ci", "shared").unwrap();
+        let names = product_names(&fleet(), "ci", "app", "shared").unwrap();
         assert!(names.is_empty());
     }
 
     #[test]
     fn key_names_has_no_label_for_a_source_only_name() {
-        let names = KeyNames::new(&fleet(), "ci").unwrap();
+        let names = KeyNames::new(&fleet(), "ci", "app").unwrap();
         assert_eq!(
             names.label("FLEET__SHARED__SHARED_TOKEN"),
             "FLEET__SHARED__SHARED_TOKEN"
