@@ -55,6 +55,16 @@ That document is exactly what `opv_structure_plan` / `opv_structure_apply` retur
 describe --json` reproduces the `opv_configuration` document, `opv ready --json` the
 readiness receipt, `opv access` and `opv plan` their tools.
 
+## Deploys: the user approves, you run exactly that once
+
+Never run `opv sync` on your own. Show the plan (`opv plan <env> --json`, or
+`opv_deployment_plan`), then hand the user its `approve_command`:
+`opv approve <plan_id> --sync <env>` (with the same `--target`, `--product`, `--deploy`,
+`--prune` and `--rotate` you will use). They run it in their own terminal. Then run
+`opv sync <env> --approved <plan_id>` with the same flags (MCP: `opv_sync`). It runs that
+plan once, within 15 minutes. `stale_plan`: the item, target or configuration changed;
+show the new plan and ask again. `approval_required`: wait for the user.
+
 ## Self-made secrets
 
 For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
@@ -78,11 +88,15 @@ repository and environment their CI job uses, then hand them
 (from `opv_access` or `opv access --json`): it creates the identity and stores its token as
 a GitHub secret without showing it.
 
-A validation job (`check`, `plan`, `ready`) uses the read-only reader from
-`opv bootstrap --ci-reader <env>`. A job that syncs uses the target's deploy identity from
-`opv access <env> --target <name>`: boundary read plus read and write on its own state vault,
-where delivery evidence goes. `opv ready` says `evidence_write: "not_verified"`: only a sync
-checked with `opv delivery verify` proves it. Never widen a boundary vault to write.
+A validation job (`check`, `plan`, `ready`) uses the environment's read-only reader
+(`opv access <env> --create --github <owner/repo>`, no `--target`). A job that syncs uses the
+target's deploy identity (`--target <name>`): boundary read plus read and write on its own
+state vault, where delivery evidence goes. `opv ready` says `evidence_write:
+"not_verified"`: only a sync checked with `opv delivery verify` proves it. Never widen a
+boundary vault to write. For the job file, run `opv ci workflow <env> --target <name>
+[--github-env <env>]` instead of writing YAML; committing it is a change the user approves.
+A `pending_revoke` finding means an old identity still reads the vault: once
+`opv delivery verify` passes, the user removes it in 1Password.
 
 ## Pick the flow from `opv ready --json`
 
