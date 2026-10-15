@@ -269,7 +269,6 @@ fn temp_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-
 /// Read a claimed file and enforce every condition; the caller removes it afterwards.
 fn read_claimed(
     path: &Path,
