@@ -39,6 +39,7 @@ pub(crate) mod json_tests;
 mod ledger_tests;
 pub mod local;
 pub mod local_delivery;
+pub mod masked;
 pub mod login;
 pub mod mcp_install;
 pub mod open;
