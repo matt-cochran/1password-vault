@@ -55,7 +55,7 @@ crossterm = { version = "0.29", optional = true }
 [target.'cfg(unix)'.dependencies]
 # SIGINT/SIGTERM/SIGHUP/SIGQUIT forwarding to the running CLI (NR-12); libc is already in
 # the tree.
-signal-hook = "0.3"
+signal-hook = "0.4"
 libc = "0.2"
 # Azure deploy credentials (FR-40, SR-4): statfs (RAM-backed check), file owner and the
 # liveness of the run that left a stale directory. Already in the tree via tempfile.
