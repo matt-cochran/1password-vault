@@ -132,6 +132,10 @@ pub struct TargetReport {
     /// Why the target is `grants_missing`; omitted when it is `ready`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Always `not_verified` (#134): `ready` sees that the state vault can be opened, which
+    /// does not show that this identity can write delivery evidence there. Only a sync that
+    /// records evidence proves it (`opv delivery verify`); a read-only CI reader never can.
+    pub evidence_write: &'static str,
 }
 
 /// One thing a person or agent must act on, with one runnable prerequisite and one verify
@@ -269,6 +273,7 @@ fn build_targets(inputs: &Inputs<'_>) -> Vec<TargetReport> {
                     Some(_) => "grants_missing".into(),
                 },
                 reason,
+                evidence_write: "not_verified",
             });
         }
     }

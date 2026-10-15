@@ -51,6 +51,39 @@ When a stored value has a formatting problem opv can fix (a trailing newline or 
 
 There is no command that writes a `.env` file or prints `export` lines, on purpose (SR-4). If a tool insists on a `.env` file, configure it to read the process environment instead; Compose's `env_file:` can be replaced by `environment:` entries without values.
 
+## Only the declared keys, or keys as files: `[products.<p>.local]`
+
+By default the app inherits your environment as described above. A product can narrow that, or take some keys as files, with a `local` table ([design and guarantees](design/local-delivery.md)):
+
+```toml
+[products.journeeze.local]
+environment = "declared_only"        # the app gets its declared keys and PATH, HOME, user, shell, locale, terminal, TMPDIR; nothing else
+secrets_dir_env = "JZ_SECRETS_DIR"   # the variable naming the directory of file keys
+
+[products.journeeze.keys.GITHUB_APP_PRIVATE_KEY]
+kind = "secret"
+environments = ["dev", "prod"]
+file = "github-app/private-key"      # under opv run: a file in that directory, not a variable
+```
+
+`opv run` then starts its delivery step between `op run` and your command. With or without `declared_only`, no `OP_*` variable (1Password sessions, service-account or Connect credentials) reaches the app. A key with `file` is written to a fresh private directory in RAM (`$XDG_RUNTIME_DIR` on tmpfs, mode 0700, files 0400, never through a link), named by `secrets_dir_env`. The directory is removed when the app exits or on Ctrl-C, and if opv was killed, by the next run or at logout. Without a RAM-backed runtime directory (macOS, native Windows, a WSL session without one), a file key refuses the run (`ram_dir_unavailable`, exit 6) instead of writing to disk. Targets ignore `local` and `file`: they deliver keys as before.
+
+**Secret-store apps.** An app with a `SecretStore` / mounted-secrets port reads `$JZ_SECRETS_DIR/github-app/private-key`, its own naming contract, and needs no variable or file of its own:
+
+```sh
+opv run dev --product journeeze -- cargo run
+```
+
+**Cloudflare Workers (Vite plugin, wrangler).** Do not create `.dev.vars`. Declare the product `declared_only` and let the plugin read process variables. The Worker's `env` bindings are then exactly the declared keys (plus the basics, none of them secret), never your shell's other tokens:
+
+```sh
+opv run dev --product valum -- env CLOUDFLARE_INCLUDE_PROCESS_ENV=true npx vite dev
+```
+
+Each Worker or service is its own product, run with its own `--product`. A key the current mode does not need (for example the mail provider's key while mail is captured locally) is left out by its rules, and test versus live billing keys are separate values per environment. opv's tests check the filtering with the real binary and fake values. Cloudflare's own reading of the variables follows its documentation for `CLOUDFLARE_INCLUDE_PROCESS_ENV`; check it once with your plugin version.
+
+What opv cannot do: stop the app (or another process of the same user) from logging or copying what it receives. This narrows what reaches the app; it is not a sandbox.
+
 ## Several products or checkouts
 
 - `OPV_PRODUCT=api` sets the default `--product` for `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env` (never `sync`); stderr says `product api (from OPV_PRODUCT)`. A single-product repository in a fleet can export it once, for example in `.envrc`.

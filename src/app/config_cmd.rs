@@ -377,32 +377,187 @@ struct Listed {
     account: Option<manifest::Account>,
 }
 
-/// Every visible manifest: one metadata listing per account (one call when op knows at
-/// most one account). An account that cannot be listed is a note, unless it is the only
-/// one (then its error, e.g. `Next: opv login`, is the result).
-fn list_all(r: &dyn CommandRunner, notes: &mut Vec<String>) -> Result<Vec<Listed>, Error> {
-    let accounts = manifest::accounts(r);
-    if accounts.len() <= 1 {
-        return Ok(manifest::list(r, None, &Host::detect)?
-            .into_iter()
-            .map(|row| Listed { row, account: None })
-            .collect());
-    }
-    let mut all = Vec::new();
-    for a in accounts {
-        match manifest::list(r, Some(&a.account_uuid), &Host::detect) {
-            Ok(rows) => all.extend(rows.into_iter().map(|row| Listed {
-                row,
-                account: Some(a.clone()),
-            })),
-            Err(e) => notes.push(format!(
-                "account {}: not listed ({})",
-                a.url,
-                e.text().lines().next().unwrap_or_default()
-            )),
+/// One account's listing (#135): named by its account ID, since several accounts can share
+/// one sign-in address. Never the person's email or user ID.
+#[derive(Debug, Clone, serde::Serialize)]
+struct AccountReport {
+    account_id: String,
+    sign_in: String,
+    shorthand: Option<String>,
+    /// `listed` or `failed`.
+    status: &'static str,
+    /// Manifests listed; `None` when the listing failed.
+    manifests: Option<usize>,
+    error_code: Option<&'static str>,
+    reason: Option<String>,
+}
+
+impl AccountReport {
+    fn new(a: &manifest::Account, listed: Result<usize, &Error>) -> Self {
+        let (status, manifests, error_code, reason) = match listed {
+            Ok(n) => ("listed", Some(n), None, None),
+            Err(e) => (
+                "failed",
+                None,
+                Some(e.code().as_str()),
+                Some(e.text().lines().next().unwrap_or_default().to_string()),
+            ),
+        };
+        Self {
+            account_id: a.account_uuid.clone(),
+            sign_in: a
+                .url
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .to_string(),
+            shorthand: Some(a.shorthand.clone()).filter(|s| !s.is_empty()),
+            status,
+            manifests,
+            error_code,
+            reason,
         }
     }
-    Ok(all)
+}
+
+/// What discovery listed (#135): the manifests, one report per account asked, and which
+/// accounts were asked (`selected`: the one given or `OP_ACCOUNT`; `all`: every account op
+/// knows; `default`: op's own account, when it knows at most one).
+struct Inventory {
+    listed: Vec<Listed>,
+    accounts: Vec<AccountReport>,
+    scope: &'static str,
+}
+
+impl Inventory {
+    /// True when every account asked was listed: only then is a missing project absent.
+    fn complete(&self) -> bool {
+        self.accounts.iter().all(|a| a.status == "listed")
+    }
+
+    /// `inventory_incomplete` naming the accounts that could not be listed, or `None`.
+    fn incomplete(&self) -> Option<Error> {
+        let failed: Vec<&AccountReport> = self
+            .accounts
+            .iter()
+            .filter(|a| a.status != "listed")
+            .collect();
+        let first = failed.first()?;
+        let names = failed
+            .iter()
+            .map(|a| format!("{} ({})", a.sign_in, a.account_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id = &first.account_id;
+        Some(
+            Error::Source(
+                format!(
+                    "the project inventory is incomplete: {} of {} 1Password accounts could \
+                     not be listed: {names}",
+                    failed.len(),
+                    self.accounts.len()
+                )
+                .into(),
+            )
+            .with_code(crate::error::Code::InventoryIncomplete)
+            .with_do(
+                "sign in to each account named above in your own terminal; until then, do not \
+                 treat a project missing from this list as absent and do not create a \
+                 replacement vault or manifest",
+            )
+            .with_next(format!(
+                "opv login --account {id} -- opv projects --account {id}"
+            )),
+        )
+    }
+}
+
+/// Every visible manifest (#135). With `selected` (`--account`, else `OP_ACCOUNT`, which
+/// `opv login --account` gives its command) only that account is listed and its failure is
+/// the result. Without it, one listing per account op knows (one call when it knows at most
+/// one, whose failure is the result); an account that cannot be listed is reported, never
+/// dropped, so an incomplete inventory is never mistaken for an empty one.
+fn inventory(r: &dyn CommandRunner, selected: Option<&str>) -> Result<Inventory, Error> {
+    let accounts = manifest::accounts(r);
+    if let Some(who) = selected {
+        let id = if accounts.is_empty() {
+            who.to_string()
+        } else {
+            manifest::resolve(&accounts, who)?
+        };
+        let rows = manifest::list(r, Some(&id), &Host::detect)?;
+        let account = accounts.into_iter().find(|a| a.account_uuid == id);
+        return Ok(Inventory {
+            accounts: account
+                .iter()
+                .map(|a| AccountReport::new(a, Ok(rows.len())))
+                .collect(),
+            listed: rows
+                .into_iter()
+                .map(|row| Listed {
+                    row,
+                    account: account.clone(),
+                })
+                .collect(),
+            scope: "selected",
+        });
+    }
+    if accounts.len() <= 1 {
+        let rows = manifest::list(r, None, &Host::detect)?;
+        return Ok(Inventory {
+            accounts: accounts
+                .iter()
+                .map(|a| AccountReport::new(a, Ok(rows.len())))
+                .collect(),
+            listed: rows
+                .into_iter()
+                .map(|row| Listed { row, account: None })
+                .collect(),
+            scope: "default",
+        });
+    }
+    let mut inv = Inventory {
+        listed: Vec::new(),
+        accounts: Vec::new(),
+        scope: "all",
+    };
+    for a in accounts {
+        match manifest::list(r, Some(&a.account_uuid), &Host::detect) {
+            Ok(rows) => {
+                inv.accounts.push(AccountReport::new(&a, Ok(rows.len())));
+                inv.listed.extend(rows.into_iter().map(|row| Listed {
+                    row,
+                    account: Some(a.clone()),
+                }));
+            }
+            Err(e) => inv.accounts.push(AccountReport::new(&a, Err(&e))),
+        }
+    }
+    Ok(inv)
+}
+
+/// One note per account that could not be listed, naming it unambiguously.
+fn notes_of(inv: &Inventory) -> Vec<String> {
+    inv.accounts
+        .iter()
+        .filter(|a| a.status != "listed")
+        .map(|a| {
+            format!(
+                "account {} ({}): not listed ({})",
+                a.sign_in,
+                a.account_id,
+                a.reason.as_deref().unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+/// The line for an inventory that holds no manifest.
+fn nothing_listed(inv: &Inventory) -> &'static str {
+    if inv.complete() {
+        "no project manifests visible"
+    } else {
+        "no project manifests listed: the inventory is incomplete"
+    }
 }
 
 fn store_of(l: &Listed) -> Found {
@@ -418,14 +573,15 @@ fn store_of(l: &Listed) -> Found {
 /// for its environment names. Names only, never a value.
 pub fn projects(
     r: &dyn CommandRunner,
+    account: Option<&str>,
     long: bool,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let mut notes = Vec::new();
-    let listed = list_all(r, &mut notes)?;
+    let inv = inventory(r, account)?;
+    let notes = notes_of(&inv);
     let mut docs = Vec::new();
-    for l in &listed {
+    for l in &inv.listed {
         let envs = long.then(|| {
             store_of(l)
                 .load(r)
@@ -445,6 +601,7 @@ pub fn projects(
                     "vault_id": l.row.vault.id,
                     "item_id": l.row.id,
                     "account": l.account.as_ref().map(|a| a.url.clone()),
+                    "account_id": l.account.as_ref().map(|a| a.account_uuid.clone()),
                     "repos": store::row_repos(&l.row),
                     "paths": store::row_paths(&l.row),
                 });
@@ -458,14 +615,18 @@ pub fn projects(
             .collect();
         let s = serde_json::to_string(&json!({
             "schema_version": crate::json::SCHEMA_VERSION,
+            "scope": inv.scope,
+            "complete": inv.complete(),
+            "accounts": inv.accounts,
             "projects": v,
             "notes": notes,
         }))
         .map_err(|_| Error::Config("cannot serialize the project list".into()))?;
-        return line(out, s);
+        line(out, s)?;
+        return inv.incomplete().map_or(Ok(()), Err);
     }
     if docs.is_empty() {
-        line(out, "no project manifests visible")?;
+        line(out, nothing_listed(&inv))?;
     }
     for (l, envs) in &docs {
         let mut parts = vec![format!("vault {}", store::vault_label(&l.row))];
@@ -497,7 +658,7 @@ pub fn projects(
     for n in &notes {
         line(out, format!("note: {n}"))?;
     }
-    Ok(())
+    inv.incomplete().map_or(Ok(()), Err)
 }
 
 /// `status --all [--json]`: the one-line-per-environment overview for every visible
@@ -509,15 +670,16 @@ pub fn projects(
 /// directory.
 pub fn status_all(
     r: &dyn CommandRunner,
+    account: Option<&str>,
     product: Option<&str>,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let mut notes = Vec::new();
-    let listed = list_all(r, &mut notes)?;
+    let inv = inventory(r, account)?;
+    let notes = notes_of(&inv);
     let mut first: Option<Error> = None;
     let mut docs = Vec::new();
-    for l in &listed {
+    for l in &inv.listed {
         let name = store::project_of(&l.row)
             .unwrap_or(&l.row.title)
             .to_string();
@@ -572,6 +734,9 @@ pub fn status_all(
             .collect();
         let s = serde_json::to_string(&json!({
             "schema_version": crate::json::SCHEMA_VERSION,
+            "scope": inv.scope,
+            "complete": inv.complete(),
+            "accounts": inv.accounts,
             "projects": v,
             "notes": notes,
         }))
@@ -579,7 +744,7 @@ pub fn status_all(
         line(out, s)?;
     } else {
         if docs.is_empty() {
-            line(out, "no project manifests visible")?;
+            line(out, nothing_listed(&inv))?;
         }
         for (name, vault, res) in &docs {
             match res {
@@ -596,7 +761,7 @@ pub fn status_all(
             line(out, format!("note: {n}"))?;
         }
     }
-    first.map_or(Ok(()), Err)
+    first.or_else(|| inv.incomplete()).map_or(Ok(()), Err)
 }
 
 /// `e` with a `Next:` that runs as typed (its step split into `Do:` and a command, never

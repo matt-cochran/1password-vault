@@ -2,8 +2,10 @@
 //! on any Unix with a temporary directory standing in for `$XDG_RUNTIME_DIR`.
 
 use super::*;
+use crate::ramdir::private_dir;
 use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
+use crate::runner::signals;
 
 const SECRET: &str = "sp-secret-FIXTUREVALUE";
 

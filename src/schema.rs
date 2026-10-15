@@ -121,6 +121,20 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "version",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
+        command: "approve",
+        effect: "interactive",
+        needs_terminal: true,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
         command: "bootstrap",
         effect: "writes_1password",
         needs_terminal: false,
@@ -326,7 +340,8 @@ const JSON_ONLY: [&str; 1] = ["schema"];
 /// The `opv schema` document for the command tree `root` of version `version`.
 pub fn describe(root: &clap::Command, version: &str) -> Value {
     let mut commands = Vec::new();
-    for sub in root.get_subcommands() {
+    // A hidden command is opv's own internal step (`local-delivery`), not for callers.
+    for sub in root.get_subcommands().filter(|s| !s.is_hide_set()) {
         leaf_commands(sub, String::new(), &mut commands);
     }
     let global: Vec<Value> = root
@@ -570,18 +585,30 @@ fn documents() -> Value {
             "undeclared"
         ],
         "add": ["product", "key", "kind", "environments", "saved_in", "changed"],
+        "version": [
+            "opv: {version}",
+            "tools: [{program, vendor, status: installed | missing | unknown, version, reason, providers, configured}]",
+            "providers: [{section, configured, tools}]",
+            "config: {source: file | manifest | none, path, read}"
+        ],
         "projects": [
-            "projects: [{project, title, vault, vault_id, item_id, account, repos, paths, environments?, error?}]",
+            "scope: selected | all | default",
+            "complete: true only when every account asked was listed (else exit 4, inventory_incomplete)",
+            "accounts: [{account_id, sign_in, shorthand, status: listed | failed, manifests, error_code, reason}]",
+            "projects: [{project, title, vault, vault_id, item_id, account, account_id, repos, paths, environments?, error?}]",
             "notes"
         ],
         "status --all": [
+            "scope",
+            "complete",
+            "accounts",
             "projects: [{project, vault, environments: [status_overview environment], error_code, error}]",
             "notes"
         ],
         "item skeleton": ["environment", "added: [{product, key, kind}]"],
         "open": ["environment", "product", "key", "section", "field", "open_url"],
         "adopt": "{environment, applied, rows [{found, product, key, action (match|format_only|import|replace|differs|held_immutable|fails_rule|conflict|ambiguous|not_declared|not_applicable), rule}], writes, decisions_needed, next}: names, actions and findings only, never a value",
-        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only. A target whose deploy credentials, state vault or boundaries cannot be opened is `grants_missing` in the matrix, naming what could not be opened",
+        "ready": "{receipt_id, opv_version, config {source}, account ({account_id, by} or null), matrix [{environment, product, target, keys, saved, findings, delivered}], targets [{environment, name, provider, locator, state (ready|grants_missing), reason?, evidence_write (not_verified: an open state vault does not prove delivery evidence can be written; a sync checked with opv delivery verify does)}], findings [{code (an error code, an account finding, or key_missing|key_empty|key_failed_rule|key_wrong_kind), scope {account?, environment?, product?, key?}, blocking, actor (owner|agent|ci), effect (none|signs_in|writes_1password|writes_target|writes_config), prerequisite, verify}], next ({actor, command} or null)}: names, IDs and codes only. A target whose deploy credentials, state vault or boundaries cannot be opened is `grants_missing` in the matrix, naming what could not be opened",
         "access": "{environments: [{environment, report: {checks: [{grant: {principal: {kind (deploy|ci_reader), environment, target?}, service_account, vault_id, permission (read|read_write)}, state (present|missing|read_only_needed|not_visible)}], extra: [{vault_id, service_account}], checked, unclassified}, commands: [string]}]}: who needs each boundary and target and the owner's exact commands for the missing grants; --target narrows to one target; read-only, never says clean",
         "bootstrap": "{environments: [{environment, boundaries: [{boundary, products, action (ok|create|ids_not_in_account), vault_id?, item_id?, vault?, item?}], state_vaults: [{target, action (ok|create|ids_not_in_account), vault_id?, vault?}]}]}: per environment, each needed boundary and each target's state vault with its action; no --state flag",
         "account list": "{discovery (ok|unavailable|op_missing|credential: a service account or Connect decides the account), platform, cli_accounts_only, selected ({account_id, by (flag|env|pointer|manifest|only), source} or null), accounts [{account_id, user_id, email, address, shorthand, source, signed_in (true|false|null), selected}], findings [{code (no_accounts|selected_account_absent|account_ambiguous|selected_signed_out|discovery_unavailable|op_missing), human_required, message, next}], next}: account metadata only, never a credential, session or field value",

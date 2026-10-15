@@ -84,6 +84,7 @@ pub const FLYCTL: Tool = Tool {
     not_found: &[],
     signed_out: &[],
     aliases: &["fly"],
+    version_args: &["version"],
 };
 
 /// A Fly token in the environment, in the order they are tried (by name only).

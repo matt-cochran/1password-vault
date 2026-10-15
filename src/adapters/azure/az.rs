@@ -43,6 +43,7 @@ pub const AZ_CLI: Tool = Tool {
     ],
     signed_out: &[],
     aliases: &[],
+    version_args: &["version", "--output", "tsv"],
 };
 
 /// Global flag that keeps `az` quiet apart from errors (R7).

@@ -1,19 +1,82 @@
-# Read-only MCP interface
+# MCP interface
 
-The optional `opv-mcp` binary uses the official Rust MCP SDK (`rmcp`) over stdio.
-It exposes three tools:
+The optional `opv-mcp` binary uses the official Rust MCP SDK (`rmcp`) over stdio. It
+lets an assistant inspect a project, manage its declared structure, and prepare the
+1Password structure it needs. A person keeps three things: signing in, approving
+structural changes in their own terminal, and entering every secret value in 1Password.
 
-| Tool | Input | Response |
-|---|---|---|
-| `opv_ready` | declared environment | readiness counts, fixed human guidance |
-| `opv_configuration` | none | environment names, confirmation flags, product/key names and kinds |
-| `opv_deployment_plan` | declared environment | action metadata, plan ID when available; no execution |
+| Tool | Input | Changes | Response |
+|---|---|---|---|
+| `opv_ready` | declared environment | nothing | readiness counts, fixed human guidance |
+| `opv_configuration` | none | nothing | environment names, confirmation flags, product/key names and kinds |
+| `opv_deployment_plan` | declared environment | nothing | action metadata, plan ID when available; no execution |
+| `opv_declare_key` | product, key, kind, environments, rules, guidance, immutable | local `secrets.toml` | `changed` |
+| `opv_declare_environment` | environment | local `secrets.toml` | `changed` |
+| `opv_declare_target` | environment, target, provider, public provider options, products | local `secrets.toml` | `changed` |
+| `opv_structure_plan` | none | nothing | the structural plan and its `plan_id` |
+| `opv_structure_apply` | `plan_id` | 1Password structure, then `secrets.toml` IDs | created public IDs, links for key entry, added field names |
 
-No tool accepts a secret value, arbitrary command, file path, approval boolean, or
-deployment flag. Configuration inspection does not export configuration values,
-rules, mode values, vault IDs, or item IDs. Readiness does not forward messages,
-health facts, or generated commands. Responses are constructed from allowlisted
-fields; raw upstream JSON and diagnostic messages are never returned to the agent.
+No tool accepts or returns a secret value, an arbitrary command, a file path, an
+executable, or an approval boolean. Responses are built field by field from checked
+identifiers; raw upstream JSON and diagnostic text are never returned. An error is its
+stable `code` and a fixed `human_action` (and, for `stale_plan`, the new `plan_id`).
+
+## Who does what
+
+1. **The assistant owns declarations and structure.** It declares products, keys
+   (kind, environments, validation rules, one line of guidance, `immutable`),
+   environments and named targets with the `opv_declare_*` tools. These edit the local
+   `secrets.toml` only: nothing in 1Password, no value. A generated configuration is
+   never edited; declare in its generator's input instead.
+2. **The assistant plans.** `opv_structure_plan` lists every boundary vault and item,
+   state vault, delivery item and empty field the configuration needs in the project's
+   1Password account, and returns a `plan_id`. It changes nothing.
+3. **The person approves in their own terminal.** `opv approve <plan_id>` re-plans,
+   shows each step by name, and asks them to type the plan id back. The approval is
+   single use, lasts 15 minutes, and names the project and 1Password account.
+4. **The assistant applies.** `opv_structure_apply` with the same `plan_id` re-plans,
+   refuses a plan that changed (`stale_plan`) or has no unused approval
+   (`approval_required`), then creates exactly the plan. The 1Password app asks the
+   person to authorize the writes. It returns created IDs and 1Password links.
+5. **The person enters values in 1Password** at those links, never in chat, files or
+   arguments.
+6. **The assistant checks readiness** with `opv_ready` and reports names and status only.
+
+Not structural, and never through MCP: permission grants (CI reader or deploy
+identities), deploy credentials, credential replacement, shared (`from`) and personal
+keys, removals and changes to an existing target, sync, deploy, prune, rotation and
+release. Each stays a separately approved command in the person's terminal.
+
+## Authorization and its limits
+
+The approval binds one `plan_id`, which is SHA-256 over the project, the 1Password
+account ID, the configuration text and every planned step. A plan approved for another
+project, account or configuration never applies, and any change after the review makes
+the id stale. The approval file lives in the person's state directory
+(`$XDG_STATE_HOME/opv/approvals`, else `~/.local/state/opv/approvals`; directory 0700,
+file 0600, refused when it is a symlink or readable by others) and is claimed by an
+atomic rename, so two applies cannot both use it.
+
+`opv_structure_apply` refuses to run when an `op` session token (`OP_SESSION_*`), a
+service account (`OP_SERVICE_ACCOUNT_TOKEN`) or Connect (`OP_CONNECT_*`) is in its
+environment, and it checks that a person (not a service account) is signed in. Its
+writes therefore go through the 1Password app's desktop integration, which asks the
+person to authorize them, and the assistant process never holds a write credential.
+
+What this does not do: an assistant that also has an unrestricted shell as the same OS
+user can run `opv approve` in a pseudo-terminal, write an approval file, or run
+`opv bootstrap` itself. The approval is a gate for assistants that act through MCP; the
+1Password app's own authorization prompt on every write is the control that holds
+against a process with a shell. Treat MCP as one boundary, not a sandbox.
+
+Recorded IDs the selected account cannot see stop the plan (`ids_not_in_account`), and a
+vault whose visibility cannot be told refuses it: structure is never recreated or rebound
+around an access failure. Existing fields and values are never changed; fields are only
+added. A run that stops part-way keeps the IDs it recorded; plan and approve again to
+finish (objects already created are found again by title, never duplicated).
+
+For a generated configuration, apply records nothing in the file and returns
+`generator_ids`, the lines to add to the generator's input.
 
 ## Build and configure
 
@@ -21,9 +84,10 @@ fields; raw upstream JSON and diagnostic messages are never returned to the agen
 cargo build --locked --features mcp --bin opv-mcp
 ```
 
-The default CLI build does not enable MCP. Launch the server with an absolute
-trusted project directory chosen by the human. Manually authenticate the vendor
-CLIs in your own terminal first. Secrets are entered only in 1Password.
+The default CLI build does not enable MCP. Launch the server with an absolute trusted
+project directory chosen by the person. Sign in to 1Password in the desktop app (with
+Settings > Developer > Integrate with 1Password CLI on); do not start the server from a
+terminal that holds an `op signin` session.
 
 Example Claude Code configuration (merge with existing MCP servers):
 
@@ -39,48 +103,48 @@ Example Claude Code configuration (merge with existing MCP servers):
 ```
 
 Use trusted absolute executable paths and review the project configuration before
-connecting. The server cannot switch projects at an agent's request.
+connecting. The server cannot switch projects at an assistant's request.
 
-## Approval boundary
+## Read-only inspection
 
-All exposed operations are read-only. There is deliberately no mutation tool.
-An agent cannot approve itself with an `approved: true` argument or token.
-Review the plan in the human's terminal and approve the specific change before
-running the corresponding opv configuration, sync, deploy, rotate, or prune command.
-No existing client configuration is installed or modified automatically.
+`opv_ready`, `opv_configuration`, `opv_deployment_plan` and `opv_structure_plan` run on a
+runner that refuses every write and inherited execution beneath the application code,
+including layout tidying the CLI planning path would attempt. If an inspection needs such
+a repair, the server returns `human_approval_required`. Tool annotations are descriptive
+hints, not the enforcement mechanism.
 
-The runner refuses writes and inherited execution below application orchestration,
-including layout tidying attempted by the existing CLI planning path. If a plan
-needs such a repair, the server returns `human_approval_required`; the human must
-review and perform the repair separately. It does not silently grant permission.
-Tool annotations are descriptive hints, not the enforcement mechanism.
+## Without structural MCP (CLI fallback)
+
+An opv older than this release, or a client without MCP, uses the owner-terminal
+commands: the person runs `opv bootstrap --dry-run`, then `opv bootstrap`, and
+`opv target add` for each target. The assistant declares with `opv add` and
+`opv init --add-env` once the configuration is bootstrapped. Report a missing MCP tool
+as a capability gap; never work around it.
 
 ## Security and limits
 
-opv internally reads values to validate or compare them; “never return values” is
-an MCP response boundary, not a claim that no machine reads credentials. Typed
-allowlisted responses omit value-bearing fields and raw error text. Names are
-still metadata: do not give untrusted clients access to sensitive projects.
+opv internally reads items to find their fields; “never return values” is an MCP
+response boundary, not a claim that no machine reads them. Names are still metadata: do
+not give untrusted clients access to sensitive projects.
 
-Each operation uses a 20-second runner budget, runs serially, and clears its
-redaction registry on completion. Vendor CLIs retain their own authentication and
-cache behavior; MCP is not a sandbox for those tools or for other tools available
-to the agent. No network listener or arbitrary shell execution is exposed.
+Inspection uses a 20-second runner budget (the structural plan 60 seconds, apply 300
+seconds, for the 1Password app's prompts), runs serially, and clears its redaction
+registry on completion. Vendor CLIs keep their own authentication and cache behavior. No
+network listener or arbitrary shell execution is exposed.
 
-The session readiness hook is separate and optional. MCP provides callable
-inspection tools; the hook provides a session-start reminder. Neither authorizes
+The session readiness hook is separate and optional. Neither it nor MCP authorizes
 deployment or prevents a separate unrestricted shell from reading secrets.
 
 ## Validation
 
-Run the feature-enabled suite and linter:
-
 ```sh
 cargo test --locked --features fake,mcp
 cargo clippy --all-targets --features fake,mcp -- -D warnings
+python3 tests/mcp_protocol.py target/debug/opv-mcp
 ```
 
-Tests cover refusal before vendor writes, value-field suppression, and readiness
-findings even on a successful receipt. A protocol smoke test should initialize the
-stdio server, list tools, call configuration in a disposable fixture project, and
-verify unknown mutation tools are rejected without vendor calls.
+Tests cover refusal before vendor writes, value-field suppression on success and on
+hostile upstream output, approval replay, expiry and scope mismatch, stale plans,
+credential-bearing environments, partial-failure recovery, idempotent re-runs, preserved
+values, generated configurations, and a declare, plan, approve, apply flow over dev,
+staging and prod with a shared boundary and independent Fly targets.

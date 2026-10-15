@@ -14,6 +14,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv access [<env>] [--target <t>] [--json]` | who needs each boundary and target, and who can read it now; the owner's command to create a reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | does every placement of a product still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
+| `opv version [--json]` | opv's version and each CLI it runs (op, flyctl, az, kubectl, gh): installed with its version, missing or unknown, and which ones this project's configuration uses; no sign-in | nothing |
+| `opv approve <plan_id>` | in your own terminal: review the structural plan an assistant prepared through MCP and approve it once (15 minutes) | a local approval record |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` | create every missing boundary vault, item and state vault, record their IDs and add every declared field empty | 1Password and `secrets.toml` |
 | `opv target add <env> <name> --<provider options> [--products <p>]... [--deploy-credentials <op://v/i>] [--dry-run] [--json]` | declare one named target, infer its provider from the options, create its state vault and record its ID ([usage](#add-a-target-opv-target-add)) | the configuration and 1Password |
 | `opv target list [--env <env>] [--json]` | the declared targets: provider, locator, products, deploy identity and state vault ([usage](#add-a-target-opv-target-add)) | nothing (read-only) |
@@ -36,7 +38,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv config import --vault <v> [--file <f>] [--project <p>] [--path <dir>]...` | save a `secrets.toml` as the project manifest | 1Password (a new manifest) |
 | `opv config edit` | edit, validate, diff and save the configuration | the configuration; needs your own terminal |
 | `opv config check --file <f>` | compare a committed copy with the manifest | nothing |
-| `opv projects [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
+| `opv projects [--account <a>] [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
 | `opv help states`, `opv help <command>` | what each state word means; a command's help | nothing |
 | `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
 | `opv schema` | the installed binary as one JSON document | nothing |
@@ -169,7 +171,7 @@ api (vault acme-dev):
   prod: 14 keys · 13 saved · 1 skipped · 0 findings · 0 not yet on Fly
 ```
 
-`projects` makes one metadata listing per 1Password account op knows (no manifest is read unless `--long`). `status --all` reads each manifest once and then does what `opv status` does per environment, with the usual read retries; a project that cannot be read is one line `name (vault V): not read (<reason>)` and the others still run. `status --all --product <p>` (or `OPV_PRODUCT`) lists only the projects that declare `<p>` and counts only its keys. Its `Next:` is a command (never an error's prose) and names the project, so it runs from any directory: `Next: env OPV_PROJECT=myapp opv status dev`. In `--json`, an environment that could not be read carries that command as `next`. Both take `--json`. Names only, never values.
+`projects` makes one metadata listing per 1Password account op knows (no manifest is read unless `--long`). `--account <email, account ID or sign-in address>` lists that account only, and so does `OP_ACCOUNT`, which `opv login --account <a> -- opv projects` sets for its command. `--json` names every account it asked in `accounts` (`account_id`, `sign_in`, `shorthand`, `status` `listed` or `failed`, `manifests`, `error_code`, `reason`; never an email), says which accounts with `scope` (`selected`, `all` or `default`), and gives each project its `account_id`. Several accounts can share one sign-in address (`my.1password.com`), so the account ID is what tells them apart. When any account could not be listed, `complete` is `false`: the projects that were listed are still shown, the text listing says `the inventory is incomplete`, and opv exits 4 with `inventory_incomplete`, whose `next` signs in to the first such account and lists it again. A project missing from an incomplete inventory may be in an account that was not read; it is not absent. `status --all` reports the same way. `status --all` reads each manifest once and then does what `opv status` does per environment, with the usual read retries; a project that cannot be read is one line `name (vault V): not read (<reason>)` and the others still run. `status --all --product <p>` (or `OPV_PRODUCT`) lists only the projects that declare `<p>` and counts only its keys. Its `Next:` is a command (never an error's prose) and names the project, so it runs from any directory: `Next: env OPV_PROJECT=myapp opv status dev`. In `--json`, an environment that could not be read carries that command as `next`. Both take `--json`. Names only, never values.
 
 ### Plan
 
@@ -500,6 +502,8 @@ Next (owner): opv open api/STRIPE_KEY --env staging
 
 `--json` gives the receipt as one document (`opv schema` lists its fields). Each finding has a stable `code`, a `scope` (account, environment, product, key), `blocking`, the `actor` who acts (`owner`, `agent`, `ci`), its `effect` (`none`, `signs_in`, `writes_1password`, `writes_target`, `writes_config`), one `prerequisite` command and one `verify` command, so an assistant never parses prose; a [settings health](configuration.md#settings-health-likely-wrong-values) finding (non-blocking) also has a `message`, one sentence naming the keys and environments, never a value. `receipt_id` changes whenever anything in the receipt does; `--save <file>` keeps the receipt (names, IDs and codes only) to resume a handoff after a session ends. It never tidies or writes.
 
+Each target in `targets` is `ready` (every vault and item it needs could be opened) or `grants_missing`, and carries `evidence_write: "not_verified"`: an open state vault does not show that the identity can write delivery evidence there. The read-only CI reader never can; a target's deploy identity (`opv access <env> --target <name>`) can. A sync that records evidence, checked with `opv delivery verify`, is the proof.
+
 ## Moving existing settings in: `opv adopt`
 
 Starting a project from a `.env` file? `opv init <env> --from .env --apply` declares every key and imports the values in one step ([configuration](configuration.md#start-from-an-existing-env-opv-init---from)); `adopt` is for keys already declared.
@@ -553,6 +557,16 @@ opv bootstrap --dry-run                # each boundary and state vault: ok, crea
 opv bootstrap                          # create the missing ones and record every ID
 opv bootstrap --ci-reader prod         # also print the CI reader's create command
 ```
+
+## Assistant-prepared structure: `opv approve`
+
+An assistant connected to the [opv MCP server](mcp.md) can declare keys, environments and targets in `secrets.toml` and prepare the same structure `opv bootstrap` creates as a plan (`opv_structure_plan`), but it cannot create it on its own. You review and approve that exact plan in your own terminal:
+
+```sh
+opv approve sp-3f9c0a1b2c3d4e5f        # shows each vault, item and empty field; type the id back to approve
+```
+
+`approve` re-plans and refuses an id that no longer matches (`stale_plan`, exit 6, with the current id in `Next:`). It lists every step by name and asks you to type the plan id; any other answer records nothing. The approval is single use, expires after 15 minutes, and names the project and 1Password account (from `OP_ACCOUNT`, the `.opv` pointer, or the only account op knows). It needs an interactive terminal and refuses under CI or with a service-account or Connect credential set; it has no flag that skips the question. The assistant then applies the plan (`opv_structure_apply`), which the 1Password app asks you to authorize, and gives you the links where you enter each value. Without an approval it fails with `approval_required`. Approving never syncs, deploys, grants access or touches a value.
 
 ## Walkthrough: one product on a shared app and a dedicated overflow app
 
@@ -671,10 +685,12 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `item_not_found` | 4 | after_fix | no | the item is not in the vault (moved, archived, deleted, or a wrong item_id) |
 | `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot access the vault |
 | `item_changed` | 4 | after_fix | yes | opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history) |
+| `inventory_incomplete` | 4 | after_fix | yes | one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist |
 | `target_error` | 5 | after_fix | no | the target (Fly, Azure, Kubernetes) refused or failed |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |
 | `policy_refused` | 6 | after_fix | no | opv refused the operation |
+| `approval_required` | 6 | after_fix | yes | the structural plan has no unused, unexpired approval for this project and account; a person runs opv approve <plan_id> in their own terminal |
 | `keys_blocking` | 6 | after_fix | yes | sync refused: keys are missing or failing a rule; nothing was written |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; pass --confirm <env> |
 | `confirm_mismatch` | 6 | never | no | --confirm names another environment |

@@ -160,7 +160,18 @@ pub fn run(
         .collect::<Result<_, Error>>()?;
     let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
+    // #136, #137: a product with `[products.<p>.local]` runs its app through opv's local
+    // delivery step, as `op run`'s child: it keeps only what the product declares and
+    // writes `file` keys to a private RAM directory (names and paths only in argv).
+    let delivery = prod
+        .local
+        .as_ref()
+        .map(|l| delivery_args(l, &selected))
+        .transpose()?;
     let mut args: Vec<&str> = vec!["run", "--"];
+    if let Some(d) = &delivery {
+        args.extend(d.iter().map(String::as_str));
+    }
     args.extend(command.iter().map(String::as_str));
 
     // Clear all declared keys, including other products and mode-skipped keys.
@@ -179,6 +190,36 @@ pub fn run(
             io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
             k => Error::Dependency(format!("cannot run {OP} ({k})").into()),
         })
+}
+
+/// The local delivery step's command line before the app's (#136, #137): this opv binary,
+/// `local-delivery`, the selected key names, the environment mode, the directory variable
+/// and each file key's path, then `--`. Names and paths only, never a value.
+fn delivery_args(
+    local: &crate::domain::model::Local,
+    selected: &[(&String, &KeySpec)],
+) -> Result<Vec<String>, Error> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .ok_or_else(|| {
+            Error::Dependency("cannot find this opv binary for local delivery".into())
+        })?;
+    let mut a = vec![exe, "local-delivery".to_string()];
+    for (key, spec) in selected {
+        a.extend(["--key".to_string(), (*key).clone()]);
+        if let Some(path) = &spec.file {
+            a.extend(["--file".to_string(), format!("{key}={path}")]);
+        }
+    }
+    if local.environment == crate::domain::model::LocalEnvironment::DeclaredOnly {
+        a.push("--declared-only".to_string());
+    }
+    if let Some(v) = &local.secrets_dir_env {
+        a.extend(["--dir-env".to_string(), v.clone()]);
+    }
+    a.push("--".to_string());
+    Ok(a)
 }
 
 /// FR-47: `product` holds canonical values for other products' keys and is never run on
@@ -225,6 +266,61 @@ mod tests {
         assert_eq!(calls[0].program, "op");
         assert_eq!(calls[0].args, vec!["run", "--", "env", "-0"]);
         assert!(calls[0].inherited && calls[0].stdin.is_none());
+    }
+
+    /// #136, #137: the fixture's allumata delivers OPENAI_API_KEY as a file, declared-only.
+    fn local_fleet() -> Fleet {
+        let text = std::fs::read_to_string("tests/fixtures/secrets.toml")
+            .unwrap()
+            .replace(
+                "guidance = \"OpenAI platform / API keys\"",
+                "guidance = \"OpenAI platform / API keys\"\nfile = \"openai/api-key\"",
+            );
+        crate::config::parse(&format!(
+            "{text}\n[products.allumata.local]\nenvironment = \"declared_only\"\nsecrets_dir_env = \"APP_SECRETS_DIR\"\n"
+        ))
+        .unwrap()
+    }
+
+    fn local_args() -> Vec<String> {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&local_fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
+        r.calls.borrow()[0].args.clone()
+    }
+
+    #[test]
+    fn a_local_product_runs_through_the_delivery_step() {
+        assert_eq!(local_args()[3], "local-delivery");
+    }
+
+    #[test]
+    fn the_delivery_step_is_declared_only() {
+        assert!(local_args().contains(&"--declared-only".to_string()));
+    }
+
+    #[test]
+    fn the_delivery_step_gets_each_file_path() {
+        assert!(local_args().contains(&"OPENAI_API_KEY=openai/api-key".to_string()));
+    }
+
+    #[test]
+    fn the_delivery_step_ends_with_the_apps_command() {
+        let a = local_args();
+        assert_eq!(&a[a.len() - 2..], ["--", "app"]);
+    }
+
+    #[test]
+    fn the_delivery_step_gets_references_never_values() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&local_fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
+        assert!(env_of(&r).iter().all(|(_, v)| v.starts_with("op://")));
+    }
+
+    #[test]
+    fn a_product_without_local_runs_its_command_directly() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
+        assert_eq!(r.calls.borrow()[0].args, ["run", "--", "app"]);
     }
 
     #[test]
