@@ -7,7 +7,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
     STATES_HELP, add, config_cmd, config_export, doctor, explain, init, open, run as run_cmd,
-    signin, skeleton, status, sync, target_cmd,
+    signin, skeleton, status, sync, target_cmd, target_credentials,
 };
 use opv::config;
 use opv::config_store;
@@ -417,6 +417,19 @@ const TARGET_LIST_QUICK: &str = "\
 Examples:
   opv target list                     # every declared target
   opv target list --env prod --json   # one environment as one document";
+
+const TARGET_CREDENTIALS_QUICK: &str = "\
+Examples:
+  opv target credentials staging --target web --create   # mint and store the credential
+  opv target credentials staging --target web            # show the recorded state";
+
+const TARGET_CREDENTIALS_MORE: &str = "\
+Mints the target's least-privilege deploy credential at its provider and stores it in a
+new 1Password item in the target's state vault, then records deploy_credentials on the
+target. The token is never shown, copied or pasted. One confirmation names the
+credential, its 90-day validity, the target and the item; declining creates nothing.
+Without --create, prints whether deploy_credentials is recorded and whether the provider
+can mint one. A person's own terminal and 1Password session are required.";
 
 const ENV_ADD_QUICK: &str = "\
 Examples:
@@ -1341,6 +1354,18 @@ enum TargetCmd {
         /// Print one JSON array instead of lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Mint a target's least-privilege deploy credential and store it in 1Password.
+    #[command(before_help = TARGET_CREDENTIALS_QUICK, after_help = TARGET_CREDENTIALS_MORE)]
+    Credentials {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// The target to mint the credential for (^[a-z][a-z0-9-]*$).
+        #[arg(long)]
+        target: String,
+        /// Mint the credential and store it; without it, print the recorded state.
+        #[arg(long)]
+        create: bool,
     },
 }
 
@@ -2591,6 +2616,48 @@ fn run(
     {
         return run_edit(cli.cmd, &found?, target_options, &r, out).map(|()| 0);
     }
+    // `target credentials` mints the provider token and records the new item's reference in
+    // the local secrets.toml (a manifest has no file to edit): FR-40.
+    if let Cmd::Target(TargetCmd::Credentials {
+        env,
+        target,
+        create,
+    }) = &cli.cmd
+    {
+        let found = found?;
+        let fleet = found.load(&r)?;
+        if !create {
+            return target_credentials::show(&fleet, env, target, &r, out).map(|()| 0);
+        }
+        opv::app::setup_runtime::Console::require_terminal(
+            "target credentials --create",
+            &typed_command(),
+        )?;
+        let path = match &found {
+            config_store::Found::File { store, .. } => store.path.clone(),
+            config_store::Found::Manifest(_) => {
+                return Err(opv::error::Error::Policy(
+                    "this project's configuration lives in a 1Password manifest, so opv cannot \
+                     record deploy_credentials in a file; add it with opv config edit"
+                        .into(),
+                )
+                .with_code(opv::error::Code::PolicyRefused));
+            }
+        };
+        let project =
+            opv::app::personal::project_name(&r, &std::env::current_dir().unwrap_or_default());
+        return target_credentials::run(
+            &fleet,
+            &path,
+            env,
+            target,
+            &project,
+            &r,
+            &mut opv::app::setup_runtime::Console,
+            out,
+        )
+        .map(|()| 0);
+    }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
     // The project's account (its manifest's, or the one recorded in .opv): `doctor`
     // without --env checks the sign-in of that account, never op's default (FR-40).
@@ -2878,6 +2945,7 @@ fn run_other(
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Target(TargetCmd::Add { .. }) => unreachable!("handled by run_edit"),
+        Cmd::Target(TargetCmd::Credentials { .. }) => unreachable!("handled by run"),
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
         | Cmd::Skill(_)

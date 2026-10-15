@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use super::onepassword::{Session, diagnose, failed_op_error, json_error, read_op, session_error};
 use crate::config;
-use crate::domain::{Boundary, Environment};
+use crate::domain::{Boundary, Environment, SecretValue};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::{CommandRunner, Output, status_text};
@@ -348,6 +348,67 @@ pub fn create_item_tagged(
         "item",
         title,
         "create the item in the 1Password app, then re-run opv init",
+    )
+}
+
+/// One typed field of the template [`create_item_with_secret_fields`] serializes: no value
+/// is ever held outside the zeroizing template buffer.
+#[derive(serde::Serialize)]
+struct SecretFieldTemplate<'a> {
+    id: &'a str,
+    label: &'a str,
+    #[serde(rename = "type")]
+    ty: &'static str,
+    value: &'a str,
+}
+
+/// The `op item create` template, serialized straight into a zeroizing buffer (SR-8).
+#[derive(serde::Serialize)]
+struct ItemTemplate<'a> {
+    category: &'static str,
+    fields: Vec<SecretFieldTemplate<'a>>,
+    sections: &'a [()],
+    tags: &'a [String],
+}
+
+/// Create a Secure Note `title` in `vault_id` whose `fields` are one CONCEALED field per
+/// `(label, value)` (FR-40), tagged with `tags` (names, never values). The template is
+/// serialized directly into a zeroizing buffer and sent on `op item create`'s stdin only
+/// (SR-3/SR-8); the value never reaches argv or an error. A person running `opv target
+/// credentials --create` gets the new item's ID.
+pub fn create_item_with_secret_fields(
+    r: &dyn CommandRunner,
+    vault_id: &str,
+    title: &str,
+    tags: &[String],
+    fields: &[(&str, &SecretValue)],
+) -> Result<Named, Error> {
+    let args = [
+        "item", "create", "-", "--vault", vault_id, "--title", title, "--format", "json",
+    ];
+    let template = ItemTemplate {
+        category: "SECURE_NOTE",
+        fields: fields
+            .iter()
+            .map(|(label, value)| SecretFieldTemplate {
+                id: label,
+                label,
+                ty: "CONCEALED",
+                value: value.expose(),
+            })
+            .collect(),
+        sections: &[],
+        tags,
+    };
+    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
+    serde_json::to_writer(&mut *buf, &template).map_err(|e| json_error(&e))?;
+    created(
+        r,
+        &args,
+        Some(buf.as_slice()),
+        "item",
+        title,
+        "create the item in the 1Password app, then re-run opv target credentials --create",
     )
 }
 

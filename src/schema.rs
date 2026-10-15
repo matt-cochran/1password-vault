@@ -350,6 +350,15 @@ pub const EFFECTS: &[Effect] = &[
         handles_values: false,
         ask_user_first: false,
     },
+    // `target credentials --create` mints the provider token (handling a value only in
+    // memory) and stores it in 1Password; the owner runs it in their own terminal (FR-40).
+    Effect {
+        command: "target credentials",
+        effect: "writes_1password",
+        needs_terminal: true,
+        handles_values: true,
+        ask_user_first: true,
+    },
     Effect {
         command: "env add",
         effect: "writes_config",
