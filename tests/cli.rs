@@ -1469,3 +1469,17 @@ fn projects_in_a_login_child_lists_only_the_selected_account() {
 fn projects_with_a_signed_out_account_is_incomplete() {
     assert_eq!(projects_code(None), Some(4));
 }
+
+/// #131: `opv --version` stays one line, `opv <version>`, for callers that read it.
+#[test]
+fn the_version_flag_prints_one_line() {
+    let (_, out, _) = opv(&["--version"]);
+    assert_eq!(out, format!("opv {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+/// #131: `opv version` works with no CLI on PATH and outside any project.
+#[test]
+fn version_without_any_cli_exits_0() {
+    let (code, _, err) = opv(&["version", "--json"]);
+    assert_eq!(code, 0, "{err}");
+}

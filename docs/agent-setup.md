@@ -30,13 +30,10 @@ This page is for an AI assistant (Claude Code, Codex, Cursor and similar) that i
 
 ```sh
 opv --version || curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
-op --version        # 1Password CLI; tested with 2.40.0
-flyctl version      # Fly target; tested with 0.4.112 and later 0.4.x patches
-az version          # Azure target; 2.60 or newer
-kubectl version --client   # Kubernetes target
+opv version --json   # opv, op and each provider CLI with its version; which ones this project uses
 ```
 
-If a tool the target needs is missing, `opv doctor` (step 3) prints the install command for the user's OS.
+`opv version` needs no sign-in and changes nothing: one local version probe per CLI opv runs (op is tested with 2.40.0, flyctl with 0.4.112 and later 0.4.x patches, az 2.60 or newer). A CLI is `installed` with its version, `missing`, or `unknown` with a reason (`timed out`, `probe failed`, `version not recognised`); `configured` says whether this project's `secrets.toml` uses it (`null` when there is none here, or the configuration is in 1Password). If a tool the target needs is missing, `opv doctor` (step 3) prints the install command for the user's OS.
 
 ## 2. Choose the products
 

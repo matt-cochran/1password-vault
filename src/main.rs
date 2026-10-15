@@ -342,6 +342,11 @@ Examples:
   opv ready                      # every environment × product, findings, the next step
   opv ready --json --save r.json # the receipt for an assistant or a handoff";
 
+const VERSION_QUICK: &str = "\
+Examples:
+  opv version                  # opv, op and each provider CLI, with versions
+  opv version --json           # the same, for support and CI";
+
 const APPROVE_QUICK: &str = "\
 Examples:
   opv approve sp-3f9c0a1b2c3d4e5f   # review the assistant's structural plan, then type its id";
@@ -726,6 +731,17 @@ enum Cmd {
         /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
+    },
+    /// opv's version and every CLI it runs, with their versions (read-only; no sign-in).
+    ///
+    /// One bounded local version probe per CLI (1Password, then each provider's); the
+    /// configuration here, if any, says which ones this project uses. `opv --version`
+    /// prints opv's version line only.
+    #[command(before_help = VERSION_QUICK)]
+    Version {
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Approve, in your own terminal, the structural plan an assistant prepared (#133).
     ///
@@ -1821,6 +1837,7 @@ impl Cmd {
             | Cmd::Check { json, .. }
             | Cmd::Status { json, .. }
             | Cmd::Projects { json, .. }
+            | Cmd::Version { json }
             | Cmd::Explain { json, .. }
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
@@ -2090,6 +2107,11 @@ fn run(
                 json: *json,
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
+        }
+        Cmd::Version { json } => {
+            let here = std::env::current_dir().unwrap_or_default();
+            return opv::app::version::run(&r, cli.config.as_deref(), &here, *json, out)
+                .map(|()| 0);
         }
         Cmd::Approve { plan_id } => {
             opv::app::setup_runtime::Console::require_terminal(
@@ -2472,6 +2494,7 @@ fn run_other(
         | Cmd::Account(_)
         | Cmd::Bootstrap { .. }
         | Cmd::Approve { .. }
+        | Cmd::Version { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")

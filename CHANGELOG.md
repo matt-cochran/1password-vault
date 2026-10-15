@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Assistant-managed structure through MCP, approved by a person (#133, FR-61). New tools `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml` only; never a value), `opv_structure_plan` (read-only; returns a `plan_id` bound to the project, account and configuration) and `opv_structure_apply` (creates exactly an approved plan through the 1Password app's authorization; refuses stale or unapproved plans and credential-bearing environments; returns public IDs and 1Password links for key entry). New command `opv approve <plan_id>`: the person reviews the plan in their own terminal and approves it once (15 minutes). New error codes `approval_required` and, from MCP, `credential_in_environment`.
+- `opv version [--json]`: opv's version and every CLI it runs (1Password, then each provider's), each `installed` with its version, `missing` or `unknown` with a reason, and whether this project's configuration uses it, from one bounded local version probe per CLI (no sign-in, no service call). `opv --version` is unchanged (#131).
 - `opv projects --account <a>` lists one account; without it, `OP_ACCOUNT` (set by `opv login --account <a> -- <command>`) selects it (#135).
 
 ## [0.7.0] - 2026-10-14

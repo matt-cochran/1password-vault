@@ -121,6 +121,13 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "version",
+        effect: "reads",
+        needs_terminal: false,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
         command: "approve",
         effect: "interactive",
         needs_terminal: true,
@@ -577,6 +584,12 @@ fn documents() -> Value {
             "undeclared"
         ],
         "add": ["product", "key", "kind", "environments", "saved_in", "changed"],
+        "version": [
+            "opv: {version}",
+            "tools: [{program, vendor, status: installed | missing | unknown, version, reason, providers, configured}]",
+            "providers: [{section, configured, tools}]",
+            "config: {source: file | manifest | none, path, read}"
+        ],
         "projects": [
             "scope: selected | all | default",
             "complete: true only when every account asked was listed (else exit 4, inventory_incomplete)",
