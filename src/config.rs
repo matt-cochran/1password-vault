@@ -1167,8 +1167,9 @@ fn check_ids(name: &str, owner: &str, vault_id: &str, item_id: &str) -> Result<(
 }
 
 /// `[products.<p>.local]` and the keys' `file` paths (#136, #137): the directory variable
-/// is a plain, unreserved name; each path is relative, at most four plain components,
-/// unique, and never inside another key's file.
+/// is a plain, unreserved name; each path is relative, at most four `/`-separated
+/// components matching `^[a-z0-9]+(-[a-z0-9]+)*$`, unique, and never inside another key's
+/// file.
 fn validate_local(product: &str, p: &crate::domain::Product) -> Result<(), String> {
     let files: Vec<(&String, &str)> = p
         .keys
@@ -1194,10 +1195,12 @@ fn validate_local(product: &str, p: &crate::domain::Product) -> Result<(), Strin
             ));
         }
     }
-    let component = |c: &str| {
-        let mut chars = c.chars();
-        chars.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
-            && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    let segment = |s: &str| {
+        s.split('-').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        })
     };
     let mut seen: Vec<&str> = Vec::new();
     for (key, path) in &files {
@@ -1208,11 +1211,11 @@ fn validate_local(product: &str, p: &crate::domain::Product) -> Result<(), Strin
             ));
         }
         let parts: Vec<&str> = path.split('/').collect();
-        if path.len() > 128 || parts.len() > 4 || !parts.iter().all(|c| component(c)) {
+        if path.len() > 128 || parts.len() > 4 || !parts.iter().all(|c| segment(c)) {
             return Err(format!(
                 "product {product:?}: key {key}: file {path:?} must be a relative path of at \
-                 most four parts, each starting with a letter or digit and using only letters, \
-                 digits, '.', '_' and '-'"
+                 most four slash-separated parts, each matching ^[a-z0-9]+(-[a-z0-9]+)*$ \
+                 (lower-case letters and digits, with '-' only between them)"
             ));
         }
         if let Some(other) = seen.iter().find(|o| {
@@ -1787,6 +1790,56 @@ mod tests {
     #[test]
     fn a_secrets_directory_without_a_file_key_is_refused() {
         assert!(parse(&format!("{}{LOCAL}", ok())).is_err());
+    }
+
+    #[test]
+    fn a_nested_lowercase_file_path_loads() {
+        assert!(parse(&with_file("github-app/private-key")).is_ok());
+    }
+
+    #[test]
+    fn a_two_segment_lowercase_file_path_loads() {
+        assert!(parse(&with_file("database/url")).is_ok());
+    }
+
+    #[test]
+    fn another_nested_lowercase_file_path_loads() {
+        assert!(parse(&with_file("otel/endpoint")).is_ok());
+    }
+
+    #[test]
+    fn an_uppercase_file_path_is_refused() {
+        assert!(parse(&with_file("GitHub-app/private-key")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_with_a_dot_is_refused() {
+        assert!(parse(&with_file("github.app/private-key")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_with_an_underscore_is_refused() {
+        assert!(parse(&with_file("github_app/private-key")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_with_an_empty_segment_is_refused() {
+        assert!(parse(&with_file("github-app//private-key")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_with_a_leading_dash_is_refused() {
+        assert!(parse(&with_file("-github-app/private-key")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_with_a_trailing_dash_is_refused() {
+        assert!(parse(&with_file("github-app-/private-key")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_with_more_than_four_segments_is_refused() {
+        assert!(parse(&with_file("a/b/c/d/e")).is_err());
     }
 
     #[test]
