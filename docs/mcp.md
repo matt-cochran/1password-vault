@@ -16,6 +16,7 @@ structural changes in their own terminal, and entering every secret value in 1Pa
 | `opv_declare_target` | environment, target, provider, public provider options, products | local `secrets.toml` | `changed` |
 | `opv_structure_plan` | none | nothing | the structural plan and its `plan_id` |
 | `opv_structure_apply` | `plan_id` | 1Password structure, then `secrets.toml` IDs | created public IDs, links for key entry, added field names |
+| `opv_generate` | declared environment and 1–20 `product/KEY` names | 1Password values (empty fields only) | each generated key's product, key, `encoding` (`base64` or `hex`) and recipe `bytes`; never a value (CLI: `opv generate <env> <product/KEY>…`) |
 
 No tool accepts or returns a secret value, an arbitrary command, a file path, an
 executable, or an approval boolean. Responses are built field by field from checked
