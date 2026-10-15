@@ -468,10 +468,21 @@ fn ci_reader_prints_one_create_command_naming_every_boundary_vault() {
     ];
     vaults.sort();
     assert!(out.contains(&format!(
-        "  op service-account create \"myapp-prod-ci\" --vault {}:read_items --vault \
-         {}:read_items --expires-in 90d\n",
+        "run op service-account create \"myapp-prod-ci\" --vault {}:read_items --vault \
+         {}:read_items --expires-in 90d yourself",
         vaults[0], vaults[1]
     )));
+}
+
+#[test]
+fn ci_reader_steps_first_to_creating_it_without_showing_its_token() {
+    let (_dir, path, op) = workspace_with(TWO);
+    let opts = Opts {
+        ci_reader: Some("prod".into()),
+        ..Opts::default()
+    };
+    let out = run_with(&path, &op, &opts).unwrap();
+    assert!(out.contains("  opv access prod --create --github <owner/repo>"));
 }
 
 #[test]
