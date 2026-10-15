@@ -100,6 +100,13 @@ impl Provider for FlyProvider {
         &["flyctl", "fly auth"]
     }
 
+    /// The Fly CLI action pinned in the GitHub Actions example (`docs/usage.md`).
+    fn ci_setup_step(&self) -> Option<&'static str> {
+        Some(
+            "      - name: Install flyctl\n        uses: superfly/flyctl-actions/setup-flyctl@master",
+        )
+    }
+
     fn credential_vars(&self) -> &'static [&'static str] {
         CREDENTIAL_VARS
     }

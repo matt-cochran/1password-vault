@@ -691,6 +691,9 @@ enum Cmd {
     /// Delivery receipts: whether a product's target still holds what opv delivered.
     #[command(subcommand)]
     Delivery(DeliveryCmd),
+    /// Print a ready-to-commit GitHub Actions workflow (YAML) for one target (read-only).
+    #[command(subcommand)]
+    Ci(CiCmd),
     /// Declare a named deployment target of an environment, or list the declared ones.
     #[command(subcommand)]
     Target(TargetCmd),
@@ -1207,6 +1210,32 @@ Examples:
   opv delivery verify prod --product api                       # each placement: verified, changed, or not delivered
   opv delivery verify prod --product api --target web          # one placement
   opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
+
+#[derive(Subcommand)]
+enum CiCmd {
+    /// Print a ready-to-commit GitHub Actions workflow (YAML) that syncs one target, so an
+    /// assistant never writes the workflow from scratch.
+    #[command(before_help = CI_WORKFLOW_QUICK)]
+    Workflow {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Target name whose provider setup step and sync command the workflow uses.
+        #[arg(long, value_name = "NAME")]
+        target: String,
+        /// GitHub environment the job declares (`environment:`); without it, none.
+        #[arg(long, value_name = "ENVIRONMENT")]
+        github_env: Option<String>,
+        /// Let the job deploy after syncing (adds --deploy to the sync command).
+        #[arg(long)]
+        deploy: bool,
+    },
+}
+
+const CI_WORKFLOW_QUICK: &str = "\
+Examples:
+  opv ci workflow prod --target web                     # print the workflow for one target
+  opv ci workflow prod --target web --github-env prod   # run the job in the prod environment
+  opv ci workflow prod --target web --deploy            # let the job deploy after syncing";
 
 #[derive(Subcommand)]
 enum TargetCmd {
@@ -2846,6 +2875,14 @@ fn run_other(
             json,
             out,
         ),
+        Cmd::Ci(CiCmd::Workflow {
+            env,
+            target,
+            github_env,
+            deploy,
+        }) => {
+            opv::app::ci_workflow::run(&loaded?, &env, &target, github_env.as_deref(), deploy, out)
+        }
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
             source,
