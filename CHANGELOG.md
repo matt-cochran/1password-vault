@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-15
+
+0.8.1 was not released on its own; its changes are part of 0.9.0.
+
 ### Added
 
 - `opv access` reports `pending_revoke` when several service accounts with one name read a vault (after `opv access --create` replaced an identity): keep the newest until `opv delivery verify` shows its delivery, then remove the older ones. `no_ci_reader` now steps to `opv access <env> --create --github <owner/repo>`.
@@ -14,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `opv run --role <ROLE>`: a key may declare `roles = ["serve", "migrate"]` (lower-case names, validated at load; an empty list is refused). A key without `roles` reaches every role; a key with them only when `--role` names one. A product with role-scoped keys requires `--role`, and an undeclared role is refused (exit 2), both before anything is read from 1Password. Roles apply to local `opv run` only, never to `sync` or a target (#136).
 - `opv run --preview [--json]`: a metadata-only delivery preview. It lists each key the run would deliver with its source, destination (`env:<NAME>` or `file:<relative path>`) and roles, the keys a role withholds, the environment mode, the secrets-directory variable, RAM-backed file-delivery support and the `op`/signed-in prerequisites (`unknown` when undeterminable). It reads no value and runs no command (#136).
 - The MCP tool `opv_delivery_preview` returns the same preview document as `opv run --preview --json`, built field by field from identifiers, read-only (#136).
-
 - `opv target credentials <env> --target <name> --create`: mint a target's least-privilege deploy credential at its provider and store it straight in a new 1Password item in the target's state vault, then record `deploy_credentials`. The token is never shown, copied or pasted (stdin only, held in a zeroizing buffer); one confirmation names the credential and its 90-day validity, and it refuses a target that already records `deploy_credentials` before any provider call (0.9.0).
 - CLI parity with the MCP server (j8): `opv env add <env>` declares an environment (the `opv_declare_environment` work and refusals), `opv structure plan [--json]` prints the `opv_structure_plan` document and its `plan_id`, `opv structure apply <plan_id> [--json]` applies an approved plan through the same single-use `opv approve` and returns the `opv_structure_apply` document, and `opv config describe [--json]` prints the `opv_configuration` metadata; docs/mcp.md lists each tool's command and `opv schema` exposes them under `mcp_tools`.
 - `opv access <env> [--target <name>] --create --github <owner/repo> [--github-env <env>]`: create a CI or deploy identity with exactly its grants and store its token as a GitHub secret on stdin, never shown; one confirmation, GitHub checked first. The MCP tool `opv_access` gives assistants each identity, its state and this command (0.9.0).
@@ -24,29 +27,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `opv login --account <ID> --no-record`: sign in to an account for this login only, leaving the project's `.opv` unchanged (#153).
 - `opv plan --rotate <product/KEY>` (repeatable) plans the replacement of an immutable key already on the target: its rows show `would_stage` and the ON TARGET word `rotate` (`"rotate": true` in JSON), and the sorted rotate set is part of the plan id, so a plan with a rotation never shares an id with one without. `opv sync --rotate <k> --expect-plan <id>` now applies such a plan (only `--prune-immutable` stays refused with `--expect-plan`), a person can approve a rotating sync with `opv approve <id> --sync <env> --rotate <k>` (the rotate set is part of the approval scope), and the MCP tool `opv_sync` takes an optional `rotate`.
 - `opv setup` takes secrets in a masked prompt: a fixed `********` once anything is typed or pasted, never the length.
+- `opv approve <plan_id> --sync <env> [--target …] [--product …] [--deploy] [--prune] [--rotate …]`: a person approves one deployment plan in their own terminal (each name it writes or unsets is listed, never a value); `opv sync <env> --approved <plan_id>` and the MCP tool `opv_sync` then run exactly that plan once, within 15 minutes. A stale plan is refused before the approval is used; `--prune-immutable` is never approved this way.
+- `opv ci workflow <env> --target <name> [--github-env <env>] [--deploy]` prints a ready-to-commit GitHub Actions workflow for one target: pinned actions and opv release, `--confirm` for a `confirm_env` environment, the delivery receipt uploaded and verified, and the `opv access … --create` command its token comes from.
+- `opv_ready` (MCP) returns each finding's code, blocking flag, actor, effect and next step (an `opv` command or a 1Password item link only) and each target's state; the environment is optional.
+- `docs/design/delivery-transports.md`: the same delivery contract for local containers and Fly, and the plan for retiring an app-side env shim (#136; design only).
+- `opv mcp serve --project <dir>`: opv's MCP server ships in every released `opv` (npm, `install.sh`, the GitHub release), so assistants need no separate build. `opv mcp install [--client claude|codex|all]` registers it for a project in Claude Code's `.mcp.json` and Codex's `config.toml`, merging into existing configuration (other servers kept, a different `opv` entry refused unless `--force`, no value or credential written; npm installs register the shared `~/.local/bin/opv`).
+
+### Changed
+
+- `opv run` on an environment with `confirm_env = true` (production, typically) needs `--confirm <env>`, as `opv sync` does, before its values reach a local process; nothing is read without it. `--preview` needs none.
+- `opv bootstrap --ci-reader <env>` steps first to `opv access <env> --create --github <owner/repo>` (token stored without being shown); the raw `op service-account create` command remains for other CI providers.
+- The generated and documented GitHub Actions workflow pins `superfly/flyctl-actions/setup-flyctl@1.6` instead of `@master`.
+- The separate `opv-mcp` binary is removed (FR-60, one way only): run `opv mcp serve` instead; `opv mcp install` rewrites an assistant's entry with `--force`.
 
 ### Fixed
 
 - `opv access` reported a vault outside the selected account as "not visible" and printed an `Owner runs:` command that could not succeed. It now reports `not in this account` with a `vault_not_in_account` finding (next: `opv vault locate`) and prints no such command (#153).
 - One account order everywhere: `OP_ACCOUNT` (set by `opv login --account` for its command), then `.opv`, then the only account. `opv login --account B -- opv check` ran against `.opv`'s account before. A non-ID account value is resolved to one account ID (ambiguous values are refused), no account is passed beside a service-account or Connect credential, and the automatic sign-in signs in to the account of the call that failed.
 - A bare `OP_SESSION` variable is reported (`stale_session_variable`) and refused by the MCP structural apply, like `OP_SESSION_<name>`.
-
-### Changed
-
-- `opv run` on an environment with `confirm_env = true` (production, typically) needs `--confirm <env>`, as `opv sync` does, before its values reach a local process; nothing is read without it. `--preview` needs none.
-
-## [0.8.1] - 2026-10-15
-
-### Added
-
-- `opv mcp serve --project <dir>`: opv's MCP server ships in every released `opv` (npm, `install.sh`, the GitHub release), so assistants need no separate build. `opv mcp install [--client claude|codex|all]` registers it for a project in Claude Code's `.mcp.json` and Codex's `config.toml`, merging into existing configuration (other servers kept, a different `opv` entry refused unless `--force`, no value or credential written; npm installs register the shared `~/.local/bin/opv`).
-
-### Changed
-
-- The separate `opv-mcp` binary is removed (FR-60, one way only): run `opv mcp serve` instead; `opv mcp install` rewrites an assistant's entry with `--force`.
-
-### Fixed
-
+- `opv_deployment_plan` reported every row's action as `review`: it now maps the plan's own actions (`write`, `unset`, `hold`, `none`), names each row's target and returns the `approve_command`.
+- In WSL with the Windows `op.exe`, sign-in and account steps point to the Windows 1Password app instead of `opv login --add`, which cannot reach the app's accounts there.
+- Minted tokens (`opv access --create`, `opv target credentials --create`) are registered with the output scrubber the moment they exist.
 - A write to 1Password with nobody signed in (`opv target add` right after its `--dry-run` signed in, #150) was a "policy denied" refusal with a bare `Next: opv login`. It is now `op_not_signed_in`: in a person's terminal opv signs them in at op's prompt and runs the command again (still only for a person), the message says that an earlier command's sign-in has ended, and `Next:` names the project's account.
 - `opv doctor`'s tests no longer depend on the agent skill installed on the machine running them.
 
@@ -367,7 +368,10 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/matt-cochran/1password-vault/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/matt-cochran/1password-vault/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/matt-cochran/1password-vault/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/matt-cochran/1password-vault/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/matt-cochran/1password-vault/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/matt-cochran/1password-vault/compare/v0.4.0...v0.5.0

@@ -133,7 +133,7 @@ hints, not the enforcement mechanism.
 
 ## Without structural MCP (CLI fallback)
 
-An opv older than 0.8.1 (whose MCP server was a separate `opv-mcp` binary built from source), or a client without MCP, uses the owner-terminal
+An opv older than 0.9.0 (whose MCP server was a separate `opv-mcp` binary built from source), or a client without MCP, uses the owner-terminal
 commands: the person runs `opv bootstrap --dry-run`, then `opv bootstrap`, and
 `opv target add` for each target. The assistant declares with `opv add` and
 `opv init --add-env` once the configuration is bootstrapped. Report a missing MCP tool
