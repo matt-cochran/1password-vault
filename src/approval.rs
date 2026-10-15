@@ -85,8 +85,13 @@ pub fn consume_in(
     validate_plan_id(plan_id)?;
     ensure_dir(dir)?;
     let source = dir.join(format!("{plan_id}.json"));
-    let claimed = dir.join(format!("{plan_id}.used-{now}-{}", std::process::id()));
-    match std::fs::rename(&source, &claimed) {
+    // Unique per claim attempt (two threads of one process can claim in the same second).
+    let claimed = dir.join(format!(
+        "{plan_id}.used-{now}-{}-{}",
+        std::process::id(),
+        temp_seq()
+    ));
+    match claim(&source, &claimed) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let why = if used_exists(dir, plan_id) {
@@ -101,6 +106,27 @@ pub fn consume_in(
     let outcome = read_claimed(&claimed, plan_id, project, account, now);
     let _ = std::fs::remove_file(&claimed);
     outcome
+}
+
+/// Rename `source` to `claimed`: the atomic claim. Of concurrent claims exactly one rename
+/// can succeed, because the source is gone after it. On Windows a rename racing another can
+/// fail with a sharing violation (`PermissionDenied`) while the source still exists; it is
+/// retried briefly so the race still has one winner instead of none.
+fn claim(source: &Path, claimed: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(source, claimed) {
+            Err(e)
+                if cfg!(windows)
+                    && e.kind() == std::io::ErrorKind::PermissionDenied
+                    && tries < 50 =>
+            {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// [`record_in`] in [`dir`].

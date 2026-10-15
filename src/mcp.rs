@@ -140,7 +140,7 @@ impl Server {
 
     #[tool(
         name = "opv_configuration",
-        description = "Inspect declared environment and key metadata only. No values, rules, vault identifiers, or configuration export. Changes require human approval outside MCP.",
+        description = "Inspect declared environment, key and target metadata only: environment names, product/key names and kinds, and each target's provider and delivered products. No values, rules, vault identifiers, locators, credential references, or configuration export.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn configuration(&self) -> String {
@@ -363,7 +363,37 @@ fn inspect(project: &std::path::Path, operation: Operation, env: Option<&str>) -
             .map(|(name, e)| json!({"name": name, "requires_confirmation": e.confirm_env}))
             .collect();
         let keys: Vec<_> = fleet.products.iter().filter(|(n, _)| identifier(n)).flat_map(|(product, p)| p.keys.iter().filter(|(n, _)| identifier(n)).map(move |(key, spec)| json!({"product": product, "key": key, "kind": match spec.kind { Kind::Secret => "secret", Kind::Config => "config" }}))).collect();
-        return json!({"ok": true, "environments": environments, "keys": keys, "changes_available": false});
+        // #133: the declared connectors (targets): provider, the products each delivers,
+        // and whether its state vault and deploy identity are declared. Never a locator,
+        // vault ID or credential reference.
+        let targets: Vec<_> = fleet
+            .environments
+            .iter()
+            .filter(|(n, _)| identifier(n))
+            .flat_map(|(env, e)| {
+                let fleet = &fleet;
+                e.targets
+                    .iter()
+                    .filter(|(n, _)| identifier(n))
+                    .map(move |(name, t)| {
+                        let products: Vec<&str> = fleet
+                            .products
+                            .keys()
+                            .filter(|p| identifier(p) && fleet.delivers(env, name, p))
+                            .map(String::as_str)
+                            .collect();
+                        json!({
+                            "environment": env,
+                            "name": name,
+                            "provider": t.config.provider().section(),
+                            "products": products,
+                            "state_vault_recorded": !t.state_vault_id.is_empty(),
+                            "deploy_credentials_declared": t.deploy_credentials.is_some(),
+                        })
+                    })
+            })
+            .collect();
+        return json!({"ok": true, "environments": environments, "keys": keys, "targets": targets, "changes_available": false});
     }
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     let result = match operation {

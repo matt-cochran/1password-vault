@@ -8,7 +8,7 @@ structural changes in their own terminal, and entering every secret value in 1Pa
 | Tool | Input | Changes | Response |
 |---|---|---|---|
 | `opv_ready` | declared environment | nothing | readiness counts, fixed human guidance |
-| `opv_configuration` | none | nothing | environment names, confirmation flags, product/key names and kinds |
+| `opv_configuration` | none | nothing | environment names, confirmation flags, product/key names and kinds, and each target's provider, delivered products and whether its state vault and deploy identity are declared |
 | `opv_deployment_plan` | declared environment | nothing | action metadata, plan ID when available; no execution |
 | `opv_declare_key` | product, key, kind, environments, rules, guidance, immutable | local `secrets.toml` | `changed` |
 | `opv_declare_environment` | environment | local `secrets.toml` | `changed` |
