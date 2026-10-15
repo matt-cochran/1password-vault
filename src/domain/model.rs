@@ -104,6 +104,11 @@ pub struct KeySpec {
     /// `same_value_across_environments` health finding for this key.
     #[serde(default)]
     pub allow_same_value: bool,
+    /// Local file delivery (#136): under `opv run`, the value is a file at this relative
+    /// path (`github-app/private-key`) in the product's private secrets directory
+    /// ([`Local::secrets_dir_env`]) instead of a variable. Targets are unaffected.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 impl KeySpec {
@@ -131,6 +136,33 @@ pub struct Product {
     /// own error (FR-47) instead of a bare serde `missing field` message.
     #[serde(default)]
     pub keys: BTreeMap<String, KeySpec>,
+    /// How `opv run` delivers this product's values locally (#136, #137); `None`: every
+    /// key as a variable in the inherited environment.
+    #[serde(default)]
+    pub local: Option<Local>,
+}
+
+/// `[products.<p>.local]`: local delivery under `opv run` (#136, #137).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Local {
+    /// `inherit` (the default) or `declared_only`: the app's environment is the product's
+    /// declared keys and a fixed set of basics (PATH, HOME, locale, terminal), nothing else
+    /// inherited (#137: a Worker's bindings stay the declared scope).
+    #[serde(default)]
+    pub environment: LocalEnvironment,
+    /// The variable naming the private directory that holds the keys with `file` (#136).
+    #[serde(default)]
+    pub secrets_dir_env: Option<String>,
+}
+
+/// What `opv run` passes on from the environment it was started in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalEnvironment {
+    #[default]
+    Inherit,
+    DeclaredOnly,
 }
 
 /// One recorded access boundary of an environment (FR-57): the vault holding exactly one

@@ -38,6 +38,7 @@ pub(crate) mod json_tests;
 #[cfg(test)]
 mod ledger_tests;
 pub mod local;
+pub mod local_delivery;
 pub mod login;
 pub mod open;
 pub mod personal;

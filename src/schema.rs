@@ -340,7 +340,8 @@ const JSON_ONLY: [&str; 1] = ["schema"];
 /// The `opv schema` document for the command tree `root` of version `version`.
 pub fn describe(root: &clap::Command, version: &str) -> Value {
     let mut commands = Vec::new();
-    for sub in root.get_subcommands() {
+    // A hidden command is opv's own internal step (`local-delivery`), not for callers.
+    for sub in root.get_subcommands().filter(|s| !s.is_hide_set()) {
         leaf_commands(sub, String::new(), &mut commands);
     }
     let global: Vec<Value> = root

@@ -42,6 +42,14 @@ account or Connect credentials. If a tool is missing in this version, say so; us
 `opv bootstrap` in the user's terminal instead and never work around it. Details:
 `opv guide agent`, section "Optional MCP server".
 
+## Local secret files and Workers
+
+Never create `.env`, `.dev.vars` or any file holding a value, and never write a wrapper that
+exports values. For a secret-store app or a Cloudflare Worker, declare
+`[products.<p>.local]` with `environment = "declared_only"` (and `secrets_dir_env` plus
+`file = "<path>"` on keys the app reads as files), then `opv run <env> --product <p> -- <cmd>`
+(Workers: `-- env CLOUDFLARE_INCLUDE_PROCESS_ENV=true npx vite dev`).
+
 ## CI identities
 
 A validation job (`check`, `plan`, `ready`) uses the read-only reader from

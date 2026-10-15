@@ -16,6 +16,7 @@ pub mod host;
 pub mod json;
 pub mod ports;
 pub mod provider;
+pub mod ramdir;
 pub mod runner;
 pub mod schema;
 pub mod scrub;

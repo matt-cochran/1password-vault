@@ -198,6 +198,8 @@ opv account use <ID>        # record the user's chosen account in .opv (ask the 
 - If the environments use different 1Password accounts, add `account = "<sign-in address>"` to each environment (ask the user which account holds which vault). The user then signs in with `opv login <env>`; every opv command uses that environment's account.
 - To let `plan`, `status` and `sync` sign in to the target without the user's own CLI login, the user creates an item with that target's deploy identity (Fly: `FLY_API_TOKEN`; Azure: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) and you add `deploy_credentials = "op://<vault>/<item>"`. Kubernetes uses the user's kubeconfig instead (Azure fields only when its secrets are in a Key Vault through `secrets_in`); Azure deploy credentials work on Linux, WSL and Windows, not macOS. Details: [configuration.md](configuration.md#account-and-deploy-credentials).
 
+- An app that reads secrets from files through a secret-store port, or a Cloudflare Worker whose bindings come from the environment, never gets a `.env`, `.dev.vars` or exported file. Declare `[products.<p>.local]` (`environment = "declared_only"`, `secrets_dir_env`, and `file` on the keys the app reads as files) and run it with `opv run`; see [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal). Never write a wrapper that copies values into files or variables yourself.
+
 ## 7. CI
 
 - CI uses one of two 1Password identities, never both in one job, and never an owner's:

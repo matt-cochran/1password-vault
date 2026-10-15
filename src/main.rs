@@ -732,6 +732,20 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
     },
+    /// Internal: the local delivery step `opv run` starts under `op run` (#136, #137).
+    #[command(name = "local-delivery", hide = true)]
+    LocalDelivery {
+        #[arg(long = "key")]
+        keys: Vec<String>,
+        #[arg(long)]
+        declared_only: bool,
+        #[arg(long)]
+        dir_env: Option<String>,
+        #[arg(long = "file")]
+        files: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// opv's version and every CLI it runs, with their versions (read-only; no sign-in).
     ///
     /// One bounded local version probe per CLI (1Password, then each provider's); the
@@ -2108,6 +2122,30 @@ fn run(
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
         }
+        Cmd::LocalDelivery {
+            keys,
+            declared_only,
+            dir_env,
+            files,
+            command,
+        } => {
+            let files = files
+                .iter()
+                .map(|f| {
+                    f.split_once('=')
+                        .map(|(k, p)| (k.to_string(), p.to_string()))
+                        .ok_or_else(|| Error::Config("--file takes KEY=path".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let d = opv::app::local_delivery::Delivery {
+                keys: keys.clone(),
+                declared_only: *declared_only,
+                files,
+                dir_env: dir_env.clone(),
+                command: command.clone(),
+            };
+            return opv::app::local_delivery::run(&d);
+        }
         Cmd::Version { json } => {
             let here = std::env::current_dir().unwrap_or_default();
             return opv::app::version::run(&r, cli.config.as_deref(), &here, *json, out)
@@ -2495,6 +2533,7 @@ fn run_other(
         | Cmd::Bootstrap { .. }
         | Cmd::Approve { .. }
         | Cmd::Version { .. }
+        | Cmd::LocalDelivery { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
@@ -3176,7 +3215,10 @@ mod tests {
     /// print them.
     fn leaf_helps() -> Vec<(String, String, String)> {
         fn walk(cmd: &mut clap::Command, prefix: &str, out: &mut Vec<(String, String, String)>) {
-            for sub in cmd.get_subcommands_mut().filter(|s| s.get_name() != "help") {
+            for sub in cmd
+                .get_subcommands_mut()
+                .filter(|s| s.get_name() != "help" && !s.is_hide_set())
+            {
                 let name = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
                     walk(sub, &format!("{name} "), out);
@@ -3284,7 +3326,7 @@ mod tests {
     #[test]
     fn schema_lists_every_command_with_an_effect() {
         fn leaves(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
-            for sub in cmd.get_subcommands() {
+            for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
                 let path = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
                     leaves(sub, &format!("{path} "), out);
@@ -3353,7 +3395,7 @@ mod tests {
             prefix: &str,
             out: &mut Vec<(String, &'a clap::Command)>,
         ) {
-            for sub in cmd.get_subcommands() {
+            for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
                 let path = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
                     leaves(sub, &format!("{path} "), out);

@@ -1016,6 +1016,15 @@ Owner decision 2026-10-15: assistants manage declarations and structure through 
 - MCP answers are built from checked identifiers only: never a value, upstream text, or error message; errors are stable codes with fixed human guidance.
 - These are the same operations as `opv bootstrap` and `opv add` (shared code), reached by an assistant through a person's approval; the owner-terminal commands remain the way for a person (FR-60 is about one form per concept, not one caller).
 
+## FR-62 — Local Delivery Scope and Secret Files (#136, #137)
+
+Design: `docs/design/local-delivery.md`.
+
+- `[products.<p>.local]` makes `opv run` start opv's delivery step as `op run`'s child. `op run` stays the resolver and the masking parent; the step's argv holds names and paths only.
+- No `OP_*` variable reaches the app. `environment = "declared_only"` limits it to the selected keys plus a fixed list of non-secret basics.
+- A key with `file` is written, not exported: into a fresh 0700 directory under a user-owned, RAM-backed `$XDG_RUNTIME_DIR`, files 0400, created exclusively and never through a link, named by `secrets_dir_env`. The directory is removed on exit and on signal, and swept by the next run when its process is gone. Where no such directory exists the run is refused (`ram_dir_unavailable`), never written to disk.
+- Products without `local`, and every target, behave as before.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging
