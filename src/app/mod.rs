@@ -13,6 +13,7 @@ pub mod access;
 pub mod account;
 pub mod add;
 pub mod adopt;
+pub mod approve;
 #[cfg(test)]
 mod azure_tests;
 pub mod bootstrap;
@@ -21,6 +22,7 @@ mod characterization_tests;
 pub(crate) mod ci_summary;
 pub mod config_cmd;
 pub mod config_export;
+pub mod declare;
 pub mod delivery;
 pub mod doctor;
 pub mod explain;
@@ -36,6 +38,7 @@ pub(crate) mod json_tests;
 #[cfg(test)]
 mod ledger_tests;
 pub mod local;
+pub mod local_delivery;
 pub mod login;
 pub mod open;
 pub mod personal;
@@ -68,6 +71,7 @@ mod skill_tests;
 #[cfg(test)]
 mod staged_tests;
 pub mod status;
+pub mod structure;
 pub(crate) mod suggest;
 pub mod sync;
 pub mod target_cmd;
@@ -77,6 +81,7 @@ mod ux2_tests;
 #[cfg(test)]
 mod ux_tests;
 pub(crate) mod variables;
+pub mod version;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};

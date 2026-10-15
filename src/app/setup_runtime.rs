@@ -184,6 +184,25 @@ impl Backend for Runtime {
     fn child(&self, command: &[String]) -> Result<i32, Error> {
         self.spawn_child(command)
     }
+    fn probe(&self, args: &[&str]) -> Result<Output, Error> {
+        let env = self.environment();
+        let call = Call {
+            program: "op",
+            args,
+            stdin: None,
+            env: &env,
+            limit: None,
+        };
+        let out = self
+            .runner
+            .probe(&call, crate::runner::PROBE_TIMEOUT)
+            .map_err(dependency)?;
+        if out.status != 0 {
+            // A failed status check is the answer; its stderr never attaches elsewhere.
+            let _ = crate::runner::take_failure_excerpt();
+        }
+        Ok(out)
+    }
     fn native(&self) -> Result<(), Error> {
         super::run::ensure_native(&self.runner)
     }
@@ -232,9 +251,16 @@ impl Backend for Runtime {
                 command.args(["--account", account]);
             }
         }
-        // Generic sessions can be stale. Account-specific sessions are selected by op;
-        // --force asks it to emit a fresh assignment, which stays in this process.
+        // A fresh sign-in starts from no session: an inherited `OP_SESSION` or
+        // `OP_SESSION_<account>` (an expired one from an earlier `eval $(op signin)`, or one
+        // for another account on the same sign-in address) must not decide what op does
+        // (#142). --force asks op for a fresh assignment, which stays in this process.
         command.env_remove("OP_SESSION").env("OP_DEBUG", "false");
+        for (name, _) in std::env::vars_os() {
+            if name.to_str().is_some_and(|n| n.starts_with("OP_SESSION_")) {
+                command.env_remove(&name);
+            }
+        }
         let what = if add_account {
             "adding the account"
         } else {
@@ -252,17 +278,37 @@ impl Backend for Runtime {
 /// Why [`run_prompted`] failed: the classified op failure, or an opv-side error (op
 /// missing) already worded.
 pub enum PromptFailure {
-    Op(super::signin_filter::Failure),
+    /// The classified failure, and op's own error messages (as op printed them).
+    Op(super::signin_filter::Failure, Vec<String>),
     Spawn(Error),
 }
 
 impl PromptFailure {
     fn error(self, what: &str, account: Option<&str>, command: &str) -> Error {
         match self {
-            PromptFailure::Op(f) => f.error(what, account, command),
+            PromptFailure::Op(f, messages) => {
+                let e = f.error(what, account, command);
+                match said(&messages) {
+                    Some(line) => e.map_text(|t| format!("{t}\n1Password said: {line}")),
+                    None => e,
+                }
+            }
             PromptFailure::Spawn(e) => e,
         }
     }
+}
+
+/// op's last error message, scrubbed and cut to one short line, for the person to see what
+/// 1Password itself reported (#142: a failure opv words alone can hide the cause). op's
+/// error lines carry no typed secret; the scrubber removes any token-shaped text anyway.
+fn said(messages: &[String]) -> Option<String> {
+    let last = messages.iter().rev().find(|m| !m.trim().is_empty())?;
+    let line: String = crate::scrub::scrub(last.lines().next().unwrap_or_default())
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    (!line.trim().is_empty()).then_some(line)
 }
 
 /// Run an op command that prompts the owner (`op signin`, `op account add`): stdin stays
@@ -292,10 +338,10 @@ fn run_prompted(command: &mut Command) -> Result<Zeroizing<Vec<u8>>, PromptFailu
     }
     // The prompt line op left open ends here, before opv's own message.
     let _ = writeln!(io::stderr());
-    Err(PromptFailure::Op(super::signin_filter::classify(
-        &messages,
-        exit_code(&status),
-    )))
+    Err(PromptFailure::Op(
+        super::signin_filter::classify(&messages, exit_code(&status)),
+        messages,
+    ))
 }
 
 /// The exit code, or 128 + the signal that ended the child (130 for Ctrl-C).
@@ -481,5 +527,37 @@ mod tests {
     #[test]
     fn empty_output_supports_desktop_authentication() {
         assert!(session_assignment(b"").unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod said_tests {
+    use super::said;
+
+    #[test]
+    fn a_failed_sign_in_shows_1passwords_last_message() {
+        let m = vec![
+            "first".to_string(),
+            "You are not currently signed in.".to_string(),
+        ];
+        assert_eq!(
+            said(&m).as_deref(),
+            Some("You are not currently signed in.")
+        );
+    }
+
+    #[test]
+    fn a_session_token_in_1passwords_message_is_scrubbed() {
+        let m = vec!["export OP_SESSION_my=abcDEF1234567890secret".to_string()];
+        assert!(
+            !said(&m)
+                .unwrap_or_default()
+                .contains("abcDEF1234567890secret")
+        );
+    }
+
+    #[test]
+    fn no_message_adds_nothing() {
+        assert_eq!(said(&[]), None);
     }
 }

@@ -40,6 +40,7 @@ fn account_report() -> account::Report {
         pointer: None,
         manifest: None,
         platform: Platform::Linux,
+        session_vars: Vec::new(),
     })
 }
 
@@ -102,6 +103,7 @@ fn signed_out_report() -> account::Report {
         pointer: None,
         manifest: None,
         platform: Platform::Linux,
+        session_vars: Vec::new(),
     })
 }
 
@@ -116,6 +118,7 @@ fn unavailable_report() -> account::Report {
         pointer: None,
         manifest: None,
         platform: Platform::Linux,
+        session_vars: Vec::new(),
     })
 }
 
@@ -1052,9 +1055,59 @@ fn ready_run_lists_every_target_of_an_environment_with_provider_and_locator() {
         doc["targets"],
         serde_json::json!([
             {"environment": "prod", "name": "portfolio", "provider": "Fly",
-             "locator": "app mcproductlabs-portfolio-production", "state": "ready"},
+             "locator": "app mcproductlabs-portfolio-production", "state": "ready",
+             "evidence_write": "not_verified"},
             {"environment": "prod", "name": "secondary", "provider": "Fly",
-             "locator": "app secondary-app", "state": "ready"},
+             "locator": "app secondary-app", "state": "ready",
+             "evidence_write": "not_verified"},
         ])
+    );
+}
+
+/// #134: an open state vault is never presented as proof that delivery evidence can be
+/// written.
+#[test]
+fn a_ready_target_does_not_claim_evidence_can_be_written() {
+    use crate::app::testutil::{complete_item, fly_empty};
+    use crate::runner::Output;
+    let fleet = crate::app::testutil::fleet_with("");
+    let responses = vec![
+        Output::success(Vec::new()),
+        complete_item(),
+        fly_empty(),
+        Output::success(b"[]".to_vec()),
+    ];
+    let doc = ready_doc(&fleet, Some("prod"), responses);
+    assert_eq!(doc["targets"][0]["evidence_write"], "not_verified");
+}
+
+/// #142: two accounts on one sign-in address is advice, never a readiness blocker.
+#[test]
+fn a_shared_sign_in_address_does_not_block_readiness() {
+    let acct = |id: &str, short: &str| crate::adapters::onepassword_manifest::Account {
+        account_uuid: id.into(),
+        url: "https://my.1password.com/".into(),
+        email: format!("{short}@example.com"),
+        user_uuid: format!("U{id}"),
+        shorthand: short.into(),
+    };
+    let account = account::report(&account::Inputs {
+        discovery: crate::adapters::onepassword_manifest::Discovery::Listed(vec![
+            acct("PERS0000000000000000000001", "my"),
+            acct("BUSI0000000000000000000002", "biz"),
+        ]),
+        signed_in: &|_| Some(true),
+        flag: Some("BUSI0000000000000000000002"),
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: crate::host::Platform::Wsl,
+        session_vars: Vec::new(),
+    });
+    let r = receipt(&inputs(&account, vec![]), "0.8.0");
+    assert!(
+        !r.findings
+            .iter()
+            .any(|f| f.code == "shared_sign_in_address" && f.blocking)
     );
 }

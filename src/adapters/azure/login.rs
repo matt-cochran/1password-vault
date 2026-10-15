@@ -31,7 +31,8 @@ use crate::domain::{Kind, SecretValue};
 use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
-use crate::runner::{Outcome, signals, unknown_text};
+use crate::ramdir::{PrivateDir, owned_dir, ram_backed, sweep};
+use crate::runner::{Outcome, unknown_text};
 
 /// The fields an Azure `deploy_credentials` item holds.
 pub const FIELDS: &[CredentialField] = &[
@@ -57,10 +58,6 @@ pub const DIR_PREFIX: &str = if cfg!(windows) { "opv-az-" } else { "opv-az." };
 pub const NO_RAM_DIR: &str = "deploy credentials for Azure need a private RAM directory \
      ($XDG_RUNTIME_DIR on tmpfs), which this machine doesn't have; nothing was read or \
      changed\n  next: sign in with az login and remove deploy_credentials, or use OIDC in CI";
-
-/// Linux `statfs` magic numbers of the RAM file systems.
-const TMPFS_MAGIC: u64 = 0x0102_1994;
-const RAMFS_MAGIC: u64 = 0x8584_58f6;
 
 /// The Azure CLI signed in as the environment's service principal, in a private directory
 /// removed on drop.
@@ -91,8 +88,8 @@ pub fn start_in(
     if !owned_dir(&runtime) || !is_ram(&runtime).unwrap_or(false) {
         return Err(refuse());
     }
-    sweep(&runtime);
-    let dir = PrivateDir::create(&runtime).map_err(|_| refuse())?;
+    sweep(&runtime, DIR_PREFIX);
+    let dir = PrivateDir::create(&runtime, DIR_PREFIX).map_err(|_| refuse())?;
     Ok(AzureLogin { dir })
 }
 
@@ -110,8 +107,8 @@ fn start_windows(base: Option<PathBuf>) -> Result<AzureLogin, Error> {
             )
             .with_code(Code::RamDirUnavailable)
         })?;
-    sweep(&base);
-    let dir = PrivateDir::create(&base).map_err(|e| {
+    sweep(&base, DIR_PREFIX);
+    let dir = PrivateDir::create(&base, DIR_PREFIX).map_err(|e| {
         Error::Policy(
             format!(
                 "cannot create a private az directory under {} ({:?}); nothing was read or \
@@ -126,51 +123,6 @@ fn start_windows(base: Option<PathBuf>) -> Result<AzureLogin, Error> {
     Ok(AzureLogin { dir })
 }
 
-/// Whether `path` is a directory (not a symlink) owned by this user.
-fn owned_dir(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::symlink_metadata(path)
-            .is_ok_and(|m| m.file_type().is_dir() && m.uid() == rustix::process::geteuid().as_raw())
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
-    }
-}
-
-/// Whether a directory opv just created is private: owned by the user and, on Unix, no
-/// group or other access. (On Windows its ACL was set at creation.)
-fn private_dir(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        owned_dir(path) && std::fs::symlink_metadata(path).is_ok_and(|m| m.mode() & 0o077 == 0)
-    }
-    #[cfg(not(unix))]
-    {
-        owned_dir(path)
-    }
-}
-
-/// Whether `path` is on a RAM file system (tmpfs or ramfs). Linux only; elsewhere (macOS)
-/// no directory qualifies.
-pub fn ram_backed(path: &Path) -> io::Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        let st = rustix::fs::statfs(path)?;
-        #[allow(clippy::unnecessary_cast)]
-        let magic = (st.f_type as u64) & 0xffff_ffff;
-        Ok(magic == TMPFS_MAGIC || magic == RAMFS_MAGIC)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (path, TMPFS_MAGIC, RAMFS_MAGIC);
-        Ok(false)
-    }
-}
-
 /// Sweep the private directories that killed runs left behind (SR-4), at the start of
 /// every Azure run whether or not it signs in with deploy credentials (I2): the Linux
 /// runtime directory when it is the user's and RAM-backed, `%LOCALAPPDATA%\Temp` on
@@ -181,7 +133,7 @@ pub fn sweep_stale() {
             && base.is_absolute()
             && base.is_dir()
         {
-            sweep(&base);
+            sweep(&base, DIR_PREFIX);
         }
         return;
     }
@@ -192,163 +144,19 @@ pub fn sweep_stale() {
         && owned_dir(&runtime)
         && ram_backed(&runtime).unwrap_or(false)
     {
-        sweep(&runtime);
-    }
-}
-
-/// Remove `<prefix><pid>-*` directories whose run is gone (killed before it could clean
-/// up). A live run's directory, anything not owned by this user and anything that is not
-/// a plain directory are left alone.
-fn sweep(base: &Path) {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix(DIR_PREFIX))
-            .and_then(|rest| rest.split('-').next())
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let path = entry.path();
-        if !alive(pid) && owned_dir(&path) {
-            remove_with_retries(&path);
-        }
-    }
-}
-
-/// Whether process `pid` exists.
-fn alive(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        match i32::try_from(pid)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            None => false,
-            Some(p) => !matches!(
-                rustix::process::test_kill_process(p),
-                Err(e) if e == rustix::io::Errno::SRCH
-            ),
-        }
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        // SAFETY: query-only handle, closed before returning.
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                return false;
-            }
-            let mut code = 0u32;
-            let ok = GetExitCodeProcess(h, &mut code);
-            CloseHandle(h);
-            ok != 0 && code == STILL_ACTIVE as u32
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        true
-    }
-}
-
-/// Remove `path` recursively. On Windows az's helper processes can hold files for a few
-/// seconds, so the removal is retried with backoff for up to about 10 s.
-fn remove_with_retries(path: &Path) {
-    let mut delay = std::time::Duration::from_millis(100);
-    let mut waited = std::time::Duration::ZERO;
-    loop {
-        match std::fs::remove_dir_all(path) {
-            Ok(()) => return,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
-            Err(_) if cfg!(windows) && waited < std::time::Duration::from_secs(10) => {
-                std::thread::sleep(delay);
-                waited += delay;
-                delay = (delay * 2).min(std::time::Duration::from_secs(2));
-            }
-            Err(_) => return,
-        }
-    }
-}
-
-/// A fresh private directory, removed (with everything az wrote) on drop and on a signal.
-struct PrivateDir {
-    path: PathBuf,
-    utf8: String,
-}
-
-impl PrivateDir {
-    fn create(base: &Path) -> io::Result<Self> {
-        use std::hash::BuildHasher;
-        let random =
-            std::collections::hash_map::RandomState::new().hash_one(std::time::Instant::now());
-        let path = base.join(format!("{DIR_PREFIX}{}-{random:016x}", std::process::id()));
-        let utf8 = path
-            .to_str()
-            .ok_or(io::ErrorKind::InvalidInput)?
-            .to_string();
-        make_private_dir(&path)?;
-        signals::register_cleanup(path.clone());
-        let dir = Self { path, utf8 };
-        if !private_dir(&dir.path) {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        Ok(dir)
-    }
-}
-
-/// Create `path` (never an existing one: a race or a planted link fails), private from the
-/// start: mode 0700 on Unix, a protected user-only ACL on Windows.
-fn make_private_dir(path: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
-        let sec = super::winsec::UserOnly::new(true)?;
-        let w = super::winsec::wide(path.to_str().ok_or(io::ErrorKind::InvalidInput)?);
-        // SAFETY: NUL-terminated path; the attributes outlive the call.
-        if unsafe { CreateDirectoryW(w.as_ptr(), sec.attributes()) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(path)
-    }
-}
-
-impl Drop for PrivateDir {
-    fn drop(&mut self) {
-        remove_with_retries(&self.path);
-        signals::unregister_cleanup(&self.path);
+        sweep(&runtime, DIR_PREFIX);
     }
 }
 
 impl AzureLogin {
     /// The private configuration directory of this run.
     pub fn dir(&self) -> &Path {
-        &self.dir.path
+        self.dir.path()
     }
 
     /// The child environment of every az call of this run.
     fn az_env(&self) -> Vec<(&'static str, &str)> {
-        let mut env = vec![("AZURE_CONFIG_DIR", self.dir.utf8.as_str())];
+        let mut env = vec![("AZURE_CONFIG_DIR", self.dir.utf8())];
         if cfg!(windows) {
             env.push(("AZURE_CORE_ENCRYPT_TOKEN_CACHE", "true"));
         }
@@ -457,7 +265,7 @@ impl DeployLogin for AzureLogin {
             e => e,
         })?;
         match outcome {
-            Outcome::Done(_) => check_store(&self.dir.path, cfg!(windows)),
+            Outcome::Done(_) => check_store(self.dir.path(), cfg!(windows)),
             Outcome::Refused(o) => Err(rejected(format!("exit {}", o.status))),
             Outcome::Unknown {
                 status: Some(s), ..

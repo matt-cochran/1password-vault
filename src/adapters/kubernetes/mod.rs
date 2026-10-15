@@ -66,6 +66,7 @@ pub const KUBECTL: Tool = Tool {
     not_found: &["(NotFound)"],
     signed_out: &[],
     aliases: &[],
+    version_args: &["version", "--client"],
 };
 /// The `data` key every opv Secret stores its value under.
 pub const VALUE_KEY: &str = "value";

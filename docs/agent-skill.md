@@ -29,6 +29,35 @@ prompts or in the 1Password app; ask before anything that writes (the schema's
 `ask_user_first`); prefer `--json` and act on `error.code`, `next` and `human_required`, not
 on message text.
 
+## Agents own structure; people own sign-in, approval and values
+
+With the opv MCP server (`opv-mcp`), declare products, keys, environments and targets with
+`opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml`
+only; never a value), then `opv_structure_plan`. Ask the user to run `opv approve <plan_id>`
+in their own terminal (never run it yourself), then `opv_structure_apply` with that id. Hand
+the user the returned 1Password links to enter values there, and finish with `opv_ready`.
+`stale_plan`: plan and ask again. `approval_required`: wait for the user's approval.
+`credential_in_environment`: the user restarts the server without `op` session, service
+account or Connect credentials. If a tool is missing in this version, say so; use
+`opv bootstrap` in the user's terminal instead and never work around it. Details:
+`opv guide agent`, section "Optional MCP server".
+
+## Local secret files and Workers
+
+Never create `.env`, `.dev.vars` or any file holding a value, and never write a wrapper that
+exports values. For a secret-store app or a Cloudflare Worker, declare
+`[products.<p>.local]` with `environment = "declared_only"` (and `secrets_dir_env` plus
+`file = "<path>"` on keys the app reads as files), then `opv run <env> --product <p> -- <cmd>`
+(Workers: `-- env CLOUDFLARE_INCLUDE_PROCESS_ENV=true npx vite dev`).
+
+## CI identities
+
+A validation job (`check`, `plan`, `ready`) uses the read-only reader from
+`opv bootstrap --ci-reader <env>`. A job that syncs uses the target's deploy identity from
+`opv access <env> --target <name>`: boundary read plus read and write on its own state vault,
+where delivery evidence goes. `opv ready` says `evidence_write: "not_verified"`: only a sync
+checked with `opv delivery verify` proves it. Never widen a boundary vault to write.
+
 ## Pick the flow from `opv ready --json`
 
 - **No configuration yet** (`config_not_found`): there is one form (FR-60). Let
@@ -40,6 +69,12 @@ on message text.
   validates it, creates its state vault and records its placements). Never create a second configuration beside
   one that exists, and never edit a file whose first line says it is generated: hand the
   printed IDs to its generator.
+- **Finding existing projects**: `opv projects --json` lists manifests per 1Password account.
+  Use `--account <email or account ID>` (or run it as `opv login --account <a> -- opv projects
+  --account <a> --json`) to ask one account. Trust a missing project only when `complete` is
+  `true`. An `inventory_incomplete` error (exit 4) or an `accounts[]` entry with `status:
+  "failed"` means that account was not read: hand its `next` to the user and wait. Never
+  treat an incomplete inventory as permission to create a replacement vault or manifest.
 - **Adding a placement** (a product on another target): `opv ready --json` names a target as
   `grants_missing` until its deploy credentials, state vault and every boundary it reads can
   be opened. Declare one with `opv target add <env> <name> --<provider options>` (it asks

@@ -1060,6 +1060,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                 from: None,
                 personal: false,
                 allow_same_value: false,
+                file: None,
             }
         }
         let target = GithubTarget {
@@ -1097,6 +1098,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     source_only: false,
                     boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
+                    local: None,
                 },
             ),
             (
@@ -1105,6 +1107,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     source_only: false,
                     boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
+                    local: None,
                 },
             ),
             (
@@ -1113,6 +1116,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     source_only: true,
                     boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
+                    local: None,
                 },
             ),
         ]);

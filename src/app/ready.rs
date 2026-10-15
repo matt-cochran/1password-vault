@@ -132,6 +132,10 @@ pub struct TargetReport {
     /// Why the target is `grants_missing`; omitted when it is `ready`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Always `not_verified` (#134): `ready` sees that the state vault can be opened, which
+    /// does not show that this identity can write delivery evidence there. Only a sync that
+    /// records evidence proves it (`opv delivery verify`); a read-only CI reader never can.
+    pub evidence_write: &'static str,
 }
 
 /// One thing a person or agent must act on, with one runnable prerequisite and one verify
@@ -247,7 +251,7 @@ fn receipt_id(
         findings,
     };
     let bytes = serde_json::to_vec(&input).expect("the receipt id input serializes");
-    let hex = format!("{:x}", Sha256::digest(&bytes));
+    let hex = hex::encode(Sha256::digest(&bytes));
     format!("rcpt-{}", &hex[..12])
 }
 
@@ -269,6 +273,7 @@ fn build_targets(inputs: &Inputs<'_>) -> Vec<TargetReport> {
                     Some(_) => "grants_missing".into(),
                 },
                 reason,
+                evidence_write: "not_verified",
             });
         }
     }
@@ -452,7 +457,15 @@ fn build_findings(inputs: &Inputs<'_>) -> Vec<Finding> {
                 account: selected.clone(),
                 ..Scope::default()
             },
-            blocking: f.code != "discovery_unavailable",
+            // Advisory (#142): opv names accounts by ID and ignores other accounts'
+            // session variables when it signs in, so these never block readiness.
+            blocking: !matches!(
+                f.code.as_str(),
+                "discovery_unavailable"
+                    | "shared_sign_in_address"
+                    | "session_for_other_account"
+                    | "stale_session_variable"
+            ),
             actor: "owner".into(),
             effect: effect.into(),
             prerequisite: f.next.clone().unwrap_or_else(|| "opv account list".into()),

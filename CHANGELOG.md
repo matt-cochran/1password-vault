@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
+### Dependencies
+
+- `sha2` 0.11 (digests are hex-encoded explicitly; output unchanged), `signal-hook` 0.4, `serde_json` 1.0.154. Release workflow: `actions/upload-artifact` 7.0.2, `actions/download-artifact` 8.0.2 (a download whose hash does not match now fails the release), `actions/setup-node` 7.1.0, `taiki-e/install-action` 2.87.27.
+
+### Changed
+
+- CI guidance separates the read-only validation reader (`opv bootstrap --ci-reader`) from each target's deploy identity (`opv access <env> --target <name>`: boundary read, its own state vault read and write), which a syncing job needs to record delivery evidence. `bootstrap --ci-reader` says so, and `opv ready` marks each target `evidence_write: "not_verified"` instead of implying that a visible state vault can be written (#134).
+
+### Fixed
+
+- An approval is claimed by an exclusive create (`O_EXCL`, `CREATE_NEW` on Windows), which has exactly one winner on every platform; on Windows two concurrent claims could both be refused by a rename sharing violation. The record is spent whatever the verdict, and a new approval of the same plan replaces a used one (#133).
+- `opv login` on a machine with several accounts on one sign-in address (WSL, op 2.40) could fail after the password with "1Password did not start a session" (#142). `op signin` no longer inherits `OP_SESSION_*` variables from the shell. A refused sign-in now shows op's own message (scrubbed) on a `1Password said:` line. The status check before the prompt is one probe instead of three retries.
+- New advisory findings in `opv account list`, `opv ready` and before `opv login`'s prompt: `shared_sign_in_address`, `session_for_other_account` and `stale_session_variable`, each naming accounts by shorthand, email and ID and variables by name only (#142).
+
+- A structural apply that stops part-way keeps the IDs it already recorded; declarations work on a configuration that is not bootstrapped yet (#133).
+
+- `opv projects` and `opv status --all` no longer report a successful empty inventory when 1Password accounts could not be listed (#135). Each account asked is reported in `accounts` by account ID (accounts sharing `my.1password.com` are told apart; never an email), `complete` says whether every account was listed, and an incomplete inventory keeps the projects it found but exits 4 with the new `inventory_incomplete` code, whose `next` signs in to that account.
+- A listing that failed for one account is diagnosed for that account (`op whoami --account <id>`), never as another account's signed-in identity (#135).
+
+### Added
+
+- Assistant-managed structure through MCP, approved by a person (#133, FR-61). New tools `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml` only; never a value), `opv_structure_plan` (read-only; returns a `plan_id` bound to the project, account and configuration) and `opv_structure_apply` (creates exactly an approved plan through the 1Password app's authorization; refuses stale or unapproved plans and credential-bearing environments; returns public IDs and 1Password links for key entry). New command `opv approve <plan_id>`: the person reviews the plan in their own terminal and approves it once (15 minutes). New error codes `approval_required` and, from MCP, `credential_in_environment`.
+- Local delivery for secret-store apps and Cloudflare Workers (#136, #137, FR-62). `[products.<p>.local]` with `environment = "declared_only"` gives the app only its declared keys and a fixed set of non-secret basics. `file = "<path>"` on a key, with `secrets_dir_env`, delivers that key as a 0400 file in a private RAM directory (Linux and WSL; refused, never written to disk, elsewhere), removed when the app exits. Under `local`, no `OP_*` credential reaches the app. Products without `local` are unchanged. Recipes in local development; guarantees and limits in `docs/design/local-delivery.md`.
+- `opv_configuration` (MCP) also lists each declared target: its provider, the products it delivers, and whether its state vault and deploy identity are declared; never a locator, vault ID or credential reference (#133).
+- `opv version [--json]`: opv's version and every CLI it runs (1Password, then each provider's), each `installed` with its version, `missing` or `unknown` with a reason, and whether this project's configuration uses it, from one bounded local version probe per CLI (no sign-in, no service call). `opv --version` is unchanged (#131).
+- `opv projects --account <a>` lists one account; without it, `OP_ACCOUNT` (set by `opv login --account <a> -- <command>`) selects it (#135).
+
 ## [0.7.0] - 2026-10-14
 
 Named deployment targets and one vault per access boundary, with **no backward compatibility**. opv is not yet declared live, so 0.7.0 keeps one way to do each thing (FR-60). Nothing is migrated: a configuration in a removed form fails at load, and the error shows the exact current form to write. See [docs/configuration.md](docs/configuration.md) ("Removed forms") and [docs/design/placements-and-access-boundaries.md](docs/design/placements-and-access-boundaries.md).

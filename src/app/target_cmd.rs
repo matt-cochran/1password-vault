@@ -150,7 +150,7 @@ fn add_inner(
             &section,
             &products,
             args.deploy_credentials.as_deref(),
-            state_vault_id,
+            Some(state_vault_id),
             items,
         );
         let text = insert_target(original, &args.env, &args.name, &body, &comment)?;
@@ -212,7 +212,7 @@ fn add_inner(
 /// The provider named by `--provider`, or else the one provider whose options were given,
 /// with the options checked against its [`InitField`]s: unknown option, another provider's
 /// option, or a missing required one is refused (H3).
-fn provider_and_values(
+pub(crate) fn provider_and_values(
     args: &AddArgs,
 ) -> Result<(&'static dyn Provider, BTreeMap<&'static str, String>), Error> {
     let provider = match &args.provider {
@@ -309,7 +309,7 @@ fn find_field(flag: &str) -> Option<(&'static dyn Provider, &'static InitField)>
 /// `--products`: each named product is declared and not source-only; duplicates dropped, the
 /// order kept. Empty means the target delivers every product with a key in its environment
 /// (FR-48). The loader checks the same rule; this names the flag.
-fn checked_products(fleet: &Fleet, given: &[String]) -> Result<Vec<String>, Error> {
+pub(crate) fn checked_products(fleet: &Fleet, given: &[String]) -> Result<Vec<String>, Error> {
     let mut products: Vec<String> = Vec::new();
     for p in given {
         if products.iter().any(|q| q == p) {
@@ -337,13 +337,13 @@ fn checked_products(fleet: &Fleet, given: &[String]) -> Result<Vec<String>, Erro
 
 /// The fragment inserting one target under `[environments.<env>.targets.<name>]`: the
 /// provider's section, `products`, `deploy_credentials` and `state_vault_id`, in that order.
-fn target_table(
+pub(crate) fn target_table(
     env: &str,
     name: &str,
     section: &str,
     products: &[String],
     deploy: Option<&str>,
-    state_vault_id: &str,
+    state_vault_id: Option<&str>,
     items: &[(String, String)],
 ) -> String {
     let mut s = format!("[environments.{env}.targets.{name}]\n");
@@ -361,10 +361,13 @@ fn target_table(
             toml::Value::String(d.to_string())
         ));
     }
-    s.push_str(&format!(
-        "state_vault_id = {}\n",
-        toml::Value::String(state_vault_id.to_string())
-    ));
+    // None: declared only; the approved structural plan creates the state vault (#133).
+    if let Some(id) = state_vault_id {
+        s.push_str(&format!(
+            "state_vault_id = {}\n",
+            toml::Value::String(id.to_string())
+        ));
+    }
     if !items.is_empty() {
         let entries: Vec<String> = items
             .iter()
@@ -379,7 +382,7 @@ fn target_table(
 /// the TOML fragment [`target_table`] built; `comment` is the one-line note above the new
 /// table. An unknown environment or a `targets` written in a shape opv does not edit is
 /// refused with the reason.
-fn insert_target(
+pub(crate) fn insert_target(
     original: &str,
     env: &str,
     name: &str,

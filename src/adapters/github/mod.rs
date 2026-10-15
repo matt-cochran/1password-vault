@@ -63,6 +63,7 @@ pub const GH: Tool = Tool {
     // Spike Q9: a rejected or missing token.
     signed_out: &["HTTP 401"],
     aliases: &[],
+    version_args: &["--version"],
 };
 
 /// A GitHub token in the environment, in the order `gh` prefers them (by name only).

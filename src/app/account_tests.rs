@@ -60,6 +60,7 @@ fn inputs<'a>(
         pointer,
         manifest,
         platform,
+        session_vars: Vec::new(),
     }
 }
 
@@ -806,6 +807,7 @@ fn a_selection_matching_several_accounts_is_ambiguous_not_absent() {
         pointer: None,
         manifest: None,
         platform: Platform::Linux,
+        session_vars: Vec::new(),
     });
     assert_eq!(r.findings[0].code, "account_ambiguous");
 }
@@ -815,4 +817,106 @@ fn using_an_unknown_account_says_it_is_not_registered() {
     let dir = tempfile::tempdir().unwrap();
     let e = use_account(&two_at_one_address(), "nobody@x.example", dir.path()).unwrap_err();
     assert_eq!(e.code(), Code::AccountNotRegistered);
+}
+
+// --- #142: two accounts on one sign-in address, and session variables in the shell ---
+
+/// The owner's WSL setup: a personal (`my`) and a business (`mcproductlabs`) account, both
+/// on my.1password.com.
+fn personal() -> Account {
+    acct(
+        "PERS0000000000000000000001",
+        "me@example.com",
+        "my.1password.com",
+        "my",
+        "USERPERS000000000000000001",
+    )
+}
+
+fn business() -> Account {
+    acct(
+        "BUSI0000000000000000000002",
+        "me@business.example",
+        "my.1password.com",
+        "mcproductlabs",
+        "USERBUSI000000000000000002",
+    )
+}
+
+fn shared(vars: &[&str]) -> Report {
+    report(&Inputs {
+        discovery: Discovery::Listed(vec![personal(), business()]),
+        signed_in: &none_signed_in,
+        flag: Some("BUSI0000000000000000000002"),
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: Platform::Wsl,
+        session_vars: vars.iter().map(|v| v.to_string()).collect(),
+    })
+}
+
+fn codes(r: &Report) -> Vec<&str> {
+    r.findings.iter().map(|f| f.code.as_str()).collect()
+}
+
+#[test]
+fn two_accounts_on_one_address_are_reported() {
+    assert!(codes(&shared(&[])).contains(&"shared_sign_in_address"));
+}
+
+#[test]
+fn the_shared_address_finding_names_each_accounts_shorthand() {
+    let r = shared(&[]);
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "shared_sign_in_address")
+        .unwrap();
+    assert!(
+        f.message.contains("my = me@example.com")
+            && f.message.contains("mcproductlabs = me@business.example")
+    );
+}
+
+#[test]
+fn a_session_variable_for_the_other_account_is_reported() {
+    assert!(codes(&shared(&["OP_SESSION_my"])).contains(&"session_for_other_account"));
+}
+
+#[test]
+fn a_session_variable_for_the_selected_account_is_fine() {
+    assert!(
+        !codes(&shared(&["OP_SESSION_mcproductlabs"]))
+            .iter()
+            .any(|c| c.contains("session"))
+    );
+}
+
+#[test]
+fn a_session_variable_for_no_known_account_is_stale() {
+    assert!(codes(&shared(&["OP_SESSION_gone"])).contains(&"stale_session_variable"));
+}
+
+#[test]
+fn a_session_finding_comes_before_the_shared_address_note() {
+    assert_eq!(
+        shared(&["OP_SESSION_my"]).next.as_deref(),
+        Some("opv login --account BUSI0000000000000000000002")
+    );
+}
+
+#[test]
+fn accounts_on_different_addresses_are_not_reported_as_shared() {
+    let r = report(&Inputs {
+        discovery: Discovery::Listed(vec![owner(), other()]),
+        signed_in: &none_signed_in,
+        flag: None,
+        env: None,
+        pointer: None,
+        manifest: None,
+        platform: Platform::Linux,
+        session_vars: Vec::new(),
+    });
+    assert!(!codes(&r).contains(&"shared_sign_in_address"));
 }
