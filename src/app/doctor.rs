@@ -1604,16 +1604,13 @@ mod tests {
     }
 
     #[test]
-    fn next_step_names_account_add_when_no_account_exists() {
+    fn next_step_names_login_add_when_no_account_exists() {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(b"[]".to_vec()));
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert!(
-            do_line(&out).starts_with("Do: add one: op account add"),
-            "{out}"
-        );
+        assert!(out.contains("Next: opv login --add"), "{out}");
     }
 
     #[test]
