@@ -35,8 +35,6 @@ pub struct FormState {
     pub form: Form,
     /// Every declared environment (the add-key checkboxes; the add-env duplicates check).
     pub envs: Vec<String>,
-    /// Fleet profile: a key needs a product.
-    pub fleet: bool,
     pub at: usize,
     /// The last validation error, shown under the form.
     pub error: Option<String>,
@@ -55,16 +53,11 @@ pub enum Outcome {
 
 impl FormState {
     /// The add-key form, with `product` and `env` preset from the screen it was opened on.
-    pub fn add_key(
-        envs: Vec<String>,
-        fleet: bool,
-        product: Option<String>,
-        env: Option<String>,
-    ) -> Self {
+    pub fn add_key(envs: Vec<String>, product: Option<String>, env: Option<String>) -> Self {
         let environments = env.into_iter().collect();
         FormState {
             form: Form::AddKey(AddKeyForm {
-                product: if fleet { product } else { None },
+                product,
                 key: String::new(),
                 kind: KindChoice::Secret,
                 environments,
@@ -73,8 +66,7 @@ impl FormState {
                 allow_same_value: false,
             }),
             envs,
-            fleet,
-            at: if fleet { 0 } else { 1 },
+            at: 0,
             error: None,
         }
         .start()
@@ -89,7 +81,6 @@ impl FormState {
                 item: String::new(),
             }),
             envs,
-            fleet: false,
             at: 0,
             error: None,
         }
@@ -107,10 +98,7 @@ impl FormState {
         match &self.form {
             Form::AddKey(_) => {
                 let mut v = Vec::new();
-                if self.fleet {
-                    v.push(Row::Product);
-                }
-                v.extend([Row::Key, Row::Kind]);
+                v.extend([Row::Product, Row::Key, Row::Kind]);
                 v.extend((0..self.envs.len()).map(Row::Env));
                 v.extend([Row::Guidance, Row::Personal, Row::AllowSame]);
                 v
@@ -172,7 +160,7 @@ impl FormState {
                 if f.product.as_deref().is_some_and(str::is_empty) {
                     f.product = None;
                 }
-                add_key_command(&f, self.fleet)
+                add_key_command(&f)
             }
             Form::AddEnv(f) => add_env_command(f, &self.envs),
         }

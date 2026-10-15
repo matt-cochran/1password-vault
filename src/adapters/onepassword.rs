@@ -49,7 +49,7 @@ use serde::de::{self, Deserializer, Visitor};
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::domain::model::{Environment, Kind, Profile, SIMPLE_PRODUCT, key_label};
+use crate::domain::model::{Boundary, Environment, Kind, key_label};
 use crate::domain::plan::ItemField;
 use crate::domain::secret::SecretValue;
 use crate::error::{Code, Error};
@@ -401,11 +401,12 @@ pub fn session_error(
 pub(crate) fn failed_op_error(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     host: &dyn Fn() -> Host,
     failed: &str,
     grant: &str,
 ) -> Error {
-    failed_op_error_as(r, env, host, failed, grant, false)
+    failed_op_error_as(r, env, b, host, failed, grant, false)
 }
 
 /// [`failed_op_error`] for a read or (`write`) a write. For a write whose session cannot be
@@ -413,18 +414,20 @@ pub(crate) fn failed_op_error(
 pub(crate) fn failed_op_error_as(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     host: &dyn Fn() -> Host,
     failed: &str,
     grant: &str,
     write: bool,
 ) -> Error {
     // The probes explain the failed call; its excerpt stays with the error (NR-31).
-    crate::runner::diagnosing(|| failed_op_session_error(r, env, host, failed, grant, write))
+    crate::runner::diagnosing(|| failed_op_session_error(r, env, b, host, failed, grant, write))
 }
 
 fn failed_op_session_error(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     host: &dyn Fn() -> Host,
     failed: &str,
     grant: &str,
@@ -435,16 +438,16 @@ fn failed_op_session_error(
         Err(e) => return e,
     };
     match session {
-        Session::SignedIn(t) if !write => item_unavailable(r, env, failed, t, grant),
-        Session::SignedIn(t) => Error::Source(not_available(env, failed, t, grant).into()),
+        Session::SignedIn(t) if !write => item_unavailable(r, b, failed, t, grant),
+        Session::SignedIn(t) => Error::Source(not_available(b, failed, t, grant).into()),
         Session::Unknown if write => Error::Unknown(
             format!(
                 "{failed}; the item may or may not have been changed{}, then re-run",
-                rerun_hint(env)
+                rerun_hint(b)
             )
             .into(),
         ),
-        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(env)).into()),
+        Session::Unknown => Error::Source(format!("{failed}{}", rerun_hint(b)).into()),
         s => session_error(s, &host(), Some(failed), Some(env.name.as_str()))
             .expect("every other session is an error"),
     }
@@ -455,22 +458,22 @@ fn failed_op_session_error(
 /// from an item that was moved, archived or deleted. IDs only, never a title (FR-13).
 fn item_unavailable(
     r: &dyn CommandRunner,
-    env: &Environment,
+    b: &Boundary,
     failed: &str,
     t: IdentityType,
     grant: &str,
 ) -> Error {
-    unavailable_for(env, failed, t, grant, vault_access(r, env))
+    unavailable_for(b, failed, t, grant, vault_access(r, b))
 }
 
 /// `op vault get <vault_id>`: `Some(true)` when the vault is readable, `Some(false)` when
 /// this identity cannot access it, `None` when the probe could not run. Exit status only;
 /// its output names the vault and is dropped unread (SR-1).
-fn vault_access(r: &dyn CommandRunner, env: &Environment) -> Option<bool> {
+fn vault_access(r: &dyn CommandRunner, b: &Boundary) -> Option<bool> {
     r.probe(
         &Call::new(
             OP,
-            &["vault", "get", env.vault_id.as_str(), "--format", "json"],
+            &["vault", "get", b.vault_id.as_str(), "--format", "json"],
         ),
         PROBE_TIMEOUT,
     )
@@ -480,13 +483,13 @@ fn vault_access(r: &dyn CommandRunner, env: &Environment) -> Option<bool> {
 
 /// The signed-in item-read error for a known vault probe result (NR-26).
 fn unavailable_for(
-    env: &Environment,
+    b: &Boundary,
     failed: &str,
     t: IdentityType,
     grant: &str,
     vault_readable: Option<bool>,
 ) -> Error {
-    let (item, vault) = (&env.item_id, &env.vault_id);
+    let (item, vault) = (&b.item_id, &b.vault_id);
     let code = match vault_readable {
         Some(true) => Code::ItemNotFound,
         Some(false) => Code::VaultNoAccess,
@@ -504,7 +507,7 @@ fn unavailable_for(
              {vault}\n  next: {grant} (vault {vault}), or check vault_id in secrets.toml, \
              then `{OP} vault get {vault}`"
             ),
-            None => not_available(env, failed, t, grant),
+            None => not_available(b, failed, t, grant),
         }
         .into(),
     )
@@ -512,49 +515,37 @@ fn unavailable_for(
 }
 
 /// A signed-in failure whose cause is not known: access or the IDs.
-fn not_available(env: &Environment, failed: &str, t: IdentityType, grant: &str) -> String {
+fn not_available(b: &Boundary, failed: &str, t: IdentityType, grant: &str) -> String {
     format!(
         "{failed}: signed in to 1Password as {t}, but item {} in vault {} is not available to \
          this identity\n  next: {grant} (vault {}), or check vault_id and item_id in the \
          configuration",
-        env.item_id, env.vault_id, env.vault_id
+        b.item_id, b.vault_id, b.vault_id
     )
 }
 
-/// Read the environment's item once, by vault ID and item ID (FR-13). See the module docs.
-/// The host is detected only if the read fails.
-pub fn read_item(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
-    read_item_on(r, env, &Host::detect)
+/// Read one boundary item `b` of `env` once, by vault ID and item ID (FR-13, FR-57). See
+/// the module docs. The host is detected only if the read fails.
+pub fn read_item(r: &dyn CommandRunner, env: &Environment, b: &Boundary) -> Result<Item, Error> {
+    read_item_on(r, env, b, &Host::detect)
 }
 
-/// [`read_item`] for a configuration of the given profile. The call is the same single
-/// whole-item read by IDs (FR-13); only the fields returned differ: sectioned fields for
-/// the fleet profile, unsectioned fields (section [`SIMPLE_PRODUCT`]) for the simple
-/// profile (FR-20).
-pub fn read_item_as(
-    r: &dyn CommandRunner,
-    env: &Environment,
-    profile: Profile,
-) -> Result<Item, Error> {
-    read_profile_on(r, env, profile, None, &Host::detect)
-}
-
-/// [`read_item_as`] limited to the fields in `sections` (fleet profile): fields of other
-/// sections are skipped before they are validated, so a malformed field in another
-/// product's section cannot fail a product-scoped check (#52). Still one read (FR-13).
+/// [`read_item`] limited to the fields in `sections`: fields of other sections are skipped
+/// before they are validated, so a malformed field in another product's section cannot fail
+/// a product-scoped check (#52). Still one read (FR-13).
 pub fn read_item_in_sections(
     r: &dyn CommandRunner,
     env: &Environment,
-    profile: Profile,
+    b: &Boundary,
     sections: &BTreeSet<String>,
 ) -> Result<Item, Error> {
-    read_profile_on(r, env, profile, Some(sections), &Host::detect)
+    read_sections_on(r, env, b, Some(sections), &Host::detect)
 }
 
-/// The environment's one item read (FR-13) with no field parsing: the tolerant reader
+/// One boundary item's read (FR-13) with no field parsing: the tolerant reader
 /// ([`super::onepassword_tidy`], FR-43) parses the raw JSON itself. `fields` is empty.
-pub fn read_whole(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
-    read_whole_as(r, env, false)
+pub fn read_whole(r: &dyn CommandRunner, env: &Environment, b: &Boundary) -> Result<Item, Error> {
+    read_whole_as(r, env, b, false)
 }
 
 /// `op`'s global flag that bypasses its local cache (op 2.x; `OP_CACHE=false` is the same
@@ -578,24 +569,33 @@ pub fn default_section() -> Value {
 /// [`read_whole`] straight from 1Password, bypassing `op`'s local cache ([`NO_CACHE`]):
 /// every read a 1Password write is built from or checked against (the tidy, `item
 /// skeleton`).
-pub fn read_whole_fresh(r: &dyn CommandRunner, env: &Environment) -> Result<Item, Error> {
-    read_whole_as(r, env, true)
+pub fn read_whole_fresh(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    b: &Boundary,
+) -> Result<Item, Error> {
+    read_whole_as(r, env, b, true)
 }
 
-fn read_whole_as(r: &dyn CommandRunner, env: &Environment, fresh: bool) -> Result<Item, Error> {
+fn read_whole_as(
+    r: &dyn CommandRunner,
+    env: &Environment,
+    b: &Boundary,
+    fresh: bool,
+) -> Result<Item, Error> {
     let mut args = vec![
         "item",
         "get",
-        env.item_id.as_str(),
+        b.item_id.as_str(),
         "--vault",
-        env.vault_id.as_str(),
+        b.vault_id.as_str(),
         "--format",
         "json",
     ];
     if fresh {
         args.push(NO_CACHE);
     }
-    let raw = read_diagnosed(r, env, &args, &Host::detect)?;
+    let raw = read_diagnosed(r, env, b, &args, &Host::detect)?;
     Ok(Item {
         fields: Vec::new(),
         version: item_version(&raw),
@@ -608,40 +608,39 @@ fn read_whole_as(r: &dyn CommandRunner, env: &Environment, fresh: bool) -> Resul
 pub fn read_item_with(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     host: &Host,
 ) -> Result<Item, Error> {
-    read_item_on(r, env, &|| *host)
+    read_item_on(r, env, b, &|| *host)
 }
 
 fn read_item_on(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
-    read_profile_on(r, env, Profile::Fleet, None, host)
+    read_sections_on(r, env, b, None, host)
 }
 
-fn read_profile_on(
+fn read_sections_on(
     r: &dyn CommandRunner,
     env: &Environment,
-    profile: Profile,
+    b: &Boundary,
     sections: Option<&BTreeSet<String>>,
     host: &dyn Fn() -> Host,
 ) -> Result<Item, Error> {
     let args = [
         "item",
         "get",
-        env.item_id.as_str(),
+        b.item_id.as_str(),
         "--vault",
-        env.vault_id.as_str(),
+        b.vault_id.as_str(),
         "--format",
         "json",
     ];
-    let stdout = read_diagnosed(r, env, &args, host)?;
-    let fields = match profile {
-        Profile::Fleet => parse_fields(&stdout, sections)?,
-        Profile::Simple => parse_unsectioned_fields(&stdout)?,
-    };
+    let stdout = read_diagnosed(r, env, b, &args, host)?;
+    let fields = parse_fields(&stdout, sections)?;
     Ok(Item {
         fields,
         version: item_version(&stdout),
@@ -816,6 +815,7 @@ const ANY_FAILURE: [i32; 255] = {
 fn read_diagnosed(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     args: &[&str],
     host: &dyn Fn() -> Host,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -843,7 +843,7 @@ fn read_diagnosed(
             Session::SignedIn(t) => t,
             Session::Unknown => {
                 return Err(Error::Source(
-                    format!("{}{}", failed(status), rerun_hint(env)).into(),
+                    format!("{}{}", failed(status), rerun_hint(b)).into(),
                 ));
             }
             s => {
@@ -853,23 +853,23 @@ fn read_diagnosed(
                 );
             }
         };
-        let readable = vault_access(r, env);
+        let readable = vault_access(r, b);
         if readable != Some(true) {
-            return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
+            return Err(unavailable_for(b, &failed(status), t, GRANT, readable));
         }
         if missing {
-            return Err(unavailable_for(env, &failed(status), t, GRANT, readable));
+            return Err(unavailable_for(b, &failed(status), t, GRANT, readable));
         }
         Ok((t, readable))
     })?;
     r.note(&format!(
         "{} failed; signed in with access to vault {}, so retrying",
         call.step(),
-        env.vault_id
+        b.vault_id
     ));
     match read_op(r, args, host)? {
         Output { status: 0, stdout } => Ok(stdout),
-        Output { status, .. } => Err(unavailable_for(env, &failed(status), t, GRANT, readable)),
+        Output { status, .. } => Err(unavailable_for(b, &failed(status), t, GRANT, readable)),
     }
 }
 
@@ -882,10 +882,11 @@ fn read_diagnosed(
 pub fn write_skeleton(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     item: &Item,
     missing: &[(String, String, Kind)],
 ) -> Result<Option<u64>, Error> {
-    write_skeleton_on(r, env, item, missing, &Host::detect)
+    write_skeleton_on(r, env, b, item, missing, &Host::detect)
 }
 
 /// [`write_skeleton`] on a given host (tests). A failed edit is diagnosed like a failed
@@ -893,16 +894,18 @@ pub fn write_skeleton(
 pub fn write_skeleton_with(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &Host,
 ) -> Result<Option<u64>, Error> {
-    write_skeleton_on(r, env, item, missing, &|| *host)
+    write_skeleton_on(r, env, b, item, missing, &|| *host)
 }
 
 fn write_skeleton_on(
     r: &dyn CommandRunner,
     env: &Environment,
+    b: &Boundary,
     item: &Item,
     missing: &[(String, String, Kind)],
     host: &dyn Fn() -> Host,
@@ -918,9 +921,9 @@ fn write_skeleton_on(
     let args = [
         "item",
         "edit",
-        env.item_id.as_str(),
+        b.item_id.as_str(),
         "--vault",
-        env.vault_id.as_str(),
+        b.vault_id.as_str(),
         "--format",
         "json",
     ];
@@ -952,6 +955,7 @@ fn write_skeleton_on(
         return Err(failed_op_error_as(
             r,
             env,
+            b,
             host,
             &format!("op item edit failed ({})", status_text(status)),
             "grant this identity write access to the vault",
@@ -965,10 +969,10 @@ fn write_skeleton_on(
 /// command to re-run by hand (`op`'s stderr is shown only as a scrubbed excerpt). IDs only; without
 /// `--format json` and `--reveal`, `op` conceals secret fields. (`op item edit` cannot be
 /// re-run without its stdin, so the hint reads the item.)
-fn rerun_hint(env: &Environment) -> String {
+fn rerun_hint(b: &Boundary) -> String {
     format!(
         "; run `{OP} item get {} --vault {}` to see why",
-        env.item_id, env.vault_id
+        b.item_id, b.vault_id
     )
 }
 
@@ -1048,9 +1052,6 @@ struct RawField {
     ty: String,
     #[serde(default)]
     label: String,
-    /// Set on built-in fields (`USERNAME`, `PASSWORD`, `NOTES`); never a declared key.
-    #[serde(default)]
-    purpose: Option<String>,
     #[serde(default)]
     value: Option<Concealed>,
 }
@@ -1137,66 +1138,6 @@ fn parse_fields(json: &[u8], only: Option<&BTreeSet<String>>) -> Result<Vec<Item
     Ok(out)
 }
 
-/// Simple profile (FR-20): the fields outside any labelled section, keyed by section
-/// [`SIMPLE_PRODUCT`]. Sectioned fields are ignored, as are built-in fields (with a
-/// `purpose`) and fields whose label cannot be a key name (`^[A-Z][A-Z0-9_]*$`, e.g.
-/// `notesPlain` or `one-time password`), because they can never match a declared key. A
-/// field that could be a key but has an unsupported type, or a label given twice, is a
-/// `Source` error naming the label (FR-14).
-fn parse_unsectioned_fields(json: &[u8]) -> Result<Vec<ItemField>, Error> {
-    let raw: RawItem = serde_json::from_slice(json).map_err(|e| json_error(&e))?;
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for f in raw.fields {
-        let sectioned = f
-            .section
-            .as_ref()
-            .and_then(|s| s.label.as_deref())
-            .is_some_and(|l| !l.is_empty());
-        if sectioned || f.purpose.is_some() || !is_key_name(&f.label) {
-            continue;
-        }
-        let kind = match f.ty.as_str() {
-            "CONCEALED" => Kind::Secret,
-            "STRING" => Kind::Config,
-            _ => {
-                return Err(Error::Source(
-                    format!("unsupported field type on {}", f.label).into(),
-                ));
-            }
-        };
-        if !seen.insert(f.label.clone()) {
-            return Err(Error::Source(
-                format!("duplicate field {} in item", f.label).into(),
-            ));
-        }
-        out.push(ItemField {
-            section: SIMPLE_PRODUCT.to_string(),
-            label: f.label,
-            kind,
-            concealed: kind == Kind::Secret,
-            value: f
-                .value
-                .map_or_else(|| SecretValue::new(String::new()), |c| c.0),
-        });
-    }
-    Ok(out)
-}
-
-fn is_key_name(s: &str) -> bool {
-    let mut c = s.chars();
-    matches!(c.next(), Some('A'..='Z'))
-        && c.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-}
-
-/// A field outside any labelled section (no `section`, or one without a label).
-fn is_unsectioned(f: &Value) -> bool {
-    f.get("section")
-        .and_then(|s| s.get("label"))
-        .and_then(Value::as_str)
-        .is_none_or(str::is_empty)
-}
-
 /// A JSON tree whose strings are zeroized when it is dropped.
 pub(crate) struct WipeOnDrop(pub(crate) Value);
 
@@ -1242,11 +1183,6 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
                 str_at(f, "label"),
             ) {
                 existing.insert((s, l));
-            } else if let Some(l) = str_at(f, "label")
-                && is_unsectioned(f)
-            {
-                // Simple profile (FR-20): unsectioned fields are keyed by SIMPLE_PRODUCT.
-                existing.insert((SIMPLE_PRODUCT.to_string(), l));
             }
         }
     }
@@ -1276,22 +1212,6 @@ fn add_missing(doc: &mut Value, missing: &[(String, String, Kind)]) -> Result<()
             Kind::Secret => "CONCEALED",
             Kind::Config => "STRING",
         };
-        if section == SIMPLE_PRODUCT {
-            // Simple profile (FR-20): outside any named section, in the default one the
-            // 1Password apps show (a field with no section is hidden in them).
-            if !sections.iter().any(|(i, _)| i == DEFAULT_SECTION_ID)
-                && !new_sections
-                    .iter()
-                    .any(|s: &Value| s["id"] == DEFAULT_SECTION_ID)
-            {
-                new_sections.push(default_section());
-            }
-            let id = unique(label.to_lowercase(), |c| field_ids.contains(c));
-            field_ids.insert(id.clone());
-            new_fields.push(json!({"id": id, "section": default_section(), "type": ty,
-                                   "label": label, "value": ""}));
-            continue;
-        }
         let section_id = match sections.iter().find(|(_, l)| l == section) {
             Some((id, _)) => id.clone(),
             None => {
@@ -1396,14 +1316,15 @@ mod tests {
     fn test_env() -> Environment {
         Environment {
             name: "staging".into(),
+            ..Default::default()
+        }
+    }
+
+    /// The boundary item the tests read (`vstg`/`istg`).
+    fn test_at() -> Boundary {
+        Boundary {
             vault_id: "vstg".into(),
             item_id: "istg".into(),
-            target: Some(Box::new(crate::adapters::fly::FlyTarget {
-                app: "fleet-staging".into(),
-                secret_name_template: "FLEET__{PRODUCT}__{KEY}".into(),
-                profile: crate::domain::Profile::Fleet,
-            })),
-            ..Default::default()
         }
     }
 
@@ -1469,12 +1390,12 @@ mod tests {
 
     fn read(bytes: Vec<u8>) -> Item {
         let r = FakeRunner::new([Output::success(bytes)]);
-        read_item_with(&r, &test_env(), &linux()).unwrap()
+        read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap()
     }
 
     fn read_err(bytes: Vec<u8>) -> Error {
         let r = FakeRunner::new([Output::success(bytes)]);
-        read_item_with(&r, &test_env(), &linux()).unwrap_err()
+        read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err()
     }
 
     fn find<'a>(fields: &'a [ItemField], section: &str, label: &str) -> &'a ItemField {
@@ -1489,7 +1410,7 @@ mod tests {
     #[test]
     fn reads_whole_item_once_by_id() {
         let r = FakeRunner::new([Output::success(allumata_item())]);
-        let item = read_item_with(&r, &test_env(), &linux()).unwrap();
+        let item = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap();
         let calls = r.calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].program, "op");
@@ -1651,7 +1572,7 @@ mod tests {
     #[test]
     fn non_zero_exit_while_signed_in_is_source_naming_ids_and_identity_type() {
         let r = signed_in_vault_ok_item_missing();
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         let m = match &e {
             Error::Source(m) => m.clone(),
             other => panic!("{other:?}"),
@@ -1691,7 +1612,7 @@ mod tests {
     #[test]
     fn failed_read_is_diagnosed_before_it_is_retried() {
         let r = signed_in_vault_ok_item_missing();
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert_eq!(
             argvs(&r)[..4],
             [
@@ -1713,7 +1634,7 @@ mod tests {
         );
         r.push_with_stderr(Output::failure(1), "[ERROR] not signed in\n");
         r.push_with_stderr(accounts(1), "");
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert_eq!(
             crate::runner::take_failure_excerpt().map(|x| x.lines),
             Some(vec!["[ERROR] item istg isn't in vault vstg".to_string()])
@@ -1725,7 +1646,7 @@ mod tests {
     fn first_read_registers_its_values_with_the_scrubber() {
         let raw = br#"{"fields":[{"label":"K","value":"FirstReadMarker7Qz"}]}"#.to_vec();
         let r = FakeRunner::new([Output::success(raw)]);
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert!(!crate::scrub::scrub("x FirstReadMarker7Qz").contains("FirstReadMarker7Qz"));
     }
 
@@ -1739,7 +1660,7 @@ mod tests {
             vault_ok(),
             Output::success(item_json),
         ]);
-        assert!(read_item_with(&r, &test_env(), &linux()).is_ok());
+        assert!(read_item_with(&r, &test_env(), &test_at(), &linux()).is_ok());
     }
 
     /// S2: signed in with vault access, op said the item does not exist: reported at once
@@ -1753,7 +1674,7 @@ mod tests {
         );
         r.push_with_stderr(Output::success(WHOAMI_SA), "");
         r.push_with_stderr(vault_ok(), "");
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
     }
 
@@ -1767,7 +1688,7 @@ mod tests {
         );
         r.push_with_stderr(Output::success(WHOAMI_SA), "");
         r.push_with_stderr(vault_ok(), "");
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert!(
             e.to_string().contains("item istg not found in vault vstg"),
             "{e}"
@@ -1778,7 +1699,7 @@ mod tests {
     #[test]
     fn not_signed_in_is_reported_without_a_retry() {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
     }
 
@@ -1790,7 +1711,7 @@ mod tests {
             Output::success(WHOAMI_SA),
             Output::failure(1),
         ]);
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert_eq!(item_reads(&r), 1, "{:?}", argvs(&r));
     }
 
@@ -1799,7 +1720,7 @@ mod tests {
     #[test]
     fn item_missing_from_readable_vault_is_named() {
         let r = signed_in_vault_ok_item_missing();
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert!(
             e.to_string()
                 .contains("item istg not found in vault vstg (moved, archived or deleted?)"),
@@ -1815,7 +1736,7 @@ mod tests {
             Output::success(WHOAMI_SA),
             Output::failure(1),
         ]);
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert!(
             e.to_string()
                 .contains("this identity cannot access vault vstg"),
@@ -1827,7 +1748,7 @@ mod tests {
     #[test]
     fn vault_probe_output_is_never_echoed() {
         let r = signed_in_vault_ok_item_missing();
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert!(!format!("{e} {e:?}").contains("OPHINTMARKER"), "{e}");
     }
 
@@ -1836,7 +1757,7 @@ mod tests {
     #[test]
     fn non_zero_exit_not_signed_in_is_auth_with_signin_command() {
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         let t = e.to_string();
         assert!(t.contains("not signed in to 1Password"), "{t}");
@@ -1850,7 +1771,7 @@ mod tests {
     #[test]
     fn diagnosis_makes_no_extra_item_read() {
         let r = signed_in_vault_ok_item_missing();
-        let _ = read_item_with(&r, &test_env(), &linux());
+        let _ = read_item_with(&r, &test_env(), &test_at(), &linux());
         assert_eq!(
             item_reads(&r),
             1 + crate::runner::READ_ATTEMPTS as usize,
@@ -1864,7 +1785,7 @@ mod tests {
     fn rerun_hint_only_when_session_cannot_be_diagnosed() {
         let r = FakeRunner::new([Output::failure(1)]);
         r.push_unknown("timeout");
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m == "op item get failed (exit 1); run `op item get istg --vault vstg` to see why"),
             "{e:?}"
@@ -1889,7 +1810,7 @@ mod tests {
         };
         for s in sessions() {
             let r = FakeRunner::new(std::iter::once(leaky()).chain(s));
-            let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+            let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
             let t = format!("{e} {e:?}");
             assert!(!t.contains(MARK) && !t.contains("--reveal"), "{t}");
             assert!(
@@ -1901,10 +1822,11 @@ mod tests {
         for s in sessions() {
             let r = FakeRunner::new([Output::success(item_json.clone()), leaky()]);
             r.responses.borrow_mut().extend(s.into_iter().map(Ok));
-            let item = read_item_with(&r, &test_env(), &linux()).unwrap();
+            let item = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap();
             let e = write_skeleton_with(
                 &r,
                 &test_env(),
+                &test_at(),
                 &item,
                 &[("p".into(), format!("{MARK}K"), Kind::Secret)],
                 &linux(),
@@ -1922,7 +1844,7 @@ mod tests {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = crate::host::with_test_host(linux(), || {
-            read_item_with(&r, &test_env(), &linux()).unwrap_err()
+            read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err()
         });
         assert!(
             e.to_string()
@@ -1936,8 +1858,9 @@ mod tests {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let ci = Host::from_env(&FakeEnv::new("linux").var("CI"));
-        let e =
-            crate::host::with_test_host(ci, || read_item_with(&r, &test_env(), &ci).unwrap_err());
+        let e = crate::host::with_test_host(ci, || {
+            read_item_with(&r, &test_env(), &test_at(), &ci).unwrap_err()
+        });
         assert!(
             matches!(&e, Error::Unknown(m) if m == "1Password did not respond after 3 \
                 attempts (op item get); nothing was changed. Check \
@@ -1956,10 +1879,10 @@ mod tests {
             linux()
         };
         let r = FakeRunner::new([Output::success(item_json)]);
-        read_item_on(&r, &test_env(), &host).unwrap();
+        read_item_on(&r, &test_env(), &test_at(), &host).unwrap();
         assert_eq!(called.get(), 0);
         let r = FakeRunner::new([Output::failure(1), Output::failure(1), accounts(1)]);
-        let _ = read_item_on(&r, &test_env(), &host);
+        let _ = read_item_on(&r, &test_env(), &test_at(), &host);
         assert!(called.get() > 0);
     }
 
@@ -2033,7 +1956,7 @@ mod tests {
     fn missing_op_binary_is_dependency_error_with_install_hint() {
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
-        let e = read_item_with(&r, &test_env(), &linux()).unwrap_err();
+        let e = read_item_with(&r, &test_env(), &test_at(), &linux()).unwrap_err();
         assert!(
             matches!(&e, Error::Dependency(m) if m.contains("op CLI not found on PATH\n  install")),
             "{e:?}"
@@ -2098,6 +2021,7 @@ mod tests {
         write_skeleton(
             &r,
             &test_env(),
+            &test_at(),
             &item,
             &[
                 ("allumata".into(), "STRIPE_SECRET_KEY".into(), Kind::Secret),
@@ -2173,7 +2097,7 @@ mod tests {
             "OPENAI_API_KEY".to_string(),
             Kind::Secret,
         )];
-        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
+        write_skeleton(&r, &test_env(), &test_at(), &item, &missing).unwrap();
         let tpl = edit_stdin(&r);
         assert_eq!(tpl["sections"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -2202,7 +2126,7 @@ mod tests {
             "OPENAI_API_KEY".to_string(),
             Kind::Secret,
         )];
-        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
+        write_skeleton(&r, &test_env(), &test_at(), &item, &missing).unwrap();
         let tpl = edit_stdin(&r);
         let id = tpl_field(&tpl, "allumata", "OPENAI_API_KEY")["id"]
             .as_str()
@@ -2215,7 +2139,7 @@ mod tests {
     fn skeleton_with_nothing_missing_makes_no_call() {
         let item = read(allumata_item());
         let r = FakeRunner::default();
-        write_skeleton(&r, &test_env(), &item, &[]).unwrap();
+        write_skeleton(&r, &test_env(), &test_at(), &item, &[]).unwrap();
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -2228,7 +2152,7 @@ mod tests {
             "SIGNUP_POLICY".to_string(),
             Kind::Secret,
         )];
-        let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
+        let e = write_skeleton(&r, &test_env(), &test_at(), &item, &missing).unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m.contains("allumata/SIGNUP_POLICY")),
             "{e:?}"
@@ -2243,7 +2167,7 @@ mod tests {
         assert_eq!(fields.len(), 2);
         let r = FakeRunner::new([Output::success("{}")]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
+        write_skeleton(&r, &test_env(), &test_at(), &item, &missing).unwrap();
         let tpl = edit_stdin(&r);
         assert_eq!(
             tpl_field(&tpl, "allumata", "OPENAI_API_KEY")["value"],
@@ -2256,7 +2180,8 @@ mod tests {
         let item = read(allumata_item());
         let r = FakeRunner::new([Output::failure(2), Output::success(WHOAMI_SA)]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        let e = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux())
+            .unwrap_err();
         assert!(
             matches!(&e, Error::Source(m) if m.starts_with("op item edit failed (exit 2): signed in")
                 && m.mentions("grant this identity write access to the vault")
@@ -2270,7 +2195,8 @@ mod tests {
         let item = read(allumata_item());
         let r = FakeRunner::new([Output::failure(2), Output::failure(1), accounts(1)]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        let e = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux())
+            .unwrap_err();
         assert_eq!(e.exit_code(), 7, "{e}");
         assert!(e.to_string().contains("opv login staging"), "{e}");
     }
@@ -2282,7 +2208,8 @@ mod tests {
         let r = FakeRunner::default();
         r.push_unknown("timeout");
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        let e = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux())
+            .unwrap_err();
         assert_eq!(e.exit_code(), 9, "{e}");
     }
 
@@ -2293,7 +2220,8 @@ mod tests {
         let r = FakeRunner::new([Output::failure(1)]);
         r.push_io_error(io::ErrorKind::TimedOut);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        let e = write_skeleton_with(&r, &test_env(), &item, &missing, &linux()).unwrap_err();
+        let e = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux())
+            .unwrap_err();
         assert_eq!(e.exit_code(), 9, "{e}");
     }
 
@@ -2303,7 +2231,7 @@ mod tests {
         let item = read(allumata_item());
         let r = FakeRunner::new([Output::failure(2), Output::success(WHOAMI_SA)]);
         let missing = [("allumata".to_string(), "NEW_KEY".to_string(), Kind::Config)];
-        let _ = write_skeleton_with(&r, &test_env(), &item, &missing, &linux());
+        let _ = write_skeleton_with(&r, &test_env(), &test_at(), &item, &missing, &linux());
         assert_eq!(
             argvs(&r)
                 .iter()
@@ -2313,7 +2241,7 @@ mod tests {
         );
     }
 
-    // ---------- simple profile (FR-20) ----------
+    // ---------- unsectioned fields (FR-20 removed) ----------
 
     /// An unsectioned field, as `op` returns a field added outside any section.
     fn tf(id: &str, ty: &str, label: &str, value: &str) -> Value {
@@ -2343,11 +2271,6 @@ mod tests {
         )
     }
 
-    fn read_simple(bytes: Vec<u8>) -> Result<Item, Error> {
-        let r = FakeRunner::new([Output::success(bytes)]);
-        read_profile_on(&r, &test_env(), Profile::Simple, None, &linux)
-    }
-
     fn labels(item: &Item) -> Vec<(&str, &str)> {
         item.fields
             .iter()
@@ -2356,130 +2279,9 @@ mod tests {
     }
 
     #[test]
-    fn simple_read_is_one_whole_item_call_by_ids() {
-        let r = FakeRunner::new([Output::success(simple_item())]);
-        read_profile_on(&r, &test_env(), Profile::Simple, None, &linux).unwrap();
-        let calls = r.calls.borrow();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].args, GET_ARGS);
-    }
-
-    #[test]
-    fn simple_read_returns_only_unsectioned_key_fields() {
-        let item = read_simple(simple_item()).unwrap();
-        assert_eq!(labels(&item), [("", "JWT_KEY"), ("", "LOG_LEVEL")]);
-    }
-
-    #[test]
-    fn simple_read_types_fields_by_field_type() {
-        let item = read_simple(simple_item()).unwrap();
-        assert_eq!(find(&item.fields, "", "JWT_KEY").kind, Kind::Secret);
-        assert_eq!(find(&item.fields, "", "LOG_LEVEL").kind, Kind::Config);
-    }
-
-    #[test]
-    fn simple_read_treats_a_section_without_label_as_unsectioned() {
-        let bytes = item_json(
-            json!([]),
-            vec![
-                json!({"id": "k", "section": {"id": "add more"}, "type": "CONCEALED",
-                        "label": "API_KEY", "value": "x-FIXTURE"}),
-            ],
-        );
-        let item = read_simple(bytes).unwrap();
-        assert_eq!(labels(&item), [("", "API_KEY")]);
-    }
-
-    #[test]
-    fn simple_read_unsupported_type_is_source_error_naming_label_only() {
-        let bytes = item_json(
-            json!([]),
-            vec![tf("k", "URL", "API_URL", "https://FIXTURE")],
-        );
-        let Err(Error::Source(m)) = read_simple(bytes) else {
-            panic!("expected Source error")
-        };
-        assert!(m.contains("API_URL") && !m.contains("FIXTURE"), "{m}");
-    }
-
-    #[test]
-    fn simple_read_duplicate_label_is_source_error() {
-        let bytes = item_json(
-            json!([]),
-            vec![
-                tf("a", "CONCEALED", "API_KEY", "a-FIXTURE"),
-                tf("b", "CONCEALED", "API_KEY", "b-FIXTURE"),
-            ],
-        );
-        let Err(Error::Source(m)) = read_simple(bytes) else {
-            panic!("expected Source error")
-        };
-        assert!(m.contains("duplicate") && m.contains("API_KEY"), "{m}");
-    }
-
-    #[test]
-    fn fleet_read_still_ignores_unsectioned_key_fields() {
+    fn read_ignores_unsectioned_key_fields() {
         let item = read(simple_item());
         assert_eq!(labels(&item), [("allumata", "SECTIONED")]);
-    }
-
-    #[test]
-    fn simple_skeleton_adds_its_field_to_the_default_section() {
-        let item = read_simple(simple_item()).unwrap();
-        let r = FakeRunner::new([Output::success("{}")]);
-        let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Secret)];
-        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
-        let tpl = edit_stdin(&r);
-        let f = tpl["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["label"] == "DATABASE_URL")
-            .expect("new field");
-        assert_eq!(f["section"], json!({"id": "add more"}));
-    }
-
-    #[test]
-    fn simple_skeleton_adds_a_concealed_empty_field() {
-        let item = read_simple(simple_item()).unwrap();
-        let r = FakeRunner::new([Output::success("{}")]);
-        let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Secret)];
-        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
-        let tpl = edit_stdin(&r);
-        let f = tpl["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["label"] == "DATABASE_URL")
-            .expect("new field")
-            .clone();
-        assert_eq!((&f["type"], &f["value"]), (&json!("CONCEALED"), &json!("")));
-    }
-
-    #[test]
-    fn simple_skeleton_creates_only_the_default_section() {
-        let item = read_simple(simple_item()).unwrap();
-        let r = FakeRunner::new([Output::success("{}")]);
-        let missing = [(String::new(), "DATABASE_URL".to_string(), Kind::Config)];
-        write_skeleton(&r, &test_env(), &item, &missing).unwrap();
-        let sections = edit_stdin(&r)["sections"].as_array().unwrap().clone();
-        assert!(
-            sections
-                .iter()
-                .skip(1)
-                .all(|s| s == &json!({"id": "add more"})),
-            "{sections:?}"
-        );
-    }
-
-    #[test]
-    fn simple_skeleton_refuses_an_existing_top_level_field() {
-        let item = read_simple(simple_item()).unwrap();
-        let r = FakeRunner::new([Output::success("{}")]);
-        let missing = [(String::new(), "JWT_KEY".to_string(), Kind::Secret)];
-        let e = write_skeleton(&r, &test_env(), &item, &missing).unwrap_err();
-        assert!(matches!(e, Error::Source(m) if m.contains("JWT_KEY")));
-        assert!(r.calls.borrow().is_empty(), "nothing written");
     }
 
     // ------------------------------------------------------------ private item links (H1)

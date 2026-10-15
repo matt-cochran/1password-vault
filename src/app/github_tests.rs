@@ -35,11 +35,11 @@ const POLICY_V2: &str = "invite_only";
 /// staging only so `--prune` has managed names to remove in ci.
 const CI_KEYS: &str = r#"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.allumata = { vault_id = "vci", item_id = "ici" }
 
-[environments.ci.github]
-repo = "example-org/example-repo"
+[environments.ci.targets.app]
+state_vault_id = "sci"
+github.repo = "example-org/example-repo"
 
 [products.allumata.keys.CI_SECRET]
 kind = "secret"
@@ -64,12 +64,12 @@ environments = ["staging"]
 /// The same keys on two repositories, under the GitHub environment `staging`.
 const CI_KEYS_TWO: &str = r#"
 [environments.ci]
-vault_id = "vci"
-item_id = "ici"
+boundaries.allumata = { vault_id = "vci", item_id = "ici" }
 
-[environments.ci.github]
-repos = ["example-org/a", "example-org/b"]
-environment = "staging"
+[environments.ci.targets.app]
+state_vault_id = "sci"
+github.repos = ["example-org/a", "example-org/b"]
+github.environment = "staging"
 
 [products.allumata.keys.CI_SECRET]
 kind = "secret"
@@ -569,7 +569,7 @@ fn sync_deploy_says_github_applies_each_write_at_once() {
     res.unwrap();
     assert!(
         out.lines()
-            .any(|l| l == "nothing to deploy: GitHub applies each write at once"),
+            .any(|l| l == "ci/app: nothing to deploy: GitHub applies each write at once"),
         "{out}"
     );
 }

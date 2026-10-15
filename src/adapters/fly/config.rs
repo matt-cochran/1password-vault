@@ -1,4 +1,4 @@
-//! The Fly provider: `[environments.<env>.fly]` parsing, Fly name rules, doctor checks and
+//! The Fly provider: a target's `fly` section parsing, Fly name rules, doctor checks and
 //! the port wiring (FR-37, §10.3). Every user-visible Fly message is unchanged from 0.4.
 
 use std::any::Any;
@@ -10,7 +10,6 @@ use serde::Deserialize;
 use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami, not_logged_in};
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
 use crate::config::{check_ident, is_id};
-use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -39,10 +38,9 @@ pub struct FlyProvider;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlyTarget {
     pub app: String,
-    /// Fly secret name template containing `{PRODUCT}` and `{KEY}` (`{KEY}` under the
-    /// simple profile); defines the managed set (FR-8).
+    /// Fly secret name template containing `{KEY}` and optionally `{PRODUCT}`; defines the
+    /// managed set (FR-8). Two keys rendering one name are refused at load (FR-30).
     pub secret_name_template: String,
-    pub profile: Profile,
 }
 
 impl FlyTarget {
@@ -61,15 +59,6 @@ impl FlyTarget {
 struct RawFly {
     app: String,
     secret_name: String,
-}
-
-/// `secret_name` is accepted only so that validation can reject it naming the profile.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSimpleFly {
-    app: String,
-    #[serde(default)]
-    secret_name: Option<toml::Value>,
 }
 
 impl Provider for FlyProvider {
@@ -91,48 +80,20 @@ impl Provider for FlyProvider {
         &[&FLYCTL]
     }
 
-    fn parse(
-        &self,
-        section: &Section<'_>,
-        profile: Profile,
-    ) -> Result<Box<dyn TargetConfig>, Error> {
+    fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
-        let target = match profile {
-            Profile::Fleet => {
-                let f: RawFly = section.deserialize()?;
-                check_app(env, &f.app)?;
-                let t = &f.secret_name;
-                if !t.contains("{PRODUCT}") || !t.contains("{KEY}") {
-                    return Err(Error::Config(format!(
-                        "environment {env}: fly.secret_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
-                    ).into()));
-                }
-                FlyTarget {
-                    app: f.app,
-                    secret_name_template: f.secret_name,
-                    profile,
-                }
-            }
-            Profile::Simple => {
-                let f: RawSimpleFly = section.deserialize()?;
-                check_app(env, &f.app)?;
-                if f.secret_name.is_some() {
-                    return Err(Error::Config(
-                        format!(
-                            "environment {env}: fly.secret_name is not allowed under the simple \
-                         profile (the Fly name is the key name)"
-                        )
-                        .into(),
-                    ));
-                }
-                FlyTarget {
-                    app: f.app,
-                    secret_name_template: SIMPLE_TEMPLATE.into(),
-                    profile,
-                }
-            }
-        };
-        Ok(Box::new(target))
+        let f: RawFly = section.deserialize()?;
+        check_app(env, &f.app)?;
+        let t = &f.secret_name;
+        if !t.contains("{KEY}") {
+            return Err(Error::Config(
+                format!("environment {env}: fly.secret_name {t:?} must contain {{KEY}}").into(),
+            ));
+        }
+        Ok(Box::new(FlyTarget {
+            app: f.app,
+            secret_name_template: f.secret_name,
+        }))
     }
 
     fn doctor_checks(&self) -> &'static [&'static str] {
@@ -153,29 +114,27 @@ impl Provider for FlyProvider {
         Ok(Box::<super::login::FlyLogin>::default())
     }
 
-    fn setup_hint(&self, profile: Profile) -> String {
-        match profile {
-            Profile::Simple => "configure fly.app".into(),
-            Profile::Fleet => "configure fly.app and fly.secret_name".into(),
-        }
+    fn setup_hint(&self) -> String {
+        "configure fly.app and fly.secret_name".into()
     }
 
     fn init_fields(&self) -> &'static [InitField] {
         &INIT_FIELDS
     }
 
-    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
-        let mut lines: Vec<(&str, &str)> = vec![("app", values.get("app")?.as_str())];
-        match (values.get("secret_name"), profile) {
-            (Some(t), _) => lines.push(("secret_name", t)),
-            (None, Profile::Fleet) => lines.push(("secret_name", FLEET_TEMPLATE)),
-            (None, Profile::Simple) => {}
-        }
+    fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
+        let template = values
+            .get("secret_name")
+            .map_or(FLEET_TEMPLATE, String::as_str);
+        let lines = [
+            ("app", values.get("app")?.as_str()),
+            ("secret_name", template),
+        ];
         Some(init_lines("fly", lines))
     }
 }
 
-/// `opv init --target fly` options (H3): `--fly-app` and `--fly-secret-name`.
+/// `opv target add` options of the Fly provider (H3): `--fly-app` and `--fly-secret-name`.
 static INIT_FIELDS: [InitField; 2] = [
     InitField {
         field: "app",
@@ -184,7 +143,7 @@ static INIT_FIELDS: [InitField; 2] = [
     },
     InitField {
         field: "secret_name",
-        help: "Fly secret name template (fleet profile; default FLEET__{PRODUCT}__{KEY})",
+        help: "Fly secret name template (default FLEET__{PRODUCT}__{KEY}; {KEY} for bare names)",
         required: false,
     },
 ];
@@ -225,17 +184,10 @@ impl TargetConfig for FlyTarget {
     }
 
     fn shared_target_error(&self, first: &str, second: &str) -> String {
-        match self.profile {
-            Profile::Simple => format!(
-                "environments {first} and {second} both use Fly app {:?}; under the simple \
-                 profile each environment needs its own app",
-                self.app
-            ),
-            Profile::Fleet => format!(
-                "environments {first} and {second} both use Fly app {:?} with fly.secret_name {:?}",
-                self.app, self.secret_name_template
-            ),
-        }
+        format!(
+            "environments {first} and {second} both use Fly app {:?} with fly.secret_name {:?}",
+            self.app, self.secret_name_template
+        )
     }
 
     fn open<'a>(
@@ -352,14 +304,12 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::SIMPLE_PRODUCT;
     use crate::runner::fake::FakeRunner;
 
     fn fleet_target(template: &str) -> FlyTarget {
         FlyTarget {
             app: "a".into(),
             secret_name_template: template.into(),
-            profile: Profile::Fleet,
         }
     }
 
@@ -372,12 +322,8 @@ mod tests {
     }
 
     #[test]
-    fn simple_template_renders_the_key_name_itself() {
-        let t = FlyTarget {
-            profile: Profile::Simple,
-            ..fleet_target(SIMPLE_TEMPLATE)
-        };
-        assert_eq!(t.env_name(SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
+    fn key_template_renders_the_key_name_itself() {
+        assert_eq!(fleet_target("{KEY}").env_name("web", "JWT_KEY"), "JWT_KEY");
     }
 
     #[test]
@@ -394,10 +340,7 @@ mod tests {
     fn init_section_writes_the_fleet_template() {
         assert_eq!(
             PROVIDER
-                .init_section(
-                    &BTreeMap::from([("app", "my-app".to_string())]),
-                    Profile::Fleet
-                )
+                .init_section(&BTreeMap::from([("app", "my-app".to_string())]))
                 .as_deref(),
             Some("fly.app = \"my-app\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n")
         );

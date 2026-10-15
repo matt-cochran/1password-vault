@@ -13,10 +13,34 @@ const DB: &str = "postgres://FIXTUREVALUE@db/app";
 const API_DB: &str = "FLEET__API__DATABASE_URL";
 const WORKER_DB: &str = "FLEET__WORKER__DATABASE_URL";
 
+/// The fixture plus `extra`: every product `extra` introduces shares the fixture's single
+/// boundary (`allumata`), so the environment's products are read once (FR-57).
+fn bounded_with(extra: &str) -> crate::domain::Fleet {
+    let base = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
+    let combined: toml::Table = toml::from_str(&format!("{base}\n{extra}")).unwrap();
+    let declared: BTreeSet<String> = toml::from_str::<toml::Table>(&base).unwrap()["products"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let mut out = base;
+    for product in combined["products"].as_table().unwrap().keys() {
+        if !declared.contains(product) {
+            out.push_str(&format!(
+                "\n[products.{product}]\nboundary = \"allumata\"\n"
+            ));
+        }
+    }
+    out.push('\n');
+    out.push_str(extra);
+    crate::config::parse(&out).unwrap()
+}
+
 /// The fixture plus `api/DATABASE_URL` and `worker/DATABASE_URL` shared from it, with
 /// `worker_rules` as the worker key's own rules (`{}` for none).
 fn shared_fleet(worker_rules: &str) -> crate::domain::Fleet {
-    fleet_with(&format!(
+    bounded_with(&format!(
         "[products.api.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"staging\", \"prod\"]\n\
          guidance = \"Neon / connection string\"\n\n\
          [products.worker.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"api/DATABASE_URL\"\n\
@@ -177,11 +201,12 @@ fn product_check_reports_the_missing_source_of_its_shared_key() {
 #[test]
 fn explain_shows_the_shared_chain() {
     let mut out = Vec::new();
-    super::explain::run(
+    crate::app::testutil::explain(
         &fleet_shared(),
         "worker/DATABASE_URL",
         Some("prod"),
         &mut out,
+        false,
     )
     .unwrap();
     assert!(
@@ -194,7 +219,14 @@ fn explain_shows_the_shared_chain() {
 #[test]
 fn explain_of_a_source_names_the_keys_sharing_it() {
     let mut out = Vec::new();
-    super::explain::run(&fleet_shared(), "api/DATABASE_URL", Some("prod"), &mut out).unwrap();
+    crate::app::testutil::explain(
+        &fleet_shared(),
+        "api/DATABASE_URL",
+        Some("prod"),
+        &mut out,
+        false,
+    )
+    .unwrap();
     assert!(
         text_of(&out).contains("shared by:") && text_of(&out).contains("worker/DATABASE_URL"),
         "{}",
@@ -212,7 +244,7 @@ fn skeleton_creates_no_field_for_a_shared_key() {
 
 #[test]
 fn rotating_an_immutable_source_restages_the_keys_sharing_it() {
-    let f = fleet_with(
+    let f = bounded_with(
         "[products.worker.keys.INTEGRATION_ENC_KEY]\nkind = \"secret\"\n\
          from = \"allumata/INTEGRATION_ENC_KEY\"\nenvironments = [\"prod\"]\n",
     );

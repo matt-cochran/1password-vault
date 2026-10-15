@@ -1,6 +1,8 @@
 //! opv: orchestrates secrets from 1Password into runtime targets (Fly.io first).
 //!
-//! It never stores, encrypts or serves secret values; see `docs/design/requirements.md` §7 and §9.
+//! It is not an independent secrets store or encryption service. See the security
+//! model in `docs/usage.md` for runtime access, Azure credential-cache exceptions,
+//! and memory/redaction limits.
 
 pub mod adapters;
 pub mod app;
@@ -24,3 +26,6 @@ pub use error::Error;
 /// The user documentation, for links in messages: a binary install has no `docs/` folder
 /// (review #17).
 pub const DOCS_URL: &str = "https://github.com/matt-cochran/1password-vault/blob/main/docs";
+
+#[cfg(feature = "mcp")]
+pub mod mcp;

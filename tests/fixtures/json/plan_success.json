@@ -6,6 +6,7 @@
   "changes": "some",
   "rows": [
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "INTEGRATION_ENC_KEY",
       "kind": "secret",
@@ -13,11 +14,11 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
-      "fly_name": "FLEET__ALLUMATA__INTEGRATION_ENC_KEY",
-      "target": "absent",
+      "target_state": "absent",
       "action": "would_stage"
     },
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "OPENAI_API_KEY",
       "kind": "secret",
@@ -25,11 +26,11 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "fly_name": "FLEET__ALLUMATA__OPENAI_API_KEY",
-      "target": "present",
+      "target_state": "present",
       "action": "would_stage"
     },
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "SIGNUP_POLICY",
       "kind": "config",
@@ -37,11 +38,11 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
-      "fly_name": "FLEET__ALLUMATA__SIGNUP_POLICY",
-      "target": null,
+      "target_state": null,
       "action": null
     },
     {
+      "target": "portfolio",
       "product": "allumata",
       "key": "STRIPE_SECRET_KEY",
       "kind": "secret",
@@ -49,8 +50,7 @@
       "rule": null,
       "reason": null,
       "target_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
-      "fly_name": "FLEET__ALLUMATA__STRIPE_SECRET_KEY",
-      "target": "absent",
+      "target_state": "absent",
       "action": null
     }
   ],
@@ -69,7 +69,7 @@
     "held": 0,
     "to_prune": 0
   },
-  "plan_id": "4fe9a87d",
-  "next": "opv sync prod --deploy --expect-plan 4fe9a87d",
+  "plan_id": "b23ff43d",
+  "next": "opv sync prod --deploy --expect-plan b23ff43d",
   "do": null
 }

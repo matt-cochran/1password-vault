@@ -86,7 +86,7 @@ impl<W: Write> Painter<W> {
     }
 
     fn paint(&mut self, line: &str) -> String {
-        if (line.starts_with("PRODUCT ") || line.starts_with("KEY "))
+        if (line.starts_with("TARGET ") || line.starts_with("PRODUCT ") || line.starts_with("KEY "))
             && let Some(col) = line.find("  STATE")
         {
             self.state_col = Some(col + 2);

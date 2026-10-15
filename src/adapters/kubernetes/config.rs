@@ -1,4 +1,4 @@
-//! `[environments.<env>.kubernetes]` parsing, Kubernetes name rules, doctor checks and the
+//! A target's `kubernetes` section parsing, Kubernetes name rules, doctor checks and the
 //! port wiring (FR-37, FR-38, `docs/design/multi-cloud-targets.md` §12).
 //!
 //! Every identifier is checked while the section is deserialized, so a bad value is reported
@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::Deserialize;
-use serde::de::{self, Deserializer, IgnoredAny};
+use serde::de::{self, Deserializer};
 
 use super::external::{self, Bridge, ExternalStore};
 use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
@@ -17,7 +17,7 @@ use super::{
     KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM, valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::domain::{AccessFinding, Profile, SIMPLE_TEMPLATE};
+use crate::domain::AccessFinding;
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::{PinnedRuntime, Ports};
@@ -42,10 +42,10 @@ const CHECKS: [&str; 4] = [
     "kubernetes access",
 ];
 
-/// The env-name template `opv init` writes under the fleet profile.
+/// The env-name template `opv init` writes when none is given.
 const INIT_FLEET_TEMPLATE: &str = "FLEET__{PRODUCT}__{KEY}";
 
-/// `opv init --target kubernetes` options (H3), in the order they are written.
+/// `opv target add` options of the Kubernetes provider (H3), in the order they are written.
 static INIT_FIELDS: [InitField; 6] = [
     InitField {
         field: "context",
@@ -69,7 +69,7 @@ static INIT_FIELDS: [InitField; 6] = [
     },
     InitField {
         field: "env_name",
-        help: "Env-name template (fleet profile; default FLEET__{PRODUCT}__{KEY})",
+        help: "Env-name template (default FLEET__{PRODUCT}__{KEY}; {KEY} for bare names)",
         required: false,
     },
     InitField {
@@ -98,7 +98,7 @@ pub struct KubernetesTarget {
     /// Context, namespace, Deployment, container and the opv environment (the
     /// `opv-managed` label value), as the adapters use them.
     pub target: KubeTarget,
-    /// Env-name template; `{KEY}` under the simple profile.
+    /// Env-name template with `{KEY}` and optionally `{PRODUCT}`.
     pub env_name_template: String,
     pub config: ConfigRoute,
     /// The named store secrets live in (`secrets_in`, FR-39), bound through the External
@@ -112,11 +112,10 @@ static BINDINGS: [StoreBinding; 1] = [StoreBinding {
     via: "External Secrets Operator",
 }];
 
-/// The section as written. `E` is how `env_name` is read: a template under the fleet
-/// profile, a refusal under the simple one.
+/// The section as written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Raw<E> {
+struct Raw {
     #[serde(deserialize_with = "context")]
     context: String,
     #[serde(deserialize_with = "namespace")]
@@ -125,42 +124,26 @@ struct Raw<E> {
     deployment: String,
     #[serde(default, deserialize_with = "container")]
     container: Option<String>,
-    #[serde(default = "none")]
-    env_name: Option<E>,
+    #[serde(default)]
+    env_name: Option<Template>,
     #[serde(default)]
     config: ConfigRoute,
 }
 
-fn none<E>() -> Option<E> {
-    None
-}
-
-/// A fleet `env_name`: must contain `{PRODUCT}` and `{KEY}`.
+/// An `env_name`: must contain `{KEY}` (`{PRODUCT}` is optional; two keys rendering one
+/// name are refused at load, FR-30).
 struct Template(String);
 
 impl<'de> Deserialize<'de> for Template {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let t = String::deserialize(d)?;
-        if t.contains("{PRODUCT}") && t.contains("{KEY}") {
+        if t.contains("{KEY}") {
             Ok(Self(t))
         } else {
             Err(de::Error::custom(format!(
-                "kubernetes.env_name {t:?} must contain {{PRODUCT}} and {{KEY}}"
+                "kubernetes.env_name {t:?} must contain {{KEY}}"
             )))
         }
-    }
-}
-
-/// A simple-profile `env_name`: always refused, pointing at its line.
-struct Refused;
-
-impl<'de> Deserialize<'de> for Refused {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        IgnoredAny::deserialize(d)?;
-        Err(de::Error::custom(
-            "kubernetes.env_name is not allowed under the simple profile (the env name is the \
-             key name)",
-        ))
     }
 }
 
@@ -210,7 +193,7 @@ pub(crate) fn is_context(s: &str) -> bool {
         })
 }
 
-impl<E> Raw<E> {
+impl Raw {
     fn target(self, env: &str, env_name_template: String) -> KubernetesTarget {
         KubernetesTarget {
             target: KubeTarget {
@@ -240,30 +223,19 @@ impl Provider for KubernetesProvider {
         &[&KUBECTL]
     }
 
-    fn parse(
-        &self,
-        section: &Section<'_>,
-        profile: Profile,
-    ) -> Result<Box<dyn TargetConfig>, Error> {
+    fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
-        let target =
-            match profile {
-                Profile::Fleet => {
-                    let mut raw: Raw<Template> = section.deserialize()?;
-                    let Some(Template(t)) = raw.env_name.take() else {
-                        return Err(Error::Config(format!(
-                        "environment {env}: kubernetes.env_name is required under the fleet \
-                         profile (for example \"FLEET__{{PRODUCT}}__{{KEY}}\")"
-                    ).into()));
-                    };
-                    raw.target(env, t)
-                }
-                Profile::Simple => {
-                    let raw: Raw<Refused> = section.deserialize()?;
-                    raw.target(env, SIMPLE_TEMPLATE.into())
-                }
-            };
-        Ok(Box::new(target))
+        let mut raw: Raw = section.deserialize()?;
+        let Some(Template(t)) = raw.env_name.take() else {
+            return Err(Error::Config(
+                format!(
+                    "environment {env}: kubernetes.env_name is required (for example \
+                     \"FLEET__{{PRODUCT}}__{{KEY}}\", or \"{{KEY}}\" for bare names)"
+                )
+                .into(),
+            ));
+        };
+        Ok(Box::new(raw.target(env, t)))
     }
 
     fn doctor_checks(&self) -> &'static [&'static str] {
@@ -282,29 +254,23 @@ impl Provider for KubernetesProvider {
         )
     }
 
-    fn setup_hint(&self, profile: Profile) -> String {
-        match profile {
-            Profile::Simple => {
-                "configure kubernetes.context, kubernetes.namespace and kubernetes.deployment"
-                    .into()
-            }
-            Profile::Fleet => "configure kubernetes.context, kubernetes.namespace, \
-                               kubernetes.deployment and kubernetes.env_name"
-                .into(),
-        }
+    fn setup_hint(&self) -> String {
+        "configure kubernetes.context, kubernetes.namespace, kubernetes.deployment and \
+         kubernetes.env_name"
+            .into()
     }
 
     fn init_fields(&self) -> &'static [InitField] {
         &INIT_FIELDS
     }
 
-    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
+    fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
         let mut lines: Vec<(&str, &str)> = Vec::new();
         for f in &INIT_FIELDS {
-            let v = match (values.get(f.field), f.field, profile) {
-                (Some(v), _, _) => v.as_str(),
-                (None, "env_name", Profile::Fleet) => INIT_FLEET_TEMPLATE,
-                (None, _, _) => continue,
+            let v = match (values.get(f.field), f.field) {
+                (Some(v), _) => v.as_str(),
+                (None, "env_name") => INIT_FLEET_TEMPLATE,
+                (None, _) => continue,
             };
             lines.push((f.field, v));
         }
@@ -827,15 +793,16 @@ impl fmt::Display for AccessFix<'_> {
 mod tests {
     use super::*;
     use crate::config::parse;
-    use crate::domain::{Fleet, SIMPLE_PRODUCT};
+    use crate::domain::Fleet;
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
 
     const ENV: &str = r#"
+
 [environments.dev]
-vault_id = "v"
-item_id = "i"
-[environments.dev.kubernetes]
+[environments.dev.targets.app]
+state_vault_id = "s"
+[environments.dev.targets.app.kubernetes]
 context = "kind-opv"
 namespace = "myapp"
 deployment = "api"
@@ -849,7 +816,7 @@ environments = ["dev"]
 "#;
 
     fn doc(env: &str, keys: &str) -> String {
-        format!("[profile]\nkind = \"fleet\"\n{env}{keys}")
+        crate::config::testing::bounded(&format!("{env}{keys}"))
     }
 
     /// The fleet document with `from` replaced by `to` in the environment.
@@ -864,8 +831,9 @@ environments = ["dev"]
 
     fn kube_of<'f>(f: &'f Fleet, env: &str) -> &'f KubernetesTarget {
         f.environments[env]
-            .target()
-            .and_then(|t| t.as_any().downcast_ref::<KubernetesTarget>())
+            .targets
+            .values()
+            .find_map(|t| t.config.as_any().downcast_ref::<KubernetesTarget>())
             .expect("not kubernetes")
     }
 
@@ -971,7 +939,7 @@ environments = ["dev"]
     fn env_name_without_placeholders_points_at_its_line() {
         let e = err(&with("FLEET__{PRODUCT}__{KEY}", "STATIC"));
         assert!(
-            e.contains("line 11, column 12") && e.contains("must contain {PRODUCT} and {KEY}"),
+            e.contains("line 11, column 12") && e.contains("must contain {KEY}"),
             "{e}"
         );
     }
@@ -997,35 +965,29 @@ environments = ["dev"]
         assert!(e.contains("line 11, column 1"), "{e}");
     }
 
-    const SIMPLE: &str = r#"
-[profile]
-kind = "simple"
+    /// One product `app` on a `{KEY}` template.
+    const BARE: &str = r#"
 [environments.dev]
-vault_id = "v"
-item_id = "i"
-[environments.dev.kubernetes]
-context = "kind-opv"
-namespace = "myapp"
-deployment = "api"
-[keys.JWT_KEY]
+boundaries.app = { vault_id = "v", item_id = "i" }
+[environments.dev.targets.app]
+state_vault_id = "s"
+kubernetes.context = "kind-opv"
+kubernetes.namespace = "myapp"
+kubernetes.deployment = "api"
+kubernetes.env_name = "{KEY}"
+[products.app.keys.JWT_KEY]
 kind = "secret"
 environments = ["dev"]
 "#;
-
-    #[test]
-    fn simple_profile_uses_the_key_name_as_env_name() {
-        let f = parse(SIMPLE).unwrap();
-        assert_eq!(f.target_name("dev", SIMPLE_PRODUCT, "JWT_KEY"), "JWT_KEY");
-    }
 
     /// A key ending in `_` renders a Kubernetes name ending in `-`: refused at load, at the
     /// key's declaration, not at sync.
     #[test]
     fn key_ending_in_underscore_is_refused_at_its_line() {
-        let e = err(&SIMPLE.replace("[keys.JWT_KEY]", "[keys.JWT_KEY_]"));
+        let e = err(&BARE.replace("keys.JWT_KEY]", "keys.JWT_KEY_]"));
         assert!(
-            e.contains("JWT_KEY_ renders Kubernetes name \"jwt-key-\"")
-                && e.contains("line 11, column 7"),
+            e.contains("app/JWT_KEY_ renders Kubernetes name \"jwt-key-\"")
+                && e.contains("line 10, column 20"),
             "{e}"
         );
     }
@@ -1036,16 +998,6 @@ environments = ["dev"]
         assert!(
             e.contains("api/DB_URL_ renders Kubernetes name \"fleet--api--db-url-\"")
                 && e.contains("line 13, column 20"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn env_name_under_simple_profile_points_at_its_line() {
-        let e = err(&SIMPLE.replace("api\"\n", "api\"\nenv_name = \"{KEY}\"\n"));
-        assert!(
-            e.contains("line 11, column 12")
-                && e.contains("kubernetes.env_name is not allowed under the simple profile"),
             "{e}"
         );
     }
@@ -1092,7 +1044,8 @@ environments = ["dev"]
     fn two_environments_on_different_namespaces_are_accepted() {
         let second = ENV
             .replace("environments.dev", "environments.stage")
-            .replace("\"myapp\"", "\"myapp-stage\"");
+            .replace("\"myapp\"", "\"myapp-stage\"")
+            .replace("state_vault_id = \"s\"", "state_vault_id = \"s-stage\"");
         assert!(parse(&doc(&format!("{ENV}{second}"), KEYS)).is_ok());
     }
 
@@ -1331,25 +1284,25 @@ azure_key_vault = "kv-myapp-prod"
 subscription = "00000000-0000-0000-0000-000000000000"
 "#;
 
-    /// A simple-profile file: `[stores.prod-vault]`, environment `dev` on Kubernetes with
-    /// `extra` added to its section, and keys `keys`.
+    /// `[stores.prod-vault]`, environment `dev` with target `app` on Kubernetes (`{KEY}`)
+    /// with `extra` added to its section, and keys `keys`.
     fn bound(extra: &str, keys: &str) -> String {
-        format!(
-            r#"[profile]
-kind = "simple"
-{STORE}[environments.dev]
-vault_id = "v"
-item_id = "i"
-[environments.dev.kubernetes]
+        crate::config::testing::bounded(&format!(
+            r#"{STORE}[environments.dev]
+[environments.dev.targets.app]
+state_vault_id = "s"
+[environments.dev.targets.app.kubernetes]
 context = "kind-opv"
 namespace = "myapp"
 deployment = "api"
+env_name = "{{KEY}}"
 {extra}
 {keys}"#
-        )
+        ))
     }
 
-    const DB_URL: &str = "[keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+    const DB_URL: &str =
+        "[products.app.keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
 
     fn bound_target(extra: &str) -> KubernetesTarget {
         kube_of(&parse(&bound(extra, DB_URL)).unwrap(), "dev").clone()
@@ -1406,15 +1359,15 @@ deployment = "api"
     }
 
     fn on(section: &str, body: &str) -> String {
-        format!(
-            "[profile]\nkind = \"simple\"\n{STORE}[environments.dev]\nvault_id = \"v\"\nitem_id \
-             = \"i\"\n[environments.dev.{section}]\n{body}\nsecrets_in = \"prod-vault\"\n{DB_URL}"
-        )
+        crate::config::testing::bounded(&format!(
+            "{STORE}[environments.dev]\n[environments.dev.targets.app]\nstate_vault_id = \"s\"\n\
+             [environments.dev.targets.app.{section}]\n{body}\nsecrets_in = \"prod-vault\"\n{DB_URL}"
+        ))
     }
 
     #[test]
     fn secrets_in_on_fly_lists_the_supported_pairs() {
-        let e = err(&on("fly", "app = \"my-app\""));
+        let e = err(&on("fly", "app = \"my-app\"\nsecret_name = \"{KEY}\""));
         assert!(
             e.contains("supported secrets_in pairs: azure_key_vault → kubernetes (External Secrets Operator)"),
             "{e}"
@@ -1424,7 +1377,7 @@ deployment = "api"
     #[test]
     fn secrets_in_on_azure_is_an_unsupported_pair() {
         let body = "subscription = \"00000000-0000-0000-0000-000000000000\"\nkey_vault = \
-                    \"kv-a\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"";
+                    \"kv-a\"\nresource_group = \"rg\"\ncontainer_app = \"ca\"\nidentity = \"system\"\nenv_name = \"{KEY}\"";
         let e = err(&on("azure", body));
         assert!(
             e.contains("azure cannot keep its secrets in store \"prod-vault\""),
@@ -1443,14 +1396,14 @@ deployment = "api"
         let text = bound("", DB_URL).replace("[stores.prod-vault]", "[stores.Prod_Vault]");
         let e = err(&text);
         assert!(
-            e.contains("line 3") && e.contains("store \"Prod_Vault\""),
+            e.contains("line 1") && e.contains("store \"Prod_Vault\""),
             "{e}"
         );
     }
 
     #[test]
     fn key_whose_store_spelling_ends_in_a_dash_is_refused() {
-        let keys = "[keys.DB_URL_]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
+        let keys = "[products.app.keys.DB_URL_]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
         let e = err(&bound("secrets_in = \"prod-vault\"", keys));
         assert!(
             e.contains("must start and end with a letter or digit"),
@@ -1461,14 +1414,15 @@ deployment = "api"
     #[test]
     fn two_environments_sharing_a_store_and_names_are_refused() {
         let text = format!(
-            "{}[environments.prod]\nvault_id = \"v2\"\nitem_id = \"i2\"\n\
-             [environments.prod.kubernetes]\ncontext = \"kind-opv\"\nnamespace = \"other\"\n\
-             deployment = \"api\"\nsecrets_in = \"prod-vault\"\n",
+            "{}[environments.prod]\n\
+             [environments.prod.targets.app]\nstate_vault_id = \"s2\"\n\
+             [environments.prod.targets.app.kubernetes]\ncontext = \"kind-opv\"\nnamespace = \"other\"\n\
+             deployment = \"api\"\nenv_name = \"{{KEY}}\"\nsecrets_in = \"prod-vault\"\n",
             bound("secrets_in = \"prod-vault\"", "")
-        ) + "[keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n";
-        let e = err(&text);
+        ) + "[products.app.keys.DB_URL]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\n";
+        let e = err(&crate::config::testing::bounded(&text));
         assert!(
-            e.contains("environments dev and prod both keep Key Vault name db-url in Key Vault kv-myapp-prod"),
+            e.contains("environments dev (target app) and prod (target app) both keep Key Vault name db-url in Key Vault kv-myapp-prod"),
             "{e}"
         );
     }
@@ -1476,7 +1430,8 @@ deployment = "api"
     #[test]
     fn a_long_key_that_fits_key_vault_but_not_a_kubernetes_label_is_refused() {
         let long = format!("K{}", "A".repeat(70));
-        let keys = format!("[keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
+        let keys =
+            format!("[products.app.keys.{long}]\nkind = \"secret\"\nenvironments = [\"dev\"]\n");
         let e = err(&bound("secrets_in = \"prod-vault\"", &keys));
         assert!(
             e.contains("renders Kubernetes name of 71 characters"),
@@ -1488,7 +1443,7 @@ deployment = "api"
     fn bound_target_explains_the_chain() {
         let t = bound_target("secrets_in = \"prod-vault\"");
         let chain = t
-            .explain(SIMPLE_PRODUCT, "DB_URL")
+            .explain("app", "DB_URL")
             .into_iter()
             .find(|(label, _)| *label == "chain")
             .map(|(_, v)| v);

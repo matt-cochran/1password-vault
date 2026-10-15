@@ -9,7 +9,7 @@ This example keeps the secrets and variables of two repositories (`my-org/api`, 
 
 ## Set it up
 
-1. **Values.** In 1Password, create vault `ci` and item `ci values` (or run `opv init ci-api --github-repo my-org/api`, which creates them and writes the IDs). Then fill in the fields opv asks for:
+1. **Values.** In 1Password, create vault `ci` and item `ci values` (or run `opv init ci-api --vault ci --item "ci values"`, which creates them and writes the IDs, then `opv target add ci-api app --github-repo my-org/api` for its target). Then fill in the fields opv asks for:
 
    ```sh
    opv item skeleton ci-api   # adds empty fields: shared/FLY_API_TOKEN, api/NPM_TOKEN, ...

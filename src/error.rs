@@ -468,8 +468,12 @@ codes! {
     ManifestExists => "manifest_exists", 2, Never, false, "a manifest for this project already exists; change it with opv config edit";
     ConfigChanged => "config_changed", 2, Safe, false, "the configuration changed while opv was editing it: nothing was written and re-running is safe, or (when the error says so) another edit landed with opv's and a person checks the manifest's history";
     ConfigInvalid => "config_invalid", 2, AfterFix, false, "secrets.toml or a flag value is not valid";
+    BoundaryMissing => "boundary_missing", 2, AfterFix, false, "a product has a key desired in an environment whose boundary (vault and item) is not recorded";
+    StateVaultMissing => "state_vault_missing", 2, AfterFix, false, "a target has no state vault recorded for its delivery evidence";
+    StateVaultWiderThanValues => "state_vault_wider_than_values", 2, AfterFix, true, "a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own";
+    DuplicateScope => "duplicate_scope", 2, Never, false, "a receipt file holds more than one entry for the same environment, product and target";
     UnknownEnv => "unknown_env", 2, Never, false, "the environment is not defined in secrets.toml";
-    UnknownProduct => "unknown_product", 2, Never, false, "the product is not declared, or the simple profile takes none";
+    UnknownProduct => "unknown_product", 2, Never, false, "the product is not declared";
     UndeclaredKey => "undeclared_key", 2, Never, false, "the key is not declared (for this environment)";
     NoTarget => "no_target", 2, Never, false, "the environment has no deployment target (run-only)";
     DependencyMissing => "dependency_missing", 3, AfterFix, false, "op or the target CLI is missing or unusable";

@@ -5,9 +5,12 @@ $ flyctl releases --app mcproductlabs-portfolio-production --json
 $ flyctl secrets import --app mcproductlabs-portfolio-production --stage
 <stdin 59 bytes sha256=0f98ecce2ef78b93e665c0dc9d435b61b1dbfe641cf7a7ac6515091c6a583caf>
 $ flyctl secrets list --app mcproductlabs-portfolio-production --json
+$ op whoami --format json
+$ op item get iprd --vault vprd --format json --cache=false
 --- stdout
-unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
-held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
-summary: written 0 · unchanged 1 · held 1 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
+prod/portfolio: delivery: allumata not recorded: not confirmed by this sync: FLEET__ALLUMATA__INTEGRATION_ENC_KEY; no delivery item is recorded for allumata on prod/portfolio; opv bootstrap creates it
+prod/portfolio: unchanged: allumata/OPENAI_API_KEY (FLEET__ALLUMATA__OPENAI_API_KEY)
+prod/portfolio: held (immutable), not rewritten (pass --rotate PRODUCT/KEY to replace): allumata/INTEGRATION_ENC_KEY (FLEET__ALLUMATA__INTEGRATION_ENC_KEY)
+prod/portfolio: summary: written 0 · unchanged 1 · held 1 · deployed no · pending 0 · pruned 0 · kept 0 · skipped 1
 --- result
 Ok(())

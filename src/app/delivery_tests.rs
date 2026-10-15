@@ -24,23 +24,41 @@ fn digest(v: &str) -> String {
     hex::encode(Sha256::digest(v))[..16].to_string()
 }
 
-/// 1Password (the stateful fake) plus a Fly app's secrets: name → (value, staged).
+/// One Fly app's secrets: name → (value, staged).
+type Secrets = BTreeMap<String, (String, bool)>;
+
+/// 1Password (the stateful fake) plus Fly apps' secrets, by app.
 struct World {
     op: FakeOp,
-    fly: RefCell<BTreeMap<String, (String, bool)>>,
+    fly: RefCell<BTreeMap<String, Secrets>>,
     /// The next `secrets import` fails before it reaches Fly.
     fail_import: std::cell::Cell<bool>,
 }
 
+/// The value of `--app` in a flyctl call.
+fn app_of(args: &[&str]) -> String {
+    args.iter()
+        .position(|a| *a == "--app")
+        .map(|i| args[i + 1].to_string())
+        .unwrap_or_default()
+}
+
 impl World {
+    /// Fly app `app`'s secrets, for a test to change as someone outside opv would.
+    fn app(&self, app: &str) -> std::cell::RefMut<'_, Secrets> {
+        std::cell::RefMut::map(self.fly.borrow_mut(), |f| {
+            f.entry(app.to_string()).or_default()
+        })
+    }
+
     fn fly(&self, args: &[&str], stdin: Option<&[u8]>) -> Output {
+        let app = app_of(args);
         match args {
             ["status", ..] => fly_app_ok(),
             ["releases", ..] => fly_releases("complete"),
             ["secrets", "list", ..] => {
                 let v: Vec<Value> = self
-                    .fly
-                    .borrow()
+                    .app(&app)
                     .iter()
                     .map(|(n, (value, staged))| {
                         json!({"name": n, "digest": digest(value),
@@ -54,18 +72,13 @@ impl World {
                     return Output::failure(1);
                 }
                 let text = String::from_utf8(stdin.unwrap().to_vec()).unwrap();
+                let mut secrets = self.app(&app);
                 for line in text.lines() {
                     let (name, quoted) = line.split_once('=').unwrap();
                     let value = quoted.trim_matches('"').to_string();
-                    let same = self
-                        .fly
-                        .borrow()
-                        .get(name)
-                        .is_some_and(|(v, _)| *v == value);
+                    let same = secrets.get(name).is_some_and(|(v, _)| *v == value);
                     if !same {
-                        self.fly
-                            .borrow_mut()
-                            .insert(name.to_string(), (value, true));
+                        secrets.insert(name.to_string(), (value, true));
                     }
                 }
                 ok()
@@ -144,11 +157,9 @@ fn field(section: &str, label: &str, value: &str) -> Value {
            "type": "CONCEALED", "label": label, "value": value})
 }
 
-/// prod on Fly app `myapp`, state vault STATE; api (TOKEN, SHARED from shared/KEY) and web
-/// (SESSION, SHARED from shared/KEY); shared is source-only.
-fn world() -> (World, Fleet) {
-    let op = FakeOp::default();
-    let id = op.insert(
+/// The values item (api, web and shared sections) in VALUES; returns its ID.
+fn values_item(op: &FakeOp) -> String {
+    op.insert(
         VALUES,
         json!({
             "title": "myapp · prod values", "category": "SECURE_NOTE",
@@ -160,18 +171,67 @@ fn world() -> (World, Fleet) {
                 field("shared", "KEY", &format!("key-{MARK}")),
             ]
         }),
+    )
+}
+
+/// An empty delivery item in STATE, as `opv bootstrap` creates it; returns its ID.
+fn delivery_item(op: &FakeOp, product: &str, target: &str) -> String {
+    op.insert(
+        STATE,
+        json!({"title": crate::domain::naming::delivery_item(product, target),
+               "category": "SECURE_NOTE",
+               "fields": [{"id": "notesPlain", "type": "STRING", "purpose": "NOTES",
+                           "label": "notesPlain",
+                           "value": crate::domain::naming::delivery_item_notes(product, target, "prod")}]}),
+    )
+}
+
+/// The products: api (TOKEN, SHARED from shared/KEY) and web (SESSION, SHARED from
+/// shared/KEY); shared is source-only.
+const PRODUCTS: &str = "[products.shared]\nsource_only = true\n\
+     [products.shared.keys.KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
+     [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
+     [products.api.keys.SHARED]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"shared/KEY\"\n\
+     [products.web.keys.SESSION]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
+     [products.web.keys.SHARED]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"shared/KEY\"\n";
+
+/// prod's boundaries, all in the one values item `id`.
+fn boundaries(id: &str) -> String {
+    format!(
+        "[environments.prod]\n\
+         boundaries.shared = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+         boundaries.api = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n\
+         boundaries.web = {{ vault_id = \"{VALUES}\", item_id = \"{id}\" }}\n"
+    )
+}
+
+/// Target `name` on Fly app `app`, its state vault STATE, with `items` (product → ID).
+fn target_toml(name: &str, app: &str, items: &[(&str, &str)]) -> String {
+    let items: Vec<String> = items
+        .iter()
+        .map(|(p, i)| format!("{p} = \"{i}\""))
+        .collect();
+    format!(
+        "[environments.prod.targets.{name}]\nstate_vault_id = \"{STATE}\"\n\
+         fly.app = \"{app}\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+         delivery_items = {{ {} }}\n",
+        items.join(", ")
+    )
+}
+
+/// prod on Fly app `myapp` (target `app`), state vault STATE holding api's and web's
+/// delivery items.
+fn world() -> (World, Fleet) {
+    let op = FakeOp::default();
+    let id = values_item(&op);
+    let (api, web) = (
+        delivery_item(&op, "api", "app"),
+        delivery_item(&op, "web", "app"),
     );
     let fleet = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n\
-         [environments.prod]\nvault_id = \"{VALUES}\"\nitem_id = \"{id}\"\n\
-         state_vault_id = \"{STATE}\"\nfly.app = \"myapp\"\n\
-         fly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
-         [products.shared]\nsource_only = true\n\
-         [products.shared.keys.KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
-         [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
-         [products.api.keys.SHARED]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"shared/KEY\"\n\
-         [products.web.keys.SESSION]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
-         [products.web.keys.SHARED]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"shared/KEY\"\n"
+        "{}{}{PRODUCTS}",
+        boundaries(&id),
+        target_toml("app", "myapp", &[("api", &api), ("web", &web)])
     ))
     .unwrap();
     let w = World {
@@ -195,12 +255,12 @@ fn sync_all(w: &World, fleet: &Fleet) -> Result<(), Error> {
 /// `opv delivery verify prod --json` → product → (state, revision).
 fn verify_doc(w: &World, fleet: &Fleet) -> Value {
     let mut out = Vec::new();
-    let _ = verify(fleet, "prod", None, None, w, true, &mut out);
+    let _ = verify(fleet, "prod", None, &[], None, w, true, &mut out);
     serde_json::from_slice(&out).unwrap()
 }
 
 fn state_of(doc: &Value, product: &str) -> String {
-    doc["products"]
+    doc["placements"]
         .as_array()
         .unwrap()
         .iter()
@@ -210,7 +270,7 @@ fn state_of(doc: &Value, product: &str) -> String {
 }
 
 fn revision_of(doc: &Value, product: &str) -> Option<String> {
-    doc["products"]
+    doc["placements"]
         .as_array()
         .unwrap()
         .iter()
@@ -284,19 +344,20 @@ fn a_resync_after_rotation_mints_a_new_revision() {
 #[test]
 fn an_edit_on_the_target_outside_opv_is_drift() {
     let (w, fleet) = delivered();
-    w.fly.borrow_mut().insert(
+    w.app("myapp").insert(
         "FLEET__API__TOKEN".into(),
         ("edited-elsewhere".into(), false),
     );
     let doc = verify_doc(&w, &fleet);
-    let names = doc["products"][0]["names"].to_string() + &doc["products"][1]["names"].to_string();
+    let names =
+        doc["placements"][0]["names"].to_string() + &doc["placements"][1]["names"].to_string();
     assert!(names.contains("drifted_on_target"), "{doc}");
 }
 
 #[test]
 fn a_name_removed_from_the_target_is_missing() {
     let (w, fleet) = delivered();
-    w.fly.borrow_mut().remove("FLEET__WEB__SESSION");
+    w.app("myapp").remove("FLEET__WEB__SESSION");
     let doc = verify_doc(&w, &fleet);
     assert!(doc.to_string().contains("missing_on_target"), "{doc}");
 }
@@ -305,7 +366,7 @@ fn a_name_removed_from_the_target_is_missing() {
 fn a_staged_delivery_is_reported_as_not_yet_deployed() {
     let (w, fleet) = delivered();
     let doc = verify_doc(&w, &fleet);
-    assert_eq!(doc["products"][0]["deployed"], "staged");
+    assert_eq!(doc["placements"][0]["deployed"], "staged");
 }
 
 #[test]
@@ -352,18 +413,77 @@ fn a_new_key_changes_the_binding_set() {
 }
 
 #[test]
-fn another_target_cannot_reuse_the_revision() {
+fn another_app_cannot_reuse_the_revision() {
     let (w, fleet) = delivered();
     let mut moved = fleet.clone();
-    let env = moved.environments.get_mut("prod").unwrap();
+    let t = moved
+        .environments
+        .get_mut("prod")
+        .unwrap()
+        .targets
+        .get_mut("app")
+        .unwrap();
     let other = crate::config::parse(&format!(
-        "[profile]\nkind = \"fleet\"\n[environments.prod]\nvault_id = \"{VALUES}\"\nitem_id = \"x\"\n\
-         fly.app = \"another-app\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n[products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+        "[environments.prod]\n\
+         boundaries.api = {{ vault_id = \"{VALUES}\", item_id = \"x\" }}\n\
+         [environments.prod.targets.app]\nstate_vault_id = \"{STATE}\"\n\
+         fly.app = \"another-app\"\nfly.secret_name = \"FLEET__{{PRODUCT}}__{{KEY}}\"\n\
+         [products.api.keys.TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
     ))
     .unwrap();
-    env.target = other.environments["prod"].target.clone();
+    t.config = other.environments["prod"].targets["app"].config.clone_box();
     let doc = verify_doc(&w, &moved);
     assert_eq!(state_of(&doc, "api"), "not_delivered");
+}
+
+#[test]
+fn a_placement_without_a_recorded_delivery_item_is_not_delivered() {
+    let _person = crate::app::tidy::activate();
+    let (w, mut fleet) = world();
+    fleet
+        .environments
+        .get_mut("prod")
+        .unwrap()
+        .targets
+        .get_mut("app")
+        .unwrap()
+        .delivery_items
+        .remove("api");
+    sync_all(&w, &fleet).unwrap();
+    assert_eq!(state_of(&verify_doc(&w, &fleet), "api"), "not_delivered");
+}
+
+#[test]
+fn sync_never_looks_a_delivery_item_up_by_title() {
+    let (w, _) = delivered();
+    assert_eq!(w.op.count(&["op", "item", "list"]), 0);
+}
+
+#[test]
+fn a_delivery_item_keeps_its_notes() {
+    let (w, fleet) = delivered();
+    let id = &fleet.environments["prod"].targets["app"].delivery_items["api"];
+    assert!(
+        w.op.item(id)["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["purpose"] == "NOTES")
+    );
+}
+
+#[test]
+fn writing_one_placement_never_touches_another() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let web = fleet.environments["prod"].targets["app"].delivery_items["web"].clone();
+    let before = w.op.item(&web);
+    let opts = SyncOpts {
+        product: Some("api".into()),
+        ..SyncOpts::default()
+    };
+    sync_with(&w, &fleet, opts).0.unwrap();
+    assert_eq!(w.op.item(&web), before);
 }
 
 #[test]
@@ -381,6 +501,51 @@ fn the_receipt_file_holds_each_delivery() {
     assert_eq!(doc["deliveries"].as_array().unwrap().len(), 2);
 }
 
+/// The error `verify` returns for a receipt file holding each delivery twice (FR-58).
+fn duplicate_receipt_error() -> Error {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.receipt.json");
+    let opts = SyncOpts {
+        receipt: Some(path.clone()),
+        ..SyncOpts::default()
+    };
+    sync_with(&w, &fleet, opts).0.unwrap();
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let copies = doc["deliveries"].as_array().unwrap().clone();
+    doc["deliveries"].as_array_mut().unwrap().extend(copies);
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    verify(
+        &fleet,
+        "prod",
+        None,
+        &[],
+        Some(&path),
+        &w,
+        true,
+        &mut Vec::new(),
+    )
+    .unwrap_err()
+}
+
+#[test]
+fn a_duplicate_scope_in_the_receipt_file_is_a_duplicate_scope_error() {
+    assert_eq!(
+        duplicate_receipt_error().code(),
+        crate::error::Code::DuplicateScope
+    );
+}
+
+#[test]
+fn a_duplicate_scope_error_tells_the_caller_to_keep_one() {
+    assert!(
+        duplicate_receipt_error()
+            .text()
+            .starts_with("duplicate_scope: the receipt file holds 2 receipts for ")
+    );
+}
+
 #[test]
 fn a_kept_receipt_that_is_no_longer_current_is_superseded() {
     let _person = crate::app::tidy::activate();
@@ -395,9 +560,18 @@ fn a_kept_receipt_that_is_no_longer_current_is_superseded() {
     w.set_value("api", "TOKEN", &format!("tok2-{MARK}"));
     sync_all(&w, &fleet).unwrap();
     let mut out = Vec::new();
-    let _ = verify(&fleet, "prod", Some("api"), Some(&path), &w, true, &mut out);
+    let _ = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &[],
+        Some(&path),
+        &w,
+        true,
+        &mut out,
+    );
     let doc: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(doc["products"][0]["state"], "superseded");
+    assert_eq!(doc["placements"][0]["state"], "superseded");
 }
 
 #[test]
@@ -416,6 +590,7 @@ fn nothing_shown_holds_a_value_or_a_digest() {
         &fleet,
         "prod",
         None,
+        &[],
         Some(&path),
         &w,
         false,
@@ -424,17 +599,324 @@ fn nothing_shown_holds_a_value_or_a_digest() {
     let all = sync_out
         + &std::fs::read_to_string(&path).unwrap()
         + &String::from_utf8(verify_out).unwrap();
-    let digests: Vec<String> = w.fly.borrow().values().map(|(v, _)| digest(v)).collect();
+    let digests: Vec<String> = w.app("myapp").values().map(|(v, _)| digest(v)).collect();
     assert!(
         !all.contains(MARK) && digests.iter().all(|d| !all.contains(d.as_str())),
         "{all}"
     );
 }
 
+// ---- Placements (FR-58, #114): one product on two targets of one environment ---------
+
+/// prod with api on two targets, `a` (Fly app `app-a`) and `b` (`app-b`), each with api's
+/// own delivery item in STATE.
+fn two_targets() -> (World, Fleet) {
+    let op = FakeOp::default();
+    let id = values_item(&op);
+    let (a, b) = (
+        delivery_item(&op, "api", "a"),
+        delivery_item(&op, "api", "b"),
+    );
+    let fleet = crate::config::parse(&format!(
+        "{}{}{}{PRODUCTS}",
+        boundaries(&id),
+        target_toml("a", "app-a", &[("api", &a)])
+            .replace("delivery_items", "products = [\"api\"]\ndelivery_items"),
+        target_toml("b", "app-b", &[("api", &b)])
+            .replace("delivery_items", "products = [\"api\"]\ndelivery_items"),
+    ))
+    .unwrap();
+    let w = World {
+        op,
+        fly: RefCell::default(),
+        fail_import: std::cell::Cell::new(false),
+    };
+    (w, fleet)
+}
+
+/// `opv sync prod --target <t>`.
+fn sync_target(w: &World, fleet: &Fleet, target: &str) {
+    let opts = SyncOpts {
+        targets: vec![target.to_string()],
+        ..SyncOpts::default()
+    };
+    sync_with(w, fleet, opts).0.unwrap();
+}
+
+/// `opv delivery verify prod --product api --json` → target → (state, deployed).
+fn placements(w: &World, fleet: &Fleet) -> BTreeMap<String, (String, String)> {
+    let mut out = Vec::new();
+    let _ = verify(fleet, "prod", Some("api"), &[], None, w, true, &mut out);
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    doc["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["target"].as_str().unwrap().to_string(),
+                (
+                    p["state"].as_str().unwrap().to_string(),
+                    p["deployed"].as_str().unwrap().to_string(),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn states(w: &World, fleet: &Fleet) -> Vec<(String, String)> {
+    placements(w, fleet)
+        .into_iter()
+        .map(|(t, (state, _))| (t, state))
+        .collect()
+}
+
+/// api delivered to `a`, then to `b`.
+fn on_both() -> (World, Fleet) {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = two_targets();
+    sync_target(&w, &fleet, "a");
+    sync_target(&w, &fleet, "b");
+    (w, fleet)
+}
+
+/// Change api/TOKEN in 1Password, as a person would.
+fn rotate_token(w: &World) {
+    w.set_value("api", "TOKEN", &format!("tok2-{MARK}"));
+}
+
+/// The plan of target `target`: what plan and status judge from.
+fn plan_of(w: &World, fleet: &Fleet, target: &str) -> crate::domain::plan::SyncPlan {
+    let (_, ports) = crate::app::open_target(fleet, "prod", target, w).unwrap();
+    let none = std::collections::BTreeSet::new();
+    crate::app::read_and_plan(fleet, "prod", Some(target), w, Some(&ports), &none, &none)
+        .unwrap()
+        .0
+}
+
+/// The plan's judgement of api/TOKEN on target `target`.
+fn token_on(w: &World, fleet: &Fleet, target: &str) -> crate::domain::plan::TargetState {
+    plan_of(w, fleet, target)
+        .rows
+        .iter()
+        .find(|r| r.product == "api" && r.key == "TOKEN")
+        .unwrap()
+        .target
+}
+
 #[test]
-fn verify_without_a_state_vault_names_bootstrap() {
-    let (w, mut fleet) = world();
-    fleet.environments.get_mut("prod").unwrap().state_vault_id = None;
-    let err = verify(&fleet, "prod", None, None, &w, true, &mut Vec::new()).unwrap_err();
-    assert_eq!(err.next_step(), Some("opv bootstrap --state prod"));
+fn a_product_recorded_on_two_targets_stays_verified_on_both() {
+    let (w, fleet) = on_both();
+    assert_eq!(
+        states(&w, &fleet),
+        [
+            ("a".to_string(), "verified".to_string()),
+            ("b".to_string(), "verified".to_string())
+        ]
+    );
+}
+
+#[test]
+fn verify_target_narrows_to_one_placement() {
+    let (w, fleet) = on_both();
+    let mut out = Vec::new();
+    let _ = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &["b".to_string()],
+        None,
+        &w,
+        true,
+        &mut out,
+    );
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["placements"][0]["target"], "b");
+}
+
+#[test]
+fn verify_target_returns_only_that_placement() {
+    let (w, fleet) = on_both();
+    let mut out = Vec::new();
+    let _ = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &["b".to_string()],
+        None,
+        &w,
+        true,
+        &mut out,
+    );
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["placements"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_stale_revision_on_b_leaves_a_verified() {
+    let (w, fleet) = on_both();
+    rotate_token(&w);
+    sync_target(&w, &fleet, "a");
+    assert_eq!(placements(&w, &fleet)["a"].0, "verified");
+}
+
+#[test]
+fn a_stale_revision_on_b_is_changed() {
+    let (w, fleet) = on_both();
+    rotate_token(&w);
+    sync_target(&w, &fleet, "a");
+    assert_eq!(placements(&w, &fleet)["b"].0, "changed");
+}
+
+#[test]
+fn staged_and_deployed_are_per_placement() {
+    let (w, fleet) = on_both();
+    for (_, staged) in w.app("app-a").values_mut() {
+        *staged = false;
+    }
+    let p = placements(&w, &fleet);
+    assert_eq!(
+        (p["a"].1.as_str(), p["b"].1.as_str()),
+        ("deployed", "staged")
+    );
+}
+
+#[test]
+fn drift_on_b_is_not_drift_on_a() {
+    let (w, fleet) = on_both();
+    w.app("app-b").insert(
+        "FLEET__API__TOKEN".into(),
+        ("edited-elsewhere".into(), false),
+    );
+    assert_eq!(
+        (
+            plan_of(&w, &fleet, "a").drift,
+            plan_of(&w, &fleet, "b").drift
+        ),
+        (Vec::new(), vec!["FLEET__API__TOKEN".to_string()])
+    );
+}
+
+#[test]
+fn the_ledger_judges_each_placement_by_its_own_evidence() {
+    let (w, fleet) = on_both();
+    rotate_token(&w);
+    sync_target(&w, &fleet, "a");
+    use crate::domain::plan::TargetState;
+    assert_eq!(
+        (token_on(&w, &fleet, "a"), token_on(&w, &fleet, "b")),
+        (TargetState::Present, TargetState::WouldChange)
+    );
+}
+
+#[test]
+fn receipt_selection_is_independent_of_order() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = two_targets();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prod.receipt.json");
+    let opts = SyncOpts {
+        receipt: Some(path.clone()),
+        ..SyncOpts::default()
+    };
+    sync_with(&w, &fleet, opts).0.unwrap();
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["deliveries"].as_array_mut().unwrap().reverse();
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    let mut out = Vec::new();
+    let _ = verify(
+        &fleet,
+        "prod",
+        Some("api"),
+        &[],
+        Some(&path),
+        &w,
+        true,
+        &mut out,
+    );
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    let states: Vec<&str> = doc["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["verified", "verified"]);
+}
+
+#[test]
+fn no_op_argument_holds_a_value_digest_or_fingerprint() {
+    let (w, fleet) = on_both();
+    let _ = placements(&w, &fleet);
+    let secrets: Vec<String> =
+        w.op.items
+            .borrow()
+            .iter()
+            .flat_map(|i| i["fields"].as_array().cloned().unwrap_or_default())
+            .filter(|f| f["type"] == "CONCEALED")
+            .filter_map(|f| f["value"].as_str().map(str::to_string))
+            .chain(w.app("app-a").values().map(|(v, _)| digest(v)))
+            .collect();
+    let argv: Vec<String> =
+        w.op.calls
+            .borrow()
+            .iter()
+            .flat_map(|c| c.args.clone())
+            .collect();
+    // An evidence line's store version and fingerprint; any other concealed value whole.
+    let parts: Vec<&str> = secrets
+        .iter()
+        .flat_map(|s| match s.strip_prefix("v1|") {
+            Some(line) => line.split('|').take(2).collect::<Vec<_>>(),
+            None => vec![s.as_str()],
+        })
+        .collect();
+    assert!(
+        parts.iter().all(|s| argv.iter().all(|a| !a.contains(s))),
+        "{argv:?}"
+    );
+}
+
+#[test]
+fn sync_never_reads_or_writes_an_opv_state_section() {
+    let (w, _) = on_both();
+    assert!(!w.op.saw("opv · state"));
+}
+
+// ---- The binding set: exactly what the target delivers (FR-58) ----------------------
+
+/// [`world`] plus api/STRIPE, a key the `payments = "off"` mode skips in prod.
+fn with_a_mode_skipped_key() -> (World, Fleet) {
+    let (w, fleet) = world();
+    let api = fleet.environments["prod"].targets["app"].delivery_items["api"].clone();
+    let web = fleet.environments["prod"].targets["app"].delivery_items["web"].clone();
+    let id = fleet.environments["prod"].boundaries["api"].item_id.clone();
+    let fleet = crate::config::parse(&format!(
+        "{}modes.api.payments = \"off\"\n{}{PRODUCTS}\
+         [products.api.keys.STRIPE]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\
+         rules = {{ prefix_by_mode = {{ mode = \"payments\", values = {{ test = \"sk_test_\" }}, skip = [\"off\"] }} }}\n",
+        boundaries(&id),
+        target_toml("app", "myapp", &[("api", &api), ("web", &web)])
+    ))
+    .unwrap();
+    (w, fleet)
+}
+
+#[test]
+fn a_mode_skipped_key_is_not_in_the_binding_set() {
+    let (_, fleet) = with_a_mode_skipped_key();
+    let names: Vec<String> = bindings(&fleet, "prod", "app", "api")
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert_eq!(names, ["FLEET__API__SHARED", "FLEET__API__TOKEN"]);
+}
+
+#[test]
+fn a_product_with_a_mode_skipped_key_mints_a_revision() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = with_a_mode_skipped_key();
+    sync_all(&w, &fleet).unwrap();
+    assert_eq!(state_of(&verify_doc(&w, &fleet), "api"), "verified");
 }

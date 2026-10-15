@@ -29,6 +29,7 @@ fn scope() -> Scope {
         account_id: "acct-1".into(),
         environment: "prod".into(),
         product: "api".into(),
+        target: "p-main".into(),
         provider: "fly".into(),
         locator: "myapp".into(),
     }
@@ -319,6 +320,88 @@ fn verify_names_the_first_differing_scope_field() {
     s.product = "web".into();
     let v = verify(Some((&r, &e)), &s, &[binding(NAME)], &[]);
     assert_eq!(v.reason.as_deref(), Some("recorded for another account_id"));
+}
+
+#[test]
+fn verify_reports_a_different_target_as_not_delivered() {
+    let r = receipt();
+    let e = [evidence(NAME)];
+    let mut s = scope();
+    s.target = "p-overflow".into();
+    let v = verify(Some((&r, &e)), &s, &[binding(NAME)], &[]);
+    assert_eq!(v.state, "not_delivered");
+}
+
+#[test]
+fn verify_names_a_different_target_in_the_reason() {
+    let r = receipt();
+    let e = [evidence(NAME)];
+    let mut s = scope();
+    s.target = "p-overflow".into();
+    let v = verify(Some((&r, &e)), &s, &[binding(NAME)], &[]);
+    assert_eq!(v.reason.as_deref(), Some("recorded for another target"));
+}
+
+// ---- select: full-scope receipt selection (FR-58) --------------------------------
+
+#[test]
+fn select_returns_the_receipt_whose_full_scope_matches() {
+    let receipts = [receipt()];
+    assert_eq!(
+        select(&receipts, &scope())
+            .unwrap()
+            .map(|r| r.revision.as_str()),
+        Some(REVISION)
+    );
+}
+
+#[test]
+fn select_finds_a_matching_receipt_regardless_of_order() {
+    let mut other = receipt();
+    other.scope.target = "p-other".into();
+    other.revision = "drv-other".into();
+    let receipts = [other, receipt()];
+    assert_eq!(
+        select(&receipts, &scope())
+            .unwrap()
+            .map(|r| r.revision.as_str()),
+        Some(REVISION)
+    );
+}
+
+#[test]
+fn select_returns_none_when_no_receipt_matches_the_scope() {
+    let mut other = receipt();
+    other.scope.target = "p-other".into();
+    assert_eq!(select(&[other], &scope()).unwrap(), None);
+}
+
+#[test]
+fn select_refuses_two_receipts_with_the_same_full_scope() {
+    assert_eq!(
+        select(&[receipt(), receipt()], &scope()),
+        Err(DuplicateScope { count: 2 })
+    );
+}
+
+// ---- scope serialization (FR-58) -------------------------------------------------
+
+#[test]
+fn receipt_round_trips_with_its_target() {
+    let mut r = receipt();
+    r.scope.target = "p-overflow".into();
+    let text = serde_json::to_string(&r).unwrap();
+    let back: Receipt = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.scope.target, "p-overflow");
+}
+
+#[test]
+fn scope_declares_target_between_product_and_provider() {
+    let text = serde_json::to_string(&scope()).unwrap();
+    let product = text.find("\"product\"").unwrap();
+    let target = text.find("\"target\"").unwrap();
+    let provider = text.find("\"provider\"").unwrap();
+    assert!(product < target && target < provider, "{text}");
 }
 
 // ---- verify: rule 3, binding set changed -----------------------------------------

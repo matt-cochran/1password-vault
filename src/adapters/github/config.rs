@@ -1,10 +1,11 @@
-//! The GitHub provider: `[environments.<env>.github]` parsing and validation, GitHub name
-//! rules, product scope, doctor, preflight and the port wiring (FR-46, FR-48).
+//! The GitHub provider: a target's `github` section parsing and validation, GitHub name
+//! rules, doctor, preflight and the port wiring (FR-46). Which products a target delivers
+//! is the target's `products` (FR-48, FR-56), not this provider's.
 //!
 //! The section is read with [`Section::deserialize`], so a shape error points at its line;
 //! the rules the TOML shape cannot express (exactly one of `repo`/`repos`, repository
-//! spelling, GitHub environment names, product scope) are checked here and worded like the
-//! Fly provider (`environment <env>: github.<field> ...`).
+//! spelling, GitHub environment names) are checked here and worded like the Fly provider
+//! (`environment <env>: github.<field> ...`).
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,7 +16,6 @@ use serde::Deserialize;
 use super::{CREDENTIAL_VARS, GH, PROGRAM};
 use crate::adapters::probe::{spawn_tool, version_in};
 use crate::config::check_ident;
-use crate::domain::{Profile, SIMPLE_TEMPLATE};
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -41,11 +41,8 @@ pub struct GithubTarget {
     /// The GitHub environment whose secrets and variables are written; `None`: repository
     /// secrets and variables.
     pub environment: Option<String>,
-    /// The products whose keys this target receives (FR-48); `None`: every product.
-    pub products: Option<BTreeSet<String>>,
     /// Name template with `{KEY}` and optionally `{PRODUCT}`; default `{KEY}`.
     pub secret_name_template: String,
-    pub profile: Profile,
 }
 
 /// The section as written. `deny_unknown_fields` makes a typo a TOML error at its line.
@@ -59,14 +56,12 @@ struct RawGithub {
     #[serde(default)]
     environment: Option<String>,
     #[serde(default)]
-    products: Option<BTreeSet<String>>,
-    #[serde(default)]
     secret_name: Option<String>,
 }
 
-/// `opv init --target github` options (H3), in the order they are written. `repos` is not
+/// `opv target add` options of the GitHub provider (H3), in the order they are written. `repos` is not
 /// offered: `repo` names the one repository most environments use; edit the file for more.
-static INIT_FIELDS: [InitField; 4] = [
+static INIT_FIELDS: [InitField; 3] = [
     InitField {
         field: "repo",
         help: "GitHub repository as owner/name (not looked up; gh is not called)",
@@ -75,11 +70,6 @@ static INIT_FIELDS: [InitField; 4] = [
     InitField {
         field: "environment",
         help: "GitHub environment whose secrets and variables are written (optional)",
-        required: false,
-    },
-    InitField {
-        field: "products",
-        help: "Comma-separated products this target receives (fleet profile; default all)",
         required: false,
     },
     InitField {
@@ -123,11 +113,7 @@ impl Provider for GithubProvider {
     fn tools(&self) -> &'static [&'static crate::host::Tool] {
         &[&super::GH]
     }
-    fn parse(
-        &self,
-        section: &Section<'_>,
-        profile: Profile,
-    ) -> Result<Box<dyn TargetConfig>, Error> {
+    fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error> {
         let env = section.env();
         let raw: RawGithub = section.deserialize()?;
         let (repos, field) = match (raw.repo, raw.repos) {
@@ -179,23 +165,7 @@ impl Provider for GithubProvider {
                 "^[A-Za-z0-9._ -]{1,255}$",
             )?;
         }
-        if let Some(products) = &raw.products {
-            if products.is_empty() {
-                return Err(Error::Config(
-                    format!("environment {env}: github.products must not be empty").into(),
-                ));
-            }
-            if profile == Profile::Simple {
-                return Err(Error::Config(
-                    format!(
-                        "environment {env}: github.products is not allowed under the simple \
-                         profile (the target product scope is a fleet feature)"
-                    )
-                    .into(),
-                ));
-            }
-        }
-        let secret_name_template = raw.secret_name.unwrap_or_else(|| SIMPLE_TEMPLATE.into());
+        let secret_name_template = raw.secret_name.unwrap_or_else(|| "{KEY}".into());
         if !secret_name_template.contains("{KEY}") {
             return Err(Error::Config(
                 format!(
@@ -208,9 +178,7 @@ impl Provider for GithubProvider {
         Ok(Box::new(GithubTarget {
             repos,
             environment: raw.environment,
-            products: raw.products,
             secret_name_template,
-            profile,
         }))
     }
     fn doctor_checks(&self) -> &'static [&'static str] {
@@ -227,14 +195,13 @@ impl Provider for GithubProvider {
     fn deploy_login(&self) -> Result<Box<dyn crate::provider::DeployLogin>, Error> {
         Ok(Box::<super::login::GithubLogin>::default())
     }
-    fn setup_hint(&self, profile: Profile) -> String {
-        let _ = profile;
+    fn setup_hint(&self) -> String {
         "configure github.repo".into()
     }
     fn init_fields(&self) -> &'static [InitField] {
         &INIT_FIELDS
     }
-    fn init_section(&self, values: &BTreeMap<&str, String>, _profile: Profile) -> Option<String> {
+    fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
         let mut out = String::new();
         if let Some(repo) = values.get("repo") {
             out.push_str(&init_lines("github", [("repo", repo.as_str())]));
@@ -244,15 +211,6 @@ impl Provider for GithubProvider {
                 "github",
                 [("environment", environment.as_str())],
             ));
-        }
-        if let Some(products) = values.get("products") {
-            let items: Vec<String> = products
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| toml::Value::String(s.to_string()).to_string())
-                .collect();
-            out.push_str(&format!("github.products = [{}]\n", items.join(", ")));
         }
         if let Some(secret_name) = values.get("secret_name") {
             out.push_str(&init_lines(
@@ -323,14 +281,6 @@ impl TargetConfig for GithubTarget {
             env_label: "GitHub name",
             store: None,
         }
-    }
-    fn serves(&self, product: &str) -> bool {
-        self.products.as_ref().is_none_or(|p| p.contains(product))
-    }
-    fn scoped_products(&self) -> Option<Vec<&str>> {
-        self.products
-            .as_ref()
-            .map(|p| p.iter().map(String::as_str).collect())
     }
     fn same_target(&self, other: &dyn TargetConfig) -> bool {
         other
@@ -477,15 +427,15 @@ mod tests {
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
 
-    /// Parse an inline `github` section body under `profile`.
-    fn parse_body(body: &str, profile: Profile) -> Result<Box<dyn TargetConfig>, Error> {
+    /// Parse an inline `github` section body.
+    fn parse_body(body: &str) -> Result<Box<dyn TargetConfig>, Error> {
         let text = format!("{{ {} }}", body.replace('\n', ", "));
         let value = toml::de::DeValue::parse(&text).expect("inline table parses");
-        PROVIDER.parse(&Section::new("dev", &value, &text), profile)
+        PROVIDER.parse(&Section::new("dev", &value, &text))
     }
 
     fn target_of(body: &str) -> GithubTarget {
-        parse_body(body, Profile::Fleet)
+        parse_body(body)
             .expect("section parses")
             .as_any()
             .downcast_ref::<GithubTarget>()
@@ -495,14 +445,7 @@ mod tests {
 
     /// The `Error::Config` text of a refused section body.
     fn config_error(body: &str) -> String {
-        match parse_body(body, Profile::Fleet) {
-            Err(Error::Config(m)) => m.to_string(),
-            other => panic!("expected Config error, got {other:?}"),
-        }
-    }
-
-    fn simple_error(body: &str) -> String {
-        match parse_body(body, Profile::Simple) {
+        match parse_body(body) {
             Err(Error::Config(m)) => m.to_string(),
             other => panic!("expected Config error, got {other:?}"),
         }
@@ -550,18 +493,6 @@ environment = "staging""#
             .environment
             .as_deref(),
             Some("staging")
-        );
-    }
-
-    #[test]
-    fn parse_reads_products() {
-        assert_eq!(
-            target_of(
-                r#"repo = "org/r"
-products = ["api", "web"]"#
-            )
-            .products,
-            Some(BTreeSet::from(["api".to_string(), "web".to_string()]))
         );
     }
 
@@ -632,13 +563,6 @@ repos = ["org/a"]"#,
     }
 
     #[test]
-    fn parse_refuses_empty_products() {
-        assert!(
-            config_error("repo = \"org/r\"\nproducts = []").contains("products must not be empty")
-        );
-    }
-
-    #[test]
     fn parse_refuses_secret_name_without_key() {
         let e = config_error(
             r#"repo = "org/r"
@@ -646,15 +570,6 @@ secret_name = "STATIC""#,
         );
         assert!(
             e.contains("github.secret_name") && e.contains("{KEY}"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn parse_refuses_products_under_the_simple_profile() {
-        let e = simple_error("repo = \"org/r\"\nproducts = [\"api\"]");
-        assert!(
-            e.contains("github.products") && e.contains("simple profile"),
             "{e}"
         );
     }
@@ -676,17 +591,6 @@ secret_name = "STATIC""#,
     fn env_name_is_the_key_when_the_template_has_no_product() {
         let t = target_of("repo = \"org/r\"\nsecret_name = \"{KEY}\"");
         assert_eq!(t.env_name("my-app", "API_KEY"), "API_KEY");
-    }
-
-    #[test]
-    fn serves_only_lists_the_products_given() {
-        let t = target_of("repo = \"org/r\"\nproducts = [\"api\"]");
-        assert!(t.serves("api") && !t.serves("web"));
-    }
-
-    #[test]
-    fn serves_every_product_without_a_products_list() {
-        assert!(target_of("repo = \"org/r\"").serves("anything"));
     }
 
     // same_target ------------------------------------------------------------------------
@@ -914,28 +818,9 @@ secret_name = "STATIC""#,
     fn init_section_writes_the_repo() {
         assert_eq!(
             PROVIDER
-                .init_section(
-                    &BTreeMap::from([("repo", "org/r".to_string())]),
-                    Profile::Fleet
-                )
+                .init_section(&BTreeMap::from([("repo", "org/r".to_string())]))
                 .as_deref(),
             Some("github.repo = \"org/r\"\n")
-        );
-    }
-
-    #[test]
-    fn init_section_writes_products_as_an_array() {
-        assert_eq!(
-            PROVIDER
-                .init_section(
-                    &BTreeMap::from([
-                        ("repo", "org/r".to_string()),
-                        ("products", "api, web".to_string()),
-                    ]),
-                    Profile::Fleet
-                )
-                .as_deref(),
-            Some("github.repo = \"org/r\"\ngithub.products = [\"api\", \"web\"]\n")
         );
     }
 }

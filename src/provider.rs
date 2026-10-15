@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use toml::Spanned;
 use toml::de::{DeValue, ValueDeserializer};
 
-use crate::domain::{Kind, Profile, SecretValue};
+use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::ports::{PinnedStore, Ports};
@@ -21,7 +21,8 @@ use crate::runner::CommandRunner;
 
 /// One deployment provider. Registered once in `adapters::registry::PROVIDERS`.
 pub trait Provider: Sync {
-    /// Config section name under `[environments.<env>]`: "fly", "azure", "kubernetes".
+    /// Config section name under `[environments.<env>.targets.<name>]`: "fly", "azure",
+    /// "kubernetes", "github".
     fn section(&self) -> &'static str;
     /// User-facing name: "Fly", "Azure", "Kubernetes".
     fn label(&self) -> &'static str;
@@ -31,11 +32,7 @@ pub trait Provider: Sync {
     fn tools(&self) -> &'static [&'static Tool];
     /// Parses and validates that section (identifiers, templates, required fields). Read
     /// the section with [`Section::deserialize`], so a shape error points at its line.
-    fn parse(
-        &self,
-        section: &Section<'_>,
-        profile: Profile,
-    ) -> Result<Box<dyn TargetConfig>, Error>;
+    fn parse(&self, section: &Section<'_>) -> Result<Box<dyn TargetConfig>, Error>;
     /// Whether a stored value's version, as the store lists it, is derived from the value
     /// (a digest): then opv never shows it, as it is equal for equal values and can be used
     /// to test a guess (`opv history`, #95). Version ids and timestamps are not.
@@ -52,20 +49,20 @@ pub trait Provider: Sync {
     fn doctor_checks(&self) -> &'static [&'static str];
     /// What a person adds to deploy with this provider, e.g. `configure fly.app`. Only the
     /// default provider (`adapters::registry::DEFAULT`) is ever asked.
-    fn setup_hint(&self, profile: Profile) -> String;
-    /// The fields `opv init --target <section>` takes (FR-23, H3), each as the option
+    fn setup_hint(&self) -> String;
+    /// The fields `opv target add` takes for this provider (FR-56, H3), each as the option
     /// `--<section>-<field>` ([`init_flag`]). Empty when the provider does not support
-    /// `init`. A new provider adds its options here; core and the CLI need no change.
+    /// `target add`. A new provider adds its options here; core and the CLI need no change.
     fn init_fields(&self) -> &'static [InitField] {
         &[]
     }
-    /// The TOML lines `opv init` writes under `[environments.<env>]` for this target, from
-    /// the given `values` (field → value; every required field present), or `None` when the
-    /// provider does not support `init`. Fill what the profile needs and the user did not
-    /// give (a fleet name template). Nothing is looked up; the result is validated with the
-    /// same loader as a hand-written file.
-    fn init_section(&self, values: &BTreeMap<&str, String>, profile: Profile) -> Option<String> {
-        let _ = (values, profile);
+    /// The TOML lines `opv target add` writes under `[environments.<env>.targets.<name>]`
+    /// for this target, from the given `values` (field → value; every required field
+    /// present), or `None` when the provider does not support `target add`. Fill what the target needs and the
+    /// user did not give (a name template). Nothing is looked up; the result is validated
+    /// with the same loader as a hand-written file.
+    fn init_section(&self, values: &BTreeMap<&str, String>) -> Option<String> {
+        let _ = values;
         None
     }
     /// The fields a `deploy_credentials` item holds for this provider, by convention
@@ -169,13 +166,13 @@ pub fn deploy_provider(target: &dyn TargetConfig) -> &'static dyn Provider {
 pub struct InitField {
     /// The field under the provider's section, e.g. `key_vault`.
     pub field: &'static str,
-    /// What to give, for `opv init --help`.
+    /// What to give, for `opv target add --help`.
     pub help: &'static str,
-    /// Whether `init --target <section>` needs it.
+    /// Whether a target of this provider needs it.
     pub required: bool,
 }
 
-/// The `opv init` option of `field`: `--azure-key-vault` is `azure-key-vault`.
+/// The `opv target add` option of `field`: `--azure-key-vault` is `azure-key-vault`.
 pub fn init_flag(p: &dyn Provider, field: &InitField) -> String {
     format!("{}-{}", p.section(), field.field.replace('_', "-"))
 }
@@ -267,8 +264,8 @@ pub fn store_eq_as<T: PartialEq + 'static>(this: &T, other: &dyn StoreConfig) ->
     other.as_any().downcast_ref::<T>() == Some(this)
 }
 
-/// One provider section of `secrets.toml` (`[environments.<env>.<section>]`), with its
-/// place in the file so errors point at the offending line.
+/// One provider section of `secrets.toml` (`[environments.<env>.targets.<name>]`'s
+/// `<section>`), with its place in the file so errors point at the offending line.
 pub struct Section<'a> {
     env: &'a str,
     value: &'a Spanned<DeValue<'a>>,
@@ -322,22 +319,12 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     fn secrets_in(&self) -> Option<&dyn StoreConfig> {
         None
     }
-    /// Whether keys of `product` are delivered to this target (FR-48). `false`: the
-    /// product's keys render no name here (never written, managed or pruned, and exempt
-    /// from the name collision check). Default: every product.
-    fn serves(&self, product: &str) -> bool {
-        let _ = product;
-        true
-    }
-    /// The products this target is limited to (FR-48), as configured, for load-time
-    /// validation: each must be declared and not source-only. `None`: every product.
-    fn scoped_products(&self) -> Option<Vec<&str>> {
-        None
-    }
-    /// True when `other` is the same target: two environments on it would manage the same
-    /// names, and each would prune what the other stages (FR-8).
+    /// True when `other` is the same target: two targets on it would manage the same names,
+    /// and each would prune what the other stages (FR-8). Which products a target delivers
+    /// is not the provider's to decide: see [`crate::domain::Fleet::delivers`] (FR-56).
     fn same_target(&self, other: &dyn TargetConfig) -> bool;
-    /// The configuration error for environments `first` and `second` sharing this target.
+    /// The configuration error for targets `first` and `second` (each named as `<env>
+    /// (target <name>)`) sharing this target.
     fn shared_target_error(&self, first: &str, second: &str) -> String;
     /// The store and runtime adapters of this target (FR-28). `managed` is every env name
     /// the template renders for a declared key (FR-8); the ports speak those names.

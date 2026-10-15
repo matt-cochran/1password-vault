@@ -480,6 +480,20 @@ fn no_secret_in_any_argv() {
             ("flyctl", vec!["releases", "--app", APP, "--json"]),
             ("flyctl", vec!["secrets", "import", "--app", APP, "--stage"]),
             ("flyctl", vec!["secrets", "list", "--app", APP, "--json"]),
+            ("op", vec!["whoami", "--format", "json"]),
+            (
+                "op",
+                vec![
+                    "item",
+                    "get",
+                    "iprd",
+                    "--vault",
+                    "vprd",
+                    "--format",
+                    "json",
+                    "--cache=false",
+                ],
+            ),
             (
                 "flyctl",
                 vec!["secrets", "unset", N_STRIPE, "--app", APP, "--stage"]
@@ -973,7 +987,8 @@ fn clean_status_prints_summary_line() {
     assert_eq!(r.code, 0, "{}", r.all());
     let first = r.stdout.lines().next().unwrap();
     assert!(
-        first.starts_with("prod: ") && first.ends_with(" · 0 findings · 2 not yet on Fly"),
+        first.starts_with("prod/portfolio: ")
+            && first.ends_with(" · 0 findings · 2 not yet on Fly"),
         "{}",
         r.stdout
     );
@@ -1353,8 +1368,8 @@ fn status_json_totals_are_names_and_counts() {
     );
 }
 
-/// FR-21: each row object carries product, key, kind, state, failing rule, Fly name and
-/// target presence.
+/// FR-21, FR-56: each row object carries its target, product, key, kind, state, failing
+/// rule, target name and target presence.
 #[test]
 fn status_json_row_carries_the_contract_fields() {
     let h = Harness::new(&good_item());
@@ -1369,15 +1384,15 @@ fn status_json_row_carries_the_contract_fields() {
     assert_eq!(
         row,
         &json!({
+            "target": "portfolio",
             "product": "allumata",
             "key": "OPENAI_API_KEY",
             "kind": "secret",
             "state": "saved",
             "rule": null,
             "reason": null,
-            "fly_name": N_OPENAI,
             "target_name": N_OPENAI,
-            "target": "absent",
+            "target_state": "absent",
             "action": "would_stage",
         }),
         "{}",
@@ -1615,18 +1630,24 @@ fn simple_profile_commands_never_leak_values() {
     }
 }
 
-/// FR-13, §8 item 15: a simple `fly sync --prune --deploy` reads the item exactly once.
+/// FR-13, §8 item 15, D12: a simple `fly sync --prune --deploy` reads the values item
+/// once cached and once fresh (the fresh read feeds the delivery evidence).
 #[test]
-fn simple_profile_sync_reads_one_item() {
+fn simple_profile_sync_reads_the_item_fresh_once() {
     let h = simple_harness();
     let r = h.run_config(SIMPLE_CONFIG, &["sync", "prod", "--prune", "--deploy"]);
     assert_eq!(r.code, 0, "{}", r.all());
-    let gets = h
+    let item_gets: Vec<Vec<String>> = h
         .calls()
-        .iter()
+        .into_iter()
         .filter(|c| c.prog == "op" && c.argv.first().map(String::as_str) == Some("item"))
+        .map(|c| c.argv)
+        .collect();
+    let fresh = item_gets
+        .iter()
+        .filter(|a| a.iter().any(|x| x == "--cache=false"))
         .count();
-    assert_eq!(gets, 1);
+    assert_eq!(fresh, 1, "{item_gets:?}");
 }
 
 /// FR-8, SR-6, §8 item 15: `--prune` under the simple profile unsets the declared key not
@@ -1663,22 +1684,23 @@ const HEX_MARK: &str = "f22dec0de5";
 /// One key per rule failure path (FR-15, FR-22), every rule in its own key so each row
 /// fails exactly one way. Config text holds no marker.
 const REASONS_CONFIG: &str = r#"
-[profile]
-kind = "fleet"
-
 [environments.staging]
-vault_id = "vstg"
-item_id = "istg"
+boundaries.allumata = { vault_id = "vstg", item_id = "istg" }
+
+[environments.staging.targets.app]
 fly.app = "reasons-staging"
 fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sstg"
 
 [environments.prod]
-vault_id = "vprd"
-item_id = "iprd"
-fly.app = "mcproductlabs-portfolio-production"
-fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+boundaries.allumata = { vault_id = "vprd", item_id = "iprd" }
 modes.allumata.payments = "test"
 modes.allumata.region = "weird"
+
+[environments.prod.targets.app]
+fly.app = "mcproductlabs-portfolio-production"
+fly.secret_name = "FLEET__{PRODUCT}__{KEY}"
+state_vault_id = "sprd"
 
 [products.allumata.keys.REFUSED]
 kind = "secret"
@@ -1775,11 +1797,6 @@ rules = { https_url = true }
 kind = "secret"
 environments = ["prod"]
 rules = { ensure_prefix = "pre_" }
-
-[products.allumata.keys.PATTERN]
-kind = "secret"
-environments = ["prod"]
-rules = { ensure_prefix = "pre_", pattern = "[a-z]+" }
 
 [products.allumata.keys.UNKNOWN_TRANSFORM]
 kind = "secret"
@@ -1941,12 +1958,6 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             "nothing after the prefix",
         ),
         (
-            "PATTERN",
-            format!("pre_{m}"),
-            "pattern",
-            "text after the prefix does not match the pattern",
-        ),
-        (
             "UNKNOWN_TRANSFORM",
             format!("{m}t"),
             "transform",
@@ -2105,8 +2116,8 @@ fn explain_makes_no_op_or_flyctl_call() {
     assert!(h.calls().is_empty(), "{:?}", h.calls());
 }
 
-/// FR-22, FR-20, SR-1: under the simple profile a failing row's reason carries no marker,
-/// in text or JSON, and the JSON row keeps `product: null`.
+/// FR-22, FR-20, SR-1: a failing row's reason carries no marker, in text or JSON, and the
+/// JSON row names its product.
 #[test]
 fn simple_profile_rule_failure_reason_carries_no_marker() {
     let h = Harness::new(&item(vec![
@@ -2140,7 +2151,7 @@ fn simple_profile_rule_failure_reason_carries_no_marker() {
         .clone();
     assert_eq!(
         (row["product"].clone(), row["reason"].clone()),
-        (Value::Null, json!("expected prefix postgres://"))
+        (json!("app"), json!("expected prefix postgres://"))
     );
 }
 
@@ -2436,7 +2447,8 @@ fn sync_json_stdout_is_one_document() {
     assert_eq!(pending, [N_ENC, N_OPENAI], "{}", r.all());
 }
 
-/// P22: `status` without an environment prints one line per environment.
+/// P22, FR-56: `status` without an environment prints one line per target of each
+/// environment.
 #[test]
 fn status_without_env_prints_one_line_per_environment() {
     let h = Harness::new(&good_item());
@@ -2446,7 +2458,7 @@ fn status_without_env_prints_one_line_per_environment() {
         .lines()
         .map(|l| l.split(':').next().unwrap_or_default())
         .collect();
-    assert_eq!(envs, ["prod", "staging"], "{}", r.all());
+    assert_eq!(envs, ["prod/portfolio", "staging/portfolio"], "{}", r.all());
 }
 
 /// H8, SR-1: with `GITHUB_STEP_SUMMARY` set, status, plan and sync (missing keys and
