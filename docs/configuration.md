@@ -167,6 +167,10 @@ environments = ["prod"]
 rules = { enum = ["debug", "info", "warn"] }
 ```
 
+### Local delivery: `[products.<p>.local]` and `file`
+
+Optional, for `opv run` only (targets ignore both). `environment = "declared_only"` gives the app only the product's declared keys and a fixed set of basics; `secrets_dir_env = "<VAR>"` names the variable that points at a private RAM directory holding every key with `file = "<relative/path>"` (as a file, not a variable). Paths are relative, at most four parts of letters, digits, `.`, `_` and `-`, unique, and never inside another key's path; `secrets_dir_env` must be a plain variable name, not `PATH`, `HOME`, `XDG_CONFIG_HOME`, `OP_*` or one of the product's keys, and needs at least one `file` key. Recipes for secret-store apps and Cloudflare Workers: [local development](local-development.md#only-the-declared-keys-or-keys-as-files-productsplocal); guarantees and limits: [design](design/local-delivery.md).
+
 ### Targets: where products deploy
 
 A **target** is one named placement in one environment: one provider's options, the products it serves, its deploy identity and its delivery evidence. An environment declares its targets only as `[environments.<env>.targets.<name>]`, also when there is just one. An environment with no target is run-only: `check`, `run`, `config export` and `item skeleton` work; `plan` and `sync` refuse it.

@@ -906,6 +906,7 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         for (key, spec) in &p.keys {
             validate_key(&format!("{product}/{key}"), key, spec, &environments)?;
         }
+        validate_local(product, p).map_err(|m| doc.at_path(&["products", product], m))?;
     }
 
     let mut products = raw.products;
@@ -1161,6 +1162,67 @@ fn check_ids(name: &str, owner: &str, vault_id: &str, item_id: &str) -> Result<(
             is_id,
             "^[A-Za-z0-9][A-Za-z0-9._-]*$",
         )?;
+    }
+    Ok(())
+}
+
+/// `[products.<p>.local]` and the keys' `file` paths (#136, #137): the directory variable
+/// is a plain, unreserved name; each path is relative, at most four plain components,
+/// unique, and never inside another key's file.
+fn validate_local(product: &str, p: &crate::domain::Product) -> Result<(), String> {
+    let files: Vec<(&String, &str)> = p
+        .keys
+        .iter()
+        .filter_map(|(k, spec)| spec.file.as_deref().map(|f| (k, f)))
+        .collect();
+    let dir_env = p.local.as_ref().and_then(|l| l.secrets_dir_env.as_deref());
+    if let Some(v) = dir_env {
+        if !is_env_name(v)
+            || matches!(v, "PATH" | "HOME" | "XDG_CONFIG_HOME")
+            || v.starts_with("OP_")
+            || p.keys.contains_key(v)
+        {
+            return Err(format!(
+                "product {product:?}: local.secrets_dir_env {v:?} must match ^[A-Z][A-Z0-9_]*$, \
+                 and be neither PATH, HOME, XDG_CONFIG_HOME, OP_* nor one of its keys"
+            ));
+        }
+        if files.is_empty() {
+            return Err(format!(
+                "product {product:?}: local.secrets_dir_env is set but no key has file = \
+                 \"<path>\"; add file to the keys the app reads from that directory, or remove it"
+            ));
+        }
+    }
+    let component = |c: &str| {
+        let mut chars = c.chars();
+        chars.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    for (key, path) in &files {
+        if dir_env.is_none() {
+            return Err(format!(
+                "product {product:?}: key {key} has file = {path:?} but the product sets no \
+                 local.secrets_dir_env (the variable that names the directory)"
+            ));
+        }
+        let parts: Vec<&str> = path.split('/').collect();
+        if path.len() > 128 || parts.len() > 4 || !parts.iter().all(|c| component(c)) {
+            return Err(format!(
+                "product {product:?}: key {key}: file {path:?} must be a relative path of at \
+                 most four parts, each starting with a letter or digit and using only letters, \
+                 digits, '.', '_' and '-'"
+            ));
+        }
+        if let Some(other) = seen.iter().find(|o| {
+            **o == *path || path.starts_with(&format!("{o}/")) || o.starts_with(&format!("{path}/"))
+        }) {
+            return Err(format!(
+                "product {product:?}: key {key}: file {path:?} collides with {other:?}"
+            ));
+        }
+        seen.push(path);
     }
     Ok(())
 }
@@ -1651,6 +1713,86 @@ mod tests {
     /// The fixture with `from` replaced by `to`.
     fn mutate(from: &str, to: &str) -> String {
         replaced(&ok(), from, to)
+    }
+
+    // --- #136, #137: local delivery ---
+
+    const LOCAL: &str = "\n[products.allumata.local]\nenvironment = \"declared_only\"\nsecrets_dir_env = \"APP_SECRETS_DIR\"\n";
+
+    fn with_file(path: &str) -> String {
+        replaced(
+            &format!("{}{LOCAL}", ok()),
+            "guidance = \"OpenAI platform / API keys\"",
+            &format!("guidance = \"OpenAI platform / API keys\"\nfile = \"{path}\""),
+        )
+    }
+
+    #[test]
+    fn a_file_key_with_a_secrets_directory_loads() {
+        assert!(parse(&with_file("openai/api-key")).is_ok());
+    }
+
+    #[test]
+    fn a_file_key_records_its_path() {
+        let f = parse(&with_file("openai/api-key")).unwrap();
+        assert_eq!(
+            f.products["allumata"].keys["OPENAI_API_KEY"]
+                .file
+                .as_deref(),
+            Some("openai/api-key")
+        );
+    }
+
+    #[test]
+    fn declared_only_is_read() {
+        let f = parse(&with_file("openai/api-key")).unwrap();
+        assert_eq!(
+            f.products["allumata"].local.as_ref().unwrap().environment,
+            crate::domain::model::LocalEnvironment::DeclaredOnly
+        );
+    }
+
+    #[test]
+    fn a_file_key_without_a_secrets_directory_is_refused() {
+        let t = with_file("openai/api-key").replace("secrets_dir_env = \"APP_SECRETS_DIR\"\n", "");
+        assert!(parse(&t).is_err());
+    }
+
+    #[test]
+    fn a_file_path_that_climbs_out_is_refused() {
+        assert!(parse(&with_file("../escape")).is_err());
+    }
+
+    #[test]
+    fn an_absolute_file_path_is_refused() {
+        assert!(parse(&with_file("/etc/passwd")).is_err());
+    }
+
+    #[test]
+    fn a_file_path_inside_another_keys_file_is_refused() {
+        let t = replaced(
+            &with_file("openai"),
+            "[products.allumata.keys.INTEGRATION_ENC_KEY]\n",
+            "[products.allumata.keys.INTEGRATION_ENC_KEY]\nfile = \"openai/nested\"\n",
+        );
+        assert!(parse(&t).is_err());
+    }
+
+    #[test]
+    fn a_reserved_secrets_directory_variable_is_refused() {
+        let t = with_file("k").replace("APP_SECRETS_DIR", "OP_SESSION_x");
+        assert!(parse(&t).is_err());
+    }
+
+    #[test]
+    fn a_secrets_directory_without_a_file_key_is_refused() {
+        assert!(parse(&format!("{}{LOCAL}", ok())).is_err());
+    }
+
+    #[test]
+    fn an_unknown_local_environment_mode_is_refused() {
+        let t = with_file("k").replace("declared_only", "everything");
+        assert!(parse(&t).is_err());
     }
 
     /// `text` with boundary `b` recorded in `env` (IDs `v<b>` and `i<b>`).

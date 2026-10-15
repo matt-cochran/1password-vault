@@ -882,8 +882,10 @@ Design: `docs/design/accounts-and-readiness.md` §2 (#80).
 - `opv account list [--json]` lists the 1Password accounts the installed `op` knows, read-only: it never prompts, signs in, adds an account, creates a manifest or tidies an item. Per account: account ID, user ID, email, sign-in address, shorthand, `source` (`cli`), `signed_in` (`op whoami --account <id>`, exit status only; `null` when the probe cannot run) and `selected`. Never a credential, session or field value.
 - The document carries `discovery` (`ok`, `unavailable`, `op_missing`), `platform`, `cli_accounts_only` (true on Linux and WSL, where `op` keeps its own accounts; the text output then says that accounts only in a desktop app are not listed until added to this CLI), and `selected` `{account_id, by, source}` with `by` one of `flag`, `env`, `pointer`, `manifest`, `only` (exactly one account: reported, not chosen) or `null`.
 - Findings with stable codes: `no_accounts`, `selected_account_absent`, `selected_signed_out`, `discovery_unavailable`, `op_missing`, each with `human_required` and one runnable next step that names the account when one is known.
+- Advisory findings (#142), never blocking `ready`: `shared_sign_in_address` (several listed accounts on one sign-in address; each named by shorthand, email and ID), `session_for_other_account` and `stale_session_variable` (an `OP_SESSION_<name>` variable, read by name only, that belongs to another listed account than the selected one, or to none). `opv login` prints them before 1Password's prompt, never passes inherited `OP_SESSION_*` variables to `op signin`, and adds op's own scrubbed message to a refused sign-in.
 - `opv account use <id|email|address|shorthand> [--json]` records the account in `.opv` deterministically (no prompt, no sign-in). An ambiguous match fails with code `account_ambiguous`, listing each candidate's account ID and address only, with `Next: opv account use <ID>`; an unknown one fails with `selected_account_absent` and the add-account step.
 - `opv schema` lists both commands, their effects and the document.
+- Project discovery (`opv projects`, `status --all`, #135) asks the selected account only (`--account`, else `OP_ACCOUNT`), else every account op knows, and reports each by account ID with `listed`/`failed`. An inventory with any failed account is `complete: false` and exits with `inventory_incomplete` (exit 4, human required); it is never presented as an empty inventory. A failed listing is diagnosed for its own account.
 
 ## FR-50 — Sign-In Experience
 
@@ -1003,6 +1005,26 @@ Owner ruling 2026-10-14: opv is greenfield until declared live; there is one way
 - Not covered: tolerance of the shapes external tools emit (`op`, `flyctl`, `az`, `kubectl`, `gh` field casing or optional fields) and importing values from other formats (FR-53); these are inputs from outside opv, not earlier forms of opv.
 - Removed by this ruling in 0.7.0, besides FR-56 to FR-58's replacements: the simple profile and `[profile]` (FR-20; one product is a configuration with one product), the `pattern` rule (FR-24), the `fly_name` JSON field (use `target_name`), and `opv schema`'s `deprecated` list.
 - The ruling is revisited when opv is declared live; until then this requirement wins over any earlier text that keeps a deprecated form.
+
+## FR-61 — Assistant-Managed Structure, Person-Approved (#133)
+
+Owner decision 2026-10-15: assistants manage declarations and structure through MCP; people sign in, approve structure in their own terminal, and enter values in 1Password.
+
+- `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` edit the local `secrets.toml` only (no 1Password call, no value). They work before bootstrap: a text is validated as it will load once the structural plan records its IDs. Shared and personal keys, deploy credentials, removals and changes to an existing target are not declarations. A generated configuration is never edited.
+- `opv_structure_plan` computes, with reads only, what `opv bootstrap` creates (boundary vaults and items, state vaults, delivery items, empty fields) for the project's account, and an id `sp-<16 hex>` = SHA-256 over project, account ID, configuration text and every step. A recorded ID outside the account (`ids_not_in_account`) or a vault whose visibility cannot be told refuses the plan.
+- `opv approve <plan_id>` (interactive terminal only; refused under CI or with a service-account or Connect credential) re-plans, refuses a stale id, shows every step and records a single-use approval (15 minutes; project, account and plan id) only when the person types the id back. No flag skips the question.
+- `opv_structure_apply <plan_id>` re-plans (`stale_plan`), consumes the approval (`approval_required`; claimed by atomic rename, so it is used once), requires a person's session and refuses `OP_SESSION_*`, `OP_SERVICE_ACCOUNT_TOKEN` and `OP_CONNECT_*` in its environment, so writes go through the 1Password app's authorization. It records IDs as each phase completes (a partial run keeps them; objects are found again by title), only adds fields, and for a generated file returns `generator_ids` instead of writing it.
+- MCP answers are built from checked identifiers only: never a value, upstream text, or error message; errors are stable codes with fixed human guidance.
+- These are the same operations as `opv bootstrap` and `opv add` (shared code), reached by an assistant through a person's approval; the owner-terminal commands remain the way for a person (FR-60 is about one form per concept, not one caller).
+
+## FR-62 — Local Delivery Scope and Secret Files (#136, #137)
+
+Design: `docs/design/local-delivery.md`.
+
+- `[products.<p>.local]` makes `opv run` start opv's delivery step as `op run`'s child. `op run` stays the resolver and the masking parent; the step's argv holds names and paths only.
+- No `OP_*` variable reaches the app. `environment = "declared_only"` limits it to the selected keys plus a fixed list of non-secret basics.
+- A key with `file` is written, not exported: into a fresh 0700 directory under a user-owned, RAM-backed `$XDG_RUNTIME_DIR`, files 0400, created exclusively and never through a link, named by `secrets_dir_env`. The directory is removed on exit and on signal, and swept by the next run when its process is gone. Where no such directory exists the run is refused (`ram_dir_unavailable`), never written to disk.
+- Products without `local`, and every target, behave as before.
 
 # 4. Security Requirements
 

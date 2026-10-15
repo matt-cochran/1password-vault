@@ -2,6 +2,8 @@
 
 opv talks to 1Password and to a deployment target through their own CLIs (`op`, `flyctl`, `az`, `kubectl`), over networks that drop, time out and lag. This page says what opv does when something goes wrong and what you see. The exit codes and error codes themselves are listed in [usage](usage.md#exit-codes).
 
+When you report a problem, include the output of `opv version` (or `opv version --json`): opv's version and each CLI it runs, with their versions, from local probes only, with no sign-in and no value.
+
 ## What a failure looks like
 
 Every failure ends the same way on stderr: opv's error line, then (when an external call failed) what that program said, then at most one `Do:` line and exactly one `Next:` line, always last.
@@ -89,6 +91,7 @@ Names and IDs stay readable. A CLI's stdout and what opv sends on stdin are neve
 
 ## Sign-in and access problems
 
+- A sign-in that 1Password refuses ends with opv's code and step and, on the next line, `1Password said:` with op's own message (scrubbed), so the cause is never hidden. Before the prompt, `opv login` notes what can send a sign-in to the wrong account: several accounts on one sign-in address (`shared_sign_in_address`), or an `OP_SESSION_<name>` variable left in the shell for another account or none (`session_for_other_account`, `stale_session_variable`; opv ignores it when it signs in). `opv account list` shows the same checks without signing in.
 - Not signed in to 1Password on a person's machine is exit 7 with `opv login <env>` (the same in every shell). Under CI (`CI` or `GITHUB_ACTIONS` set and not `false`) it says to set `OP_SERVICE_ACCOUNT_TOKEN` instead. A machine with no 1Password account gets the `op account add` command first.
 - With a service-account or Connect token set, a failing `op whoami` cannot tell a rejected token from a lost network, so it is a 1Password error (exit 4) that names the variable to check.
 - Signed in, but the read still failed: exit 4, naming the vault and item IDs and the identity type (never the identity), and telling removed vault access from a moved, archived or deleted item.

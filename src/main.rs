@@ -251,11 +251,16 @@ const PROJECTS_QUICK: &str = "\
 Examples:
   opv projects                 # name, vault, repo and paths
   opv projects --long          # also environment names (one read per project)
-  opv projects --json          # the same, for scripts";
+  opv projects --json          # the same, for scripts
+  opv projects --account you@example.com   # one 1Password account only";
 
 const PROJECTS_MORE: &str = "\
-One metadata listing per signed-in 1Password account; names only, never a value. Changes
-nothing. opv status --all checks every project's environments.";
+One metadata listing per 1Password account (only --account's, or OP_ACCOUNT's, which
+opv login --account sets for its command); names only, never a value. Changes nothing.
+An account that cannot be listed makes the inventory incomplete: the listed projects are
+still shown, \"complete\" is false, and opv exits 4 with inventory_incomplete, since a
+project missing from it may only be in that account. opv status --all checks every
+project's environments.";
 
 const SKELETON_QUICK: &str = "\
 Examples:
@@ -336,6 +341,23 @@ const READY_QUICK: &str = "\
 Examples:
   opv ready                      # every environment × product, findings, the next step
   opv ready --json --save r.json # the receipt for an assistant or a handoff";
+
+const VERSION_QUICK: &str = "\
+Examples:
+  opv version                  # opv, op and each provider CLI, with versions
+  opv version --json           # the same, for support and CI";
+
+const APPROVE_QUICK: &str = "\
+Examples:
+  opv approve sp-3f9c0a1b2c3d4e5f   # review the assistant's structural plan, then type its id";
+
+const APPROVE_MORE: &str = "\
+An assistant prepares a structural plan with the opv MCP tool opv_structure_plan (vaults,
+items, empty fields, delivery items; never a value). Review it here and type its id to
+approve it; opv_structure_apply then creates exactly that, once, within 15 minutes. A plan
+that changed since it was prepared is refused (stale_plan). The approval is a local file
+in your state directory: it is a gate for assistants that only use MCP, not a secret, and
+the 1Password app's own prompt on each write remains the control that matters.";
 
 const BOOTSTRAP_QUICK: &str = "\
 Examples:
@@ -590,6 +612,10 @@ enum Cmd {
     /// paths; --long also reads each manifest once for its environment names.
     #[command(before_help = PROJECTS_QUICK, after_help = PROJECTS_MORE)]
     Projects {
+        /// List only this 1Password account (email, account ID or sign-in address);
+        /// defaults to OP_ACCOUNT, which opv login --account sets for its command.
+        #[arg(long, value_name = "ACCOUNT")]
+        account: Option<String>,
         /// Read each manifest for its environment names.
         #[arg(long)]
         long: bool,
@@ -705,6 +731,43 @@ enum Cmd {
         /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
+    },
+    /// Internal: the local delivery step `opv run` starts under `op run` (#136, #137).
+    #[command(name = "local-delivery", hide = true)]
+    LocalDelivery {
+        #[arg(long = "key")]
+        keys: Vec<String>,
+        #[arg(long)]
+        declared_only: bool,
+        #[arg(long)]
+        dir_env: Option<String>,
+        #[arg(long = "file")]
+        files: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// opv's version and every CLI it runs, with their versions (read-only; no sign-in).
+    ///
+    /// One bounded local version probe per CLI (1Password, then each provider's); the
+    /// configuration here, if any, says which ones this project uses. `opv --version`
+    /// prints opv's version line only.
+    #[command(before_help = VERSION_QUICK)]
+    Version {
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve, in your own terminal, the structural plan an assistant prepared (#133).
+    ///
+    /// Shows every vault, item and empty field the plan creates and asks you to type the
+    /// plan id back. The approval is single use, lasts 15 minutes, and applies to this
+    /// project and 1Password account only; the 1Password app still asks you to authorize
+    /// each change. Needs an interactive terminal; there is no flag that skips the question.
+    #[command(before_help = APPROVE_QUICK, after_help = APPROVE_MORE)]
+    Approve {
+        /// The plan id the assistant showed (sp- and 16 hex digits).
+        #[arg(value_name = "PLAN_ID")]
+        plan_id: String,
     },
     /// Create every missing boundary vault, item and state vault, record their IDs, and add
     /// the empty fields.
@@ -1788,6 +1851,7 @@ impl Cmd {
             | Cmd::Check { json, .. }
             | Cmd::Status { json, .. }
             | Cmd::Projects { json, .. }
+            | Cmd::Version { json }
             | Cmd::Explain { json, .. }
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
@@ -1947,6 +2011,22 @@ fn run(
             &mut runtime,
             &mut setup_runtime::Console,
         )?;
+        // #142: before 1Password's prompt, say what in this machine's setup can make a
+        // sign-in go to the wrong account (names only; never a value).
+        for f in opv::app::account::gather(&probe, account.as_deref())
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.code.as_str(),
+                    "shared_sign_in_address"
+                        | "session_for_other_account"
+                        | "stale_session_variable"
+                )
+            })
+        {
+            let _ = writeln!(io::stderr(), "note ({}): {}", f.code, f.message);
+        }
         let fleet = match find_config(cli.config.as_ref(), config_source).transpose()? {
             Some(f) => Some(f),
             None => manifest_for_login(&cli, config_source),
@@ -2007,8 +2087,13 @@ fn run(
         return run_init(cli, config_source, &r, out).map(|()| 0);
     }
     match &cli.cmd {
-        Cmd::Projects { long, json } => {
-            return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        Cmd::Projects {
+            account,
+            long,
+            json,
+        } => {
+            let account = account.clone().or_else(config_store::account_env);
+            return config_cmd::projects(&r, account.as_deref(), *long, *json, out).map(|()| 0);
         }
         #[cfg(feature = "ui")]
         Cmd::Ui => {
@@ -2053,6 +2138,57 @@ fn run(
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
         }
+        Cmd::LocalDelivery {
+            keys,
+            declared_only,
+            dir_env,
+            files,
+            command,
+        } => {
+            let files = files
+                .iter()
+                .map(|f| {
+                    f.split_once('=')
+                        .map(|(k, p)| (k.to_string(), p.to_string()))
+                        .ok_or_else(|| Error::Config("--file takes KEY=path".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let d = opv::app::local_delivery::Delivery {
+                keys: keys.clone(),
+                declared_only: *declared_only,
+                files,
+                dir_env: dir_env.clone(),
+                command: command.clone(),
+            };
+            return opv::app::local_delivery::run(&d);
+        }
+        Cmd::Version { json } => {
+            let here = std::env::current_dir().unwrap_or_default();
+            return opv::app::version::run(&r, cli.config.as_deref(), &here, *json, out)
+                .map(|()| 0);
+        }
+        Cmd::Approve { plan_id } => {
+            opv::app::setup_runtime::Console::require_terminal(
+                "approve",
+                &format!("opv approve {plan_id}"),
+            )?;
+            let here = std::env::current_dir().unwrap_or_default();
+            let scope = opv::app::structure::scope(&here, &r)?;
+            r.use_account(Some(scope.account.clone()));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            return opv::app::approve::run(
+                &r,
+                &scope,
+                plan_id,
+                now,
+                &mut TerminalReview,
+                &mut |p, project, account, now| opv::approval::record(p, project, account, now),
+            )
+            .map(|()| 0);
+        }
         Cmd::Account(AccountCmd::List { account, json }) => {
             return opv::app::account::list(&r, account.as_deref(), *json, out).map(|()| 0);
         }
@@ -2070,7 +2206,9 @@ fn run(
             if used && let Some(p) = &product {
                 let _ = writeln!(io::stderr(), "product {p} (from OPV_PRODUCT)");
             }
-            return config_cmd::status_all(&r, product.as_deref(), *json, out).map(|()| 0);
+            let account = config_store::account_env();
+            return config_cmd::status_all(&r, account.as_deref(), product.as_deref(), *json, out)
+                .map(|()| 0);
         }
         Cmd::Config(ConfigCmd::Import { .. }) | Cmd::Config(ConfigCmd::Check { .. }) => {
             return run_config_manifest(cli, &r, out).map(|()| 0);
@@ -2409,6 +2547,9 @@ fn run_other(
         | Cmd::Projects { .. }
         | Cmd::Account(_)
         | Cmd::Bootstrap { .. }
+        | Cmd::Approve { .. }
+        | Cmd::Version { .. }
+        | Cmd::LocalDelivery { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
@@ -2909,6 +3050,27 @@ fn exit_byte(code: i32) -> u8 {
     }
 }
 
+/// `opv approve`'s review on the person's own terminal (checked before it runs).
+struct TerminalReview;
+
+impl opv::app::approve::Review for TerminalReview {
+    fn show(&mut self, line: &str) -> Result<(), Error> {
+        writeln!(io::stdout(), "{line}")
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
+    }
+    fn ask(&mut self, question: &str) -> Result<String, Error> {
+        let mut out = io::stdout();
+        write!(out, "{question} ")
+            .and_then(|()| out.flush())
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).map_err(|e| {
+            Error::Dependency(format!("cannot read the answer ({})", e.kind()).into())
+        })?;
+        Ok(answer.trim().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3069,7 +3231,10 @@ mod tests {
     /// print them.
     fn leaf_helps() -> Vec<(String, String, String)> {
         fn walk(cmd: &mut clap::Command, prefix: &str, out: &mut Vec<(String, String, String)>) {
-            for sub in cmd.get_subcommands_mut().filter(|s| s.get_name() != "help") {
+            for sub in cmd
+                .get_subcommands_mut()
+                .filter(|s| s.get_name() != "help" && !s.is_hide_set())
+            {
                 let name = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
                     walk(sub, &format!("{name} "), out);
@@ -3177,7 +3342,7 @@ mod tests {
     #[test]
     fn schema_lists_every_command_with_an_effect() {
         fn leaves(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
-            for sub in cmd.get_subcommands() {
+            for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
                 let path = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
                     leaves(sub, &format!("{path} "), out);
@@ -3246,7 +3411,7 @@ mod tests {
             prefix: &str,
             out: &mut Vec<(String, &'a clap::Command)>,
         ) {
-            for sub in cmd.get_subcommands() {
+            for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
                 let path = format!("{prefix}{}", sub.get_name());
                 if sub.has_subcommands() {
                     leaves(sub, &format!("{path} "), out);

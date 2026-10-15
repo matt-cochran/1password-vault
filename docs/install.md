@@ -21,7 +21,7 @@ WSL and macOS under Rosetta), verifies the download against the release's
 platform, a missing checksum tool or a checksum mismatch fails closed.
 
 ```sh
-sh install.sh --version v0.7.0   # install exactly this release (default: latest)
+sh install.sh --version v0.8.0   # install exactly this release (default: latest)
 sh install.sh --dir /usr/local/bin
 sh install.sh --check            # report what would happen, change nothing
 ```
@@ -127,7 +127,12 @@ gh attestation verify opv-x86_64-unknown-linux-musl --repo matt-cochran/1passwor
 
 ## Prerequisites
 
-Install only what your target needs; `opv doctor` checks exactly that and prints the install command for your OS.
+Install only what your target needs; `opv doctor` checks exactly that and prints the install command for your OS. To see every version at once, for a support request or a CI log, run one command; it needs no sign-in and changes nothing:
+
+```sh
+opv version          # opv, then op, flyctl, az, kubectl and gh: version, missing or unknown, and which this project uses
+opv version --json   # the same, as one document
+```
 
 | Need | Version | For |
 |---|---|---|

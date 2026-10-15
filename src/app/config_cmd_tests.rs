@@ -301,7 +301,7 @@ fn projects_lists_name_vault_and_repo() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
     let mut out = Vec::new();
-    projects(&op, false, false, &mut out).unwrap();
+    projects(&op, None, false, false, &mut out).unwrap();
     assert_eq!(
         text(&out),
         "myapp: vault myapp-dev; repo github.com/acme/myapp\n"
@@ -312,7 +312,7 @@ fn projects_lists_name_vault_and_repo() {
 fn projects_without_long_reads_no_manifest() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
-    projects(&op, false, false, &mut Vec::new()).unwrap();
+    projects(&op, None, false, false, &mut Vec::new()).unwrap();
     assert_eq!(op.count(&["op", "item", "get"]), 0);
 }
 
@@ -321,7 +321,7 @@ fn projects_long_names_the_environments() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
     let mut out = Vec::new();
-    projects(&op, true, false, &mut out).unwrap();
+    projects(&op, None, true, false, &mut out).unwrap();
     assert!(text(&out).contains("environments dev"), "{}", text(&out));
 }
 
@@ -338,7 +338,7 @@ fn projects_json_has_the_paths() {
         ),
     );
     let mut out = Vec::new();
-    projects(&op, false, true, &mut out).unwrap();
+    projects(&op, None, false, true, &mut out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["projects"][0]["paths"][0], "apps/api");
 }
@@ -349,7 +349,7 @@ fn status_all_reports_an_unreadable_project_and_goes_on() {
     put(&op, "broken", "[profile\n");
     put(&op, "myapp", TOML);
     let mut out = Vec::new();
-    let _ = status_all(&op, None, false, &mut out);
+    let _ = status_all(&op, None, None, false, &mut out);
     let t = text(&out);
     assert!(
         t.contains("broken (vault myapp-dev): not read")
@@ -362,7 +362,7 @@ fn status_all_reports_an_unreadable_project_and_goes_on() {
 fn status_all_fails_when_a_project_cannot_be_read() {
     let op = FakeOp::default();
     put(&op, "broken", "[profile\n");
-    assert!(status_all(&op, None, false, &mut Vec::new()).is_err());
+    assert!(status_all(&op, None, None, false, &mut Vec::new()).is_err());
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn status_all_json_has_one_entry_per_project() {
     put(&op, "b", TOML);
     let mut out = Vec::new();
     // The environments' items are not in the fake: each project is still one entry.
-    let _ = status_all(&op, None, true, &mut out);
+    let _ = status_all(&op, None, None, true, &mut out);
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["projects"].as_array().unwrap().len(), 2);
 }
@@ -445,7 +445,7 @@ fn status_all_with_a_product_lists_only_projects_declaring_it() {
     put(&op, "a", FLEET_TOML);
     put(&op, "b", TOML);
     let mut out = Vec::new();
-    let _ = status_all(&op, Some("api"), true, &mut out);
+    let _ = status_all(&op, None, Some("api"), true, &mut out);
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["projects"].as_array().unwrap().len(), 1);
 }
@@ -455,7 +455,7 @@ fn status_all_with_a_product_lists_only_projects_declaring_it() {
 fn status_all_environment_error_next_is_runnable() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
-    let e = status_all(&op, None, false, &mut Vec::new()).unwrap_err();
+    let e = status_all(&op, None, None, false, &mut Vec::new()).unwrap_err();
     assert!(
         crate::error::is_runnable(e.next_step().unwrap_or_default()),
         "{:?}",
@@ -469,10 +469,214 @@ fn status_all_json_environment_error_carries_a_runnable_next() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
     let mut out = Vec::new();
-    let _ = status_all(&op, None, true, &mut out);
+    let _ = status_all(&op, None, None, true, &mut out);
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     let next = v["projects"][0]["environments"][0]["next"]
         .as_str()
         .unwrap_or_default();
     assert!(crate::error::is_runnable(next), "{next}");
+}
+
+// --- #135: discovery reports every account, and never an incomplete list as empty ---
+
+mod discovery {
+    use super::super::*;
+    use crate::runner::{Output, fake::FakeRunner, fake::failed_read};
+
+    const A: &str = "ACCOUNTAAA000000000000AAAA";
+    const B: &str = "ACCOUNTBBB000000000000BBBB";
+    const EMAIL: &str = "person-c135@example.com";
+
+    /// Two accounts on the same sign-in address (my.1password.com), as in the owner's
+    /// report: a personal one (A) and a business one (B).
+    fn two_accounts() -> Output {
+        Output::success(format!(
+            r#"[{{"url":"https://my.1password.com","email":"{EMAIL}","user_uuid":"USERAAA0000000000000000AAA","account_uuid":"{A}","shorthand":"my"}},{{"url":"https://my.1password.com","email":"{EMAIL}","user_uuid":"USERBBB0000000000000000BBB","account_uuid":"{B}","shorthand":"biz"}}]"#
+        ))
+    }
+
+    fn one_manifest() -> Output {
+        Output::success(
+            r#"[{"id":"itemaaaaaaaaaaaaaaaaaaaaaa","title":"opv · app","tags":["opv-manifest"],"version":1,"vault":{"id":"vaultaaaaaaaaaaaaaaaaaaaaa","name":"app-dev"}}]"#,
+        )
+    }
+
+    /// The responses for one account whose listing fails and whose `op whoami --account`
+    /// says it is signed out.
+    fn signed_out() -> Vec<Output> {
+        failed_read(1).chain([Output::failure(1)]).collect()
+    }
+
+    fn runner(listings: Vec<Vec<Output>>) -> FakeRunner {
+        let mut all = vec![two_accounts()];
+        all.extend(listings.into_iter().flatten());
+        FakeRunner::new(all)
+    }
+
+    fn projects_json(r: &FakeRunner, account: Option<&str>) -> (Result<(), Error>, Value) {
+        let mut out = Vec::new();
+        let res = projects(r, account, false, true, &mut out);
+        let doc = serde_json::from_slice(&out).unwrap_or(Value::Null);
+        (res, doc)
+    }
+
+    use serde_json::Value;
+
+    #[test]
+    fn a_selected_account_is_the_only_account_listed() {
+        let r = runner(vec![vec![Output::success("[]")]]);
+        let _ = projects_json(&r, Some(B));
+        assert!(!r.argv_contains(A));
+    }
+
+    #[test]
+    fn a_selected_account_is_listed_by_its_account_id() {
+        let r = runner(vec![vec![Output::success("[]")]]);
+        let _ = projects_json(&r, Some(B));
+        assert!(r.argv_contains(B));
+    }
+
+    #[test]
+    fn a_selected_account_listing_is_complete() {
+        let r = runner(vec![vec![Output::success("[]")]]);
+        let (_, doc) = projects_json(&r, Some(B));
+        assert_eq!(doc["complete"], true);
+    }
+
+    #[test]
+    fn a_selected_account_is_chosen_by_its_shorthand() {
+        let r = runner(vec![vec![Output::success("[]")]]);
+        let (_, doc) = projects_json(&r, Some("biz"));
+        assert_eq!(doc["accounts"][0]["account_id"], B);
+    }
+
+    #[test]
+    fn a_selected_signed_out_account_is_op_not_signed_in() {
+        let r = runner(vec![signed_out()]);
+        let (res, _) = projects_json(&r, Some(B));
+        assert_eq!(res.unwrap_err().code().as_str(), "op_not_signed_in");
+    }
+
+    #[test]
+    fn every_account_failing_is_inventory_incomplete() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let (res, _) = projects_json(&r, None);
+        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+    }
+
+    #[test]
+    fn every_account_failing_is_not_complete() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let (_, doc) = projects_json(&r, None);
+        assert_eq!(doc["complete"], false);
+    }
+
+    #[test]
+    fn failed_accounts_are_told_apart_by_account_id() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let (_, doc) = projects_json(&r, None);
+        let ids: Vec<&str> = doc["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["account_id"].as_str())
+            .collect();
+        assert_eq!(ids, [A, B]);
+    }
+
+    #[test]
+    fn a_failed_account_is_reported_as_failed() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let (_, doc) = projects_json(&r, None);
+        assert_eq!(doc["accounts"][1]["status"], "failed");
+    }
+
+    #[test]
+    fn a_failed_account_report_names_why() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let (_, doc) = projects_json(&r, None);
+        assert_eq!(doc["accounts"][1]["error_code"], "op_not_signed_in");
+    }
+
+    #[test]
+    fn an_incomplete_inventory_names_a_sign_in_step_for_the_failed_account() {
+        let r = runner(vec![vec![Output::success("[]")], signed_out()]);
+        let (res, _) = projects_json(&r, None);
+        assert_eq!(
+            res.unwrap_err().next_step(),
+            Some(format!("opv login --account {B} -- opv projects --account {B}").as_str())
+        );
+    }
+
+    #[test]
+    fn a_partial_inventory_keeps_the_projects_it_listed() {
+        let r = runner(vec![vec![one_manifest()], signed_out()]);
+        let (_, doc) = projects_json(&r, None);
+        assert_eq!(doc["projects"][0]["account_id"], A);
+    }
+
+    #[test]
+    fn a_partial_inventory_is_inventory_incomplete() {
+        let r = runner(vec![vec![one_manifest()], signed_out()]);
+        let (res, _) = projects_json(&r, None);
+        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+    }
+
+    #[test]
+    fn a_listed_account_counts_its_manifests() {
+        let r = runner(vec![vec![one_manifest()], signed_out()]);
+        let (_, doc) = projects_json(&r, None);
+        assert_eq!(doc["accounts"][0]["manifests"], 1);
+    }
+
+    #[test]
+    fn every_account_listing_nothing_is_a_verified_empty_inventory() {
+        let r = runner(vec![
+            vec![Output::success("[]")],
+            vec![Output::success("[]")],
+        ]);
+        let (res, _) = projects_json(&r, None);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn a_verified_empty_inventory_is_complete() {
+        let r = runner(vec![
+            vec![Output::success("[]")],
+            vec![Output::success("[]")],
+        ]);
+        let (_, doc) = projects_json(&r, None);
+        assert_eq!(doc["complete"], true);
+    }
+
+    #[test]
+    fn a_failed_account_is_never_diagnosed_as_another_signed_in_identity() {
+        let r = runner(vec![vec![Output::success("[]")], signed_out()]);
+        let (res, doc) = projects_json(&r, None);
+        let shown = format!("{doc}{}", res.unwrap_err());
+        assert!(!shown.contains("signed in to 1Password as"), "{shown}");
+    }
+
+    #[test]
+    fn account_reports_never_show_the_persons_email() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let (res, doc) = projects_json(&r, None);
+        let shown = format!("{doc}{}", res.unwrap_err());
+        assert!(!shown.contains(EMAIL), "{shown}");
+    }
+
+    #[test]
+    fn an_incomplete_text_listing_never_claims_there_are_no_projects() {
+        let r = runner(vec![signed_out(), signed_out()]);
+        let mut out = Vec::new();
+        let _ = projects(&r, None, false, false, &mut out);
+        assert!(!String::from_utf8_lossy(&out).contains("no project manifests visible"));
+    }
+
+    #[test]
+    fn status_all_with_an_incomplete_inventory_is_inventory_incomplete() {
+        let r = runner(vec![vec![Output::success("[]")], signed_out()]);
+        let res = status_all(&r, None, None, true, &mut Vec::new());
+        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+    }
 }

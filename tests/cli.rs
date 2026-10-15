@@ -1420,3 +1420,66 @@ fn sigquit_removes_the_private_az_dir() {
 fn sigint_removes_the_private_az_dir() {
     assert_eq!(az_dir_left_after("INT"), Vec::<String>::new());
 }
+
+/// #135: an `op` that knows two accounts on one sign-in address (my.1password.com) and holds
+/// a session for the business one (B) only, as after `opv login --account B`.
+#[cfg(unix)]
+const TWO_ACCOUNTS_OP: &str = r#"case "$*" in
+  "account list"*) echo '[{"url":"https://my.1password.com","email":"a@example.com","user_uuid":"USERAAA0000000000000000AAA","account_uuid":"ACCOUNTAAA000000000000AAAA","shorthand":"my"},{"url":"https://my.1password.com","email":"b@example.com","user_uuid":"USERBBB0000000000000000BBB","account_uuid":"ACCOUNTBBB000000000000BBBB","shorthand":"biz"}]'; exit 0 ;;
+  *ACCOUNTBBB000000000000BBBB*) echo '[]'; exit 0 ;;
+  *) echo '[ERROR] not signed in' >&2; exit 1 ;;
+esac"#;
+
+/// Exit code of `opv projects --json` against [`TWO_ACCOUNTS_OP`], with `OP_ACCOUNT` set
+/// as `opv login --account <a> -- <command>` sets it for its command.
+#[cfg(unix)]
+fn projects_code(op_account: Option<&str>) -> Option<i32> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let op = dir.path().join("op");
+    std::fs::write(&op, format!("#!/bin/sh\n{TWO_ACCOUNTS_OP}\n")).unwrap();
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_opv"));
+    cmd.env_remove("GITHUB_STEP_SUMMARY")
+        .args(["projects", "--json"])
+        .env_remove("OP_SERVICE_ACCOUNT_TOKEN")
+        .env_remove("OP_CONNECT_TOKEN")
+        .env_remove("OP_ACCOUNT")
+        .env("PATH", dir.path())
+        .env("OPV_TEST_BACKOFF_SCALE", "0")
+        .current_dir(dir.path());
+    if let Some(a) = op_account {
+        cmd.env("OP_ACCOUNT", a);
+    }
+    cmd.output().unwrap().status.code()
+}
+
+/// #135: the account `opv login --account` selected is the one listed, so a signed-out
+/// account beside it on the same sign-in address does not fail the listing.
+#[cfg(unix)]
+#[test]
+fn projects_in_a_login_child_lists_only_the_selected_account() {
+    assert_eq!(projects_code(Some("ACCOUNTBBB000000000000BBBB")), Some(0));
+}
+
+/// #135: without a selected account, a signed-out account makes the inventory incomplete
+/// (exit 4), never a successful empty one.
+#[cfg(unix)]
+#[test]
+fn projects_with_a_signed_out_account_is_incomplete() {
+    assert_eq!(projects_code(None), Some(4));
+}
+
+/// #131: `opv --version` stays one line, `opv <version>`, for callers that read it.
+#[test]
+fn the_version_flag_prints_one_line() {
+    let (_, out, _) = opv(&["--version"]);
+    assert_eq!(out, format!("opv {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+/// #131: `opv version` works with no CLI on PATH and outside any project.
+#[test]
+fn version_without_any_cli_exits_0() {
+    let (code, _, err) = opv(&["version", "--json"]);
+    assert_eq!(code, 0, "{err}");
+}

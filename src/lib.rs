@@ -6,6 +6,7 @@
 
 pub mod adapters;
 pub mod app;
+pub mod approval;
 pub mod config;
 pub mod config_edit;
 pub mod config_store;
@@ -15,6 +16,7 @@ pub mod host;
 pub mod json;
 pub mod ports;
 pub mod provider;
+pub mod ramdir;
 pub mod runner;
 pub mod schema;
 pub mod scrub;

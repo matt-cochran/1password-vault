@@ -496,3 +496,29 @@ fn create_command_creates_the_account_with_its_vault_grants_and_expiry() {
         )
     );
 }
+
+/// #134: with two targets, each deploy identity writes only its own state vault, and the
+/// environment's CI reader writes none.
+#[test]
+fn each_target_writes_only_its_own_state_vault_and_the_ci_reader_writes_none() {
+    let grants = required(
+        "myapp",
+        &[
+            target("prod", "web", &["vcore"], "sweb"),
+            target("prod", "api", &["vcore"], "sapi"),
+        ],
+        &[ci_needs("prod", &["vcore"])],
+    );
+    let writes: Vec<(String, String)> = grants
+        .iter()
+        .filter(|g| g.permission == Permission::ReadWrite)
+        .map(|g| (g.service_account.clone(), g.vault_id.clone()))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            ("myapp-prod-api-deploy".to_string(), "sapi".to_string()),
+            ("myapp-prod-web-deploy".to_string(), "sweb".to_string())
+        ]
+    );
+}

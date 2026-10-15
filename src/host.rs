@@ -204,6 +204,9 @@ pub struct Tool {
     pub signed_out: &'static [&'static str],
     /// Other names the program is installed under, for runnable `Next:` lines (`fly`).
     pub aliases: &'static [&'static str],
+    /// The arguments that print its own version locally, without contacting its service
+    /// or checking for updates (`opv version`, #131).
+    pub version_args: &'static [&'static str],
 }
 
 /// Every CLI opv runs: the 1Password CLI, then each registered provider's
@@ -311,6 +314,7 @@ pub const OP_CLI: Tool = Tool {
         "invalid session:",
     ],
     aliases: &[],
+    version_args: &["--version"],
 };
 
 /// A non-interactive 1Password credential in the environment (by name; value never read).
