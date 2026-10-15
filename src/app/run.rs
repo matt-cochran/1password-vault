@@ -22,6 +22,38 @@ use crate::runner::CommandRunner;
 
 const OP: &str = "op";
 
+/// 0.9.0: running an app with the secrets of an environment that sets `confirm_env`
+/// (production, typically) needs the environment's name again, as `sync` does: one
+/// deliberate step before its values reach a local process. Checked before anything is
+/// read. `--preview` reads no value and needs none. `retry` is the same run with
+/// `--confirm <env>`, shown as the next step.
+pub fn require_confirmation(
+    fleet: &Fleet,
+    env_name: &str,
+    confirm: Option<&str>,
+    retry: &str,
+) -> Result<(), Error> {
+    let env = fleet.environment(env_name)?;
+    match confirm {
+        Some(c) if c != env_name => Err(Error::Policy(
+            format!("--confirm {c} does not match environment {env_name}; nothing was read").into(),
+        )
+        .with_code(crate::error::Code::ConfirmMismatch)
+        .with_next(retry.to_string())),
+        None if env.confirm_env => Err(Error::Policy(
+            format!(
+                "{env_name} sets confirm_env: running a command with its values needs \
+                 --confirm {env_name}; nothing was read"
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::ConfirmRequired)
+        .with_do("ask the user whether to run it with this environment's values")
+        .with_next(retry.to_string())),
+        _ => Ok(()),
+    }
+}
+
 /// `run <env> --product <p> -- <cmd>`: without `--product`, the one product with keys
 /// desired in `env_name` is used (D10/FR-34); a named product is validated by [`run`].
 pub fn run_for(
@@ -514,5 +546,56 @@ environments = ["ci"]
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run_for(&source_only_fleet(), "ci", None, None, &cmd(&["env"]), &r).unwrap();
         assert_eq!(argvs(&r), vec!["op run -- env"]);
+    }
+
+    fn guarded() -> Fleet {
+        crate::config::parse(
+            r#"[environments.prod]
+confirm_env = true
+boundaries.api = { vault_id = "vprod", item_id = "iprod" }
+
+[environments.dev]
+boundaries.api = { vault_id = "vdev", item_id = "idev" }
+
+[products.api.keys.TOKEN]
+kind = "secret"
+environments = ["prod", "dev"]
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_guarded_environment_needs_its_name_again() {
+        let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::ConfirmRequired);
+    }
+
+    #[test]
+    fn a_guarded_environment_runs_when_confirmed() {
+        assert!(require_confirmation(&guarded(), "prod", Some("prod"), "retry").is_ok());
+    }
+
+    #[test]
+    fn a_confirmation_naming_another_environment_is_refused() {
+        let e = require_confirmation(&guarded(), "prod", Some("dev"), "retry").unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::ConfirmMismatch);
+    }
+
+    #[test]
+    fn an_unguarded_environment_needs_no_confirmation() {
+        assert!(require_confirmation(&guarded(), "dev", None, "retry").is_ok());
+    }
+
+    #[test]
+    fn the_refusal_steps_to_the_confirmed_run() {
+        let e = require_confirmation(
+            &guarded(),
+            "prod",
+            None,
+            "opv run prod --confirm prod -- env",
+        )
+        .unwrap_err();
+        assert_eq!(e.next_step(), Some("opv run prod --confirm prod -- env"));
     }
 }

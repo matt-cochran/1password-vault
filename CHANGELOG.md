@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One account order everywhere: `OP_ACCOUNT` (set by `opv login --account` for its command), then `.opv`, then the only account. `opv login --account B -- opv check` ran against `.opv`'s account before. A non-ID account value is resolved to one account ID (ambiguous values are refused), no account is passed beside a service-account or Connect credential, and the automatic sign-in signs in to the account of the call that failed.
 - A bare `OP_SESSION` variable is reported (`stale_session_variable`) and refused by the MCP structural apply, like `OP_SESSION_<name>`.
 
+### Changed
+
+- `opv run` on an environment with `confirm_env = true` (production, typically) needs `--confirm <env>`, as `opv sync` does, before its values reach a local process; nothing is read without it. `--preview` needs none.
+
 ## [0.8.1] - 2026-10-15
 
 ### Added

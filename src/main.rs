@@ -693,6 +693,9 @@ enum Cmd {
         /// With --preview: print one JSON document.
         #[arg(long, requires = "preview")]
         json: bool,
+        /// The environment's name again; required when it sets confirm_env = true.
+        #[arg(long, value_name = "ENV", hide_short_help = true)]
+        confirm: Option<String>,
         /// Command and arguments, after `--`.
         #[arg(
             required_unless_present = "preview",
@@ -2684,6 +2687,7 @@ fn run(
         role,
         preview,
         json,
+        confirm,
         command,
     } = &cmd
     {
@@ -2707,8 +2711,22 @@ fn run(
             )?;
             return Ok(0);
         }
+        let fleet = loaded?;
+        let mut retry = format!("opv run {env} --confirm {env}");
+        if let Some(p) = product {
+            retry.push_str(&format!(" --product {}", shell_word(p)));
+        }
+        if let Some(r) = role {
+            retry.push_str(&format!(" --role {}", shell_word(r)));
+        }
+        retry.push_str(" --");
+        for w in command {
+            retry.push(' ');
+            retry.push_str(&shell_word(w));
+        }
+        run_cmd::require_confirmation(&fleet, env, confirm.as_deref(), &retry)?;
         return run_cmd::run_for(
-            &loaded?,
+            &fleet,
             env,
             product.as_deref(),
             role.as_deref(),
