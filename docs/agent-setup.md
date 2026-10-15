@@ -236,7 +236,7 @@ per project; it complements the skill and does not authorize or block commands.
 
 ## Optional MCP server: structure through tools, values by the person
 
-The [MCP interface](mcp.md) (`opv-mcp`) lets you inspect readiness, configuration metadata and deployment previews, and manage the project's structure. It never accepts or returns a secret value. Use it this way:
+The [MCP interface](mcp.md) (`opv mcp serve`, registered for a project with `opv mcp install`, which writes the assistant's configuration: ask first) lets you inspect readiness, configuration metadata and deployment previews, and manage the project's structure. It never accepts or returns a secret value. Use it this way:
 
 1. Declare with `opv_declare_key` (product, key, kind, environments, rules, one line of guidance, `immutable`), `opv_declare_environment` and `opv_declare_target` (provider and public options such as the Fly app; never deploy credentials). They edit the local `secrets.toml` only, and work before the structure exists. A generated configuration is never edited: declare in its generator's input.
 2. Call `opv_structure_plan`. Show the user its steps (vaults, items, delivery items, empty fields) and its `plan_id`.

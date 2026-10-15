@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-15
+
+### Added
+
+- `opv mcp serve --project <dir>`: opv's MCP server ships in every released `opv` (npm, `install.sh`, the GitHub release), so assistants need no separate build. `opv mcp install [--client claude|codex|all]` registers it for a project in Claude Code's `.mcp.json` and Codex's `config.toml`, merging into existing configuration (other servers kept, a different `opv` entry refused unless `--force`, no value or credential written; npm installs register the shared `~/.local/bin/opv`).
+
+### Changed
+
+- The separate `opv-mcp` binary is removed (FR-60, one way only): run `opv mcp serve` instead; `opv mcp install` rewrites an assistant's entry with `--force`.
+
+### Fixed
+
+- A write to 1Password with nobody signed in (`opv target add` right after its `--dry-run` signed in, #150) was a "policy denied" refusal with a bare `Next: opv login`. It is now `op_not_signed_in`: in a person's terminal opv signs them in at op's prompt and runs the command again (still only for a person), the message says that an earlier command's sign-in has ended, and `Next:` names the project's account.
+- `opv doctor`'s tests no longer depend on the agent skill installed on the machine running them.
+
 ## [0.8.0] - 2026-10-15
 
 ### Dependencies

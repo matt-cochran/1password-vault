@@ -347,6 +347,15 @@ Examples:
   opv version                  # opv, op and each provider CLI, with versions
   opv version --json           # the same, for support and CI";
 
+const MCP_SERVE_QUICK: &str = "\
+Examples:
+  opv mcp serve --project /abs/path/to/project   # what an assistant's MCP client runs";
+
+const MCP_INSTALL_QUICK: &str = "\
+Examples:
+  opv mcp install                        # this project, for Claude Code and Codex
+  opv mcp install --client claude        # only the project's .mcp.json";
+
 const APPROVE_QUICK: &str = "\
 Examples:
   opv approve sp-3f9c0a1b2c3d4e5f   # review the assistant's structural plan, then type its id";
@@ -646,6 +655,9 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// opv's MCP server for coding assistants: serve it, or register it with an assistant.
+    #[command(subcommand)]
+    Mcp(McpCmd),
     /// Delivery receipts: whether a product's target still holds what opv delivered.
     #[command(subcommand)]
     Delivery(DeliveryCmd),
@@ -1191,6 +1203,53 @@ enum TargetCmd {
 }
 
 #[derive(Subcommand)]
+enum McpCmd {
+    /// Run the MCP server over stdio for one project (started by the assistant's client).
+    ///
+    /// Tools: readiness, configuration and target metadata, plan previews, declarations and
+    /// the approval-gated structure (docs/mcp.md). Never accepts or returns a secret value.
+    /// Start it without op session, service-account or Connect credentials.
+    #[command(before_help = MCP_SERVE_QUICK)]
+    Serve {
+        /// The trusted project directory, chosen by the person (absolute).
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+    },
+    /// Register `opv mcp serve` for a project with Claude Code (.mcp.json) and/or Codex.
+    ///
+    /// Merges into the existing configuration: other servers and settings are kept, and an
+    /// entry of the same name that runs something else is refused unless --force.
+    #[command(before_help = MCP_INSTALL_QUICK)]
+    Install {
+        /// Which assistant's configuration to write.
+        #[arg(long, value_enum, default_value_t = McpClient::All)]
+        client: McpClient,
+        /// The project directory; default: the git top level, else this directory.
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        /// The server's name in the client configuration.
+        #[arg(long, default_value = "opv")]
+        name: String,
+        /// Replace an existing entry of that name that runs something else.
+        #[arg(long)]
+        force: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum McpClient {
+    /// Claude Code: the project's .mcp.json.
+    Claude,
+    /// Codex: $CODEX_HOME/config.toml, else ~/.codex/config.toml.
+    Codex,
+    /// Both.
+    All,
+}
+
+#[derive(Subcommand)]
 enum AccountCmd {
     /// List the 1Password accounts this CLI knows and which one this project uses (read-only).
     #[command(before_help = ACCOUNT_LIST_QUICK)]
@@ -1401,6 +1460,19 @@ fn main() -> ExitCode {
     let json = cli.cmd.json_mode();
     opv::runner::signals::set_rerun(&rerun);
     opv::runner::signals::set_json(json.is_some());
+    // The MCP server owns stdin and stdout for the whole session: it runs before opv takes
+    // the stdout lock below, which its runtime's writer thread would otherwise wait on
+    // forever (found by the protocol smoke test).
+    if let Cmd::Mcp(McpCmd::Serve { project }) = &cli.cmd {
+        return match mcp_serve(project) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                let step = e.step(&rerun, &help);
+                let _ = write!(io::stderr(), "{}", opv::error::report_with(&e, &step, None));
+                ExitCode::from(exit_byte(e.exit_code()))
+            }
+        };
+    }
     let mut stdout = PipeSafe {
         inner: io::stdout().lock(),
         closed: false,
@@ -1852,6 +1924,7 @@ impl Cmd {
             | Cmd::Status { json, .. }
             | Cmd::Projects { json, .. }
             | Cmd::Version { json }
+            | Cmd::Mcp(McpCmd::Install { json, .. })
             | Cmd::Explain { json, .. }
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
@@ -2161,6 +2234,17 @@ fn run(
                 command: command.clone(),
             };
             return opv::app::local_delivery::run(&d);
+        }
+        Cmd::Mcp(McpCmd::Serve { .. }) => unreachable!("served before stdout is locked"),
+        Cmd::Mcp(McpCmd::Install {
+            client,
+            project,
+            name,
+            force,
+            json,
+        }) => {
+            return mcp_install(&r, *client, project.as_deref(), name, *force, *json, out)
+                .map(|()| 0);
         }
         Cmd::Version { json } => {
             let here = std::env::current_dir().unwrap_or_default();
@@ -2549,6 +2633,7 @@ fn run_other(
         | Cmd::Bootstrap { .. }
         | Cmd::Approve { .. }
         | Cmd::Version { .. }
+        | Cmd::Mcp(_)
         | Cmd::LocalDelivery { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
@@ -3048,6 +3133,135 @@ fn exit_byte(code: i32) -> u8 {
         Ok(0) | Err(_) => 1,
         Ok(b) => b,
     }
+}
+
+/// `opv mcp serve --project <dir>`: the MCP server over stdio, until the client closes it.
+#[cfg(feature = "mcp")]
+fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
+    use rmcp::{ServiceExt, transport::stdio};
+    let fail = |what: &str| Error::Config(format!("opv mcp serve: {what}").into());
+    let project = project
+        .canonicalize()
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| fail("--project must be an existing directory"))?;
+    std::env::set_current_dir(&project).map_err(|_| fail("cannot enter the project directory"))?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            Error::Dependency(format!("cannot start the MCP runtime ({})", e.kind()).into())
+        })?;
+    rt.block_on(async {
+        let server = opv::mcp::Server::new(project)
+            .serve(stdio())
+            .await
+            .map_err(|_| fail("the MCP client did not complete the handshake"))?;
+        server
+            .waiting()
+            .await
+            .map_err(|_| fail("the MCP session ended with an error"))?;
+        Ok::<_, Error>(0)
+    })
+}
+
+#[cfg(not(feature = "mcp"))]
+fn mcp_serve(_project: &std::path::Path) -> Result<i32, Error> {
+    Err(Error::Dependency(
+        "this opv was built without MCP; install a release build (npm, install.sh or the GitHub release)".into(),
+    ))
+}
+
+/// `opv mcp install`: register `<this opv> mcp serve --project <dir>` with the chosen
+/// assistants (FR-61).
+fn mcp_install(
+    r: &dyn CommandRunner,
+    client: McpClient,
+    project: Option<&std::path::Path>,
+    name: &str,
+    force: bool,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::mcp_install::{self as mi, Registered};
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(Error::Config(
+            "--name must be letters, digits, '-' or '_'".into(),
+        ));
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let project = match project {
+        Some(p) => p.to_path_buf(),
+        None => config_store::git_toplevel(r).unwrap_or(here),
+    };
+    let project = project
+        .canonicalize()
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| Error::Config("--project must be an existing directory".into()))?;
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| {
+            Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
+        })?;
+    // npm's bundled copy lives under node_modules and moves on every upgrade: register the
+    // shared install that npm's postinstall and install.sh keep current instead.
+    let exe = if exe.components().any(|c| c.as_os_str() == "node_modules") {
+        match opv::app::mcp_install::shared_install().filter(|p| p.is_file()) {
+            Some(shared) => shared,
+            None => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "note: this opv runs from npm's bundled copy ({}), which moves on upgrade; \
+                     run npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv, \
+                     then opv mcp install again",
+                    exe.display()
+                );
+                exe
+            }
+        }
+    } else {
+        exe
+    };
+    let command = exe.display().to_string();
+    let args = mi::server_args(&project);
+    let mut done: Vec<Registered> = Vec::new();
+    if matches!(client, McpClient::Claude | McpClient::All) {
+        let path = project.join(".mcp.json");
+        done.push(mi::register("claude", &path, |t| {
+            mi::merge_claude(t, &path, name, &command, &args, force)
+        })?);
+    }
+    if matches!(client, McpClient::Codex | McpClient::All) {
+        let path = mi::codex_config()?;
+        done.push(mi::register("codex", &path, |t| {
+            mi::merge_codex(t, &path, name, &command, &args, force)
+        })?);
+    }
+    if json {
+        let doc = serde_json::json!({
+            "schema_version": opv::json::SCHEMA_VERSION,
+            "server": {"name": name, "command": command, "args": args},
+            "registered": done,
+            "next": "restart the assistant, then ask it to call opv_ready",
+        });
+        return writeln!(out, "{doc}")
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()));
+    }
+    for d in &done {
+        writeln!(out, "{} {} ({})", d.action, d.path.display(), d.client)
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;
+    }
+    writeln!(
+        out,
+        "opv's MCP server runs as: {command} {}\nRestart the assistant to load it; it never sees a secret value. Start it without op session, service-account or Connect credentials.",
+        args.join(" ")
+    )
+    .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
 }
 
 /// `opv approve`'s review on the person's own terminal (checked before it runs).

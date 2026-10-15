@@ -31,7 +31,8 @@ on message text.
 
 ## Agents own structure; people own sign-in, approval and values
 
-With the opv MCP server (`opv-mcp`), declare products, keys, environments and targets with
+With the opv MCP server (`opv mcp serve`; `opv mcp install` registers it for the project after
+the user agrees), declare products, keys, environments and targets with
 `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml`
 only; never a value), then `opv_structure_plan`. Ask the user to run `opv approve <plan_id>`
 in their own terminal (never run it yourself), then `opv_structure_apply` with that id. Hand
