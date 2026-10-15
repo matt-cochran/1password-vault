@@ -191,10 +191,7 @@ fn no_account(p: P) {
     assert!(!t.contains("to see why"), "{t}");
     assert_signin_syntax(p, &t, Some("prod"));
     // NoAccount is unreachable under CI (no `op account list` there), so no CI case.
-    assert!(
-        t.contains("\n  add one: op account add --address <sign-in address> --email <email>\n"),
-        "{t}"
-    );
+    assert!(t.contains("\n  add one: opv login --add\n"), "{t}");
     assert!(
         t.contains(
             "type the Secret Key and password only at op's prompts, never into chat, \
@@ -202,8 +199,8 @@ fn no_account(p: P) {
         ),
         "{t}"
     );
-    // `op account add` comes first, then the sign-in command.
-    assert!(t.find("op account add").unwrap() < t.find("then sign in").unwrap());
+    // `opv login --add` comes first, then the sign-in command.
+    assert!(t.find("opv login --add").unwrap() < t.find("then sign in").unwrap());
     if matches!(p, P::Wsl) {
         assert!(t.contains("WSL"), "{t}");
     }

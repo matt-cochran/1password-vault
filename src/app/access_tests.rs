@@ -308,27 +308,37 @@ fn target_narrowing_omits_the_ci_reader() {
 
 // --- unreadable vaults --------------------------------------------------------------
 
+/// Every needed vault is in the account (`op vault get` finds it), but no access list can
+/// be read: the person cannot manage these vaults.
+fn unreadable() -> FakeOp {
+    let op = FakeOp::default();
+    for v in [VSHARED, VWEB, VWORKER, VWEB_STATE, VWORKER_STATE] {
+        op.vaults.borrow_mut().push((v.into(), v.into()));
+    }
+    op
+}
+
 #[test]
 fn an_unreadable_vault_is_reported_not_visible() {
-    let doc = run_json(&FakeOp::default(), Some("prod"), None);
+    let doc = run_json(&unreadable(), Some("prod"), None);
     assert_eq!(state_of(&doc, VWEB_STATE), "not_visible");
 }
 
 #[test]
 fn an_unreadable_vault_is_counted_unclassified() {
-    let doc = run_json(&FakeOp::default(), Some("prod"), None);
+    let doc = run_json(&unreadable(), Some("prod"), None);
     assert_eq!(doc["environments"][0]["report"]["unclassified"], 8);
 }
 
 #[test]
 fn the_text_reports_an_unreadable_vault_as_not_visible() {
-    assert!(run_text(&FakeOp::default(), Some("prod"), None).contains("not visible"));
+    assert!(run_text(&unreadable(), Some("prod"), None).contains("not visible"));
 }
 
 #[test]
 fn the_output_never_says_clean() {
     assert!(
-        !run_text(&FakeOp::default(), Some("prod"), None)
+        !run_text(&unreadable(), Some("prod"), None)
             .to_lowercase()
             .contains("clean")
     );
@@ -336,12 +346,12 @@ fn the_output_never_says_clean() {
 
 #[test]
 fn an_unreadable_vault_keeps_its_finding() {
-    assert!(run_text(&FakeOp::default(), Some("prod"), None).contains("access_not_visible"));
+    assert!(run_text(&unreadable(), Some("prod"), None).contains("access_not_visible"));
 }
 
 #[test]
 fn a_finding_names_the_vault_it_is_about() {
-    assert!(run_text(&FakeOp::default(), Some("prod"), None).contains("the vwebstate vault"));
+    assert!(run_text(&unreadable(), Some("prod"), None).contains("the vwebstate vault"));
 }
 
 // --- readers and privacy ------------------------------------------------------------
@@ -433,4 +443,74 @@ fn the_json_document_carries_the_report() {
 fn the_json_document_carries_the_commands() {
     let doc = run_json(&visible(), Some("prod"), None);
     assert!(doc["environments"][0]["commands"].is_array());
+}
+
+// --- #153: a vault not in the selected account is not "not visible" ---
+
+/// Every grant missing, and the `web` boundary vault unreadable: in the account (`op vault
+/// get` finds it) when `in_account`, else not.
+fn web_vault_unreadable(in_account: bool) -> FakeOp {
+    let op = members_only();
+    op.vault_users.borrow_mut().remove(VWEB);
+    if in_account {
+        op.vaults
+            .borrow_mut()
+            .push((VWEB.into(), "shop-web-prod".into()));
+    }
+    op
+}
+
+fn web_check_state(op: &FakeOp) -> Value {
+    let doc = run_json(op, Some("prod"), Some("web"));
+    doc["environments"][0]["report"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["grant"]["vault_id"] == VWEB)
+        .unwrap()["state"]
+        .clone()
+}
+
+#[test]
+fn a_vault_missing_from_the_account_is_not_in_account() {
+    assert_eq!(
+        web_check_state(&web_vault_unreadable(false)),
+        "not_in_account"
+    );
+}
+
+#[test]
+fn a_vault_in_the_account_with_an_unreadable_list_stays_not_visible() {
+    assert_eq!(web_check_state(&web_vault_unreadable(true)), "not_visible");
+}
+
+#[test]
+fn no_owner_command_is_printed_for_an_identity_needing_a_missing_vault() {
+    let doc = run_json(&web_vault_unreadable(false), Some("prod"), Some("web"));
+    assert!(
+        doc["environments"][0]["commands"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_missing_vault_points_at_vault_locate() {
+    let text = run_text(&web_vault_unreadable(false), Some("prod"), Some("web"));
+    assert!(
+        text.contains("vault_not_in_account") && text.contains("opv vault locate vweb"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_identity_whose_vaults_all_exist_still_gets_its_owner_command() {
+    let doc = run_json(&web_vault_unreadable(true), Some("prod"), Some("web"));
+    assert!(
+        !doc["environments"][0]["commands"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

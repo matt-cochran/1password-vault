@@ -931,9 +931,9 @@ fn expired_session_is_auth_with_signin_command() {
     );
 }
 
-/// FR-26: no account on this machine → `op account add`, then sign in; exit 7.
+/// FR-26: no account on this machine → `opv login --add`, then sign in; exit 7.
 #[test]
-fn no_account_is_auth_with_account_add() {
+fn no_account_is_auth_with_login_add() {
     let mut h = Harness::new(&good_item());
     h.unset("OP_SERVICE_ACCOUNT_TOKEN")
         .set("SHELL", "/bin/zsh")
@@ -945,7 +945,7 @@ fn no_account_is_auth_with_account_add() {
         assert_eq!(r.code, 7, "{cmd:?}: {}", r.all());
         for want in [
             "no 1Password account is set up for op on this machine",
-            "\n  add one: op account add --address <sign-in address> --email <email>\n",
+            "\n  add one: opv login --add\n",
             "\n  then sign in: opv login",
             "type the Secret Key and password only at op's prompts",
         ] {

@@ -824,7 +824,7 @@ fn other_commands_never_look_up_titles() {
         (
             "run",
             Box::new(|r| {
-                let _ = run_cmd::run_for(&cfg, "prod", Some("allumata"), &["true".into()], r);
+                let _ = run_cmd::run_for(&cfg, "prod", Some("allumata"), None, &["true".into()], r);
             }),
         ),
     ];

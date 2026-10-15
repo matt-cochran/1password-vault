@@ -6,51 +6,60 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 
 | Command | What it does | Changes |
 |---|---|---|
-| `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv login [<env>] [--add] [--account <a> [--no-record]] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command. `--account` records the project's account in `.opv`; with `--no-record`, it signs in to that account for this login only and leaves `.opv` unchanged | nothing; needs your own terminal |
 | `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
 | `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
 | `opv tidy <env> [--json]` | put the environment's 1Password item in opv's layout: one verified edit, nothing deleted ([store layout](configuration.md#store-layout)); a person signed in with their own session only | the 1Password item's layout |
 | `opv history <env> [--json]` | what opv last wrote to the target, per key: time, plan id, changed outside opv ([usage](#write-history-opv-history)) | nothing (read-only) |
+| `opv access <env> [--target <t>] --create --github <owner/repo> [--github-env <e>] [--secret-name <n>]` | in your own terminal: create that identity's 1Password service account (exact grants, 90 days) and store its token as a GitHub secret on gh's stdin, never shown; checks gh, the repository and the environment first, asks once | 1Password and GitHub |
 | `opv access [<env>] [--target <t>] [--json]` | who needs each boundary and target, and who can read it now; the owner's command to create a reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | does every placement of a product still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
+| `opv ci workflow <env> --target <name> [--github-env <environment>] [--deploy]` | print a ready-to-commit GitHub Actions workflow (YAML) that syncs one target, so an assistant never writes the workflow from scratch | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv mcp install [--client claude\|codex\|all] [--project <dir>] [--name <n>] [--force] [--json]` | register opv's MCP server for a project with Claude Code (`.mcp.json`) and/or Codex (`~/.codex/config.toml`), merging into existing configuration ([MCP](mcp.md)) | the assistant's configuration |
 | `opv mcp serve --project <dir>` | run the MCP server over stdio (what the assistant's client starts) | nothing by itself; see [MCP](mcp.md) |
+| `opv generate <env> <product/KEY>…` | make a self-generated secret (a key with `base64_bytes` or `hex_bytes`) with the OS CSPRNG and write it into its empty 1Password field, read back and verified; never shown, never over a value, provider keys refused | 1Password |
+| `opv vault locate <vault ID> [--json]` | which of the 1Password accounts this CLI knows holds a vault: `found`, `not found` or `unknown` (not signed in) per account; names and IDs only | nothing |
 | `opv version [--json]` | opv's version and each CLI it runs (op, flyctl, az, kubectl, gh): installed with its version, missing or unknown, and which ones this project's configuration uses; no sign-in | nothing |
 | `opv approve <plan_id>` | in your own terminal: review the structural plan an assistant prepared through MCP and approve it once (15 minutes) | a local approval record |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` | create every missing boundary vault, item and state vault, record their IDs and add every declared field empty | 1Password and `secrets.toml` |
+| `opv structure plan [--json]` | plan the structure this configuration declares (the `opv_structure_plan` document): every vault, item, state vault, delivery item and empty field by name, and a `plan_id` | nothing (read-only) |
+| `opv structure apply <plan_id> [--json]` | apply exactly the plan a person approved with `opv approve <plan_id>` in their own terminal (single use); refuses an unapproved or stale plan, creating nothing | 1Password and `secrets.toml` |
 | `opv target add <env> <name> --<provider options> [--products <p>]... [--deploy-credentials <op://v/i>] [--dry-run] [--json]` | declare one named target, infer its provider from the options, create its state vault and record its ID ([usage](#add-a-target-opv-target-add)) | the configuration and 1Password |
 | `opv target list [--env <env>] [--json]` | the declared targets: provider, locator, products, deploy identity and state vault ([usage](#add-a-target-opv-target-add)) | nothing (read-only) |
+| `opv target credentials <env> --target <name> [--create]` | mint a target's least-privilege deploy credential and store it in a new 1Password item, recording `deploy_credentials`; without `--create`, print the recorded state ([usage](#mint-a-targets-deploy-credential-opv-target-credentials)) | the target provider, 1Password and the configuration; needs your own terminal |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
 | `opv account use <email or ID>` | record the project's account in `.opv`, without a prompt | `.opv` |
 | `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
 | `opv doctor [--env <env> [--product <p>]] [--json]` | find setup problems and show the next step | nothing |
 | `opv check <env> [--product <p>] [--json]` | are the keys saved and valid? no target is contacted | nothing |
 | `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>]` | 1Password and every target side by side, names only | nothing |
-| `opv plan <env> [--product <p>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
-| `opv sync <env> [--deploy] [--prune] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
-| `opv run <env> [--product <p>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)) | nothing |
+| `opv plan <env> [--product <p>] [--rotate <product/KEY>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
+| `opv sync <env> [--deploy] [--prune] [--rotate <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
+| `opv run <env> [--product <p>] [--role <r>] [--confirm <env>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value; an environment with `confirm_env = true` needs `--confirm <env>` | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
 | `opv init <env> [--vault <title>] [--item <title>] [--product <p>]` | configuration (boundaries and products) from an existing item; no target ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
 | `opv init <env> --from <file.env> [--config-key KEY]... [--secret-key KEY]... [--apply]` | start from an existing `.env`: declare every key, then import the values, verified ([configuration](configuration.md#start-from-an-existing-env-opv-init---from)) | with `--apply`: the configuration and the item's fields |
 | `opv add <[product/]KEY> --kind secret\|config [...]` | declare a key, or add environments to one | the configuration |
+| `opv env add <env> [--json]` | declare an environment in `secrets.toml` (the `opv_declare_environment` declaration); refuses a generated configuration | the configuration |
 | `opv item skeleton <env> [--json]` | add every missing declared field to the item, empty | the 1Password item |
 | `opv config export [<env>] [--toml\|--json]` | print the configuration, or an environment's config values | nothing |
 | `opv config import --vault <v> [--file <f>] [--project <p>] [--path <dir>]...` | save a `secrets.toml` as the project manifest | 1Password (a new manifest) |
 | `opv config edit` | edit, validate, diff and save the configuration | the configuration; needs your own terminal |
 | `opv config check --file <f>` | compare a committed copy with the manifest | nothing |
+| `opv config describe [--json]` | the declared metadata (the `opv_configuration` document): environment names, product/key names and kinds, each target's provider, products and declared state vault/deploy identity; names only | nothing (read-only) |
 | `opv projects [--account <a>] [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
 | `opv help states`, `opv help <command>` | what each state word means; a command's help | nothing |
 | `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
 | `opv schema` | the installed binary as one JSON document | nothing |
 | `opv guide agent` | the setup guide for AI assistants, for this version | nothing |
-| `opv skill install [--target claude\|codex\|all] [--user\|--project <dir>] [--force]` | install the agent skill (versioned with this binary) where coding agents look | the skill files |
-| `opv skill status [--json]` | installed skill copies: version, current or older, edited | nothing |
+| `opv skill install [--target claude\|codex\|all] [--user\|--project <dir>] [--force]` | install the agent skill (versioned with this binary) where coding agents look; installers register the user-level skill by default | the skill files |
+| `opv skill status [--json]` | installed skill copies: version, current or older, edited, and the command to update an older copy | nothing |
 
 "Nothing" means nothing on your targets and no change to what a value means. Run by a person signed in with their own session, a command that reads an item (except `doctor` and `ready`, which never write; `opv schema` marks the others `tidies_1password`) may also tidy its 1Password layout once (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
-`sync` also takes `--rotate <product/KEY>` and `--prune-immutable <product/KEY>` for immutable keys (both repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)).
+`plan` and `sync` also take `--rotate <product/KEY>` for immutable keys; `sync` additionally takes `--prune-immutable <product/KEY>` (all repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)).
 
 ### Global options and environment
 
@@ -195,6 +204,8 @@ plan 7f3c9a1e (1Password item v41): sync --expect-plan 7f3c9a1e applies exactly 
 Next: opv sync prod --deploy --prune --expect-plan 7f3c9a1e
 ```
 
+`--rotate <product/KEY>` (repeatable) plans the replacement of an immutable key that is already on the target: its rows show `would_stage` and the ON TARGET word `rotate` (`"rotate": true` in JSON), and the sorted rotate set is part of the plan id, so a plan with a rotation never shares an id with one without. Validation is the same as `sync --rotate`: an unknown key or a non-immutable key is refused the same way.
+
 `plan` covers every target of the environment under one plan id; `--target <name>` (repeatable) narrows it to those targets. On Azure and Kubernetes the line says `would write`. The `Next:` command carries the plan id (`--expect-plan`, which also stands for `--confirm` on a [guarded environment](#guarded-environments)), adds `--prune` only when something would be pruned, `--product` when you scoped the plan and `--target` when you narrowed the targets. When a key blocks the sync, `plan` lists it first with its `open:` link, says `would stage once the findings are fixed:`, exits 8 with `Do: fix the keys above in 1Password`, and its `Next:` line opens the first key in 1Password.
 
 ### Review, then apply exactly that plan: `--expect-plan`
@@ -217,7 +228,8 @@ Next: opv plan prod
 - The id covers names, states, version ids and the item's version number, never a value or a digest of one, so it is safe to paste into a PR or chat. Any edit to the item changes it, even to a field this environment does not use.
 - Nothing is stored: there is no plan file. A CI job can plan in a pull request and apply on merge with the id from the plan step.
 - On a [guarded environment](#guarded-environments), `--expect-plan` is enough on its own: the id is bound to that environment.
-- `--expect-plan` cannot be combined with `--rotate` or `--prune-immutable` (exit 2), because `plan` never shows a rotation.
+- `--expect-plan` is accepted with `--rotate` when the id was computed with the same rotate set, and refused with `--prune-immutable` (exit 2), because `plan` never prunes an immutable key.
+- A rotation can be approved for an assistant: `opv approve <id> --sync <env> --rotate <product/KEY>` re-plans with the rotate set, shows each rotated key as `rotate product/KEY on <target>`, and records an approval whose scope includes that set; an approval recorded without it never covers a rotating `opv sync` (or MCP `opv_sync`), and the reverse.
 - `sync --json` reports the id of the plan it applied as `plan_id`.
 - An exit 9 (a deploy that timed out or lost its connection) is safe to re-run with the same id: what that run already wrote is the plan's own progress, not a change to it (values it staged that wait for a deploy on Fly, or versions stamped with this plan id on Azure and Kubernetes), so `sync --expect-plan <id>` still matches and finishes the deploy.
 
@@ -389,7 +401,17 @@ api/OPENAI_API_KEY: saved
 no findings; no deployment target checked
 ```
 
-`run <env> [--product <p>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` takes no `--json` and exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
+`run <env> [--product <p>] [--role <r>] -- <cmd>` starts a command with the keys as environment variables under their plain names, through `op run`, with no `.env` file. It first removes every key name declared in the configuration from the inherited environment, so another product's keys never leak in. opv's options go before `--`; `run` exits with the command's own exit code. The local guide, with Docker Compose, editors, product switching and WSL, is [local-development.md](local-development.md).
+
+### Process roles: `--role`
+
+A key may declare the processes it belongs to: `roles = ["serve", "migrate"]` in its key table (one or more names, each lower-case letters, digits and `-`, at most 32 characters; an empty list is refused at load). A key without `roles` reaches every role and a run without `--role`. A key with `roles` reaches a run only when `--role` names one of them, so migration-owner material in `DATABASE_URL_UNPOOLED` never enters a `--role serve` run's environment or secrets directory.
+
+All refusals are fail-closed, before anything is read from 1Password: a product with any role-scoped key and no `--role` is refused (exit 2) naming the declared roles; a `--role` no key declares is refused naming them too, never delivering everything. Roles apply to `opv run` only; `sync` and targets ignore them.
+
+### Delivery preview: `--preview`
+
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 1); the text form prints one line per key plus the summary lines.
 
 ## Doctor
 
@@ -442,9 +464,11 @@ prod:
 Owner runs: op service-account create "myapp-prod-web" --vault vprd0000000000000000000002:read_items --vault vstate0000000000000000001:read_items,write_items
 ```
 
-The states are `present`, `missing` and `read-only needed`; a vault it cannot see is `not visible` and is counted under `unclassified`, never assumed fine. It never says "clean": it says what was checked and what it could not classify. It warns when an environment that deploys has no read-only CI reader (`no_ci_reader`), when a reader can write (`ci_reader_can_write`), or when it cannot see who uses a vault (`access_not_visible`); each finding carries the owner's exact command. One `Owner runs:` create command is printed per principal with a missing or too-broad grant, because 1Password fixes a service account's vaults and permissions at creation. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
+The states are `present`, `missing` and `read-only needed`; a vault whose access list it cannot read is `not visible` and is counted under `unclassified`, never assumed fine. A vault that `op vault get` cannot find in the selected account at all is `not in this account`, with a `vault_not_in_account` finding whose step is `opv vault locate <vault ID>`; no `Owner runs:` command is printed for an identity that needs it, because it could not succeed in this account. It never says "clean": it says what was checked and what it could not classify. It warns when an environment that deploys has no read-only CI reader (`no_ci_reader`), when a reader can write (`ci_reader_can_write`), when several service accounts with one name read a vault, as after a re-created identity (`pending_revoke`: keep the newest until `opv delivery verify` shows its delivery, then remove the older ones in 1Password), or when it cannot see who uses a vault (`access_not_visible`); each finding carries its next step (`no_ci_reader`: `opv access <env> --create --github <owner/repo>`, which stores the token without showing it). One `Owner runs:` create command is printed per principal with a missing or too-broad grant, because 1Password fixes a service account's vaults and permissions at creation. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
 
-`--json` gives `{environments: [{environment, report, commands}]}`, where `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
+`opv access <env> --target <name> --create --github <owner/repo> --github-env <environment>` creates the identity instead of printing its command: it checks that gh is signed in and can see the repository and environment (creating the GitHub environment if missing, after asking), shows the account name, every grant and where the token goes, asks once, runs `op service-account create … --raw`, and pipes the token into `gh secret set OP_SERVICE_ACCOUNT_TOKEN --repo … --env …` on stdin. The token is never shown, typed, logged or written to a file. It refuses before creating anything when a vault is not in the selected account, and if storing the token fails it says to remove the new account in 1Password and run it again (1Password shows a token once). An existing account of the same name is left alone: keep it until the new token has produced verified delivery evidence.
+
+`--json` gives `{environments: [{environment, report, commands, findings}]}`, where `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
 
 ## Delivery receipts: `opv sync --receipt` and `opv delivery verify`
 
@@ -550,14 +574,23 @@ opv target add staging site --fly-app site-staging --dry-run
 opv target list --env prod --json
 ```
 
+## Mint a target's deploy credential: `opv target credentials`
+
+`opv target credentials <env> --target <name> --create` mints the target's least-privilege deploy credential at its provider and stores it straight in a new 1Password item, then records `deploy_credentials = "op://<state vault>/<new item>"` on the target. The token is never shown, copied or pasted: opv holds it only in memory and sends it to `op item create` on stdin. It names the credential `opv-<project>-<env>-<target>`, requests 90 days' validity, and stores it in the target's state vault under the title `<project> · <target> · <env> deploy credentials` (tagged `opv-deploy:<project>/<env>/<target>`). It asks once, showing all of that; declining creates nothing. It refuses, before any provider call, a target that already records `deploy_credentials` (rotation is a separate reviewed step) and a provider that cannot mint one. If storing fails after minting, the error names the credential and says how to revoke it at the provider. It needs your own interactive terminal and 1Password session; it ends with `Next: opv doctor --env <env> --target <name>`. Without `--create` it only prints whether `deploy_credentials` is recorded and whether the provider can mint one.
+
+```sh
+opv target credentials staging --target web --create
+opv target credentials staging --target web
+```
+
 ## Fresh fleet: `opv bootstrap`
 
-`opv bootstrap` completes a configuration whose boundaries and targets have no IDs yet. In the selected 1Password account it creates, for every boundary an environment needs and does not record, a vault `<project>-<boundary>-<env>` and an item `<project> · <boundary> · <env> values` (found when they exist); and for every target without `state_vault_id`, a state vault `<project>-<env>-<target>-state`. It records their IDs in the file (comments and order kept) and adds every declared field, empty. One run records every missing boundary and state vault; bootstrap has no flag that narrows it to one. `--dry-run` shows the plan and changes nothing. Recorded IDs the selected account cannot see stop with `ids_not_in_account`: select the account that holds them (`opv account use <ID>`) or pass `--rebind <env>` to record new boundary IDs in this account (values are not moved). A file whose first line starts with `# generated` is never rewritten; the IDs are printed for its generator. It needs your own session (it writes 1Password), never syncs or deploys, and ends with `Next: opv ready`. Re-running is safe. `--ci-reader <env>` also prints one owner command: the create command for a read-only CI service account over every boundary vault of that environment (`op service-account create … --vault <id>:read_items`), which you run yourself, because 1Password shows the token once. A complete walk-through from a fresh account to the first guarded deploy is in [examples/fleet-fly](../examples/fleet-fly/).
+`opv bootstrap` completes a configuration whose boundaries and targets have no IDs yet. In the selected 1Password account it creates, for every boundary an environment needs and does not record, a vault `<project>-<boundary>-<env>` and an item `<project> · <boundary> · <env> values` (found when they exist); and for every target without `state_vault_id`, a state vault `<project>-<env>-<target>-state`. It records their IDs in the file (comments and order kept) and adds every declared field, empty. One run records every missing boundary and state vault; bootstrap has no flag that narrows it to one. `--dry-run` shows the plan and changes nothing. Recorded IDs the selected account cannot see stop with `ids_not_in_account`: select the account that holds them (`opv account use <ID>`) or pass `--rebind <env>` to record new boundary IDs in this account (values are not moved). A file whose first line starts with `# generated` is never rewritten; the IDs are printed for its generator. It needs your own session (it writes 1Password), never syncs or deploys, and ends with `Next: opv ready`. Re-running is safe. `--ci-reader <env>` also prints the owner's step for a read-only CI service account over every boundary vault of that environment: `opv access <env> --create --github <owner/repo>`, which creates it and stores its token as a GitHub secret without showing it, and, for another CI provider, the raw `op service-account create … --vault <id>:read_items` command you run yourself (1Password shows that token once). A complete walk-through from a fresh account to the first guarded deploy is in [examples/fleet-fly](../examples/fleet-fly/).
 
 ```sh
 opv bootstrap --dry-run                # each boundary and state vault: ok, create or ids_not_in_account
 opv bootstrap                          # create the missing ones and record every ID
-opv bootstrap --ci-reader prod         # also print the CI reader's create command
+opv bootstrap --ci-reader prod         # also print the CI reader's create step
 ```
 
 ## Assistant-prepared structure: `opv approve`
@@ -823,15 +856,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.8.1   # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.9.0   # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
         uses: 1password/install-cli-action@v1
       - name: Install flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
       - name: Install opv
         run: |
           base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
@@ -843,7 +875,7 @@ jobs:
         run: opv sync prod
 ```
 
-CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes either from `deploy_credentials` in that vault (opv reads it and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own) or from the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
+CI uses one 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`), scoped to the vaults the job needs. The target credential comes from the target's `deploy_credentials` item, whose least-privilege deploy identity the owner creates with `opv access <env> --target <name> --create --github <owner/repo> --github-env <environment>` (the token goes straight into the GitHub secret, never shown); opv reads the item and hands it to the target CLI for the run only, so the job needs no `FLY_API_TOKEN` secret of its own. Otherwise use the CI provider's OIDC federation (for example `azure/login` with a federated credential), which needs no stored secret at all. Never give CI a break-glass credential.
 
 This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`) applies everything staged by every tool. Install `op` and `flyctl` on the runner first (for example with the official 1Password and Fly GitHub Actions); on Azure or Kubernetes, install `az` or `kubectl` instead of `flyctl` and sign the runner in to it (or use `deploy_credentials`). An environment with `confirm_env = true` also needs `--confirm <env>` in the job.
 
@@ -851,7 +883,7 @@ This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`
 
 ```yaml
       - name: Deliver api's secrets and keep the receipt
-        run: opv sync prod --product api --expect-plan "$PLAN_ID" --receipt api.receipt.json
+        run: opv sync prod --product api --receipt api.receipt.json
       - uses: actions/upload-artifact@v4
         with: { name: api-delivery, path: api.receipt.json }
       # Later, before reusing an accepted record (read-only; exit 8 unless verified):
@@ -859,7 +891,7 @@ This stages without deploying; a later `fly deploy` (or `opv sync prod --deploy`
         run: opv delivery verify prod --product api --receipt api.receipt.json --json
 ```
 
-The receipt names `api`'s revision and binding set, never a value or digest. Another product's later sync leaves `api` verified, and a rotation of `api`'s values or of a shared value it reads does not. See [delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
+There is no `--expect-plan` here: CI has no one to review a plan, so the job syncs what the item and the target hold at run time; `--expect-plan` guards a plan a person reviewed. The receipt names `api`'s revision and binding set, never a value or digest. Another product's later sync leaves `api` verified, and a rotation of `api`'s values or of a shared value it reads does not. See [delivery receipts](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify).
 
 **Job summary.** When `$GITHUB_STEP_SUMMARY` is set (GitHub Actions sets it for every step), `status`, `plan` and `sync` append a Markdown section to the job's summary page: for `status` and `plan`, the count line, `changes` (plan) and one table row per key, problems first, with target, product, key, kind, state word (`failed <rule>`, without the reason) and on-target word; for `sync`, its summary line and the written, pruned, pending, held, extra and unchanged names. It holds names and state words only: no value, no rule reason and no 1Password link (the link names your account). Nothing to configure; outside GitHub Actions nothing is written. For a nightly drift check, run `opv plan prod --json` and alert when `changes` is `some`.
 

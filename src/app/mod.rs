@@ -10,9 +10,11 @@
 //! - Output names products, keys, kinds, rules and target names, never values (SR-1).
 
 pub mod access;
+pub mod access_create;
 pub mod account;
 pub mod add;
 pub mod adopt;
+pub mod agent_view;
 pub mod approve;
 #[cfg(test)]
 mod azure_tests;
@@ -20,12 +22,15 @@ pub mod bootstrap;
 #[cfg(test)]
 mod characterization_tests;
 pub(crate) mod ci_summary;
+pub mod ci_workflow;
 pub mod config_cmd;
 pub mod config_export;
 pub mod declare;
 pub mod delivery;
+pub mod delivery_preview;
 pub mod doctor;
 pub mod explain;
+pub mod generate;
 #[cfg(test)]
 mod github_tests;
 #[cfg(test)]
@@ -40,6 +45,7 @@ mod ledger_tests;
 pub mod local;
 pub mod local_delivery;
 pub mod login;
+pub mod masked;
 pub mod mcp_install;
 pub mod open;
 pub mod personal;
@@ -73,15 +79,18 @@ mod skill_tests;
 mod staged_tests;
 pub mod status;
 pub mod structure;
+pub mod structure_cmd;
 pub(crate) mod suggest;
 pub mod sync;
 pub mod target_cmd;
+pub mod target_credentials;
 pub(crate) mod tidy;
 #[cfg(test)]
 mod ux2_tests;
 #[cfg(test)]
 mod ux_tests;
 pub(crate) mod variables;
+pub mod vault_locate;
 pub mod version;
 
 use std::cell::RefCell;
@@ -195,6 +204,7 @@ pub(crate) fn plan_id_of(
     plan: &SyncPlan,
     listed: &[StoreEntry],
     ports: &Ports<'_>,
+    rotate: &BTreeSet<(String, String)>,
     own_plan: Option<&str>,
 ) -> String {
     let name_of = |p: &str, k: &str| {
@@ -208,6 +218,7 @@ pub(crate) fn plan_id_of(
             item_version,
             listed,
             version_ids: matches!(ports, Ports::Pinned { .. }),
+            rotate,
             name_of: &name_of,
             own_plan,
         },
@@ -423,6 +434,9 @@ pub(crate) struct JsonPart<'a> {
     pub plan: &'a SyncPlan,
     /// A pinned target's bindings (R5), keyed by name on the target.
     pub pinned: Option<&'a BTreeMap<String, PinnedRow>>,
+    /// `--rotate` entries the part was planned with (`plan` only); sets `rotate` on the
+    /// matching rows. `None` for `status`.
+    pub rotate: Option<&'a BTreeSet<(String, String)>>,
 }
 
 /// FR-21: one names-only JSON document for `status --json` and `plan --json`. Every row
@@ -589,6 +603,7 @@ fn json_rows(
             let bound = target_name
                 .as_deref()
                 .and_then(|n| part.pinned.and_then(|m| m.get(n)));
+            let rotate = part.rotate.is_some_and(|s| rotated(s, r));
             JsonRow {
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
@@ -596,6 +611,7 @@ fn json_rows(
                 chain: bound.and_then(|b| b.chain.clone()),
                 open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 target: Some(part.target.to_string()),
+                rotate,
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
@@ -706,6 +722,15 @@ pub(crate) struct JsonRow {
     /// A shared key's source, `product/KEY` (FR-45).
     #[serde(skip_serializing_if = "Option::is_none")]
     shared_from: Option<String>,
+    /// True when this `plan` was made with `--rotate` for this row's key (FR-16); absent
+    /// otherwise, so a plan without rotation is unchanged.
+    #[serde(skip_serializing_if = "is_false")]
+    rotate: bool,
+}
+
+/// Serialize a `false` boolean field only when true (`rotate`).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl JsonRow {
@@ -734,8 +759,17 @@ impl JsonRow {
             chain: None,
             open_url: None,
             shared_from: json_source(r),
+            rotate: false,
         }
     }
+}
+
+/// Whether `--rotate` names `r`'s key, or the key it shares its value from (FR-16, FR-45).
+pub(crate) fn rotated(set: &BTreeSet<(String, String)>, r: &Row) -> bool {
+    set.contains(&(r.product.clone(), r.key.clone()))
+        || r.source
+            .as_ref()
+            .is_some_and(|(p, k)| set.contains(&(p.clone(), k.clone())))
 }
 
 /// The `shared_from` of a JSON row (FR-45).
@@ -955,6 +989,7 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
               sync writes it again (a staging target stages it and compares digests)
   pending     written, not yet live; the next sync --deploy rolls it out
   held        immutable and already set; kept as it is (replace with --rotate)
+  rotate      an immutable key this plan replaces because --rotate named it
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote
   n/a         not delivered to the target (config keys, unless the target takes config as
@@ -2039,6 +2074,40 @@ pub(crate) mod testutil {
     pub fn fleet_with(extra: &str) -> Fleet {
         let text = std::fs::read_to_string("tests/fixtures/secrets.toml").unwrap();
         config::parse(&format!("{text}\n{extra}")).unwrap()
+    }
+
+    /// Two prod keys scoped to the process roles `serve` and `migrate` (#136).
+    pub const ROLE_KEYS: &str = "\
+[products.allumata.keys.SERVE_TOKEN]
+kind = \"secret\"
+environments = [\"prod\"]
+roles = [\"serve\"]
+
+[products.allumata.keys.DATABASE_URL_UNPOOLED]
+kind = \"secret\"
+environments = [\"prod\"]
+roles = [\"migrate\"]
+";
+
+    /// The fixture fleet plus the two role-scoped keys.
+    pub fn role_fleet() -> Fleet {
+        fleet_with(ROLE_KEYS)
+    }
+
+    /// [`role_fleet`] plus a local delivery section and a `migrate`-scoped file key.
+    pub fn role_local_fleet() -> Fleet {
+        fleet_with(&format!(
+            "{ROLE_KEYS}\n[products.allumata.keys.MIGRATE_PEM]
+kind = \"secret\"
+environments = [\"prod\"]
+roles = [\"migrate\"]
+file = \"db/migrate-pem\"
+
+[products.allumata.local]
+environment = \"declared_only\"
+secrets_dir_env = \"APP_SECRETS_DIR\"
+"
+        ))
     }
 
     /// 32 bytes, base64. The bytes spell the marker, so a decoded leak is detectable too.

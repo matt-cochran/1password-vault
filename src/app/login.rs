@@ -111,9 +111,11 @@ pub fn run_or(
 /// picks one from a menu, shown even when one account is registered (the one op sees may not
 /// be the one they mean, #79), with "Add another 1Password account" always offered. `add`
 /// (`opv login --add`) adds an account right away. Where `op` keeps its own accounts (Linux,
-/// WSL), an account it does not know yet is added here, at op's prompts, and signed in in the
-/// same step. The choice is recorded in `.opv`, so later commands never fall back to op's
-/// default account. `None`: nothing to choose.
+/// and WSL with a native `op`), an account it does not know yet is added here, at op's
+/// prompts, and signed in in the same step; in WSL with the Windows `op.exe` the accounts
+/// live in the Windows 1Password app, so adding one is done in the app. The choice is
+/// recorded in `.opv`, so later commands never fall back to op's default account. `None`:
+/// nothing to choose.
 pub fn choose_account(
     r: &dyn crate::runner::CommandRunner,
     given: Option<&str>,
@@ -122,10 +124,29 @@ pub fn choose_account(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
+    choose_account_with(r, given, add, start, backend, ui, true)
+}
+
+/// [`choose_account`]; `record` false (`opv login --no-record`, #153) signs in to the
+/// account for this login only and leaves `.opv` as it is, for a one-off look into another
+/// account (on a shared sign-in address, the only way to reach the second account through
+/// opv's session handling).
+pub fn choose_account_with(
+    r: &dyn crate::runner::CommandRunner,
+    given: Option<&str>,
+    add: bool,
+    start: &std::path::Path,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+    record: bool,
+) -> Result<Option<String>, Error> {
     use crate::adapters::onepassword_manifest as manifest;
     use crate::host::{Host, Platform};
-    let platform = Host::detect().platform;
-    let own_op = matches!(platform, Platform::Linux | Platform::Wsl);
+    let host = Host::detect();
+    let platform = host.platform;
+    // In WSL with the Windows `op.exe`, accounts live in the Windows app: op's own prompt
+    // is not reachable, so adding one is done in the app.
+    let own_op = matches!(platform, Platform::Linux | Platform::Wsl) && !host.op_is_windows_exe();
     let accounts = manifest::accounts(r);
     const ADD: &str = "Add another 1Password account";
     let added = |now: &[manifest::Account]| {
@@ -209,6 +230,13 @@ pub fn choose_account(
             }
         }
     };
+    if !record {
+        ui.show(&format!(
+            "Signing in to 1Password account {} for this login only; .opv is unchanged.",
+            backend.account_label(&uuid)
+        ))?;
+        return Ok(Some(uuid));
+    }
     let path = crate::config_store::record_account(start, &uuid)?;
     ui.show(&format!(
         "This project uses 1Password account {}; recorded in {} (commit it).",

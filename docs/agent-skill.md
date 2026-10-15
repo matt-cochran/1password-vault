@@ -43,6 +43,35 @@ account or Connect credentials. If a tool is missing in this version, say so; us
 `opv bootstrap` in the user's terminal instead and never work around it. Details:
 `opv guide agent`, section "Optional MCP server".
 
+## CLI or MCP
+
+Every MCP tool has the same command on the CLI: `opv schema` lists each tool with its
+command under `mcp_tools`. Without an MCP client, run the structure flow yourself in the
+same order: declare with `opv env add`/`opv add`/`opv target add` (local `secrets.toml`
+only), then `opv structure plan --json` for the plan and its `plan_id`, ask the user to run
+`opv approve <plan_id>` in their own terminal, then `opv structure apply <plan_id> --json`.
+That document is exactly what `opv_structure_plan` / `opv_structure_apply` return, and
+`opv structure apply` refuses an unapproved or stale plan just the same. `opv config
+describe --json` reproduces the `opv_configuration` document, `opv ready --json` the
+readiness receipt, `opv access` and `opv plan` their tools.
+
+## Deploys: the user approves, you run exactly that once
+
+Never run `opv sync` on your own. Show the plan (`opv plan <env> --json`, or
+`opv_deployment_plan`), then hand the user its `approve_command`:
+`opv approve <plan_id> --sync <env>` (with the same `--target`, `--product`, `--deploy`,
+`--prune` and `--rotate` you will use). They run it in their own terminal. Then run
+`opv sync <env> --approved <plan_id>` with the same flags (MCP: `opv_sync`). It runs that
+plan once, within 15 minutes. `stale_plan`: the item, target or configuration changed;
+show the new plan and ask again. `approval_required`: wait for the user.
+
+## Self-made secrets
+
+For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
+then run `opv generate <env> <product/KEY>` (with the MCP server, the tool is `opv_generate`):
+the value goes straight into 1Password and is never shown. Never suggest `openssl rand` or
+pasting generated values.
+
 ## Local secret files and Workers
 
 Never create `.env`, `.dev.vars` or any file holding a value, and never write a wrapper that
@@ -53,11 +82,21 @@ exports values. For a secret-store app or a Cloudflare Worker, declare
 
 ## CI identities
 
-A validation job (`check`, `plan`, `ready`) uses the read-only reader from
-`opv bootstrap --ci-reader <env>`. A job that syncs uses the target's deploy identity from
-`opv access <env> --target <name>`: boundary read plus read and write on its own state vault,
-where delivery evidence goes. `opv ready` says `evidence_write: "not_verified"`: only a sync
-checked with `opv delivery verify` proves it. Never widen a boundary vault to write.
+Never build `op service-account create` commands by hand. Ask the user for the GitHub
+repository and environment their CI job uses, then hand them
+`opv access <env> --target <name> --create --github <owner/repo> --github-env <env>`
+(from `opv_access` or `opv access --json`): it creates the identity and stores its token as
+a GitHub secret without showing it.
+
+A validation job (`check`, `plan`, `ready`) uses the environment's read-only reader
+(`opv access <env> --create --github <owner/repo>`, no `--target`). A job that syncs uses the
+target's deploy identity (`--target <name>`): boundary read plus read and write on its own
+state vault, where delivery evidence goes. `opv ready` says `evidence_write:
+"not_verified"`: only a sync checked with `opv delivery verify` proves it. Never widen a
+boundary vault to write. For the job file, run `opv ci workflow <env> --target <name>
+[--github-env <env>]` instead of writing YAML; committing it is a change the user approves.
+A `pending_revoke` finding means an old identity still reads the vault: once
+`opv delivery verify` passes, the user removes it in 1Password.
 
 ## Pick the flow from `opv ready --json`
 
@@ -82,6 +121,11 @@ checked with `opv delivery verify` proves it. Never widen a boundary vault to wr
   first and creates the target's state vault). A `state_vault_wider_than_values` load error
   means a target shares a state vault it cannot read; give it its own by deleting its
   `state_vault_id` and running `opv bootstrap`.
+- **A target's deploy credential**: never mint, read, copy or paste one. Have the user run
+  `opv target credentials <env> --target <name> --create` in their own terminal; it mints
+  the least-privilege credential at the provider, stores it in a new 1Password item and
+  records `deploy_credentials` — the token is never printed. If they decline or the target
+  already records one, it is a stop: hand `opv explain` to them and wait.
 - **Account findings** (`no_accounts`, `selected_account_absent`, `account_ambiguous`,
   `selected_signed_out`): run `opv account list --json`; ask the user which account; record it
   with `opv account use <ID>`; hand `opv login --add --account <email>` or
@@ -95,6 +139,11 @@ checked with `opv delivery verify` proves it. Never widen a boundary vault to wr
 - **Everything saved**: local runs use `opv run <env> --product <p> -- <command>`; deploys go
   `opv plan <env>` then `opv sync <env> --expect-plan <id>` (add `--deploy` only when the user
   wants to deploy). CI secrets in GitHub Actions use a `github` environment and the same sync.
+- **Which keys a local run would deliver, and their roles**: `opv run <env> --preview --json`
+  (or MCP `opv_delivery_preview`) reports each key's source, destination and roles, the keys a
+  role withholds, the environment mode, the secrets-directory variable, file-delivery support
+  and the `op`/signed-in prerequisites, without reading a value. Use it to check delivery
+  (including `--role`) before the user runs the command.
 - **"Is product P still what was delivered?"** (targets with a state vault): run
   `opv delivery verify <env> --product <P> --json`. It reports every placement of P, each with
   its target and state; `--target <name>` narrows to one placement. Only `verified` is proof.

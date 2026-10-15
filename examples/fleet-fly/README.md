@@ -8,7 +8,7 @@ Two products (`api`, `worker`), three environments (`dev` for local runs, `stagi
 opv doctor                 # op and flyctl present? it says where they are if not on PATH
 opv account list           # the 1Password accounts this CLI knows, and which one is selected
 opv login --add            # add your account here if it is not listed (1Password's own prompt)
-opv account use you@example.com   # record it for this project in .opv (commit .opv)
+opv account use "<account ID>"   # the account ID from opv account list; record it in .opv (commit .opv)
 ```
 
 On WSL, the Linux 1Password CLI does not see the Windows app's accounts: `opv login --add` adds yours to the Linux CLI once. On macOS and Windows the CLI uses the app's accounts (turn on Settings > Developer > Integrate with 1Password CLI).
@@ -59,7 +59,7 @@ opv bootstrap --ci-reader staging   # prints the owner's commands for a read-onl
 That read-only reader is for validation jobs (`opv check`, `opv plan`, `opv ready`); it cannot write delivery evidence. A job that syncs or deploys uses the target's own deploy identity instead, which reads the boundary vaults and reads and writes only that target's state vault:
 
 ```sh
-opv access staging --target web     # prints the owner's create command for the web target's deploy identity
+opv access staging --target app     # prints the owner's create command for the app target's deploy identity
 ```
 
 Give each job only the token it needs (`OP_SERVICE_ACCOUNT_TOKEN`) and, for deploys, a `deploy_credentials` item with a Fly deploy token for that one app ([configuration](../../docs/configuration.md#account-and-deploy-credentials)). Keep an old token until its replacement has recorded verified delivery evidence (`opv delivery verify staging --product <p>`). The CI job itself is in [usage](../../docs/usage.md#github-actions-example); to manage the repositories' own CI secrets from 1Password, see [examples/github-ci](../github-ci/).

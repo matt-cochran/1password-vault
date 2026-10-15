@@ -38,7 +38,7 @@ pub struct Inputs<'a> {
 pub fn session_var_names() -> Vec<String> {
     let mut names: Vec<String> = std::env::vars_os()
         .filter_map(|(k, _)| k.into_string().ok())
-        .filter(|k| k.starts_with("OP_SESSION_"))
+        .filter(|k| k == "OP_SESSION" || k.starts_with("OP_SESSION_"))
         .collect();
     names.sort();
     names
@@ -267,7 +267,9 @@ fn session_var_findings(
     let next = selected.map(|id| format!("opv login --account {id}"));
     vars.iter()
         .filter_map(|var| {
-            let name = var.strip_prefix("OP_SESSION_")?;
+            // The bare `OP_SESSION` (an `op signin` without an account) names no account:
+            // stale here, since opv names accounts.
+            let name = var.strip_prefix("OP_SESSION_").unwrap_or("");
             let owner = listed.iter().find(|a| {
                 [&a.shorthand, &a.user_uuid, &a.account_uuid]
                     .iter()

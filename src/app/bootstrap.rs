@@ -804,19 +804,21 @@ fn ci_reader_steps(
     };
     let lines = [
         format!(
-            "CI reader {} for {env} (run it yourself; the token is shown once, by 1Password):",
+            "CI reader {} for {env}: create it and store its token as a GitHub Actions secret \
+             in one step, the token never shown (run it yourself, in your own terminal):",
             access_plan::ci_account(project, env)
         ),
-        format!("  {command}"),
-        "  store the token it prints as the CI secret OP_SERVICE_ACCOUNT_TOKEN in your CI \
-         provider (on GitHub: the repository's Settings > Secrets and variables > Actions), \
-         pasting it there yourself; never give CI an owner or break-glass credential"
-            .to_string(),
+        format!("  opv access {env} --create --github <owner/repo> [--github-env <environment>]"),
+        format!(
+            "  another CI provider: run {command} yourself and paste the token it shows once \
+             straight into that provider's secret OP_SERVICE_ACCOUNT_TOKEN; never give CI an \
+             owner or break-glass credential"
+        ),
         format!(
             "  this reader validates only (check, plan, ready): it cannot write delivery \
              evidence. A CI job that syncs or deploys uses each target's deploy identity \
              instead (boundary read, its own state vault read and write): opv access {env} \
-             --target <name> prints its create command"
+             --target <name> --create --github <owner/repo>"
         ),
     ];
     for l in lines {

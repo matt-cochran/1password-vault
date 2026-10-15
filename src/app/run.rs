@@ -15,12 +15,44 @@ use std::io;
 
 use super::personal;
 use crate::adapters::onepassword;
-use crate::domain::{Fleet, KeySpec, rules};
+use crate::domain::{Fleet, KeySpec};
 use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
 const OP: &str = "op";
+
+/// 0.9.0: running an app with the secrets of an environment that sets `confirm_env`
+/// (production, typically) needs the environment's name again, as `sync` does: one
+/// deliberate step before its values reach a local process. Checked before anything is
+/// read. `--preview` reads no value and needs none. `retry` is the same run with
+/// `--confirm <env>`, shown as the next step.
+pub fn require_confirmation(
+    fleet: &Fleet,
+    env_name: &str,
+    confirm: Option<&str>,
+    retry: &str,
+) -> Result<(), Error> {
+    let env = fleet.environment(env_name)?;
+    match confirm {
+        Some(c) if c != env_name => Err(Error::Policy(
+            format!("--confirm {c} does not match environment {env_name}; nothing was read").into(),
+        )
+        .with_code(crate::error::Code::ConfirmMismatch)
+        .with_next(retry.to_string())),
+        None if env.confirm_env => Err(Error::Policy(
+            format!(
+                "{env_name} sets confirm_env: running a command with its values needs \
+                 --confirm {env_name}; nothing was read"
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::ConfirmRequired)
+        .with_do("ask the user whether to run it with this environment's values")
+        .with_next(retry.to_string())),
+        _ => Ok(()),
+    }
+}
 
 /// `run <env> --product <p> -- <cmd>`: without `--product`, the one product with keys
 /// desired in `env_name` is used (D10/FR-34); a named product is validated by [`run`].
@@ -28,6 +60,7 @@ pub fn run_for(
     fleet: &Fleet,
     env_name: &str,
     product: Option<&str>,
+    role: Option<&str>,
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
@@ -35,19 +68,34 @@ pub fn run_for(
         Some(p) => p.to_string(),
         None => super::pick_product(fleet, env_name, None, "run")?,
     };
-    run(fleet, env_name, &product, command, runner)
+    run_with_role(fleet, env_name, &product, role, command, runner)
 }
 
 /// Run `command` under `op run` with the product's references for `env_name` in its
 /// environment. Returns the child's exit code, which `main` uses as the process exit code.
 ///
 /// Keys passed: every key of `product` declared for `env_name` whose rules apply
-/// ([`rules::applies`]). Keys skipped by a mode (e.g. `payments = "off"`) are left out,
+/// ([`crate::domain::rules::applies`]). Keys skipped by a mode (e.g. `payments = "off"`) are left out,
 /// because their field may be empty and `op run` fails on an empty reference.
 pub fn run(
     fleet: &Fleet,
     env_name: &str,
     product: &str,
+    command: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
+    run_with_role(fleet, env_name, product, None, command, runner)
+}
+
+/// [`run`] with `--role` (#136): the keys are selected once, by
+/// [`crate::app::delivery_preview::select`],
+/// so a role withheld key is neither referenced on `op run`'s command line nor written by
+/// the local delivery step nor put in the child environment.
+pub fn run_with_role(
+    fleet: &Fleet,
+    env_name: &str,
+    product: &str,
+    role: Option<&str>,
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
@@ -66,11 +114,8 @@ pub fn run(
         .with_next("opv run --help"));
     }
 
-    let selected: Vec<(&String, &KeySpec)> = prod
-        .keys
-        .iter()
-        .filter(|(_, spec)| rules::applies(spec, env_name, env, product))
-        .collect();
+    let selection = super::delivery_preview::select(env_name, env, product, prod, role)?;
+    let selected: Vec<(&String, &KeySpec)> = selection.delivered;
     // FR-55: a personal key's value is in the person's own item. Locate it before the read
     // and before `op run`, so a missing personal item stops the run and names the keys.
     let personal_env = if selected
@@ -499,7 +544,58 @@ environments = ["ci"]
     #[test]
     fn run_without_product_uses_the_only_non_source_only_product() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
-        run_for(&source_only_fleet(), "ci", None, &cmd(&["env"]), &r).unwrap();
+        run_for(&source_only_fleet(), "ci", None, None, &cmd(&["env"]), &r).unwrap();
         assert_eq!(argvs(&r), vec!["op run -- env"]);
+    }
+
+    fn guarded() -> Fleet {
+        crate::config::parse(
+            r#"[environments.prod]
+confirm_env = true
+boundaries.api = { vault_id = "vprod", item_id = "iprod" }
+
+[environments.dev]
+boundaries.api = { vault_id = "vdev", item_id = "idev" }
+
+[products.api.keys.TOKEN]
+kind = "secret"
+environments = ["prod", "dev"]
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_guarded_environment_needs_its_name_again() {
+        let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::ConfirmRequired);
+    }
+
+    #[test]
+    fn a_guarded_environment_runs_when_confirmed() {
+        assert!(require_confirmation(&guarded(), "prod", Some("prod"), "retry").is_ok());
+    }
+
+    #[test]
+    fn a_confirmation_naming_another_environment_is_refused() {
+        let e = require_confirmation(&guarded(), "prod", Some("dev"), "retry").unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::ConfirmMismatch);
+    }
+
+    #[test]
+    fn an_unguarded_environment_needs_no_confirmation() {
+        assert!(require_confirmation(&guarded(), "dev", None, "retry").is_ok());
+    }
+
+    #[test]
+    fn the_refusal_steps_to_the_confirmed_run() {
+        let e = require_confirmation(
+            &guarded(),
+            "prod",
+            None,
+            "opv run prod --confirm prod -- env",
+        )
+        .unwrap_err();
+        assert_eq!(e.next_step(), Some("opv run prod --confirm prod -- env"));
     }
 }

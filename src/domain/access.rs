@@ -9,6 +9,8 @@
 //! `SERVICE_ACCOUNT` type string is from 1Password's documentation and has not yet been
 //! confirmed against a live account.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -42,8 +44,13 @@ pub struct AccessFinding {
 }
 
 const ACCESS_NOT_VISIBLE: &str = "access_not_visible";
+/// #153: a needed vault that `op vault get` cannot find in the selected account.
+pub const VAULT_NOT_IN_ACCOUNT: &str = "vault_not_in_account";
 const NO_CI_READER: &str = "no_ci_reader";
 const CI_READER_CAN_WRITE: &str = "ci_reader_can_write";
+/// 0.9.0: several service accounts with one name read a vault, as after `opv access
+/// --create` made a replacement: the older one waits to be removed in 1Password.
+pub const PENDING_REVOKE: &str = "pending_revoke";
 
 /// `users`: Some(parsed JSON array) when the list could be read, None when it could not (not
 /// visible to this person).
@@ -104,9 +111,8 @@ fn reader(user: &serde_json::Map<String, Value>) -> Reader {
 }
 
 /// Findings for the analysed environments, in input order, then by code order:
-/// access_not_visible, no_ci_reader, ci_reader_can_write. `project` names the suggested
-/// service account.
-pub fn findings(project: &str, envs: &[EnvAccess]) -> Vec<AccessFinding> {
+/// access_not_visible, no_ci_reader, ci_reader_can_write, pending_revoke.
+pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
     let mut out = Vec::new();
     for access in envs {
         if !access.visible {
@@ -130,10 +136,10 @@ pub fn findings(project: &str, envs: &[EnvAccess]) -> Vec<AccessFinding> {
                     "{} deploys but has no read-only service account for CI",
                     access.environment
                 ),
+                // The token goes straight into the CI secret, never shown (0.9.0).
                 next: Some(format!(
-                    "op service-account create \"{project}-{}-ci\" --vault {}:read_items \
-                     --expires-in 90d",
-                    access.environment, access.vault_id
+                    "opv access {} --create --github <owner/repo>",
+                    access.environment
                 )),
             });
         }
@@ -150,6 +156,23 @@ pub fn findings(project: &str, envs: &[EnvAccess]) -> Vec<AccessFinding> {
                     account.name, access.environment
                 ),
                 next: None,
+            });
+        }
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for account in &access.service_accounts {
+            *seen.entry(account.name.as_str()).or_default() += 1;
+        }
+        for (name, n) in seen.into_iter().filter(|(_, n)| *n > 1) {
+            out.push(AccessFinding {
+                code: PENDING_REVOKE,
+                environment: access.environment.clone(),
+                message: format!(
+                    "{n} service accounts named {name} can read the {} vault: keep the newest \
+                     until its token has produced verified delivery evidence, then remove the \
+                     older ones in 1Password (Developer > Service accounts)",
+                    access.environment
+                ),
+                next: Some(format!("opv delivery verify {}", access.environment)),
             });
         }
     }

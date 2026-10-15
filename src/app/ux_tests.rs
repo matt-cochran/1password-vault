@@ -842,6 +842,107 @@ fn fly_plan_id_is_stable_across_runs() {
     assert_eq!(fly_plan_id(&fleet()), fly_plan_id(&fleet()));
 }
 
+// ---- A7 / FR-16: --rotate plans and applies a replacement ------------------------------
+
+const ENC: &str = "allumata/INTEGRATION_ENC_KEY";
+
+/// The key values of an item already matching its target; ENC is held unless rotated.
+fn present() -> Output {
+    fly(&[(OPENAI_FLY, "d1"), (ENC_FLY, "d2")])
+}
+
+/// The plan of `rotate` against an item whose keys are all present and unchanged.
+fn plan_rotate_out(rotate: &[&str], json: bool) -> (Result<(), Error>, String) {
+    let rotate: Vec<String> = rotate.iter().map(|s| s.to_string()).collect();
+    let r = FakeRunner::new([complete_item(), present()]);
+    let mut out = Vec::new();
+    let res = sync::plan_rotating(&fleet(), "prod", &[], None, &rotate, &r, &mut out, json);
+    (res, text_of(&out))
+}
+
+fn rotate_plan_id(rotate: &[&str]) -> String {
+    let (_, out) = plan_rotate_out(rotate, true);
+    serde_json::from_str::<Value>(&out).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn enc_row(out: &str) -> Value {
+    let doc: Value = serde_json::from_str(out).unwrap();
+    doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "INTEGRATION_ENC_KEY")
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn plan_rotate_marks_the_rotated_row_in_json() {
+    let (_, out) = plan_rotate_out(&[ENC], true);
+    assert_eq!(enc_row(&out)["rotate"], Value::Bool(true), "{out}");
+}
+
+#[test]
+fn plan_rotate_stages_a_held_immutable_key() {
+    let (_, out) = plan_rotate_out(&[ENC], true);
+    assert_eq!(
+        enc_row(&out)["action"],
+        Value::String("would_stage".into()),
+        "{out}"
+    );
+}
+
+#[test]
+fn plan_rotate_changes_the_plan_id() {
+    assert_ne!(rotate_plan_id(&[]), rotate_plan_id(&[ENC]));
+}
+
+#[test]
+fn plan_rotate_marks_the_row_on_target_as_rotate() {
+    let (_, out) = plan_rotate_out(&[ENC], false);
+    assert!(
+        out.lines()
+            .any(|l| l.contains("INTEGRATION_ENC_KEY") && l.ends_with("rotate")),
+        "{out}"
+    );
+}
+
+#[test]
+fn plan_rotate_refuses_a_non_immutable_key() {
+    let (res, _) = plan_rotate_out(&["allumata/OPENAI_API_KEY"], false);
+    assert!(matches!(res, Err(Error::Config(_))));
+}
+
+#[test]
+fn sync_with_rotate_and_its_plan_id_writes_the_rotated_key() {
+    let id = rotate_plan_id(&[ENC]);
+    let r = fly_run(complete_item(), present(), present());
+    let o = SyncOpts {
+        rotate: vec![ENC.into()],
+        ..expect(&id)
+    };
+    let (res, _) = sync_out(&fleet(), &r, &o);
+    assert!(
+        res.is_ok() && import_stdin(&r).unwrap_or_default().contains(ENC_FLY),
+        "{res:?}"
+    );
+}
+
+#[test]
+fn sync_with_rotate_and_a_plain_plan_id_is_stale() {
+    let id = rotate_plan_id(&[]);
+    let r = fly_run(complete_item(), present(), present());
+    let o = SyncOpts {
+        rotate: vec![ENC.into()],
+        ..expect(&id)
+    };
+    let (res, _) = sync_out(&fleet(), &r, &o);
+    assert_eq!(res.unwrap_err().code(), crate::error::Code::StalePlan);
+}
+
 #[test]
 fn sync_with_the_reviewed_fly_plan_id_stages() {
     let r = new_secrets();
@@ -910,10 +1011,10 @@ fn expect_plan_satisfies_confirm_env() {
 }
 
 #[test]
-fn expect_plan_with_rotate_is_refused_before_any_call() {
+fn expect_plan_with_prune_immutable_is_refused_before_any_call() {
     let r = FakeRunner::new([]);
     let o = SyncOpts {
-        rotate: vec!["allumata/OPENAI_API_KEY".into()],
+        prune_immutable: vec!["allumata/INTEGRATION_ENC_KEY".into()],
         ..expect("00000000")
     };
     let (res, _) = sync_out(&fleet(), &r, &o);
