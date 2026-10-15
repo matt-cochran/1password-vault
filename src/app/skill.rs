@@ -203,6 +203,32 @@ pub fn install(
     Ok(installed)
 }
 
+/// After an upgrade through any channel, rewrite every existing, unedited user-level copy
+/// under `root` that is not already `version`, and return the paths written. A missing copy
+/// is never created, an edited copy is never touched, and a failed write is ignored: this
+/// is best effort on a run that must still succeed.
+///
+/// The caller passes [`user_root`] in production; the parameter keeps the behaviour
+/// testable against a temporary directory.
+pub fn refresh_user_copies(root: &Path, version: &str) -> Vec<PathBuf> {
+    let text = render(version);
+    let mut updated = Vec::new();
+    for target in ALL {
+        let path = target.path(root);
+        let Ok(existing) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Unedited and out of date: safe to overwrite. Edited copies (no matching marker)
+        // and copies already at this version are left alone.
+        if installed_version(&existing).is_some_and(|found| found != version)
+            && crate::config_edit::write_atomic(&path, &text, || Ok(())).is_ok()
+        {
+            updated.push(path);
+        }
+    }
+    updated
+}
+
 /// One installed copy of the skill.
 #[derive(Debug, serde::Serialize)]
 pub struct Copy {

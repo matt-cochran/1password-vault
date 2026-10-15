@@ -53,8 +53,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
 | `opv schema` | the installed binary as one JSON document | nothing |
 | `opv guide agent` | the setup guide for AI assistants, for this version | nothing |
-| `opv skill install [--target claude\|codex\|all] [--user\|--project <dir>] [--force]` | install the agent skill (versioned with this binary) where coding agents look | the skill files |
-| `opv skill status [--json]` | installed skill copies: version, current or older, edited | nothing |
+| `opv skill install [--target claude\|codex\|all] [--user\|--project <dir>] [--force]` | install the agent skill (versioned with this binary) where coding agents look; installers register the user-level skill by default | the skill files |
+| `opv skill status [--json]` | installed skill copies: version, current or older, edited, and the command to update an older copy | nothing |
 
 "Nothing" means nothing on your targets and no change to what a value means. Run by a person signed in with their own session, a command that reads an item (except `doctor` and `ready`, which never write; `opv schema` marks the others `tidies_1password`) may also tidy its 1Password layout once (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 

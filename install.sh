@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
-#   sh install.sh [--version vX.Y.Z] [--dir <path>] [--check] [--skill]
+#   sh install.sh [--version vX.Y.Z] [--dir <path>] [--check] [--no-skill]
 #
 # The script installs the release asset that matches the running platform,
 # verifies it against the release's SHA256SUMS (and `gh attestation verify`
@@ -29,15 +29,16 @@ DEFAULT_DIR="${HOME:-/tmp}/.local/bin"
 version=""
 dir="$DEFAULT_DIR"
 check_only=0
-skill=0
+skill=1
 
 usage() {
   cat <<EOF
-Usage: install.sh [--version vX.Y.Z] [--dir <path>] [--check] [--skill]
+Usage: install.sh [--version vX.Y.Z] [--dir <path>] [--check] [--no-skill]
   --version vX.Y.Z  Install exactly this release (default: latest).
   --dir <path>      Install into <path> (default: $DEFAULT_DIR).
   --check           Report what would happen and change nothing.
-  --skill           Also install the opv agent skill for this user (both agents).
+  --skill           Install the opv agent skill (the default; kept for compatibility).
+  --no-skill        Do not install the opv agent skill for this user.
 EOF
 }
 
@@ -72,7 +73,12 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --skill)
+      # The default since 0.9.0; still accepted so older invocations keep working.
       skill=1
+      shift
+      ;;
+    --no-skill)
+      skill=0
       shift
       ;;
     -h|--help)
@@ -256,12 +262,14 @@ print_path_hint() {
   esac
 }
 
-# With --skill, run the freshly installed opv to put the embedded agent skill where
-# coding agents look. The skill is optional, so a failure warns and does not fail the
-# install that already succeeded.
+# By default, run the freshly installed opv to put the embedded agent skill where coding
+# agents look. `--no-skill`, CI and OPV_NO_SKILL=1 skip it; the skill is optional, so a
+# failure warns and does not fail the install that already succeeded.
 install_skill() {
   [ "$skill" -eq 1 ] || return 0
   [ "$check_only" -eq 0 ] || return 0
+  [ -z "${CI:-}" ] || return 0
+  [ "${OPV_NO_SKILL:-}" != "1" ] || return 0
   if ! "$exe" skill install --user --target all; then
     echo "install.sh: opv skill install failed; run it yourself when ready" >&2
   fi

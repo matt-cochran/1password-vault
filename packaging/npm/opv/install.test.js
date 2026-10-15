@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { setup, run, sha256 } = require('./_harness.js');
+const { registerSkill } = require('./install.js');
 
 const unix = { skip: process.platform === 'win32' ? 'POSIX shell fixture' : false };
 
@@ -130,4 +131,56 @@ test('install replaces a broken symlink at the canonical path', unix, () => {
   fs.symlinkSync(path.join(h.root, 'missing'), h.target);
   install(h);
   assert.equal(fs.lstatSync(h.target).isSymbolicLink(), false);
+});
+
+test('registerSkill runs the installed binary with the user install arguments', () => {
+  const calls = [];
+  registerSkill('/bin/opv', {
+    env: {},
+    spawn: (cmd, args) => {
+      calls.push([cmd, args]);
+      return { status: 0 };
+    },
+  });
+  assert.deepEqual(calls, [
+    ['/bin/opv', ['skill', 'install', '--user', '--target', 'all']],
+  ]);
+});
+
+test('registerSkill does not run the binary when CI is set', () => {
+  let calls = 0;
+  registerSkill('/bin/opv', {
+    env: { CI: 'true' },
+    spawn: () => {
+      calls += 1;
+      return { status: 0 };
+    },
+  });
+  assert.equal(calls, 0);
+});
+
+test('registerSkill does not run the binary when OPV_NO_SKILL is 1', () => {
+  let calls = 0;
+  registerSkill('/bin/opv', {
+    env: { OPV_NO_SKILL: '1' },
+    spawn: () => {
+      calls += 1;
+      return { status: 0 };
+    },
+  });
+  assert.equal(calls, 0);
+});
+
+test('registerSkill warns on stderr and does not throw when the binary fails', () => {
+  let warnings = '';
+  registerSkill('/bin/opv', {
+    env: {},
+    spawn: () => ({ status: 1 }),
+    stderr: {
+      write: (message) => {
+        warnings += message;
+      },
+    },
+  });
+  assert.match(warnings, /could not register the agent skill/);
 });

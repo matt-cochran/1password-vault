@@ -10,7 +10,9 @@ The easiest way on every platform is npm: `npm install -g @matthew-cochran/opv` 
 curl -fsSL https://raw.githubusercontent.com/matt-cochran/1password-vault/main/install.sh | sh
 ```
 
-Add `-s -- --skill` (`... | sh -s -- --skill`) to also install the opv agent skill for AI coding assistants (`opv skill install --user --target all`); `opv skill status` shows installed copies and `opv doctor` warns when one is older than the binary. A copy you edited is kept unless you pass `opv skill install --force`.
+The opv agent skill for AI coding assistants (`opv skill install --user --target all`, for Claude Code and Codex) is registered for this user by default, and again when the script finds opv already installed. Opt out with `--no-skill` (`... | sh -s -- --no-skill`), or leave the skill alone in automation by setting `CI` or `OPV_NO_SKILL=1`; `--skill` is still accepted and is the default now. `opv skill status` shows installed copies and `opv doctor` warns when one is older than the binary. A copy you edited is kept unless you pass `opv skill install --force`.
+
+An upgrade through any channel (cargo, Homebrew, a manual binary, `install.sh` or npm) refreshes existing unedited user copies of the skill on the next `opv` run, so a copy you never edited stays in step with the binary.
 
 
 `install.sh` installs or updates `opv` into `~/.local/bin` without `sudo` and without
