@@ -192,6 +192,8 @@ new_case() {
   FAKE_RT=0
   FAKE_GH_EXIT=0
   FAKE_GH_AUTH_EXIT=0
+  TEST_CI=""
+  TEST_OPV_NO_SKILL=""
   BASE_OVERRIDE="$FIXTURE"
 }
 
@@ -201,6 +203,8 @@ install_run() {
   INSTALL_OUT=$(
     PATH="$FAKEBIN:$PATH" \
     HOME="$HOME_DIR" \
+    CI="${TEST_CI:-}" \
+    OPV_NO_SKILL="${TEST_OPV_NO_SKILL:-}" \
     OPV_INSTALL_BASE_URL="file://$BASE_OVERRIDE" \
     FAKE_UNAME_S="$FAKE_S" \
     FAKE_UNAME_M="$FAKE_M" \
@@ -486,19 +490,42 @@ t_reinstall_of_same_version_keeps_an_existing_record() {
 }
 
 # ---------------------------------------------------------------------------
-# --skill
+# agent skill registration
 # ---------------------------------------------------------------------------
 
-t_skill_flag_runs_skill_install() {
+t_default_install_registers_the_agent_skill() {
+  new_case
+  make_fake_opv "$TARGET" 1.2.3
+  install_run "$1" --version v1.2.3 --dir "$TARGET"
+  check_file_contains "$HOME_DIR/opv-skill-args" "skill install --user --target all"
+}
+
+t_skill_flag_still_registers_the_agent_skill() {
   new_case
   make_fake_opv "$TARGET" 1.2.3
   install_run "$1" --version v1.2.3 --dir "$TARGET" --skill
   check_file_contains "$HOME_DIR/opv-skill-args" "skill install --user --target all"
 }
 
-t_without_skill_flag_does_not_run_skill_install() {
+t_no_skill_flag_skips_the_agent_skill() {
   new_case
   make_fake_opv "$TARGET" 1.2.3
+  install_run "$1" --version v1.2.3 --dir "$TARGET" --no-skill
+  check_not_exists "$HOME_DIR/opv-skill-args"
+}
+
+t_ci_skips_the_agent_skill() {
+  new_case
+  make_fake_opv "$TARGET" 1.2.3
+  TEST_CI=1
+  install_run "$1" --version v1.2.3 --dir "$TARGET"
+  check_not_exists "$HOME_DIR/opv-skill-args"
+}
+
+t_opv_no_skill_env_skips_the_agent_skill() {
+  new_case
+  make_fake_opv "$TARGET" 1.2.3
+  TEST_OPV_NO_SKILL=1
   install_run "$1" --version v1.2.3 --dir "$TARGET"
   check_not_exists "$HOME_DIR/opv-skill-args"
 }
@@ -546,8 +573,11 @@ for test_fn in \
   t_install_writes_installed_by_record \
   t_custom_dir_install_leaves_no_installed_by_record \
   t_reinstall_of_same_version_keeps_an_existing_record \
-  t_skill_flag_runs_skill_install \
-  t_without_skill_flag_does_not_run_skill_install \
+  t_default_install_registers_the_agent_skill \
+  t_skill_flag_still_registers_the_agent_skill \
+  t_no_skill_flag_skips_the_agent_skill \
+  t_ci_skips_the_agent_skill \
+  t_opv_no_skill_env_skips_the_agent_skill \
   t_check_with_skill_does_not_run_skill_install
 do
   run_for_shells "$test_fn"

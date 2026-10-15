@@ -89,11 +89,94 @@ pub fn run(
     }
     let needs = plan_needs(fleet, &ordered, target)?;
     let (observations, readers) = observe(r, &needs)?;
+    let missing = missing_vaults(r, &readers);
     let mut envs = Vec::with_capacity(needs.len());
     for need in &needs {
-        envs.push(build(need, &project, &observations, &readers));
+        envs.push(build(need, &project, &observations, &readers, &missing));
     }
     report(out, &envs, json)
+}
+
+/// One principal's identity (0.9.0, `opv access --create`): its service-account name, every
+/// grant it needs (1Password fixes a service account's vaults at creation), whether such an
+/// account already reads them all, and the vaults the selected account cannot find (then
+/// no account can be created here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub service_account: String,
+    pub grants: Vec<Grant>,
+    pub already_present: bool,
+    pub not_in_account: Vec<String>,
+}
+
+/// The identity of `target`'s deploy principal in `env`, or of `env`'s CI reader when
+/// `target` is `None`. Reads only: one `op vault user list` per needed vault, and `op vault
+/// get` for each unreadable one.
+pub fn identity(
+    fleet: &crate::domain::Fleet,
+    env: &str,
+    target: Option<&str>,
+    project: &str,
+    r: &dyn CommandRunner,
+) -> Result<Identity, Error> {
+    let environment = fleet.environment(env)?;
+    if let Some(t) = target
+        && !environment.targets.contains_key(t)
+    {
+        return Err(
+            Error::Config(format!("environment {env} has no target {t:?}").into())
+                .with_code(crate::error::Code::Usage)
+                .with_next(format!("opv access {env}")),
+        );
+    }
+    let name = fleet
+        .environments
+        .keys()
+        .find(|n| n.as_str() == env)
+        .expect("checked above");
+    let ordered = [(name, environment)];
+    let needs = plan_needs(fleet, &ordered, target)?;
+    let need = &needs[0];
+    let all = required(project, &need.targets, &need.ci);
+    let wanted = match target {
+        Some(t) => Principal::Deploy {
+            environment: env.to_string(),
+            target: t.to_string(),
+        },
+        None => Principal::CiReader {
+            environment: env.to_string(),
+        },
+    };
+    let grants: Vec<Grant> = all.into_iter().filter(|g| g.principal == wanted).collect();
+    let Some(first) = grants.first() else {
+        return Err(Error::Config(
+            format!("{env} needs no vault for this identity; there is nothing to create").into(),
+        )
+        .with_next(format!("opv access {env}")));
+    };
+    let service_account = first.service_account.clone();
+    let (_, readers) = observe(r, &needs)?;
+    let missing = missing_vaults(r, &readers);
+    let observed: Vec<ObservedVault> = grants
+        .iter()
+        .map(|g| ObservedVault {
+            vault_id: &g.vault_id,
+            readers: readers.get(&g.vault_id).and_then(|r| r.as_deref()),
+        })
+        .collect();
+    let report = compare(&grants, &observed);
+    let already_present = report.checks.iter().all(|c| c.state == GrantState::Present);
+    let not_in_account: Vec<String> = grants
+        .iter()
+        .filter(|g| missing.contains(&g.vault_id))
+        .map(|g| g.vault_id.clone())
+        .collect();
+    Ok(Identity {
+        service_account,
+        grants,
+        already_present,
+        not_in_account,
+    })
 }
 
 /// Build each environment's needs from the configuration (FR-59): a target reads exactly
@@ -182,6 +265,33 @@ fn observe(r: &dyn CommandRunner, needs: &[Needs<'_>]) -> Result<(Observations, 
     Ok((observations, readers))
 }
 
+/// #153: of the vaults whose user list could not be read, the ones `op vault get` cannot
+/// find either: not in the selected account, or not open to this person at all. A vault
+/// that exists but whose access list needs a manager stays `not visible`. One exit-status
+/// probe per such vault; its output names the vault and is dropped unread.
+fn missing_vaults(r: &dyn CommandRunner, readers: &Readers) -> BTreeSet<String> {
+    readers
+        .iter()
+        .filter(|(_, seen)| seen.is_none())
+        .filter(|(vault, _)| {
+            r.probe(
+                &crate::runner::Call::new(
+                    "op",
+                    &["vault", "get", vault.as_str(), "--format", "json"],
+                ),
+                crate::runner::PROBE_TIMEOUT,
+            )
+            .is_ok_and(|o| {
+                if o.status != 0 {
+                    let _ = crate::runner::take_failure_excerpt();
+                }
+                o.status != 0
+            })
+        })
+        .map(|(vault, _)| vault.clone())
+        .collect()
+}
+
 /// Compare one environment's needs with what was observed, and collect the owner commands
 /// for the missing grants and the findings that still apply (FR-59).
 fn build(
@@ -189,6 +299,7 @@ fn build(
     project: &str,
     observations: &Observations,
     readers: &Readers,
+    missing: &BTreeSet<String>,
 ) -> EnvReport {
     let grants = required(project, &need.targets, &need.ci);
     let boundary: BTreeSet<&str> = need
@@ -210,17 +321,35 @@ fn build(
             readers: readers.get(*vault).and_then(|r| r.as_deref()),
         })
         .collect();
-    let report = compare(&grants, &observed);
+    let mut report = compare(&grants, &observed);
+    for check in &mut report.checks {
+        if check.state == GrantState::NotVisible && missing.contains(&check.grant.vault_id) {
+            check.state = GrantState::NotInAccount;
+        }
+    }
     let commands = owner_commands(&report.checks);
     let mut env_findings = Vec::new();
-    for vault in &needed {
+    for vault in needed.iter().filter(|v| missing.contains(**v)) {
+        env_findings.push(crate::domain::access::AccessFinding {
+            code: crate::domain::access::VAULT_NOT_IN_ACCOUNT,
+            environment: need.name.to_string(),
+            message: format!(
+                "vault {vault} is not in the selected 1Password account, or you cannot open \
+                 it; no service-account command is printed for an identity that needs it, \
+                 because it could not succeed here. Find the account that holds it, then fix \
+                 the configured vault_id or select that account"
+            ),
+            next: Some(format!("opv vault locate {vault}")),
+        });
+    }
+    for vault in needed.iter().filter(|v| !missing.contains(**v)) {
         let access = analyse(
             vault,
             vault,
             false,
             observations.get(*vault).and_then(|o| o.as_ref()),
         );
-        for finding in findings(project, &[access]) {
+        for finding in findings(&[access]) {
             // A deploy identity writes its own state vault by design (FR-59); the CI-reader
             // warning is about writing values, so it applies to the boundary vaults only.
             if finding.code == "ci_reader_can_write" && !boundary.contains(*vault) {
@@ -252,12 +381,18 @@ fn owner_commands(checks: &[GrantCheck]) -> Vec<String> {
         // 1Password fixes a service account's vaults and permissions at creation, so a
         // missing grant and a reader that can write where it should only read are both fixed
         // by recreating the account with its full grant list (FR-59).
-        if group.iter().any(|check| {
-            matches!(
-                check.state,
-                GrantState::Missing | GrantState::ReadOnlyNeeded
-            )
-        }) {
+        // #153: never print a command that cannot succeed in this account.
+        let runnable = !group
+            .iter()
+            .any(|check| check.state == GrantState::NotInAccount);
+        if runnable
+            && group.iter().any(|check| {
+                matches!(
+                    check.state,
+                    GrantState::Missing | GrantState::ReadOnlyNeeded
+                )
+            })
+        {
             let grants: Vec<Grant> = group.iter().map(|check| check.grant.clone()).collect();
             if let Some(command) = create_command(&grants) {
                 commands.push(command);
@@ -280,6 +415,9 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
                     "environment": env.name,
                     "report": env.report,
                     "commands": env.commands,
+                    "findings": env.findings.iter().map(|f| serde_json::json!({
+                        "code": f.code, "message": f.message, "next": f.next,
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -362,6 +500,7 @@ fn state_label(state: &GrantState) -> &'static str {
         GrantState::Missing => "missing",
         GrantState::ReadOnlyNeeded => "read-only needed",
         GrantState::NotVisible => "not visible",
+        GrantState::NotInAccount => "not in this account",
     }
 }
 

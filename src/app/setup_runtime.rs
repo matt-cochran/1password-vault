@@ -450,8 +450,9 @@ impl Interaction for Console {
         ))
     }
     fn secret(&mut self, title: &str) -> Result<SecretValue, Error> {
-        let value = rpassword::prompt_password(format!("{title} (hidden; Enter to skip): ")).map_err(|_| Error::Dependency("Cannot read hidden input. Use your own interactive terminal, or fill this field privately in 1Password.".into()))?;
-        Ok(SecretValue::new(value))
+        // Masked, not hidden (0.9.0): the person sees that a paste landed, never its length.
+        super::masked::prompt(title)?
+            .ok_or_else(|| Error::Policy("Stopped. No further changes made.".into()))
     }
     fn choose(&mut self, question: &str, choices: &[String]) -> Result<String, Error> {
         println!("{question}");

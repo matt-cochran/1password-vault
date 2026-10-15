@@ -184,6 +184,10 @@ impl Provider for GithubProvider {
     fn doctor_checks(&self) -> &'static [&'static str] {
         &["gh", "gh auth"]
     }
+
+    fn ci_setup_step(&self) -> Option<&'static str> {
+        None
+    }
     fn credential_vars(&self) -> &'static [&'static str] {
         CREDENTIAL_VARS
     }

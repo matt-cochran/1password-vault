@@ -101,6 +101,31 @@ function isOpvBinary(file) {
   );
 }
 
+// Register the embedded agent skill unless the environment opts out or is CI: a headless
+// install must stay non-interactive and leave no per-user side effects.
+function shouldRegisterSkill(env = process.env) {
+  return !env.CI && env.OPV_NO_SKILL !== '1';
+}
+
+// Run the just-installed binary to put the embedded skill where coding agents look, for
+// this user and both agents. No shell; the child's stderr reaches ours so a real error is
+// visible, but any failure only warns and never fails the npm install. `spawn`, `env` and
+// `stderr` are parameters so the skip rules and arguments are unit-testable.
+function registerSkill(exe, { spawn = spawnSync, env = process.env, stderr = process.stderr } = {}) {
+  if (!shouldRegisterSkill(env)) return false;
+  const result = spawn(exe, ['skill', 'install', '--user', '--target', 'all'], {
+    stdio: ['ignore', 'ignore', 'inherit'],
+    timeout: 30000,
+  });
+  if (result.error || result.status !== 0) {
+    stderr.write(
+      `opv: could not register the agent skill (run: ${exe} skill install --user)\n`,
+    );
+    return false;
+  }
+  return true;
+}
+
 function printPathHint(dir) {
   const entries = (process.env.PATH || '').split(path.delimiter);
   if (entries.includes(dir)) return;
@@ -165,6 +190,12 @@ function install() {
   fs.mkdirSync(dataDir(), { recursive: true });
   fs.writeFileSync(recordPath(), `npm ${version} ${hash}\n`);
 
+  try {
+    registerSkill(target);
+  } catch {
+    // Best effort: registering the skill never fails the install.
+  }
+
   if (oldVersion && oldVersion !== version) {
     process.stdout.write(`opv ${oldVersion} → ${version}\n`);
   } else if (!oldVersion) {
@@ -197,4 +228,6 @@ module.exports = {
   isOpvBinary,
   install,
   printPathHint,
+  shouldRegisterSkill,
+  registerSkill,
 };

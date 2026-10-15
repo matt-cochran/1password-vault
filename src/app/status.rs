@@ -128,6 +128,7 @@ pub fn run_targeted(
                 target: &p.name,
                 plan: &p.plan,
                 pinned: p.pinned.as_ref().map(|s| &s.rows),
+                rotate: None,
             })
             .collect();
         write_json(

@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::parser::ValueSource;
@@ -7,7 +7,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use opv::Error;
 use opv::app::{
     STATES_HELP, add, config_cmd, config_export, doctor, explain, init, open, run as run_cmd,
-    signin, skeleton, status, sync, target_cmd,
+    signin, skeleton, status, sync, target_cmd, target_credentials,
 };
 use opv::config;
 use opv::config_store;
@@ -203,9 +203,9 @@ Examples:
   opv sync prod --deploy --confirm prod  # an environment with confirm_env = true";
 
 const SYNC_MORE: &str = "\
-Refuses (exit 6) and stages nothing when a key is missing or failing a rule, naming a
-missing --confirm too. Nothing is deployed or removed without --deploy/--prune.
-  opv sync prod --deploy --expect-plan 674d43e2  # exactly the plan opv plan showed
+Refuses (exit 6), staging nothing, on a missing or failing key or a missing --confirm.
+No deploy or removal without --deploy/--prune (--prune-immutable for an immutable key).
+  opv sync prod --expect-plan 674d43e2  # exactly the plan opv plan showed (meets confirm_env)
   opv sync prod --rotate api/SIGNING_KEY # replace an immutable key that is already set";
 
 const EXPORT_QUICK: &str = "\
@@ -347,9 +347,30 @@ Examples:
   opv version                  # opv, op and each provider CLI, with versions
   opv version --json           # the same, for support and CI";
 
+const GENERATE_QUICK: &str = "\
+Examples:
+  opv generate dev api/SESSION_KEY             # a key with base64_bytes = 32: 32 random bytes
+  opv generate prod api/SESSION_KEY api/CSRF_KEY";
+
+const VAULT_LOCATE_QUICK: &str = "\
+Examples:
+  opv vault locate zu64e5fmaxlklvyajhwkkdgldy   # which account holds this vault
+  opv vault locate zu64e5fmaxlklvyajhwkkdgldy --json";
+
+const MCP_SERVE_QUICK: &str = "\
+Examples:
+  opv mcp serve --project /abs/path/to/project   # what an assistant's MCP client runs";
+
+const MCP_INSTALL_QUICK: &str = "\
+Examples:
+  opv mcp install                        # this project, for Claude Code and Codex
+  opv mcp install --client claude        # only the project's .mcp.json";
+
 const APPROVE_QUICK: &str = "\
 Examples:
-  opv approve sp-3f9c0a1b2c3d4e5f   # review the assistant's structural plan, then type its id";
+  opv approve sp-3f9c0a1b2c3d4e5f                    # review the assistant's structural plan
+  opv approve 3f9c0a1b --sync prod --target web      # review and approve one sync plan
+  opv approve 3f9c0a1b --sync prod --deploy          # ... that also deploys";
 
 const APPROVE_MORE: &str = "\
 An assistant prepares a structural plan with the opv MCP tool opv_structure_plan (vaults,
@@ -357,7 +378,13 @@ items, empty fields, delivery items; never a value). Review it here and type its
 approve it; opv_structure_apply then creates exactly that, once, within 15 minutes. A plan
 that changed since it was prepared is refused (stale_plan). The approval is a local file
 in your state directory: it is a gate for assistants that only use MCP, not a secret, and
-the 1Password app's own prompt on each write remains the control that matters.";
+the 1Password app's own prompt on each write remains the control that matters.
+
+With --sync <env> (and the same --target, --product, --deploy, --prune and --rotate the
+assistant named), it re-plans that sync, lists each name it would write, rotate or unset
+(never a value), and asks you to type the plan id. The assistant may then run exactly that
+sync once within 15 minutes, bound to the plan: any change to the item, the target or the
+configuration voids it. Pruning immutable keys is never approved this way.";
 
 const BOOTSTRAP_QUICK: &str = "\
 Examples:
@@ -389,6 +416,39 @@ const TARGET_LIST_QUICK: &str = "\
 Examples:
   opv target list                     # every declared target
   opv target list --env prod --json   # one environment as one document";
+
+const TARGET_CREDENTIALS_QUICK: &str = "\
+Examples:
+  opv target credentials staging --target web --create   # mint and store the credential
+  opv target credentials staging --target web            # show the recorded state";
+
+const TARGET_CREDENTIALS_MORE: &str = "\
+Mints the target's least-privilege deploy credential at its provider and stores it in a
+new 1Password item in the target's state vault, then records deploy_credentials on the
+target. The token is never shown, copied or pasted. One confirmation names the
+credential, its 90-day validity, the target and the item; declining creates nothing.
+Without --create, prints whether deploy_credentials is recorded and whether the provider
+can mint one. A person's own terminal and 1Password session are required.";
+
+const ENV_ADD_QUICK: &str = "\
+Examples:
+  opv env add staging           # declare the environment in secrets.toml
+  opv env add staging --json    # the same report an assistant gets over MCP";
+
+const STRUCTURE_PLAN_QUICK: &str = "\
+Examples:
+  opv structure plan           # names, states and the plan_id, to review
+  opv structure plan --json    # exactly the opv_structure_plan document";
+
+const STRUCTURE_APPLY_QUICK: &str = "\
+Examples:
+  opv structure apply sp-0123456789abcdef           # apply an approved plan
+  opv structure apply sp-0123456789abcdef --json    # the applied report";
+
+const CONFIG_DESCRIBE_QUICK: &str = "\
+Examples:
+  opv config describe           # environments, keys and targets, names only
+  opv config describe --json    # exactly the opv_configuration document";
 
 const ACCOUNT_LIST_QUICK: &str = "\
 Examples:
@@ -543,6 +603,10 @@ enum Cmd {
         /// 1Password's own prompt.
         #[arg(long)]
         add: bool,
+        /// Sign in to --account for this login only and leave .opv unchanged (a one-off look
+        /// into another account, such as opv vault locate).
+        #[arg(long, requires = "account")]
+        no_record: bool,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -633,8 +697,24 @@ enum Cmd {
         /// [env: OPV_PRODUCT]
         #[arg(long)]
         product: Option<String>,
+        /// Deliver only keys that declare this process role (and keys without roles).
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// Print what this run would deliver; reads no value and runs nothing.
+        #[arg(long)]
+        preview: bool,
+        /// With --preview: print one JSON document.
+        #[arg(long, requires = "preview")]
+        json: bool,
+        /// The environment's name again; required when it sets confirm_env = true.
+        #[arg(long, value_name = "ENV", hide_short_help = true)]
+        confirm: Option<String>,
         /// Command and arguments, after `--`.
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            required_unless_present = "preview",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         command: Vec<String>,
     },
     /// Preview deployment changes without changing anything.
@@ -646,12 +726,40 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// Generate self-made secrets (base64_bytes / hex_bytes keys) straight into 1Password.
+    ///
+    /// The value comes from the operating system's CSPRNG and goes only into the 1Password
+    /// field (one verified edit); it is never shown, logged or written elsewhere. A field
+    /// that already has a value is never replaced; provider-issued keys are refused.
+    #[command(before_help = GENERATE_QUICK)]
+    Generate {
+        /// Environment name from the configuration.
+        env: String,
+        /// The keys, as product/KEY.
+        #[arg(required = true, value_name = "PRODUCT/KEY")]
+        keys: Vec<String>,
+    },
+    /// 1Password vaults: find which account holds one (read-only).
+    #[command(subcommand)]
+    Vault(VaultCmd),
+    /// opv's MCP server for coding assistants: serve it, or register it with an assistant.
+    #[command(subcommand)]
+    Mcp(McpCmd),
     /// Delivery receipts: whether a product's target still holds what opv delivered.
     #[command(subcommand)]
     Delivery(DeliveryCmd),
+    /// Print a ready-to-commit GitHub Actions workflow (YAML) for one target (read-only).
+    #[command(subcommand)]
+    Ci(CiCmd),
     /// Declare a named deployment target of an environment, or list the declared ones.
     #[command(subcommand)]
     Target(TargetCmd),
+    /// Declare an environment in secrets.toml, like the MCP `opv_declare_environment` tool.
+    #[command(subcommand)]
+    Env(EnvCmd),
+    /// Plan or apply this project's 1Password structure, like the MCP structure tools.
+    #[command(subcommand)]
+    Structure(StructureCmd),
     /// Bring values that exist elsewhere into the environment's 1Password item, after review.
     #[command(before_help = ADOPT_QUICK, after_help = ADOPT_MORE)]
     Adopt {
@@ -716,6 +824,26 @@ enum Cmd {
         /// Project name for the service accounts; defaults to the repository's name.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
+        /// Create the identity (the target's deploy identity, or without --target the CI
+        /// reader) and store its token as a GitHub secret; your own terminal only. The
+        /// token is never shown, typed or written to a file.
+        #[arg(long, requires_all = ["env", "github"])]
+        create: bool,
+        /// With --create: the GitHub repository (owner/repo) whose secret receives the token.
+        #[arg(long, value_name = "OWNER/REPO", requires = "create")]
+        github: Option<String>,
+        /// With --create: the GitHub environment the CI job declares (created if missing);
+        /// without it, a repository secret.
+        #[arg(long, value_name = "NAME", requires = "create")]
+        github_env: Option<String>,
+        /// With --create: the secret's name.
+        #[arg(
+            long,
+            value_name = "NAME",
+            default_value = "OP_SERVICE_ACCOUNT_TOKEN",
+            requires = "create"
+        )]
+        secret_name: String,
         /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
@@ -765,9 +893,37 @@ enum Cmd {
     /// each change. Needs an interactive terminal; there is no flag that skips the question.
     #[command(before_help = APPROVE_QUICK, after_help = APPROVE_MORE)]
     Approve {
-        /// The plan id the assistant showed (sp- and 16 hex digits).
+        /// The plan id the assistant showed (sp- and 16 hex digits, or a sync plan's id
+        /// with --sync).
         #[arg(value_name = "PLAN_ID")]
         plan_id: String,
+        /// Approve this environment's deployment (sync) plan instead of a structural plan:
+        /// the assistant may then run exactly that sync once (`opv sync <env> --approved
+        /// <plan_id>` or the MCP tool opv_sync).
+        #[arg(long, value_name = "ENV")]
+        sync: Option<String>,
+        /// With --sync: only this named target (repeatable), as the assistant's plan.
+        #[arg(long = "target", value_name = "NAME", requires = "sync")]
+        target: Vec<String>,
+        /// With --sync: only this product, as the assistant's plan.
+        #[arg(long, requires = "sync")]
+        product: Option<String>,
+        /// With --sync: the approved sync also deploys.
+        #[arg(long, requires = "sync")]
+        deploy: bool,
+        /// With --sync: the approved sync also unsets managed names no longer declared
+        /// (never an immutable key).
+        #[arg(long, requires = "sync")]
+        prune: bool,
+        /// With --sync: approve replacing this immutable key (repeatable, PRODUCT/KEY).
+        #[arg(
+            long,
+            value_name = "PRODUCT/KEY",
+            requires = "sync",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        rotate: Vec<String>,
     },
     /// Create every missing boundary vault, item and state vault, record their IDs, and add
     /// the empty fields.
@@ -1049,6 +1205,10 @@ struct PlanArgs {
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
+    /// Plan to replace this immutable key even though it is present (repeatable). Part of
+    /// the plan id, so a plan with rotation never shares an id with one without.
+    #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
+    rotate: Vec<String>,
 }
 
 /// Arguments of `sync`.
@@ -1056,8 +1216,7 @@ struct PlanArgs {
 struct SyncArgs {
     /// Environment name from the configuration (for example staging or prod).
     env: String,
-    /// Deploy when a staged digest changed, a prune happened, or a managed name is
-    /// still pending (Staged/Partial) on the target from an earlier run.
+    /// Deploy when something staged changed, was pruned, or is pending from an earlier run.
     #[arg(long)]
     deploy: bool,
     /// Unset managed names that are not desired in this environment. Immutable keys
@@ -1067,12 +1226,10 @@ struct SyncArgs {
     /// The environment's name again; required when it sets confirm_env = true.
     #[arg(long, value_name = "ENV")]
     confirm: Option<String>,
-    /// Write, prune and deploy only this product's names. A deploy
-    /// still restarts the whole app. OPV_PRODUCT is never used here.
+    /// Write, prune and deploy only this product's names (a deploy restarts the whole app).
     #[arg(long)]
     product: Option<String>,
-    /// Apply only the plan `opv plan` showed with this id; refused (exit 6) if anything
-    /// changed since. Also satisfies confirm_env.
+    /// Apply only the plan opv plan showed with this id (exit 6 if it changed since).
     #[arg(long, value_name = "PLAN_ID")]
     expect_plan: Option<String>,
     /// Write the delivery receipts this sync mints (names, ids and times) to FILE; needs
@@ -1091,12 +1248,24 @@ struct SyncArgs {
     #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
     rotate: Vec<String>,
     /// Let --prune unset this immutable key (repeatable).
-    #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "PRODUCT/KEY",
+        hide_short_help = true,
+        hide_long_help = true
+    )]
     prune_immutable: Vec<String>,
     /// Only this named target of the environment (repeatable). Without it, every target,
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
+    /// Run once the sync plan a person approved with opv approve <PLAN_ID> --sync <ENV>.
+    #[arg(
+        long,
+        value_name = "PLAN_ID",
+        conflicts_with_all = ["expect_plan", "confirm", "prune_immutable"]
+    )]
+    approved: Option<String>,
 }
 
 impl From<SyncArgs> for sync::SyncOpts {
@@ -1147,6 +1316,32 @@ Examples:
   opv delivery verify prod --receipt api.receipt.json --json   # the kept receipt is still current?";
 
 #[derive(Subcommand)]
+enum CiCmd {
+    /// Print a ready-to-commit GitHub Actions workflow (YAML) that syncs one target, so an
+    /// assistant never writes the workflow from scratch.
+    #[command(before_help = CI_WORKFLOW_QUICK)]
+    Workflow {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// Target name whose provider setup step and sync command the workflow uses.
+        #[arg(long, value_name = "NAME")]
+        target: String,
+        /// GitHub environment the job declares (`environment:`); without it, none.
+        #[arg(long, value_name = "ENVIRONMENT")]
+        github_env: Option<String>,
+        /// Let the job deploy after syncing (adds --deploy to the sync command).
+        #[arg(long)]
+        deploy: bool,
+    },
+}
+
+const CI_WORKFLOW_QUICK: &str = "\
+Examples:
+  opv ci workflow prod --target web                     # print the workflow for one target
+  opv ci workflow prod --target web --github-env prod   # run the job in the prod environment
+  opv ci workflow prod --target web --deploy            # let the job deploy after syncing";
+
+#[derive(Subcommand)]
 enum TargetCmd {
     /// Declare one named deployment target of an environment: writes the configuration and
     /// creates the target's state vault.
@@ -1188,6 +1383,120 @@ enum TargetCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Mint a target's least-privilege deploy credential and store it in 1Password.
+    #[command(before_help = TARGET_CREDENTIALS_QUICK, after_help = TARGET_CREDENTIALS_MORE)]
+    Credentials {
+        /// Environment name from the configuration (for example prod).
+        env: String,
+        /// The target to mint the credential for (^[a-z][a-z0-9-]*$).
+        #[arg(long)]
+        target: String,
+        /// Mint the credential and store it; without it, print the recorded state.
+        #[arg(long)]
+        create: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Declare an environment in secrets.toml; its vaults and items come from the approved
+    /// structure (same guarantee as the MCP `opv_declare_environment` tool).
+    #[command(before_help = ENV_ADD_QUICK)]
+    Add {
+        /// New environment name (^[a-z][a-z0-9-]*$).
+        environment: String,
+        /// Print the same report an assistant gets over MCP, instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StructureCmd {
+    /// Plan the 1Password structure this configuration declares (read-only): names and a
+    /// plan_id only, no value and no write.
+    #[command(before_help = STRUCTURE_PLAN_QUICK)]
+    Plan {
+        /// Print exactly the document the MCP `opv_structure_plan` tool returns.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply exactly the plan a person approved with `opv approve <plan_id>` in their own
+    /// terminal (single use); refuses an unapproved or stale plan, creating nothing.
+    #[command(before_help = STRUCTURE_APPLY_QUICK)]
+    Apply {
+        /// The plan id `opv structure plan` printed (sp- and 16 hex digits).
+        #[arg(value_name = "PLAN_ID")]
+        plan_id: String,
+        /// Print exactly the document the MCP `opv_structure_apply` tool returns.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Which of the 1Password accounts this CLI knows holds a vault (names and IDs only).
+    ///
+    /// Asks each account with `op vault get` (exit status only). An account that is not
+    /// signed in is reported unknown, never "not there"; its next step signs in to it for
+    /// this check only, without changing the project's .opv.
+    #[command(before_help = VAULT_LOCATE_QUICK)]
+    Locate {
+        /// The vault ID, as opv access or a configuration names it.
+        #[arg(value_name = "VAULT_ID")]
+        vault: String,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Run the MCP server over stdio for one project (started by the assistant's client).
+    ///
+    /// Tools: readiness, configuration and target metadata, plan previews, declarations and
+    /// the approval-gated structure (docs/mcp.md). Never accepts or returns a secret value.
+    /// Start it without op session, service-account or Connect credentials.
+    #[command(before_help = MCP_SERVE_QUICK)]
+    Serve {
+        /// The trusted project directory, chosen by the person (absolute).
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+    },
+    /// Register `opv mcp serve` for a project with Claude Code (.mcp.json) and/or Codex.
+    ///
+    /// Merges into the existing configuration: other servers and settings are kept, and an
+    /// entry of the same name that runs something else is refused unless --force.
+    #[command(before_help = MCP_INSTALL_QUICK)]
+    Install {
+        /// Which assistant's configuration to write.
+        #[arg(long, value_enum, default_value_t = McpClient::All)]
+        client: McpClient,
+        /// The project directory; default: the git top level, else this directory.
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        /// The server's name in the client configuration.
+        #[arg(long, default_value = "opv")]
+        name: String,
+        /// Replace an existing entry of that name that runs something else.
+        #[arg(long)]
+        force: bool,
+        /// Print one JSON document instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum McpClient {
+    /// Claude Code: the project's .mcp.json.
+    Claude,
+    /// Codex: $CODEX_HOME/config.toml, else ~/.codex/config.toml.
+    Codex,
+    /// Both.
+    All,
 }
 
 #[derive(Subcommand)]
@@ -1256,6 +1565,14 @@ enum ConfigCmd {
         /// The committed copy.
         #[arg(long, value_name = "PATH")]
         file: PathBuf,
+    },
+    /// Print the declared configuration metadata (environments, keys, targets), names only;
+    /// same document as the MCP `opv_configuration` tool.
+    #[command(before_help = CONFIG_DESCRIBE_QUICK)]
+    Describe {
+        /// Print exactly the document the MCP `opv_configuration` tool returns.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1395,12 +1712,33 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage_error(e),
     };
+    // FR-52: after an upgrade through any channel, bring existing unedited user copies of
+    // the agent skill up to this binary's version. Best effort and stderr only, so an
+    // `--json` command's stdout stays exactly one document (A1).
+    if !skill_refresh_skipped(&cli.cmd)
+        && let Some(root) = opv::app::skill::user_root()
+    {
+        refresh_agent_skill(&root, env!("CARGO_PKG_VERSION"), &mut io::stderr());
+    }
     let target_options = target_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
     let help = help_command();
     let json = cli.cmd.json_mode();
     opv::runner::signals::set_rerun(&rerun);
     opv::runner::signals::set_json(json.is_some());
+    // The MCP server owns stdin and stdout for the whole session: it runs before opv takes
+    // the stdout lock below, which its runtime's writer thread would otherwise wait on
+    // forever (found by the protocol smoke test).
+    if let Cmd::Mcp(McpCmd::Serve { project }) = &cli.cmd {
+        return match mcp_serve(project) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                let step = e.step(&rerun, &help);
+                let _ = write!(io::stderr(), "{}", opv::error::report_with(&e, &step, None));
+                ExitCode::from(exit_byte(e.exit_code()))
+            }
+        };
+    }
     let mut stdout = PipeSafe {
         inner: io::stdout().lock(),
         closed: false,
@@ -1696,7 +2034,7 @@ fn rerun_command(cmd: &Cmd) -> String {
 
 /// `opv run ... --json -- cmd`: clap takes an unknown opv flag before `--` as the start
 /// of the child command. A COMMAND whose first word starts with `-` and did not come right
-/// after `--` is refused (M8): opv's flags go before `--`, and `run` has no `--json`.
+/// after `--` is refused (M8): opv's flags go before `--`.
 fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
     let first = command.first().filter(|w| w.starts_with('-'))?;
     let after_dashes = argv
@@ -1723,7 +2061,7 @@ fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
         words.extend(child.iter().map(|a| shell_word(a)));
     }
     let hint = if first == "--json" {
-        "run takes no --json (the command's own output is passed through)"
+        "run's --json needs --preview; opv's options go before --"
     } else {
         "opv's options go before --"
     };
@@ -1811,6 +2149,9 @@ impl Cmd {
             }
             Cmd::Plan(a) => Some((&a.env, Reach::Target)),
             Cmd::Sync(a) => Some((&a.env, Reach::Target)),
+            Cmd::Approve {
+                sync: Some(env), ..
+            } => Some((env, Reach::Target)),
             Cmd::Doctor { env: Some(env), .. } => Some((env, Reach::Target)),
             Cmd::Adopt { env, from, .. } if from == "target" || from.starts_with("target:") => {
                 Some((env, Reach::Target))
@@ -1835,6 +2176,11 @@ impl Cmd {
             Cmd::Status { target, .. } => target,
             Cmd::Plan(a) => &a.target,
             Cmd::Sync(a) => &a.target,
+            Cmd::Approve {
+                sync: Some(_),
+                target,
+                ..
+            } => target,
             _ => return None,
         };
         match targets.as_slice() {
@@ -1852,6 +2198,8 @@ impl Cmd {
             | Cmd::Status { json, .. }
             | Cmd::Projects { json, .. }
             | Cmd::Version { json }
+            | Cmd::Mcp(McpCmd::Install { json, .. })
+            | Cmd::Vault(VaultCmd::Locate { json, .. })
             | Cmd::Explain { json, .. }
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
@@ -1878,6 +2226,16 @@ impl Cmd {
             Cmd::Config(ConfigCmd::Export { env, json, .. }) => {
                 return (env.is_some() || *json).then_some(true);
             }
+            Cmd::Env(EnvCmd::Add { json, .. })
+            | Cmd::Structure(StructureCmd::Plan { json })
+            | Cmd::Structure(StructureCmd::Apply { json, .. })
+            | Cmd::Config(ConfigCmd::Describe { json }) => return json.then_some(true),
+            // `run --preview --json` prints exactly the builder's document (no framing).
+            Cmd::Run {
+                preview: true,
+                json: true,
+                ..
+            } => return Some(true),
             _ => false,
         };
         json.then_some(false)
@@ -1992,6 +2350,7 @@ fn run(
         command,
         account,
         add,
+        no_record,
     } = &cli.cmd
     {
         use opv::app::{login, setup_runtime};
@@ -2003,14 +2362,26 @@ fn run(
         );
         // One runtime: an account added and signed in here keeps its session for the login.
         let mut runtime = setup_runtime::Runtime::default().for_command("login");
-        login::choose_account(
+        let chosen = login::choose_account_with(
             &probe,
             account.as_deref(),
             *add,
             &here,
             &mut runtime,
             &mut setup_runtime::Console,
+            !*no_record,
         )?;
+        // #153: this login only, in the chosen account, whatever the project records.
+        if *no_record {
+            return login::run_or(
+                None,
+                chosen.as_deref(),
+                None,
+                command,
+                &mut runtime,
+                &mut setup_runtime::Console,
+            );
+        }
         // #142: before 1Password's prompt, say what in this machine's setup can make a
         // sign-in go to the wrong account (names only; never a value).
         for f in opv::app::account::gather(&probe, account.as_deref())
@@ -2071,10 +2442,10 @@ fn run(
     );
     // FR-40, NR-7: the account recorded for this checkout (.opv) or OP_ACCOUNT; a manifest
     // found in another account replaces it below. Never op's default when one is known.
-    r.use_account(
-        config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
-            .or_else(config_store::account_env),
-    );
+    // FR-40, NR-7: one order everywhere (OP_ACCOUNT, else .opv), resolved to an account ID;
+    // never under a service-account or Connect credential.
+    let here = std::env::current_dir().unwrap_or_default();
+    r.use_account(config_store::selected_account_id(&r, &here)?);
     // `run` keeps default signal behaviour: the user's command under `op run` handles its
     // own signals and its exit code is passed through (FR-4). `setup` and `login` are
     // interactive and returned above.
@@ -2087,6 +2458,19 @@ fn run(
         return run_init(cli, config_source, &r, out).map(|()| 0);
     }
     match &cli.cmd {
+        Cmd::Env(EnvCmd::Add { environment, json }) => {
+            return opv::app::structure_cmd::env_add(&r, &here, environment, *json, out)
+                .map(|()| 0);
+        }
+        Cmd::Structure(StructureCmd::Plan { json }) => {
+            // Read and write the project's own 1Password account, never op's default.
+            r.use_account(Some(opv::app::structure::scope(&here, &r)?.account));
+            return opv::app::structure_cmd::plan(&r, &here, *json, out).map(|()| 0);
+        }
+        Cmd::Structure(StructureCmd::Apply { plan_id, json }) => {
+            r.use_account(Some(opv::app::structure::scope(&here, &r)?.account));
+            return opv::app::structure_cmd::apply(&r, &here, plan_id, *json, out).map(|()| 0);
+        }
         Cmd::Projects {
             account,
             long,
@@ -2162,12 +2546,30 @@ fn run(
             };
             return opv::app::local_delivery::run(&d);
         }
+        Cmd::Mcp(McpCmd::Serve { .. }) => unreachable!("served before stdout is locked"),
+        Cmd::Mcp(McpCmd::Install {
+            client,
+            project,
+            name,
+            force,
+            json,
+        }) => {
+            return mcp_install(&r, *client, project.as_deref(), name, *force, *json, out)
+                .map(|()| 0);
+        }
+        Cmd::Vault(VaultCmd::Locate { vault, json }) => {
+            return opv::app::vault_locate::run(&r, vault, *json, out).map(|()| 0);
+        }
         Cmd::Version { json } => {
             let here = std::env::current_dir().unwrap_or_default();
             return opv::app::version::run(&r, cli.config.as_deref(), &here, *json, out)
                 .map(|()| 0);
         }
-        Cmd::Approve { plan_id } => {
+        Cmd::Approve {
+            plan_id,
+            sync: None,
+            ..
+        } => {
             opv::app::setup_runtime::Console::require_terminal(
                 "approve",
                 &format!("opv approve {plan_id}"),
@@ -2256,6 +2658,48 @@ fn run(
     {
         return run_edit(cli.cmd, &found?, target_options, &r, out).map(|()| 0);
     }
+    // `target credentials` mints the provider token and records the new item's reference in
+    // the local secrets.toml (a manifest has no file to edit): FR-40.
+    if let Cmd::Target(TargetCmd::Credentials {
+        env,
+        target,
+        create,
+    }) = &cli.cmd
+    {
+        let found = found?;
+        let fleet = found.load(&r)?;
+        if !create {
+            return target_credentials::show(&fleet, env, target, &r, out).map(|()| 0);
+        }
+        opv::app::setup_runtime::Console::require_terminal(
+            "target credentials --create",
+            &typed_command(),
+        )?;
+        let path = match &found {
+            config_store::Found::File { store, .. } => store.path.clone(),
+            config_store::Found::Manifest(_) => {
+                return Err(opv::error::Error::Policy(
+                    "this project's configuration lives in a 1Password manifest, so opv cannot \
+                     record deploy_credentials in a file; add it with opv config edit"
+                        .into(),
+                )
+                .with_code(opv::error::Code::PolicyRefused));
+            }
+        };
+        let project =
+            opv::app::personal::project_name(&r, &std::env::current_dir().unwrap_or_default());
+        return target_credentials::run(
+            &fleet,
+            &path,
+            env,
+            target,
+            &project,
+            &r,
+            &mut opv::app::setup_runtime::Console,
+            out,
+        )
+        .map(|()| 0);
+    }
     let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
     // The project's account (its manifest's, or the one recorded in .opv): `doctor`
     // without --env checks the sign-in of that account, never op's default (FR-40).
@@ -2263,8 +2707,10 @@ fn run(
         Ok(config_store::Found::Manifest(m)) => m.account.clone(),
         _ => None,
     }
-    .or_else(|| config_store::pointer_account(&std::env::current_dir().unwrap_or_default()))
-    .or_else(config_store::account_env);
+    .or(config_store::selected_account_id(
+        &r,
+        &std::env::current_dir().unwrap_or_default(),
+    )?);
     r.use_account(run_account.clone());
     let loaded = found.and_then(|f| f.load(&r));
     let mut cmd = cli.cmd;
@@ -2305,10 +2751,55 @@ fn run(
     if let Cmd::Run {
         env,
         product,
+        role,
+        preview,
+        json,
+        confirm,
         command,
     } = &cmd
     {
-        return run_cmd::run_for(&loaded?, env, product.as_deref(), command, runner);
+        if *preview {
+            if !command.is_empty() {
+                return Err(Error::Config(
+                    "--preview takes no command: it reads no value and runs nothing; drop the \
+                     words after --"
+                        .into(),
+                )
+                .with_code(opv::error::Code::Usage));
+            }
+            opv::app::delivery_preview::preview_for(
+                &loaded?,
+                env,
+                product.as_deref(),
+                role.as_deref(),
+                *json,
+                runner,
+                out,
+            )?;
+            return Ok(0);
+        }
+        let fleet = loaded?;
+        let mut retry = format!("opv run {env} --confirm {env}");
+        if let Some(p) = product {
+            retry.push_str(&format!(" --product {}", shell_word(p)));
+        }
+        if let Some(r) = role {
+            retry.push_str(&format!(" --role {}", shell_word(r)));
+        }
+        retry.push_str(" --");
+        for w in command {
+            retry.push(' ');
+            retry.push_str(&shell_word(w));
+        }
+        run_cmd::require_confirmation(&fleet, env, confirm.as_deref(), &retry)?;
+        return run_cmd::run_for(
+            &fleet,
+            env,
+            product.as_deref(),
+            role.as_deref(),
+            command,
+            runner,
+        );
     }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
 }
@@ -2351,28 +2842,73 @@ fn run_skill(cmd: &SkillCmd, out: &mut dyn Write) -> Result<(), Error> {
             if *json {
                 writeln!(out, "{}", skill::status_document(&copies)?).map_err(write_err)?;
             } else {
-                for copy in &copies {
-                    let state = if copy.edited {
-                        "edited"
-                    } else if copy.current {
-                        "current"
-                    } else {
-                        "older"
-                    };
-                    writeln!(
-                        out,
-                        "{} {} {} opv {} {state}",
-                        copy.scope,
-                        copy.target.as_str(),
-                        copy.path.display(),
-                        copy.version.as_deref().unwrap_or("unknown"),
-                    )
-                    .map_err(write_err)?;
-                }
+                write_skill_status(&copies, out)?;
             }
         }
     }
     Ok(())
+}
+
+/// The text lines of `opv skill status`: one per copy, then the update hint when an
+/// unedited copy is older than this binary (FR-52).
+fn write_skill_status(copies: &[opv::app::skill::Copy], out: &mut dyn Write) -> Result<(), Error> {
+    for copy in copies {
+        let state = if copy.edited {
+            "edited"
+        } else if copy.current {
+            "current"
+        } else {
+            "older"
+        };
+        writeln!(
+            out,
+            "{} {} {} opv {} {state}",
+            copy.scope,
+            copy.target.as_str(),
+            copy.path.display(),
+            copy.version.as_deref().unwrap_or("unknown"),
+        )
+        .map_err(write_err)?;
+    }
+    if copies.iter().any(|c| !c.edited && !c.current) {
+        writeln!(out, "run opv skill install --user to update").map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// Rewrite existing, unedited user-level copies of the agent skill to `version` and report
+/// each updated path on `stderr`; never on stdout and never a failure (FR-52, A1).
+fn refresh_agent_skill(root: &Path, version: &str, stderr: &mut dyn Write) {
+    for path in opv::app::skill::refresh_user_copies(root, version) {
+        let _ = writeln!(
+            stderr,
+            "opv: updated the agent skill at {} to {version}",
+            path.display()
+        );
+    }
+}
+
+/// Whether the once-per-run agent-skill refresh must be skipped: the user opted out, the
+/// environment is CI, the command is `opv skill …` itself, or this is a test build.
+fn skill_refresh_skipped(cmd: &Cmd) -> bool {
+    if matches!(cmd, Cmd::Skill(_)) {
+        return true;
+    }
+    if std::env::var("OPV_NO_SKILL").is_ok_and(|v| v == "1") {
+        return true;
+    }
+    if std::env::var("CI").is_ok_and(|v| !v.is_empty()) {
+        return true;
+    }
+    running_under_test()
+}
+
+/// Cargo and nextest leave markers in the run environment. Without this, a spawned test
+/// binary would rewrite the developer's real skill copies on the machine running the tests.
+fn running_under_test() -> bool {
+    ["NEXTEST", "RUST_TEST_THREADS", "CARGO_MANIFEST_DIR"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
 }
 
 /// The root `opv skill install` writes under: the home for `--user`, the given project
@@ -2541,14 +3077,19 @@ fn run_other(
         Cmd::Init { .. } => unreachable!("handled by run_init"),
         Cmd::Add { .. } => unreachable!("handled by run_edit"),
         Cmd::Target(TargetCmd::Add { .. }) => unreachable!("handled by run_edit"),
+        Cmd::Target(TargetCmd::Credentials { .. }) => unreachable!("handled by run"),
         Cmd::Completions { .. }
         | Cmd::Guide { .. }
         | Cmd::Skill(_)
         | Cmd::Projects { .. }
         | Cmd::Account(_)
         | Cmd::Bootstrap { .. }
-        | Cmd::Approve { .. }
+        | Cmd::Approve { sync: None, .. }
         | Cmd::Version { .. }
+        | Cmd::Mcp(_)
+        | Cmd::Vault(_)
+        | Cmd::Env(_)
+        | Cmd::Structure(_)
         | Cmd::LocalDelivery { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
@@ -2605,10 +3146,48 @@ fn run_other(
         }
         Cmd::Tidy { env, json } => opv::app::repair::run(&loaded?, &env, r, json, out),
         Cmd::Access {
+            env: Some(env),
+            target,
+            project,
+            create: true,
+            github: Some(repo),
+            github_env,
+            secret_name,
+            ..
+        } => {
+            opv::app::setup_runtime::Console::require_terminal(
+                "access --create",
+                &std::env::args().collect::<Vec<_>>().join(" "),
+            )?;
+            let dir = std::env::current_dir().unwrap_or_default();
+            let project = match project.as_deref() {
+                Some(name) => config_store::default_project(Some(name), None, &dir)?,
+                None => opv::app::personal::project_name(r, &dir),
+            };
+            let req = opv::app::access_create::Request {
+                env: &env,
+                target: target.as_deref(),
+                project: &project,
+                github: opv::app::access_create::GitHub {
+                    repo,
+                    environment: github_env,
+                    secret: secret_name,
+                },
+            };
+            opv::app::access_create::run(
+                &loaded?,
+                &req,
+                r,
+                &mut opv::app::setup_runtime::Console,
+                out,
+            )
+        }
+        Cmd::Access {
             env,
             target,
             project,
             json,
+            ..
         } => opv::app::access::run(
             &loaded?,
             env.as_deref(),
@@ -2618,6 +3197,7 @@ fn run_other(
             json,
             out,
         ),
+        Cmd::Generate { env, keys } => opv::app::generate::run(&loaded?, &env, &keys, r, out),
         Cmd::Delivery(DeliveryCmd::Verify {
             env,
             product,
@@ -2634,6 +3214,14 @@ fn run_other(
             json,
             out,
         ),
+        Cmd::Ci(CiCmd::Workflow {
+            env,
+            target,
+            github_env,
+            deploy,
+        }) => {
+            opv::app::ci_workflow::run(&loaded?, &env, &target, github_env.as_deref(), deploy, out)
+        }
         Cmd::Ready { env, json, save } => opv::app::ready::run(
             &loaded?,
             source,
@@ -2656,21 +3244,90 @@ fn run_other(
             target,
             ..
         } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json),
-        Cmd::Plan(a) => sync::plan_targeted(
+        Cmd::Plan(a) => sync::plan_rotating(
             &loaded?,
             &a.env,
             &a.target,
             a.product.as_deref(),
+            &a.rotate,
             r,
             out,
             a.json,
         ),
+        Cmd::Approve {
+            plan_id,
+            sync: Some(env),
+            target,
+            product,
+            deploy,
+            prune,
+            rotate,
+        } => {
+            opv::app::setup_runtime::Console::require_terminal(
+                "approve",
+                &format!("opv approve {plan_id} --sync {env}"),
+            )?;
+            let here = std::env::current_dir().unwrap_or_default();
+            let (project, account) = opv::app::structure::binding(&here, r)?;
+            let scope = opv::app::approve::SyncScope {
+                env,
+                targets: target,
+                product,
+                deploy,
+                prune,
+                rotate,
+            };
+            opv::app::approve::run_sync(
+                r,
+                &loaded?,
+                &project,
+                &account,
+                &scope,
+                &plan_id,
+                unix_now(),
+                &mut TerminalReview,
+                &mut |p, key, project, account, now| {
+                    opv::approval::record_scoped(p, key, project, account, now)
+                },
+            )
+        }
+        Cmd::Sync(a) if a.approved.is_some() => {
+            let plan_id = a.approved.clone().unwrap_or_default();
+            let here = std::env::current_dir().unwrap_or_default();
+            let (project, account) = opv::app::structure::binding(&here, r)?;
+            let scope = opv::app::approve::SyncScope {
+                env: a.env.clone(),
+                targets: a.target.clone(),
+                product: a.product.clone(),
+                deploy: a.deploy,
+                prune: a.prune,
+                rotate: a.rotate.clone(),
+            };
+            opv::app::approve::run_approved_sync(
+                &loaded?,
+                &scope,
+                &plan_id,
+                &project,
+                &account,
+                unix_now(),
+                r,
+                out,
+                a.json,
+                a.receipt.clone(),
+                &mut |p, key, project, account, now| {
+                    opv::approval::consume_scoped(p, key, project, account, now)
+                },
+            )
+        }
         Cmd::Sync(a) => {
             let env = a.env.clone();
             sync::run(&loaded?, &env, r, out, &a.into())
         }
         Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
             config_export::run(&loaded?, &env, r, out)
+        }
+        Cmd::Config(ConfigCmd::Describe { json }) => {
+            opv::app::structure_cmd::config_describe(&loaded?, json, out)
         }
         // Reached only when discovery failed: its error is the result.
         Cmd::Config(_) => loaded.map(|_| ()),
@@ -3030,7 +3687,9 @@ fn sign_in_here() -> Result<bool, Error> {
         return Ok(false);
     }
     let here = std::env::current_dir().unwrap_or_default();
-    let account = config_store::pointer_account(&here).or_else(config_store::account_env);
+    // The account of the op call that found no session (0.9.0), else the selected one.
+    let account =
+        opv::runner::signed_out_account().or_else(|| config_store::selected_account(&here));
     eprintln!(
         "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
          to go on; your password goes only to 1Password's prompt."
@@ -3050,7 +3709,144 @@ fn exit_byte(code: i32) -> u8 {
     }
 }
 
+/// `opv mcp serve --project <dir>`: the MCP server over stdio, until the client closes it.
+#[cfg(feature = "mcp")]
+fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
+    use rmcp::{ServiceExt, transport::stdio};
+    let fail = |what: &str| Error::Config(format!("opv mcp serve: {what}").into());
+    let project = project
+        .canonicalize()
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| fail("--project must be an existing directory"))?;
+    std::env::set_current_dir(&project).map_err(|_| fail("cannot enter the project directory"))?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            Error::Dependency(format!("cannot start the MCP runtime ({})", e.kind()).into())
+        })?;
+    rt.block_on(async {
+        let server = opv::mcp::Server::new(project)
+            .serve(stdio())
+            .await
+            .map_err(|_| fail("the MCP client did not complete the handshake"))?;
+        server
+            .waiting()
+            .await
+            .map_err(|_| fail("the MCP session ended with an error"))?;
+        Ok::<_, Error>(0)
+    })
+}
+
+#[cfg(not(feature = "mcp"))]
+fn mcp_serve(_project: &std::path::Path) -> Result<i32, Error> {
+    Err(Error::Dependency(
+        "this opv was built without MCP; install a release build (npm, install.sh or the GitHub release)".into(),
+    ))
+}
+
+/// `opv mcp install`: register `<this opv> mcp serve --project <dir>` with the chosen
+/// assistants (FR-61).
+fn mcp_install(
+    r: &dyn CommandRunner,
+    client: McpClient,
+    project: Option<&std::path::Path>,
+    name: &str,
+    force: bool,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    use opv::app::mcp_install::{self as mi, Registered};
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(Error::Config(
+            "--name must be letters, digits, '-' or '_'".into(),
+        ));
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let project = match project {
+        Some(p) => p.to_path_buf(),
+        None => config_store::git_toplevel(r).unwrap_or(here),
+    };
+    let project = project
+        .canonicalize()
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| Error::Config("--project must be an existing directory".into()))?;
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| {
+            Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
+        })?;
+    // npm's bundled copy lives under node_modules and moves on every upgrade: register the
+    // shared install that npm's postinstall and install.sh keep current instead.
+    let exe = if exe.components().any(|c| c.as_os_str() == "node_modules") {
+        match opv::app::mcp_install::shared_install().filter(|p| p.is_file()) {
+            Some(shared) => shared,
+            None => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "note: this opv runs from npm's bundled copy ({}), which moves on upgrade; \
+                     run npm rebuild -g @matthew-cochran/opv --allow-scripts=@matthew-cochran/opv, \
+                     then opv mcp install again",
+                    exe.display()
+                );
+                exe
+            }
+        }
+    } else {
+        exe
+    };
+    let command = exe.display().to_string();
+    let args = mi::server_args(&project);
+    let mut done: Vec<Registered> = Vec::new();
+    if matches!(client, McpClient::Claude | McpClient::All) {
+        let path = project.join(".mcp.json");
+        done.push(mi::register("claude", &path, |t| {
+            mi::merge_claude(t, &path, name, &command, &args, force)
+        })?);
+    }
+    if matches!(client, McpClient::Codex | McpClient::All) {
+        let path = mi::codex_config()?;
+        done.push(mi::register("codex", &path, |t| {
+            mi::merge_codex(t, &path, name, &command, &args, force)
+        })?);
+    }
+    if json {
+        let doc = serde_json::json!({
+            "schema_version": opv::json::SCHEMA_VERSION,
+            "server": {"name": name, "command": command, "args": args},
+            "registered": done,
+            "next": "restart the assistant, then ask it to call opv_ready",
+        });
+        return writeln!(out, "{doc}")
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()));
+    }
+    for d in &done {
+        writeln!(out, "{} {} ({})", d.action, d.path.display(), d.client)
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;
+    }
+    writeln!(
+        out,
+        "opv's MCP server runs as: {command} {}\nRestart the assistant to load it; it never sees a secret value. Start it without op session, service-account or Connect credentials.",
+        args.join(" ")
+    )
+    .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
+}
+
 /// `opv approve`'s review on the person's own terminal (checked before it runs).
+/// Seconds since the Unix epoch (0 if the clock is before it).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
 struct TerminalReview;
 
 impl opv::app::approve::Review for TerminalReview {
@@ -3540,5 +4336,76 @@ mod tests {
         }
         assert!(texts[0].contains("7 authentication"), "{}", texts[0]);
         assert!(texts.iter().all(|t| !t.contains("expect-no-change")));
+    }
+
+    /// An upgrade refreshes an existing unedited user copy and names it on the given
+    /// (stderr) stream, never on stdout.
+    #[test]
+    fn refresh_agent_skill_announces_an_update_on_the_given_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = opv::app::skill::Target::Claude.path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, opv::app::skill::render("0.0.1")).unwrap();
+
+        let mut err = Vec::new();
+        refresh_agent_skill(dir.path(), "9.9.9", &mut err);
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!(
+                "opv: updated the agent skill at {} to 9.9.9\n",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn refresh_agent_skill_says_nothing_when_all_copies_are_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = opv::app::skill::Target::Claude.path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, opv::app::skill::render("9.9.9")).unwrap();
+
+        let mut err = Vec::new();
+        refresh_agent_skill(dir.path(), "9.9.9", &mut err);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    /// FR-52: `opv skill status` points at the command that refreshes an older copy.
+    #[test]
+    fn skill_status_names_the_update_command_for_an_older_copy() {
+        let copies = vec![opv::app::skill::Copy {
+            scope: "user".into(),
+            target: opv::app::skill::Target::Claude,
+            path: PathBuf::from("/home/x/.claude/skills/opv/SKILL.md"),
+            version: Some("0.1.0".into()),
+            edited: false,
+            current: false,
+        }];
+        let mut out = Vec::new();
+        write_skill_status(&copies, &mut out).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("run opv skill install --user to update")
+        );
+    }
+
+    #[test]
+    fn skill_status_has_no_update_hint_when_every_copy_is_current() {
+        let copies = vec![opv::app::skill::Copy {
+            scope: "user".into(),
+            target: opv::app::skill::Target::Claude,
+            path: PathBuf::from("/home/x/.claude/skills/opv/SKILL.md"),
+            version: Some("9.9.9".into()),
+            edited: false,
+            current: true,
+        }];
+        let mut out = Vec::new();
+        write_skill_status(&copies, &mut out).unwrap();
+        assert!(
+            !String::from_utf8(out)
+                .unwrap()
+                .contains("run opv skill install --user to update")
+        );
     }
 }

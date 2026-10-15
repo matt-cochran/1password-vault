@@ -7,7 +7,7 @@ npm i -g @matthew-cochran/opv
 opv --version
 ```
 
-npm picks the prebuilt `opv` binary for your operating system and CPU through a per-platform optional dependency. A postinstall script also copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place the install script uses; it never replaces a file that is not an opv binary. Run `npm i -g` without `sudo`. npm 12 and newer run install scripts only when allowed: `npm i -g --allow-scripts=@matthew-cochran/opv @matthew-cochran/opv` (without it, `opv` still works through npm's own link). If your shell then says `~/.local/bin/opv: No such file or directory`, run `hash -r`.
+npm picks the prebuilt `opv` binary for your operating system and CPU through a per-platform optional dependency. A postinstall script also copies it to `~/.local/bin/opv` (`%LOCALAPPDATA%\Programs\opv\opv.exe` on Windows), the same place the install script uses, and registers the agent skill for this user (`opv skill install --user --target all`); it never replaces a file that is not an opv binary. Set `OPV_NO_SKILL=1` or `CI` to skip skill registration in automation. An upgrade refreshes existing unedited user copies of the skill on the next `opv` run. Run `npm i -g` without `sudo`. npm 12 and newer run install scripts only when allowed: `npm i -g --allow-scripts=@matthew-cochran/opv @matthew-cochran/opv` (without it, `opv` still works through npm's own link). If your shell then says `~/.local/bin/opv: No such file or directory`, run `hash -r`.
 
 - Website: [opv.dev](https://opv.dev)
 - Documentation and source: [github.com/matt-cochran/1password-vault](https://github.com/matt-cochran/1password-vault#readme)

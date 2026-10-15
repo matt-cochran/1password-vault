@@ -661,7 +661,7 @@ fn cmd(args: &[&str]) -> Vec<String> {
 #[test]
 fn run_passes_product_scoped_references_for_desired_keys() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
-    run::run_for(&simple(), "prod", Some("app"), &cmd(&["env"]), &r).unwrap();
+    run::run_for(&simple(), "prod", Some("app"), None, &cmd(&["env"]), &r).unwrap();
     let env = r.calls.borrow()[0].env.clone();
     assert_eq!(
         env,
@@ -685,6 +685,14 @@ fn run_passes_product_scoped_references_for_desired_keys() {
 #[test]
 fn run_execs_op_run_with_the_command() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
-    run::run_for(&simple(), "prod", Some("app"), &cmd(&["env", "-0"]), &r).unwrap();
+    run::run_for(
+        &simple(),
+        "prod",
+        Some("app"),
+        None,
+        &cmd(&["env", "-0"]),
+        &r,
+    )
+    .unwrap();
     assert_eq!(argvs(&r), vec!["op run -- env -0"]);
 }

@@ -567,8 +567,25 @@ fn write_no_follow(path: &Path, text: &str) -> std::io::Result<()> {
 pub fn walk_up(start: &Path, name: &str) -> Option<PathBuf> {
     start
         .ancestors()
+        .take_while(|d| hermetic(d))
         .map(|d| d.join(name))
         .find(|p| p.is_file())
+}
+
+/// Test builds never look at or above the system temp directory: a `.opv` or
+/// `secrets.toml` a developer left in `/tmp` must not reach a test's scratch directory
+/// (found: a stray `/tmp/.opv` failed login and discovery tests on one machine only).
+#[cfg(test)]
+fn hermetic(dir: &Path) -> bool {
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.canonicalize().unwrap_or(tmp);
+    let here = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    here != tmp && !tmp.starts_with(&here)
+}
+
+#[cfg(not(test))]
+fn hermetic(_: &Path) -> bool {
+    true
 }
 
 /// Find the configuration (see the module docs). The `op` and `git` calls go through `r`.
@@ -595,7 +612,9 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
         let text = fs::read_to_string(&path)
             .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display()).into()))?;
         let dot = parse_dot_opv(&text, &path)?;
-        let account = pick_account(r, dot.account.or_else(|| req.account.clone()))?;
+        // One order everywhere (0.9.0): OP_ACCOUNT (which `opv login --account` sets for its
+        // command) before the checkout's .opv.
+        let account = pick_account(r, req.account.clone().or(dot.account))?;
         if let Some(project) = &dot.project {
             return by_project(r, project, account, Matched::DotFile(path));
         }
@@ -613,6 +632,39 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
     }
 }
 
+/// The account value that selects this project's 1Password account, in the one order every
+/// command uses (0.9.0): `OP_ACCOUNT` (which `opv login --account` sets for its command),
+/// else the nearest `.opv`. `None` under a service-account or Connect credential, which
+/// decides the account itself.
+pub fn selected_account(start: &Path) -> Option<String> {
+    if Host::detect().op_credential.is_some() {
+        return None;
+    }
+    account_env().or_else(|| pointer_account(start))
+}
+
+/// [`selected_account`] as an account ID: a value that is not one (an email, a shorthand,
+/// a sign-in address) is resolved once against the accounts op knows, so `op` never picks
+/// one of several accounts on a shared address. An ambiguous or unknown value is refused
+/// with the candidates; no selection stays `None` (op's own choice).
+pub fn selected_account_id(r: &dyn CommandRunner, start: &Path) -> Result<Option<String>, Error> {
+    let Some(given) = selected_account(start) else {
+        return Ok(None);
+    };
+    let is_uuid = given.len() == 26
+        && given
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    if is_uuid {
+        return Ok(Some(given));
+    }
+    let accounts = manifest::accounts(r);
+    if accounts.is_empty() {
+        return Ok(Some(given));
+    }
+    manifest::resolve(&accounts, &given).map(Some)
+}
+
 /// The 1Password account every manifest call of this run uses (NR-7: never op's default
 /// when it could be the wrong one). A given account (`.opv`, `OP_ACCOUNT`) that is not
 /// already an account ID is resolved to one (`op` takes no email; a sign-in address can be
@@ -621,8 +673,9 @@ pub fn locate(req: &Request, r: &dyn CommandRunner) -> Result<Found, Error> {
 /// search asked the 1Password app about an account this project was never pointed at).
 /// A service-account or Connect credential decides the account itself: `None`.
 pub fn pick_account(r: &dyn CommandRunner, given: Option<String>) -> Result<Option<String>, Error> {
+    // A credential decides the account: no `--account` beside it (0.9.0, as documented).
     if Host::detect().op_credential.is_some() {
-        return Ok(given);
+        return Ok(None);
     }
     let is_uuid = |a: &str| {
         a.len() == 26

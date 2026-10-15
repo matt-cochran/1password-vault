@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::{CREDENTIAL_VARS, FLYCTL, Fly, PROGRAM, auth_whoami, not_logged_in};
 use crate::adapters::probe::{parse_version, spawn_tool, version_in};
 use crate::config::{check_ident, is_id};
+use crate::domain::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
 use crate::ports::Ports;
@@ -100,6 +101,11 @@ impl Provider for FlyProvider {
         &["flyctl", "fly auth"]
     }
 
+    /// The Fly CLI action pinned in the GitHub Actions example (`docs/usage.md`).
+    fn ci_setup_step(&self) -> Option<&'static str> {
+        Some("      - name: Install flyctl\n        uses: superfly/flyctl-actions/setup-flyctl@1.6")
+    }
+
     fn credential_vars(&self) -> &'static [&'static str] {
         CREDENTIAL_VARS
     }
@@ -112,6 +118,24 @@ impl Provider for FlyProvider {
 
     fn deploy_login(&self) -> Result<Box<dyn crate::provider::DeployLogin>, Error> {
         Ok(Box::<super::login::FlyLogin>::default())
+    }
+
+    fn mint_deploy_credential(
+        &self,
+        target: &dyn TargetConfig,
+        name: &str,
+        r: &dyn CommandRunner,
+    ) -> Option<Result<BTreeMap<String, SecretValue>, Error>> {
+        let t = target.as_any().downcast_ref::<FlyTarget>()?;
+        Some(super::login::mint_deploy_credential(r, &t.app, name))
+    }
+
+    fn mint_preflight(&self, r: &dyn CommandRunner) -> Option<Result<(), Error>> {
+        Some(super::login::mint_preflight(r))
+    }
+
+    fn mint_cleanup_hint(&self) -> Option<&'static str> {
+        Some(super::login::CLEANUP_HINT)
     }
 
     fn setup_hint(&self) -> String {

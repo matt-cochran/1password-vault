@@ -91,7 +91,7 @@ fn check_with_one_product_needs_no_flag() {
 #[test]
 fn run_with_one_product_needs_no_flag() {
     let r = FakeRunner::new([Output::success(Vec::new())]);
-    let code = run::run_for(&fleet(), "prod", None, &cmd(&["env"]), &r).unwrap();
+    let code = run::run_for(&fleet(), "prod", None, None, &cmd(&["env"]), &r).unwrap();
     assert_eq!(code, 0);
 }
 
@@ -137,6 +137,7 @@ fn run_with_several_products_exits_two() {
     let e = run::run_for(
         &two_products(),
         "prod",
+        None,
         None,
         &cmd(&["env"]),
         &FakeRunner::new([]),
@@ -223,6 +224,7 @@ fn run_with_a_source_only_product_needs_no_flag() {
     let code = run::run_for(
         &one_product_and_a_source_only(),
         "ci",
+        None,
         None,
         &cmd(&["env"]),
         &r,

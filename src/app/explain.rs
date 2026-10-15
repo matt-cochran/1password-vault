@@ -414,7 +414,11 @@ fn explain_in(
         if let Some(b) = item {
             doc["reference"] =
                 serde_json::json!(format!("op://{}/{}/{field_label}", b.vault_id, b.item_id));
-            doc["inspect"] = serde_json::json!(inspect_command(&b.item_id, &b.vault_id));
+            doc["inspect"] = serde_json::json!(inspect_command(
+                &b.item_id,
+                &b.vault_id,
+                env.account.as_deref()
+            ));
         }
         if let Some(ci) = &ci {
             doc["readers"] = serde_json::json!({
@@ -493,7 +497,10 @@ fn explain_in(
         ));
     }
     if let Some(b) = item {
-        rows.push(("inspect".into(), inspect_command(&b.item_id, &b.vault_id)));
+        rows.push((
+            "inspect".into(),
+            inspect_command(&b.item_id, &b.vault_id, env.account.as_deref()),
+        ));
     }
     // H1: the command that opens the item in 1Password, where the value is typed.
     rows.push(("open".into(), format!("opv open {label} --env {env_name}")));
@@ -682,9 +689,13 @@ fn readers_line(deploy: &[String], ci: &str) -> String {
     parts.join(", ")
 }
 
-/// The `op` command a person can run to look at the item themselves. Never `--reveal`.
-fn inspect_command(item_id: &str, vault_id: &str) -> String {
-    format!("op item get {item_id} --vault {vault_id}")
+/// The `op` command a person can run to look at the item themselves. Never `--reveal`;
+/// names the environment's account when it has one (I6).
+fn inspect_command(item_id: &str, vault_id: &str, account: Option<&str>) -> String {
+    format!(
+        "op item get {item_id} --vault {vault_id}{}",
+        crate::adapters::onepassword::account_suffix(account)
+    )
 }
 
 /// The declared rules as `name = value`, from the configuration only.
@@ -999,6 +1010,28 @@ mod tests {
     #[test]
     fn prints_op_item_get_with_item_and_vault_ids() {
         assert!(openai_prod().contains("inspect:    op item get iprd --vault vprd"));
+    }
+
+    /// I6: the inspect command names the environment's account, so it cannot run against
+    /// op's default account.
+    #[test]
+    fn inspect_names_the_environment_account() {
+        let f = crate::config::parse(
+            "[environments.prod]\n\
+             account = \"AENV00000000000000000000AA\"\n\
+             boundaries.allumata = { vault_id = \"vprd\", item_id = \"iprd\" }\n\
+             [products.allumata.keys.OPENAI_API_KEY]\n\
+             kind = \"secret\"\n\
+             environments = [\"prod\"]\n",
+        )
+        .unwrap();
+        let out = explain(&f, "allumata/OPENAI_API_KEY", Some("prod")).unwrap();
+        assert!(
+            out.contains(
+                "inspect:    op item get iprd --vault vprd --account AENV00000000000000000000AA"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

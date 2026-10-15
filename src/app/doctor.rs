@@ -1074,9 +1074,22 @@ fn opv_on_path(r: &dyn CommandRunner) -> Result<Check, Error> {
 /// The agent skill copies installed where coding agents look (FR-52). The skill is
 /// optional, so no copy is ok; a copy older than this binary or edited by hand warns,
 /// naming its path and the command that refreshes it.
+/// Where doctor looks for installed skills: the user's and the project's agent folders.
+/// Test builds look nowhere, so doctor's golden output never depends on the machine that
+/// runs the tests (a developer's own installed skill changed it).
+#[cfg(not(test))]
+fn skill_roots() -> Vec<(&'static str, std::path::PathBuf)> {
+    super::skill::roots()
+}
+
+#[cfg(test)]
+fn skill_roots() -> Vec<(&'static str, std::path::PathBuf)> {
+    Vec::new()
+}
+
 fn agent_skill() -> Check {
     let version = env!("CARGO_PKG_VERSION");
-    let copies = super::skill::status(&super::skill::roots(), version);
+    let copies = super::skill::status(&skill_roots(), version);
     if copies.is_empty() {
         return Check::Ok("not installed (optional: opv skill install)".into());
     }
@@ -1591,16 +1604,13 @@ mod tests {
     }
 
     #[test]
-    fn next_step_names_account_add_when_no_account_exists() {
+    fn next_step_names_login_add_when_no_account_exists() {
         let mut g = good();
         g[1] = Output::failure(1);
         g.insert(2, Output::success(b"[]".to_vec()));
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
-        assert!(
-            do_line(&out).starts_with("Do: add one: op account add"),
-            "{out}"
-        );
+        assert!(out.contains("Next: opv login --add"), "{out}");
     }
 
     #[test]
