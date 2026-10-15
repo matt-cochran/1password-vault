@@ -812,6 +812,12 @@ fn ci_reader_steps(
          provider (on GitHub: the repository's Settings > Secrets and variables > Actions), \
          pasting it there yourself; never give CI an owner or break-glass credential"
             .to_string(),
+        format!(
+            "  this reader validates only (check, plan, ready): it cannot write delivery \
+             evidence. A CI job that syncs or deploys uses each target's deploy identity \
+             instead (boundary read, its own state vault read and write): opv access {env} \
+             --target <name> prints its create command"
+        ),
     ];
     for l in lines {
         writeln!(out, "{l}").map_err(write_err)?;

@@ -42,6 +42,14 @@ account or Connect credentials. If a tool is missing in this version, say so; us
 `opv bootstrap` in the user's terminal instead and never work around it. Details:
 `opv guide agent`, section "Optional MCP server".
 
+## CI identities
+
+A validation job (`check`, `plan`, `ready`) uses the read-only reader from
+`opv bootstrap --ci-reader <env>`. A job that syncs uses the target's deploy identity from
+`opv access <env> --target <name>`: boundary read plus read and write on its own state vault,
+where delivery evidence goes. `opv ready` says `evidence_write: "not_verified"`: only a sync
+checked with `opv delivery verify` proves it. Never widen a boundary vault to write.
+
 ## Pick the flow from `opv ready --json`
 
 - **No configuration yet** (`config_not_found`): there is one form (FR-60). Let
