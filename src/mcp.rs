@@ -345,7 +345,7 @@ impl Server {
 
     #[tool(
         name = "opv_sync",
-        description = "Run exactly the deployment (sync) plan plan_id once, after a person approved it in their own terminal with `opv approve <plan_id> --sync <env>` (the approve_command opv_deployment_plan returns, with the same --target, --product, --deploy and --prune). Refuses a stale or unapproved plan, writing nothing; the approval is single use and lasts 15 minutes. Never rotates or prunes an immutable key. Returns the names written, pruned, pending and held, and whether it deployed; never a value.",
+        description = "Run exactly the deployment (sync) plan plan_id once, after a person approved it in their own terminal with `opv approve <plan_id> --sync <env>` (the approve_command opv_deployment_plan returns, with the same --target, --product, --deploy, --prune and --rotate). Refuses a stale or unapproved plan, writing nothing; the approval is single use and lasts 15 minutes. Rotates only the immutable keys the person approved and never prunes an immutable key. Returns the names written, pruned, pending and held, and whether it deployed; never a value.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -408,6 +408,10 @@ pub struct SyncScopeArgs {
     /// Unset managed names no longer declared; only when approved with --prune.
     #[serde(default)]
     pub(crate) prune: bool,
+    /// `PRODUCT/KEY` immutable keys to replace even though present; only the ones the
+    /// person approved with --rotate.
+    #[serde(default)]
+    pub(crate) rotate: Vec<String>,
 }
 
 /// A sync plan id: eight lowercase hex digits.
@@ -453,7 +457,16 @@ pub(crate) fn sync_approved(
     let names = std::iter::once(&args.environment)
         .chain(args.targets.iter())
         .chain(args.product.iter());
-    if names.into_iter().any(|n| !identifier(n)) || args.targets.len() > 20 {
+    // Each --rotate entry is PRODUCT/KEY, both declared-name identifiers.
+    let rotate_ok = args.rotate.iter().all(|r| {
+        r.split_once('/')
+            .is_some_and(|(p, k)| identifier(p) && identifier(k))
+    });
+    if names.into_iter().any(|n| !identifier(n))
+        || args.targets.len() > 20
+        || !rotate_ok
+        || args.rotate.len() > 20
+    {
         return structure_error("invalid_name", "Use declared names only.");
     }
     if !sync_plan_id(&args.plan_id) {
@@ -473,6 +486,7 @@ pub(crate) fn sync_approved(
         product: args.product.clone(),
         deploy: args.deploy,
         prune: args.prune,
+        rotate: args.rotate.clone(),
     };
     let mut report = zeroize::Zeroizing::new(Vec::new());
     let ran = crate::app::approve::run_approved_sync(

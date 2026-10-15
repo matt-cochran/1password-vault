@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The MCP tool `opv_generate` exposes `opv generate <env> <product/KEY>…` to assistants: it writes the generated values only into empty fields, never replaces a value, never returns a value, and refuses when an op session, service-account or Connect credential is in the server's environment (0.9.0).
 - `opv vault locate <vault ID>`: which of the 1Password accounts this CLI knows holds a vault (found, not found, or unknown when not signed in); never claims "absent" for an account it could not ask (#153).
 - `opv login --account <ID> --no-record`: sign in to an account for this login only, leaving the project's `.opv` unchanged (#153).
+- `opv plan --rotate <product/KEY>` (repeatable) plans the replacement of an immutable key already on the target: its rows show `would_stage` and the ON TARGET word `rotate` (`"rotate": true` in JSON), and the sorted rotate set is part of the plan id, so a plan with a rotation never shares an id with one without. `opv sync --rotate <k> --expect-plan <id>` now applies such a plan (only `--prune-immutable` stays refused with `--expect-plan`), a person can approve a rotating sync with `opv approve <id> --sync <env> --rotate <k>` (the rotate set is part of the approval scope), and the MCP tool `opv_sync` takes an optional `rotate`.
 - `opv setup` takes secrets in a masked prompt: a fixed `********` once anything is typed or pasted, never the length.
 
 ### Fixed

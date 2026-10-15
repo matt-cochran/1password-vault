@@ -477,7 +477,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
                 "created_section", "renamed_section", "created_field", "made_concealed",
                 "renamed_field", "moved_field", "kept_duplicate", "normalized_value"
             ],
-            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "extra", "drift", "n/a"],
+            "text_on_target": ["new", "same", "changed", "unknown", "pending", "held", "rotate", "extra", "drift", "n/a"],
         },
         "documents": documents(),
     })

@@ -545,6 +545,7 @@ fn east_scope() -> SyncScope {
         product: None,
         deploy: false,
         prune: false,
+        rotate: Vec::new(),
     }
 }
 
@@ -769,6 +770,230 @@ fn approving_a_sync_lists_each_name_it_writes() {
     );
 }
 
+// --- rotation (FR-16): plan --rotate and an approved sync --rotate ---
+
+const LOCK: &str = "FLEET__API__LOCK";
+
+/// Add an immutable `api/LOCK`, present on east, to the world's item and its Fly app.
+fn world_with_lock() -> World {
+    let w = world();
+    {
+        let mut items = w.op.items.borrow_mut();
+        for i in items.iter_mut() {
+            if i["id"] == w.item_id.as_str() {
+                let mut fields = i["fields"].as_array().cloned().unwrap_or_default();
+                fields.push(json!({
+                    "id": "api-LOCK", "section": {"id": "api", "label": "api"},
+                    "type": "CONCEALED", "label": "LOCK", "value": format!("lock-{MARK}")
+                }));
+                i["fields"] = json!(fields);
+            }
+        }
+    }
+    w.fly.borrow_mut().insert(
+        "myapp-east".into(),
+        BTreeMap::from([(LOCK.to_string(), (format!("lock-{MARK}"), false))]),
+    );
+    w
+}
+
+/// [`fleet_of`] with an immutable `api/LOCK`, so `--rotate api/LOCK` is valid.
+fn fleet_with_lock(w: &World) -> Fleet {
+    let mut fleet = fleet_of(w, &[("east", STATE_EAST)]);
+    let mut lock = fleet.products["api"].keys["TOKEN"].clone();
+    lock.immutable = true;
+    fleet
+        .products
+        .get_mut("api")
+        .unwrap()
+        .keys
+        .insert("LOCK".into(), lock);
+    fleet
+}
+
+fn plan_doc_rotating(w: &World, fleet: &Fleet, only: &[&str], rotate: &[&str]) -> Value {
+    let mut out = Vec::new();
+    let rotate: Vec<String> = rotate.iter().map(|s| s.to_string()).collect();
+    sync::plan_rotating(
+        fleet,
+        "prod",
+        &targets(only),
+        None,
+        &rotate,
+        w,
+        &mut out,
+        true,
+    )
+    .unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+fn plan_id_rotating(w: &World, fleet: &Fleet, only: &[&str], rotate: &[&str]) -> String {
+    plan_doc_rotating(w, fleet, only, rotate)["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn lock_row(doc: &Value) -> &Value {
+    doc["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "LOCK")
+        .unwrap()
+}
+
+#[test]
+fn a_plan_with_rotate_marks_the_rotated_row() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let doc = plan_doc_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    assert_eq!(lock_row(&doc)["rotate"], json!(true), "{doc}");
+}
+
+#[test]
+fn a_plan_with_rotate_stages_the_rotated_row() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let doc = plan_doc_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    assert_eq!(lock_row(&doc)["action"], json!("would_stage"), "{doc}");
+}
+
+#[test]
+fn a_plan_with_rotate_has_a_different_id() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let plain = plan_doc_rotating(&w, &fleet, &["east"], &[]);
+    let rotated = plan_doc_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    assert_ne!(plain["plan_id"], rotated["plan_id"]);
+}
+
+#[test]
+fn a_plan_with_rotate_names_the_row_rotate() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let mut out = Vec::new();
+    let rotate = vec!["api/LOCK".to_string()];
+    sync::plan_rotating(
+        &fleet,
+        "prod",
+        &targets(&["east"]),
+        None,
+        &rotate,
+        &w,
+        &mut out,
+        false,
+    )
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.contains("LOCK") && l.ends_with("rotate")),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_approval_without_rotation_does_not_cover_a_rotating_approved_sync() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let dir = tempfile::tempdir().unwrap();
+    let id = plan_id_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    // The same plan id, but an approval recorded for a scope without rotation.
+    crate::approval::record_scoped_in(
+        &dir.path().join("approvals"),
+        &id,
+        &east_scope().key(),
+        PROJECT,
+        ACCOUNT,
+        1_000,
+    )
+    .unwrap();
+    let rotating = SyncScope {
+        rotate: vec!["api/LOCK".into()],
+        ..east_scope()
+    };
+    let e = approved_sync(dir.path(), &w, &fleet, &rotating, &id).unwrap_err();
+    assert_eq!(e.code(), Code::ApprovalRequired);
+}
+
+#[test]
+fn an_approval_with_the_same_rotation_covers_a_rotating_approved_sync() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let dir = tempfile::tempdir().unwrap();
+    let rotating = SyncScope {
+        rotate: vec!["api/LOCK".into()],
+        ..east_scope()
+    };
+    let id = plan_id_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    crate::approval::record_scoped_in(
+        &dir.path().join("approvals"),
+        &id,
+        &rotating.key(),
+        PROJECT,
+        ACCOUNT,
+        1_000,
+    )
+    .unwrap();
+    let res = approved_sync(dir.path(), &w, &fleet, &rotating, &id);
+    assert!(res.is_ok(), "{res:?}");
+}
+
+#[test]
+fn an_approved_rotating_sync_writes_the_rotated_key() {
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let dir = tempfile::tempdir().unwrap();
+    let rotating = SyncScope {
+        rotate: vec!["api/LOCK".into()],
+        ..east_scope()
+    };
+    let id = plan_id_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    approve_in(dir.path(), &w, &fleet, &rotating, &id);
+    approved_sync(dir.path(), &w, &fleet, &rotating, &id).unwrap();
+    assert_eq!(w.names_on("myapp-east"), [LOCK, NAME]);
+}
+
+#[test]
+fn approving_a_rotation_lists_the_rotated_key() {
+    struct Seen(Vec<String>, String);
+    impl approve_cmd::Review for Seen {
+        fn show(&mut self, line: &str) -> Result<(), Error> {
+            self.0.push(line.to_string());
+            Ok(())
+        }
+        fn ask(&mut self, _: &str) -> Result<String, Error> {
+            Ok(self.1.clone())
+        }
+    }
+    let w = world_with_lock();
+    let fleet = fleet_with_lock(&w);
+    let rotating = SyncScope {
+        rotate: vec!["api/LOCK".into()],
+        ..east_scope()
+    };
+    let id = plan_id_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    let mut ui = Seen(Vec::new(), id.clone());
+    let _ = approve_cmd::run_sync(
+        &w,
+        &fleet,
+        PROJECT,
+        ACCOUNT,
+        &rotating,
+        &id,
+        1_000,
+        &mut ui,
+        &mut |_, _, _, _, _| Ok(()),
+    );
+    assert!(
+        ui.0.iter().any(|l| l == "  rotate api/LOCK on east"),
+        "{:?}",
+        ui.0
+    );
+}
+
 // --- opv_sync (0.9.0): the MCP side of an approved sync ---
 
 #[cfg(feature = "mcp")]
@@ -781,6 +1006,7 @@ fn mcp_sync(w: &World, fleet: &Fleet, dir: &std::path::Path, id: &str) -> Value 
         product: None,
         deploy: false,
         prune: false,
+        rotate: Vec::new(),
     };
     crate::mcp::sync_approved(
         fleet,
@@ -812,6 +1038,61 @@ fn opv_sync_writes_an_approved_plan() {
     approve_in(dir.path(), &w, &fleet, &east_scope(), &id);
     let answer = mcp_sync(&w, &fleet, dir.path(), &id);
     assert_eq!(answer["written"], json!([NAME]), "{answer}");
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn opv_sync_runs_the_approved_rotation() {
+    let w = world_with_lock();
+    // The target holds an older value, so the rotation is a real write.
+    w.fly
+        .borrow_mut()
+        .get_mut("myapp-east")
+        .unwrap()
+        .insert(LOCK.into(), ("lock-old".into(), false));
+    let fleet = fleet_with_lock(&w);
+    let dir = tempfile::tempdir().unwrap();
+    let rotating = SyncScope {
+        rotate: vec!["api/LOCK".into()],
+        ..east_scope()
+    };
+    let id = plan_id_rotating(&w, &fleet, &["east"], &["api/LOCK"]);
+    approve_in(dir.path(), &w, &fleet, &rotating, &id);
+    let _person = tidy::activate();
+    let args = crate::mcp::SyncScopeArgs {
+        environment: "prod".into(),
+        plan_id: id,
+        targets: targets(&["east"]),
+        product: None,
+        deploy: false,
+        prune: false,
+        rotate: vec!["api/LOCK".into()],
+    };
+    let answer = crate::mcp::sync_approved(
+        &fleet,
+        &args,
+        PROJECT,
+        ACCOUNT,
+        &w,
+        1_010,
+        std::iter::empty(),
+        &mut |p, key, project, account, now| {
+            crate::approval::consume_scoped_in(
+                &dir.path().join("approvals"),
+                p,
+                key,
+                project,
+                account,
+                now,
+            )
+        },
+    );
+    assert!(
+        answer["written"]
+            .as_array()
+            .is_some_and(|a| a.contains(&json!(LOCK))),
+        "{answer}"
+    );
 }
 
 #[cfg(feature = "mcp")]
@@ -864,6 +1145,7 @@ fn opv_sync_refuses_an_op_credential_in_its_environment() {
         product: None,
         deploy: false,
         prune: false,
+        rotate: Vec::new(),
     };
     let answer = crate::mcp::sync_approved(
         &fleet,

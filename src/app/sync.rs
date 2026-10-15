@@ -129,15 +129,15 @@ pub fn run(
     // and the guard together (H12).
     let guard = confirm_env(fleet, env_name, opts)?;
     let guarded = guard.guarded;
-    if opts.expect_plan.is_some() && !(opts.rotate.is_empty() && opts.prune_immutable.is_empty()) {
+    if opts.expect_plan.is_some() && !opts.prune_immutable.is_empty() {
         let without = SyncOpts {
             expect_plan: None,
             receipt: None,
             ..opts.clone()
         };
         return Err(Error::Config(
-            "--expect-plan applies the plan `opv plan` showed, which never rotates or prunes an \
-             immutable key; nothing was changed"
+            "--expect-plan applies the plan `opv plan` showed, which never prunes an immutable \
+             key; nothing was changed"
                 .into(),
         )
         .with_next(without.command(env_name, guarded)));
@@ -481,6 +481,7 @@ impl Ctx<'_> {
             plan,
             listed,
             ports,
+            self.rotate,
             self.opts.expect_plan.as_deref(),
         )
     }
@@ -505,6 +506,11 @@ fn expect_run(
     let mut review = format!("opv plan {env_name}");
     for t in &opts.targets {
         review.push_str(&format!(" --target {t}"));
+    }
+    let mut rotate = opts.rotate.clone();
+    rotate.sort();
+    for k in &rotate {
+        review.push_str(&format!(" --rotate {k}"));
     }
     if let Some(p) = &opts.product {
         review.push_str(&format!(" --product {p}"));
@@ -1976,7 +1982,26 @@ pub fn plan_targeted(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
+    plan_rotating(fleet, env_name, targets, product, &[], r, out, json)
+}
+
+/// [`plan_targeted`] with `--rotate PRODUCT/KEY` entries (FR-16, repeatable): those immutable
+/// keys are planned as replaced even though present. The rotate set is part of the plan id,
+/// so a plan with rotation never shares an id with one without; validation is exactly
+/// [`parse_rotate`], which `sync --rotate` uses too.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_rotating(
+    fleet: &Fleet,
+    env_name: &str,
+    targets: &[String],
+    product: Option<&str>,
+    rotate: &[String],
+    r: &dyn CommandRunner,
+    out: &mut dyn Write,
+    json: bool,
+) -> Result<(), Error> {
     check_product(fleet, product, "plan", Some(env_name))?;
+    let parsed = parse_rotate(fleet, env_name, rotate)?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let names = resolve_targets(fleet, env_name, targets, "plan")?;
     let runners = target_runners(fleet, env_name, &names, r)?;
@@ -1986,7 +2011,7 @@ pub fn plan_targeted(
             Some(s) => s,
             None => r,
         };
-        parts.push(plan_part(fleet, env_name, name, product, r)?);
+        parts.push(plan_part(fleet, env_name, name, product, &parsed, r)?);
     }
     let n: usize = parts.iter().map(|p| p.findings()).sum();
     // FR-41: what `sync --expect-plan` re-derives; names and version ids only.
@@ -2015,6 +2040,8 @@ pub fn plan_targeted(
         expect_plan: clean.then(|| id.clone()),
         receipt: None,
         targets: targets.to_vec(),
+        // The canonical (sorted, deduped) rotate set, so the Next command is stable.
+        rotate: parsed.iter().map(|(p, k)| key_label(p, k)).collect(),
         ..SyncOpts::default()
     }
     .command(env_name, !clean && fleet.environment(env_name)?.confirm_env);
@@ -2040,6 +2067,7 @@ pub fn plan_targeted(
                 target: &p.name,
                 plan: &p.plan,
                 pinned: None,
+                rotate: Some(&p.rotate),
             })
             .collect();
         write_json(
@@ -2111,6 +2139,8 @@ struct PlanPart<'f> {
     id: String,
     /// Names on the target opv does not manage (FR-5, never touched).
     unmanaged: usize,
+    /// The canonical `--rotate` set this part was planned with (FR-16).
+    rotate: BTreeSet<(String, String)>,
 }
 
 impl PlanPart<'_> {
@@ -2118,8 +2148,11 @@ impl PlanPart<'_> {
         self.plan.rows.iter().filter(|r| is_blocking(r)).count()
     }
 
-    /// The row's ON TARGET word.
+    /// The row's ON TARGET word: `rotate` for a `--rotate`d key, else [`target_word`].
     fn word(&self, row: &Row) -> String {
+        if super::rotated(&self.rotate, row) {
+            return "rotate".to_string();
+        }
         let held = self
             .plan
             .held_immutable
@@ -2212,6 +2245,7 @@ fn plan_part<'f>(
     env_name: &str,
     name: &str,
     product: Option<&str>,
+    rotate: &BTreeSet<(String, String)>,
     r: &dyn CommandRunner,
 ) -> Result<PlanPart<'f>, Error> {
     let (_, t) = super::target(fleet, env_name, name)?;
@@ -2219,7 +2253,7 @@ fn plan_part<'f>(
     preflight::read(t, r)?;
     let none = BTreeSet::new();
     let (mut plan, on_target, item_version) =
-        read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), &none, &none)?;
+        read_and_plan_versioned(fleet, env_name, Some(name), r, Some(&ports), rotate, &none)?;
     let scope = match product {
         Some(p) => {
             let names = product_names(fleet, env_name, name, p)?;
@@ -2256,6 +2290,7 @@ fn plan_part<'f>(
         &plan,
         &on_target,
         &ports,
+        rotate,
         None,
     );
     let verb = match ports {
@@ -2272,6 +2307,7 @@ fn plan_part<'f>(
         var_plan,
         verb,
         id,
+        rotate: rotate.clone(),
     })
 }
 

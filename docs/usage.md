@@ -33,8 +33,8 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv doctor [--env <env> [--product <p>]] [--json]` | find setup problems and show the next step | nothing |
 | `opv check <env> [--product <p>] [--json]` | are the keys saved and valid? no target is contacted | nothing |
 | `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>]` | 1Password and every target side by side, names only | nothing |
-| `opv plan <env> [--product <p>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
-| `opv sync <env> [--deploy] [--prune] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
+| `opv plan <env> [--product <p>] [--rotate <product/KEY>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
+| `opv sync <env> [--deploy] [--prune] [--rotate <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
 | `opv run <env> [--product <p>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)) | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
@@ -58,7 +58,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 
 "Nothing" means nothing on your targets and no change to what a value means. Run by a person signed in with their own session, a command that reads an item (except `doctor` and `ready`, which never write; `opv schema` marks the others `tidies_1password`) may also tidy its 1Password layout once (missing sections and empty fields, labels, duplicates; nothing is deleted, [store layout](configuration.md#store-layout)); a service account, Connect, CI or a run under `deploy_credentials` never writes to 1Password.
 
-`sync` also takes `--rotate <product/KEY>` and `--prune-immutable <product/KEY>` for immutable keys (both repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)).
+`plan` and `sync` also take `--rotate <product/KEY>` for immutable keys; `sync` additionally takes `--prune-immutable <product/KEY>` (all repeatable, shown by `--help`, not `-h`; [below](#status-plan-and-sync)).
 
 ### Global options and environment
 
@@ -203,6 +203,8 @@ plan 7f3c9a1e (1Password item v41): sync --expect-plan 7f3c9a1e applies exactly 
 Next: opv sync prod --deploy --prune --expect-plan 7f3c9a1e
 ```
 
+`--rotate <product/KEY>` (repeatable) plans the replacement of an immutable key that is already on the target: its rows show `would_stage` and the ON TARGET word `rotate` (`"rotate": true` in JSON), and the sorted rotate set is part of the plan id, so a plan with a rotation never shares an id with one without. Validation is the same as `sync --rotate`: an unknown key or a non-immutable key is refused the same way.
+
 `plan` covers every target of the environment under one plan id; `--target <name>` (repeatable) narrows it to those targets. On Azure and Kubernetes the line says `would write`. The `Next:` command carries the plan id (`--expect-plan`, which also stands for `--confirm` on a [guarded environment](#guarded-environments)), adds `--prune` only when something would be pruned, `--product` when you scoped the plan and `--target` when you narrowed the targets. When a key blocks the sync, `plan` lists it first with its `open:` link, says `would stage once the findings are fixed:`, exits 8 with `Do: fix the keys above in 1Password`, and its `Next:` line opens the first key in 1Password.
 
 ### Review, then apply exactly that plan: `--expect-plan`
@@ -225,7 +227,8 @@ Next: opv plan prod
 - The id covers names, states, version ids and the item's version number, never a value or a digest of one, so it is safe to paste into a PR or chat. Any edit to the item changes it, even to a field this environment does not use.
 - Nothing is stored: there is no plan file. A CI job can plan in a pull request and apply on merge with the id from the plan step.
 - On a [guarded environment](#guarded-environments), `--expect-plan` is enough on its own: the id is bound to that environment.
-- `--expect-plan` cannot be combined with `--rotate` or `--prune-immutable` (exit 2), because `plan` never shows a rotation.
+- `--expect-plan` is accepted with `--rotate` when the id was computed with the same rotate set, and refused with `--prune-immutable` (exit 2), because `plan` never prunes an immutable key.
+- A rotation can be approved for an assistant: `opv approve <id> --sync <env> --rotate <product/KEY>` re-plans with the rotate set, shows each rotated key as `rotate product/KEY on <target>`, and records an approval whose scope includes that set; an approval recorded without it never covers a rotating `opv sync` (or MCP `opv_sync`), and the reverse.
 - `sync --json` reports the id of the plan it applied as `plan_id`.
 - An exit 9 (a deploy that timed out or lost its connection) is safe to re-run with the same id: what that run already wrote is the plan's own progress, not a change to it (values it staged that wait for a deploy on Fly, or versions stamped with this plan id on Azure and Kubernetes), so `sync --expect-plan <id>` still matches and finishes the deploy.
 

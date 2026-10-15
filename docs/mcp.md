@@ -17,7 +17,7 @@ structural changes in their own terminal, and entering every secret value in 1Pa
 | `opv_structure_plan` | `opv structure plan` | none | nothing | the structural plan and its `plan_id` |
 | `opv_structure_apply` | `opv structure apply <PLAN_ID>` | `plan_id` | 1Password structure, then `secrets.toml` IDs | created public IDs, links for key entry, added field names |
 | `opv_generate` | `opv generate <env> <product/KEY>…` | declared environment and 1–20 `product/KEY` names | 1Password values (empty fields only) | each generated key's product, key, `encoding` (`base64` or `hex`) and recipe `bytes`; never a value |
-| `opv_sync` | `opv sync <env> --approved <PLAN_ID>` | environment, `plan_id`, optional targets and product, `deploy`, `prune` | the deployment target (exactly the approved plan, once) | names written, pruned, pending and held, and whether it deployed; on refusal the `approve_command` to show the person |
+| `opv_sync` | `opv sync <env> --approved <PLAN_ID>` | environment, `plan_id`, optional targets and product, `deploy`, `prune`, `rotate` (`PRODUCT/KEY` entries) | the deployment target (exactly the approved plan, once; rotates only the immutable keys the person approved) | names written, pruned, pending and held, and whether it deployed; on refusal the `approve_command` to show the person |
 
 Every tool has a CLI command with the same guarantee and the same `--json` document
 (the command is also listed by `opv schema` under `mcp_tools`). The CLI apply and sync

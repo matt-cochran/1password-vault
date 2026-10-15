@@ -27,6 +27,11 @@ pub struct PlanIdInput<'a> {
     pub env: &'a str,
     /// `--product`, when the plan was scoped to one product.
     pub product: Option<&'a str>,
+    /// `--rotate` entries: immutable keys this plan replaces even though present (FR-16),
+    /// as `(product, key)`. Sorted and hashed, so a plan with a rotation never shares an id
+    /// with one without. Empty adds nothing to the hash, so a plan without rotation keeps
+    /// the id it had.
+    pub rotate: &'a BTreeSet<(String, String)>,
     /// The 1Password item's `version` integer, when `op` reported one.
     pub item_version: Option<u64>,
     /// The store listing the plan was built against.
@@ -52,6 +57,14 @@ pub fn plan_id(input: &PlanIdInput<'_>, plan: &SyncPlan) -> String {
     put("opv-plan-v1");
     put(input.env);
     put(input.product.unwrap_or(""));
+    // A rotation is part of the reviewed plan (FR-16). Names only, never a value.
+    if !input.rotate.is_empty() {
+        put("rotate");
+        for (p, k) in input.rotate {
+            put(p);
+            put(k);
+        }
+    }
     put(&input
         .item_version
         .map(|v| v.to_string())
@@ -365,11 +378,45 @@ mod tests {
                 item_version: Some(item_version),
                 listed,
                 version_ids: true,
+                rotate: &BTreeSet::new(),
                 name_of: &|_, k| Some(k.to_string()),
                 own_plan: None,
             },
             plan,
         )
+    }
+
+    /// A plan of `plan_with(&[])` with `rotate` set.
+    fn with_rotate(rotate: &[(&str, &str)]) -> String {
+        let set: BTreeSet<(String, String)> = rotate
+            .iter()
+            .map(|(p, k)| (p.to_string(), k.to_string()))
+            .collect();
+        plan_id(
+            &PlanIdInput {
+                env: "prod",
+                product: None,
+                item_version: Some(1),
+                listed: &[],
+                version_ids: false,
+                rotate: &set,
+                name_of: &|_, k| Some(k.to_string()),
+                own_plan: None,
+            },
+            &plan_with(&[]),
+        )
+    }
+
+    /// FR-16: a plan that rotates an immutable key never shares an id with one that does not.
+    #[test]
+    fn plan_id_changes_when_a_rotation_is_added() {
+        assert_ne!(with_rotate(&[]), with_rotate(&[("api", "K")]));
+    }
+
+    /// The rotated key itself is part of the id: another rotation set gives another id.
+    #[test]
+    fn plan_id_changes_with_the_rotated_key() {
+        assert_ne!(with_rotate(&[("api", "K")]), with_rotate(&[("api", "J")]));
     }
 
     #[test]
@@ -423,6 +470,7 @@ mod tests {
                     item_version: Some(1),
                     listed: &[entry("DB_URL", digest)],
                     version_ids: false,
+                    rotate: &BTreeSet::new(),
                     name_of: &|_, k| Some(k.to_string()),
                     own_plan: None,
                 },
@@ -457,6 +505,7 @@ mod tests {
                 item_version: Some(41),
                 listed,
                 version_ids: true,
+                rotate: &BTreeSet::new(),
                 name_of: &|_, k| Some(k.to_string()),
                 own_plan: own,
             },

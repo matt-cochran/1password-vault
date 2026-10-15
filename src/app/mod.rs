@@ -202,6 +202,7 @@ pub(crate) fn plan_id_of(
     plan: &SyncPlan,
     listed: &[StoreEntry],
     ports: &Ports<'_>,
+    rotate: &BTreeSet<(String, String)>,
     own_plan: Option<&str>,
 ) -> String {
     let name_of = |p: &str, k: &str| {
@@ -215,6 +216,7 @@ pub(crate) fn plan_id_of(
             item_version,
             listed,
             version_ids: matches!(ports, Ports::Pinned { .. }),
+            rotate,
             name_of: &name_of,
             own_plan,
         },
@@ -430,6 +432,9 @@ pub(crate) struct JsonPart<'a> {
     pub plan: &'a SyncPlan,
     /// A pinned target's bindings (R5), keyed by name on the target.
     pub pinned: Option<&'a BTreeMap<String, PinnedRow>>,
+    /// `--rotate` entries the part was planned with (`plan` only); sets `rotate` on the
+    /// matching rows. `None` for `status`.
+    pub rotate: Option<&'a BTreeSet<(String, String)>>,
 }
 
 /// FR-21: one names-only JSON document for `status --json` and `plan --json`. Every row
@@ -596,6 +601,7 @@ fn json_rows(
             let bound = target_name
                 .as_deref()
                 .and_then(|n| part.pinned.and_then(|m| m.get(n)));
+            let rotate = part.rotate.is_some_and(|s| rotated(s, r));
             JsonRow {
                 binding: bound.map(|b| b.binding),
                 pending_deploy: bound.map(|b| b.pending_deploy),
@@ -603,6 +609,7 @@ fn json_rows(
                 chain: bound.and_then(|b| b.chain.clone()),
                 open_url: link.filter(|_| is_blocking(r)).map(str::to_string),
                 target: Some(part.target.to_string()),
+                rotate,
                 ..JsonRow::new(r, target_name, json_target(r.kind, r.target), action)
             }
         })
@@ -713,6 +720,15 @@ pub(crate) struct JsonRow {
     /// A shared key's source, `product/KEY` (FR-45).
     #[serde(skip_serializing_if = "Option::is_none")]
     shared_from: Option<String>,
+    /// True when this `plan` was made with `--rotate` for this row's key (FR-16); absent
+    /// otherwise, so a plan without rotation is unchanged.
+    #[serde(skip_serializing_if = "is_false")]
+    rotate: bool,
+}
+
+/// Serialize a `false` boolean field only when true (`rotate`).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl JsonRow {
@@ -741,8 +757,17 @@ impl JsonRow {
             chain: None,
             open_url: None,
             shared_from: json_source(r),
+            rotate: false,
         }
     }
+}
+
+/// Whether `--rotate` names `r`'s key, or the key it shares its value from (FR-16, FR-45).
+pub(crate) fn rotated(set: &BTreeSet<(String, String)>, r: &Row) -> bool {
+    set.contains(&(r.product.clone(), r.key.clone()))
+        || r.source
+            .as_ref()
+            .is_some_and(|(p, k)| set.contains(&(p.clone(), k.clone())))
 }
 
 /// The `shared_from` of a JSON row (FR-45).
@@ -962,6 +987,7 @@ ON TARGET: the key on its deployment target (the TARGET column names the target)
               sync writes it again (a staging target stages it and compares digests)
   pending     written, not yet live; the next sync --deploy rolls it out
   held        immutable and already set; kept as it is (replace with --rotate)
+  rotate      an immutable key this plan replaces because --rotate named it
   extra       on the target but not wanted in this environment; not pruned without --prune
   drift       the running app is bound to something other than what opv last wrote
   n/a         not delivered to the target (config keys, unless the target takes config as
