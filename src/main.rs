@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::parser::ValueSource;
@@ -1659,6 +1659,14 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage_error(e),
     };
+    // FR-52: after an upgrade through any channel, bring existing unedited user copies of
+    // the agent skill up to this binary's version. Best effort and stderr only, so an
+    // `--json` command's stdout stays exactly one document (A1).
+    if !skill_refresh_skipped(&cli.cmd)
+        && let Some(root) = opv::app::skill::user_root()
+    {
+        refresh_agent_skill(&root, env!("CARGO_PKG_VERSION"), &mut io::stderr());
+    }
     let target_options = target_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
     let help = help_command();
@@ -2688,28 +2696,73 @@ fn run_skill(cmd: &SkillCmd, out: &mut dyn Write) -> Result<(), Error> {
             if *json {
                 writeln!(out, "{}", skill::status_document(&copies)?).map_err(write_err)?;
             } else {
-                for copy in &copies {
-                    let state = if copy.edited {
-                        "edited"
-                    } else if copy.current {
-                        "current"
-                    } else {
-                        "older"
-                    };
-                    writeln!(
-                        out,
-                        "{} {} {} opv {} {state}",
-                        copy.scope,
-                        copy.target.as_str(),
-                        copy.path.display(),
-                        copy.version.as_deref().unwrap_or("unknown"),
-                    )
-                    .map_err(write_err)?;
-                }
+                write_skill_status(&copies, out)?;
             }
         }
     }
     Ok(())
+}
+
+/// The text lines of `opv skill status`: one per copy, then the update hint when an
+/// unedited copy is older than this binary (FR-52).
+fn write_skill_status(copies: &[opv::app::skill::Copy], out: &mut dyn Write) -> Result<(), Error> {
+    for copy in copies {
+        let state = if copy.edited {
+            "edited"
+        } else if copy.current {
+            "current"
+        } else {
+            "older"
+        };
+        writeln!(
+            out,
+            "{} {} {} opv {} {state}",
+            copy.scope,
+            copy.target.as_str(),
+            copy.path.display(),
+            copy.version.as_deref().unwrap_or("unknown"),
+        )
+        .map_err(write_err)?;
+    }
+    if copies.iter().any(|c| !c.edited && !c.current) {
+        writeln!(out, "run opv skill install --user to update").map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// Rewrite existing, unedited user-level copies of the agent skill to `version` and report
+/// each updated path on `stderr`; never on stdout and never a failure (FR-52, A1).
+fn refresh_agent_skill(root: &Path, version: &str, stderr: &mut dyn Write) {
+    for path in opv::app::skill::refresh_user_copies(root, version) {
+        let _ = writeln!(
+            stderr,
+            "opv: updated the agent skill at {} to {version}",
+            path.display()
+        );
+    }
+}
+
+/// Whether the once-per-run agent-skill refresh must be skipped: the user opted out, the
+/// environment is CI, the command is `opv skill …` itself, or this is a test build.
+fn skill_refresh_skipped(cmd: &Cmd) -> bool {
+    if matches!(cmd, Cmd::Skill(_)) {
+        return true;
+    }
+    if std::env::var("OPV_NO_SKILL").is_ok_and(|v| v == "1") {
+        return true;
+    }
+    if std::env::var("CI").is_ok_and(|v| !v.is_empty()) {
+        return true;
+    }
+    running_under_test()
+}
+
+/// Cargo and nextest leave markers in the run environment. Without this, a spawned test
+/// binary would rewrite the developer's real skill copies on the machine running the tests.
+fn running_under_test() -> bool {
+    ["NEXTEST", "RUST_TEST_THREADS", "CARGO_MANIFEST_DIR"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
 }
 
 /// The root `opv skill install` writes under: the home for `--user`, the given project
@@ -4132,5 +4185,76 @@ mod tests {
         }
         assert!(texts[0].contains("7 authentication"), "{}", texts[0]);
         assert!(texts.iter().all(|t| !t.contains("expect-no-change")));
+    }
+
+    /// An upgrade refreshes an existing unedited user copy and names it on the given
+    /// (stderr) stream, never on stdout.
+    #[test]
+    fn refresh_agent_skill_announces_an_update_on_the_given_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = opv::app::skill::Target::Claude.path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, opv::app::skill::render("0.0.1")).unwrap();
+
+        let mut err = Vec::new();
+        refresh_agent_skill(dir.path(), "9.9.9", &mut err);
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!(
+                "opv: updated the agent skill at {} to 9.9.9\n",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn refresh_agent_skill_says_nothing_when_all_copies_are_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = opv::app::skill::Target::Claude.path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, opv::app::skill::render("9.9.9")).unwrap();
+
+        let mut err = Vec::new();
+        refresh_agent_skill(dir.path(), "9.9.9", &mut err);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    /// FR-52: `opv skill status` points at the command that refreshes an older copy.
+    #[test]
+    fn skill_status_names_the_update_command_for_an_older_copy() {
+        let copies = vec![opv::app::skill::Copy {
+            scope: "user".into(),
+            target: opv::app::skill::Target::Claude,
+            path: PathBuf::from("/home/x/.claude/skills/opv/SKILL.md"),
+            version: Some("0.1.0".into()),
+            edited: false,
+            current: false,
+        }];
+        let mut out = Vec::new();
+        write_skill_status(&copies, &mut out).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("run opv skill install --user to update")
+        );
+    }
+
+    #[test]
+    fn skill_status_has_no_update_hint_when_every_copy_is_current() {
+        let copies = vec![opv::app::skill::Copy {
+            scope: "user".into(),
+            target: opv::app::skill::Target::Claude,
+            path: PathBuf::from("/home/x/.claude/skills/opv/SKILL.md"),
+            version: Some("9.9.9".into()),
+            edited: false,
+            current: true,
+        }];
+        let mut out = Vec::new();
+        write_skill_status(&copies, &mut out).unwrap();
+        assert!(
+            !String::from_utf8(out)
+                .unwrap()
+                .contains("run opv skill install --user to update")
+        );
     }
 }

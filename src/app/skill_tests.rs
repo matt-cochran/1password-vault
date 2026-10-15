@@ -83,6 +83,48 @@ fn install_force_replaces_an_edited_copy() {
 }
 
 #[test]
+fn refresh_rewrites_an_unedited_older_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Target::Claude.path(dir.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, skill::render("0.1.0")).unwrap();
+
+    let updated = skill::refresh_user_copies(dir.path(), V);
+    assert_eq!(updated, vec![path]);
+}
+
+#[test]
+fn refresh_leaves_an_edited_copy_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Target::Claude.path(dir.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, format!("{}hand edit\n", skill::render("0.1.0"))).unwrap();
+
+    let updated = skill::refresh_user_copies(dir.path(), V);
+    assert!(updated.is_empty(), "{updated:?}");
+}
+
+#[test]
+fn refresh_does_not_create_a_missing_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Target::Codex.path(dir.path());
+
+    skill::refresh_user_copies(dir.path(), V);
+    assert!(!path.exists(), "{} was created", path.display());
+}
+
+#[test]
+fn refresh_leaves_a_current_copy_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Target::Claude.path(dir.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, skill::render(V)).unwrap();
+
+    let updated = skill::refresh_user_copies(dir.path(), V);
+    assert!(updated.is_empty(), "{updated:?}");
+}
+
+#[test]
 fn status_reports_the_version_and_state_of_each_copy() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
