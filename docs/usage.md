@@ -27,6 +27,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv structure apply <plan_id> [--json]` | apply exactly the plan a person approved with `opv approve <plan_id>` in their own terminal (single use); refuses an unapproved or stale plan, creating nothing | 1Password and `secrets.toml` |
 | `opv target add <env> <name> --<provider options> [--products <p>]... [--deploy-credentials <op://v/i>] [--dry-run] [--json]` | declare one named target, infer its provider from the options, create its state vault and record its ID ([usage](#add-a-target-opv-target-add)) | the configuration and 1Password |
 | `opv target list [--env <env>] [--json]` | the declared targets: provider, locator, products, deploy identity and state vault ([usage](#add-a-target-opv-target-add)) | nothing (read-only) |
+| `opv target credentials <env> --target <name> [--create]` | mint a target's least-privilege deploy credential and store it in a new 1Password item, recording `deploy_credentials`; without `--create`, print the recorded state ([usage](#mint-a-targets-deploy-credential-opv-target-credentials)) | the target provider, 1Password and the configuration; needs your own terminal |
 | `opv account list [--account <a>] [--json]` | the 1Password accounts this CLI knows, which one the project uses, what to do next | nothing |
 | `opv account use <email or ID>` | record the project's account in `.opv`, without a prompt | `.opv` |
 | `opv setup [--product <p>] [--recipe <file>] [--account <a>]` | guided, resumable onboarding from `opv.setup.toml` ([guided setup](guided-setup.md)) | the 1Password item; needs your own terminal |
@@ -571,6 +572,15 @@ A target is one named deployment target under `[environments.<env>.targets.<name
 opv target add prod p-overflow --fly-app p-overflow-prod --products p
 opv target add staging site --fly-app site-staging --dry-run
 opv target list --env prod --json
+```
+
+## Mint a target's deploy credential: `opv target credentials`
+
+`opv target credentials <env> --target <name> --create` mints the target's least-privilege deploy credential at its provider and stores it straight in a new 1Password item, then records `deploy_credentials = "op://<state vault>/<new item>"` on the target. The token is never shown, copied or pasted: opv holds it only in memory and sends it to `op item create` on stdin. It names the credential `opv-<project>-<env>-<target>`, requests 90 days' validity, and stores it in the target's state vault under the title `<project> · <target> · <env> deploy credentials` (tagged `opv-deploy:<project>/<env>/<target>`). It asks once, showing all of that; declining creates nothing. It refuses, before any provider call, a target that already records `deploy_credentials` (rotation is a separate reviewed step) and a provider that cannot mint one. If storing fails after minting, the error names the credential and says how to revoke it at the provider. It needs your own interactive terminal and 1Password session; it ends with `Next: opv doctor --env <env> --target <name>`. Without `--create` it only prints whether `deploy_credentials` is recorded and whether the provider can mint one.
+
+```sh
+opv target credentials staging --target web --create
+opv target credentials staging --target web
 ```
 
 ## Fresh fleet: `opv bootstrap`

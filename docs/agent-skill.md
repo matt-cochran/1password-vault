@@ -121,6 +121,11 @@ A `pending_revoke` finding means an old identity still reads the vault: once
   first and creates the target's state vault). A `state_vault_wider_than_values` load error
   means a target shares a state vault it cannot read; give it its own by deleting its
   `state_vault_id` and running `opv bootstrap`.
+- **A target's deploy credential**: never mint, read, copy or paste one. Have the user run
+  `opv target credentials <env> --target <name> --create` in their own terminal; it mints
+  the least-privilege credential at the provider, stores it in a new 1Password item and
+  records `deploy_credentials` — the token is never printed. If they decline or the target
+  already records one, it is a stop: hand `opv explain` to them and wait.
 - **Account findings** (`no_accounts`, `selected_account_absent`, `account_ambiguous`,
   `selected_signed_out`): run `opv account list --json`; ask the user which account; record it
   with `opv account use <ID>`; hand `opv login --add --account <email>` or

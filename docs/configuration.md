@@ -605,6 +605,15 @@ opv target add prod shared --fly-app myapp-production
 opv target add ci actions --github-repo my-org/my-app --products api
 ```
 
+### Mint a target's deploy credential: `opv target credentials`
+
+A target that deploys through `deploy_credentials` needs an item with just its least-privilege identity. `opv target credentials <env> --target <name> --create` mints that credential at the provider and stores it straight in a new 1Password item in the target's state vault, then records `deploy_credentials` for you. The token is never shown, copied or pasted: it stays in memory and reaches `op item create` on stdin only. The credential is named `opv-<project>-<env>-<target>`, asked to be valid for 90 days, and stored under the title `<project> · <target> · <env> deploy credentials`. One confirmation names all of that and the state vault; declining creates nothing. It refuses, before calling the provider, a target that already records `deploy_credentials` — rotation is a separate reviewed step — and a provider that cannot mint one here. A person's own interactive terminal and 1Password session are required. It writes the reference through the same configuration editor as `opv target add` (comments kept, the whole file validated, a concurrent change refused) and ends with `Next: opv doctor --env <env> --target <name>`. Without `--create` it prints whether `deploy_credentials` is recorded and whether the provider can mint one.
+
+```sh
+opv target credentials prod --target shared --create
+opv target credentials prod --target shared
+```
+
 ### Start from an existing `.env`: `opv init --from`
 
 A project that already runs from a `.env` file gets into opv in one step, without a script:

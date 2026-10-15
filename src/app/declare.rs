@@ -220,6 +220,40 @@ pub fn target(r: &dyn CommandRunner, path: &Path, t: &Target) -> Result<bool, Er
     Ok(true)
 }
 
+/// Record `deploy_credentials` on an existing target in the configuration at `path`
+/// (FR-40). `reference` is an `op://<vault>/<item>` reference (an identifier, never a
+/// value). The same validated, concurrency-checked edit as every other declaration: every
+/// comment and line is kept, a generated configuration is refused, and a concurrent change
+/// writes nothing.
+pub fn set_target_deploy_credentials(
+    r: &dyn CommandRunner,
+    path: &Path,
+    env: &str,
+    target: &str,
+    reference: &str,
+) -> Result<(), Error> {
+    let store = store(path)?;
+    let base = store.read(r)?;
+    let mut doc = super::bootstrap::parse_doc(&base.text)?;
+    let table = doc
+        .get_mut("environments")
+        .and_then(|e| e.get_mut(env))
+        .and_then(|e| e.get_mut("targets"))
+        .and_then(|t| t.get_mut(target))
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| {
+            cfg(format!(
+                "environment {env} has no target {target:?} opv can edit; add this line by \
+                 hand: deploy_credentials = {reference:?}"
+            ))
+        })?;
+    table.insert("deploy_credentials", toml_edit::value(reference));
+    let text = doc.to_string();
+    store.parse(&text)?;
+    crate::config_store::save(&store, r, &base, &text)?;
+    Ok(())
+}
+
 /// The environment names declared in the file at `path` (for checks before a declaration).
 pub fn environments(path: &Path) -> Result<BTreeSet<String>, Error> {
     let text = std::fs::read_to_string(path).map_err(|e| {

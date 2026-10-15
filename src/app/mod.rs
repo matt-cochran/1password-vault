@@ -83,6 +83,7 @@ pub mod structure_cmd;
 pub(crate) mod suggest;
 pub mod sync;
 pub mod target_cmd;
+pub mod target_credentials;
 pub(crate) mod tidy;
 #[cfg(test)]
 mod ux2_tests;
