@@ -26,46 +26,58 @@ pub fn run(
 ) -> Result<(), Error> {
     // Both an unknown environment and an unknown target are usage errors (exit 2), and the
     // target is resolved before a byte is written.
-    let (_, t) = super::target(fleet, env, target).map_err(|e| match e.code() {
+    let (e, t) = super::target(fleet, env, target).map_err(|e| match e.code() {
         Code::UnknownEnv => e.with_code(Code::Usage),
         _ => e,
     })?;
     let yaml = workflow(
-        env,
-        target,
-        github_env,
-        deploy,
+        &Job {
+            env,
+            target,
+            github_env,
+            deploy,
+            confirm: e.confirm_env,
+        },
         t.provider().ci_setup_step(),
     );
     out.write_all(yaml.as_bytes()).map_err(write_err)
 }
 
+/// What the job syncs.
+struct Job<'a> {
+    env: &'a str,
+    target: &'a str,
+    github_env: Option<&'a str>,
+    deploy: bool,
+    /// The environment has `confirm_env = true`: the sync names it with `--confirm`.
+    confirm: bool,
+}
+
 /// The whole workflow as text. `setup` is the target provider's CI setup step, indented as
 /// a `steps:` entry, or `None` when the provider needs none.
-fn workflow(
-    env: &str,
-    target: &str,
-    github_env: Option<&str>,
-    deploy: bool,
-    setup: Option<&str>,
-) -> String {
+fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
+    let (env, target, github_env) = (job.env, job.target, job.github_env);
     let version = env!("CARGO_PKG_VERSION");
-    let job = format!("sync-{env}-{target}");
+    let id = format!("sync-{env}-{target}");
     let mut s = String::new();
-    s.push_str(
-        "# the token comes from: opv access <env> --target <name> --create \
-         --github <owner/repo> --github-env <github-env>\n",
-    );
-    s.push_str(&format!("name: {job}\n\n"));
+    let github_env_flag = github_env
+        .map(|g| format!(" --github-env {g}"))
+        .unwrap_or_default();
+    s.push_str(&format!(
+        "# the token comes from (run once by a person in their own terminal):\n\
+         #   opv access {env} --target {target} --create --github <owner/repo>{github_env_flag}\n"
+    ));
+    s.push_str(&format!("name: {id}\n\n"));
     s.push_str("on:\n  workflow_dispatch:\n\n");
     s.push_str("permissions:\n  contents: read\n\n");
-    s.push_str(&format!("jobs:\n  {job}:\n"));
+    s.push_str(&format!("jobs:\n  {id}:\n"));
     s.push_str("    runs-on: ubuntu-latest\n");
     if let Some(g) = github_env {
         s.push_str(&format!("    environment: {g}\n"));
     }
     s.push_str("    env:\n");
     s.push_str("      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}\n");
+    s.push_str("      OP_CACHE: \"false\"\n");
     s.push_str(&format!(
         "      OPV_VERSION: v{version}   # pin the release you tested; bump it deliberately\n"
     ));
@@ -87,9 +99,14 @@ fn workflow(
     s.push_str("          sha256sum -c SHA256SUMS --ignore-missing\n");
     s.push_str("          install -m 0755 opv-x86_64-unknown-linux-musl /usr/local/bin/opv\n");
     s.push_str(&format!("      - name: Sync secrets to {target}\n"));
-    let deploy = if deploy { " --deploy" } else { "" };
+    let confirm = if job.confirm {
+        format!(" --confirm {env}")
+    } else {
+        String::new()
+    };
+    let deploy = if job.deploy { " --deploy" } else { "" };
     s.push_str(&format!(
-        "        run: opv sync {env} --target {target} --receipt {target}.receipt.json{deploy}\n"
+        "        run: opv sync {env} --target {target}{confirm} --receipt {target}.receipt.json{deploy}\n"
     ));
     s.push_str("      - uses: actions/upload-artifact@v4\n");
     s.push_str(&format!(

@@ -58,7 +58,7 @@ fn refused(env: &str, target: &str) -> (Error, String) {
 #[test]
 fn fly_target_includes_the_flyctl_setup_step() {
     assert!(
-        fly_workflow(None, false).contains("uses: superfly/flyctl-actions/setup-flyctl@master"),
+        fly_workflow(None, false).contains("uses: superfly/flyctl-actions/setup-flyctl@1.6"),
         "{}",
         fly_workflow(None, false)
     );
@@ -136,10 +136,8 @@ fn job_id_names_the_environment_and_target() {
 #[test]
 fn identity_header_names_the_access_command() {
     assert!(
-        fly_workflow(None, false).contains(
-            "# the token comes from: opv access <env> --target <name> --create \
-             --github <owner/repo> --github-env <github-env>"
-        ),
+        fly_workflow(None, false)
+            .contains("#   opv access prod --target portfolio --create --github <owner/repo>"),
         "{}",
         fly_workflow(None, false)
     );
@@ -204,4 +202,26 @@ fn unknown_environment_is_a_usage_error() {
 fn unknown_environment_prints_nothing() {
     let (_, out) = refused("missing", "portfolio");
     assert_eq!(out, "");
+}
+
+#[test]
+fn identity_header_carries_the_github_environment() {
+    assert!(
+        fly_workflow(Some("production"), false)
+            .contains("--github <owner/repo> --github-env production")
+    );
+}
+
+#[test]
+fn an_environment_that_needs_confirmation_is_confirmed_in_the_sync() {
+    let fleet = config::parse(&FLY_FLEET.replace(
+        "[environments.prod]\n",
+        "[environments.prod]\nconfirm_env = true\n",
+    ))
+    .unwrap();
+    let mut out = Vec::new();
+    run(&fleet, "prod", "portfolio", None, false, &mut out).unwrap();
+    assert!(
+        text_of(&out).contains("run: opv sync prod --target portfolio --confirm prod --receipt")
+    );
 }

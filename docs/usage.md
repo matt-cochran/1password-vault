@@ -836,7 +836,7 @@ jobs:
       - name: Install the 1Password CLI
         uses: 1password/install-cli-action@v1
       - name: Install flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
       - name: Install opv
         run: |
           base=https://github.com/matt-cochran/1password-vault/releases/download/$OPV_VERSION
