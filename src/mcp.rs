@@ -437,7 +437,8 @@ fn credential_in_environment(vars: impl Iterator<Item = (String, String)>) -> Op
     vars.filter(|(_, v)| !v.is_empty())
         .map(|(k, _)| k)
         .find(|k| {
-            k.starts_with("OP_SESSION_")
+            k == "OP_SESSION"
+                || k.starts_with("OP_SESSION_")
                 || [
                     "OP_SERVICE_ACCOUNT_TOKEN",
                     "OP_CONNECT_HOST",
@@ -780,6 +781,12 @@ mod tests {
     fn an_op_session_token_refuses_the_structural_apply() {
         let found = credential_in_environment(vars(&[("OP_SESSION_my", "x")]));
         assert_eq!(found.as_deref(), Some("OP_SESSION_my"));
+    }
+
+    #[test]
+    fn a_bare_op_session_refuses_the_structural_apply() {
+        let found = credential_in_environment(vars(&[("OP_SESSION", "x")]));
+        assert_eq!(found.as_deref(), Some("OP_SESSION"));
     }
 
     #[test]

@@ -347,6 +347,11 @@ Examples:
   opv version                  # opv, op and each provider CLI, with versions
   opv version --json           # the same, for support and CI";
 
+const VAULT_LOCATE_QUICK: &str = "\
+Examples:
+  opv vault locate zu64e5fmaxlklvyajhwkkdgldy   # which account holds this vault
+  opv vault locate zu64e5fmaxlklvyajhwkkdgldy --json";
+
 const MCP_SERVE_QUICK: &str = "\
 Examples:
   opv mcp serve --project /abs/path/to/project   # what an assistant's MCP client runs";
@@ -659,6 +664,9 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// 1Password vaults: find which account holds one (read-only).
+    #[command(subcommand)]
+    Vault(VaultCmd),
     /// opv's MCP server for coding assistants: serve it, or register it with an assistant.
     #[command(subcommand)]
     Mcp(McpCmd),
@@ -1201,6 +1209,24 @@ enum TargetCmd {
         #[arg(long)]
         env: Option<String>,
         /// Print one JSON array instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Which of the 1Password accounts this CLI knows holds a vault (names and IDs only).
+    ///
+    /// Asks each account with `op vault get` (exit status only). An account that is not
+    /// signed in is reported unknown, never "not there"; its next step signs in to it for
+    /// this check only, without changing the project's .opv.
+    #[command(before_help = VAULT_LOCATE_QUICK)]
+    Locate {
+        /// The vault ID, as opv access or a configuration names it.
+        #[arg(value_name = "VAULT_ID")]
+        vault: String,
+        /// Print one JSON document instead of lines.
         #[arg(long)]
         json: bool,
     },
@@ -1929,6 +1955,7 @@ impl Cmd {
             | Cmd::Projects { json, .. }
             | Cmd::Version { json }
             | Cmd::Mcp(McpCmd::Install { json, .. })
+            | Cmd::Vault(VaultCmd::Locate { json, .. })
             | Cmd::Explain { json, .. }
             | Cmd::Open { json, .. }
             | Cmd::Init { json, .. }
@@ -2262,6 +2289,9 @@ fn run(
         }) => {
             return mcp_install(&r, *client, project.as_deref(), name, *force, *json, out)
                 .map(|()| 0);
+        }
+        Cmd::Vault(VaultCmd::Locate { vault, json }) => {
+            return opv::app::vault_locate::run(&r, vault, *json, out).map(|()| 0);
         }
         Cmd::Version { json } => {
             let here = std::env::current_dir().unwrap_or_default();
@@ -2653,6 +2683,7 @@ fn run_other(
         | Cmd::Approve { .. }
         | Cmd::Version { .. }
         | Cmd::Mcp(_)
+        | Cmd::Vault(_)
         | Cmd::LocalDelivery { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {

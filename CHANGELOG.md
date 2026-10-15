@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `opv vault locate <vault ID>`: which of the 1Password accounts this CLI knows holds a vault (found, not found, or unknown when not signed in); never claims "absent" for an account it could not ask (#153).
+- `opv login --account <ID> --no-record`: sign in to an account for this login only, leaving the project's `.opv` unchanged (#153).
+- `opv setup` takes secrets in a masked prompt: a fixed `********` once anything is typed or pasted, never the length.
+
+### Fixed
+
+- `opv access` reported a vault outside the selected account as "not visible" and printed an `Owner runs:` command that could not succeed. It now reports `not in this account` with a `vault_not_in_account` finding (next: `opv vault locate`) and prints no such command (#153).
+- One account order everywhere: `OP_ACCOUNT` (set by `opv login --account` for its command), then `.opv`, then the only account. `opv login --account B -- opv check` ran against `.opv`'s account before. A non-ID account value is resolved to one account ID (ambiguous values are refused), no account is passed beside a service-account or Connect credential, and the automatic sign-in signs in to the account of the call that failed.
+- A bare `OP_SESSION` variable is reported (`stale_session_variable`) and refused by the MCP structural apply, like `OP_SESSION_<name>`.
+
 ## [0.8.1] - 2026-10-15
 
 ### Added

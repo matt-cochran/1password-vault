@@ -6,7 +6,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 
 | Command | What it does | Changes |
 |---|---|---|
-| `opv login [<env>] [--add] [--account <a>] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command | nothing; needs your own terminal |
+| `opv login [<env>] [--add] [--account <a> [--no-record]] [-- <cmd>]` | sign in to the environment's 1Password account: a signed-in terminal, or one command. `--account` records the project's account in `.opv`; with `--no-record`, it signs in to that account for this login only and leaves `.opv` unchanged | nothing; needs your own terminal |
 | `opv adopt <env> --from <file.env>\|target [--replace <p/KEY>]... [--apply] [--json]` | bring values that exist elsewhere into the item, after review | with `--apply`: the 1Password item |
 | `opv ui` | browse and manage every environment, product and key in a terminal UI; actions run these same commands behind plan and confirmation | what you confirm |
 | `opv tidy <env> [--json]` | put the environment's 1Password item in opv's layout: one verified edit, nothing deleted ([store layout](configuration.md#store-layout)); a person signed in with their own session only | the 1Password item's layout |
@@ -16,6 +16,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv mcp install [--client claude\|codex\|all] [--project <dir>] [--name <n>] [--force] [--json]` | register opv's MCP server for a project with Claude Code (`.mcp.json`) and/or Codex (`~/.codex/config.toml`), merging into existing configuration ([MCP](mcp.md)) | the assistant's configuration |
 | `opv mcp serve --project <dir>` | run the MCP server over stdio (what the assistant's client starts) | nothing by itself; see [MCP](mcp.md) |
+| `opv vault locate <vault ID> [--json]` | which of the 1Password accounts this CLI knows holds a vault: `found`, `not found` or `unknown` (not signed in) per account; names and IDs only | nothing |
 | `opv version [--json]` | opv's version and each CLI it runs (op, flyctl, az, kubectl, gh): installed with its version, missing or unknown, and which ones this project's configuration uses; no sign-in | nothing |
 | `opv approve <plan_id>` | in your own terminal: review the structural plan an assistant prepared through MCP and approve it once (15 minutes) | a local approval record |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` | create every missing boundary vault, item and state vault, record their IDs and add every declared field empty | 1Password and `secrets.toml` |
@@ -442,7 +443,7 @@ prod:
 Owner runs: op service-account create "myapp-prod-web" --vault vprd0000000000000000000002:read_items --vault vstate0000000000000000001:read_items,write_items
 ```
 
-The states are `present`, `missing` and `read-only needed`; a vault it cannot see is `not visible` and is counted under `unclassified`, never assumed fine. It never says "clean": it says what was checked and what it could not classify. It warns when an environment that deploys has no read-only CI reader (`no_ci_reader`), when a reader can write (`ci_reader_can_write`), or when it cannot see who uses a vault (`access_not_visible`); each finding carries the owner's exact command. One `Owner runs:` create command is printed per principal with a missing or too-broad grant, because 1Password fixes a service account's vaults and permissions at creation. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
+The states are `present`, `missing` and `read-only needed`; a vault whose access list it cannot read is `not visible` and is counted under `unclassified`, never assumed fine. A vault that `op vault get` cannot find in the selected account at all is `not in this account`, with a `vault_not_in_account` finding whose step is `opv vault locate <vault ID>`; no `Owner runs:` command is printed for an identity that needs it, because it could not succeed in this account. It never says "clean": it says what was checked and what it could not classify. It warns when an environment that deploys has no read-only CI reader (`no_ci_reader`), when a reader can write (`ci_reader_can_write`), or when it cannot see who uses a vault (`access_not_visible`); each finding carries the owner's exact command. One `Owner runs:` create command is printed per principal with a missing or too-broad grant, because 1Password fixes a service account's vaults and permissions at creation. opv prints it and never runs it, because 1Password shows the new token once, to you. Store it as the CI secret `OP_SERVICE_ACCOUNT_TOKEN` yourself.
 
 `--json` gives `{environments: [{environment, report, commands}]}`, where `report` holds the checks (principal, vault id, permission, state), the extra readers, the findings and the `checked`/`unclassified` counts. In `opv ui` it is the "CI access" entry in the sidebar.
 

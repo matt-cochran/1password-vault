@@ -83,6 +83,7 @@ mod ux2_tests;
 #[cfg(test)]
 mod ux_tests;
 pub(crate) mod variables;
+pub mod vault_locate;
 pub mod version;
 
 use std::cell::RefCell;
