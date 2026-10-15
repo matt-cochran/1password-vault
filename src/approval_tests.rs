@@ -210,3 +210,13 @@ fn a_group_or_other_accessible_approvals_directory_is_refused() {
     let refused = record_in(&dir, PLAN, "proj", "acct", NOW).unwrap_err();
     assert_eq!(refused.code(), Code::PolicyRefused);
 }
+
+#[test]
+fn approving_the_same_plan_again_after_use_makes_it_usable_once_more() {
+    let t = tempdir();
+    let dir = approvals(&t);
+    record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
+    consume_in(&dir, PLAN, "proj", "acct", NOW + 1).unwrap();
+    record_in(&dir, PLAN, "proj", "acct", NOW + 2).unwrap();
+    assert!(consume_in(&dir, PLAN, "proj", "acct", NOW + 3).is_ok());
+}

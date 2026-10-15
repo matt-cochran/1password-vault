@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- On Windows, two concurrent claims of one structural approval could both be refused by a rename sharing violation; a claim is now unique per attempt and a sharing violation is retried briefly, so exactly one wins (#133).
+- An approval is claimed by an exclusive create (`O_EXCL`, `CREATE_NEW` on Windows), which has exactly one winner on every platform; on Windows two concurrent claims could both be refused by a rename sharing violation. The record is spent whatever the verdict, and a new approval of the same plan replaces a used one (#133).
 
 - A structural apply that stops part-way keeps the IDs it already recorded; declarations work on a configuration that is not bootstrapped yet (#133).
 

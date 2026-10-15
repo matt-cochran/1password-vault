@@ -61,6 +61,8 @@ pub fn record_in(
 ) -> Result<(), Error> {
     validate_plan_id(plan_id)?;
     ensure_dir(dir)?;
+    // A new approval of this plan replaces any earlier one, used or not.
+    let _ = std::fs::remove_file(dir.join(format!("{plan_id}.claim")));
     let approval = Approval {
         plan_id: plan_id.to_string(),
         project: project.to_string(),
@@ -71,10 +73,14 @@ pub fn record_in(
 }
 
 /// Use up the approval for `plan_id`: `Ok` only when one exists in `dir`, is unused,
-/// unexpired (`now < expires_at`), and its project and account equal the given ones. It is
-/// claimed first (atomic rename of `<plan_id>.json` to `<plan_id>.used-<now>-<pid>`), so of
-/// two concurrent consumers exactly one succeeds; the claimed file is then removed. Any
-/// refusal leaves no reusable approval behind when the record was claimed.
+/// unexpired (`now < expires_at`), and its project and account equal the given ones.
+///
+/// The claim is an exclusive create of `<plan_id>.claim` (`O_CREAT|O_EXCL`, `CREATE_NEW` on
+/// Windows), which has exactly one winner on every platform, even for concurrent claims in
+/// one process. Only the winner reads the record, and it removes the record whatever the
+/// verdict, so a refused or used approval is never usable again. A claim file left by a
+/// crash keeps the approval unusable (fail closed) until a person approves again
+/// ([`record_in`] clears it).
 pub fn consume_in(
     dir: &Path,
     plan_id: &str,
@@ -85,48 +91,34 @@ pub fn consume_in(
     validate_plan_id(plan_id)?;
     ensure_dir(dir)?;
     let source = dir.join(format!("{plan_id}.json"));
-    // Unique per claim attempt (two threads of one process can claim in the same second).
-    let claimed = dir.join(format!(
-        "{plan_id}.used-{now}-{}-{}",
-        std::process::id(),
-        temp_seq()
-    ));
-    match claim(&source, &claimed) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let why = if used_exists(dir, plan_id) {
-                "already used"
-            } else {
-                "no approval recorded"
-            };
-            return Err(refusal(plan_id, why));
+    let lock = dir.join(format!("{plan_id}.claim"));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    match opts.open(&lock) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(refusal(plan_id, "already used or being used"));
         }
         Err(e) => return Err(refusal(plan_id, format_args!("cannot claim record: {e}"))),
     }
-    let outcome = read_claimed(&claimed, plan_id, project, account, now);
-    let _ = std::fs::remove_file(&claimed);
-    outcome
-}
-
-/// Rename `source` to `claimed`: the atomic claim. Of concurrent claims exactly one rename
-/// can succeed, because the source is gone after it. On Windows a rename racing another can
-/// fail with a sharing violation (`PermissionDenied`) while the source still exists; it is
-/// retried briefly so the race still has one winner instead of none.
-fn claim(source: &Path, claimed: &Path) -> std::io::Result<()> {
-    let mut tries = 0;
-    loop {
-        match std::fs::rename(source, claimed) {
-            Err(e)
-                if cfg!(windows)
-                    && e.kind() == std::io::ErrorKind::PermissionDenied
-                    && tries < 50 =>
-            {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            other => return other,
+    let outcome = match std::fs::symlink_metadata(&source) {
+        Ok(m) if m.file_type().is_file() => read_claimed(&source, plan_id, project, account, now),
+        Ok(_) => Err(refusal(plan_id, "malformed record")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(refusal(plan_id, "no approval recorded"))
         }
-    }
+        Err(e) => Err(refusal(plan_id, format_args!("cannot read record: {e}"))),
+    };
+    // The record is spent whatever the verdict; the claim file stays, so the same id can
+    // never be claimed again until a new approval replaces it.
+    let _ = std::fs::remove_file(&source);
+    outcome
 }
 
 /// [`record_in`] in [`dir`].
@@ -277,19 +269,6 @@ fn temp_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Whether a claimed (`*.used-*`) file for `plan_id` exists: a completed consume or a crash
-/// between claim and removal.
-fn used_exists(dir: &Path, plan_id: &str) -> bool {
-    let prefix = format!("{plan_id}.used-");
-    std::fs::read_dir(dir).is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(&prefix))
-        })
-    })
-}
 
 /// Read a claimed file and enforce every condition; the caller removes it afterwards.
 fn read_claimed(
