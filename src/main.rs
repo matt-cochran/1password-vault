@@ -552,6 +552,10 @@ enum Cmd {
         /// 1Password's own prompt.
         #[arg(long)]
         add: bool,
+        /// Sign in to --account for this login only and leave .opv unchanged (a one-off look
+        /// into another account, such as opv vault locate).
+        #[arg(long, requires = "account")]
+        no_record: bool,
         /// Command and arguments to run signed in, after `--`; without one, opens a
         /// signed-in terminal.
         #[arg(value_name = "COMMAND", last = true)]
@@ -2065,6 +2069,7 @@ fn run(
         command,
         account,
         add,
+        no_record,
     } = &cli.cmd
     {
         use opv::app::{login, setup_runtime};
@@ -2076,14 +2081,26 @@ fn run(
         );
         // One runtime: an account added and signed in here keeps its session for the login.
         let mut runtime = setup_runtime::Runtime::default().for_command("login");
-        login::choose_account(
+        let chosen = login::choose_account_with(
             &probe,
             account.as_deref(),
             *add,
             &here,
             &mut runtime,
             &mut setup_runtime::Console,
+            !*no_record,
         )?;
+        // #153: this login only, in the chosen account, whatever the project records.
+        if *no_record {
+            return login::run_or(
+                None,
+                chosen.as_deref(),
+                None,
+                command,
+                &mut runtime,
+                &mut setup_runtime::Console,
+            );
+        }
         // #142: before 1Password's prompt, say what in this machine's setup can make a
         // sign-in go to the wrong account (names only; never a value).
         for f in opv::app::account::gather(&probe, account.as_deref())

@@ -89,9 +89,10 @@ pub fn run(
     }
     let needs = plan_needs(fleet, &ordered, target)?;
     let (observations, readers) = observe(r, &needs)?;
+    let missing = missing_vaults(r, &readers);
     let mut envs = Vec::with_capacity(needs.len());
     for need in &needs {
-        envs.push(build(need, &project, &observations, &readers));
+        envs.push(build(need, &project, &observations, &readers, &missing));
     }
     report(out, &envs, json)
 }
@@ -182,6 +183,33 @@ fn observe(r: &dyn CommandRunner, needs: &[Needs<'_>]) -> Result<(Observations, 
     Ok((observations, readers))
 }
 
+/// #153: of the vaults whose user list could not be read, the ones `op vault get` cannot
+/// find either: not in the selected account, or not open to this person at all. A vault
+/// that exists but whose access list needs a manager stays `not visible`. One exit-status
+/// probe per such vault; its output names the vault and is dropped unread.
+fn missing_vaults(r: &dyn CommandRunner, readers: &Readers) -> BTreeSet<String> {
+    readers
+        .iter()
+        .filter(|(_, seen)| seen.is_none())
+        .filter(|(vault, _)| {
+            r.probe(
+                &crate::runner::Call::new(
+                    "op",
+                    &["vault", "get", vault.as_str(), "--format", "json"],
+                ),
+                crate::runner::PROBE_TIMEOUT,
+            )
+            .is_ok_and(|o| {
+                if o.status != 0 {
+                    let _ = crate::runner::take_failure_excerpt();
+                }
+                o.status != 0
+            })
+        })
+        .map(|(vault, _)| vault.clone())
+        .collect()
+}
+
 /// Compare one environment's needs with what was observed, and collect the owner commands
 /// for the missing grants and the findings that still apply (FR-59).
 fn build(
@@ -189,6 +217,7 @@ fn build(
     project: &str,
     observations: &Observations,
     readers: &Readers,
+    missing: &BTreeSet<String>,
 ) -> EnvReport {
     let grants = required(project, &need.targets, &need.ci);
     let boundary: BTreeSet<&str> = need
@@ -210,10 +239,28 @@ fn build(
             readers: readers.get(*vault).and_then(|r| r.as_deref()),
         })
         .collect();
-    let report = compare(&grants, &observed);
+    let mut report = compare(&grants, &observed);
+    for check in &mut report.checks {
+        if check.state == GrantState::NotVisible && missing.contains(&check.grant.vault_id) {
+            check.state = GrantState::NotInAccount;
+        }
+    }
     let commands = owner_commands(&report.checks);
     let mut env_findings = Vec::new();
-    for vault in &needed {
+    for vault in needed.iter().filter(|v| missing.contains(**v)) {
+        env_findings.push(crate::domain::access::AccessFinding {
+            code: crate::domain::access::VAULT_NOT_IN_ACCOUNT,
+            environment: need.name.to_string(),
+            message: format!(
+                "vault {vault} is not in the selected 1Password account, or you cannot open \
+                 it; no service-account command is printed for an identity that needs it, \
+                 because it could not succeed here. Find the account that holds it, then fix \
+                 the configured vault_id or select that account"
+            ),
+            next: Some(format!("opv vault locate {vault}")),
+        });
+    }
+    for vault in needed.iter().filter(|v| !missing.contains(**v)) {
         let access = analyse(
             vault,
             vault,
@@ -252,12 +299,18 @@ fn owner_commands(checks: &[GrantCheck]) -> Vec<String> {
         // 1Password fixes a service account's vaults and permissions at creation, so a
         // missing grant and a reader that can write where it should only read are both fixed
         // by recreating the account with its full grant list (FR-59).
-        if group.iter().any(|check| {
-            matches!(
-                check.state,
-                GrantState::Missing | GrantState::ReadOnlyNeeded
-            )
-        }) {
+        // #153: never print a command that cannot succeed in this account.
+        let runnable = !group
+            .iter()
+            .any(|check| check.state == GrantState::NotInAccount);
+        if runnable
+            && group.iter().any(|check| {
+                matches!(
+                    check.state,
+                    GrantState::Missing | GrantState::ReadOnlyNeeded
+                )
+            })
+        {
             let grants: Vec<Grant> = group.iter().map(|check| check.grant.clone()).collect();
             if let Some(command) = create_command(&grants) {
                 commands.push(command);
@@ -362,6 +415,7 @@ fn state_label(state: &GrantState) -> &'static str {
         GrantState::Missing => "missing",
         GrantState::ReadOnlyNeeded => "read-only needed",
         GrantState::NotVisible => "not visible",
+        GrantState::NotInAccount => "not in this account",
     }
 }
 

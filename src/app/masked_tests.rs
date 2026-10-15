@@ -22,7 +22,10 @@ fn one_typed_character_shows_the_mask() {
 
 #[test]
 fn a_paste_shows_the_mask() {
-    assert_eq!(typed(vec![Key::Paste("sk_live_abc".into())]).display(), MASK);
+    assert_eq!(
+        typed(vec![Key::Paste("sk_live_abc".into())]).display(),
+        MASK
+    );
 }
 
 #[test]
@@ -45,7 +48,10 @@ fn backspace_to_empty_hides_the_mask() {
 
 #[test]
 fn clear_empties_the_field() {
-    assert_eq!(typed(vec![Key::Paste("abc".into()), Key::Clear]).display(), "");
+    assert_eq!(
+        typed(vec![Key::Paste("abc".into()), Key::Clear]).display(),
+        ""
+    );
 }
 
 #[test]

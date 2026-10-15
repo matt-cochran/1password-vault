@@ -122,6 +122,22 @@ pub fn choose_account(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
+    choose_account_with(r, given, add, start, backend, ui, true)
+}
+
+/// [`choose_account`]; `record` false (`opv login --no-record`, #153) signs in to the
+/// account for this login only and leaves `.opv` as it is, for a one-off look into another
+/// account (on a shared sign-in address, the only way to reach the second account through
+/// opv's session handling).
+pub fn choose_account_with(
+    r: &dyn crate::runner::CommandRunner,
+    given: Option<&str>,
+    add: bool,
+    start: &std::path::Path,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+    record: bool,
+) -> Result<Option<String>, Error> {
     use crate::adapters::onepassword_manifest as manifest;
     use crate::host::{Host, Platform};
     let platform = Host::detect().platform;
@@ -209,6 +225,13 @@ pub fn choose_account(
             }
         }
     };
+    if !record {
+        ui.show(&format!(
+            "Signing in to 1Password account {} for this login only; .opv is unchanged.",
+            backend.account_label(&uuid)
+        ))?;
+        return Ok(Some(uuid));
+    }
     let path = crate::config_store::record_account(start, &uuid)?;
     ui.show(&format!(
         "This project uses 1Password account {}; recorded in {} (commit it).",

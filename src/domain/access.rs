@@ -42,6 +42,8 @@ pub struct AccessFinding {
 }
 
 const ACCESS_NOT_VISIBLE: &str = "access_not_visible";
+/// #153: a needed vault that `op vault get` cannot find in the selected account.
+pub const VAULT_NOT_IN_ACCOUNT: &str = "vault_not_in_account";
 const NO_CI_READER: &str = "no_ci_reader";
 const CI_READER_CAN_WRITE: &str = "ci_reader_can_write";
 
