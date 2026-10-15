@@ -106,6 +106,14 @@ pub struct Environment {
     environment: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyScope {
+    /// A declared environment name; omitted: every declared environment.
+    #[serde(default)]
+    environment: Option<String>,
+}
+
 impl Server {
     pub fn new(project: PathBuf) -> Self {
         Self {
@@ -142,11 +150,11 @@ impl Server {
 impl Server {
     #[tool(
         name = "opv_ready",
-        description = "Read readiness metadata for one environment. Never returns values. Humans handle authentication and secret entry. No changes are authorized.",
+        description = "Read readiness metadata for one declared environment, or for every environment when none is named: each finding's code, blocking flag, actor, effect and next step (an opv command or a 1Password item link), and each target's state. Never returns a value, message or verification text. Humans handle authentication and secret entry. No changes are authorized.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
-    async fn ready(&self, Parameters(args): Parameters<Environment>) -> String {
-        self.inspect(Operation::Ready, Some(args.environment)).await
+    async fn ready(&self, Parameters(args): Parameters<ReadyScope>) -> String {
+        self.inspect(Operation::Ready, args.environment).await
     }
 
     #[tool(
@@ -826,6 +834,73 @@ fn applied_projection(a: &crate::app::structure::Applied) -> Value {
     })
 }
 
+/// The next step an assistant may repeat for a finding: an `opv` command, or a 1Password
+/// item link, and nothing else. A raw `op` command, a value or any other text becomes null.
+fn ready_step(prerequisite: &str) -> Option<String> {
+    let opv = prerequisite.starts_with("opv ")
+        && !prerequisite.contains('\n')
+        && prerequisite.len() <= 200;
+    let link = prerequisite.starts_with("https://start.1password.com/open/i?")
+        && prerequisite
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/:?=&._-".contains(&b));
+    (opv || link).then(|| prerequisite.to_string())
+}
+
+/// One receipt finding as the MCP answer: checked fields only, never its message or
+/// verification text. Scope fields that are not identifiers are dropped.
+fn ready_finding(f: &Value) -> Value {
+    let mut finding = json!({"blocking": f["blocking"].as_bool().unwrap_or(false)});
+    if let Some(code) = f["code"].as_str().filter(|c| identifier(c)) {
+        finding["code"] = json!(code);
+    }
+    for field in ["environment", "product", "key"] {
+        if let Some(v) = f["scope"][field].as_str().filter(|v| identifier(v)) {
+            finding[field] = json!(v);
+        }
+    }
+    if let Some(actor) = f["actor"]
+        .as_str()
+        .filter(|a| ["owner", "agent", "ci"].contains(a))
+    {
+        finding["actor"] = json!(actor);
+    }
+    if let Some(effect) = f["effect"].as_str().filter(|e| {
+        [
+            "none",
+            "signs_in",
+            "writes_1password",
+            "writes_target",
+            "writes_config",
+        ]
+        .contains(e)
+    }) {
+        finding["effect"] = json!(effect);
+    }
+    finding["step"] = json!(f["prerequisite"].as_str().and_then(ready_step));
+    finding
+}
+
+/// One receipt target as the MCP answer: its state, never its locator or reason.
+fn ready_target(t: &Value) -> Option<Value> {
+    let environment = t["environment"].as_str().filter(|v| identifier(v))?;
+    let name = t["name"].as_str().filter(|v| identifier(v))?;
+    let mut target = json!({"environment": environment, "name": name});
+    if let Some(state) = t["state"]
+        .as_str()
+        .filter(|s| ["ready", "grants_missing"].contains(s))
+    {
+        target["state"] = json!(state);
+    }
+    if let Some(evidence) = t["evidence_write"]
+        .as_str()
+        .filter(|s| ["not_verified", "verified"].contains(s))
+    {
+        target["evidence_write"] = json!(evidence);
+    }
+    Some(target)
+}
+
 /// Construct a new response, never recursively forwarding arbitrary upstream fields.
 fn project_receipt(doc: &Value, operation: Operation) -> Value {
     if doc.get("schema_version").and_then(Value::as_u64) != Some(1) {
@@ -839,7 +914,14 @@ fn project_receipt(doc: &Value, operation: Operation) -> Value {
             if findings.iter().any(|f| !f["blocking"].is_boolean()) {
                 return inspection_error("invalid_receipt");
             }
-            json!({"ok": true, "blocking_findings": findings.iter().filter(|f| f["blocking"] == true).count(), "other_findings": findings.iter().filter(|f| f["blocking"] == false).count(), "human_action": "Use opv ready in your terminal for details; humans authenticate and enter values in 1Password.", "snapshot_only": true})
+            let projected: Vec<Value> = findings.iter().map(ready_finding).collect();
+            let targets: Vec<Value> = doc["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(ready_target)
+                .collect();
+            json!({"ok": true, "blocking_findings": findings.iter().filter(|f| f["blocking"] == true).count(), "other_findings": findings.iter().filter(|f| f["blocking"] == false).count(), "findings": projected, "targets": targets, "human_action": "Use opv ready in your terminal for details; humans authenticate and enter values in 1Password.", "snapshot_only": true})
         }
         Operation::Plan => {
             let Some(rows) = doc.get("rows").and_then(Value::as_array) else {
@@ -1069,6 +1151,164 @@ mod tests {
         assert_eq!(
             project_receipt(&doc, Operation::Ready)["blocking_findings"],
             1
+        );
+    }
+
+    fn ready_doc(findings: Value, targets: Value) -> Value {
+        json!({"schema_version": 1, "findings": findings, "targets": targets})
+    }
+
+    #[test]
+    fn a_ready_scope_without_an_environment_covers_every_environment() {
+        let scope: ReadyScope = serde_json::from_value(json!({})).expect("empty scope");
+        assert_eq!(scope.environment, None);
+    }
+
+    #[test]
+    fn a_ready_finding_never_repeats_its_message_or_verify_text() {
+        let doc = ready_doc(
+            json!([{
+                "code": "settings_unhealthy", "scope": {}, "blocking": true,
+                "actor": "owner", "effect": "none", "prerequisite": "opv ready",
+                "verify": "opv settings show SECRET_MARKER", "message": "SECRET_MARKER"
+            }]),
+            json!([]),
+        );
+        assert!(
+            !project_receipt(&doc, Operation::Ready)
+                .to_string()
+                .contains("SECRET_MARKER")
+        );
+    }
+
+    #[test]
+    fn a_ready_step_keeps_an_opv_prerequisite() {
+        let doc = ready_doc(
+            json!([{"code": "grants_missing", "scope": {}, "blocking": true,
+                    "prerequisite": "opv access prod --target fleet"}]),
+            json!([]),
+        );
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]["step"],
+            "opv access prod --target fleet"
+        );
+    }
+
+    #[test]
+    fn a_ready_step_keeps_a_1password_item_link() {
+        let link = "https://start.1password.com/open/i?a=ABC&v=vault1&i=item1";
+        let doc = ready_doc(
+            json!([{"code": "missing_item", "scope": {}, "blocking": true,
+                    "prerequisite": link}]),
+            json!([]),
+        );
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]["step"],
+            link
+        );
+    }
+
+    #[test]
+    fn a_ready_step_drops_a_raw_op_command() {
+        let doc = ready_doc(
+            json!([{"code": "missing_item", "scope": {}, "blocking": true,
+                    "prerequisite": "op item edit api --vault core"}]),
+            json!([]),
+        );
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]["step"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn a_ready_step_drops_other_text() {
+        let doc = ready_doc(
+            json!([{"code": "missing_item", "scope": {}, "blocking": true,
+                    "prerequisite": "sign in with your account"}]),
+            json!([]),
+        );
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]["step"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn a_ready_finding_drops_an_unknown_actor() {
+        let doc = ready_doc(
+            json!([{"code": "missing_item", "scope": {}, "blocking": true,
+                    "actor": "robot"}]),
+            json!([]),
+        );
+        assert!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]
+                .get("actor")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_ready_finding_drops_an_unknown_effect() {
+        let doc = ready_doc(
+            json!([{"code": "missing_item", "scope": {}, "blocking": true,
+                    "effect": "deletes_everything"}]),
+            json!([]),
+        );
+        assert!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]
+                .get("effect")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_ready_finding_drops_a_scope_field_that_is_not_an_identifier() {
+        let doc = ready_doc(
+            json!([{"code": "missing_item", "blocking": true,
+                    "scope": {"key": "API KEY with spaces"}}]),
+            json!([]),
+        );
+        assert!(
+            project_receipt(&doc, Operation::Ready)["findings"][0]
+                .get("key")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_ready_receipt_without_an_environment_lists_every_environment() {
+        let target = |environment: &str| {
+            json!({"environment": environment, "name": "fleet", "provider": "fly",
+                   "locator": "SECRET_MARKER", "state": "ready",
+                   "reason": "SECRET_MARKER", "evidence_write": "not_verified"})
+        };
+        let doc = ready_doc(json!([]), json!([target("staging"), target("prod")]));
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["targets"]
+                .as_array()
+                .expect("targets")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_ready_target_carries_only_its_environment_name_state_and_evidence() {
+        let doc = ready_doc(
+            json!([]),
+            json!([{"environment": "prod", "name": "fleet", "provider": "fly",
+                    "locator": "SECRET_MARKER", "state": "grants_missing",
+                    "reason": "SECRET_MARKER", "evidence_write": "not_verified"}]),
+        );
+        assert_eq!(
+            project_receipt(&doc, Operation::Ready)["targets"][0]
+                .as_object()
+                .expect("object")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["environment", "name", "state", "evidence_write"]
         );
     }
 }
