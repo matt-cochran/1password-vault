@@ -36,7 +36,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv config import --vault <v> [--file <f>] [--project <p>] [--path <dir>]...` | save a `secrets.toml` as the project manifest | 1Password (a new manifest) |
 | `opv config edit` | edit, validate, diff and save the configuration | the configuration; needs your own terminal |
 | `opv config check --file <f>` | compare a committed copy with the manifest | nothing |
-| `opv projects [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
+| `opv projects [--account <a>] [--long] [--json]` | projects whose configuration lives in 1Password | nothing |
 | `opv help states`, `opv help <command>` | what each state word means; a command's help | nothing |
 | `opv completions <bash\|zsh\|fish\|powershell>` | a shell completion script | nothing |
 | `opv schema` | the installed binary as one JSON document | nothing |
@@ -169,7 +169,7 @@ api (vault acme-dev):
   prod: 14 keys · 13 saved · 1 skipped · 0 findings · 0 not yet on Fly
 ```
 
-`projects` makes one metadata listing per 1Password account op knows (no manifest is read unless `--long`). `status --all` reads each manifest once and then does what `opv status` does per environment, with the usual read retries; a project that cannot be read is one line `name (vault V): not read (<reason>)` and the others still run. `status --all --product <p>` (or `OPV_PRODUCT`) lists only the projects that declare `<p>` and counts only its keys. Its `Next:` is a command (never an error's prose) and names the project, so it runs from any directory: `Next: env OPV_PROJECT=myapp opv status dev`. In `--json`, an environment that could not be read carries that command as `next`. Both take `--json`. Names only, never values.
+`projects` makes one metadata listing per 1Password account op knows (no manifest is read unless `--long`). `--account <email, account ID or sign-in address>` lists that account only, and so does `OP_ACCOUNT`, which `opv login --account <a> -- opv projects` sets for its command. `--json` names every account it asked in `accounts` (`account_id`, `sign_in`, `shorthand`, `status` `listed` or `failed`, `manifests`, `error_code`, `reason`; never an email), says which accounts with `scope` (`selected`, `all` or `default`), and gives each project its `account_id`. Several accounts can share one sign-in address (`my.1password.com`), so the account ID is what tells them apart. When any account could not be listed, `complete` is `false`: the projects that were listed are still shown, the text listing says `the inventory is incomplete`, and opv exits 4 with `inventory_incomplete`, whose `next` signs in to the first such account and lists it again. A project missing from an incomplete inventory may be in an account that was not read; it is not absent. `status --all` reports the same way. `status --all` reads each manifest once and then does what `opv status` does per environment, with the usual read retries; a project that cannot be read is one line `name (vault V): not read (<reason>)` and the others still run. `status --all --product <p>` (or `OPV_PRODUCT`) lists only the projects that declare `<p>` and counts only its keys. Its `Next:` is a command (never an error's prose) and names the project, so it runs from any directory: `Next: env OPV_PROJECT=myapp opv status dev`. In `--json`, an environment that could not be read carries that command as `next`. Both take `--json`. Names only, never values.
 
 ### Plan
 
@@ -671,6 +671,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `item_not_found` | 4 | after_fix | no | the item is not in the vault (moved, archived, deleted, or a wrong item_id) |
 | `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot access the vault |
 | `item_changed` | 4 | after_fix | yes | opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history) |
+| `inventory_incomplete` | 4 | after_fix | yes | one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist |
 | `target_error` | 5 | after_fix | no | the target (Fly, Azure, Kubernetes) refused or failed |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |

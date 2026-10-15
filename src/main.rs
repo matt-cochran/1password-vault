@@ -251,11 +251,16 @@ const PROJECTS_QUICK: &str = "\
 Examples:
   opv projects                 # name, vault, repo and paths
   opv projects --long          # also environment names (one read per project)
-  opv projects --json          # the same, for scripts";
+  opv projects --json          # the same, for scripts
+  opv projects --account you@example.com   # one 1Password account only";
 
 const PROJECTS_MORE: &str = "\
-One metadata listing per signed-in 1Password account; names only, never a value. Changes
-nothing. opv status --all checks every project's environments.";
+One metadata listing per 1Password account (only --account's, or OP_ACCOUNT's, which
+opv login --account sets for its command); names only, never a value. Changes nothing.
+An account that cannot be listed makes the inventory incomplete: the listed projects are
+still shown, \"complete\" is false, and opv exits 4 with inventory_incomplete, since a
+project missing from it may only be in that account. opv status --all checks every
+project's environments.";
 
 const SKELETON_QUICK: &str = "\
 Examples:
@@ -590,6 +595,10 @@ enum Cmd {
     /// paths; --long also reads each manifest once for its environment names.
     #[command(before_help = PROJECTS_QUICK, after_help = PROJECTS_MORE)]
     Projects {
+        /// List only this 1Password account (email, account ID or sign-in address);
+        /// defaults to OP_ACCOUNT, which opv login --account sets for its command.
+        #[arg(long, value_name = "ACCOUNT")]
+        account: Option<String>,
         /// Read each manifest for its environment names.
         #[arg(long)]
         long: bool,
@@ -2007,8 +2016,13 @@ fn run(
         return run_init(cli, config_source, &r, out).map(|()| 0);
     }
     match &cli.cmd {
-        Cmd::Projects { long, json } => {
-            return config_cmd::projects(&r, *long, *json, out).map(|()| 0);
+        Cmd::Projects {
+            account,
+            long,
+            json,
+        } => {
+            let account = account.clone().or_else(config_store::account_env);
+            return config_cmd::projects(&r, account.as_deref(), *long, *json, out).map(|()| 0);
         }
         #[cfg(feature = "ui")]
         Cmd::Ui => {
@@ -2070,7 +2084,9 @@ fn run(
             if used && let Some(p) = &product {
                 let _ = writeln!(io::stderr(), "product {p} (from OPV_PRODUCT)");
             }
-            return config_cmd::status_all(&r, product.as_deref(), *json, out).map(|()| 0);
+            let account = config_store::account_env();
+            return config_cmd::status_all(&r, account.as_deref(), product.as_deref(), *json, out)
+                .map(|()| 0);
         }
         Cmd::Config(ConfigCmd::Import { .. }) | Cmd::Config(ConfigCmd::Check { .. }) => {
             return run_config_manifest(cli, &r, out).map(|()| 0);

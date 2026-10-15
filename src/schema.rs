@@ -571,10 +571,16 @@ fn documents() -> Value {
         ],
         "add": ["product", "key", "kind", "environments", "saved_in", "changed"],
         "projects": [
-            "projects: [{project, title, vault, vault_id, item_id, account, repos, paths, environments?, error?}]",
+            "scope: selected | all | default",
+            "complete: true only when every account asked was listed (else exit 4, inventory_incomplete)",
+            "accounts: [{account_id, sign_in, shorthand, status: listed | failed, manifests, error_code, reason}]",
+            "projects: [{project, title, vault, vault_id, item_id, account, account_id, repos, paths, environments?, error?}]",
             "notes"
         ],
         "status --all": [
+            "scope",
+            "complete",
+            "accounts",
             "projects: [{project, vault, environments: [status_overview environment], error_code, error}]",
             "notes"
         ],

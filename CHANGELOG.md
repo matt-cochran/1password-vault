@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `opv projects` and `opv status --all` no longer report a successful empty inventory when 1Password accounts could not be listed (#135). Each account asked is reported in `accounts` by account ID (accounts sharing `my.1password.com` are told apart; never an email), `complete` says whether every account was listed, and an incomplete inventory keeps the projects it found but exits 4 with the new `inventory_incomplete` code, whose `next` signs in to that account.
+- A listing that failed for one account is diagnosed for that account (`op whoami --account <id>`), never as another account's signed-in identity (#135).
+
+### Added
+
+- `opv projects --account <a>` lists one account; without it, `OP_ACCOUNT` (set by `opv login --account <a> -- <command>`) selects it (#135).
+
 ## [0.7.0] - 2026-10-14
 
 Named deployment targets and one vault per access boundary, with **no backward compatibility**. opv is not yet declared live, so 0.7.0 keeps one way to do each thing (FR-60). Nothing is migrated: a configuration in a removed form fails at load, and the error shows the exact current form to write. See [docs/configuration.md](docs/configuration.md) ("Removed forms") and [docs/design/placements-and-access-boundaries.md](docs/design/placements-and-access-boundaries.md).

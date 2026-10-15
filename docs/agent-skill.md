@@ -40,6 +40,12 @@ on message text.
   validates it, creates its state vault and records its placements). Never create a second configuration beside
   one that exists, and never edit a file whose first line says it is generated: hand the
   printed IDs to its generator.
+- **Finding existing projects**: `opv projects --json` lists manifests per 1Password account.
+  Use `--account <email or account ID>` (or run it as `opv login --account <a> -- opv projects
+  --account <a> --json`) to ask one account. Trust a missing project only when `complete` is
+  `true`. An `inventory_incomplete` error (exit 4) or an `accounts[]` entry with `status:
+  "failed"` means that account was not read: hand its `next` to the user and wait. Never
+  treat an incomplete inventory as permission to create a replacement vault or manifest.
 - **Adding a placement** (a product on another target): `opv ready --json` names a target as
   `grants_missing` until its deploy credentials, state vault and every boundary it reads can
   be opened. Declare one with `opv target add <env> <name> --<provider options>` (it asks

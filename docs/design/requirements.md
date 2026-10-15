@@ -884,6 +884,7 @@ Design: `docs/design/accounts-and-readiness.md` §2 (#80).
 - Findings with stable codes: `no_accounts`, `selected_account_absent`, `selected_signed_out`, `discovery_unavailable`, `op_missing`, each with `human_required` and one runnable next step that names the account when one is known.
 - `opv account use <id|email|address|shorthand> [--json]` records the account in `.opv` deterministically (no prompt, no sign-in). An ambiguous match fails with code `account_ambiguous`, listing each candidate's account ID and address only, with `Next: opv account use <ID>`; an unknown one fails with `selected_account_absent` and the add-account step.
 - `opv schema` lists both commands, their effects and the document.
+- Project discovery (`opv projects`, `status --all`, #135) asks the selected account only (`--account`, else `OP_ACCOUNT`), else every account op knows, and reports each by account ID with `listed`/`failed`. An inventory with any failed account is `complete: false` and exits with `inventory_incomplete` (exit 4, human required); it is never presented as an empty inventory. A failed listing is diagnosed for its own account.
 
 ## FR-50 — Sign-In Experience
 

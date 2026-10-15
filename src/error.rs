@@ -481,6 +481,7 @@ codes! {
     ItemNotFound => "item_not_found", 4, AfterFix, false, "the item is not in the vault (moved, archived, deleted, or a wrong item_id)";
     VaultNoAccess => "vault_no_access", 4, AfterFix, true, "the signed-in identity cannot access the vault";
     ItemChanged => "item_changed", 4, AfterFix, true, "opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history)";
+    InventoryIncomplete => "inventory_incomplete", 4, AfterFix, true, "one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist";
     TargetError => "target_error", 5, AfterFix, false, "the target (Fly, Azure, Kubernetes) refused or failed";
     TargetUnhealthy => "target_unhealthy", 5, AfterFix, false, "the new revision did not become healthy; the previous one keeps serving";
     UpdateRefused => "update_refused", 5, AfterFix, false, "the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal";

@@ -119,10 +119,46 @@ pub(crate) fn failure(
     }
 }
 
+/// The error for a read of `what` that failed, diagnosed for `account` when one is known
+/// (#135): a `whoami` probe for exactly that account, so a failure for one account is
+/// never reported as another account's signed-in identity. Without an account this is the
+/// shared [`failure`] path, unchanged for its other callers.
+fn diagnosis(
+    r: &dyn CommandRunner,
+    host: &dyn Fn() -> Host,
+    account: Option<&str>,
+    failed: &str,
+    what: &str,
+) -> Error {
+    let Some(id) = account else {
+        return failure(r, host, failed, what);
+    };
+    match signed_in(r, id) {
+        Some(false) => Error::Auth(
+            format!(
+                "{failed}: the 1Password account {id} is not signed in; this project's \
+                 configuration lives in 1Password"
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::OpNotSignedIn)
+        .with_next(format!("opv login --account {id}")),
+        Some(true) => Error::Source(
+            format!(
+                "{failed}: signed in to 1Password account {id}\n  next: check that this \
+                 account can see {what}"
+            )
+            .into(),
+        ),
+        None => failure(r, host, failed, what),
+    }
+}
+
 /// One read; a call still failing after its retries is diagnosed.
 fn read(
     r: &dyn CommandRunner,
     args: &[&str],
+    account: Option<&str>,
     host: &dyn Fn() -> Host,
     failed: &str,
     what: &str,
@@ -132,7 +168,7 @@ fn read(
         Ok(Outcome::Done(o)) => o,
         Ok(Outcome::Refused(o)) => {
             let failed = format!("{failed} failed ({})", status_text(o.status));
-            return Err(failure(r, host, &failed, what));
+            return Err(diagnosis(r, host, account, &failed, what));
         }
         Ok(Outcome::Unknown { .. }) => return Err(OP_CLI.outage(&call.step())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -160,6 +196,7 @@ pub fn list(
     let out = read(
         r,
         &args,
+        account,
         host,
         &format!("op item list --tags {MANIFEST_TAG}"),
         "the vault that holds this project's manifest",
@@ -387,6 +424,7 @@ pub fn get(
     let out = read(
         r,
         &args,
+        account,
         host,
         &format!("op item get {item_id} --vault {vault_id}"),
         &format!("vault {vault_id}"),
@@ -711,6 +749,45 @@ mod tests {
         let r = FakeRunner::new([Output::success("{}")]);
         signed_in(&r, "ACCOUNTUUID000000000000AAA");
         assert!(r.argv_contains("ACCOUNTUUID000000000000AAA"));
+    }
+
+    /// #135: a listing that failed for account B is diagnosed for B, never as another
+    /// account's signed-in identity.
+    #[test]
+    fn a_listing_for_a_signed_out_account_is_op_not_signed_in() {
+        let r = signed_out_listing();
+        let e = list(&r, Some("ACCOUNTBBB000000000000BBB"), &Host::detect).unwrap_err();
+        assert_eq!(e.code().as_str(), "op_not_signed_in");
+    }
+
+    #[test]
+    fn a_listing_for_a_signed_out_account_names_that_account() {
+        let r = signed_out_listing();
+        let e = list(&r, Some("ACCOUNTBBB000000000000BBB"), &Host::detect).unwrap_err();
+        assert!(
+            e.text().contains("ACCOUNTBBB000000000000BBB"),
+            "{}",
+            e.text()
+        );
+    }
+
+    #[test]
+    fn a_listing_for_a_signed_out_account_never_names_a_signed_in_identity() {
+        let r = signed_out_listing();
+        let e = list(&r, Some("ACCOUNTBBB000000000000BBB"), &Host::detect).unwrap_err();
+        assert!(
+            !e.text().contains("signed in to 1Password as"),
+            "{}",
+            e.text()
+        );
+    }
+
+    /// A runner whose `op item list` fails every attempt and whose `op whoami --account`
+    /// probe fails too (the account is signed out).
+    fn signed_out_listing() -> FakeRunner {
+        let mut responses: Vec<Output> = crate::runner::fake::failed_read(1).collect();
+        responses.push(Output::failure(1));
+        FakeRunner::new(responses)
     }
 
     #[test]
