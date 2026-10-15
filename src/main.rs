@@ -380,12 +380,11 @@ that changed since it was prepared is refused (stale_plan). The approval is a lo
 in your state directory: it is a gate for assistants that only use MCP, not a secret, and
 the 1Password app's own prompt on each write remains the control that matters.
 
-With --sync <env> (and the same --target, --product, --deploy and --prune the assistant
-named), it re-plans that sync, lists each name it would write or unset (never a value),
-and asks you to type the plan id. The assistant may then run exactly that sync once within
-15 minutes, bound to the plan: any change to the item, the target or the configuration
-voids it. Rotation and pruning immutable keys are never approved this way; run those
-yourself with opv sync.";
+With --sync <env> (and the same --target, --product, --deploy, --prune and --rotate the
+assistant named), it re-plans that sync, lists each name it would write, rotate or unset
+(never a value), and asks you to type the plan id. The assistant may then run exactly that
+sync once within 15 minutes, bound to the plan: any change to the item, the target or the
+configuration voids it. Pruning immutable keys is never approved this way.";
 
 const BOOTSTRAP_QUICK: &str = "\
 Examples:
@@ -900,6 +899,15 @@ enum Cmd {
         /// (never an immutable key).
         #[arg(long, requires = "sync")]
         prune: bool,
+        /// With --sync: approve replacing this immutable key (repeatable, PRODUCT/KEY).
+        #[arg(
+            long,
+            value_name = "PRODUCT/KEY",
+            requires = "sync",
+            hide_short_help = true,
+            hide_long_help = true
+        )]
+        rotate: Vec<String>,
     },
     /// Create every missing boundary vault, item and state vault, record their IDs, and add
     /// the empty fields.
@@ -1181,6 +1189,10 @@ struct PlanArgs {
     /// in name order, under one plan id.
     #[arg(long = "target", value_name = "NAME")]
     target: Vec<String>,
+    /// Plan to replace this immutable key even though it is present (repeatable). Part of
+    /// the plan id, so a plan with rotation never shares an id with one without.
+    #[arg(long, value_name = "PRODUCT/KEY", hide_short_help = true)]
+    rotate: Vec<String>,
 }
 
 /// Arguments of `sync`.
@@ -1235,7 +1247,7 @@ struct SyncArgs {
     #[arg(
         long,
         value_name = "PLAN_ID",
-        conflicts_with_all = ["expect_plan", "confirm", "rotate", "prune_immutable"]
+        conflicts_with_all = ["expect_plan", "confirm", "prune_immutable"]
     )]
     approved: Option<String>,
 }
@@ -3146,11 +3158,12 @@ fn run_other(
             target,
             ..
         } => status::run_targeted(&loaded?, &env, &target, product.as_deref(), r, out, json),
-        Cmd::Plan(a) => sync::plan_targeted(
+        Cmd::Plan(a) => sync::plan_rotating(
             &loaded?,
             &a.env,
             &a.target,
             a.product.as_deref(),
+            &a.rotate,
             r,
             out,
             a.json,
@@ -3162,6 +3175,7 @@ fn run_other(
             product,
             deploy,
             prune,
+            rotate,
         } => {
             opv::app::setup_runtime::Console::require_terminal(
                 "approve",
@@ -3175,6 +3189,7 @@ fn run_other(
                 product,
                 deploy,
                 prune,
+                rotate,
             };
             opv::app::approve::run_sync(
                 r,
@@ -3200,6 +3215,7 @@ fn run_other(
                 product: a.product.clone(),
                 deploy: a.deploy,
                 prune: a.prune,
+                rotate: a.rotate.clone(),
             };
             opv::app::approve::run_approved_sync(
                 &loaded?,
