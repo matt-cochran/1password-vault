@@ -17,6 +17,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
 | `opv mcp install [--client claude\|codex\|all] [--project <dir>] [--name <n>] [--force] [--json]` | register opv's MCP server for a project with Claude Code (`.mcp.json`) and/or Codex (`~/.codex/config.toml`), merging into existing configuration ([MCP](mcp.md)) | the assistant's configuration |
 | `opv mcp serve --project <dir>` | run the MCP server over stdio (what the assistant's client starts) | nothing by itself; see [MCP](mcp.md) |
+| `opv generate <env> <product/KEY>…` | make a self-generated secret (a key with `base64_bytes` or `hex_bytes`) with the OS CSPRNG and write it into its empty 1Password field, read back and verified; never shown, never over a value, provider keys refused | 1Password |
 | `opv vault locate <vault ID> [--json]` | which of the 1Password accounts this CLI knows holds a vault: `found`, `not found` or `unknown` (not signed in) per account; names and IDs only | nothing |
 | `opv version [--json]` | opv's version and each CLI it runs (op, flyctl, az, kubectl, gh): installed with its version, missing or unknown, and which ones this project's configuration uses; no sign-in | nothing |
 | `opv approve <plan_id>` | in your own terminal: review the structural plan an assistant prepared through MCP and approve it once (15 minutes) | a local approval record |

@@ -347,6 +347,11 @@ Examples:
   opv version                  # opv, op and each provider CLI, with versions
   opv version --json           # the same, for support and CI";
 
+const GENERATE_QUICK: &str = "\
+Examples:
+  opv generate dev api/SESSION_KEY             # a key with base64_bytes = 32: 32 random bytes
+  opv generate prod api/SESSION_KEY api/CSRF_KEY";
+
 const VAULT_LOCATE_QUICK: &str = "\
 Examples:
   opv vault locate zu64e5fmaxlklvyajhwkkdgldy   # which account holds this vault
@@ -664,6 +669,19 @@ enum Cmd {
     /// 1Password accounts: which ones this machine's CLI knows, and the project's.
     #[command(subcommand)]
     Account(AccountCmd),
+    /// Generate self-made secrets (base64_bytes / hex_bytes keys) straight into 1Password.
+    ///
+    /// The value comes from the operating system's CSPRNG and goes only into the 1Password
+    /// field (one verified edit); it is never shown, logged or written elsewhere. A field
+    /// that already has a value is never replaced; provider-issued keys are refused.
+    #[command(before_help = GENERATE_QUICK)]
+    Generate {
+        /// Environment name from the configuration.
+        env: String,
+        /// The keys, as product/KEY.
+        #[arg(required = true, value_name = "PRODUCT/KEY")]
+        keys: Vec<String>,
+    },
     /// 1Password vaults: find which account holds one (read-only).
     #[command(subcommand)]
     Vault(VaultCmd),
@@ -2811,6 +2829,7 @@ fn run_other(
             json,
             out,
         ),
+        Cmd::Generate { env, keys } => opv::app::generate::run(&loaded?, &env, &keys, r, out),
         Cmd::Delivery(DeliveryCmd::Verify {
             env,
             product,

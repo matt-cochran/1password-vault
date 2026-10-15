@@ -43,6 +43,12 @@ account or Connect credentials. If a tool is missing in this version, say so; us
 `opv bootstrap` in the user's terminal instead and never work around it. Details:
 `opv guide agent`, section "Optional MCP server".
 
+## Self-made secrets
+
+For a key with `base64_bytes` or `hex_bytes` (encryption, session, signing keys), ask the user,
+then run `opv generate <env> <product/KEY>`: the value goes straight into 1Password and is
+never shown. Never suggest `openssl rand` or pasting generated values.
+
 ## Local secret files and Workers
 
 Never create `.env`, `.dev.vars` or any file holding a value, and never write a wrapper that

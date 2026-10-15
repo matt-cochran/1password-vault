@@ -27,6 +27,7 @@ pub mod declare;
 pub mod delivery;
 pub mod doctor;
 pub mod explain;
+pub mod generate;
 #[cfg(test)]
 mod github_tests;
 #[cfg(test)]

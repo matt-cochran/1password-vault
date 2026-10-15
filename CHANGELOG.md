@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `opv access <env> [--target <name>] --create --github <owner/repo> [--github-env <env>]`: create a CI or deploy identity with exactly its grants and store its token as a GitHub secret on stdin, never shown; one confirmation, GitHub checked first. The MCP tool `opv_access` gives assistants each identity, its state and this command (0.9.0).
+- `opv generate <env> <product/KEY>…`: self-made secrets (keys with `base64_bytes` or `hex_bytes`) generated with the OS CSPRNG straight into their empty 1Password field, read back and verified; never shown, never over a value, provider-issued keys refused (0.9.0).
 - `opv vault locate <vault ID>`: which of the 1Password accounts this CLI knows holds a vault (found, not found, or unknown when not signed in); never claims "absent" for an account it could not ask (#153).
 - `opv login --account <ID> --no-record`: sign in to an account for this login only, leaving the project's `.opv` unchanged (#153).
 - `opv setup` takes secrets in a masked prompt: a fixed `********` once anything is typed or pasted, never the length.
