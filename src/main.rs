@@ -342,6 +342,18 @@ Examples:
   opv ready                      # every environment × product, findings, the next step
   opv ready --json --save r.json # the receipt for an assistant or a handoff";
 
+const APPROVE_QUICK: &str = "\
+Examples:
+  opv approve sp-3f9c0a1b2c3d4e5f   # review the assistant's structural plan, then type its id";
+
+const APPROVE_MORE: &str = "\
+An assistant prepares a structural plan with the opv MCP tool opv_structure_plan (vaults,
+items, empty fields, delivery items; never a value). Review it here and type its id to
+approve it; opv_structure_apply then creates exactly that, once, within 15 minutes. A plan
+that changed since it was prepared is refused (stale_plan). The approval is a local file
+in your state directory: it is a gate for assistants that only use MCP, not a secret, and
+the 1Password app's own prompt on each write remains the control that matters.";
+
 const BOOTSTRAP_QUICK: &str = "\
 Examples:
   opv bootstrap --dry-run      # each boundary and state vault: ok, create or ids_not_in_account
@@ -714,6 +726,18 @@ enum Cmd {
         /// Also save the receipt (names, IDs and codes only) to this file, to resume later.
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
+    },
+    /// Approve, in your own terminal, the structural plan an assistant prepared (#133).
+    ///
+    /// Shows every vault, item and empty field the plan creates and asks you to type the
+    /// plan id back. The approval is single use, lasts 15 minutes, and applies to this
+    /// project and 1Password account only; the 1Password app still asks you to authorize
+    /// each change. Needs an interactive terminal; there is no flag that skips the question.
+    #[command(before_help = APPROVE_QUICK, after_help = APPROVE_MORE)]
+    Approve {
+        /// The plan id the assistant showed (sp- and 16 hex digits).
+        #[arg(value_name = "PLAN_ID")]
+        plan_id: String,
     },
     /// Create every missing boundary vault, item and state vault, record their IDs, and add
     /// the empty fields.
@@ -2067,6 +2091,28 @@ fn run(
             };
             return opv::app::bootstrap::run(&path, &project, &opts, &r, out).map(|()| 0);
         }
+        Cmd::Approve { plan_id } => {
+            opv::app::setup_runtime::Console::require_terminal(
+                "approve",
+                &format!("opv approve {plan_id}"),
+            )?;
+            let here = std::env::current_dir().unwrap_or_default();
+            let scope = opv::app::structure::scope(&here, &r)?;
+            r.use_account(Some(scope.account.clone()));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            return opv::app::approve::run(
+                &r,
+                &scope,
+                plan_id,
+                now,
+                &mut TerminalReview,
+                &mut |p, project, account, now| opv::approval::record(p, project, account, now),
+            )
+            .map(|()| 0);
+        }
         Cmd::Account(AccountCmd::List { account, json }) => {
             return opv::app::account::list(&r, account.as_deref(), *json, out).map(|()| 0);
         }
@@ -2425,6 +2471,7 @@ fn run_other(
         | Cmd::Projects { .. }
         | Cmd::Account(_)
         | Cmd::Bootstrap { .. }
+        | Cmd::Approve { .. }
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")
@@ -2922,6 +2969,27 @@ fn exit_byte(code: i32) -> u8 {
     match u8::try_from(code) {
         Ok(0) | Err(_) => 1,
         Ok(b) => b,
+    }
+}
+
+/// `opv approve`'s review on the person's own terminal (checked before it runs).
+struct TerminalReview;
+
+impl opv::app::approve::Review for TerminalReview {
+    fn show(&mut self, line: &str) -> Result<(), Error> {
+        writeln!(io::stdout(), "{line}")
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
+    }
+    fn ask(&mut self, question: &str) -> Result<String, Error> {
+        let mut out = io::stdout();
+        write!(out, "{question} ")
+            .and_then(|()| out.flush())
+            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).map_err(|e| {
+            Error::Dependency(format!("cannot read the answer ({})", e.kind()).into())
+        })?;
+        Ok(answer.trim().to_string())
     }
 }
 

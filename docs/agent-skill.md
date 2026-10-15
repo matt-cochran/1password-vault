@@ -29,6 +29,19 @@ prompts or in the 1Password app; ask before anything that writes (the schema's
 `ask_user_first`); prefer `--json` and act on `error.code`, `next` and `human_required`, not
 on message text.
 
+## Agents own structure; people own sign-in, approval and values
+
+With the opv MCP server (`opv-mcp`), declare products, keys, environments and targets with
+`opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml`
+only; never a value), then `opv_structure_plan`. Ask the user to run `opv approve <plan_id>`
+in their own terminal (never run it yourself), then `opv_structure_apply` with that id. Hand
+the user the returned 1Password links to enter values there, and finish with `opv_ready`.
+`stale_plan`: plan and ask again. `approval_required`: wait for the user's approval.
+`credential_in_environment`: the user restarts the server without `op` session, service
+account or Connect credentials. If a tool is missing in this version, say so; use
+`opv bootstrap` in the user's terminal instead and never work around it. Details:
+`opv guide agent`, section "Optional MCP server".
+
 ## Pick the flow from `opv ready --json`
 
 - **No configuration yet** (`config_not_found`): there is one form (FR-60). Let

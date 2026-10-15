@@ -55,6 +55,38 @@ fn skeleton_item(
     // second field is added beside it, and an item the strict reader refuses still works.
     // The read the write is built from bypasses op's cache (C1): a cached copy would put
     // stale values over a newer edit.
+    let (item, missing) = missing_fields(fleet, env, b, env_name, r)?;
+    if !missing.is_empty() {
+        let written = onepassword::write_skeleton(r, env, b, &item, &missing)?;
+        // I5: one version after the read it was built from, or another edit landed with it.
+        if let (Some(v), Some(w)) = (item.version, written)
+            && w != v + 1
+        {
+            r.note(&format!(
+                "1Password ({env_name}): another edit landed while opv item skeleton wrote the \
+                 item (version {w} instead of {}); opv did not retry. Check the item's history \
+                 in 1Password.",
+                v + 1
+            ));
+        }
+    }
+    Ok(missing)
+}
+
+/// A field to add: product, key and kind.
+pub(crate) type Field = (String, String, Kind);
+
+/// The declared fields of `fleet`'s products in `env_name` that boundary item `b` lacks,
+/// with the fresh read they were judged on (the read [`skeleton_item`]'s write is built
+/// from). Names and kinds only; the item's values stay in the zeroized read (#133: the
+/// structural plan lists these without writing).
+pub(crate) fn missing_fields(
+    fleet: &Fleet,
+    env: &crate::domain::Environment,
+    b: &crate::domain::Boundary,
+    env_name: &str,
+    r: &dyn CommandRunner,
+) -> Result<(onepassword::Item, Vec<Field>), Error> {
     let item = onepassword::read_whole_fresh(r, env, b)?;
     // M2: the project manifest (FR-44) holds the configuration; it never gets key fields.
     if super::tidy::is_manifest(item.raw()) {
@@ -85,21 +117,23 @@ fn skeleton_item(
         })
         .filter(|(product, key, _)| !found.contains_key(&(product.clone(), key.clone())))
         .collect();
-    if !missing.is_empty() {
-        let written = onepassword::write_skeleton(r, env, b, &item, &missing)?;
-        // I5: one version after the read it was built from, or another edit landed with it.
-        if let (Some(v), Some(w)) = (item.version, written)
-            && w != v + 1
-        {
-            r.note(&format!(
-                "1Password ({env_name}): another edit landed while opv item skeleton wrote the \
-                 item (version {w} instead of {}); opv did not retry. Check the item's history \
-                 in 1Password.",
-                v + 1
-            ));
-        }
-    }
-    Ok(missing)
+    Ok((item, missing))
+}
+
+/// Every key of `fleet`'s products that gets a field of its own in `env_name`'s boundary
+/// items: no shared (`from`) and no personal key (FR-45, FR-55).
+pub(crate) fn declared_fields(fleet: &Fleet, env_name: &str) -> Vec<(String, String, Kind)> {
+    fleet
+        .products
+        .iter()
+        .flat_map(|(product, p)| {
+            p.keys
+                .iter()
+                .filter(|(_, spec)| spec.from.is_none() && !spec.personal)
+                .filter(|(_, spec)| spec.environments.iter().any(|e| e == env_name))
+                .map(move |(key, spec)| (product.clone(), key.clone(), spec.kind))
+        })
+        .collect()
 }
 
 /// The fields `run_as` added, as lines or (`json`) one document.

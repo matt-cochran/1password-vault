@@ -14,6 +14,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv access [<env>] [--target <t>] [--json]` | who needs each boundary and target, and who can read it now; the owner's command to create a reader ([usage](#who-can-read-each-vault-opv-access)) | nothing (read-only) |
 | `opv delivery verify <env> [--product <p>] [--target <t>] [--receipt <file>] [--json]` | does every placement of a product still hold what opv delivered ([usage](#delivery-receipts-opv-sync---receipt-and-opv-delivery-verify)) | nothing (read-only) |
 | `opv ready [<env>] [--json] [--save <file>]` | one receipt: every environment × product, findings, who acts and the next step | nothing |
+| `opv approve <plan_id>` | in your own terminal: review the structural plan an assistant prepared through MCP and approve it once (15 minutes) | a local approval record |
 | `opv bootstrap [--dry-run] [--rebind <env>] [--ci-reader <env>] [--json]` | create every missing boundary vault, item and state vault, record their IDs and add every declared field empty | 1Password and `secrets.toml` |
 | `opv target add <env> <name> --<provider options> [--products <p>]... [--deploy-credentials <op://v/i>] [--dry-run] [--json]` | declare one named target, infer its provider from the options, create its state vault and record its ID ([usage](#add-a-target-opv-target-add)) | the configuration and 1Password |
 | `opv target list [--env <env>] [--json]` | the declared targets: provider, locator, products, deploy identity and state vault ([usage](#add-a-target-opv-target-add)) | nothing (read-only) |
@@ -554,6 +555,16 @@ opv bootstrap                          # create the missing ones and record ever
 opv bootstrap --ci-reader prod         # also print the CI reader's create command
 ```
 
+## Assistant-prepared structure: `opv approve`
+
+An assistant connected to the [opv MCP server](mcp.md) can declare keys, environments and targets in `secrets.toml` and prepare the same structure `opv bootstrap` creates as a plan (`opv_structure_plan`), but it cannot create it on its own. You review and approve that exact plan in your own terminal:
+
+```sh
+opv approve sp-3f9c0a1b2c3d4e5f        # shows each vault, item and empty field; type the id back to approve
+```
+
+`approve` re-plans and refuses an id that no longer matches (`stale_plan`, exit 6, with the current id in `Next:`). It lists every step by name and asks you to type the plan id; any other answer records nothing. The approval is single use, expires after 15 minutes, and names the project and 1Password account (from `OP_ACCOUNT`, the `.opv` pointer, or the only account op knows). It needs an interactive terminal and refuses under CI or with a service-account or Connect credential set; it has no flag that skips the question. The assistant then applies the plan (`opv_structure_apply`), which the 1Password app asks you to authorize, and gives you the links where you enter each value. Without an approval it fails with `approval_required`. Approving never syncs, deploys, grants access or touches a value.
+
 ## Walkthrough: one product on a shared app and a dedicated overflow app
 
 Product `p` runs on the shared app `portfolio-prod` and, for overflow, on the dedicated app `p-overflow-prod`. Both placements read the same boundary item, so no value is entered twice; each target keeps its own state vault and its own delivery evidence. The configuration is the one in [configuration](configuration.md#one-baseline-plus-a-dedicated-overflow).
@@ -676,6 +687,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |
 | `policy_refused` | 6 | after_fix | no | opv refused the operation |
+| `approval_required` | 6 | after_fix | yes | the structural plan has no unused, unexpired approval for this project and account; a person runs opv approve <plan_id> in their own terminal |
 | `keys_blocking` | 6 | after_fix | yes | sync refused: keys are missing or failing a rule; nothing was written |
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; pass --confirm <env> |
 | `confirm_mismatch` | 6 | never | no | --confirm names another environment |

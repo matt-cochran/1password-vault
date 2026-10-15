@@ -89,7 +89,7 @@ pub struct Opts {
     pub json: bool,
 }
 
-fn parse_doc(text: &str) -> Result<DocumentMut, Error> {
+pub(crate) fn parse_doc(text: &str) -> Result<DocumentMut, Error> {
     text.parse().map_err(|e: toml_edit::TomlError| {
         Error::Config(format!("secrets.toml is not valid TOML ({e}).").into())
             .with_next("opv config edit")
@@ -221,6 +221,29 @@ pub fn plan(
     project: &str,
     rebind: &BTreeSet<String>,
 ) -> Result<Vec<EnvPlan>, Error> {
+    plan_with(r, text, project, rebind, false)
+}
+
+/// [`plan`]; `strict` (the structural plan, #133) refuses when a recorded vault's
+/// visibility cannot be told, instead of taking it as visible: an unknown answer never
+/// becomes a plan that someone approves.
+pub(crate) fn plan_with(
+    r: &dyn CommandRunner,
+    text: &str,
+    project: &str,
+    rebind: &BTreeSet<String>,
+    strict: bool,
+) -> Result<Vec<EnvPlan>, Error> {
+    let visible = |v: &str| -> Result<Option<bool>, Error> {
+        match vault_visible(r, v) {
+            None if strict => Err(Error::Unknown(
+                format!("1Password did not say whether vault {v} is visible; nothing was planned")
+                    .into(),
+            )
+            .with_code(crate::error::Code::ProviderUnavailable)),
+            seen => Ok(seen),
+        }
+    };
     let doc = parse_doc(text)?;
     let envs = environment_names(&doc)?;
     if let Some(env) = rebind.iter().find(|e| !envs.contains(e)) {
@@ -232,7 +255,7 @@ pub fn plan(
             .into_iter()
             .map(|(b, products)| {
                 let step = match recorded_boundary(&doc, &env, &b) {
-                    Some((v, i)) if !rebind.contains(&env) => match vault_visible(r, &v) {
+                    Some((v, i)) if !rebind.contains(&env) => match visible(&v)? {
                         Some(false) => BoundaryStep::IdsNotInAccount { vault_id: v },
                         _ => BoundaryStep::Ok {
                             vault_id: v,
@@ -244,18 +267,18 @@ pub fn plan(
                         item: naming::boundary_item(project, &b, &env),
                     },
                 };
-                BoundaryPlan {
+                Ok(BoundaryPlan {
                     boundary: b,
                     products: products.into_iter().collect(),
                     step,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_, Error>>()?;
         let state_vaults = targets(&doc, &env)
             .into_iter()
             .map(|(t, id)| {
                 let step = match id {
-                    Some(v) => match vault_visible(r, &v) {
+                    Some(v) => match visible(&v)? {
                         Some(false) => StateStep::IdsNotInAccount { vault_id: v },
                         _ => StateStep::Ok { vault_id: v },
                     },
@@ -263,9 +286,9 @@ pub fn plan(
                         vault: naming::state_vault(project, &env, &t),
                     },
                 };
-                StatePlan { target: t, step }
+                Ok(StatePlan { target: t, step })
             })
-            .collect();
+            .collect::<Result<_, Error>>()?;
         plans.push(EnvPlan {
             environment: env,
             boundaries,
@@ -276,7 +299,7 @@ pub fn plan(
 }
 
 /// A file whose first line says it is generated is never rewritten (FR-52).
-fn is_generated(text: &str) -> bool {
+pub(crate) fn is_generated(text: &str) -> bool {
     text.lines().next().is_some_and(|l| {
         l.trim_start()
             .to_ascii_lowercase()
@@ -346,7 +369,7 @@ pub(crate) fn ensure_vault(
 /// The item titled `title` in `vault_id`, created when missing as an empty Secure Note with
 /// `notes` and tagged `tag` (FR-55), so `ready` can tell an item moved or wired to another
 /// environment.
-fn ensure_item(
+pub(crate) fn ensure_item(
     r: &dyn CommandRunner,
     vault_id: &str,
     title: &str,
@@ -379,7 +402,7 @@ pub fn env_tag(project: &str, env: &str) -> String {
 }
 
 /// An ID bootstrap records, by where it goes in the document.
-enum Recorded {
+pub(crate) enum Recorded {
     Boundary {
         env: String,
         boundary: String,
@@ -400,7 +423,7 @@ enum Recorded {
 }
 
 impl Recorded {
-    fn line(&self) -> String {
+    pub(crate) fn line(&self) -> String {
         match self {
             Recorded::Boundary {
                 env,
@@ -428,7 +451,7 @@ impl Recorded {
     }
 
     /// Write this ID into the raw document (comments and order kept).
-    fn write(&self, doc: &mut DocumentMut) {
+    pub(crate) fn write(&self, doc: &mut DocumentMut) {
         match self {
             Recorded::Boundary {
                 env,
@@ -549,7 +572,7 @@ pub(crate) fn placement_items(
 
 /// A placeholder ID for each ID bootstrap would record, so the loader can judge the result
 /// before anything is created.
-fn placeholders(plans: &[EnvPlan]) -> Vec<Recorded> {
+pub(crate) fn placeholders(plans: &[EnvPlan]) -> Vec<Recorded> {
     let mut out = Vec::new();
     for p in plans {
         for b in &p.boundaries {
@@ -802,7 +825,7 @@ fn no_such_environment(flag: &str, env: &str) -> Error {
 }
 
 /// The first recorded ID the selected account cannot see, as `ids_not_in_account`.
-fn first_stale(plans: &[EnvPlan]) -> Option<Error> {
+pub(crate) fn first_stale(plans: &[EnvPlan]) -> Option<Error> {
     for p in plans {
         let env = &p.environment;
         for b in &p.boundaries {

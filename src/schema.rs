@@ -121,6 +121,13 @@ pub const EFFECTS: &[Effect] = &[
         ask_user_first: false,
     },
     Effect {
+        command: "approve",
+        effect: "interactive",
+        needs_terminal: true,
+        handles_values: false,
+        ask_user_first: false,
+    },
+    Effect {
         command: "bootstrap",
         effect: "writes_1password",
         needs_terminal: false,

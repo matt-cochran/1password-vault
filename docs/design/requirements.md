@@ -1005,6 +1005,17 @@ Owner ruling 2026-10-14: opv is greenfield until declared live; there is one way
 - Removed by this ruling in 0.7.0, besides FR-56 to FR-58's replacements: the simple profile and `[profile]` (FR-20; one product is a configuration with one product), the `pattern` rule (FR-24), the `fly_name` JSON field (use `target_name`), and `opv schema`'s `deprecated` list.
 - The ruling is revisited when opv is declared live; until then this requirement wins over any earlier text that keeps a deprecated form.
 
+## FR-61 — Assistant-Managed Structure, Person-Approved (#133)
+
+Owner decision 2026-10-15: assistants manage declarations and structure through MCP; people sign in, approve structure in their own terminal, and enter values in 1Password.
+
+- `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` edit the local `secrets.toml` only (no 1Password call, no value). They work before bootstrap: a text is validated as it will load once the structural plan records its IDs. Shared and personal keys, deploy credentials, removals and changes to an existing target are not declarations. A generated configuration is never edited.
+- `opv_structure_plan` computes, with reads only, what `opv bootstrap` creates (boundary vaults and items, state vaults, delivery items, empty fields) for the project's account, and an id `sp-<16 hex>` = SHA-256 over project, account ID, configuration text and every step. A recorded ID outside the account (`ids_not_in_account`) or a vault whose visibility cannot be told refuses the plan.
+- `opv approve <plan_id>` (interactive terminal only; refused under CI or with a service-account or Connect credential) re-plans, refuses a stale id, shows every step and records a single-use approval (15 minutes; project, account and plan id) only when the person types the id back. No flag skips the question.
+- `opv_structure_apply <plan_id>` re-plans (`stale_plan`), consumes the approval (`approval_required`; claimed by atomic rename, so it is used once), requires a person's session and refuses `OP_SESSION_*`, `OP_SERVICE_ACCOUNT_TOKEN` and `OP_CONNECT_*` in its environment, so writes go through the 1Password app's authorization. It records IDs as each phase completes (a partial run keeps them; objects are found again by title), only adds fields, and for a generated file returns `generator_ids` instead of writing it.
+- MCP answers are built from checked identifiers only: never a value, upstream text, or error message; errors are stable codes with fixed human guidance.
+- These are the same operations as `opv bootstrap` and `opv add` (shared code), reached by an assistant through a person's approval; the owner-terminal commands remain the way for a person (FR-60 is about one form per concept, not one caller).
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging

@@ -486,6 +486,7 @@ codes! {
     TargetUnhealthy => "target_unhealthy", 5, AfterFix, false, "the new revision did not become healthy; the previous one keeps serving";
     UpdateRefused => "update_refused", 5, AfterFix, false, "the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal";
     PolicyRefused => "policy_refused", 6, AfterFix, false, "opv refused the operation";
+    ApprovalRequired => "approval_required", 6, AfterFix, true, "the structural plan has no unused, unexpired approval for this project and account; a person runs opv approve <plan_id> in their own terminal";
     KeysBlocking => "keys_blocking", 6, AfterFix, true, "sync refused: keys are missing or failing a rule; nothing was written";
     ConfirmRequired => "confirm_required", 6, Never, true, "the environment sets confirm_env; pass --confirm <env>";
     ConfirmMismatch => "confirm_mismatch", 6, Never, false, "--confirm names another environment";

@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A structural apply that stops part-way keeps the IDs it already recorded; declarations work on a configuration that is not bootstrapped yet (#133).
+
 - `opv projects` and `opv status --all` no longer report a successful empty inventory when 1Password accounts could not be listed (#135). Each account asked is reported in `accounts` by account ID (accounts sharing `my.1password.com` are told apart; never an email), `complete` says whether every account was listed, and an incomplete inventory keeps the projects it found but exits 4 with the new `inventory_incomplete` code, whose `next` signs in to that account.
 - A listing that failed for one account is diagnosed for that account (`op whoami --account <id>`), never as another account's signed-in identity (#135).
 
 ### Added
 
+- Assistant-managed structure through MCP, approved by a person (#133, FR-61). New tools `opv_declare_key`, `opv_declare_environment` and `opv_declare_target` (local `secrets.toml` only; never a value), `opv_structure_plan` (read-only; returns a `plan_id` bound to the project, account and configuration) and `opv_structure_apply` (creates exactly an approved plan through the 1Password app's authorization; refuses stale or unapproved plans and credential-bearing environments; returns public IDs and 1Password links for key entry). New command `opv approve <plan_id>`: the person reviews the plan in their own terminal and approves it once (15 minutes). New error codes `approval_required` and, from MCP, `credential_in_environment`.
 - `opv projects --account <a>` lists one account; without it, `OP_ACCOUNT` (set by `opv login --account <a> -- <command>`) selects it (#135).
 
 ## [0.7.0] - 2026-10-14
