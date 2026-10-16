@@ -1057,18 +1057,20 @@ fn live_09_71_account_list_json_exits_0() {
     assert_eq!(out.exit(), Some(0), "{}", out.shown());
 }
 
-/// A `.opv` naming an account op does not know steps to adding it, never to `account list`.
+/// A `.opv` naming an account op does not know steps to adding it, never to `account list`:
+/// at op's prompt on Linux, in the 1Password app (then `opv login`) where the app holds the
+/// accounts (macOS).
 #[test]
 fn live_09_72_an_unknown_selected_account_steps_to_login_add() {
     let out = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
         .opv(&["account", "list", "--json"]);
-    assert_eq!(
-        out.next().as_deref(),
-        Some("opv login --add"),
-        "{}",
-        out.shown()
-    );
+    let want = if cfg!(target_os = "macos") {
+        "opv login"
+    } else {
+        "opv login --add"
+    };
+    assert_eq!(out.next().as_deref(), Some(want), "{}", out.shown());
 }
 
 #[test]
