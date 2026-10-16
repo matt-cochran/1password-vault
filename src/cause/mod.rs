@@ -263,6 +263,8 @@ pub enum Action {
         source: ConfigSource,
         field: DottedPath,
     },
+    /// Edit an input file that holds secret values; only a person opens it.
+    EditInput { path: PathBuf },
     /// Install or update a tool.
     Install { tool: String },
     /// Free of person-only meaning: check something named by the subject.
@@ -284,6 +286,7 @@ impl Action {
                 | Action::Confirm { .. }
                 | Action::Revoke { .. }
                 | Action::OwnerSetup { .. }
+                | Action::EditInput { .. }
         )
     }
 }
@@ -772,12 +775,6 @@ pub enum Cause {
         op: LocalOp,
         path: PathBuf,
         io: IoKind,
-    },
-    /// An external store (a ClusterSecretStore) is not ready; `reason` is the condition's
-    /// reason code (a CamelCase word), never its message.
-    StoreNotReady {
-        store: ResourceRef,
-        reason: String,
     },
     /// Another process connected to opv's private hand-off pipe for a vendor CLI: opv
     /// refused it and sent nothing.
@@ -1303,6 +1300,32 @@ pub enum Unverified {
 pub const EXIT_INTERNAL: i32 = 70;
 
 impl Cause {
+    /// This cause with the environment it belongs to filled in when the adapter that
+    /// classified it did not know it (an overview knows the environment's name). An `env`
+    /// already set is never replaced, and a `Partial`'s `then` is reached. This only
+    /// annotates the subject: code, exit code, retry class and steps stay the cause's.
+    pub fn in_env(mut self, env: &str) -> Cause {
+        use Cause::*;
+        match &mut self {
+            InOtherAccount { env: e, .. }
+            | MissingRight { env: e, .. }
+            | TargetRefused { env: e, .. }
+            | Unrecognized { env: e, .. }
+            | RamDirUnavailable { env: e, .. }
+            | SourceOnly { env: e, .. } => {
+                if e.is_none() {
+                    *e = Some(EnvName::new(env));
+                }
+            }
+            Partial { then, .. } => {
+                let inner = then.as_ref().clone().in_env(env);
+                **then = inner;
+            }
+            _ => {}
+        }
+        self
+    }
+
     /// The stable machine-readable code (public contract, `schema_version` 2).
     pub fn code(&self) -> &'static str {
         use Cause::*;
@@ -1408,7 +1431,6 @@ impl Cause {
             ChildStartFailed { .. } => "child_start_failed",
             DeliveryUnverified { .. } => "delivery_unverified",
             LocalIo { .. } => "local_io_failed",
-            StoreNotReady { .. } => "owner_setup_required",
             HandoffPipeContested { .. } => "handoff_refused",
             ConfigProposalInvalid { .. } => "config_invalid",
             InputUnreadable { .. } => "input_unreadable",
@@ -1476,7 +1498,6 @@ impl Cause {
                 }
             }
             OwnerSetupRequired { .. }
-            | StoreNotReady { .. }
             | TargetRefused { .. }
             | RemoteUnreachable { .. }
             | RemoteDisconnected { .. } => 5,

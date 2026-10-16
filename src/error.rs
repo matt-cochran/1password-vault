@@ -62,6 +62,13 @@ impl Error {
         Error::Catalog(Box::new(cause), Some(Box::new(upstream)))
     }
 
+    /// This error with its cause's environment filled in when the cause did not know it
+    /// (an overview knows the environment's name), keeping the upstream evidence.
+    pub fn in_env(self, env: &str) -> Error {
+        let Error::Catalog(cause, upstream) = self;
+        Error::Catalog(Box::new((*cause).in_env(env)), upstream)
+    }
+
     /// The cause and its evidence.
     pub fn parts(&self) -> (&Cause, Option<&Upstream>) {
         let Error::Catalog(c, up) = self;

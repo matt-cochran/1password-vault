@@ -4,9 +4,9 @@
 ## text stdout
 ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
 ok    op: version 2.40.0
-FAIL  op auth: you are not signed in to 1Password
-  do: sign in to 1Password
-  fix: opv login -- opv doctor --env dev
+FAIL  op auth: 1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine
+  do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+  fix: opv login --add
 skip  item: not checked (see the op auth line above)
 skip  target: environment dev has no target (run-only)
 ok    op local run: native op; opv run can start local commands
@@ -16,16 +16,16 @@ ok    agent skill: not installed (optional: opv skill install)
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: you are not signed in to 1Password
-Do: sign in to 1Password
-Next: opv login -- opv doctor --env dev
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine
+Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next: opv login --add
 
 ## json exit: 7
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":7,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"fail","detail":"you are not signed in to 1Password","next":"opv login -- opv doctor --env dev --json","do":"sign in to 1Password"},{"name":"item","target":null,"status":"skip","detail":"not checked (see the op auth line above)","next":null,"do":null},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"opv login -- opv doctor --env dev --json","do":"sign in to 1Password","error":{"code":"op_not_signed_in","category":"auth","message":"you are not signed in to 1Password","subject":{"state":{"state":"signed_out"},"system":"one_password","account":null},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"sign in to 1Password","next":"opv login -- opv doctor --env dev --json","next_kind":"handoff"}}
+{"schema_version":2,"ok":false,"exit_code":7,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"fail","detail":"1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine","next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt"},{"name":"item","target":null,"status":"skip","detail":"not checked (see the op auth line above)","next":null,"do":null},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"opv login --add","do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","error":{"code":"account_not_registered","category":"auth","message":"1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine","subject":{"in_app":false,"account":{"by":"id","value":"AE2EDEVACCOUNT000000000001"},"selected_by":{"from":"op_default"}},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"add account AE2EDEVACCOUNT000000000001 at op's prompt","next":"opv login --add","next_kind":"handoff"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: you are not signed in to 1Password
-Do: sign in to 1Password
-Next: opv login -- opv doctor --env dev --json
+opv: 1Password account AE2EDEVACCOUNT000000000001 (chosen by op's default account) is not added to op on this machine
+Do: add account AE2EDEVACCOUNT000000000001 at op's prompt
+Next: opv login --add

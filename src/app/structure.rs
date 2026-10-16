@@ -444,6 +444,12 @@ pub struct Scope {
 /// `.opv` pointer, else the only account op knows). No account, or several and none
 /// chosen, is `account_required`: opv never uses op's default for a write.
 pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
+    scope_as(start, r, &invoked("structure"))
+}
+
+/// [`scope`] for the opv command `command` (an MCP tool names its command itself, L8:
+/// its refusal is the CLI's word for word).
+pub fn scope_as(start: &Path, r: &dyn CommandRunner, command: &str) -> Result<Scope, Error> {
     use crate::config_store;
     let Some(path) = config_store::walk_up(start, "secrets.toml") else {
         return Err(no_file(start, r));
@@ -454,8 +460,7 @@ pub fn scope(start: &Path, r: &dyn CommandRunner) -> Result<Scope, Error> {
         path.parent().unwrap_or(start),
     )?;
     let given = config_store::account_env().or_else(|| config_store::pointer_account(start));
-    let account =
-        config_store::pick_account(r, given)?.ok_or_else(|| no_account(&invoked("structure")))?;
+    let account = config_store::pick_account(r, given)?.ok_or_else(|| no_account(command))?;
     Ok(Scope {
         path,
         project,

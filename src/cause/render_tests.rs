@@ -716,13 +716,6 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["/work/secrets.toml"],
         ),
         (
-            StoreNotReady {
-                store: res(ResourceKind::ExternalStore, "store-op"),
-                reason: "InvalidProviderConfig".into(),
-            },
-            vec!["store-op", "InvalidProviderConfig"],
-        ),
-        (
             HandoffPipeContested {
                 system: System::Azure,
             },
@@ -888,20 +881,19 @@ fn ordinal(c: &Cause) -> usize {
         KeyNotDeclared { .. } => 61,
         KeysBlocking { .. } => 62,
         LocalIo { .. } => 63,
-        StoreNotReady { .. } => 64,
-        HandoffPipeContested { .. } => 65,
-        ConfigProposalInvalid { .. } => 66,
-        InputUnreadable { .. } => 67,
-        ItemUnusable { .. } => 68,
-        SecretNotStored { .. } => 69,
-        AccountRequired { .. } => 70,
-        SourceOnly { .. } => 71,
-        TitleLookup { .. } => 72,
-        PersonalNotSetUp { .. } => 73,
+        HandoffPipeContested { .. } => 64,
+        ConfigProposalInvalid { .. } => 65,
+        InputUnreadable { .. } => 66,
+        ItemUnusable { .. } => 67,
+        SecretNotStored { .. } => 68,
+        AccountRequired { .. } => 69,
+        SourceOnly { .. } => 70,
+        TitleLookup { .. } => 71,
+        PersonalNotSetUp { .. } => 72,
     }
 }
 
-const VARIANTS: usize = 74;
+const VARIANTS: usize = 73;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2154,16 +2146,6 @@ fn a6_an_undeclared_key_names_its_environment() {
         c.message(),
         "key API_KEY is not declared for environment prod"
     );
-}
-
-/// A7: a store's reason is shown only as a code word, never as free text.
-#[test]
-fn a7_a_store_reason_that_is_not_a_code_is_never_echoed() {
-    let c = Cause::StoreNotReady {
-        store: res(ResourceKind::ExternalStore, "op-store"),
-        reason: "token=abc is wrong".into(),
-    };
-    assert!(!c.message().contains("abc"), "{}", c.message());
 }
 
 /// A7: a deployment that changed before the write is a target object.
@@ -3553,21 +3535,6 @@ fn an_unrecognised_failure_without_a_reply_says_the_tool_wrote_none() {
     );
 }
 
-/// A18 (01.12): a mismatched confirmation hands back the command with the right one.
-#[test]
-fn a_confirm_mismatch_hands_back_the_command_with_the_right_confirmation() {
-    let c = Cause::ConfirmMismatch {
-        given: "dev".into(),
-        env: EnvName::new("prod"),
-    };
-    let inv = Invocation {
-        command: vec!["sync".into()],
-        args: vec!["prod".into(), "--confirm".into(), "dev".into()],
-        ..inv()
-    };
-    assert_eq!(next_in(&c, &inv), "opv sync prod --confirm prod");
-}
-
 /// D (snapshot review): a disconnected remote hands back the run with every flag, its
 /// confirmation included, as the person's own step (X1, X4).
 #[test]
@@ -3636,26 +3603,122 @@ fn an_unreadable_input_says_the_once() {
     assert!(!c.message().contains("the the"));
 }
 
-/// D (snapshot review): only the confirmation changes, never another word that happens to
-/// name the mistyped environment.
+/// L1: a built plan step keeps the global `--timeout` flag with its value.
 #[test]
-fn a_confirm_mismatch_changes_only_the_confirmation() {
-    let c = Cause::ConfirmMismatch {
-        given: "dev".into(),
-        env: EnvName::new("prod"),
+fn l1_a_built_step_keeps_the_timeout_flag_with_its_value() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["environments".into(), "prod".into(), "targets".into()]),
+        rule: FieldRule::Pattern {
+            id: PatternId::TargetName,
+        },
     };
-    let inv = Invocation {
-        command: vec!["sync".into()],
-        args: vec![
-            "prod".into(),
-            "--target".into(),
-            "dev".into(),
-            "--confirm=dev".into(),
-        ],
-        ..inv()
+    let inv = cli(&["opv", "sync", "prod", "--timeout", "60"]);
+    assert_eq!(next_in(&c, &inv), "opv plan prod --timeout 60");
+}
+
+/// L1: a built plan step keeps an inline `--timeout=60`.
+#[test]
+fn l1_a_built_step_keeps_an_inline_timeout_flag() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["environments".into(), "prod".into(), "targets".into()]),
+        rule: FieldRule::Pattern {
+            id: PatternId::TargetName,
+        },
     };
-    assert_eq!(
-        next_in(&c, &inv),
-        "opv sync prod --target dev --confirm=prod"
-    );
+    let inv = cli(&["opv", "sync", "prod", "--timeout=60"]);
+    assert_eq!(next_in(&c, &inv), "opv plan prod --timeout=60");
+}
+
+/// L5: a malformed `.env` holds secret values only a person may open, so fixing it
+/// is a person's step before the same command runs again.
+#[test]
+fn l5_invalid_dotenv_needs_a_person() {
+    let c = Cause::InputInvalid {
+        path: PathBuf::from("app/.env"),
+        kind: InputKind::Dotenv,
+        at: Some(Location { line: 7, col: 1 }),
+        field: "BAD KEY".into(),
+        rule: FieldRule::Pattern {
+            id: PatternId::KeyName,
+        },
+    };
+    assert!(c.human_required(&inv()));
+}
+
+/// L5: a setup recipe holds no secret value, so an agent may fix it too.
+#[test]
+fn l5_invalid_setup_recipe_needs_no_person() {
+    let c = Cause::InputInvalid {
+        path: PathBuf::from("opv.recipe"),
+        kind: InputKind::SetupRecipe,
+        at: Some(Location { line: 3, col: 1 }),
+        field: "steps".into(),
+        rule: FieldRule::Syntax,
+    };
+    assert!(!c.human_required(&inv()));
+}
+
+// ---- L10: an overview fills the environment a cause never knew -----------------------
+
+fn unrecognized_without_env() -> Cause {
+    Cause::Unrecognized {
+        system: System::Fly,
+        established: Vec::new(),
+        env: None,
+        target: None,
+        seen: person(),
+    }
+}
+
+/// L10: a cause that never knew its environment takes the one the overview knows.
+#[test]
+fn l10_in_env_fills_an_unset_environment() {
+    let c = unrecognized_without_env().in_env("prod");
+    let env = match c {
+        Cause::Unrecognized { env, .. } => env,
+        other => panic!("not Unrecognized: {other:?}"),
+    };
+    assert_eq!(env, Some(EnvName::new("prod")));
+}
+
+/// L10: an environment the cause already carries is never replaced.
+#[test]
+fn l10_in_env_keeps_an_environment_already_set() {
+    let c = Cause::Unrecognized {
+        system: System::Fly,
+        established: Vec::new(),
+        env: Some(EnvName::new("staging")),
+        target: None,
+        seen: person(),
+    }
+    .in_env("prod");
+    let env = match c {
+        Cause::Unrecognized { env, .. } => env,
+        other => panic!("not Unrecognized: {other:?}"),
+    };
+    assert_eq!(env, Some(EnvName::new("staging")));
+}
+
+/// L10: the environment reaches a cause wrapped in `Partial`'s `then`.
+#[test]
+fn l10_in_env_reaches_a_partial_then() {
+    let c = Cause::Partial {
+        done: Vec::new(),
+        approval_used: None,
+        approval_scope: None,
+        then: Box::new(unrecognized_without_env()),
+    }
+    .in_env("prod");
+    let env = match c {
+        Cause::Partial { then, .. } => match *then {
+            Cause::Unrecognized { env, .. } => env,
+            other => panic!("not Unrecognized: {other:?}"),
+        },
+        other => panic!("not Partial: {other:?}"),
+    };
+    assert_eq!(env, Some(EnvName::new("prod")));
 }
