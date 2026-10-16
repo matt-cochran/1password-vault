@@ -1,0 +1,1 @@
+Error: failed retrieving current user: failed to run query { viewer { ... on User { id email enablePaidHobby } ... on Macaroon { email } } }: Post "https://api.fly.io/graphql": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused
