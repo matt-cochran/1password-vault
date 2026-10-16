@@ -85,6 +85,30 @@ pub fn fault(kind: Kind, _world: &World, args: &[String]) -> Reply {
     }
 }
 
+/// What a fault changes in the world before it is answered: a `not_found` on a listing or
+/// write in a GitHub environment is that environment missing (the recorded 404 says so), so
+/// the repository's environments read afterwards no longer lists it. `true` when it changed.
+pub fn fault_effect(kind: Kind, world: &mut World, args: &[String]) -> bool {
+    let w = call_words(args);
+    let (repo, env) = (repo_of(args), env_of(args));
+    match (
+        kind,
+        w.first().map(String::as_str),
+        w.get(1).map(String::as_str),
+        env,
+    ) {
+        (Kind::NotFound, Some("secret"), Some("list" | "set"), Some(e)) => {
+            let pointer = format!("/github/repos/{}/environments", repo.replace('/', "~1"));
+            world
+                .doc
+                .pointer_mut(&pointer)
+                .and_then(Value::as_object_mut)
+                .is_some_and(|envs| envs.remove(&e).is_some())
+        }
+        _ => false,
+    }
+}
+
 pub fn run(world: &mut World, args: &[String]) -> Reply {
     if args.first().is_some_and(|a| a == "--version") {
         return recorded(&format!("{DIR}/06-version"), &[]);

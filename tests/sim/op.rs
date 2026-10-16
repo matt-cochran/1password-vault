@@ -106,7 +106,8 @@ pub fn fault(kind: Kind, world: &World, args: &[String]) -> Reply {
             &[("ZZZZZZZZZZZZZZZZZZZZZZZZZZ", account)],
         ),
         (Kind::CredentialRejected, _) => case("03-service-account-token-rejected", &[]),
-        (Kind::NotFound, "vault") => case(
+        // `op vault list` names no vault, so no vault of it can be missing.
+        (Kind::NotFound, "vault") if w.get(1).is_some_and(|s| s != "list") => case(
             "08-vault-not-found",
             &[("ZZZZZZZZZZZZZZZZZZZZZZZZZZ", vault)],
         ),

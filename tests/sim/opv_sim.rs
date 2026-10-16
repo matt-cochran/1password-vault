@@ -175,6 +175,13 @@ fn simulate(program: &str, args: &[String]) -> i32 {
                     );
                     return recordings::NO_OUTPUT;
                 }
+                // An empty answer cut in half is the same answer: the fault would not happen.
+                Action::Reply(r) if r.stdout.is_empty() => {
+                    eprintln!(
+                        "opv-sim: malformed_output on a call that answers nothing: no output to damage"
+                    );
+                    return recordings::NO_OUTPUT;
+                }
                 Action::Reply(mut r) => {
                     let half = r.stdout.len() / 2;
                     r.stdout.truncate(half);
@@ -191,7 +198,15 @@ fn simulate(program: &str, args: &[String]) -> i32 {
             drop(world);
             die();
         }
-        Some(kind) => fault_reply(program, kind, &world, args),
+        Some(kind) => {
+            // A fault that says an object is missing removes it, so later reads agree.
+            if program == "gh" && gh::fault_effect(kind, &mut world, args) {
+                if let Err(e) = world.save() {
+                    return fail(&e);
+                }
+            }
+            fault_reply(program, kind, &world, args)
+        }
         None => {
             let a = answer(program, &mut world, args);
             if let Err(e) = world.save() {

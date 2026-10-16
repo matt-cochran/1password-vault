@@ -1875,7 +1875,7 @@ fn no_candidate_is_both_a_cell_and_skipped() {
 #[test]
 fn every_skipped_candidate_states_why() {
     let why = re(
-        r"^(no `[a-z_]+` reply recorded for `[a-z]+ [^`]+` under tests/fixtures/[a-z]+/failures \(opv-sim exit 86\)|`[a-z]+ [^`]+` is not modelled by opv-sim \(exit 87\)|`[a-z]+ [^`]+` fails without the fault, so it has no output for `malformed_output` to damage \(opv-sim exit 88\)|a missing `[a-z]+` is missing for every call: opv fails at its first one, `[a-z]+ [^`]+`, so this run is the one of `[a-z0-9_]+`)$",
+        r"^(no `[a-z_]+` reply recorded for `[a-z]+ [^`]+` under tests/fixtures/[a-z]+/failures \(opv-sim exit 86\)|`[a-z]+ [^`]+` is not modelled by opv-sim \(exit 87\)|`[a-z]+ [^`]+` fails or answers nothing without the fault, so it has no output for `malformed_output` to damage \(opv-sim exit 88\)|a missing `[a-z]+` is missing for every call: opv fails at its first one, `[a-z]+ [^`]+`, so this run is the one of `[a-z0-9_]+`)$",
     );
     let vague: Vec<String> = skips()
         .into_iter()
