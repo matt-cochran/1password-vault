@@ -25,7 +25,7 @@ use super::AzureTarget;
 use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
 use crate::adapters::probe::{parse_version, spawn_tool};
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::ports::PinnedRuntime;
 use crate::provider::{Check, Preflight, PreflightMode, Verdict};
@@ -199,17 +199,23 @@ fn subscription(v: &Vault, r: &dyn CommandRunner) -> Result<(), Error> {
     if !az::signed_in(r)? {
         return Err(az::not_logged_in(None));
     }
-    Err(Error::Auth(
+    Err(Error::Target(
         format!(
             "signed in to Azure, but this account cannot see subscription {s} ({f}); \
-         nothing was changed\n  next: `az account list -o table` lists the subscriptions it \
-         can see; sign in with an account that can see {s} (`az login`), or correct \
-         {f}",
+             nothing was changed",
             s = v.subscription,
             f = v.subscription_field
         )
         .into(),
+    )
+    .with_code(Code::PermissionDenied)
+    .with_do(format!(
+        "sign in with an account that can see subscription {s} (az login), ask an owner to \
+         give this account a role on it, or correct {f}",
+        s = v.subscription,
+        f = v.subscription_field
     ))
+    .with_next("az account list -o table"))
 }
 
 /// `keyvault show`: the vault exists in the subscription (NR-25). On failure a read-only
@@ -281,16 +287,19 @@ fn vault_answers(v: &Vault, r: &dyn CommandRunner, vault: &Value) -> Result<(), 
             )
             .into(),
         )),
-        Outcome::Refused(_) => Err(Error::Auth(
+        Outcome::Refused(_) => Err(Error::Target(
             format!(
                 "Key Vault {kv} refused to list its secrets to this account (Azure RBAC or access \
-             policy); nothing was changed\n  next: ask an owner to grant it: `az role \
-             assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope \
-             {id}`; a new grant can take a few minutes to apply, then run opv again",
-                id = vault["id"].as_str().unwrap_or("<vault id>")
+             policy); nothing was changed"
             )
             .into(),
-        )),
+        )
+        .with_code(Code::PermissionDenied)
+        .with_do(format!(
+            "ask an owner to grant it (a new grant can take a few minutes to apply): az role \
+             assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope {id}",
+            id = vault["id"].as_str().unwrap_or("<vault id>")
+        ))),
     }
 }
 
@@ -716,7 +725,7 @@ mod tests {
     #[test]
     fn preflight_on_an_invisible_subscription_names_it_and_the_next_step() {
         let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.contains(
+        assert!(matches!(res, Err(Error::Target(m)) if m.contains(
             "cannot see subscription 00000000-0000-0000-0000-000000000000 (azure.subscription)"
         ) && m.mentions("az account list -o table")));
     }
@@ -757,9 +766,23 @@ mod tests {
         let mut responses = vec![ok(), out(&vault_show())];
         responses.extend(crate::runner::fake::failed_read(1));
         let (_, res) = preflight_on(responses);
-        assert!(matches!(res, Err(Error::Auth(m)) if m.mentions(
-            "az role assignment create --role \"Key Vault Secrets Officer\""
-        )));
+        assert!(res.as_ref().err().and_then(Error::action).is_some_and(|a| {
+            a.contains("az role assignment create --role \"Key Vault Secrets Officer\"")
+        }));
+    }
+
+    #[test]
+    fn vault_refusing_this_account_is_permission_denied() {
+        let mut responses = vec![ok(), out(&vault_show())];
+        responses.extend(crate::runner::fake::failed_read(1));
+        let (_, res) = preflight_on(responses);
+        assert_eq!(res.err().map(|e| e.code()), Some(Code::PermissionDenied));
+    }
+
+    #[test]
+    fn an_invisible_subscription_is_permission_denied() {
+        let (_, res) = preflight_on(vec![Output::failure(1), ok()]);
+        assert_eq!(res.err().map(|e| e.code()), Some(Code::PermissionDenied));
     }
 
     #[test]

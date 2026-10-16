@@ -411,7 +411,7 @@ impl TargetConfig for AzureTarget {
         // Directories a killed run left behind are removed at the start of every Azure run
         // (I2, SR-4), not only by the next deploy sign-in.
         super::login::sweep_stale();
-        let app = ContainerApp::new(r, self, managed.clone());
+        let app = ContainerApp::new(r, self, managed.clone()).for_env(env);
         // Tests shorten the health wait; production has no such switch.
         #[cfg(test)]
         let app = match TEST_WAIT.with(std::cell::Cell::get) {
