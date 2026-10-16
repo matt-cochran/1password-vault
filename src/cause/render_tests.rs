@@ -3757,3 +3757,58 @@ fn a_child_that_did_not_start_names_the_command_to_give() {
         )
     );
 }
+
+/// R2-7: a file delivery that has no runtime folder names the folder to configure.
+#[test]
+fn a_file_delivery_without_a_runtime_folder_names_xdg_runtime_dir() {
+    let c = Cause::RamDirUnavailable {
+        remote: None,
+        why: RamDir::Unset,
+        purpose: RamPurpose::FileDelivery,
+        env: None,
+        product: None,
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .contains("XDG_RUNTIME_DIR")
+    );
+}
+
+/// R2-8: a value missing after adopt points at the item, not the item's history.
+#[test]
+fn a_value_missing_after_adopt_checks_the_item() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["adopt".into()],
+            args: vec!["dev".into()],
+        },
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .starts_with("check item ")
+    );
+}
+
+/// R2-8: a value missing after tidy is restored from the item's history.
+#[test]
+fn a_value_missing_after_tidy_is_restored_from_history() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["tidy".into()],
+            args: vec!["dev".into()],
+        },
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .starts_with("restore ")
+    );
+}

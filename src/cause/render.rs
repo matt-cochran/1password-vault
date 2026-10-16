@@ -3413,13 +3413,20 @@ impl Cause {
                 item,
                 fields,
                 by,
-            } => plan(
-                inspect(format!(
-                    "restore {} from the history of item {item} in 1Password",
-                    list_of(fields)
-                )),
-                Next::Run(by.clone()),
-            ),
+            } => {
+                let text = if by.command == ["tidy"] {
+                    format!(
+                        "restore {} from the history of item {item} in 1Password",
+                        list_of(fields)
+                    )
+                } else {
+                    format!(
+                        "check item {item} in 1Password: another edit may have removed {} after opv wrote them",
+                        list_of(fields)
+                    )
+                };
+                plan(inspect(text), Next::Run(by.clone()))
+            }
             ToolMissing {
                 tool,
                 platform,
@@ -3698,12 +3705,18 @@ impl Cause {
                     None => "this machine".to_string(),
                 };
                 let text = match why {
-                    RamDir::Unset => format!("configure an in-memory folder on {host}"),
+                    RamDir::Unset => format!(
+                        "start a login session with a runtime folder (XDG_RUNTIME_DIR) on {host}; on WSL, enable systemd in /etc/wsl.conf"
+                    ),
                     RamDir::NotAbsolute => {
-                        format!("make the in-memory folder on {host} an absolute path")
+                        format!("set XDG_RUNTIME_DIR on {host} to an absolute path")
                     }
-                    RamDir::NotOwned => format!("use an in-memory folder on {host} that you own"),
-                    RamDir::NotTmpfs => format!("use a tmpfs folder on {host}"),
+                    RamDir::NotOwned => {
+                        format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
+                    }
+                    RamDir::NotTmpfs => {
+                        format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
+                    }
                     RamDir::NoneOnPlatform { os } => {
                         format!("deliver the settings without a file on {os} ({host})")
                     }
