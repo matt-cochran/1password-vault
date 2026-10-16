@@ -2180,7 +2180,7 @@ fn list_failure_with_stderr(value: &str) -> Run {
     h.run(&["status", "prod"])
 }
 
-const MASKED_EXCERPT: &str = "\n  flyctl said: S7CHILDSTDERR __SECRET__\n";
+const MASKED_EXCERPT: &str = "\n  flyctl said: S7CHILDSTDERR ********\n";
 
 #[test]
 fn excerpt_masks_a_raw_item_value() {
@@ -2295,8 +2295,7 @@ fn verbose_shows_scrubbed_child_stderr() {
     h.set("FAKE_STDERR_VALUE", NOTES);
     let r = h.run(&["--verbose", "status", "prod"]);
     assert!(
-        r.stderr
-            .contains("\n    stderr: S7CHILDSTDERR __SECRET__\n"),
+        r.stderr.contains("\n    stderr: S7CHILDSTDERR ********\n"),
         "{}",
         r.stderr
     );

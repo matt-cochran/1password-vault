@@ -1710,6 +1710,9 @@ enum ConfigSource {
 }
 
 fn main() -> ExitCode {
+    // Credentials in opv's own environment are secrets for the whole run: the output guard
+    // masks them wherever they would appear (design §8).
+    opv::scrub::register_credential_env();
     // clap prints usage errors itself (exit 2, shared with configuration errors); opv adds
     // the `Next:` line (NR-19).
     let matches = match cli_command().try_get_matches() {
@@ -1747,7 +1750,11 @@ fn main() -> ExitCode {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {
                 let step = e.step(&rerun, &help);
-                let _ = write!(io::stderr(), "{}", opv::error::report_with(&e, &step, None));
+                let _ = write!(
+                    opv::output::stderr(),
+                    "{}",
+                    opv::error::report_with(&e, &step, None)
+                );
                 ExitCode::from(exit_byte(e.exit_code()))
             }
         };
@@ -1779,15 +1786,20 @@ fn main() -> ExitCode {
                 Err(e) => return usage_error(e),
             },
         };
+        // Every byte opv writes passes the output guard (design §8). The guard sits above
+        // the painter, so it never strips the colours opv adds itself.
         let res = if json.is_some() {
             run(cli, config_source, &target_options, &mut body)
         } else if paint {
-            let mut painter = colour::Painter::new(&mut stdout);
-            let res = run(cli, config_source, &target_options, &mut painter);
-            let _ = painter.flush();
+            let mut guard = opv::output::OutputGuard::new(colour::Painter::new(&mut stdout));
+            let res = run(cli, config_source, &target_options, &mut guard);
+            let _ = guard.flush();
             res
         } else {
-            run(cli, config_source, &target_options, &mut stdout)
+            let mut guard = opv::output::OutputGuard::new(&mut stdout);
+            let res = run(cli, config_source, &target_options, &mut guard);
+            let _ = guard.flush();
+            res
         };
         let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
         if may_sign_in && signed_out && !signed_in {
@@ -1810,7 +1822,7 @@ fn main() -> ExitCode {
             (Err(e), Some(step)) => opv::json::finish(&body, Err((e, step)), raw),
             _ => opv::json::finish(&body, Ok(()), raw),
         };
-        let _ = stdout.write_all(&framed);
+        let _ = opv::output::OutputGuard::new(&mut stdout).write_all(&framed);
     }
     let _ = stdout.flush();
     match res {
@@ -1825,7 +1837,7 @@ fn main() -> ExitCode {
             let excerpt = opv::runner::take_failure_excerpt();
             let step = step.unwrap_or_else(|| e.step(&rerun, &help));
             let _ = write!(
-                io::stderr(),
+                opv::output::stderr(),
                 "{}",
                 opv::error::report_with(&e, &step, excerpt.as_ref())
             );
@@ -1887,7 +1899,7 @@ fn usage_error(e: clap::Error) -> ExitCode {
     let removed = removed_init_target(&args);
     let help = match &removed {
         Some((message, next)) => {
-            let _ = writeln!(io::stderr(), "error: {message}");
+            let _ = writeln!(opv::output::stderr(), "error: {message}");
             next.clone()
         }
         None => {
@@ -1895,7 +1907,7 @@ fn usage_error(e: clap::Error) -> ExitCode {
             help_command()
         }
     };
-    let _ = write!(io::stderr(), "{}", opv::error::next_line(&help));
+    let _ = write!(opv::output::stderr(), "{}", opv::error::next_line(&help));
     // `--json` asked for one document on stdout even when the command line is wrong (A1).
     if args.iter().any(|a| a == "--json") {
         let text = e.render().to_string();
@@ -1929,7 +1941,7 @@ fn usage_error(e: clap::Error) -> ExitCode {
                 &step,
             ),
         });
-        let _ = writeln!(io::stdout(), "{doc}");
+        let _ = writeln!(opv::output::stdout(), "{doc}");
     }
     ExitCode::from(exit_byte(e.exit_code()))
 }
@@ -3917,11 +3929,11 @@ struct TerminalReview;
 
 impl opv::app::approve::Review for TerminalReview {
     fn show(&mut self, line: &str) -> Result<(), Error> {
-        writeln!(io::stdout(), "{line}")
+        writeln!(opv::output::stdout(), "{line}")
             .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
     }
     fn ask(&mut self, question: &str) -> Result<String, Error> {
-        let mut out = io::stdout();
+        let mut out = opv::output::stdout();
         write!(out, "{question} ")
             .and_then(|()| out.flush())
             .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;

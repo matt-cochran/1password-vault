@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(
             crate::runner::take_failure_excerpt().map(|x| x.lines),
             Some(vec![
-                r#"error: invalid object {"data":{"value":"__SECRET__"}}"#.to_string()
+                r#"error: invalid object {"data":{"value":"********"}}"#.to_string()
             ])
         );
     }
