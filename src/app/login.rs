@@ -70,7 +70,12 @@ pub fn account_or(
         .iter()
         .find(|(n, e)| label(n, &e.account) == picked)
         .map(|(_, e)| e.account.clone())
-        .ok_or_else(|| Error::Config("unknown choice".into()))
+        .ok_or_else(|| {
+            crate::cause::Cause::Bug {
+                site: "login: the menu returned a choice it did not offer",
+            }
+            .into()
+        })
 }
 
 /// Sign in for `env` and open a terminal (empty `command`) or run `command`; returns its
@@ -239,9 +244,9 @@ pub fn choose_account_with(
     use crate::host::{Host, Platform};
     let host = Host::detect();
     let platform = host.platform;
-    // In WSL with the Windows `op.exe`, accounts live in the Windows app: op's own prompt
-    // is not reachable, so adding one is done in the app.
-    let own_op = matches!(platform, Platform::Linux | Platform::Wsl) && !host.op_is_windows_exe();
+    // On macOS and Windows, and in WSL with the Windows `op.exe`, accounts live in the
+    // 1Password app: op's own prompt is not reachable, so adding one is done in the app.
+    let own_op = !super::account::app_holds_accounts(platform, host.op_is_windows_exe());
     // #157: an `op account list` that failed is not an empty list: never start adding an
     // account because the list could not be read.
     let accounts = match manifest::discover(r) {
@@ -249,7 +254,7 @@ pub fn choose_account_with(
         manifest::Discovery::OpMissing => {
             return Err(crate::adapters::onepassword::op_missing(&host));
         }
-        manifest::Discovery::Unavailable => return Err(discovery_unavailable()),
+        manifest::Discovery::Unavailable => return Err(super::account::account_list_failed()),
     };
     const ADD: &str = "Add another 1Password account";
     let added = |now: &[manifest::Account]| {
@@ -283,8 +288,10 @@ pub fn choose_account_with(
             return Ok(None);
         }
         None if accounts.is_empty() => {
+            // Audit 04.15: where the app holds the accounts and op sees none, the account is
+            // added in the app; signing in now could only fail.
             if !own_op {
-                return Ok(None);
+                return Err(add_in_app(None));
             }
             let now = add_account(r, backend, ui, None, &accounts)?;
             match now.as_slice() {
@@ -309,7 +316,8 @@ pub fn choose_account_with(
                 })
                 .collect();
             labels.push(ADD.to_string());
-            let wsl = if platform == Platform::Wsl {
+            // With the Windows `op.exe`, the Windows app's accounts are the ones listed.
+            let wsl = if platform == Platform::Wsl && own_op {
                 " Accounts in the Windows 1Password app are not listed here until you add them."
             } else {
                 ""
@@ -361,38 +369,17 @@ fn in_project(start: &std::path::Path) -> bool {
         .any(|d| d.join(".git").exists() || d.join(".opv").symlink_metadata().is_ok())
 }
 
-/// `op account list` failed or printed something opv does not understand (#157): which
-/// accounts are on this machine is unknown, so nothing is chosen or added.
-fn discovery_unavailable() -> Error {
-    Error::Auth(
-        "op account list failed or printed something opv does not understand, so opv cannot \
-         tell which 1Password accounts are on this machine; nothing was chosen or added"
-            .into(),
-    )
-    .with_code(crate::error::Code::OpUnexpected)
-    .with_next("opv doctor")
-}
-
-/// Where op shares the 1Password app's accounts (macOS, Windows), an account is added in the
-/// app, not here.
+/// Where op shares the 1Password app's accounts (macOS, Windows, WSL with `op.exe`), an
+/// account is added in the app, not here: `account_not_registered`, whose step is the app
+/// and then `opv login`.
 fn add_in_app(who: Option<&str>) -> Error {
-    Error::Auth(
-        format!(
-            "on this system the 1Password CLI uses the 1Password app's accounts, so {} is added \
-             in the app",
-            who.unwrap_or("another account")
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::AccountNotRegistered)
-    .with_do(
-        "add the account in the 1Password app and turn on Settings > Developer > Integrate \
-         with 1Password CLI",
-    )
-    .with_next(match who {
-        Some(w) => format!("opv login --account {w}"),
-        None => "opv login".to_string(),
-    })
+    use crate::cause::{AccountRef, AccountSource, Cause};
+    Cause::AccountNotOnMachine {
+        account: who.map_or(AccountRef::Unnamed, super::account::account_ref),
+        selected_by: AccountSource::Flag,
+        in_app: true,
+    }
+    .into()
 }
 
 /// Add an account at op's prompts (signed in in the same step); the accounts op knows after.

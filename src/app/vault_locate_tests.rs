@@ -84,10 +84,60 @@ fn an_unasked_account_points_at_a_one_off_login() {
         Output::failure(1),
         Output::success("{}"),
     ]);
+    let e = res.unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".to_string(),
+        "vault".to_string(),
+        "locate".to_string(),
+        "vaultzu64".to_string(),
+    ]);
+    let (cause, _) = e.cause().expect("a catalog cause");
     assert_eq!(
-        res.unwrap_err().next_step(),
-        Some(format!("opv login --account {A} --no-record -- opv vault locate vaultzu64").as_str())
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv),
+        Some(format!(
+            "opv login --account {A} --no-record -- opv vault locate vaultzu64"
+        ))
     );
+}
+
+/// Audit 04.29: an account that could not be asked is never claimed to be signed out (the
+/// check may not have finished).
+#[test]
+fn an_unasked_account_is_not_claimed_signed_out() {
+    let (res, _) = locate(vec![
+        Output::failure(1),
+        Output::failure(1),
+        Output::failure(1),
+        Output::success("{}"),
+    ]);
+    let message = res.unwrap_err().to_string();
+    assert!(!message.contains("not signed in"), "{message}");
+}
+
+/// Audit 04.13: under a service account or Connect, the credential is asked directly.
+#[test]
+fn a_vault_the_credential_reads_is_found() {
+    let r = FakeRunner::new([Output::success("{}")]);
+    assert!(with_credential(&r, "vaultzu64", true, &mut Vec::new()).is_ok());
+}
+
+/// Audit 04.13: a vault the credential cannot read is a 1Password diagnosis, never a
+/// sign-in or account-add step.
+#[test]
+fn a_vault_the_credential_cannot_read_never_steps_to_login() {
+    let r = FakeRunner::new([Output::failure(1)]);
+    let e = with_credential(&r, "vaultzu64", false, &mut Vec::new()).unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&[
+        "opv".to_string(),
+        "vault".to_string(),
+        "locate".to_string(),
+        "vaultzu64".to_string(),
+    ]);
+    let next = e
+        .cause()
+        .and_then(|(c, _)| crate::cause::render::next_text(&c.step(&inv).1, &inv))
+        .unwrap_or_default();
+    assert!(!next.starts_with("opv login"), "{next}");
 }
 
 #[test]

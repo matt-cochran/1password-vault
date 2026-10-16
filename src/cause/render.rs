@@ -396,6 +396,7 @@ fn account_ref(a: &AccountRef) -> String {
         AccountRef::Id(id) => id.to_string(),
         AccountRef::Email(e) => e.clone(),
         AccountRef::Shorthand(s) => s.clone(),
+        AccountRef::Unnamed => "you use".to_string(),
     }
 }
 
@@ -406,6 +407,7 @@ fn account_source(s: &AccountSource) -> String {
         AccountSource::Flag => "--account".to_string(),
         AccountSource::Environment { env } => format!("environment {env}"),
         AccountSource::OpDefault => "op's default account".to_string(),
+        AccountSource::Argument => "the command line".to_string(),
     }
 }
 
@@ -968,16 +970,23 @@ impl Cause {
                 account,
                 selected_by,
                 in_app,
-            } => format!(
-                "1Password account {} (chosen by {}) is not added {}",
-                account_ref(account),
-                account_source(selected_by),
-                if *in_app {
+            } => {
+                let place = if *in_app {
                     "to the 1Password app on this machine"
                 } else {
                     "to op on this machine"
+                };
+                match account {
+                    AccountRef::Unnamed => {
+                        format!("the 1Password account to use is not added {place}")
+                    }
+                    _ => format!(
+                        "1Password account {} (chosen by {}) is not added {place}",
+                        account_ref(account),
+                        account_source(selected_by),
+                    ),
                 }
-            ),
+            }
             AccountAmbiguous { given, candidates } => format!(
                 "account {given} matches more than one 1Password account: {}",
                 list_of(candidates)
@@ -1762,13 +1771,14 @@ impl Cause {
                 selected_by: _,
                 in_app,
             } => {
+                let who = match account {
+                    AccountRef::Unnamed => "the account you use".to_string(),
+                    a => format!("account {}", account_ref(a)),
+                };
                 let text = if *in_app {
-                    format!(
-                        "add account {} in the 1Password app and turn on its CLI integration",
-                        account_ref(account)
-                    )
+                    format!("add {who} in the 1Password app and turn on its CLI integration")
                 } else {
-                    format!("add account {} at op's prompt", account_ref(account))
+                    format!("add {who} at op's prompt")
                 };
                 let next = if *in_app {
                     Next::Handoff(cmd(&["login"], &[]))
@@ -1777,7 +1787,7 @@ impl Cause {
                         AccountRef::Email(e) => {
                             Next::Handoff(cmd(&["login"], &["--add", "--account", e]))
                         }
-                        AccountRef::Id(_) | AccountRef::Shorthand(_) => {
+                        AccountRef::Id(_) | AccountRef::Shorthand(_) | AccountRef::Unnamed => {
                             Next::Handoff(cmd(&["login"], &["--add"]))
                         }
                     }

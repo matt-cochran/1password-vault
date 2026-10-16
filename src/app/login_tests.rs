@@ -864,3 +864,22 @@ fn a_write_with_no_command_line_steps_to_login_with_the_account() {
         login_handoff(&["--account", "ALABS000000000000000000001"])
     );
 }
+
+/// Audit 04.15: on macOS with no account visible to op, login says the account is added in
+/// the app, instead of carrying on into a sign-in that fails for no recognised reason.
+#[test]
+fn no_accounts_on_macos_is_an_account_to_add_in_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = crate::host::with_test_host(mac(), || {
+        choose_account(
+            &lists(&["[]"]),
+            None,
+            false,
+            dir.path(),
+            &mut Fake::signed_in(0),
+            &mut Ui::default(),
+        )
+        .unwrap_err()
+    });
+    assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
+}

@@ -9,8 +9,85 @@
 use std::io::Write;
 
 use crate::adapters::onepassword_manifest::{Account, Discovery};
+use crate::cause::{AccountId, AccountRef, AccountSource, Cause, Cmd, Invocation, VarName};
 use crate::error::{Code, Error};
 use crate::host::Platform;
+
+/// Whether the 1Password app holds the accounts `op` sees: on macOS and Windows, and for the
+/// Windows `op.exe` reached from WSL. There an account is added in the app, never with
+/// `opv login --add` (audit 04.07, design §6.4 `RefusedBecause::Platform`).
+pub fn app_holds_accounts(platform: Platform, op_windows_exe: bool) -> bool {
+    matches!(platform, Platform::MacOs | Platform::Windows) || op_windows_exe
+}
+
+/// [`app_holds_accounts`] for this machine.
+pub fn app_holds_accounts_here() -> bool {
+    let host = crate::host::Host::detect();
+    app_holds_accounts(host.platform, host.op_is_windows_exe())
+}
+
+/// How a person named an account: an email, an account ID, or anything else op matches
+/// (a shorthand, a user ID or a sign-in address). Only an email may follow
+/// `opv login --add --account` (audit 04.02).
+pub fn account_ref(value: &str) -> AccountRef {
+    if value.contains('@') {
+        AccountRef::Email(value.to_string())
+    } else if value.len() == 26
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        AccountRef::Id(AccountId::new(value))
+    } else {
+        AccountRef::Shorthand(value.to_string())
+    }
+}
+
+/// Where `account` was chosen for a sign-in, as far as opv can tell afterwards: `OP_ACCOUNT`,
+/// else the nearest `.opv` (by its path), else `--account`.
+pub fn source_of(account: &str) -> AccountSource {
+    if crate::config_store::account_env().is_some_and(|a| a == account) {
+        return AccountSource::EnvVar {
+            var: VarName::new("OP_ACCOUNT"),
+        };
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    if let Some(path) = crate::config_store::walk_up(&here, ".opv")
+        && crate::config_store::pointer_account(&here).is_some_and(|a| a == account)
+    {
+        return AccountSource::DotOpv { path };
+    }
+    AccountSource::Flag
+}
+
+/// The error for an `op account list` that failed or printed something opv does not
+/// understand (#157). One that did not finish is 1Password not answering (the 1Password
+/// diagnosis of the call); otherwise op's reply was not kept (`manifest::discover` drops
+/// it), so nothing opv could diagnose is known and the step is `opv doctor`.
+pub(crate) fn account_list_failed() -> Error {
+    let unfinished = crate::runner::take_observed().filter(|seen| {
+        matches!(
+            seen.exit(),
+            crate::cause::ExitClass::TimedOut | crate::cause::ExitClass::Signal { .. }
+        )
+    });
+    match unfinished {
+        Some(seen) => crate::adapters::onepassword_diagnose::diagnose(
+            seen,
+            "",
+            &crate::cause::DiagnoseContext::default(),
+        )
+        .into(),
+        None => Error::Source(
+            "op account list failed or printed something opv does not understand, so opv \
+             cannot tell which 1Password accounts are on this machine; nothing was chosen or \
+             recorded"
+                .into(),
+        )
+        .with_code(Code::OpUnexpected)
+        .with_next("opv doctor"),
+    }
+}
 
 /// Everything [`report`] needs, already gathered by the caller: the `op account list`
 /// result, a probe for each account's session, the selection values (in precedence order)
@@ -160,55 +237,112 @@ fn first_present<'a>(inputs: &Inputs<'a>) -> Option<(&'a str, &'static str, Stri
     None
 }
 
-/// The next step for a value that names no listed account: one add-account step for an
-/// email, else the command that lists the accounts.
-fn absent_next(value: &str) -> String {
-    if value.contains('@') {
-        format!("opv login --add --account {value}")
-    } else {
-        "opv account list".to_string()
+/// `opv account list` itself: a finding's step is rendered against it and is never this
+/// same command (X7, audit 04.03).
+fn list_invocation() -> Invocation {
+    Invocation {
+        command: vec!["account".into(), "list".into()],
+        ..Invocation::default()
     }
 }
 
-/// The finding for a selection value that names no listed account: one add-account step
-/// for an email, else the command that lists the accounts.
-fn absent_finding(value: &str, source: &str) -> Finding {
-    Finding {
-        code: "selected_account_absent".into(),
-        human_required: true,
-        message: format!(
-            "no 1Password account listed by this CLI matches {value:?} (from {source})"
-        ),
-        next: Some(absent_next(value)),
+/// A finding with a cataloged cause's words and step: the cause, then its Do, and its Next
+/// unless that is `opv account list` itself.
+fn finding_from(code: &str, cause: &Cause) -> Finding {
+    let inv = list_invocation();
+    let (_, next) = cause.step(&inv);
+    let mut message = cause.message();
+    if let Some(action) = cause.do_text(&inv) {
+        message = format!("{message}; {action}");
     }
+    let listing = crate::cause::render::cmd_text(&cmd(&["account", "list"], &[]));
+    Finding {
+        code: code.into(),
+        human_required: cause.human_required(&inv),
+        message,
+        next: crate::cause::render::next_text(&next, &inv).filter(|n| *n != listing),
+    }
+}
+
+fn cmd(command: &[&str], args: &[&str]) -> Cmd {
+    Cmd {
+        command: command.iter().map(|w| w.to_string()).collect(),
+        args: args.iter().map(|w| w.to_string()).collect(),
+    }
+}
+
+/// Where a selection value came from, from [`first_present`]'s `by` and `source`.
+fn selected_by(by: &str, source: &str) -> AccountSource {
+    match by {
+        "flag" => AccountSource::Flag,
+        "env" => AccountSource::EnvVar {
+            var: VarName::new("OP_ACCOUNT"),
+        },
+        "pointer" => AccountSource::DotOpv {
+            path: std::path::PathBuf::from(source),
+        },
+        _ => AccountSource::OpDefault,
+    }
+}
+
+/// The finding for a selection value that names no listed account (audit 04.03, 04.07,
+/// 09.01): add the account that holds it (at op's prompt, or in the 1Password app where the
+/// app holds the accounts), never `opv account list` again.
+fn absent_finding(value: &str, by: &str, source: &str, in_app: bool) -> Finding {
+    finding_from(
+        "selected_account_absent",
+        &Cause::AccountNotOnMachine {
+            account: account_ref(value),
+            selected_by: selected_by(by, source),
+            in_app,
+        },
+    )
+}
+
+/// One candidate as a person tells it apart: `ID (email, shorthand)`.
+fn candidate(a: &Account) -> String {
+    let email = if a.email.is_empty() { "-" } else { &a.email };
+    let short = if a.shorthand.is_empty() {
+        "-"
+    } else {
+        &a.shorthand
+    };
+    format!("{} ({email}, {short})", a.account_uuid)
 }
 
 /// The finding for a selection value several listed accounts match (a sign-in address is
-/// shared by every account on it): the candidates' IDs and addresses only.
+/// shared by every account on it): each candidate by ID, email and shorthand, and no
+/// runnable step, since only the person knows which one they mean (audit 04.05, X2).
 fn ambiguous_finding(value: &str, source: &str, many: &[&Account]) -> Finding {
-    let ids: Vec<String> = many
-        .iter()
-        .map(|a| format!("{} ({})", a.account_uuid, address(&a.url)))
-        .collect();
+    let named: Vec<String> = many.iter().map(|a| candidate(a)).collect();
     Finding {
         code: "account_ambiguous".into(),
         human_required: true,
         message: format!(
-            "{value:?} (from {source}) matches {} accounts: {}; name one by its account ID",
+            "{value:?} (from {source}) matches {} accounts: {}; pick the account by its \
+             email, then run opv account use <that account ID>",
             many.len(),
-            ids.join(", ")
+            named.join(", ")
         ),
-        next: Some(format!("opv account use {}", many[0].account_uuid)),
+        next: None,
     }
 }
 
-/// The finding for a selected account whose session probe says it is signed out.
+/// The finding for a selected account whose session probe failed. `op whoami --account`
+/// never asks the 1Password app, so with the app integration a person who is signed in may
+/// show here until a command is approved (audit 04.08): the message says both.
 fn signed_out_finding(account_id: &str) -> Finding {
     Finding {
         code: "selected_signed_out".into(),
         human_required: true,
-        message: format!("the selected 1Password account {account_id} is not signed in"),
-        next: Some(format!("opv login --account {account_id}")),
+        message: format!(
+            "op has no session for the selected 1Password account {account_id} here; if you \
+             use the 1Password app, unlock it and approve its prompt, else sign in"
+        ),
+        next: Some(crate::cause::render::cmd_text(&cmd(
+            &["login"],
+            &["--account", account_id],
+        ))),
     }
 }
 
@@ -306,6 +440,13 @@ fn session_var_findings(
 
 /// Build the FR-49 report. Pure: no `op` call, no filesystem, no prompt.
 pub fn report(inputs: &Inputs<'_>) -> Report {
+    report_with(inputs, false)
+}
+
+/// [`report`], for an `op` that is the Windows `op.exe` reached from WSL (`op_windows_exe`):
+/// its accounts come from the Windows 1Password app.
+pub fn report_with(inputs: &Inputs<'_>, op_windows_exe: bool) -> Report {
+    let in_app = app_holds_accounts(inputs.platform, op_windows_exe);
     let listed: &[Account] = match &inputs.discovery {
         Discovery::Listed(accounts) => accounts,
         _ => &[],
@@ -345,12 +486,14 @@ pub fn report(inputs: &Inputs<'_>) -> Report {
     let mut selected_at: Option<usize> = None;
     if matches!(inputs.discovery, Discovery::Listed(_)) {
         if listed.is_empty() {
-            findings.push(Finding {
-                code: "no_accounts".into(),
-                human_required: true,
-                message: "this 1Password CLI knows no accounts; add one".into(),
-                next: Some("opv login --add".into()),
-            });
+            findings.push(finding_from(
+                "no_accounts",
+                &Cause::AccountNotOnMachine {
+                    account: AccountRef::Unnamed,
+                    selected_by: AccountSource::OpDefault,
+                    in_app,
+                },
+            ));
         } else if let Some((value, by, source)) = first_present(inputs) {
             match matching(listed, value).as_slice() {
                 [one] => {
@@ -362,7 +505,7 @@ pub fn report(inputs: &Inputs<'_>) -> Report {
                         source,
                     });
                 }
-                [] => findings.push(absent_finding(value, &source)),
+                [] => findings.push(absent_finding(value, by, &source, in_app)),
                 many => findings.push(ambiguous_finding(value, &source, many)),
             }
         } else if listed.len() == 1 {
@@ -388,10 +531,7 @@ pub fn report(inputs: &Inputs<'_>) -> Report {
     Report {
         discovery: discovery_str(&inputs.discovery).into(),
         platform: platform_str(inputs.platform).into(),
-        cli_accounts_only: matches!(
-            inputs.platform,
-            Platform::Linux | Platform::Wsl | Platform::Other
-        ),
+        cli_accounts_only: !in_app,
         selected,
         accounts: rows,
         findings,
@@ -485,6 +625,13 @@ pub fn render_text(report: &Report, out: &mut dyn Write) -> Result<(), Error> {
             line.push_str(" (op in WSL does not see the Windows app's accounts)");
         }
         writeln!(out, "{line}").map_err(super::write_err)?;
+    } else if report.platform == "wsl" {
+        // The Windows `op.exe`: its accounts are the Windows app's (audit 04.17).
+        writeln!(
+            out,
+            "Accounts come from the Windows 1Password app; add one there."
+        )
+        .map_err(super::write_err)?;
     }
     for finding in &report.findings {
         writeln!(out, "{}: {}", finding.code, finding.message).map_err(super::write_err)?;
@@ -493,12 +640,14 @@ pub fn render_text(report: &Report, out: &mut dyn Write) -> Result<(), Error> {
 }
 
 /// Resolve `who` to one listed account and record it in the nearest `.opv`. Several
-/// matches name the candidates' IDs and addresses only and pick the first; no match names
-/// `who` and points at the add-account (or list) step.
+/// matches record nothing and name the candidates for the person to pick (never the first,
+/// X2); no match is an account not added here, added at op's prompt or, where the app holds
+/// the accounts (`in_app`), in the 1Password app.
 pub fn use_account(
     accounts: &[Account],
     who: &str,
     start: &std::path::Path,
+    in_app: bool,
 ) -> Result<UseOutcome, Error> {
     match matching(accounts, who).as_slice() {
         [one] => {
@@ -506,27 +655,20 @@ pub fn use_account(
             let path = crate::config_store::record_account(start, &account_id)?;
             Ok(UseOutcome { account_id, path })
         }
-        [] => Err(Error::Auth(
-            format!("no 1Password account listed by this CLI matches {who:?}").into(),
-        )
-        .with_code(Code::AccountNotRegistered)
-        .with_next(absent_next(who))),
-        many => {
-            let listing = many
-                .iter()
-                .map(|a| format!("  {}  {}", a.account_uuid, address(&a.url)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Err(Error::Config(
-                format!(
-                    "{} 1Password accounts match; pick one by its account ID:\n{listing}",
-                    many.len()
-                )
-                .into(),
-            )
-            .with_code(Code::AccountAmbiguous)
-            .with_next(format!("opv account use {}", many[0].account_uuid)))
+        [] => Err(Cause::AccountNotOnMachine {
+            account: account_ref(who),
+            selected_by: AccountSource::Argument,
+            in_app,
         }
+        .into()),
+        many => Err(Cause::AccountAmbiguous {
+            given: who.to_string(),
+            candidates: many
+                .iter()
+                .map(|a| AccountId::new(a.account_uuid.clone()))
+                .collect(),
+        }
+        .into()),
     }
 }
 
@@ -541,20 +683,24 @@ pub fn gather(r: &dyn crate::runner::CommandRunner, flag: Option<&str>) -> Repor
     }
     let here = std::env::current_dir().unwrap_or_default();
     let pointer = crate::config_store::pointer_account(&here);
+    // The `.opv` file by its full path, so a person can find it (audit 09.01).
+    let pointer_path = crate::config_store::walk_up(&here, ".opv")
+        .unwrap_or_else(|| std::path::PathBuf::from(".opv"));
     let env = crate::config_store::account_env();
     let probe = |id: &str| manifest::signed_in(r, id);
-    report(&Inputs {
-        discovery: manifest::discover(r),
-        signed_in: &probe,
-        flag,
-        env: env.as_deref(),
-        pointer: pointer
-            .as_deref()
-            .map(|a| (a, std::path::Path::new(".opv"))),
-        manifest: None,
-        platform: crate::host::Host::detect().platform,
-        session_vars: session_var_names(),
-    })
+    report_with(
+        &Inputs {
+            discovery: manifest::discover(r),
+            signed_in: &probe,
+            flag,
+            env: env.as_deref(),
+            pointer: pointer.as_deref().map(|a| (a, pointer_path.as_path())),
+            manifest: None,
+            platform: host.platform,
+            session_vars: session_var_names(),
+        },
+        host.op_is_windows_exe(),
+    )
 }
 
 /// The report when a non-interactive credential (service account, Connect) is set: it
@@ -583,8 +729,11 @@ pub fn list(
 ) -> Result<(), Error> {
     let doc = gather(r, flag);
     if json {
-        let mut v = serde_json::to_value(&doc)
-            .map_err(|_| Error::Config("cannot serialize the account list".into()))?;
+        let mut v = serde_json::to_value(&doc).map_err(|_| {
+            Error::from(Cause::Bug {
+                site: "account list serialization",
+            })
+        })?;
         v["schema_version"] = serde_json::json!(crate::json::SCHEMA_VERSION);
         return writeln!(out, "{v}").map_err(super::write_err);
     }
@@ -611,16 +760,10 @@ pub fn use_command(
                 &crate::host::Host::detect(),
             ));
         }
-        manifest::Discovery::Unavailable => {
-            return Err(Error::Source(
-                "op account list failed, so opv cannot check the account; nothing was recorded"
-                    .into(),
-            )
-            .with_next("opv doctor"));
-        }
+        manifest::Discovery::Unavailable => return Err(account_list_failed()),
     };
     let here = std::env::current_dir().unwrap_or_default();
-    let done = use_account(&accounts, who, &here)?;
+    let done = use_account(&accounts, who, &here, app_holds_accounts_here())?;
     if json {
         let v = serde_json::json!({
             "schema_version": crate::json::SCHEMA_VERSION,

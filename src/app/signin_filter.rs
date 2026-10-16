@@ -10,6 +10,9 @@
 
 use std::io::{self, Read, Write};
 
+use crate::cause::{
+    AccountId, AccountRef, Cause, ExitClass, NoTerminal, SessionState, System, Upstream,
+};
 use crate::error::{Code, Error};
 
 /// op's error prefix: `[ERROR] YYYY/MM/DD HH:MM:SS <message>`.
@@ -148,9 +151,20 @@ pub fn classify(messages: &[String], status: Option<i32>) -> Failure {
         "no accounts found matching",
         "no account found for",
         "account not found",
+        // macOS or Windows with the app integration off: op sees no account (audit 04.15).
+        "no accounts configured",
     ]) {
         Failure::AccountNotRegistered
-    } else if has(&["desktop app", "1password app", "app integration", "locked"]) {
+    } else if has(&[
+        "desktop app",
+        "1password app",
+        "app integration",
+        "locked",
+        // The app's approval prompt left unanswered, before any network reading (04.18).
+        "authorization timeout",
+        "authorization prompt",
+        "approval",
+    ]) {
         Failure::DesktopAppUnavailable
     } else if has(&["(401)", "unauthorized", "invalid credentials", "incorrect"]) {
         Failure::CredentialRejected
@@ -191,69 +205,111 @@ impl Failure {
         }
     }
 
+    /// The cataloged cause of this failure for `account` (as the person named it, or
+    /// `None`). `None` for a failure the catalog cannot name without the failed call's
+    /// observation (`op signin` runs on the terminal, outside the runner): 1Password not
+    /// reached, and a reason opv does not recognise.
+    pub fn cause(self, account: Option<&str>) -> Option<Cause> {
+        let signed_out = |state| Cause::NotSignedIn {
+            system: System::OnePassword,
+            account: account.map(AccountId::new),
+            state,
+        };
+        Some(match self {
+            // Audit 04.02: only an email follows `opv login --add --account`; an account ID
+            // is added at op's prompt (or in the app where the app holds the accounts).
+            Failure::AccountNotRegistered => Cause::AccountNotOnMachine {
+                account: account.map_or(AccountRef::Unnamed, super::account::account_ref),
+                selected_by: account.map_or(
+                    crate::cause::AccountSource::OpDefault,
+                    super::account::source_of,
+                ),
+                in_app: super::account::app_holds_accounts_here(),
+            },
+            Failure::DesktopAppUnavailable => signed_out(SessionState::AppLocked),
+            // A rejected password, a cancelled prompt or no session: not signed in, and
+            // signing in again is the step; op's own words are the evidence.
+            Failure::NotSignedIn | Failure::CredentialRejected | Failure::Cancelled => {
+                signed_out(SessionState::SignedOut)
+            }
+            Failure::NoTerminal => Cause::NeedsTerminal {
+                why: if crate::host::Host::detect().ci {
+                    NoTerminal::Ci
+                } else {
+                    NoTerminal::NoTty
+                },
+            },
+            Failure::ProviderUnavailable | Failure::Unexpected => return None,
+        })
+    }
+
     /// The error for `what` (`signing in`, `adding the account`) to `account` (as the person
     /// named it, or `None`) during `opv <command>`; one recovery step, naming the account
     /// whenever it is known.
     pub fn error(self, what: &str, account: Option<&str>, command: &str) -> Error {
+        if let Some(cause) = self.cause(account) {
+            return cause.into();
+        }
         let who = account.map_or(String::new(), |a| format!(" to {a}"));
         let again = match account {
             Some(a) => format!("opv login --account {a}"),
             None => "opv login".to_string(),
         };
         let (text, step, next) = match self {
-            Failure::AccountNotRegistered => (
-                format!(
-                    "1Password could not find the account{who}: it is not added to this 1Password CLI"
-                ),
-                "add it here; you type the sign-in address, Secret Key and password only at 1Password's prompt",
-                match account {
-                    Some(a) => format!("opv login --add --account {a}"),
-                    None => "opv login --add".to_string(),
-                },
-            ),
-            Failure::NotSignedIn => (
-                format!("1Password did not start a session{who}"),
-                "sign in again at 1Password's prompt",
-                again,
-            ),
-            Failure::DesktopAppUnavailable => (
-                format!("the 1Password app did not answer while {what}{who}"),
-                "unlock the 1Password app and turn on Settings > Developer > Integrate with 1Password CLI, then try again",
-                again,
-            ),
-            Failure::CredentialRejected => (
-                format!("1Password did not accept what was typed while {what}{who}"),
-                "type the password (and Secret Key when asked) again at 1Password's prompt",
-                again,
-            ),
-            Failure::Cancelled => (
-                format!("{what}{who} was cancelled"),
-                "start again when ready",
-                again,
-            ),
             Failure::ProviderUnavailable => (
                 format!("1Password could not be reached while {what}{who}"),
-                "check the network or https://status.1password.com, then try again; nothing was changed",
+                "check the network or https://status.1password.com; nothing was changed",
                 again,
             ),
-            Failure::NoTerminal => (
-                format!("1Password needs your own terminal for its prompt while {what}{who}"),
-                "run this in your own interactive terminal",
-                again,
-            ),
-            Failure::Unexpected => (
+            _ => (
                 format!("{what}{who} did not complete; 1Password gave no reason opv recognises"),
-                "check the CLI with opv doctor, then try again",
+                "check the CLI with opv doctor",
                 "opv doctor".to_string(),
             ),
         };
-        let text = format!("{text} (during opv {command}). Nothing was printed from the session.");
+        // Audit 04.27: say plainly that no session token left this process.
+        let text = format!("{text} (during opv {command}). No session token was shown or saved.");
         let e = match self {
             Failure::ProviderUnavailable => Error::Unknown(text.into()),
-            Failure::NoTerminal => Error::Policy(text.into()),
             _ => Error::Auth(text.into()),
         };
         e.with_code(self.code()).with_do(step).with_next(next)
+    }
+
+    /// [`Failure::error`] with op's own error lines (`messages`, from [`Filter`]) and exit
+    /// `status` as the scrubbed evidence of a cataloged cause (#142: opv's words alone can
+    /// hide the cause). A failure without a cause keeps its legacy text.
+    pub fn error_said(
+        self,
+        what: &str,
+        account: Option<&str>,
+        command: &str,
+        messages: &[String],
+        status: Option<i32>,
+    ) -> Error {
+        let said: Vec<String> = messages
+            .iter()
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| crate::scrub::scrub(m.lines().next().unwrap_or_default()))
+            .collect();
+        match self.cause(account) {
+            Some(cause) if !said.is_empty() => Error::with_evidence(
+                cause,
+                Upstream {
+                    source: System::OnePassword,
+                    tool: "1Password CLI".into(),
+                    version: None,
+                    exit: match status {
+                        Some(code) => ExitClass::Code { code },
+                        None => ExitClass::Signal { signal: 0 },
+                    },
+                    said,
+                    removed_advice: false,
+                    untrusted: true,
+                },
+            ),
+            _ => self.error(what, account, command),
+        }
     }
 }
 

@@ -120,9 +120,23 @@ pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
     }
     match onepassword::diagnose(r, &Host::detect) {
         Ok(Session::SignedIn(IdentityType::User)) => Identity::Person,
-        Ok(Session::SignedIn(_)) => Identity::ReadOnly,
+        Ok(Session::SignedIn(IdentityType::ServiceAccount)) => Identity::ReadOnly,
+        // Audit 04.19: a whoami without a user type observed nobody in particular; it is
+        // never reported as a service account.
         _ => Identity::Unknown,
     }
+}
+
+/// The command a person runs in their own session, by its subcommand words: the process's
+/// own command line, else `what` (`opv target add`) without its `opv`.
+fn own_command(what: &str) -> crate::cause::CommandId {
+    let inv = crate::error::invocation();
+    let words = if inv.command.is_empty() || inv.command.first().is_some_and(|w| w == "mcp") {
+        what.trim_start_matches("opv ").to_string()
+    } else {
+        inv.command.join(" ")
+    };
+    crate::cause::CommandId(words)
 }
 
 /// Refuse a write to the project manifest (FR-44: `init` creating one, `add`, `init
@@ -131,27 +145,40 @@ pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
 /// `op whoami` cannot tell, 1Password stays read-only (FR-11, SR-5; requirements FR-23's
 /// `init` acceptance). Nothing is written; the error names `opv login`.
 pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Error> {
-    let why = match identity(r) {
-        Identity::Person => return Ok(()),
-        Identity::ReadOnly => {
-            // #157: `opv login` refuses here too, so the step is a person's own terminal.
-            return Err(Error::Policy(
-                format!(
-                    "{what} writes to 1Password, which only a person signed in with their own \
-                     session may do; this run is a service account, Connect or CI, for which \
-                     1Password is read-only; nothing written"
-                )
-                .into(),
+    use crate::cause::{Cause, NoTerminal, Principal};
+    match identity(r) {
+        Identity::Person => Ok(()),
+        // #157: `opv login` refuses here too, so the step is a person's own terminal.
+        Identity::ReadOnly if Host::detect().ci && Host::detect().op_credential.is_none() => {
+            Err(Cause::NeedsTerminal {
+                why: NoTerminal::Ci,
+            }
+            .into())
+        }
+        // Catalog: `Cause::NeedsOwnSession` (own_session_required, exit 7). It stays the
+        // pre-catalog terminal_required refusal (exit 6) while tests outside this module
+        // (adopt, bootstrap, config_store) pin that code.
+        Identity::ReadOnly => Err(Error::Policy(
+            format!(
+                "{what} writes to 1Password, which only a person signed in with their own \
+                 session may do; this run uses a service account or Connect, for which \
+                 1Password is read-only; nothing written"
             )
-            .with_code(crate::error::Code::TerminalRequired)
-            .with_do(
-                "a person runs this in their own terminal, without OP_SERVICE_ACCOUNT_TOKEN, \
-                 OP_CONNECT_* or CI set",
-            ));
+            .into(),
+        )
+        .with_code(crate::error::Code::TerminalRequired)
+        .with_do(
+            "a person runs this in their own terminal, without OP_SERVICE_ACCOUNT_TOKEN or \
+             OP_CONNECT_* set",
+        )),
+        // The deploy credentials are the target's; 1Password stays read-only for the run.
+        Identity::DeployCredentials => Err(Cause::NeedsOwnSession {
+            command: own_command(what),
+            identity: Principal::ServiceAccount {
+                name: "of this run's deploy credentials".into(),
+            },
         }
-        Identity::DeployCredentials => {
-            "this run signed in with deploy credentials, for which 1Password is read-only"
-        }
+        .into()),
         Identity::Unknown => {
             // #150: nobody is signed in here (an op session started inside an earlier opv
             // command, such as a --dry-run, ends with that command). That is a sign-in,
@@ -168,21 +195,31 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
                         return Err(e);
                     }
                 }
+                // Audit 04.19: `op whoami` did not finish (a slow op.exe start, the app
+                // busy): 1Password did not answer, which a sign-in cannot fix.
+                Ok(Session::Unknown) => {
+                    if let Some(seen) = crate::runner::take_observed().filter(|s| {
+                        matches!(
+                            s.exit(),
+                            crate::cause::ExitClass::TimedOut
+                                | crate::cause::ExitClass::Signal { .. }
+                        )
+                    }) {
+                        return Err(crate::adapters::onepassword_diagnose::diagnose(
+                            seen,
+                            "",
+                            &crate::cause::DiagnoseContext::default(),
+                        )
+                        .into());
+                    }
+                }
                 _ => {}
             }
             // #150: a person's session could not be confirmed: the same sign-in as above,
             // never a policy refusal with a bare `opv login`.
-            return Err(not_signed_in(what));
+            Err(not_signed_in(what))
         }
-    };
-    Err(Error::Policy(
-        format!(
-            "{what} writes to 1Password, which only a person signed in with their own \
-             session may do; {why}; nothing written"
-        )
-        .into(),
-    )
-    .with_next(crate::adapters::onepassword_manifest::LOGIN))
+    }
 }
 
 /// The sign-in a write needs (#150): `op_not_signed_in` (in a person's terminal, opv offers
@@ -485,7 +522,11 @@ fn read_item_as(
         }
         Ok(None) => Ok(done(layout, Vec::new(), None, first, Some(who))),
         Err(e) => {
-            let text = e.to_string();
+            // Audit 04.01: the note carries the message alone, never a category prefix.
+            let text = match e.cause() {
+                Some((cause, _)) => cause.message(),
+                None => e.text().to_string(),
+            };
             r.note(&format!(
                 "could not tidy 1Password ({env_name}); read it as it is: {}",
                 text.lines().next().unwrap_or("")
