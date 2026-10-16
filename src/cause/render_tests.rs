@@ -3471,3 +3471,33 @@ fn i6_account_required_is_a_persons_pick() {
         Cause::AccountRequired { accounts: vec![] }.step_in(&inv(), &person_at_terminal());
     assert_eq!(action, Some(Action::PickBetween));
 }
+
+/// L1: a built plan step keeps the global `--timeout` flag with its value.
+#[test]
+fn l1_a_built_step_keeps_the_timeout_flag_with_its_value() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["environments".into(), "prod".into(), "targets".into()]),
+        rule: FieldRule::Pattern {
+            id: PatternId::TargetName,
+        },
+    };
+    let inv = cli(&["opv", "sync", "prod", "--timeout", "60"]);
+    assert_eq!(next_in(&c, &inv), "opv plan prod --timeout 60");
+}
+
+/// L1: a built plan step keeps an inline `--timeout=60`.
+#[test]
+fn l1_a_built_step_keeps_an_inline_timeout_flag() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["environments".into(), "prod".into(), "targets".into()]),
+        rule: FieldRule::Pattern {
+            id: PatternId::TargetName,
+        },
+    };
+    let inv = cli(&["opv", "sync", "prod", "--timeout=60"]);
+    assert_eq!(next_in(&c, &inv), "opv plan prod --timeout=60");
+}
