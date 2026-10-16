@@ -123,6 +123,7 @@ pub(crate) fn vault_missing(team: &Environment) -> Error {
         },
         &team.name,
         "personal_vault",
+        team.personal_vault.is_some(),
     )
 }
 
@@ -140,23 +141,28 @@ fn item_missing(team: &Environment, vault_id: &str, title: &str) -> Error {
         },
         &team.name,
         "personal_item",
+        true,
     )
 }
 
 /// `resource` is not in the listing `call` answered with (NotFound, taken while the runner
 /// still holds that answered call): named by the environment's `field` (`personal_vault`,
-/// `personal_item`), which sets the title opv looked for.
-fn missing(call: &Call, resource: ResourceRef, env_name: &str, field: &str) -> Error {
+/// `personal_item`), which sets the title opv looked for; `set`: whether the field is set,
+/// else opv looked for its default names and the Do says to set it.
+fn missing(call: &Call, resource: ResourceRef, env_name: &str, field: &str, set: bool) -> Error {
+    let path = DottedPath(vec![
+        "environments".into(),
+        env_name.to_string(),
+        field.to_string(),
+    ]);
     match crate::runner::take_unusable_reply(call) {
         Some(seen) => Cause::NotFound {
             system: System::OnePassword,
             resource,
-            named_by: NamedBy::ConfigField {
-                path: DottedPath(vec![
-                    "environments".into(),
-                    env_name.to_string(),
-                    field.to_string(),
-                ]),
+            named_by: if set {
+                NamedBy::ConfigField { path }
+            } else {
+                NamedBy::UnsetField { path }
             },
             state: NotFoundState::Missing,
             seen,

@@ -22,7 +22,7 @@
 
 use std::io;
 
-use crate::cause::{Cause, OutputProblem, System};
+use crate::cause::{Cause, During, OutputProblem, System};
 use crate::error::Error;
 use crate::runner::Outcome;
 
@@ -138,6 +138,8 @@ pub fn deliver(
                     problem: OutputProblem::Empty {
                         what: "read of the value from opv's pipe",
                     },
+                    // What az did without the value is not known, so no write is claimed.
+                    during: During::Read,
                     seen,
                 }
             }))

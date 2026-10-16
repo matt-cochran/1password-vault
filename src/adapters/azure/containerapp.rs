@@ -70,8 +70,8 @@ use zeroize::Zeroizing;
 use super::az::{self, Effect};
 use super::{AzureTarget, ConfigRoute, preflight};
 use crate::cause::{
-    Cause, ConfigCheck, DiagnoseContext, DottedPath, EnvName, FieldRule, Principal, Refusal,
-    ResourceKind, ResourceName, ResourceRef, System,
+    Cause, ConfigCheck, DiagnoseContext, DottedPath, During, EnvName, FieldRule, OutputProblem,
+    Principal, Refusal, ResourceKind, ResourceName, ResourceRef, System,
 };
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
@@ -403,6 +403,17 @@ impl<'a> ContainerApp<'a> {
         Ok(self.strip(spec, self.container_index(spec)?))
     }
 
+    /// The unmanaged settings that differ between `before` and `now`, as JSON paths
+    /// (`properties.template.scale.maxReplicas`), never their values; empty when either
+    /// spec has no container to compare.
+    fn changed_paths(&self, before: &Value, now: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        if let (Ok(a), Ok(b)) = (self.stripped(before), self.stripped(now)) {
+            diff_paths(&a, &b, "", &mut out);
+        }
+        out
+    }
+
     /// The vault's `properties.vaultUri` as read from Azure, without a trailing slash
     /// (NR-6; `https://<vault>.vault.azure.net` in the public cloud): kept by the preflight,
     /// else read once.
@@ -549,12 +560,16 @@ impl<'a> ContainerApp<'a> {
             return Ok(());
         }
         // Someone else changed the app's unmanaged settings while opv applied: opv's own
-        // `containerapp show` says so (R9).
+        // `containerapp show` says so (R9). opv's update is live by now.
+        let paths = self.changed_paths(&before, now);
         Err(preflight::unusable("containerapp show", |seen| {
             Cause::TargetRefused {
                 system: System::Azure,
                 subject: self.app_ref(),
-                why: Refusal::ChangedOutsideOpv,
+                why: Refusal::ChangedOutsideOpv {
+                    paths,
+                    after_apply: true,
+                },
                 env: self.env.map(EnvName::new),
                 target: None,
                 seen,
@@ -640,14 +655,18 @@ impl PinnedRuntime for ContainerApp<'_> {
             .into());
         }
         let fresh = self.show()?;
-        single_revision_mode(self.target, &fresh)?;
+        single_revision_mode(self.target, &fresh, self.env)?;
         let fresh = self.snapshot_from(fresh)?;
         if fresh.unmanaged_fingerprint != snapshot.unmanaged_fingerprint {
+            let paths = self.changed_paths(&snapshot.spec.0, &fresh.spec.0);
             return Err(preflight::unusable("containerapp show", |seen| {
                 Cause::TargetRefused {
                     system: System::Azure,
                     subject: self.app_ref(),
-                    why: Refusal::ChangedOutsideOpv,
+                    why: Refusal::ChangedOutsideOpv {
+                        paths,
+                        after_apply: false,
+                    },
                     env: self.env.map(EnvName::new),
                     target: None,
                     seen,
@@ -680,13 +699,21 @@ impl PinnedRuntime for ContainerApp<'_> {
             Some(&body),
         )?;
         *self.applied_from.borrow_mut() = Some(fresh.spec.0);
-        // The update exited 0: a reply opv cannot read, or one without the new revision,
-        // is a reply it cannot use (A1).
-        parse(&out, WHAT)?
+        // The update exited 0, so the change is applied: a reply opv cannot read, or one
+        // without the new revision, is a reply it cannot use (A1), and says so.
+        preflight::reply_json::<Value>(&out.stdout, WHAT, During::AppliedWrite)?
             .pointer("/properties/latestRevisionName")
             .and_then(Value::as_str)
             .map(|r| Revision(r.into()))
-            .ok_or_else(|| preflight::missing_in_reply(WHAT, "properties.latestRevisionName"))
+            .ok_or_else(|| {
+                preflight::bad_reply(
+                    WHAT,
+                    OutputProblem::Empty {
+                        what: "properties.latestRevisionName",
+                    },
+                    During::AppliedWrite,
+                )
+            })
     }
 
     fn await_healthy(&self, revision: &Revision) -> Result<Health, Error> {
@@ -906,20 +933,34 @@ impl PinnedRuntime for ContainerApp<'_> {
 }
 
 /// Refuses an app not in single-revision mode (NR-25): opv pins by replacing the one
-/// active revision.
-pub(crate) fn single_revision_mode(t: &AzureTarget, app: &Value) -> Result<(), Error> {
+/// active revision. `app`: the reply of the `containerapp show` just made, which the
+/// refusal is observed on; `env`: the environment being written, when known.
+pub(crate) fn single_revision_mode(
+    t: &AzureTarget,
+    app: &Value,
+    env: Option<&str>,
+) -> Result<(), Error> {
     match app
         .pointer("/properties/configuration/activeRevisionsMode")
         .and_then(Value::as_str)
         .filter(|m| !m.eq_ignore_ascii_case("single"))
     {
-        // Only an owner of the app changes its revision mode (az containerapp revision
-        // set-mode --mode single); opv never does.
-        Some(_) => Err(Cause::OwnerSetupRequired {
-            system: System::Azure,
-            object: preflight::app_ref(t),
-        }
-        .into()),
+        // Only an owner of the app changes its revision mode (the Do names `az
+        // containerapp revision set-mode --mode single`); opv never does.
+        Some(mode) => Err(preflight::unusable("containerapp show", |seen| {
+            Cause::TargetRefused {
+                system: System::Azure,
+                subject: preflight::app_ref(t),
+                why: Refusal::RevisionMode {
+                    mode: mode.to_lowercase(),
+                    resource_group: t.resource_group.to_string(),
+                    subscription: t.subscription.to_string(),
+                },
+                env: env.map(EnvName::new),
+                target: None,
+                seen,
+            }
+        })),
         None => Ok(()),
     }
 }
@@ -964,6 +1005,46 @@ fn encode_bug() -> Error {
 /// Parses the reply of `az <what>`, or reports a reply opv cannot read (A1).
 fn parse(out: &Output, what: &str) -> Result<Value, Error> {
     preflight::unreadable_json(&out.stdout, what)
+}
+
+/// Pushes onto `out` the path (under `at`) of each leaf where `a` and `b` differ: object
+/// keys joined by `.`, array items as `[i]`; an array that changed length is one path.
+fn diff_paths(a: &Value, b: &Value, at: &str, out: &mut Vec<String>) {
+    if a == b {
+        return;
+    }
+    let here = || {
+        if at.is_empty() {
+            "(the whole app)".to_string()
+        } else {
+            at.to_string()
+        }
+    };
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            for k in keys {
+                let path = if at.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{at}.{k}")
+                };
+                let null = Value::Null;
+                diff_paths(
+                    x.get(k).unwrap_or(&null),
+                    y.get(k).unwrap_or(&null),
+                    &path,
+                    out,
+                );
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (p, q)) in x.iter().zip(y).enumerate() {
+                diff_paths(p, q, &format!("{at}[{i}]"), out);
+            }
+        }
+        _ => out.push(here()),
+    }
 }
 
 /// SHA-256 hex of the canonical JSON: serde_json maps are sorted by key.
@@ -1594,7 +1675,28 @@ mod tests {
         let mut fresh = show();
         fresh["properties"]["configuration"]["ingress"]["targetPort"] = json!(8080);
         let (_, res) = apply_on(&show(), &fresh, &repin());
-        assert!(err_text(res).contains("was changed outside opv since opv last wrote it"));
+        assert!(err_text(res).contains("was changed outside opv since opv read it"));
+    }
+
+    /// I5: the refusal names the setting that changed (its path, never its value).
+    #[test]
+    fn apply_refusal_names_the_changed_setting() {
+        let mut fresh = show();
+        fresh["properties"]["configuration"]["ingress"]["targetPort"] = json!(8080);
+        let (_, res) = apply_on(&show(), &fresh, &repin());
+        assert!(err_text(res).contains("(changed: properties.configuration.ingress.targetPort)"));
+    }
+
+    #[test]
+    fn changed_paths_name_array_items_by_index() {
+        let mut out = Vec::new();
+        diff_paths(
+            &json!({"a": [{"b": 1}, {"b": 2}]}),
+            &json!({"a": [{"b": 1}, {"b": 3}]}),
+            "",
+            &mut out,
+        );
+        assert_eq!(out, vec!["a[1].b".to_string()]);
     }
 
     #[test]
@@ -1996,8 +2098,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn concurrent_unmanaged_change_after_apply_is_reported() {
+    /// `await_healthy` after an apply during which someone changed the ingress port.
+    fn changed_during_apply() -> Error {
         let snap = snapshot_of(&show());
         let (t, m) = (target(), managed());
         let mut after = show_ready();
@@ -2011,9 +2113,38 @@ mod tests {
         ]);
         let ca = adapter(&r, &t, &m);
         let rev = ca.apply(&repin(), &snap).unwrap();
-        assert_eq!(
-            ca.await_healthy(&rev).err().map(|e| e.code_str()),
-            Some("update_refused")
+        ca.await_healthy(&rev).unwrap_err()
+    }
+
+    #[test]
+    fn concurrent_unmanaged_change_after_apply_is_reported() {
+        assert_eq!(changed_during_apply().code_str(), "update_refused");
+    }
+
+    /// I5: an update that exited 0 with a reply opv cannot read says the change was made.
+    #[test]
+    fn unreadable_update_reply_says_the_change_was_applied() {
+        let snap = snapshot_of(&show());
+        let (t, m) = (target(), managed());
+        let r = FakeRunner::new([
+            out(&show()),
+            out(&serving_revision()),
+            Output::success("not json"),
+        ]);
+        let err = adapter(&r, &t, &m).apply(&repin(), &snap).unwrap_err();
+        assert!(
+            err.to_string().contains("the change was applied at Azure"),
+            "{err}"
+        );
+    }
+
+    /// I5: after the apply, the change is reported as live, not as "not overwritten".
+    #[test]
+    fn concurrent_change_after_apply_says_opvs_update_is_live() {
+        assert!(
+            changed_during_apply()
+                .to_string()
+                .contains("while opv's update was applied")
         );
     }
 

@@ -646,7 +646,7 @@ pub fn record_account(start: &Path, account: &str) -> Result<PathBuf, Error> {
         Err(e) => return Err(refuse(LocalOp::Read, e.kind().into())),
         // A symlink or another kind of file: opv only writes a plain .opv, never through it.
         Ok(m) if !m.file_type().is_file() => {
-            return Err(refuse(LocalOp::Write, IoKind::Other));
+            return Err(refuse(LocalOp::Write, IoKind::NotAPlainFile));
         }
         Ok(_) => {
             let text =

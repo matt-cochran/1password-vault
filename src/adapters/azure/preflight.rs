@@ -26,8 +26,9 @@ use super::az::{self, AZ_CLI, Effect};
 use super::containerapp::{self, ContainerApp, POLL_EVERY, PROGRESS_EVERY, WAIT_MAX};
 use crate::adapters::probe::{parse_version, spawn_tool};
 use crate::cause::{
-    Cause, DiagnoseContext, DottedPath, GrantModel, Location, NamedBy, NotFoundState, Observed,
-    OutputProblem, Refusal, ResourceKind, ResourceName, ResourceRef, Right, System, Unusable,
+    Cause, DiagnoseContext, DottedPath, During, GrantModel, Location, NamedBy, NotFoundState,
+    Observed, OutputProblem, Refusal, ResourceKind, ResourceName, ResourceRef, Right, System,
+    Unusable,
 };
 use crate::error::Error;
 use crate::host::Host;
@@ -109,7 +110,7 @@ pub fn vault_uri_of(t: &AzureTarget, r: &dyn CommandRunner) -> Result<String, Er
 /// The value is never echoed: a hostile one names only what is wrong with it.
 pub fn vault_uri(show: &Value, vault: &str) -> Result<String, Error> {
     // A vaultUri opv cannot use is a reply it cannot use (A1); its value is never echoed.
-    let bad = || unusable(VAULT_SHOW, |seen| unparseable(None, seen));
+    let bad = || invalid_in_reply(VAULT_SHOW, "properties.vaultUri");
     let raw = show
         .pointer("/properties/vaultUri")
         .and_then(Value::as_str)
@@ -217,33 +218,60 @@ pub(crate) fn unreadable_json<T: serde::de::DeserializeOwned>(
     stdout: &[u8],
     what: &str,
 ) -> Result<T, Error> {
+    reply_json(stdout, what, During::Read)
+}
+
+/// `stdout` of `az <what>` as JSON, `during` the call it answered: a read, or a write az
+/// applied, whose unreadable reply says the change is made.
+pub(crate) fn reply_json<T: serde::de::DeserializeOwned>(
+    stdout: &[u8],
+    what: &str,
+    during: During,
+) -> Result<T, Error> {
     serde_json::from_slice(stdout).map_err(|e| {
         let at = Location {
             line: u32::try_from(e.line()).unwrap_or(u32::MAX),
             col: u32::try_from(e.column()).unwrap_or(u32::MAX),
         };
-        unusable(what, |seen| unparseable(Some(at), seen))
+        unusable(what, |seen| {
+            unusable_reply(Some(at), OutputProblem::Unparseable, during, seen)
+        })
     })
 }
 
-/// `az` answered, but opv cannot read its reply.
-fn unparseable(at: Option<Location>, seen: Observed) -> Cause {
+/// `az` answered with a reply opv cannot use.
+fn unusable_reply(
+    at: Option<Location>,
+    problem: OutputProblem,
+    during: During,
+    seen: Observed,
+) -> Cause {
     Cause::UnexpectedOutput {
         system: System::Azure,
         at,
-        problem: OutputProblem::Unparseable,
+        problem,
+        during,
         seen,
     }
 }
 
-/// `az <what>` answered without `field`, which opv needs from its reply.
+/// `az <what>` (a read) answered without `field`, which opv needs from its reply.
 pub(crate) fn missing_in_reply(what: &str, field: &'static str) -> Error {
-    unusable(what, |seen| Cause::UnexpectedOutput {
-        system: System::Azure,
-        at: None,
-        problem: OutputProblem::Empty { what: field },
-        seen,
-    })
+    bad_reply(what, OutputProblem::Empty { what: field }, During::Read)
+}
+
+/// `az <what>` (a read) answered with `field` in a form opv cannot use.
+pub(crate) fn invalid_in_reply(what: &str, field: &'static str) -> Error {
+    bad_reply(
+        what,
+        OutputProblem::InvalidValue { what: field },
+        During::Read,
+    )
+}
+
+/// `az <what>` answered `during` a call with a reply that has `problem`.
+pub(crate) fn bad_reply(what: &str, problem: OutputProblem, during: During) -> Error {
+    unusable(what, |seen| unusable_reply(None, problem, during, seen))
 }
 
 /// The cause of the latest `az <what>` call (`what`: its leading words, such as
@@ -432,7 +460,7 @@ fn app(t: &AzureTarget, r: &dyn CommandRunner) -> Result<Value, Error> {
             return Err(az::failed(r, ctx));
         }
     };
-    containerapp::single_revision_mode(t, &app)?;
+    containerapp::single_revision_mode(t, &app, None)?;
     Ok(app)
 }
 
@@ -928,6 +956,20 @@ mod tests {
         assert_eq!(
             res.err().map(|e| e.code_str()),
             Some("owner_setup_required")
+        );
+    }
+
+    /// I5: the Do of a multiple-revision app is the owner's set-mode command, scoped to the
+    /// app's subscription.
+    #[test]
+    fn multiple_revision_mode_do_names_the_set_mode_command() {
+        let mut app = app_show();
+        app["properties"]["configuration"]["activeRevisionsMode"] = json!("Multiple");
+        let (_, res) = preflight_on(healthy_with(&app));
+        assert!(
+            do_of(res).contains(&format!(
+                "az containerapp revision set-mode --mode single --resource-group opv-fixture-rg --name opv-fixture-app --subscription {SUB}"
+            ))
         );
     }
 

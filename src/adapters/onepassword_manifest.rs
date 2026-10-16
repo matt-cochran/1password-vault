@@ -270,43 +270,25 @@ fn not_known(who: &str, selected_by: AccountSource) -> Error {
 
 /// Several accounts on this machine and none chosen for the project: opv never guesses and
 /// never searches them all (each search asks the 1Password app about that account, and
-/// none of them was granted to this project). The person picks one.
-///
-/// Still Legacy: its public code `account_required` (docs/usage.md, and `doctor`'s skip of
-/// the sign-in check) has no catalog cause yet; `ChoiceRequired` would rename it.
+/// none of them was granted to this project). The person picks one: `AccountRequired`,
+/// whose public code stays `account_required` (docs/usage.md, and `doctor`'s skip of the
+/// sign-in check).
 pub fn choose_error(accounts: &[Account]) -> Error {
-    Error::Config(
-        format!(
-            "{} 1Password accounts are on this machine and this project names none; opv uses \
-             only the account you choose, never op's default:\n{}",
-            accounts.len(),
-            listing(accounts)
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::AccountRequired)
-    .with_do("pick the project's account: run opv login --account <email or account ID> in your own terminal")
-    .with_next("opv account list")
-}
-
-/// One line per account: email, sign-in address and account ID (the person's own accounts,
-/// shown so they can choose).
-fn listing(accounts: &[Account]) -> String {
-    if accounts.is_empty() {
-        return "  (none: add one in the 1Password app)".into();
+    Cause::AccountRequired {
+        accounts: accounts
+            .iter()
+            .map(|a| crate::cause::AccountChoice {
+                email: a.email.clone(),
+                address: a
+                    .url
+                    .trim_start_matches("https://")
+                    .trim_end_matches('/')
+                    .to_string(),
+                id: AccountId::new(a.account_uuid.as_str()),
+            })
+            .collect(),
     }
-    accounts
-        .iter()
-        .map(|a| {
-            format!(
-                "  {}  {}  {}",
-                if a.email.is_empty() { "-" } else { &a.email },
-                a.url.trim_start_matches("https://").trim_end_matches('/'),
-                a.account_uuid
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    .into()
 }
 
 /// The accounts op knows (`op account list`, a free probe); empty when it fails. Callers
@@ -793,7 +775,22 @@ mod tests {
             account("ACCOUNTUUID000000000000AAA"),
             account("ACCOUNTUUID000000000000BBB"),
         ]);
-        assert_eq!(e.next_step(), Some("opv account list"));
+        assert!(
+            crate::error::report(&e, "-", None).contains("Next: opv account list"),
+            "{}",
+            crate::error::report(&e, "-", None)
+        );
+    }
+
+    /// I6: the catalog cause keeps the public code `account_required` (docs/usage.md,
+    /// doctor's skip of the sign-in check).
+    #[test]
+    fn choosing_among_several_accounts_keeps_account_required() {
+        let e = choose_error(&[
+            account("ACCOUNTUUID000000000000AAA"),
+            account("ACCOUNTUUID000000000000BBB"),
+        ]);
+        assert_eq!(e.code(), crate::error::Code::AccountRequired);
     }
 
     fn plain_linux() -> Host {

@@ -155,6 +155,7 @@ impl Outer {
                 ProfileName::new(outer.and_then(|o| o.profile.clone()).unwrap_or_default())
             }),
             why,
+            purpose: crate::cause::RamPurpose::FileDelivery,
             env: outer.map(|o| EnvName::new(&o.env)),
             product: outer.map(|o| ProductName::new(&o.product)),
         }

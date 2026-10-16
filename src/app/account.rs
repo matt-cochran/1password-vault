@@ -84,6 +84,7 @@ pub(crate) fn account_list_failed() -> Error {
             system: crate::cause::System::OnePassword,
             at: None,
             problem: crate::cause::OutputProblem::Unparseable,
+            during: crate::cause::During::Read,
             seen,
         }
         .into(),
