@@ -2790,7 +2790,7 @@ mod tests {
     fn failed_read_excerpt_masks_a_registered_value() {
         crate::scrub::register("RnrMarker-91kq");
         failing_read_with_stderr("bad value RnrMarker-91kq\n");
-        assert_eq!(excerpt_lines(), ["bad value __SECRET__"]);
+        assert_eq!(excerpt_lines(), ["bad value ********"]);
     }
 
     #[test]
@@ -2923,7 +2923,7 @@ mod tests {
     #[test]
     fn verbose_stderr_is_scrubbed() {
         let notes = verbose_notes("", "Authorization: Bearer abc.def\n");
-        assert_eq!(notes[1], "    stderr: Authorization: Bearer __SECRET__");
+        assert_eq!(notes[1], "    stderr: Authorization: Bearer ********");
     }
 
     /// I1: a value holding CR, BEL or ESC is masked in `--verbose` stderr too.
@@ -2964,7 +2964,7 @@ mod tests {
             ),
             &[],
         );
-        assert_eq!(crate::scrub::scrub("x m3ItemValueQ8z"), "x __SECRET__");
+        assert_eq!(crate::scrub::scrub("x m3ItemValueQ8z"), "x ********");
     }
 
     #[test]
@@ -3007,7 +3007,7 @@ mod tests {
             &Call::new("sh", &["-c", "echo 'warn PrcMarker-77xq' >&2; exit 3"]),
             &[3],
         );
-        assert_eq!(excerpt_lines(), ["warn __SECRET__"]);
+        assert_eq!(excerpt_lines(), ["warn ********"]);
     }
 
     /// More stderr than the cap neither blocks the child nor loses the last line.
