@@ -1,7 +1,17 @@
 //! The simulated `kubectl`: a cluster per context, kept as Kubernetes JSON objects. Failure
-//! replies come from `tests/fixtures/kubernetes/failures/` (kubectl v1.36.1, API server
-//! v1.37.0); recorded names (`opv-rec`, `opv-norbac`, `api`, `opv-missing` …) are replaced
-//! by the call's own.
+//! replies come from `tests/fixtures/kubernetes/failures/`, success replies from
+//! `tests/fixtures/kubernetes/success/` (both kubectl v1.36.1, API server v1.37.0, kind
+//! v0.33.0); recorded names (`opv-rec`, `opv-norbac`, `api`, `opv-missing` …) are replaced by
+//! the call's own.
+//!
+//! Recorded success replies: `auth can-i` `yes` (success 01) and `no` (failures 02),
+//! `apply -o name` (success 02: `secret/<name>`), `delete … --ignore-not-found` (success 03:
+//! one `secret "<name>" deleted from <ns> namespace` line per deleted object, nothing for a
+//! missing one), `version` and `config get-contexts` (failures 04, 07).
+//!
+//! Inferred, not recorded: `-o name` and `delete` of kinds other than Secret reuse the Secret
+//! recordings with the kind's `<resource>.<group>` word; `-o json` and `-o jsonpath=…`
+//! render the world's own objects (the scenario's documents) rather than a recording.
 //!
 //! ```json
 //! "kubernetes": {
@@ -33,6 +43,10 @@ const BOOLEAN: &[&str] = &[
     "--overwrite",
 ];
 const DIR: &str = "kubernetes/failures";
+const OK: &str = "kubernetes/success";
+/// The Secret name and namespace in the success recordings.
+const RECORDED_SECRET: &str = "opv-api--db-url-abcdefghij";
+const RECORDED_NS: &str = "opv-rec";
 const RECORDED_USER: &str = "system:serviceaccount:opv-rec:opv-norbac";
 
 pub fn call_words(args: &[String]) -> Vec<String> {
@@ -262,8 +276,7 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
             if denied(verb, &resource(res).0) {
                 case("02-can-i-create-secrets-no", &[])
             } else {
-                // The success shape of the recorded `no` (02).
-                Reply::ok("yes\n")
+                recorded(&format!("{OK}/01-can-i-create-secrets-yes"), &[])
             }
         }
         ["get", kind, rest @ ..] => {
@@ -276,7 +289,10 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
                     }
                     match all.iter().find(|o| o["metadata"]["name"] == *name) {
                         Some(o) => output(args, std::slice::from_ref(o), &singular, false),
-                        None if has(args, "--ignore-not-found") => Reply::silent(),
+                        // 03-notfound-secret-ignore: exit 0, nothing printed.
+                        None if has(args, "--ignore-not-found") => {
+                            case("03-notfound-secret-ignore", &[])
+                        }
                         None => not_found(&res, name),
                     }
                 }
@@ -346,19 +362,51 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
             if denied("delete", &res) {
                 return forbidden(&t, "delete", &res, names.first().copied().unwrap_or(""));
             }
+            let (_, _, singular) = resource(kind);
             let list = world.array_at(&format!("{base}/{res}"));
-            let before = list.len();
-            list.retain(|o| !names.iter().any(|n| o["metadata"]["name"] == *n));
-            if list.len() + names.len() != before && !has(args, "--ignore-not-found") {
+            let gone: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|n| list.iter().any(|o| o["metadata"]["name"] == *n))
+                .collect();
+            list.retain(|o| !gone.iter().any(|n| o["metadata"]["name"] == *n));
+            if gone.len() != names.len() && !has(args, "--ignore-not-found") {
                 return Reply::no_recording(&format!("kubectl delete of a missing {res}"), DIR);
             }
-            Reply::silent()
+            deleted(&singular, &gone, &t.ns)
         }
         ["patch", "deployment", name, ..] if denied("get", "deployments") => {
             forbidden(&t, "get", "deployments", name)
         }
         _ => Reply::unsupported("kubectl", args),
     }
+}
+
+/// The first stdout line (with its newline) of success recording `case`.
+fn success_line(case: &str) -> String {
+    let r = recorded(&format!("{OK}/{case}"), &[]);
+    let text = String::from_utf8_lossy(&r.stdout);
+    text.split_inclusive('\n').next().unwrap_or("").to_string()
+}
+
+/// `kubectl delete`'s reply: success 03's line for each object deleted, in the call's order
+/// (03-delete-secrets-missing-ignored: nothing for a name that was not there).
+fn deleted(singular: &str, gone: &[&str], ns: &str) -> Reply {
+    let line = success_line("03-delete-secrets");
+    let out: String = gone
+        .iter()
+        .map(|n| {
+            line.replace(
+                &format!("secret \"{RECORDED_SECRET}\""),
+                &format!("{singular} \"{n}\""),
+            )
+            .replace(
+                &format!(" {RECORDED_NS} namespace"),
+                &format!(" {ns} namespace"),
+            )
+        })
+        .collect();
+    Reply::ok(out)
 }
 
 /// A JSON-pointer key.
@@ -396,12 +444,14 @@ fn output(args: &[String], objs: &[Value], singular: &str, list: bool) -> Reply 
         objs.first().cloned().unwrap_or(Value::Null)
     };
     if fmt == "name" {
+        let line = success_line("02-apply-secret-created");
         let lines: String = objs
             .iter()
             .map(|o| {
-                format!(
-                    "{singular}/{}\n",
-                    o["metadata"]["name"].as_str().unwrap_or("")
+                let name = o["metadata"]["name"].as_str().unwrap_or("");
+                line.replace(
+                    &format!("secret/{RECORDED_SECRET}"),
+                    &format!("{singular}/{name}"),
                 )
             })
             .collect();

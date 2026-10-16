@@ -1,6 +1,14 @@
 //! The simulated `op` (1Password CLI 2.x): "1Password in a file". It answers from
 //! `world.op`, applies edits to it, and enforces sessions, accounts and vault membership.
-//! Failure replies come from `tests/fixtures/op/failures/` (op 2.40.0).
+//! Failure replies come from `tests/fixtures/op/failures/` (op 2.40.0). `whoami --format json`
+//! is recording 10; `item get` prints the world's stored item, a document of the recorded shape
+//! of `tests/fixtures/op_item.json`.
+//!
+//! **Awaiting owner recording** (needs a 1Password session; the owner runs
+//! `tests/fixtures/op/success/RECORD.md`): the JSON success shapes of `account list`,
+//! `vault list`, `vault get`, `vault user list`, `vault create`, `item list`, `item create` and
+//! `item edit`. Until then these print the world's rows in the fields opv reads, one compact
+//! line, and are not taken from a recording.
 //!
 //! ```json
 //! "op": {
