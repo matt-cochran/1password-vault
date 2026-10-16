@@ -1000,6 +1000,42 @@ fn add_env_leaves_out_the_keys_the_item_lacks() {
     );
 }
 
+// ---- FR-55: an item holding only personal keys is no environment boundary ----
+
+/// A team key (`api`, which needs the `api` boundary) and a personal key (`mine`): the item
+/// below holds only the personal one, so it is not the environment's shared item.
+const PERSONAL_KEY: &str = "[environments.prod]\n\
+boundaries.api = { vault_id = \"vprd\", item_id = \"iprd\" }\n\n\
+[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n\
+[products.mine.keys.MY_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\npersonal = true\n";
+
+fn personal_item_fields() -> Vec<Field> {
+    vec![secret("mine", "MY_TOKEN", &v("tok"))]
+}
+
+#[test]
+fn add_env_refuses_an_item_holding_only_personal_keys() {
+    let run = add_env_with(PERSONAL_KEY, &args(), &personal_item_fields());
+    assert!(matches!(
+        run.res.as_ref().unwrap_err().cause(),
+        Some((
+            crate::cause::Cause::ConfigProposalInvalid {
+                rule: crate::cause::FieldRule::Check {
+                    check: crate::cause::ConfigCheck::PersonalItemBoundary { .. }
+                },
+                ..
+            },
+            _
+        ))
+    ));
+}
+
+#[test]
+fn add_env_with_only_personal_keys_leaves_the_configuration_unchanged() {
+    let run = add_env_with(PERSONAL_KEY, &args(), &personal_item_fields());
+    assert_eq!(run.text(), PERSONAL_KEY);
+}
+
 #[test]
 fn add_env_names_the_item_fields_not_declared() {
     let run = add_env_with(EXISTING, &args(), &two_products());
