@@ -3552,3 +3552,110 @@ fn an_unrecognised_failure_without_a_reply_says_the_tool_wrote_none() {
         "op wrote no reply (exit 1), so opv cannot tell why it failed; check op on its own"
     );
 }
+
+/// A18 (01.12): a mismatched confirmation hands back the command with the right one.
+#[test]
+fn a_confirm_mismatch_hands_back_the_command_with_the_right_confirmation() {
+    let c = Cause::ConfirmMismatch {
+        given: "dev".into(),
+        env: EnvName::new("prod"),
+    };
+    let inv = Invocation {
+        command: vec!["sync".into()],
+        args: vec!["prod".into(), "--confirm".into(), "dev".into()],
+        ..inv()
+    };
+    assert_eq!(next_in(&c, &inv), "opv sync prod --confirm prod");
+}
+
+/// D (snapshot review): a disconnected remote hands back the run with every flag, its
+/// confirmation included, as the person's own step (X1, X4).
+#[test]
+fn a_remote_disconnect_hands_back_the_run_with_its_confirmation() {
+    let c = Cause::RemoteDisconnected {
+        profile: ProfileName::new("prof-box"),
+        host: "box.example".into(),
+        during: RemotePhase::Running,
+    };
+    let inv = Invocation {
+        command: vec!["run".into()],
+        args: vec![
+            "prod".into(),
+            "--product".into(),
+            "web".into(),
+            "--remote".into(),
+            "builder".into(),
+            "--confirm".into(),
+            "prod".into(),
+        ],
+        has_child: false,
+        ..inv()
+    };
+    assert_eq!(
+        next_in(&c, &inv),
+        "opv run prod --product web --remote builder --confirm prod"
+    );
+}
+
+/// D (snapshot review): a generated configuration is fixed in its generator, so no opv
+/// command is Next (retry never), never `opv config edit` on the same file.
+#[test]
+fn a_generated_configuration_names_no_opv_command_as_next() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated { generator: None },
+    };
+    let inv = Invocation {
+        command: vec!["env".into()],
+        args: vec!["add".into(), "staging".into()],
+        ..inv()
+    };
+    assert_eq!(c.step(&inv).1, Next::None(NoNext::NothingToRun));
+}
+
+/// D (snapshot review): an invalid proposal (retry never) names no command, never the
+/// command's help.
+#[test]
+fn an_invalid_proposal_names_no_command_as_next() {
+    let c = Cause::ConfigProposalInvalid {
+        source: file_source(),
+        field: DottedPath(vec!["products".into(), "web".into()]),
+        rule: FieldRule::Missing,
+    };
+    assert_eq!(c.step(&inv()).1, Next::None(NoNext::NothingToRun));
+}
+
+/// D (snapshot review): an unreadable input names its kind once ("the .env file").
+#[test]
+fn an_unreadable_input_says_the_once() {
+    let c = Cause::InputUnreadable {
+        path: PathBuf::from("missing.env"),
+        kind: InputKind::Dotenv,
+        io: IoKind::NotFound,
+    };
+    assert!(!c.message().contains("the the"));
+}
+
+/// D (snapshot review): only the confirmation changes, never another word that happens to
+/// name the mistyped environment.
+#[test]
+fn a_confirm_mismatch_changes_only_the_confirmation() {
+    let c = Cause::ConfirmMismatch {
+        given: "dev".into(),
+        env: EnvName::new("prod"),
+    };
+    let inv = Invocation {
+        command: vec!["sync".into()],
+        args: vec![
+            "prod".into(),
+            "--target".into(),
+            "dev".into(),
+            "--confirm=dev".into(),
+        ],
+        ..inv()
+    };
+    assert_eq!(
+        next_in(&c, &inv),
+        "opv sync prod --target dev --confirm=prod"
+    );
+}
