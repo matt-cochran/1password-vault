@@ -6,7 +6,6 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
@@ -14,13 +13,14 @@ use serde::de::{self, Deserializer};
 use super::external::{self, Bridge, ExternalStore};
 use super::runtime::{DEPLOY_RIGHTS, POLL_EVERY, WAIT_MAX, missing_rights};
 use super::{
-    KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM, valid_label_value,
+    Effect, Failed, KUBECTL, KubeDeployment, KubeSecrets, KubeTarget, Kubectl, PROGRAM,
+    valid_label_value,
 };
 use crate::adapters::probe::{spawn_tool, version_in};
-use crate::domain::AccessFinding;
+use crate::cause::{Cause, Unusable};
 use crate::error::Error;
 use crate::host::Host;
-use crate::ports::{PinnedRuntime, Ports};
+use crate::ports::Ports;
 use crate::provider::{
     Check, InitField, NameRules, Preflight, PreflightMode, Provider, Section, StoreBinding,
     StoreConfig, StoreNameRules, TargetConfig, Verdict, eq_as, init_lines,
@@ -291,7 +291,10 @@ impl Provider for KubernetesProvider {
         store: &dyn StoreConfig,
     ) -> Result<Box<dyn TargetConfig>, Error> {
         let Some(t) = target.as_any().downcast_ref::<KubernetesTarget>() else {
-            return Err(Error::Config("kubernetes: not a Kubernetes target".into()));
+            return Err(Cause::Bug {
+                site: "kubernetes: bind was given a target of another provider",
+            }
+            .into());
         };
         Ok(Box::new(KubernetesTarget {
             store: Some(store.clone_box()),
@@ -313,14 +316,6 @@ impl KubernetesTarget {
         self.env_name_template
             .replace("{PRODUCT}", &product)
             .replace("{KEY}", key)
-    }
-
-    /// `kubectl --context <c> --namespace <ns> <rest>`, for fix lines.
-    fn command(&self, rest: &str) -> String {
-        format!(
-            "{PROGRAM} --context {} --namespace {} {rest}",
-            self.target.context, self.target.namespace
-        )
     }
 }
 
@@ -629,9 +624,11 @@ impl TargetConfig for KubernetesTarget {
 fn kubectl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, Error> {
     let o = spawn_tool(r, KUBECTL, host, &["version", "--client"])?;
     if o.status != 0 {
-        return Err(Error::Dependency(
-            format!("{PROGRAM} version --client failed (exit {})", o.status).into(),
-        ));
+        return Err(Cause::ToolUnusable {
+            tool: PROGRAM.into(),
+            why: Unusable::VersionUnreadable,
+        }
+        .into());
     }
     Ok(match version_in(&o.stdout) {
         Some(v) => Verdict::Ok(format!("version {v}")),
@@ -640,7 +637,9 @@ fn kubectl_version(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Ver
 }
 
 impl KubernetesTarget {
-    /// `kubectl config get-contexts <ctx> -o name`: the context is in the kubeconfig.
+    /// `kubectl config get-contexts <ctx> -o name`: the context is in the kubeconfig. A
+    /// failure is the kubectl strategy's: a context missing on this machine asks for its
+    /// credentials here, never for a change to the shared `kubernetes.context` (06.26).
     fn context_check(
         &self,
         r: &dyn CommandRunner,
@@ -656,18 +655,13 @@ impl KubernetesTarget {
         if o.status == 0 {
             Ok(Verdict::Ok(format!("context {ctx} is in your kubeconfig")))
         } else {
-            Err(Error::Config(
-                format!(
-                    "context \"{ctx}\" is not in your kubeconfig (KUBECONFIG or ~/.kube/config); \
-                 nothing was changed\n  next: kubectl config get-contexts -o name lists the \
-                 contexts; set kubernetes.context in secrets.toml to one of them"
-                )
-                .into(),
-            ))
+            Err(self.probe_failure())
         }
     }
 
-    /// `kubectl --context <ctx> version --request-timeout=5s`: the API server answers.
+    /// `kubectl --context <ctx> version --request-timeout=5s`: the API server answers. A
+    /// failure is the kubectl strategy's: a 401 is a sign-in, a refused connection an
+    /// outage (nothing was changed), anything else unrecognised with kubectl's reply.
     fn cluster_check(
         &self,
         r: &dyn CommandRunner,
@@ -682,47 +676,46 @@ impl KubernetesTarget {
         )?;
         if o.status == 0 {
             Ok(Verdict::Ok(format!("API server for context {ctx} answers")))
-        } else if crate::runner::last_failure_signed_out() {
-            Err(super::unauthorized(ctx, "nothing was changed"))
         } else {
-            Err(Error::Unknown(
-                format!(
-                    "provider unavailable: the Kubernetes API server for context \"{ctx}\" did not \
-                 answer (unreachable, or your credentials for it expired); nothing was \
-                 changed\n  next: `kubectl --context {ctx} cluster-info` shows the cause; fix \
-                 it, then re-run `opv doctor`"
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::ProviderUnavailable))
+            Err(self.probe_failure())
         }
     }
 
-    /// `kubectl auth can-i` for the rights sync needs. Advisory (R6): a missing right is a
-    /// warning naming the exact grant, never a failure.
-    /// Every right sync needs (FR-32): a missing one fails, naming the grant.
+    /// The doctor probe that just failed, as the kubectl strategy classifies it.
+    fn probe_failure(&self) -> Error {
+        match Failed::take(&self.target.env, Effect::Read) {
+            Ok(mut f) => {
+                f.name_subjects(&self.target, self.target.namespace_ref());
+                f.into_error()
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// Every right sync needs (FR-32), asked with `kubectl auth can-i`: a missing one fails
+    /// with the first refusal the kubectl strategy typed (a missing right, naming the
+    /// grant); rights that cannot be checked are a warning. With a named store opv writes
+    /// no Secrets itself; the ExternalSecret rights have their own line (`external secrets
+    /// access`).
     fn access_check(&self, r: &dyn CommandRunner) -> Result<Verdict, Error> {
-        let rt = KubeDeployment::new(r, &self.target, BTreeSet::new());
-        // With a named store opv writes no Secrets itself; the ExternalSecret rights have
-        // their own line (`external secrets access`).
-        let needed =
-            |f: &AccessFinding| self.store.is_none() || !f.store_name.ends_with(" secrets");
-        match rt
-            .check_access(&[])
-            .map(|found| found.into_iter().filter(needed).collect::<Vec<_>>())
-        {
-            Ok(found) if found.is_empty() => Ok(Verdict::Ok(format!(
-                "has every right sync needs in namespace {}",
-                self.target.namespace
-            ))),
-            Ok(found) => Err(missing_rights_error(self.access_fix(&found).to_string())),
+        let external = self.store.is_some();
+        let needed = |_: &str, resource: &str| !external || resource != "secrets";
+        match missing_rights(&Kubectl::new(r, &self.target), false, needed) {
+            Ok(found) => match found.into_iter().next() {
+                None => Ok(Verdict::Ok(format!(
+                    "has every right sync needs in namespace {}",
+                    self.target.namespace
+                ))),
+                Some((_, refused)) => Err(refused),
+            },
             Err(e) => Ok(Verdict::Warn(format!("rights not checked: {e}"))),
         }
     }
 
     /// `sync` (Mutate): the rights only a deploy uses after the new revision is live
     /// ([`DEPLOY_RIGHTS`]), checked before the first write, so a missing one never fails a
-    /// deploy that succeeded (FR-32, NR-1).
+    /// deploy that succeeded (FR-32, NR-1). Only a namespace admin can grant it, so the
+    /// refusal is a person's step (06.13).
     fn deploy_rights(&self, r: &dyn CommandRunner) -> Result<(), Error> {
         let external = self.store.is_some();
         let pick = |verb: &str, resource: &str| {
@@ -730,74 +723,10 @@ impl KubernetesTarget {
                 || (external && verb == "delete" && resource == external::RESOURCE)
         };
         let found = missing_rights(&Kubectl::new(r, &self.target), external, pick)?;
-        if found.is_empty() {
-            return Ok(());
+        match found.into_iter().next() {
+            None => Ok(()),
+            Some((_, refused)) => Err(refused),
         }
-        Err(missing_rights_error(format!(
-            "sync refused, nothing was changed: {}",
-            self.access_fix(&found)
-        )))
-    }
-
-    fn access_fix(&self, found: &[AccessFinding]) -> AccessFix<'_> {
-        AccessFix {
-            target: self,
-            found: found.to_vec(),
-        }
-    }
-}
-
-/// The missing rights and the commands that grant exactly them.
-/// Signed in but missing a right sync needs (FR-32): only a namespace admin can grant
-/// it, so a person acts first (the grant commands are in `text`).
-fn missing_rights_error(text: String) -> Error {
-    Error::Target(text.into())
-        .with_code(crate::error::Code::PermissionDenied)
-        .with_do("ask a namespace admin to run the grant commands above")
-}
-
-struct AccessFix<'a> {
-    target: &'a KubernetesTarget,
-    found: Vec<AccessFinding>,
-}
-
-impl fmt::Display for AccessFix<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reasons: Vec<&str> = self.found.iter().map(|a| a.reason.as_str()).collect();
-        write!(f, "{} (sync needs it)", reasons.join("; "))?;
-        f.write_str("\n  fix (as a namespace admin):")?;
-        for resource in [
-            "secrets",
-            external::RESOURCE,
-            "deployments",
-            "replicasets",
-            "pods",
-        ] {
-            let verbs: Vec<&str> = self
-                .found
-                .iter()
-                .filter_map(|a| {
-                    let (verb, res) = a.store_name.split_once(' ')?;
-                    (res == resource).then_some(verb)
-                })
-                .collect();
-            if verbs.is_empty() {
-                continue;
-            }
-            let role = format!("opv-{}", resource.split('.').next().unwrap_or(resource));
-            write!(
-                f,
-                "\n    {}\n    {}",
-                self.target.command(&format!(
-                    "create role {role} --verb={} --resource={resource}",
-                    verbs.join(",")
-                )),
-                self.target.command(&format!(
-                    "create rolebinding {role} --role={role} --user=<your user>"
-                ))
-            )?;
-        }
-        Ok(())
     }
 }
 
@@ -1164,7 +1093,10 @@ environments = ["dev"]
             "error: You must be logged in to the server (Unauthorized)\n",
         );
         let checks = target().doctor(&r, &host);
-        assert!(matches!(&checks[2].outcome, Err(Error::Auth(_))));
+        assert_eq!(
+            checks[2].outcome.as_ref().map_err(Error::code_str).err(),
+            Some("target_not_signed_in")
+        );
     }
 
     #[test]
@@ -1194,23 +1126,68 @@ environments = ["dev"]
         assert_eq!(r.calls.borrow().len(), 1);
     }
 
+    /// The doctor check `i` when kubectl answers the healthy replies up to it, then fails
+    /// it with `stderr` (a recorded reply, `tests/fixtures/kubernetes/failures/`).
+    fn doctor_failure(i: usize, stderr: &str) -> Error {
+        let r = FakeRunner::default();
+        for out in healthy().into_iter().take(i) {
+            r.push_with_stderr(out, "");
+        }
+        r.push_with_stderr(Output::failure(1), stderr);
+        target()
+            .doctor(&r, &host)
+            .swap_remove(i)
+            .outcome
+            .unwrap_err()
+    }
+
+    const CONTEXT_MISSING: &str = "error: context kind-opv not found\n";
+
+    /// 06.26: a context missing on this machine is set up here, not renamed for everyone.
     #[test]
-    fn doctor_fails_a_missing_context_with_the_listing_command() {
-        let mut g = healthy();
-        g[1] = Output::failure(1);
-        let r = FakeRunner::new(g);
-        assert!(doctor_lines(&r)[1].contains("fix: kubectl config get-contexts -o name"));
+    fn doctor_names_a_context_missing_on_this_machine() {
+        assert!(matches!(
+            doctor_failure(1, CONTEXT_MISSING).cause(),
+            Some((
+                Cause::NotFound {
+                    state: crate::cause::NotFoundState::LocalContextMissing,
+                    ..
+                },
+                _
+            ))
+        ));
+    }
+
+    /// 06.26: the Do never edits the shared `kubernetes.context`.
+    #[test]
+    fn doctor_never_asks_to_change_the_shared_context() {
+        let step = doctor_failure(1, CONTEXT_MISSING).step("opv doctor", "opv doctor");
+        assert!(
+            !step
+                .action
+                .unwrap_or_default()
+                .contains("kubernetes.context")
+        );
     }
 
     #[test]
     fn doctor_reports_an_unreachable_cluster_as_provider_unavailable() {
-        let mut g = healthy();
-        g[2] = Output::failure(1);
-        let r = FakeRunner::new(g);
-        let l = &doctor_lines(&r)[2];
+        let refused = "The connection to the server 127.0.0.1:9 was refused - did you specify \
+                       the right host or port?\n";
+        assert_eq!(
+            doctor_failure(2, refused).code_str(),
+            "provider_unavailable"
+        );
+    }
+
+    /// 06.37: the outage text does not repeat its category.
+    #[test]
+    fn doctor_outage_text_names_no_category() {
+        let refused = "The connection to the server 127.0.0.1:9 was refused\n";
         assert!(
-            l.contains("FAIL outcome unknown: provider unavailable"),
-            "{l}"
+            !doctor_failure(2, refused)
+                .to_string()
+                .contains("provider unavailable:")
         );
     }
 
@@ -1225,23 +1202,19 @@ environments = ["dev"]
         );
     }
 
-    /// I4: every right sync needs is required; a missing one fails with the exact grant.
+    /// I4: every right sync needs is required; a missing one fails as the right refused.
     #[test]
-    fn doctor_fails_a_missing_right_with_the_exact_grant() {
+    fn doctor_fails_a_missing_right_as_permission_denied() {
         let mut g = healthy();
         g[5] = Output {
             status: 1,
             stdout: zeroize::Zeroizing::new(b"no\n".to_vec()),
         };
         let r = FakeRunner::new(g);
+        let checks = target().doctor(&r, &host);
         assert_eq!(
-            doctor_lines(&r)[3],
-            "kubernetes access: FAIL target error: your kubectl identity cannot delete \
-             Secrets, so sync \
-             --deploy cannot remove superseded versions (sync needs it)\n  fix (as a namespace \
-             admin):\n    kubectl --context kind-opv --namespace myapp create role opv-secrets \
-             --verb=delete --resource=secrets\n    kubectl --context kind-opv --namespace myapp \
-             create rolebinding opv-secrets --role=opv-secrets --user=<your user>"
+            checks[3].outcome.as_ref().map_err(Error::code_str).err(),
+            Some("permission_denied")
         );
     }
 
@@ -1262,14 +1235,13 @@ environments = ["dev"]
             .collect()
     }
 
-    /// I4: sync refuses before its first write when a right only the deploy uses is missing.
+    /// I4, 06.13: sync refuses before its first write when a right only the deploy uses is
+    /// missing, and only a namespace admin can grant it.
     #[test]
-    fn sync_preflight_refuses_without_the_right_to_list_pods() {
+    fn sync_preflight_refusal_without_a_right_needs_a_person() {
         let r = FakeRunner::new(deploy_rights("list pods"));
-        assert!(matches!(
-            target().preflight(&r, PreflightMode::Mutate),
-            Err(Error::Target(_))
-        ));
+        let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
+        assert!(e.human_required());
     }
 
     /// Signed in but missing a right: a person grants it; not a sign-in.
@@ -1284,10 +1256,12 @@ environments = ["dev"]
     fn sync_preflight_refusal_names_the_grant() {
         let r = FakeRunner::new(deploy_rights("delete secrets"));
         let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
-        assert!(
-            e.mentions("create role opv-secrets --verb=delete --resource=secrets"),
-            "{e}"
-        );
+        assert!(matches!(
+            e.cause(),
+            Some((Cause::MissingRight { grant: crate::cause::GrantModel::K8sRbac {
+                verb, resource, namespace }, .. }, _))
+                if verb == "delete" && resource == "secrets" && namespace.as_deref() == Some("myapp")
+        ));
     }
 
     #[test]
