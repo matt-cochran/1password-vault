@@ -8,6 +8,8 @@
 //! derived classifications. Rendering (`render`, `evidence`) and steps (`step`) are separate
 //! modules.
 
+pub mod evidence;
+pub mod render;
 pub mod subject;
 
 use std::path::PathBuf;
