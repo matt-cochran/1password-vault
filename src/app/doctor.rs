@@ -711,9 +711,13 @@ fn item_check(fleet: &Fleet, env_name: &str, r: &dyn CommandRunner, report: &mut
         let (word, state) = match &row.state {
             KeyState::Missing => ("missing".to_string(), ValueState::Missing),
             KeyState::WrongKind => ("wrong kind".to_string(), ValueState::StoredAsText),
-            KeyState::RuleFailed(rule, _) => {
-                (format!("failed {rule}"), ValueState::RuleFailed { rule })
-            }
+            KeyState::RuleFailed(rule, why) => (
+                format!("failed {rule}"),
+                ValueState::RuleFailed {
+                    rule,
+                    reason: Some(why.to_string()),
+                },
+            ),
             KeyState::Ready | KeyState::Skipped | KeyState::SourceBlocked => continue,
         };
         blocking.push(format!("{} ({word})", key_label(&row.product, &row.key)));
@@ -2383,7 +2387,8 @@ mod tests {
         let (_, out, _) = doctor_scoped(item_without("allumata", "OPENAI_API_KEY"), true);
         assert_eq!(
             json_doc(&out)["do"],
-            "fill in allumata/OPENAI_API_KEY in 1Password for environment prod",
+            "fill in allumata/OPENAI_API_KEY in 1Password for environment prod (click Edit on the \
+             item: it hides empty fields until then)",
             "{out}"
         );
     }

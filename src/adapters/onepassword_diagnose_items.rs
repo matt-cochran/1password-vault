@@ -85,15 +85,13 @@ fn is_definite_failure(seen: &Observed) -> bool {
     matches!(seen.exit(), ExitClass::Code { .. })
 }
 
-/// The kind, name and refind of a create whose outcome op did not deliver (timeout or
-/// signal).
+/// The kind, name and refind of a create whose outcome op did not deliver (timeout, signal
+/// or lost reply).
 fn unfinished_create<'a>(
     seen: &Observed,
     ctx: &'a DiagnoseContext,
 ) -> Option<(CreateKind, &'a String, &'a Refind)> {
-    if !matches!(seen.exit(), ExitClass::TimedOut | ExitClass::Signal { .. }) {
-        return None;
-    }
+    seen.exit().unanswered()?;
     ctx.create
         .as_ref()
         .map(|(kind, name, refind)| (*kind, name, refind))

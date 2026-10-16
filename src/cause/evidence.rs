@@ -20,6 +20,7 @@ pub fn exit_words(exit: ExitClass) -> String {
         ExitClass::Signal { signal } => format!("stopped by signal {signal}"),
         ExitClass::TimedOut => "timed out".to_string(),
         ExitClass::SpawnFailed => "did not start".to_string(),
+        ExitClass::Lost => "reply lost".to_string(),
     }
 }
 

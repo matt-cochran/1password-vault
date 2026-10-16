@@ -355,8 +355,9 @@ enum Attempt {
     /// Ended by this signal (not opv's own timeout kill).
     Killed(i32),
     /// The call ran but its reply could not be collected (its stdout or stdin pipe failed,
-    /// or opv could not wait for it), ending as this ([`KILLED_BY_OPV`] when opv ended it).
-    Lost(crate::cause::ExitClass),
+    /// or opv could not wait for it). Observed as [`ExitClass::Lost`](crate::cause::ExitClass),
+    /// whatever the child's own status, so no diagnosis reports it as a timeout or a kill.
+    Lost,
     /// stdout went past [`OUTPUT_CAP`]; the child ended as this.
     OverCap(crate::cause::ExitClass),
 }
@@ -380,7 +381,7 @@ impl Attempt {
             Attempt::Exited(o) => status_text(o.status),
             Attempt::TimedOut => "timeout".into(),
             Attempt::Killed(_) => "killed".into(),
-            Attempt::Lost(_) => "lost".into(),
+            Attempt::Lost => "lost".into(),
             Attempt::OverCap(_) => status_text(OVER_CAP),
         }
     }
@@ -932,7 +933,7 @@ mod observe {
             }
             Ok((Attempt::TimedOut, _)) => Some(ExitClass::TimedOut),
             Ok((Attempt::Killed(signal), _)) => Some(ExitClass::Signal { signal: *signal }),
-            Ok((Attempt::Lost(exit), _)) => Some(*exit),
+            Ok((Attempt::Lost, _)) => Some(ExitClass::Lost),
             Ok(_) => None,
         }
     }
@@ -1470,7 +1471,7 @@ impl ProcessRunner {
                 Ok(None) => {}
                 Err(_) => {
                     signals::kill(child);
-                    return Ok(Attempt::Lost(KILLED_BY_OPV));
+                    return Ok(Attempt::Lost);
                 }
             }
             if over.load(Ordering::SeqCst) {
@@ -1493,12 +1494,12 @@ impl ProcessRunner {
         let stdout = match rrx.recv_timeout(remaining()) {
             Ok(Ok(Some(out))) => out,
             Ok(Ok(None)) => return Ok(Attempt::OverCap(exit_class_of(status))),
-            Ok(Err(_)) => return Ok(Attempt::Lost(exit_class_of(status))),
+            Ok(Err(_)) => return Ok(Attempt::Lost),
             Err(_) => return Ok(Attempt::TimedOut),
         };
         match wrx.recv_timeout(remaining()) {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => return Ok(Attempt::Lost(exit_class_of(status))),
+            Ok(Err(_)) => return Ok(Attempt::Lost),
             Err(_) => return Ok(Attempt::TimedOut),
         }
         Ok(Attempt::Exited(Output {
@@ -2337,7 +2338,7 @@ pub mod fake {
         Ok(match kind {
             io::ErrorKind::TimedOut => Attempt::TimedOut,
             io::ErrorKind::Interrupted => Attempt::Killed(FAKE_KILL_SIGNAL),
-            io::ErrorKind::ConnectionAborted => Attempt::Lost(KILLED_BY_OPV),
+            io::ErrorKind::ConnectionAborted => Attempt::Lost,
             io::ErrorKind::OutOfMemory => Attempt::OverCap(KILLED_BY_OPV),
             _ => return Err(kind.into()),
         })

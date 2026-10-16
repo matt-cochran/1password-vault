@@ -180,14 +180,17 @@ mod tests {
 
     /// Found live: 1Password shows an empty field only in edit mode.
     #[test]
-    #[ignore = "C4: findings are the catalog's ValuesNeeded now, whose Do (render.rs value_fix) lacks the click-Edit hint; needs the catalog lane"]
     fn a_missing_key_tells_the_person_to_click_edit() {
         let f = fleet_with(
             "[environments.dev]\nboundaries.allumata = { vault_id = \"vdev\", item_id = \"idev\" }\n[products.allumata.keys.DEV_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n",
         );
         let r = FakeRunner::new([item(&[])]);
         let e = check(&f, "dev", Some("allumata"), &r, &mut Vec::new(), true).unwrap_err();
-        assert!(e.action().is_some_and(|a| a.contains("click Edit")));
+        assert!(
+            e.step("", "")
+                .action
+                .is_some_and(|a| a.contains("click Edit"))
+        );
     }
 
     #[test]

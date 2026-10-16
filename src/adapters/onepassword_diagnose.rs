@@ -86,7 +86,7 @@ pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
 /// Classify one failed `op` call from what opv established (`facts`).
 pub fn diagnose_with(seen: Observed, stderr: &str, ctx: &DiagnoseContext, facts: &Facts) -> Cause {
     // An unfinished call is diagnosed by what it was doing, never by its text.
-    if matches!(seen.exit(), ExitClass::TimedOut | ExitClass::Signal { .. }) {
+    if seen.exit().unanswered().is_some() {
         return unknown_outcome(seen, ctx);
     }
     match reading(stderr) {
@@ -190,7 +190,7 @@ fn unknown_outcome(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     }
     Cause::Unavailable {
         system: System::OnePassword,
-        why: Unanswered::Timeout,
+        why: seen.exit().unanswered().unwrap_or(Unanswered::Timeout),
         attempts: 1,
         seen,
     }

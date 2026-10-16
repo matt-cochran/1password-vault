@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::containerapp::ContainerApp;
 use super::keyvault::KeyVault;
 use super::preflight;
+use crate::cause::{Cause, ConfigCheck, DottedPath, FieldRule};
 use crate::config::{check_ident, is_id};
 use crate::error::Error;
 use crate::host::Host;
@@ -173,8 +174,16 @@ static INIT_FIELDS: [InitField; 8] = [
     },
 ];
 
-fn cfg(msg: String) -> Error {
-    Error::Config(msg.into())
+/// `azure.<field>` breaks `rule` (FR-28). The section does not carry its place in the
+/// file, so the field is named within the section.
+fn invalid(field: &str, rule: FieldRule) -> Error {
+    Cause::ConfigInvalid {
+        source: crate::domain::model::ReadFrom::default().0,
+        at: None,
+        field: DottedPath(vec!["azure".into(), field.into()]),
+        rule,
+    }
+    .into()
 }
 
 impl Provider for AzureProvider {
@@ -195,9 +204,12 @@ impl Provider for AzureProvider {
         let a: RawAzure = section.deserialize()?;
         let template = a.env_name.clone();
         if !template.contains("{KEY}") {
-            return Err(cfg(format!(
-                "environment {env}: azure.env_name {template:?} must contain {{KEY}}"
-            )));
+            return Err(invalid(
+                "env_name",
+                FieldRule::Type {
+                    expected: "a template that contains {KEY}",
+                },
+            ));
         }
         Ok(Box::new(azure_target(env, a, template)?))
     }
@@ -280,10 +292,16 @@ fn azure_target(name: &str, a: RawAzure, template: String) -> Result<AzureTarget
     let config = match a.config.as_deref() {
         None | Some("env") => ConfigRoute::Env,
         Some("store") => ConfigRoute::Store,
-        Some(v) => {
-            return Err(cfg(format!(
-                "environment {name}: azure.config must be \"env\" or \"store\", got {v:?}"
-            )));
+        Some(_) => {
+            return Err(invalid(
+                "config",
+                FieldRule::Check {
+                    check: ConfigCheck::NotOneOf {
+                        allowed: vec!["env".into(), "store".into()],
+                        closest: None,
+                    },
+                },
+            ));
         }
     };
     Ok(AzureTarget {
@@ -798,10 +816,7 @@ environments = ["prod"]
             "identity = \"system\"",
             "identity = \"system\"\nconfig = \"plain\"",
         ));
-        assert!(
-            e.contains("azure.config must be \"env\" or \"store\", got \"plain\""),
-            "{e}"
-        );
+        assert!(e.contains("azure.config must be one of env, store"), "{e}");
     }
 
     #[test]

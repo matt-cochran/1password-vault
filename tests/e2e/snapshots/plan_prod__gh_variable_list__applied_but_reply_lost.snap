@@ -7,20 +7,20 @@
 using <SCENARIO>/project/secrets.toml
 retrying gh variable list (2/3) in <delay>
 retrying gh variable list (3/3) in <delay>
-opv: GitHub did not answer after 1 attempt: it timed out
+opv: GitHub did not answer after 1 attempt: it was stopped by signal 9 before it answered
   checked: gh variable list -R e2e-org/e2e-app -e production --json name,value (stopped by signal 9)
 Do: check GitHub's status page (https://www.githubstatus.com) or the network
 Next: opv plan prod
 
 ## json exit: 9
 ## json stdout
-{"schema_version":1,"ok":false,"exit_code":9,"next":"opv plan prod --json","do":"check GitHub's status page (https://www.githubstatus.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"GitHub did not answer after 1 attempt: it timed out","subject":{"attempts":1,"system":"git_hub","why":{"why":"timeout"}},"evidence":{"checked":"gh variable list -R e2e-org/e2e-app -e production --json name,value","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"check GitHub's status page (https://www.githubstatus.com) or the network","next":"opv plan prod --json","next_kind":"rerun"}}
+{"schema_version":1,"ok":false,"exit_code":9,"next":"opv plan prod --json","do":"check GitHub's status page (https://www.githubstatus.com) or the network","error":{"code":"provider_unavailable","category":"unknown","message":"GitHub did not answer after 1 attempt: it was stopped by signal 9 before it answered","subject":{"attempts":1,"system":"git_hub","why":{"why":"killed","signal":9}},"evidence":{"checked":"gh variable list -R e2e-org/e2e-app -e production --json name,value","account":null,"upstream":null},"retry":"safe","human_required":false,"do":"check GitHub's status page (https://www.githubstatus.com) or the network","next":"opv plan prod --json","next_kind":"rerun"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 retrying gh variable list (2/3) in <delay>
 retrying gh variable list (3/3) in <delay>
-opv: GitHub did not answer after 1 attempt: it timed out
+opv: GitHub did not answer after 1 attempt: it was stopped by signal 9 before it answered
   checked: gh variable list -R e2e-org/e2e-app -e production --json name,value (stopped by signal 9)
 Do: check GitHub's status page (https://www.githubstatus.com) or the network
 Next: opv plan prod --json

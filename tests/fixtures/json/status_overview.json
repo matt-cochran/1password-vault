@@ -46,7 +46,7 @@
     "findings": 1
   },
   "next": "opv open allumata/STRIPE_SECRET_KEY --env staging",
-  "do": "fill in allumata/STRIPE_SECRET_KEY in 1Password for environment staging",
+  "do": "fill in allumata/STRIPE_SECRET_KEY in 1Password for environment staging (click Edit on the item: it hides empty fields until then)",
   "error": {
     "code": "findings",
     "category": "findings",
@@ -71,7 +71,7 @@
     },
     "retry": "after_fix",
     "human_required": true,
-    "do": "fill in allumata/STRIPE_SECRET_KEY in 1Password for environment staging",
+    "do": "fill in allumata/STRIPE_SECRET_KEY in 1Password for environment staging (click Edit on the item: it hides empty fields until then)",
     "next": "opv open allumata/STRIPE_SECRET_KEY --env staging",
     "next_kind": "run"
   }

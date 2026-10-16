@@ -1,9 +1,5 @@
 # Rules a not-yet-migrated path breaks: `<cell> <rule>`. This list only shrinks
 # (KNOWN_LEGACY_CEILING in tests/e2e/matrix.rs); remove an entry once its rule holds.
-doctor_dev__op_item_get_ie2eshareddev00000000000001__timeout next_does_not_loop
-doctor_dev__op_item_get_ie2eshareddev00000000000001__tool_missing next_does_not_loop
-doctor_dev__op_item_get_ie2ewebdev0000000000000001__timeout next_does_not_loop
-doctor_dev__op_item_get_ie2ewebdev0000000000000001__tool_missing next_does_not_loop
 plan_prod__flyctl_secrets_list__credential_rejected next_does_not_loop
 plan_prod__flyctl_secrets_list__malformed_output code_is_in_the_catalog
 plan_prod__flyctl_secrets_list__malformed_output next_does_not_loop

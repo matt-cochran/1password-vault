@@ -7,7 +7,7 @@
 use super::diagnose;
 use crate::cause::{
     CallId, Cause, CreateKind, CredentialRef, DiagnoseContext, EnvName, ExitClass, ItemId,
-    Observed, Principal, Refind, System, TargetName, VarName,
+    Observed, Principal, Refind, System, TargetName, Unanswered, VarName,
 };
 
 /// The recorded raw stderr and observed exit class for `case`.
@@ -266,4 +266,38 @@ fn a_rejected_deploy_credential_names_its_vault() {
             .message()
             .contains("(vault vlt-deploy)")
     );
+}
+
+/// The reason a read reported as unavailable gave, for an unfinished call ending as `exit`.
+fn unanswered_read(exit: ExitClass) -> Option<Unanswered> {
+    match diagnose(observed(exit, person()), "", &DiagnoseContext::default()) {
+        Cause::Unavailable { why, .. } => Some(why),
+        _ => None,
+    }
+}
+
+/// D6 (X26): a read killed by a signal is reported as killed, not as a timeout.
+#[test]
+fn d6_a_killed_read_is_unavailable_because_it_was_killed() {
+    assert_eq!(
+        unanswered_read(ExitClass::Signal { signal: 15 }),
+        Some(Unanswered::Killed { signal: 15 })
+    );
+}
+
+/// D6 (X26): a read whose reply was lost is reported as lost, not as a timeout.
+#[test]
+fn d6_a_read_with_a_lost_reply_is_unavailable_because_its_reply_was_lost() {
+    assert_eq!(unanswered_read(ExitClass::Lost), Some(Unanswered::Lost));
+}
+
+/// D6: a write whose reply was lost has an unknown outcome.
+#[test]
+fn d6_a_write_with_a_lost_reply_has_an_unknown_outcome() {
+    let ctx = DiagnoseContext {
+        write: true,
+        ..DiagnoseContext::default()
+    };
+    let cause = diagnose(observed(ExitClass::Lost, person()), "", &ctx);
+    assert_eq!(cause.code(), "outcome_unknown");
 }

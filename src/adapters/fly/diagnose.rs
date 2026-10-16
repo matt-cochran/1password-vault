@@ -19,7 +19,7 @@ use crate::cause::{
 pub fn diagnose(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
     // The runner's budget is the only clock flyctl has. An unfinished call is diagnosed by
     // what it was doing, never by its text (which may be a fragment).
-    if let Some(why) = ended_before_reply(&seen) {
+    if let Some(why) = seen.exit().unanswered() {
         return unknown_outcome(&seen, ctx, why);
     }
     match reading(stderr) {
@@ -106,15 +106,6 @@ fn reading(stderr: &str) -> Option<Reading> {
         .iter()
         .find(|(_, phrases)| phrases.iter().any(|phrase| stderr.contains(phrase)))
         .map(|(reading, _)| *reading)
-}
-
-/// The exit classes that mean the call never got a reply opv can read: opv's timeout or a
-/// signal. flyctl has no timeout of its own, so the runner's clock is the only source.
-fn ended_before_reply(seen: &Observed) -> Option<Unanswered> {
-    match seen.exit() {
-        ExitClass::TimedOut | ExitClass::Signal { .. } => Some(Unanswered::Timeout),
-        _ => None,
-    }
 }
 
 /// What to report when the call did not finish (§4.6): a create's outcome and a write's
@@ -221,6 +212,7 @@ fn established(seen: &Observed) -> Vec<String> {
     match seen.exit() {
         ExitClass::TimedOut => facts.push("the call ended on opv's timeout".to_string()),
         ExitClass::Signal { signal } => facts.push(format!("the call ended on signal {signal}")),
+        ExitClass::Lost => facts.push("the call's reply was lost".to_string()),
         _ => {}
     }
     facts

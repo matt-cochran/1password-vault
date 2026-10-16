@@ -27,9 +27,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::az::{self, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
-use crate::cause::{Cause, DiagnoseContext, Principal};
+use crate::cause::{Cause, DiagnoseContext, IoKind, Principal, RamDir};
 use crate::domain::{Kind, SecretValue};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::provider::{CredentialField, DeployLogin};
 use crate::ramdir::{PrivateDir, owned_dir, ram_backed, sweep};
 use crate::runner::Outcome;
@@ -54,12 +54,18 @@ pub const FIELDS: &[CredentialField] = &[
 pub const DIR_PREFIX: &str = if cfg!(windows) { "opv-az-" } else { "opv-az." };
 
 /// The refusal when this machine has no safe place for az's stored secret (nothing read or
-/// changed). The way out is a machine that has one (06.49): removing `deploy_credentials`
-/// would change how everyone deploys the environment, for a limit of this machine alone.
-pub const NO_RAM_DIR: &str = "deploy credentials for Azure need a private RAM directory \
-     ($XDG_RUNTIME_DIR on tmpfs), which this machine doesn't have; nothing was read or \
-     changed\n  next: run this from a Linux login session (its XDG_RUNTIME_DIR is on tmpfs) \
-     or in CI";
+/// changed), with the reason it has none. The way out is a machine that has one (06.49):
+/// removing `deploy_credentials` would change how everyone deploys the environment, for a
+/// limit of this machine alone.
+fn no_ram_dir(why: RamDir) -> Error {
+    Cause::RamDirUnavailable {
+        remote: None,
+        why,
+        env: None,
+        product: None,
+    }
+    .into()
+}
 
 /// The Azure CLI signed in as the environment's service principal, in a private directory
 /// removed on drop.
@@ -69,6 +75,9 @@ pub struct AzureLogin {
 
 /// Start an Azure deploy sign-in: steps 1 to 3 for this platform.
 pub fn start() -> Result<AzureLogin, Error> {
+    if cfg!(target_os = "macos") {
+        return Err(no_ram_dir(RamDir::NoneOnPlatform { os: "macOS" }));
+    }
     if cfg!(windows) {
         let base = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Temp"));
         return start_windows(base);
@@ -81,17 +90,26 @@ pub fn start_in(
     runtime: Option<OsString>,
     is_ram: &dyn Fn(&Path) -> io::Result<bool>,
 ) -> Result<AzureLogin, Error> {
-    let refuse = || Error::Policy(NO_RAM_DIR.into()).with_code(Code::RamDirUnavailable);
     let runtime = runtime
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .ok_or_else(refuse)?;
-    if !owned_dir(&runtime) || !is_ram(&runtime).unwrap_or(false) {
-        return Err(refuse());
+        .ok_or_else(|| no_ram_dir(RamDir::Unset))?;
+    if !runtime.is_absolute() {
+        return Err(no_ram_dir(RamDir::NotAbsolute));
+    }
+    if !owned_dir(&runtime) {
+        return Err(no_ram_dir(RamDir::NotOwned));
+    }
+    if !is_ram(&runtime).unwrap_or(false) {
+        return Err(no_ram_dir(RamDir::NotTmpfs));
     }
     sweep(&runtime, DIR_PREFIX);
-    let dir = PrivateDir::create(&runtime, DIR_PREFIX).map_err(|_| refuse())?;
+    let dir = PrivateDir::create(&runtime, DIR_PREFIX).map_err(|e| {
+        Error::from(Cause::PrivateDirFailed {
+            dir: runtime.clone(),
+            io: e.kind().into(),
+        })
+    })?;
     Ok(AzureLogin { dir })
 }
 
@@ -101,13 +119,11 @@ fn start_windows(base: Option<PathBuf>) -> Result<AzureLogin, Error> {
     let base = base
         .filter(|b| b.is_absolute() && b.is_dir())
         .ok_or_else(|| {
-            Error::Policy(
-                "deploy credentials for Azure need %LOCALAPPDATA%\\Temp for a private az \
-             directory, which was not found; nothing was read or changed\n  next: run this \
-             from a Windows login session that has %LOCALAPPDATA%, or in CI"
-                    .into(),
-            )
-            .with_code(Code::RamDirUnavailable)
+            // No %LOCALAPPDATA%\Temp: nowhere to make az's private directory.
+            Error::from(Cause::PrivateDirFailed {
+                dir: PathBuf::from(r"%LOCALAPPDATA%\Temp"),
+                io: IoKind::NotFound,
+            })
         })?;
     sweep(&base, DIR_PREFIX);
     let dir = PrivateDir::create(&base, DIR_PREFIX).map_err(|e| {
@@ -170,23 +186,15 @@ fn check_store(dir: &Path, windows: bool) -> Result<(), Error> {
     let plain = dir.join("service_principal_entries.json").exists();
     let encrypted = dir.join("service_principal_entries.bin").exists();
     if plain || !encrypted {
-        return Err(Error::Policy(
-            "az did not store the deploy credentials encrypted (DPAPI) in opv's private \
-             directory, so it was removed; nothing was changed\n  next: remove any az \
-             setting that turns off token cache encryption (AZURE_CORE_ENCRYPT_TOKEN_CACHE)"
-                .into(),
-        ));
+        // az kept the service principal unencrypted (or not at all) in opv's private
+        // directory, which is removed when the run ends; nothing was changed.
+        return Err(Cause::PrivateDirFailed {
+            dir: dir.to_path_buf(),
+            io: IoKind::PermissionDenied,
+        }
+        .into());
     }
     Ok(())
-}
-
-/// A tenant or client ID: argv-safe (GUID or domain), never starting with `-`.
-fn is_azure_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 255
-        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 impl DeployLogin for AzureLogin {
@@ -195,19 +203,13 @@ impl DeployLogin for AzureLogin {
         values: BTreeMap<String, SecretValue>,
         r: &dyn crate::runner::CommandRunner,
     ) -> Result<(), Error> {
+        // The item was read with every field FIELDS declares (onepassword's
+        // read_deploy_credentials refuses one without them), so a missing one is opv's bug.
         let get = |k: &str| {
             values.get(k).ok_or_else(|| {
-                Error::Auth(
-                    format!(
-                        "deploy credentials: the deploy_credentials item has no {k} field; \
-                         nothing was changed"
-                    )
-                    .into(),
-                )
-                .with_code(Code::DeployCredentialsFailed)
-                .with_do(format!(
-                    "add the {k} field to the environment's deploy_credentials item in 1Password"
-                ))
+                Error::from(Cause::Bug {
+                    site: "azure: deploy sign-in given values without a declared field",
+                })
             })
         };
         let (tenant, client, secret) = (
@@ -215,30 +217,17 @@ impl DeployLogin for AzureLogin {
             get("AZURE_CLIENT_ID")?,
             get("AZURE_CLIENT_SECRET")?,
         );
-        for (label, v) in [("AZURE_TENANT_ID", tenant), ("AZURE_CLIENT_ID", client)] {
-            if !is_azure_id(v.expose()) {
-                return Err(Error::Auth(
-                    format!(
-                        "deploy credentials: {label} is not a tenant or client ID (a GUID or \
-                     domain); nothing was changed"
-                    )
-                    .into(),
-                )
-                .with_code(Code::DeployCredentialsFailed)
-                .with_do(format!(
-                    "correct {label} in the environment's deploy_credentials item in 1Password"
-                )));
-            }
-        }
+        // The IDs are passed as `--name=value`, so no value is read as an option of az; a
+        // malformed ID is az's to reject, under the service principal's name (06.18).
+        let user = format!("--username={}", client.expose());
+        let tenant_arg = format!("--tenant={}", tenant.expose());
         // `--allow-no-subscriptions`: a service principal with no role on any subscription
         // still signs in, so the subscription preflight names the subscription (06.18).
         let args = [
             "login",
             "--service-principal",
-            "-u",
-            client.expose(),
-            "-t",
-            tenant.expose(),
+            &user,
+            &tenant_arg,
             "-p",
             "@/dev/stdin",
             "--allow-no-subscriptions",
