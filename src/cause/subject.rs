@@ -349,3 +349,112 @@ impl CreateKind {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
 pub struct CommandId(pub String);
+
+/// A product's key, as `--rotate` names it (`PRODUCT/KEY`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProductKey {
+    pub product: ProductName,
+    pub key: KeyName,
+}
+
+impl fmt::Display for ProductKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.product, self.key)
+    }
+}
+
+/// What a plan covers, so an approval handoff and the read that replaces a used or changed
+/// plan carry every scope flag the plan was made with (X1: never a dropped `--target`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanScope {
+    /// A deployment (sync) plan of one environment.
+    Sync {
+        env: EnvName,
+        targets: Vec<TargetName>,
+        product: Option<ProductName>,
+        deploy: bool,
+        prune: bool,
+        rotate: Vec<ProductKey>,
+    },
+    /// A structural plan (`opv structure plan`).
+    Structural,
+}
+
+/// Where the name of a resource that was not found came from, so the Do says where to fix it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum NamedBy {
+    /// A configuration field (`environments.prod.targets.web.fly.app`).
+    ConfigField { path: DottedPath },
+    /// A command-line flag (`--fly-app`).
+    Flag { flag: String },
+}
+
+/// A configuration naming rule (§4.12). Each has plain words ([`PatternId::words`]); a
+/// regular expression is never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternId {
+    /// `[stores.<name>]`.
+    StoreName,
+    /// A target name (FR-56).
+    TargetName,
+    /// A product name, and a boundary name.
+    ProductName,
+    /// Vault, item and state vault IDs, and app names that go into argv.
+    Id,
+    /// A key name, and every name a target renders (an environment variable name).
+    KeyName,
+    /// A process role.
+    RoleName,
+    /// A remote profile's name.
+    RemoteName,
+    /// A remote profile's host.
+    RemoteHost,
+    /// A remote profile's user.
+    RemoteUser,
+    /// A remote profile's pinned path (command, workdir, opv path).
+    RemotePath,
+    /// A remote profile's `host_key`.
+    HostKey,
+    /// A key's `file` under `[products.<p>.local]`.
+    LocalFile,
+    /// An environment's 1Password `account`.
+    Account,
+}
+
+impl PatternId {
+    /// The rule in plain words, as a reader would say it.
+    pub fn words(self) -> &'static str {
+        match self {
+            PatternId::StoreName => {
+                "lower-case letters, digits and -, starting and ending with a letter or digit, at most 63 characters"
+            }
+            PatternId::TargetName => "lower-case letters, digits and -, starting with a letter",
+            PatternId::ProductName => "lower-case letters, digits, _ and -, starting with a letter",
+            PatternId::Id => "letters, digits, ., _ and -, starting with a letter or digit",
+            PatternId::KeyName => "upper-case letters, digits and _, starting with a letter",
+            PatternId::RoleName => "1 to 32 lower-case letters, digits and -",
+            PatternId::RemoteName => {
+                "lower-case letters, digits and -, starting with a letter, at most 32 characters"
+            }
+            PatternId::RemoteHost => {
+                "a host name or address: letters, digits, ., - and :, not starting with -"
+            }
+            PatternId::RemoteUser => {
+                "lower-case letters, digits, _, . and -, starting with a letter or _, at most 32 characters"
+            }
+            PatternId::RemotePath => {
+                "an absolute path of letters, digits, ., _, /, + and -, without .."
+            }
+            PatternId::HostKey => "the host's public key, as <type> <base64>",
+            PatternId::LocalFile => {
+                "a relative path of at most four parts separated by /, each of lower-case letters and digits with - only between them"
+            }
+            PatternId::Account => {
+                "a 1Password sign-in address (my.1password.com), an email or an account ID"
+            }
+        }
+    }
+}

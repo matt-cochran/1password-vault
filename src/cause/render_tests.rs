@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use super::super::evidence::{BOX_LINES, upstream_box};
 use super::*;
+use crate::host::{Platform, Shell};
 
 fn seen(principal: Principal) -> Observed {
     Observed::from_failed_call(
@@ -59,6 +60,34 @@ fn res(kind: ResourceKind, name: &str) -> ResourceRef {
         name: ResourceName::new(name),
         scope: Some("scope-east".into()),
     }
+}
+
+fn sync_scope() -> PlanScope {
+    PlanScope::Sync {
+        env: EnvName::new("prod"),
+        targets: vec![TargetName::new("web"), TargetName::new("worker")],
+        product: Some(ProductName::new("api")),
+        deploy: true,
+        prune: true,
+        rotate: vec![ProductKey {
+            product: ProductName::new("api"),
+            key: KeyName::new("SIGNING_KEY"),
+        }],
+    }
+}
+
+fn fly_app_field() -> NamedBy {
+    NamedBy::ConfigField {
+        path: DottedPath(
+            ["environments", "prod", "targets", "web", "fly", "app"]
+                .map(String::from)
+                .to_vec(),
+        ),
+    }
+}
+
+fn pinned_hosts() -> PathBuf {
+    PathBuf::from("/home/me/.config/opv/known_hosts")
 }
 
 fn check_cmd() -> Cmd {
@@ -134,8 +163,17 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 target: TargetName::new("tgt-web"),
                 vault: VaultId::new("vlt-state"),
                 shared_with: vec![TargetName::new("tgt-worker")],
+                source: file_source(),
+                at: Some(Location { line: 21, col: 1 }),
             },
-            vec!["env-prod", "tgt-web", "vlt-state", "tgt-worker"],
+            vec![
+                "env-prod",
+                "tgt-web",
+                "vlt-state",
+                "tgt-worker",
+                "cfg/secrets.toml",
+                "line 21",
+            ],
         ),
         (
             ConfigNotEditable {
@@ -306,6 +344,8 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                     role: "Key Vault Secrets Officer".into(),
                     scope: "scope-kv".into(),
                 },
+                env: Some(EnvName::new("env-prod")),
+                target: Some(TargetName::new("tgt-web")),
                 seen: seen(Principal::ServicePrincipal {
                     client_id: "sp-client-1".into(),
                 }),
@@ -331,10 +371,16 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             NotFound {
                 system: System::Fly,
                 resource: res(ResourceKind::FlyApp, "app-shop"),
+                named_by: fly_app_field(),
                 state: NotFoundState::Missing,
                 seen: person(),
             },
-            vec!["Fly", "app-shop", "scope-east"],
+            vec![
+                "Fly",
+                "app-shop",
+                "scope-east",
+                "environments.prod.targets.web.fly.app",
+            ],
         ),
         (
             TargetRefused {
@@ -344,6 +390,8 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                     new_revision: "rev-new".into(),
                     serving: Some("rev-old".into()),
                 },
+                env: Some(EnvName::new("env-prod")),
+                target: Some(TargetName::new("tgt-web")),
                 seen: person(),
             },
             vec!["Azure", "ca-shop", "rev-new", "rev-old"],
@@ -401,6 +449,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             Partial {
                 done: vec!["vault shop-prod".into()],
                 approval_used: Some(PlanId::new("sp-used")),
+                approval_scope: Some(sync_scope()),
                 then: Box::new(BudgetSpent {
                     budget_seconds: 77,
                     writes_started: true,
@@ -443,9 +492,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
         ),
         (
             ToolMissing {
-                tool: "flyctl".into(),
+                tool: "op".into(),
+                platform: Platform::MacOs,
+                shell: Shell::Posix,
+                ci: false,
             },
-            vec!["flyctl"],
+            vec!["op", "brew install 1password-cli"],
         ),
         (
             ToolUnusable {
@@ -469,6 +521,8 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             Unrecognized {
                 system: System::OnePassword,
                 established: vec!["signed in".into()],
+                env: Some(EnvName::new("env-prod")),
+                target: None,
                 seen: person(),
             },
             vec!["op", "1Password", "signed in"],
@@ -518,19 +572,28 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 kind: InputKind::Dotenv,
                 at: Some(Location { line: 7, col: 1 }),
                 field: "BAD KEY".into(),
-                rule: FieldRule::Pattern { id: "key_name" },
+                rule: FieldRule::Pattern {
+                    id: PatternId::KeyName,
+                },
             },
-            vec!["app/.env", "line 7", "BAD KEY", "key name"],
+            vec![
+                "app/.env",
+                "line 7",
+                "BAD KEY",
+                "upper-case letters, digits and _",
+            ],
         ),
         (
             ApprovalMissing {
                 plan: PlanId::new("sp-9f3"),
+                scope: sync_scope(),
             },
             vec!["sp-9f3"],
         ),
         (
             ApprovalUsed {
                 plan: PlanId::new("sp-9f3"),
+                scope: sync_scope(),
                 partial: true,
             },
             vec!["sp-9f3"],
@@ -539,12 +602,14 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             PlanChanged {
                 old: PlanId::new("sp-old"),
                 new: PlanId::new("sp-new"),
+                scope: sync_scope(),
             },
             vec!["sp-old", "sp-new"],
         ),
         (
             PlanUnknown {
                 plan: "sp-what".into(),
+                scope: None,
             },
             vec!["sp-what"],
         ),
@@ -552,6 +617,8 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             RamDirUnavailable {
                 remote: Some(ProfileName::new("prof-box")),
                 why: RamDir::NotTmpfs,
+                env: Some(EnvName::new("env-prod")),
+                product: Some(ProductName::new("prod-api")),
             },
             vec!["prof-box", "tmpfs"],
         ),
@@ -568,6 +635,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 user: "deployer".into(),
                 host: "box.example".into(),
                 port: 2222,
+                known_hosts: pinned_hosts(),
             },
             vec!["prof-box", "deployer", "box.example", "2222"],
         ),
@@ -879,21 +947,94 @@ fn person_only_flags_appear_only_in_a_handoff() {
     assert_eq!(bad, Vec::<&str>::new());
 }
 
-#[test]
-fn a_unique_closest_name_is_substituted_keeping_every_flag() {
-    let c = Cause::NotDeclared {
+fn misspelt_env() -> Cause {
+    Cause::NotDeclared {
         kind: NameKind::Environment,
         given: "prdo".into(),
         candidates: vec!["prod".into()],
         closest: Closest::unique(&["prod"]),
-    };
-    let i = Invocation {
-        args: vec!["prdo".into(), "--target".into(), "web".into()],
+    }
+}
+
+fn invoked(command: &[&str], args: &[&str]) -> Invocation {
+    Invocation {
+        command: command.iter().map(|w| w.to_string()).collect(),
+        args: args.iter().map(|a| a.to_string()).collect(),
         ..inv()
-    };
+    }
+}
+
+fn next_line(c: &Cause, i: &Invocation) -> Option<String> {
+    next_text(&c.step(i).1, i)
+}
+
+#[test]
+fn a_unique_closest_name_is_substituted_into_a_read_keeping_every_flag() {
+    let i = invoked(&["status"], &["prdo", "--json"]);
     assert_eq!(
-        next_text(&c.step(&i).1, &i).as_deref(),
-        Some("opv sync prod --target web")
+        next_line(&misspelt_env(), &i).as_deref(),
+        Some("opv status prod --json")
+    );
+}
+
+#[test]
+fn a_misspelt_sync_becomes_its_plan_with_the_scope_flags() {
+    let i = invoked(
+        &["sync"],
+        &[
+            "prdo",
+            "--target",
+            "web",
+            "--deploy",
+            "--prune",
+            "--product",
+            "api",
+            "--rotate",
+            "api/K",
+        ],
+    );
+    assert_eq!(
+        next_line(&misspelt_env(), &i).as_deref(),
+        Some("opv plan prod --target web --product api --rotate api/K")
+    );
+}
+
+#[test]
+fn a_misspelt_sync_never_carries_its_confirmation_into_the_plan() {
+    let i = invoked(&["sync"], &["prdo", "--confirm", "prdo", "--approved=sp-1"]);
+    assert_eq!(
+        next_line(&misspelt_env(), &i).as_deref(),
+        Some("opv plan prod")
+    );
+}
+
+#[test]
+fn a_misspelt_bootstrap_becomes_its_dry_run() {
+    let i = invoked(&["bootstrap"], &["--rebind", "prdo"]);
+    assert_eq!(
+        next_line(&misspelt_env(), &i).as_deref(),
+        Some("opv bootstrap --rebind prod --dry-run")
+    );
+}
+
+#[test]
+fn a_misspelt_target_add_becomes_its_dry_run() {
+    let i = invoked(&["target", "add"], &["prdo", "site", "--fly-app", "site-x"]);
+    assert_eq!(
+        next_line(&misspelt_env(), &i).as_deref(),
+        Some("opv target add prod site --fly-app site-x --dry-run")
+    );
+}
+
+#[test]
+fn a_misspelt_write_without_a_read_form_lists_the_names() {
+    let i = invoked(&["generate"], &["prdo", "api/K"]);
+    assert_eq!(
+        misspelt_env().step(&i).1,
+        Next::Check(Cmd {
+            command: vec!["config".into(), "describe".into()],
+            args: vec![],
+        })
     );
 }
 
@@ -1029,6 +1170,7 @@ fn the_document_names_the_checked_account() {
 fn the_document_kinds_a_handoff() {
     let c = Cause::ApprovalMissing {
         plan: PlanId::new("sp-9f3"),
+        scope: PlanScope::Structural,
     };
     let d = document(&c, None, &inv(), false);
     assert_eq!(
@@ -1081,4 +1223,268 @@ fn a_rerun_never_renders_the_child_command() {
         ..inv()
     };
     assert_eq!(rerun_text(&i), "opv run dev -- <command>");
+}
+
+// --- contract v2: what rendering found missing ------------------------------------------------
+
+fn fixture(ordinal_of: usize) -> Cause {
+    causes()
+        .into_iter()
+        .find(|c| ordinal(c) == ordinal_of)
+        .unwrap_or(Cause::Bug { site: "none" })
+}
+
+/// Any cause's Next as a command line, under the default invocation.
+fn next_of(c: &Cause) -> Option<String> {
+    next_line(c, &inv())
+}
+
+#[test]
+fn a_missing_right_checks_its_environment_and_target() {
+    assert_eq!(
+        next_of(&fixture(25)).as_deref(),
+        Some("opv doctor --env env-prod --target tgt-web")
+    );
+}
+
+#[test]
+fn a_refused_target_checks_its_environment_and_target() {
+    assert_eq!(
+        next_of(&fixture(28)).as_deref(),
+        Some("opv doctor --env env-prod --target tgt-web")
+    );
+}
+
+#[test]
+fn an_unrecognized_failure_checks_the_environment_it_knows() {
+    assert_eq!(
+        next_of(&fixture(42)).as_deref(),
+        Some("opv doctor --env env-prod")
+    );
+}
+
+#[test]
+fn a_missing_approval_hands_off_every_scope_flag() {
+    let c = Cause::ApprovalMissing {
+        plan: PlanId::new("sp-9f3"),
+        scope: sync_scope(),
+    };
+    assert_eq!(
+        next_of(&c).as_deref(),
+        Some(
+            "opv approve sp-9f3 --sync prod --deploy --prune --target web --target worker --product api --rotate api/SIGNING_KEY"
+        )
+    );
+}
+
+#[test]
+fn a_structural_approval_hands_off_the_plan_id_alone() {
+    let c = Cause::ApprovalMissing {
+        plan: PlanId::new("sp-9f3"),
+        scope: PlanScope::Structural,
+    };
+    assert_eq!(next_of(&c).as_deref(), Some("opv approve sp-9f3"));
+}
+
+const SCOPED_PLAN: &str =
+    "opv plan prod --target web --target worker --product api --rotate api/SIGNING_KEY";
+
+#[test]
+fn a_used_approval_reads_the_plan_of_the_same_scope() {
+    assert_eq!(next_of(&fixture(50)).as_deref(), Some(SCOPED_PLAN));
+}
+
+#[test]
+fn a_changed_plan_reads_the_plan_of_the_same_scope() {
+    assert_eq!(next_of(&fixture(51)).as_deref(), Some(SCOPED_PLAN));
+}
+
+#[test]
+fn an_unknown_plan_of_a_known_scope_reads_that_scope() {
+    let c = Cause::PlanUnknown {
+        plan: "sp-what".into(),
+        scope: Some(PlanScope::Structural),
+    };
+    assert_eq!(next_of(&c).as_deref(), Some("opv structure plan"));
+}
+
+#[test]
+fn a_partial_run_on_an_approval_reads_what_remains_in_its_scope() {
+    assert_eq!(next_of(&fixture(34)).as_deref(), Some(SCOPED_PLAN));
+}
+
+#[test]
+fn an_unreachable_remote_is_checked_against_the_pinned_host_key() {
+    assert_eq!(
+        next_of(&fixture(55)).as_deref(),
+        Some(
+            "ssh -F none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/me/.config/opv/known_hosts -p 2222 deployer@box.example true"
+        )
+    );
+}
+
+#[test]
+fn a_pattern_rule_is_never_shown_as_a_regular_expression() {
+    let c = Cause::ConfigInvalid {
+        source: file_source(),
+        at: None,
+        field: DottedPath(vec!["environments".into(), "prod".into(), "targets".into()]),
+        rule: FieldRule::Pattern {
+            id: PatternId::TargetName,
+        },
+    };
+    let shown = format!("{} {}", c.message(), c.do_text(&inv()).unwrap_or_default());
+    assert!(!shown.contains(['^', '$', '[', '*']), "{shown}");
+}
+
+#[test]
+fn a_target_name_rule_reads_as_plain_words() {
+    assert_eq!(
+        PatternId::TargetName.words(),
+        "lower-case letters, digits and -, starting with a letter"
+    );
+}
+
+fn missing_op(platform: Platform, ci: bool) -> Cause {
+    Cause::ToolMissing {
+        tool: "op".into(),
+        platform,
+        shell: Shell::PowerShell,
+        ci,
+    }
+}
+
+#[test]
+fn a_missing_tool_on_windows_gets_the_windows_install_line() {
+    assert_eq!(
+        missing_op(Platform::Windows, false)
+            .do_text(&inv())
+            .as_deref(),
+        Some("install: winget install AgileBits.1Password.CLI")
+    );
+}
+
+#[test]
+fn a_missing_tool_under_ci_gets_the_ci_install_line() {
+    assert_eq!(
+        missing_op(Platform::Linux, true).do_text(&inv()),
+        Some(crate::host::OP_CLI.ci.to_string())
+    );
+}
+
+#[test]
+fn a_missing_tool_opv_does_not_know_is_named_plainly() {
+    let c = Cause::ToolMissing {
+        tool: "frobctl".into(),
+        platform: Platform::Linux,
+        shell: Shell::Posix,
+        ci: false,
+    };
+    assert_eq!(
+        c.do_text(&inv()).as_deref(),
+        Some("install frobctl and make sure it is on PATH")
+    );
+}
+
+#[test]
+fn a_missing_tool_documents_its_platform() {
+    let d = document(&missing_op(Platform::MacOs, false), None, &inv(), false);
+    assert_eq!(d["subject"]["platform"], serde_json::json!("macos"));
+}
+
+#[test]
+fn a_resource_named_by_a_flag_says_to_check_that_flag() {
+    let c = Cause::NotFound {
+        system: System::Fly,
+        resource: res(ResourceKind::FlyApp, "app-shop"),
+        named_by: NamedBy::Flag {
+            flag: "--fly-app".into(),
+        },
+        state: NotFoundState::Missing,
+        seen: person(),
+    };
+    assert_eq!(
+        c.do_text(&inv()).as_deref(),
+        Some("check the name given with --fly-app, which names Fly app app-shop in scope-east")
+    );
+}
+
+#[test]
+fn a_too_wide_state_vault_in_a_manifest_is_edited_in_the_manifest() {
+    let c = Cause::StateVaultTooWide {
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+        vault: VaultId::new("vlt"),
+        shared_with: vec![TargetName::new("worker")],
+        source: ConfigSource::Manifest {
+            title: "man-shop".into(),
+            vault: VaultId::new("vman"),
+            project: "shop".into(),
+        },
+        at: None,
+    };
+    assert_eq!(
+        c.do_text(&inv()).as_deref(),
+        Some(
+            "delete state_vault_id from [environments.prod.targets.web] in the manifest man-shop (opv config edit) so opv makes a vault for this target alone"
+        )
+    );
+}
+
+#[test]
+fn an_unavailable_ram_dir_previews_the_run_it_belongs_to() {
+    assert_eq!(
+        next_of(&fixture(53)).as_deref(),
+        Some("opv run env-prod --product prod-api --remote prof-box --preview")
+    );
+}
+
+fn too_large() -> Cause {
+    Cause::Guard {
+        guard: Guard::ValueTooLarge {
+            product: ProductName::new("api"),
+            key: KeyName::new("CERT"),
+            env: EnvName::new("prod"),
+            limit: 25_000,
+        },
+    }
+}
+
+#[test]
+fn a_value_too_large_is_filled_in_by_a_person() {
+    assert_eq!(
+        too_large().step(&inv()).0,
+        Some(Action::FillValue {
+            product: ProductName::new("api"),
+            key: KeyName::new("CERT"),
+            env: EnvName::new("prod"),
+        })
+    );
+}
+
+#[test]
+fn a_refused_generate_is_filled_in_by_a_person() {
+    let c = Cause::Guard {
+        guard: Guard::GenerateRefused {
+            product: ProductName::new("api"),
+            key: KeyName::new("CERT"),
+            env: EnvName::new("prod"),
+            why: "it is issued by a vendor",
+        },
+    };
+    assert!(c.human_required(&inv()));
+}
+
+#[test]
+fn a_command_is_rendered_from_its_argv_with_each_word_quoted() {
+    let c = Cmd {
+        command: vec!["open".into()],
+        args: vec!["api/KEY".into(), "--env".into(), "my env".into()],
+    };
+    assert_eq!(cmd_text(&c), "opv open api/KEY --env 'my env'");
+}
+
+#[test]
+fn a_vault_in_another_account_needs_no_person() {
+    assert!(!in_other_account().human_required(&inv()));
 }

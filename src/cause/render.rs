@@ -36,11 +36,12 @@ fn vendor(program: &str, args: &[&str]) -> Next {
     })
 }
 
-/// `opv <command words> <args>`, each word quoted with `shell_word`. A local stand-in until
-/// the step module's `Cmd` rendering lands.
+/// The command line of a [`Cmd`]: its argv ([`Cmd::to_argv`]), each word quoted with
+/// `shell_word`.
 pub fn cmd_text(c: &Cmd) -> String {
-    std::iter::once("opv".to_string())
-        .chain(c.command.iter().chain(c.args.iter()).map(|w| shell_word(w)))
+    c.to_argv()
+        .iter()
+        .map(|w| shell_word(w))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -127,6 +128,162 @@ fn plan_read(inv: &Invocation) -> Next {
         Some(env) => Next::Check(cmd(&["plan"], &[env])),
         None => Next::Check(cmd(&["structure", "plan"], &[])),
     }
+}
+
+/// The read of a plan scope: `opv plan <env>` with every scope flag `plan` takes, or
+/// `opv structure plan`.
+fn scope_read(scope: &PlanScope) -> Next {
+    match scope {
+        PlanScope::Structural => Next::Check(cmd(&["structure", "plan"], &[])),
+        PlanScope::Sync {
+            env,
+            targets,
+            product,
+            deploy: _,
+            prune: _,
+            rotate,
+        } => {
+            let mut args = vec![env.to_string()];
+            push_target_product_rotate(&mut args, targets, product, rotate);
+            Next::Check(Cmd {
+                command: vec!["plan".into()],
+                args,
+            })
+        }
+    }
+}
+
+/// `opv approve <id>` with every scope flag (a handoff: only a person approves).
+fn approve_handoff(plan: &PlanId, scope: &PlanScope) -> Next {
+    let mut args = vec![plan.to_string()];
+    if let PlanScope::Sync {
+        env,
+        targets,
+        product,
+        deploy,
+        prune,
+        rotate,
+    } = scope
+    {
+        args.push("--sync".into());
+        args.push(env.to_string());
+        if *deploy {
+            args.push("--deploy".into());
+        }
+        if *prune {
+            args.push("--prune".into());
+        }
+        push_target_product_rotate(&mut args, targets, product, rotate);
+    }
+    Next::Handoff(Cmd {
+        command: vec!["approve".into()],
+        args,
+    })
+}
+
+fn push_target_product_rotate(
+    args: &mut Vec<String>,
+    targets: &[TargetName],
+    product: &Option<ProductName>,
+    rotate: &[ProductKey],
+) {
+    for t in targets {
+        args.push("--target".into());
+        args.push(t.to_string());
+    }
+    if let Some(p) = product {
+        args.push("--product".into());
+        args.push(p.to_string());
+    }
+    for k in rotate {
+        args.push("--rotate".into());
+        args.push(k.to_string());
+    }
+}
+
+/// `opv doctor`, scoped to the environment and target when the cause knows them, else to
+/// the deploy credentials that acted.
+fn doctor_scoped(
+    env: &Option<EnvName>,
+    target: &Option<TargetName>,
+    principal: Option<&Principal>,
+) -> Next {
+    match (env, target) {
+        (Some(e), Some(t)) => Next::Run(cmd(
+            &["doctor"],
+            &["--env", e.as_str(), "--target", t.as_str()],
+        )),
+        (Some(e), None) => Next::Run(cmd(&["doctor"], &["--env", e.as_str()])),
+        (None, _) => doctor_for(principal, None),
+    }
+}
+
+/// Flags of `sync` that `plan` takes too, with whether each takes a value.
+const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 4] = [
+    ("--target", true),
+    ("--product", true),
+    ("--rotate", true),
+    ("--json", false),
+];
+
+/// The read form of a command, so a substituted name never lands in a write (§4.2): `sync`
+/// becomes `plan` with the scope flags `plan` takes, `bootstrap` and `target add` get
+/// `--dry-run`, `run` gets `--preview`; a read stays as it is. `None`: a write with no read
+/// form (or a command opv cannot place), so Next is a listing instead.
+fn read_form(c: Cmd) -> Option<Cmd> {
+    let path = c.command.join(" ");
+    match path.as_str() {
+        "sync" => {
+            let mut args = Vec::new();
+            let mut words = c.args.iter();
+            while let Some(a) = words.next() {
+                let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+                if !a.starts_with('-') {
+                    args.push(a.clone());
+                    continue;
+                }
+                match SYNC_FLAGS_PLAN_KEEPS.iter().find(|(f, _)| *f == flag) {
+                    Some((_, true)) if !a.contains('=') => {
+                        args.push(a.clone());
+                        if let Some(v) = words.next() {
+                            args.push(v.clone());
+                        }
+                    }
+                    Some(_) => args.push(a.clone()),
+                    None => {
+                        if sync_flag_takes_value(flag) && !a.contains('=') {
+                            words.next();
+                        }
+                    }
+                }
+            }
+            Some(Cmd {
+                command: vec!["plan".into()],
+                args,
+            })
+        }
+        "bootstrap" | "target add" => Some(with_flag(c, "--dry-run")),
+        "run" => Some(with_flag(c, "--preview")),
+        _ => {
+            let effect = crate::schema::EFFECTS.iter().find(|e| e.command == path)?;
+            matches!(effect.effect, "reads" | "none").then_some(c)
+        }
+    }
+}
+
+/// `sync` flags (other than those `plan` keeps) that take a value.
+fn sync_flag_takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--confirm" | "--expect-plan" | "--receipt" | "--prune-immutable" | "--approved"
+    )
+}
+
+fn with_flag(mut c: Cmd, flag: &str) -> Cmd {
+    if !c.args.iter().any(|a| a == flag) {
+        c.args.push(flag.into());
+    }
+    c
 }
 
 fn help_of(inv: &Invocation) -> Next {
@@ -420,10 +577,10 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
             format!("fix the syntax of {field}"),
         ),
         FieldRule::Pattern { id } => {
-            let what = id.replace(['_', '-'], " ");
+            let words = id.words();
             (
-                format!("{field} is not a valid {what}"),
-                format!("change {field} to a valid {what}"),
+                format!("{field} must be {words}"),
+                format!("change {field} to {words}"),
             )
         }
         FieldRule::Reserved { set } => (
@@ -576,6 +733,22 @@ fn unverified_words(s: &Unverified) -> String {
     }
 }
 
+/// The install line for `tool` on this platform, from the tool's own definition (FR-26):
+/// the CI job's line under CI, else the platform's.
+fn install_line(tool: &str, platform: crate::host::Platform, ci: bool) -> String {
+    use crate::host::Platform;
+    match crate::host::tool(tool) {
+        Some(t) => match (ci, platform) {
+            (true, _) => t.ci,
+            (false, Platform::MacOs) => t.macos,
+            (false, Platform::Windows) => t.windows,
+            (false, Platform::Linux | Platform::Wsl | Platform::Other) => t.linux,
+        }
+        .to_string(),
+        None => format!("install {tool} and make sure it is on PATH"),
+    }
+}
+
 fn exit_program(seen: &Observed) -> &str {
     &seen.call().program
 }
@@ -666,6 +839,8 @@ impl Cause {
                 target,
                 vault,
                 shared_with,
+                source: _,
+                at: _,
             } => format!(
                 "the state vault {vault} of target {target} in environment {env} is shared with targets {}, so it is wider than the values it holds",
                 list_of(shared_with)
@@ -860,6 +1035,8 @@ impl Cause {
                 resource,
                 right,
                 grant: _,
+                env: _,
+                target: _,
                 seen,
             } => format!(
                 "{} may not {} {} at {}",
@@ -876,6 +1053,7 @@ impl Cause {
             NotFound {
                 system,
                 resource,
+                named_by: _,
                 state,
                 seen: _,
             } => match state {
@@ -899,6 +1077,8 @@ impl Cause {
                 system,
                 subject,
                 why,
+                env: _,
+                target: _,
                 seen: _,
             } => {
                 let sys = system.label();
@@ -925,8 +1105,13 @@ impl Cause {
                 }
             }
             Guard { guard } => match guard {
-                self::Guard::ValueTooLarge { key, limit } => format!(
-                    "the value of {key} is larger than {limit} bytes, the most the target stores"
+                self::Guard::ValueTooLarge {
+                    product,
+                    key,
+                    env,
+                    limit,
+                } => format!(
+                    "the value of {product}/{key} in environment {env} is larger than {limit} bytes, the most the target stores"
                 ),
                 self::Guard::NotManagedByOpv { name } => {
                     format!("{name} was not created by opv, so opv does not change it")
@@ -941,8 +1126,13 @@ impl Cause {
                 self::Guard::ImmutableWithoutRotate { key } => {
                     format!("{key} cannot change in place: it changes only when rotated")
                 }
-                self::Guard::GenerateRefused { key, why } => {
-                    format!("opv does not generate {key}: {why}")
+                self::Guard::GenerateRefused {
+                    product,
+                    key,
+                    env,
+                    why,
+                } => {
+                    format!("opv does not generate {product}/{key} for environment {env}: {why}")
                 }
                 self::Guard::RemoteProfileRefuses {
                     profile,
@@ -1002,6 +1192,7 @@ impl Cause {
             Partial {
                 done,
                 approval_used,
+                approval_scope: _,
                 then,
             } => {
                 let mut s = format!("{}; already written: {}", then.message(), list(done));
@@ -1038,7 +1229,7 @@ impl Cause {
                 by.0,
                 list_of(fields)
             ),
-            ToolMissing { tool } => format!("{tool} is not installed, or not on PATH"),
+            ToolMissing { tool, .. } => format!("{tool} is not installed, or not on PATH"),
             ToolUnusable { tool, why } => match why {
                 Unusable::NotExecutable => format!("{tool} is not executable"),
                 Unusable::WslInteropOff => {
@@ -1064,6 +1255,8 @@ impl Cause {
             Unrecognized {
                 system,
                 established,
+                env: _,
+                target: _,
                 seen,
             } => {
                 if established.is_empty() {
@@ -1131,8 +1324,12 @@ impl Cause {
                     at_words(at)
                 )
             }
-            ApprovalMissing { plan } => format!("plan {plan} is not approved yet"),
-            ApprovalUsed { plan, partial } => {
+            ApprovalMissing { plan, scope: _ } => format!("plan {plan} is not approved yet"),
+            ApprovalUsed {
+                plan,
+                scope: _,
+                partial,
+            } => {
                 if *partial {
                     format!(
                         "approval {plan} is already used, and only part of its plan was applied"
@@ -1141,11 +1338,11 @@ impl Cause {
                     format!("approval {plan} is already used")
                 }
             }
-            PlanChanged { old, new } => {
+            PlanChanged { old, new, scope: _ } => {
                 format!("the plan changed since it was approved: {old} is now {new}")
             }
-            PlanUnknown { plan } => format!("no plan {plan} is known"),
-            RamDirUnavailable { remote, why } => match remote {
+            PlanUnknown { plan, scope: _ } => format!("no plan {plan} is known"),
+            RamDirUnavailable { remote, why, .. } => match remote {
                 Some(p) => format!(
                     "no in-memory folder for the settings file on the host of remote profile {p}: {}",
                     ram_dir_words(why)
@@ -1165,6 +1362,7 @@ impl Cause {
                 user,
                 host,
                 port,
+                known_hosts: _,
             } => format!("cannot reach {user}@{host} port {port} (remote profile {profile})"),
             RemoteDisconnected {
                 profile,
@@ -1313,12 +1511,41 @@ impl Cause {
                 target,
                 vault: _,
                 shared_with: _,
-            } => plan(
-                inspect(format!(
-                    "delete state_vault_id from [environments.{env}.targets.{target}] so opv makes a vault for this target alone"
-                )),
-                Next::Run(cmd(&["bootstrap"], &[])),
-            ),
+                source,
+                at,
+            } => {
+                let place = match source {
+                    ConfigSource::File { path, .. } => {
+                        format!(" in {}{}", path.display(), at_words(at))
+                    }
+                    ConfigSource::Manifest { title, .. } => {
+                        format!(" in the manifest {title} (opv config edit)")
+                    }
+                };
+                plan(
+                    Some((
+                        Action::EditConfig {
+                            source: source.clone(),
+                            field: DottedPath(vec![
+                                "environments".into(),
+                                env.to_string(),
+                                "targets".into(),
+                                target.to_string(),
+                                "state_vault_id".into(),
+                            ]),
+                        },
+                        format!(
+                            "delete state_vault_id from [environments.{env}.targets.{target}]{place} so opv makes a vault for this target alone"
+                        ),
+                    )),
+                    match source {
+                        ConfigSource::File { .. } => Next::Run(cmd(&["bootstrap"], &[])),
+                        ConfigSource::Manifest { .. } => {
+                            Next::Check(cmd(&["structure", "plan"], &[]))
+                        }
+                    },
+                )
+            }
             ConfigNotEditable { source, reason } => plan(
                 inspect(match reason {
                     NotEditable::Generated { path } => format!(
@@ -1399,6 +1626,7 @@ impl Cause {
                 match closest
                     .as_ref()
                     .and_then(|c| substituted(inv, given, c.as_str()))
+                    .and_then(read_form)
                 {
                     Some(c) => run_or_handoff(c),
                     None => name_listing(*kind, inv),
@@ -1642,6 +1870,8 @@ impl Cause {
                 resource,
                 right,
                 grant,
+                env,
+                target,
                 seen,
             } => plan(
                 Some((
@@ -1652,7 +1882,7 @@ impl Cause {
                     },
                     grant_words(grant, seen.principal(), resource, right),
                 )),
-                doctor_for(Some(seen.principal()), None),
+                doctor_scoped(env, target, Some(seen.principal())),
             ),
             OwnerSetupRequired { system, object } => {
                 let text = match object.kind {
@@ -1692,15 +1922,21 @@ impl Cause {
             NotFound {
                 system,
                 resource,
+                named_by,
                 state,
                 seen: _,
             } => {
                 let what = resource_words(resource);
                 let name = resource.name.as_str();
                 let text = match state {
-                    NotFoundState::Missing => {
-                        format!("check the configuration field that names {what} (opv config edit)")
-                    }
+                    NotFoundState::Missing => match named_by {
+                        NamedBy::ConfigField { path } => {
+                            format!("check {path}, which names {what} (opv config edit)")
+                        }
+                        NamedBy::Flag { flag } => {
+                            format!("check the name given with {flag}, which names {what}")
+                        }
+                    },
                     NotFoundState::SoftDeleted => match (system, resource.kind) {
                         (System::Azure, ResourceKind::KeyVault) => {
                             format!(
@@ -1738,6 +1974,8 @@ impl Cause {
                 system,
                 subject,
                 why,
+                env,
+                target,
                 seen,
             } => {
                 let what = resource_words(subject);
@@ -1754,12 +1992,27 @@ impl Cause {
                     ),
                     Refusal::NoRevision => format!("check the deployment history of {what}"),
                 };
-                plan(inspect(text), doctor_for(Some(seen.principal()), None))
+                plan(
+                    inspect(text),
+                    doctor_scoped(env, target, Some(seen.principal())),
+                )
             }
             Guard { guard } => match guard {
-                self::Guard::ValueTooLarge { key, limit } => plan(
-                    inspect(format!(
-                        "shorten the value of {key} in 1Password to {limit} bytes or less"
+                self::Guard::ValueTooLarge {
+                    product,
+                    key,
+                    env,
+                    limit,
+                } => plan(
+                    Some((
+                        Action::FillValue {
+                            product: product.clone(),
+                            key: key.clone(),
+                            env: env.clone(),
+                        },
+                        format!(
+                            "shorten the value of {product}/{key} for environment {env} in 1Password to {limit} bytes or less"
+                        ),
                     )),
                     Next::None(NoNext::NothingToRun),
                 ),
@@ -1782,8 +2035,19 @@ impl Cause {
                     inspect(format!("rotate {key} if it must change")),
                     help_of(inv),
                 ),
-                self::Guard::GenerateRefused { key, .. } => plan(
-                    inspect(format!("fill in {key} in 1Password yourself")),
+                self::Guard::GenerateRefused {
+                    product, key, env, ..
+                } => plan(
+                    Some((
+                        Action::FillValue {
+                            product: product.clone(),
+                            key: key.clone(),
+                            env: env.clone(),
+                        },
+                        format!(
+                            "fill in {product}/{key} for environment {env} in 1Password yourself"
+                        ),
+                    )),
                     Next::None(NoNext::NothingToRun),
                 ),
                 self::Guard::RemoteProfileRefuses {
@@ -1866,6 +2130,7 @@ impl Cause {
             Partial {
                 done,
                 approval_used: _,
+                approval_scope,
                 then,
             } => {
                 let inner = then.plan(inv);
@@ -1874,7 +2139,11 @@ impl Cause {
                     (Some(a), Some(t)) => Some((a, format!("{t} ({written})"))),
                     _ => inspect(format!("review what remains ({written})")),
                 };
-                plan(action, plan_read(inv))
+                let next = match approval_scope {
+                    Some(scope) => scope_read(scope),
+                    None => plan_read(inv),
+                };
+                plan(action, next)
             }
             Interrupted { .. } => plan(None, Next::Rerun),
             ChangedBeforeWrite { .. } => plan(None, Next::Rerun),
@@ -1914,10 +2183,15 @@ impl Cause {
                     args: vec![],
                 }),
             ),
-            ToolMissing { tool } => plan(
+            ToolMissing {
+                tool,
+                platform,
+                shell: _,
+                ci,
+            } => plan(
                 Some((
                     Action::Install { tool: tool.clone() },
-                    format!("install {tool} and make sure it is on PATH"),
+                    install_line(tool, *platform, *ci),
                 )),
                 Next::Rerun,
             ),
@@ -1960,15 +2234,14 @@ impl Cause {
                     Next::Run(cmd(&["doctor"], &[])),
                 )
             }
-            Unrecognized { seen, .. } => plan(
+            Unrecognized {
+                env, target, seen, ..
+            } => plan(
                 inspect(format!(
                     "read the reply of {} shown above; opv does not recognise it",
                     exit_program(seen)
                 )),
-                match inv_env(inv) {
-                    Some(env) => Next::Run(cmd(&["doctor"], &["--env", env])),
-                    None => Next::Run(cmd(&["doctor"], &[])),
-                },
+                doctor_scoped(env, target, Some(seen.principal())),
             ),
             NeedsTerminal { why: _ } => plan(
                 inspect("run it in your own terminal"),
@@ -2048,25 +2321,38 @@ impl Cause {
                     Next::Rerun,
                 )
             }
-            ApprovalMissing { plan: id } => plan(
+            ApprovalMissing { plan: id, scope } => plan(
                 Some((
                     Action::Approve { plan: id.clone() },
                     format!("approve plan {id} in your own terminal"),
                 )),
-                Next::Handoff(cmd(&["approve"], &[id.as_str()])),
+                approve_handoff(id, scope),
             ),
-            ApprovalUsed { plan: id, .. } => plan(
+            ApprovalUsed {
+                plan: id, scope, ..
+            } => plan(
                 inspect(format!(
                     "review what remains after approval {id} and approve its new plan"
                 )),
-                plan_read(inv),
+                scope_read(scope),
             ),
-            PlanChanged { old: _, new } => plan(
+            PlanChanged { old: _, new, scope } => plan(
                 inspect(format!("review the new plan {new}")),
-                plan_read(inv),
+                scope_read(scope),
             ),
-            PlanUnknown { .. } => plan(None, plan_read(inv)),
-            RamDirUnavailable { remote, why } => {
+            PlanUnknown { scope, .. } => plan(
+                None,
+                match scope {
+                    Some(s) => scope_read(s),
+                    None => plan_read(inv),
+                },
+            ),
+            RamDirUnavailable {
+                remote,
+                why,
+                env,
+                product,
+            } => {
                 let host = match remote {
                     Some(p) => format!("the host of remote profile {p}"),
                     None => "this machine".to_string(),
@@ -2082,7 +2368,22 @@ impl Cause {
                         format!("deliver the settings without a file on {os} ({host})")
                     }
                 };
-                let next = if inv.command.first().map(String::as_str) == Some("run") {
+                let next = if let (Some(env), Some(product)) = (env, product) {
+                    let mut args = vec![
+                        env.to_string(),
+                        "--product".to_string(),
+                        product.to_string(),
+                    ];
+                    if let Some(p) = remote {
+                        args.push("--remote".into());
+                        args.push(p.to_string());
+                    }
+                    args.push("--preview".into());
+                    Next::Check(Cmd {
+                        command: vec!["run".into()],
+                        args,
+                    })
+                } else if inv.command.first().map(String::as_str) == Some("run") {
                     let mut c = inv_cmd(inv);
                     c.args.push("--preview".into());
                     if carries_person_only_flag(&c) {
@@ -2107,9 +2408,11 @@ impl Cause {
                 user,
                 host,
                 port,
+                known_hosts,
             } => {
                 let port = port.to_string();
                 let dest = format!("{user}@{host}");
+                let pinned = format!("UserKnownHostsFile={}", known_hosts.display());
                 plan(
                     inspect(format!(
                         "check the connection to {host}, and that it presents the host key pinned in remote profile {profile}"
@@ -2121,6 +2424,8 @@ impl Cause {
                             "none",
                             "-o",
                             "StrictHostKeyChecking=yes",
+                            "-o",
+                            &pinned,
                             "-p",
                             &port,
                             &dest,
