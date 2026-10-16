@@ -28,11 +28,13 @@ impl DeployLogin for GithubLogin {
         mut values: BTreeMap<String, SecretValue>,
         _r: &dyn CommandRunner,
     ) -> Result<(), Error> {
-        self.token = Some(
-            values
-                .remove("GH_TOKEN")
-                .ok_or_else(|| Error::Source("deploy credentials: GH_TOKEN is missing".into()))?,
-        );
+        // The item was read with every field the provider declares (read_deploy_credentials
+        // refuses one without them), so a missing one is opv's bug.
+        self.token = Some(values.remove("GH_TOKEN").ok_or_else(|| {
+            Error::from(crate::cause::Cause::Bug {
+                site: "github: deploy sign-in given values without a declared field",
+            })
+        })?);
         Ok(())
     }
 
@@ -83,5 +85,15 @@ mod tests {
     fn sign_in_refuses_a_missing_token() {
         let mut l = GithubLogin::default();
         assert!(l.sign_in(BTreeMap::new(), &FakeRunner::default()).is_err());
+    }
+
+    #[test]
+    fn a_deploy_item_without_a_token_is_deploy_credentials_failed() {
+        let mut l = GithubLogin::default();
+        let e = l
+            .sign_in(BTreeMap::new(), &FakeRunner::default())
+            .unwrap_err();
+        // The item is read with every declared field, so a missing one is opv's bug.
+        assert_eq!(e.code_str(), "internal_error");
     }
 }

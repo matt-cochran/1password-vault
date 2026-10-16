@@ -1100,6 +1100,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
+                    remotes: Default::default(),
                 },
             ),
             (
@@ -1109,6 +1110,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
+                    remotes: Default::default(),
                 },
             ),
             (
@@ -1118,6 +1120,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
                     boundary: None,
                     keys: BTreeMap::from([("TOKEN".to_string(), key())]),
                     local: None,
+                    remotes: Default::default(),
                 },
             ),
         ]);
@@ -1125,6 +1128,7 @@ rules = { ensure_prefix = "signoz-ingestion-key=", regex = "signoz-ingestion-key
             environments: BTreeMap::from([("ci".to_string(), env)]),
             products,
             origin: Origin::File,
+            read_from: Default::default(),
         }
     }
 

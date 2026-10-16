@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::error::{Code, Error};
+use crate::cause::{
+    Cause, ConfigSource, DottedPath, FieldRule, GivenBy, IoKind, UsageProblem, VarName,
+};
+use crate::error::Error;
 
 /// The entry name opv registers by default.
 pub const NAME: &str = "opv";
@@ -41,31 +44,43 @@ pub fn server_args(project: &Path) -> Vec<String> {
     ]
 }
 
+/// `path` already has an MCP server `name` that runs something else (05.17): the name
+/// needs `--name <another>` or `--force`. The catalog's Next is `opv mcp install --help` from
+/// the person's own invocation, so `--project` and every other flag stay theirs.
 fn conflict(client: &str, path: &Path, name: &str) -> Error {
-    Error::Policy(
-        format!(
-            "{} already has an MCP server named {name:?} that runs something else; opv left it \
-             as it is",
-            path.display()
-        )
-        .into(),
-    )
-    .with_code(Code::PolicyRefused)
-    .with_do(format!(
-        "keep it and register opv under another name (--name), or replace it with --force ({client})"
-    ))
-    .with_next(format!("opv mcp install --client {client} --name opv-project"))
+    let _ = client;
+    Cause::Usage {
+        problem: UsageProblem::NeedsFlag {
+            flag: format!(
+                "the MCP server name {name}, already used in {} by a server that runs something else,",
+                path.display()
+            ),
+            needs: "--name <another name>, or --force to replace that server".to_string(),
+        },
+    }
+    .into()
 }
 
-fn invalid(path: &Path, what: &str) -> Error {
-    Error::Config(
-        format!(
-            "{} is not valid {what}; opv did not change it",
-            path.display()
-        )
-        .into(),
-    )
-    .with_code(Code::ConfigInvalid)
+/// `path` is not valid as `field` of its format (`rule`): opv did not change it.
+fn invalid(path: &Path, field: &str, rule: FieldRule) -> Error {
+    Cause::ConfigInvalid {
+        source: ConfigSource::File {
+            path: path.to_path_buf(),
+            given_by: GivenBy::Discovered,
+        },
+        at: None,
+        field: DottedPath(vec![field.to_string()]),
+        rule,
+    }
+    .into()
+}
+
+/// The merged text could not be written out again: an invariant of the parsed document.
+fn unrenderable() -> Error {
+    Cause::Bug {
+        site: "a parsed MCP configuration could not be rendered",
+    }
+    .into()
 }
 
 /// `text` (the current `.mcp.json`, empty when there is none) with `name` registered as
@@ -81,16 +96,30 @@ pub fn merge_claude(
     let mut doc: Value = if text.trim().is_empty() {
         json!({})
     } else {
-        serde_json::from_str(text).map_err(|_| invalid(path, "JSON"))?
+        serde_json::from_str(text).map_err(|_| invalid(path, "the JSON", FieldRule::Syntax))?
     };
     let Some(root) = doc.as_object_mut() else {
-        return Err(invalid(path, "an MCP configuration (a JSON object)"));
+        return Err(invalid(
+            path,
+            "the document",
+            FieldRule::Type {
+                expected: "a JSON object",
+            },
+        ));
     };
     let servers = root
         .entry("mcpServers")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .ok_or_else(|| invalid(path, "an MCP configuration (mcpServers is not an object)"))?;
+        .ok_or_else(|| {
+            invalid(
+                path,
+                "mcpServers",
+                FieldRule::Type {
+                    expected: "a JSON object",
+                },
+            )
+        })?;
     let entry = json!({"command": command, "args": args});
     let action = match servers.get(name) {
         Some(existing) if existing == &entry => return Ok((text.to_string(), "unchanged")),
@@ -99,8 +128,7 @@ pub fn merge_claude(
         None => "added",
     };
     servers.insert(name.to_string(), entry);
-    let mut out =
-        serde_json::to_string_pretty(&doc).map_err(|_| invalid(path, "JSON after the change"))?;
+    let mut out = serde_json::to_string_pretty(&doc).map_err(|_| unrenderable())?;
     out.push('\n');
     Ok((out, action))
 }
@@ -116,15 +144,23 @@ pub fn merge_codex(
     force: bool,
 ) -> Result<(String, &'static str), Error> {
     use toml_edit::{Array, DocumentMut, Item, Table, value};
-    let mut doc: DocumentMut = text.parse().map_err(|_| invalid(path, "TOML"))?;
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|_| invalid(path, "the TOML", FieldRule::Syntax))?;
     if doc.get("mcp_servers").is_none() {
         let mut t = Table::new();
         t.set_implicit(true);
         doc.insert("mcp_servers", Item::Table(t));
     }
-    let servers = doc["mcp_servers"]
-        .as_table_mut()
-        .ok_or_else(|| invalid(path, "a Codex configuration (mcp_servers is not a table)"))?;
+    let servers = doc["mcp_servers"].as_table_mut().ok_or_else(|| {
+        invalid(
+            path,
+            "mcp_servers",
+            FieldRule::Type {
+                expected: "a TOML table",
+            },
+        )
+    })?;
     let same = |t: &dyn toml_edit::TableLike| {
         t.get("command").and_then(Item::as_str) == Some(command)
             && t.get("args").and_then(Item::as_array).is_some_and(|a| {
@@ -172,7 +208,13 @@ pub fn codex_config() -> Result<PathBuf, Error> {
     }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .ok_or_else(|| Error::Config("cannot find the home directory (HOME)".into()))?;
+        .ok_or_else(|| Cause::ConfigUnreadable {
+            path: PathBuf::from("~/.codex/config.toml"),
+            io: IoKind::NotFound,
+            given_by: GivenBy::EnvVar {
+                var: VarName::new("HOME"),
+            },
+        })?;
     Ok(PathBuf::from(home).join(".codex").join("config.toml"))
 }
 
@@ -187,16 +229,20 @@ pub fn register(
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            return Err(Error::Config(
-                format!("cannot read {} ({})", path.display(), e.kind()).into(),
-            ));
+            return Err(Cause::ConfigUnreadable {
+                path: path.to_path_buf(),
+                io: e.kind().into(),
+                given_by: GivenBy::Discovered,
+            }
+            .into());
         }
     };
     let (new, action) = merge(&text)?;
     if action != "unchanged" {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| {
-                Error::Config(format!("cannot create {} ({})", dir.display(), e.kind()).into())
+            std::fs::create_dir_all(dir).map_err(|e| Cause::PrivateDirFailed {
+                dir: dir.to_path_buf(),
+                io: e.kind().into(),
             })?;
         }
         crate::config_edit::write_atomic(path, &new, || Ok(()))?;

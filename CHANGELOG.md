@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-16
+
+Every failure is now one typed cause from a closed catalog (#157, #159, #160; design: `docs/design/error-catalog.md`). This changes the `--json` error object and removes error codes; see Changed.
+
+### Added
+
+- `opv run <env> --product <p> [--role <r>] --remote <profile>`: remote development delivery without plaintext environment files (#139). A reviewed profile, `[products.<p>.remotes.<name>]`, pins the SSH host and its public host key, the user and port, the environments and roles that may go there, the remote `opv` path, the working directory and the command; every field is validated at load. The run's selection is resolved by `op run` and sent by `opv remote-send` over `ssh -F none` with strict pinned host-key checking, batch mode and no forwarding or multiplexing, to `opv remote-receive`, as one framed payload on stdin that is validated whole before anything is written or started. File keys go to a RAM-only 0700 directory on the remote host (refused, never written to disk, without one); the remote app's environment is declared-only and never holds an `OP_*` variable. A disconnect, 45 seconds without a heartbeat, or a signal stops the app's process group and removes the directory. It needs a person's terminal; no MCP tool runs it. Design, trust model and limits: `docs/design/remote-delivery.md` (FR-63).
+- `opv run --preview --remote <profile>` and `opv_delivery_preview` with `remote` preview a remote run: `transport`, the profile's pinned connection and command, and `remote_profiles` (identifiers only).
+- A `MountedSecretStore`-shaped fixture consumer reads the serving role's #136 mapping through `opv local-delivery` byte for byte, finds no migration material and refuses a traversing name (`tests/mounted_consumer.rs`).
+- Error codes `permission_denied` (signed in, but missing a right; human required, the grant in `Do:`) and `owner_setup_required` (a GitHub environment its owner must create; the command in `Do:`).
+- `opv_deployment_plan` takes optional `targets`, `product` and `rotate`, so a scoped `opv_sync` can be previewed and approved with the same scope.
+- The error catalog. Every failure, on the CLI, in `--json` and in MCP, is one cause from a closed list, with a message filled from typed fields (the vault, account, environment, target, key, file and line), at most one `Do:` and a `Next:` that runs as typed and never loops back to the same failure. Exit code, `retry` and `human_required` are derived from the cause, so they cannot contradict each other. An external failure becomes a cause only through that tool's diagnosis (`op`, `flyctl`, `az`, `kubectl`, `gh`, `ssh`), built from recorded replies; what opv cannot recognise is `unrecognized_failure`, with what opv did establish, never a guess. The code table in `docs/usage.md` is generated from the catalog.
+- What opv checked and what the tool said: a failed call adds a `checked:` line (the call, names and IDs only, and the account it ran in) and a box with the tool's error line plus its tail (at most 5 lines; `--verbose` and MCP `verbose` pass the complete reply), scrubbed, with escape sequences and bidi overrides removed, and marked when opv cut the tool's own advice.
+- The `--json` error object carries `subject`, `evidence` (`checked`, `account`, `upstream`), `retry`, `human_required`, `do`, `next` and `next_kind` (`rerun`, `run`, `check`, `handoff`, `vendor`, `none`). Text another program wrote sits only in `evidence.upstream`, always with `"untrusted": true`. `retry` adds `check_first`: something may already exist, so `next` is a read.
+- MCP answers a failure with `{ok: false, error}`, where `error` is exactly the CLI's `--json` object, built by the same code. Every MCP tool takes `verbose`, like `--verbose`.
+- New error codes, among them `unrecognized_failure`, `unexpected_output`, `resource_not_found`, `create_outcome_unknown`, `secret_not_stored`, `budget_spent`, `concurrent_edit`, `target_changed`, `own_session_required`, `target_not_signed_in`, `tool_unusable`, `remote_unreachable`, `remote_disconnected`, `remote_version_mismatch`, `child_start_failed`, `delivery_unverified`, `unknown_target`, `unknown_role`, `unknown_profile` and `internal_error`. `opv schema` and `docs/usage.md` list them all.
+- Exit 70 (`internal_error`): an opv bug, with `Next: opv version` to report it. Exits 129 (SIGHUP) and 131 (SIGQUIT) join 130 and 143 as `interrupted`; an interruption says whether writes had started.
+- Every opv process makes itself non-dumpable first thing, for every command: `PR_SET_DUMPABLE=0` and a soft `RLIMIT_CORE` of 0 on Linux (the hard limit and `opv run`'s child are untouched), a soft `RLIMIT_CORE` of 0 and `PT_DENY_ATTACH` on macOS, no crash dialog and no heap in error reports on Windows. `opv doctor` reports a Linux `fs.suid_dumpable` that would still allow a dump.
+- One output guard under every byte opv writes (stdout, stderr, `--json`, MCP answers). Values opv read from 1Password are masked deterministically, as a fixed `********` whatever their length, together with the credentials in opv's own environment (`OP_SERVICE_ACCOUNT_TOKEN`, `OP_SESSION_*`, `OP_CONNECT_TOKEN`, Fly, GitHub and Azure tokens), tokens opv mints, and known token shapes. opv's own names are never value-matched, so `--json` stays valid.
+
+### Changed
+
+- Breaking for `--json` and MCP consumers: the `error` object is the catalog's (see Added), and `detail` is gone. An MCP error is no longer `{ok, code, human_required, human_action}`. Every document (CLI `--json`, MCP, `opv schema`, `run --preview --json`) now carries `schema_version` 2: the error object changed shape and the removed codes have no aliases (FR-60), so a consumer must branch on 2 and the new codes.
+- Removed error codes, with no aliases: `source_error`, `target_error` and `op_unexpected` (now a specific cause, or `unrecognized_failure`), `auth_required` (now `permission_denied`, `target_not_signed_in` or `credential_rejected`), `desktop_app_unavailable` and `sign_in_cancelled` (now `op_not_signed_in`), `duplicate_scope` (now `input_invalid`), and `tidy_conflict` as an error code (now `item_changed` or `concurrent_edit`; a status or plan document's `tidy_error` still says `tidy_conflict`). The MCP-only codes are gone too: `invalid_name` and `invalid_plan_id` are `usage`, `credential_in_environment` is `own_session_required`, a write under CI is `terminal_required`, and `invalid_receipt`, `unsupported_receipt` and `inspection_unavailable` are `internal_error`.
+- `.opv` discovery stops at the repository root: opv never reads a `.opv` above the top of the checkout, and outside a repository it reads only the current directory. `opv bootstrap --file <f>` reads the `.opv` beside that configuration, not the shell's.
+- The agent skill is refreshed only on install: by `install.sh`, the npm postinstall and `opv skill install`. No other command writes your home directory. `opv doctor` and `opv skill status` report an outdated copy, and `opv skill status` names the install that updates it.
+- GitHub targets need gh 2.43.0 or later, the first release with `gh variable list --json`; `opv doctor` warns about an older gh.
+
+### Fixed
+
+- `opv plan` shows every write a sync makes, including the GitHub variables it sets or prunes, so a confirmed sync writes exactly the plan (#150).
+- A vault in another 1Password account names the account that holds it: `ids_not_in_account` looks it up in the machine's other accounts with the same read-only probe as `opv vault locate` (it never prompts or signs in) and steps to `opv account use <account>`. When no account that could be asked holds it, it names the accounts that could not be asked (#153).
+- An `OP_SESSION_*` for another account is never used for the project's account: the `op signin` opv runs ignores `OP_ACCOUNT` and every inherited `OP_SESSION_*` (#153).
+- A one-off `opv login --account <ID> -- <command>` outside a project writes no `.opv` (#153).
+- `opv login --account <ID> -- opv … --file <f>` takes the account from the child's `--file` or `--config`. Its failures carry their own cause (a signed-out reply is `op_not_signed_in`, never `ids_not_in_account`), and a sign-in that fails before the child starts still prints one `--json` document when the child asked for one (#159).
+- `opv login` signs in to the account asked for, whatever session is live: only a session for that account counts as signed in (a bare `op whoami` no longer does), the account chosen at the menu or with `--account` is used when the configuration names none, `.opv` is written only after the sign-in succeeds, and an empty account is never passed to `op` (#160).
+
+Wrong causes and looping next steps, found by a sweep of the CLI and MCP after #157:
+
+- `opv access` checks the 1Password session first and reports `op_not_signed_in` instead of every vault being outside the account; each environment's vaults are checked in its own account, one vault outside it is reported on its own, and the finding names the account (#157).
+- `opv login` no longer says "signed in, but vault access failed … setup vault" with a `Next: opv login` loop when `op vault list` fails under a live session. It says the session may belong to another account on the same sign-in address, runs nothing, and points at `opv account list` (#157; checking that the session belongs to the requested account is #160). A failed `op account list` no longer starts the add-account flow.
+- `opv bootstrap` (including `--dry-run`), `opv structure plan` and the MCP structure tools report a missing session as `op_not_signed_in`, not `ids_not_in_account` with a `--rebind` step; `opv_structure_apply` checks the person before it uses the single-use approval.
+- `opv ready` reports a target's real cause (sign-in, missing CLI, provider outage) instead of `grants_missing`, checks a state vault that can be read but not managed with `op vault get`, and reads each environment in its own account (as `doctor` now does).
+- "…, then run opv again" no longer renders as `Next: opv`, and a target error without a step says to fix the cause before re-running.
+- Fly failures under deploy credentials are diagnosed as the token, not "not logged in to Fly"; Kubernetes tells a 401 (sign-in), a 403 (`permission_denied`) and an outage apart, and no longer reports a forbidden API list as "ESO not installed"; Azure and Kubernetes missing rights are `permission_denied`, not `auth_required`; the Key Vault access wait tells a missing vault, no answer and a refusal apart.
+- `opv delivery verify` and receipts never use an "unknown" account (a failed `op whoami` is its own error), and `--product` with an undeclared product fails instead of passing with nothing checked.
+- `opv sync --receipt` checks the path before anything is staged, and a target error after staging says what was already staged.
+- `opv run` reports a failed personal-item lookup by its cause, not "not set up yet".
+- Manifest errors keep the step `op`'s session diagnosis gave (`opv login --add`, the CI token step) instead of `opv login`; a service account or CI is told a person runs the write in their own terminal; advisory account findings carry no login step.
+- `opv target credentials` steps follow the target's state (recorded, cannot mint, needs a provider sign-in); existing targets point at `opv config edit`, and a misspelt target lists the targets.
+- Exit codes match their error codes (`inventory_incomplete`, `account_not_registered`, `policy_refused`, deploy-credential failures), and repeated refusals no longer say to re-run.
+- MCP errors carry `human_required` and the error's own runnable `opv` step; MCP-only codes are gone (see Changed); `opv_access` returns its `checked` and `unclassified` counts and has a budget longer than the 1Password app's approval prompt; `opv_ready` findings keep their target; `docs/mcp.md` no longer says sync is unavailable through MCP.
+
+Found by the release review of every error message (the snapshot set):
+
+- A check that could not run is never reported as a guess. When op, kubectl or gh is missing, opv says so (`dependency_missing`, exit 3). When one never answers, opv reports the service unavailable with the real number of attempts. Before, these read as "not signed in", "you may not delete secrets", "account not registered" or "needs the Manage permission", and `opv account list` and `opv access` exited 0.
+- `opv account list` and `opv access` report a missing op as an error instead of a guessed state.
+- An account named by `.opv` (or `OP_ACCOUNT`) that op doesn't know is "add this account" (`account_not_registered`, `opv login --add`; on macOS, add it in the 1Password app), not "not signed in". The message names where the account was chosen.
+- Next steps keep the flags that matter (`--apply`, `--confirm`, `--timeout`), never point at `--help` when the command can be run again, and a placeholder in a step is explained by its Do.
+- The budget error says what was already written when writes had started. `opv tidy` says "tidied" only when the tidy succeeded. A file-write error names the file, not opv's temporary file.
+- `opv status` and the plan and sync errors name the environment. A Kubernetes error names the namespace and the context separately.
+- A GitHub environment that is gone is reported as needing an owner to set it up, not as an unrecognised failure.
+- `opv run --json` without `--preview` says that `--json` needs `--preview`.
+- MCP honours `OPV_PROJECT` and uses the project's account, as the CLI does, and `opv_structure_apply` checks in the CLI's order.
+- An item listed with `"tags": null` no longer breaks the manifest listing.
+- The example Claude Code readiness hook reads `schema_version` 2 (it reported every opv 0.10 receipt as unconfirmed).
+
 ## [0.9.0] - 2026-10-15
 
 0.8.1 was not released on its own; its changes are part of 0.9.0.
@@ -368,7 +435,8 @@ Local development without a deployment target. Two deprecated forms are removed,
 - `secretctl` renamed to `opv` ([#4](https://github.com/matt-cochran/1password-vault/pull/4)).
 - Gitflow guard, CI on `dev`/`staging`/`main`, and Dependabot targeting `dev` ([#5](https://github.com/matt-cochran/1password-vault/pull/5)).
 
-[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/1password-vault/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/matt-cochran/1password-vault/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/matt-cochran/1password-vault/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/matt-cochran/1password-vault/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/matt-cochran/1password-vault/compare/v0.6.1...v0.7.0

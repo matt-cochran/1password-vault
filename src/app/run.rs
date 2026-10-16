@@ -13,8 +13,11 @@
 
 use std::io;
 
+use super::local_delivery::{OUTER_VAR, Outer};
 use super::personal;
-use crate::adapters::onepassword;
+use crate::cause::{
+    Cause, Closest, EnvName, Guard, IoKind, NameKind, ProfileName, Unusable, UsageProblem,
+};
 use crate::domain::{Fleet, KeySpec};
 use crate::error::Error;
 use crate::host::Host;
@@ -25,31 +28,26 @@ const OP: &str = "op";
 /// 0.9.0: running an app with the secrets of an environment that sets `confirm_env`
 /// (production, typically) needs the environment's name again, as `sync` does: one
 /// deliberate step before its values reach a local process. Checked before anything is
-/// read. `--preview` reads no value and needs none. `retry` is the same run with
-/// `--confirm <env>`, shown as the next step.
+/// read. `--preview` reads no value and needs none. The step is the person's own run with
+/// `--confirm <env>`, built from the invocation by the cause (a person's handoff); the
+/// caller's `_retry` text is no longer shown.
 pub fn require_confirmation(
     fleet: &Fleet,
     env_name: &str,
     confirm: Option<&str>,
-    retry: &str,
+    _retry: &str,
 ) -> Result<(), Error> {
     let env = fleet.environment(env_name)?;
     match confirm {
-        Some(c) if c != env_name => Err(Error::Policy(
-            format!("--confirm {c} does not match environment {env_name}; nothing was read").into(),
-        )
-        .with_code(crate::error::Code::ConfirmMismatch)
-        .with_next(retry.to_string())),
-        None if env.confirm_env => Err(Error::Policy(
-            format!(
-                "{env_name} sets confirm_env: running a command with its values needs \
-                 --confirm {env_name}; nothing was read"
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::ConfirmRequired)
-        .with_do("ask the user whether to run it with this environment's values")
-        .with_next(retry.to_string())),
+        Some(c) if c != env_name => Err(Cause::ConfirmMismatch {
+            given: c.to_string(),
+            env: EnvName::new(env_name),
+        }
+        .into()),
+        None if env.confirm_env => Err(Cause::NeedsConfirm {
+            env: EnvName::new(env_name),
+        }
+        .into()),
         _ => Ok(()),
     }
 }
@@ -66,7 +64,7 @@ pub fn run_for(
 ) -> Result<i32, Error> {
     let product = match product {
         Some(p) => p.to_string(),
-        None => super::pick_product(fleet, env_name, None, "run")?,
+        None => super::pick_product(fleet, env_name, None)?,
     };
     run_with_role(fleet, env_name, &product, role, command, runner)
 }
@@ -99,20 +97,139 @@ pub fn run_with_role(
     command: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<i32, Error> {
+    launch(
+        fleet,
+        env_name,
+        product,
+        role,
+        Launch::Local(command),
+        runner,
+    )
+}
+
+/// `opv run <env> --product <p> [--role <r>] --remote <profile>` (#139): the same selection
+/// and references as a local run, delivered by `op run`'s child `opv remote-send` to the
+/// profile's pinned host, where the pinned command runs. The profile, its environments and
+/// its roles are checked before anything is read.
+pub fn run_remote(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+    remote: &str,
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
+    let product = match product {
+        Some(p) => p.to_string(),
+        None => super::pick_product(fleet, env_name, None)?,
+    };
+    launch(
+        fleet,
+        env_name,
+        &product,
+        role,
+        Launch::Remote(remote),
+        runner,
+    )
+}
+
+/// 09.42: the product and remote profile a `run --remote` names, checked before anything
+/// asks for a terminal (no 1Password call).
+pub fn check_remote(
+    fleet: &Fleet,
+    env_name: &str,
+    product: Option<&str>,
+    role: Option<&str>,
+    remote: &str,
+) -> Result<(), Error> {
+    let product = match product {
+        Some(p) => p.to_string(),
+        None => super::pick_product(fleet, env_name, None)?,
+    };
+    remote_profile(fleet, env_name, &product, role, remote).map(|_| ())
+}
+
+/// Where a run's values go: a local command, or a reviewed remote profile (#139).
+#[derive(Clone, Copy)]
+enum Launch<'a> {
+    Local(&'a [String]),
+    Remote(&'a str),
+}
+
+/// The profile `name` of `product`, if it may receive `env_name`'s values for `role` (#139).
+/// Checked before any 1Password read; every refusal says nothing was read.
+pub fn remote_profile<'a>(
+    fleet: &'a Fleet,
+    env_name: &str,
+    product: &str,
+    role: Option<&str>,
+    name: &str,
+) -> Result<&'a crate::domain::model::Remote, Error> {
+    let prod = fleet
+        .products
+        .get(product)
+        .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
+    let Some(r) = prod.remotes.get(name) else {
+        let known: Vec<&str> = prod.remotes.keys().map(String::as_str).collect();
+        return Err(Cause::NotDeclared {
+            kind: NameKind::RemoteProfile,
+            given: name.to_string(),
+            candidates: known.iter().map(|k| k.to_string()).collect(),
+            closest: Closest::unique(&super::suggest::close(name, known.iter().copied())),
+        }
+        .into());
+    };
+    // 07.20: the refusal names what the profile allows; its step never repeats the run.
+    let refuses = |asked: String, allowed: &[String]| -> Error {
+        Cause::Guard {
+            guard: Guard::RemoteProfileRefuses {
+                profile: ProfileName::new(name),
+                asked,
+                allowed: allowed.to_vec(),
+            },
+        }
+        .into()
+    };
+    if !r.environments.iter().any(|e| e == env_name) {
+        return Err(refuses(format!("environment {env_name}"), &r.environments));
+    }
+    if let (Some(allowed), Some(role)) = (&r.roles, role)
+        && !allowed.iter().any(|x| x == role)
+    {
+        return Err(refuses(format!("role {role}"), allowed));
+    }
+    Ok(r)
+}
+
+fn launch(
+    fleet: &Fleet,
+    env_name: &str,
+    product: &str,
+    role: Option<&str>,
+    to: Launch<'_>,
+    runner: &dyn CommandRunner,
+) -> Result<i32, Error> {
     let env = fleet.environment(env_name)?;
     let prod = fleet
         .products
         .get(product)
         .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
     if prod.source_only {
-        return Err(source_only_error(fleet, env_name, product));
+        return Err(super::source_only(fleet, product, Some(env_name)));
     }
-    if command.is_empty() {
-        return Err(Error::Config(
-            "no command given (usage: run <env> --product <p> -- <cmd>...)".into(),
-        )
-        .with_next("opv run --help"));
-    }
+    let remote = match to {
+        Launch::Local([]) => {
+            return Err(Cause::Usage {
+                problem: UsageProblem::NeedsFlag {
+                    flag: "run".into(),
+                    needs: "a command after --".into(),
+                },
+            }
+            .into());
+        }
+        Launch::Local(_) => None,
+        Launch::Remote(name) => Some((name, remote_profile(fleet, env_name, product, role, name)?)),
+    };
 
     let selection = super::delivery_preview::select(env_name, env, product, prod, role)?;
     let selected: Vec<(&String, &KeySpec)> = selection.delivered;
@@ -125,20 +242,24 @@ pub fn run_with_role(
         let project = personal::project_name(runner, &std::env::current_dir().unwrap_or_default());
         match personal::locate(runner, fleet, env_name, &project) {
             Ok(Some(e)) => Some(e),
-            Ok(None) | Err(_) => {
-                let labels: Vec<String> = selected
+            // A missing personal vault or item is personal's own cause (its step sets it
+            // up), naming the personal keys this run needs (J6); a sign-in, network or op
+            // failure is its own cause.
+            Err(e) => {
+                let keys: Vec<(&str, &str)> = selected
                     .iter()
                     .filter(|(_, spec)| personal::is_personal(fleet, spec))
-                    .map(|(key, _)| crate::domain::key_label(product, key))
+                    .map(|(key, _)| (product, key.as_str()))
                     .collect();
-                return Err(Error::Config(
-                    format!(
-                        "your personal item for {env_name} is not set up yet; it holds {}",
-                        labels.join(", ")
-                    )
-                    .into(),
-                )
-                .with_next("opv bootstrap"));
+                return Err(personal::naming_keys(e, env_name, &keys));
+            }
+            // `locate` answers `None` only when the environment declares no personal key,
+            // and a personal key was just selected for it.
+            Ok(None) => {
+                return Err(Cause::Bug {
+                    site: "run: a selected personal key whose environment declares none",
+                }
+                .into());
             }
         }
     } else {
@@ -203,21 +324,43 @@ pub fn run_with_role(
             Ok((key.as_str(), reference))
         })
         .collect::<Result<_, Error>>()?;
-    let env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut env_pairs: Vec<(&str, &str)> = refs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    // X25: the delivery step's errors name this run, never the hidden step.
+    let outer = Outer::new(
+        env_name,
+        product,
+        remote.map(|(name, _)| name),
+        &crate::error::invocation(),
+    );
 
     // #136, #137: a product with `[products.<p>.local]` runs its app through opv's local
     // delivery step, as `op run`'s child: it keeps only what the product declares and
     // writes `file` keys to a private RAM directory (names and paths only in argv).
-    let delivery = prod
-        .local
-        .as_ref()
-        .map(|l| delivery_args(l, &selected))
-        .transpose()?;
+    let delivery = match (remote, &to) {
+        // #139: the remote step carries the profile and the names; the command is pinned.
+        (Some((name, r)), _) => Some(remote_args(name, r, prod, &selected, &outer)?),
+        (None, _) => prod
+            .local
+            .as_ref()
+            .map(|l| delivery_args(l, &selected))
+            .transpose()?,
+    };
+    let outer_json = serde_json::to_string(&outer).map_err(|_| -> Error {
+        Cause::Bug {
+            site: "run: the delivery step's run",
+        }
+        .into()
+    })?;
+    if remote.is_none() && delivery.is_some() && outer.is_valid() {
+        env_pairs.push((OUTER_VAR, outer_json.as_str()));
+    }
     let mut args: Vec<&str> = vec!["run", "--"];
     if let Some(d) = &delivery {
         args.extend(d.iter().map(String::as_str));
     }
-    args.extend(command.iter().map(String::as_str));
+    if let Launch::Local(command) = to {
+        args.extend(command.iter().map(String::as_str));
+    }
 
     // Clear all declared keys, including other products and mode-skipped keys.
     // Keep PATH and authentication context; add only selected references afterward.
@@ -231,10 +374,75 @@ pub fn run_with_role(
     ensure_native(runner)?;
     runner
         .run_inherited_clean(OP, &args, &env_pairs, &remove)
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => onepassword::op_missing(&Host::detect()),
-            k => Error::Dependency(format!("cannot run {OP} ({k})").into()),
+        .map_err(|e| op_unusable(e.kind()))
+}
+
+/// `op` could not be started for the run.
+fn op_unusable(kind: io::ErrorKind) -> Error {
+    if kind == io::ErrorKind::NotFound {
+        let host = Host::detect();
+        Cause::ToolMissing {
+            tool: OP.into(),
+            platform: host.platform,
+            shell: host.shell,
+            ci: host.ci,
+        }
+        .into()
+    } else {
+        Cause::ToolUnusable {
+            tool: OP.into(),
+            why: Unusable::SpawnFailed {
+                io: IoKind::from(kind),
+            },
+        }
+        .into()
+    }
+}
+
+/// This opv binary, which `op run` starts as the delivery step.
+fn own_binary() -> Result<String, Error> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .ok_or_else(|| {
+            Cause::Bug {
+                site: "run: locating this opv binary",
+            }
+            .into()
         })
+}
+
+/// `opv remote-send --plan <json>` (#139): this opv binary and the plan (the profile's
+/// pinned connection, key names, file paths, directory variable, working directory and
+/// command). Names, paths and a public key only, never a value.
+fn remote_args(
+    name: &str,
+    remote: &crate::domain::model::Remote,
+    prod: &crate::domain::Product,
+    selected: &[(&String, &KeySpec)],
+    outer: &Outer,
+) -> Result<Vec<String>, Error> {
+    let exe = own_binary()?;
+    let keys = selected.iter().map(|(k, _)| (*k).clone()).collect();
+    let files = selected
+        .iter()
+        .filter_map(|(k, spec)| spec.file.as_ref().map(|f| ((*k).clone(), f.clone())))
+        .collect();
+    let dir_env = prod.local.as_ref().and_then(|l| l.secrets_dir_env.clone());
+    let plan =
+        super::remote_delivery::Plan::new(name, remote, keys, files, dir_env, Some(outer.clone()));
+    let json = serde_json::to_string(&plan).map_err(|_| -> Error {
+        Cause::Bug {
+            site: "run: the remote plan",
+        }
+        .into()
+    })?;
+    Ok(vec![
+        exe,
+        "remote-send".to_string(),
+        "--plan".to_string(),
+        json,
+    ])
 }
 
 /// The local delivery step's command line before the app's (#136, #137): this opv binary,
@@ -244,12 +452,7 @@ fn delivery_args(
     local: &crate::domain::model::Local,
     selected: &[(&String, &KeySpec)],
 ) -> Result<Vec<String>, Error> {
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_string))
-        .ok_or_else(|| {
-            Error::Dependency("cannot find this opv binary for local delivery".into())
-        })?;
+    let exe = own_binary()?;
     let mut a = vec![exe, "local-delivery".to_string()];
     for (key, spec) in selected {
         a.extend(["--key".to_string(), (*key).clone()]);
@@ -267,22 +470,21 @@ fn delivery_args(
     Ok(a)
 }
 
-/// FR-47: `product` holds canonical values for other products' keys and is never run on
-/// its own. The `Next:` step names a product that reads it, when one does.
-fn source_only_error(fleet: &Fleet, env_name: &str, product: &str) -> Error {
-    let e = super::source_only_message(product);
-    match fleet.referencing_product(product) {
-        Some(q) => e.with_next(format!("opv run {env_name} --product {q} -- <command>")),
-        None => e.with_next(super::check_command(fleet, Some(env_name), None)),
-    }
-}
-
 /// Windows op.exe can read metadata from WSL, but cannot execute a Linux child.
 pub fn ensure_native(runner: &dyn CommandRunner) -> Result<(), Error> {
-    runner.local_run_supported().map_err(|e| {
-        if e.kind() == io::ErrorKind::Unsupported {
-            Error::Dependency(format!("Windows op.exe cannot run a Linux child; install/sign in to Linux op, then retry. See {}/local-development.md#wsl.", crate::DOCS_URL).into())
-        } else { Error::Dependency(format!("cannot inspect native op ({})", e.kind()).into()) }
+    runner.local_run_supported().map_err(|e| -> Error {
+        let why = if e.kind() == io::ErrorKind::Unsupported {
+            Unusable::WindowsExeFromWsl
+        } else {
+            Unusable::SpawnFailed {
+                io: IoKind::from(e.kind()),
+            }
+        };
+        Cause::ToolUnusable {
+            tool: OP.into(),
+            why,
+        }
+        .into()
     })
 }
 
@@ -354,11 +556,17 @@ mod tests {
         assert_eq!(&a[a.len() - 2..], ["--", "app"]);
     }
 
+    /// The person's run (names and flags, X25) is the one other variable the step gets.
     #[test]
     fn the_delivery_step_gets_references_never_values() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
         run(&local_fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
-        assert!(env_of(&r).iter().all(|(_, v)| v.starts_with("op://")));
+        assert!(
+            env_of(&r)
+                .iter()
+                .filter(|(k, _)| k != OUTER_VAR)
+                .all(|(_, v)| v.starts_with("op://"))
+        );
     }
 
     #[test]
@@ -428,9 +636,11 @@ mod tests {
         ];
         for (e, p, c, needle) in cases {
             let r = FakeRunner::new([]);
+            // A configuration or name error (exit 2; an undeclared product is the catalog's
+            // `NotDeclared`), naming what was wrong.
             match run(&fleet(), e, p, &c, &r) {
-                Err(Error::Config(m)) => assert!(m.contains(needle), "{m}"),
-                other => panic!("expected Config, got {other:?}"),
+                Err(e) if e.exit_code() == 2 => assert!(e.to_string().contains(needle), "{e}"),
+                other => panic!("expected a configuration error, got {other:?}"),
             }
             assert!(r.calls.borrow().is_empty());
         }
@@ -467,10 +677,12 @@ mod tests {
     fn missing_op_is_a_dependency_error() {
         let r = FakeRunner::new([]);
         r.push_io_error(io::ErrorKind::NotFound);
-        assert!(matches!(
-            run(&fleet(), "prod", "allumata", &cmd(&["env"]), &r),
-            Err(Error::Dependency(_))
-        ));
+        assert_eq!(
+            run(&fleet(), "prod", "allumata", &cmd(&["env"]), &r)
+                .unwrap_err()
+                .code_str(),
+            "dependency_missing"
+        );
     }
 
     #[test]
@@ -503,7 +715,7 @@ mod tests {
         let r = FakeRunner::new([]);
         *r.local_run_error.borrow_mut() = Some(io::ErrorKind::Unsupported);
         let result = run(&fleet(), "prod", "allumata", &cmd(&["true"]), &r);
-        assert!(result.unwrap_err().to_string().contains("Linux child"));
+        assert!(result.unwrap_err().to_string().contains("Windows build"));
         assert!(r.calls.borrow().is_empty());
     }
 
@@ -538,7 +750,7 @@ environments = ["ci"]
     fn run_refuses_a_source_only_product() {
         let r = FakeRunner::new([]);
         let e = run(&source_only_fleet(), "ci", "shared", &cmd(&["env"]), &r).unwrap_err();
-        assert!(matches!(e, Error::Config(m) if m.contains("is source-only")));
+        assert_eq!(e.code_str(), "source_only");
     }
 
     #[test]
@@ -568,7 +780,7 @@ environments = ["prod", "dev"]
     #[test]
     fn a_guarded_environment_needs_its_name_again() {
         let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ConfirmRequired);
+        assert_eq!(e.code_str(), "confirm_required");
     }
 
     #[test]
@@ -579,7 +791,7 @@ environments = ["prod", "dev"]
     #[test]
     fn a_confirmation_naming_another_environment_is_refused() {
         let e = require_confirmation(&guarded(), "prod", Some("dev"), "retry").unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ConfirmMismatch);
+        assert_eq!(e.code_str(), "confirm_mismatch");
     }
 
     #[test]
@@ -587,15 +799,27 @@ environments = ["prod", "dev"]
         assert!(require_confirmation(&guarded(), "dev", None, "retry").is_ok());
     }
 
+    /// 07.37: the step addresses the person, and an agent only in passing. Was a caller's
+    /// retry string with the child's words; the catalog builds it from the invocation.
     #[test]
-    fn the_refusal_steps_to_the_confirmed_run() {
-        let e = require_confirmation(
-            &guarded(),
-            "prod",
-            None,
-            "opv run prod --confirm prod -- env",
-        )
-        .unwrap_err();
-        assert_eq!(e.next_step(), Some("opv run prod --confirm prod -- env"));
+    fn the_refusal_asks_the_person_to_make_sure() {
+        let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
+        let inv = crate::cause::Invocation::from_cli(&cmd(&["opv", "run", "prod"]));
+        let text = match e.cause() {
+            Some((c, _)) => crate::cause::render::render_text(c, None, &inv, false, false, false),
+            None => String::new(),
+        };
+        assert!(
+            text.contains("Do: make sure prod is the environment you mean"),
+            "{text}"
+        );
+    }
+
+    /// The local delivery step gets the person's run (X25).
+    #[test]
+    fn the_delivery_step_gets_the_persons_run() {
+        let r = FakeRunner::new([Output::success(Vec::new())]);
+        run(&local_fleet(), "prod", "allumata", &cmd(&["app"]), &r).unwrap();
+        assert!(env_of(&r).iter().any(|(k, _)| k == OUTER_VAR));
     }
 }

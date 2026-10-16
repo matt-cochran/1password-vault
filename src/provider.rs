@@ -26,6 +26,13 @@ pub trait Provider: Sync {
     fn section(&self) -> &'static str;
     /// User-facing name: "Fly", "Azure", "Kubernetes".
     fn label(&self) -> &'static str;
+    /// The forms this provider's own section checks ask for, as `(marker, words)`: a serde
+    /// message of a section field that contains `marker` (`must be a Key Vault name`) is
+    /// reported as that field needing `words`, never with the message itself, which quotes
+    /// the value (C1, C15).
+    fn value_shapes(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// The CLIs this provider runs, its own first: the runner takes each one's pinned
     /// environment and not-found phrases from here, and `Next:` lines starting with one
     /// count as runnable. A store another provider declares brings that provider's CLI.
@@ -80,10 +87,12 @@ pub trait Provider: Sync {
         ))
     }
     /// Start a deploy sign-in for one run (FR-40). Runs before the credential is read, so a
-    /// machine that cannot hold it safely refuses with nothing read or changed.
+    /// machine that cannot hold it safely refuses with nothing read or changed. Only called
+    /// for a provider whose [`Provider::deploy_credential_fields`] the configuration
+    /// accepted, so this default is never reached.
     fn deploy_login(&self) -> Result<Box<dyn DeployLogin>, Error> {
-        Err(Error::Config(
-            format!("{} does not support deploy_credentials", self.label()).into(),
+        Err(unreachable_default(
+            "deploy_login of a provider without deploy credentials",
         ))
     }
     /// Mint the least-privilege deploy credential of `target` at the provider and return
@@ -112,6 +121,12 @@ pub trait Provider: Sync {
     fn mint_cleanup_hint(&self) -> Option<&'static str> {
         None
     }
+    /// The provider's own listing that finds a credential [`Provider::mint_deploy_credential`]
+    /// made for `target` (A22), for `Cause::SecretNotStored`'s Next; `None` when there is none.
+    fn mint_refind(&self, target: &dyn TargetConfig) -> Option<crate::cause::VendorCmd> {
+        let _ = target;
+        None
+    }
     /// Store kinds this provider declares for `[stores.<name>]` tables (FR-39): the key that
     /// names the kind, e.g. `azure_key_vault = "kv-myapp-prod"`.
     fn store_kinds(&self) -> &'static [&'static str] {
@@ -125,13 +140,10 @@ pub trait Provider: Sync {
         kind: &str,
         section: &Section<'_>,
     ) -> Result<Box<dyn StoreConfig>, Error> {
-        Err(Error::Config(
-            format!(
-                "store {}: {} declares no store kind {kind:?}",
-                section.env(),
-                self.label()
-            )
-            .into(),
+        // Called only for a kind in `store_kinds`, which is empty here.
+        let _ = (kind, section);
+        Err(unreachable_default(
+            "parse_store of a provider without store kinds",
         ))
     }
     /// The stores of other providers this provider's runtime can bind (`secrets_in`, FR-39).
@@ -145,16 +157,16 @@ pub trait Provider: Sync {
         target: Box<dyn TargetConfig>,
         store: &dyn StoreConfig,
     ) -> Result<Box<dyn TargetConfig>, Error> {
-        let _ = target;
-        Err(Error::Config(
-            format!(
-                "{} cannot keep its secrets in {}",
-                self.label(),
-                store.describe()
-            )
-            .into(),
-        ))
+        // Called only for a pair `bindings` declares, which is empty here.
+        let _ = (target, store);
+        Err(unreachable_default("bind of a provider without bindings"))
     }
+}
+
+/// A provider-trait default that the configuration's own checks never let run: reaching it
+/// is an opv bug, never the person's configuration.
+fn unreachable_default(site: &'static str) -> Error {
+    crate::cause::Cause::Bug { site }.into()
 }
 
 /// One field of a `deploy_credentials` item (FR-40): its label and kind (concealed = secret,
@@ -319,15 +331,8 @@ impl<'a> Section<'a> {
     /// TOML error in the file: line, column and the field (FR-2), never the line itself
     /// (C1, SR-1).
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, Error> {
-        T::deserialize(ValueDeserializer::from(self.value.clone())).map_err(|e| {
-            Error::Config(
-                format!(
-                    "invalid secrets.toml: {}",
-                    crate::config::toml_error(self.text, e.span(), e.message())
-                )
-                .into(),
-            )
-        })
+        T::deserialize(ValueDeserializer::from(self.value.clone()))
+            .map_err(|e| crate::config::toml_invalid(self.text, &e))
     }
 }
 
@@ -381,6 +386,18 @@ pub trait TargetConfig: fmt::Debug + Send + Sync {
     /// `explain` lines for a config key, when this target routes config itself (Azure:
     /// a plain env value or a Key Vault reference). `None`: config is not deployed here.
     fn explain_config(&self, _product: &str, _key: &str) -> Option<Vec<(&'static str, String)>> {
+        None
+    }
+    /// The runtime a pinned target binds (its Deployment, its Container App) as a catalog
+    /// subject, with its system and program, for a refusal its own reads showed (a revision
+    /// that is unhealthy, still rolling out, or missing; design §4.5). `None`: no runtime.
+    fn runtime_subject(
+        &self,
+    ) -> Option<(
+        crate::cause::System,
+        &'static str,
+        crate::cause::ResourceRef,
+    )> {
         None
     }
     /// Equal configuration (every field), for comparing whole configurations.
@@ -476,5 +493,17 @@ impl Verdict {
             Verdict::Ok(detail) => format!("ok    {name}: {detail}"),
             Verdict::Warn(detail) => format!("warn  {name}: {detail}"),
         }
+    }
+}
+
+/// The catalog's external system behind `provider`, by its configuration section (for a
+/// cause about the provider itself, such as `Guard::ProviderHidesValues`).
+pub fn system_of(provider: &dyn Provider) -> crate::cause::System {
+    use crate::cause::System;
+    match provider.section() {
+        "fly" => System::Fly,
+        "azure" => System::Azure,
+        "kubernetes" => System::Kubernetes,
+        _ => System::GitHub,
     }
 }

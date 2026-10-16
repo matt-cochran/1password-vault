@@ -4,32 +4,68 @@
 
 use std::io;
 
+use crate::cause::{Cause, Unusable};
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{Call, CommandRunner, Output, PROBE_TIMEOUT};
 
-/// Run `program args` as a probe; a spawn failure is `Error::Dependency` naming it.
-pub(crate) fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, Error> {
-    let call = Call::new(program, args);
-    r.probe(&call, PROBE_TIMEOUT).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH").into()),
-        kind => Error::Dependency(format!("failed to run {program} ({kind})").into()),
-    })
-}
-
-/// [`spawn`] whose "not found" names the install command for this platform (FR-26).
+/// Run `tool args` as a probe. A probe that did not answer is decided by the runner's facts
+/// alone ([`probe_failure`]).
 pub(crate) fn spawn_tool(
     r: &dyn CommandRunner,
     tool: Tool,
     host: &dyn Fn() -> Host,
     args: &[&str],
 ) -> Result<Output, Error> {
-    spawn(r, tool.program, args).map_err(|e| match e {
-        Error::Dependency(m) if m.ends_with("not found on PATH") => {
-            Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)).into())
+    let call = Call::new(tool.program, args);
+    r.probe(&call, PROBE_TIMEOUT)
+        .map_err(|e| probe_failure(&tool, &e, host))
+}
+
+/// Whether a probe that returned `e` started: it ran but did not answer (opv's timeout, a
+/// signal, a lost reply), as opposed to a tool that never started (missing, not
+/// executable, failing to spawn).
+pub(crate) fn started(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+    )
+}
+
+/// The cause of a probe of `tool` that did not answer, from the runner's facts alone (design
+/// §5: runner facts win over any reading of a reply, and every probe helper decides through
+/// here before it infers a state). A tool that never started is `ToolMissing` with this
+/// host's install line when it is not on PATH (R56), else `ToolUnusable` (R57), never a Rust
+/// `ErrorKind` name; one that started and did not answer (timeout, signal, lost reply) is
+/// its system's diagnosis of the observed call, `Unavailable` for a read (R51).
+pub(crate) fn probe_failure(tool: &Tool, e: &io::Error, host: &dyn Fn() -> Host) -> Error {
+    let unusable = |why| {
+        Cause::ToolUnusable {
+            tool: tool.program.to_string(),
+            why,
         }
-        e => e,
-    })
+        .into()
+    };
+    if started(e) {
+        return tool.outage(tool.program);
+    }
+    match e.kind() {
+        io::ErrorKind::NotFound => {
+            let h = host();
+            Cause::ToolMissing {
+                tool: tool.program.to_string(),
+                platform: h.platform,
+                shell: h.shell,
+                ci: h.ci,
+            }
+            .into()
+        }
+        io::ErrorKind::PermissionDenied => unusable(Unusable::NotExecutable),
+        kind => unusable(Unusable::SpawnFailed { io: kind.into() }),
+    }
 }
 
 /// `2.40.0` / `v0.4.112` → (major, minor, patch). Missing parts count as 0; anything else
@@ -60,3 +96,7 @@ pub(crate) fn version_in(stdout: &[u8]) -> Option<String> {
         })
         .map(str::to_owned)
 }
+
+#[cfg(test)]
+#[path = "probe_tests.rs"]
+mod tests;

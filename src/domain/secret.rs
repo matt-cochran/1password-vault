@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn new_value_is_registered_with_the_scrubber() {
         let _s = SecretValue::new("sv-registered-Q4z".into());
-        assert_eq!(crate::scrub::scrub("x sv-registered-Q4z"), "x __SECRET__");
+        assert_eq!(crate::scrub::scrub("x sv-registered-Q4z"), "x ********");
     }
 
     #[test]

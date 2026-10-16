@@ -20,6 +20,74 @@ fn inherited() -> Vec<(String, String)> {
     .collect()
 }
 
+/// X25: the person's run, passed to the step, never reaches the app.
+#[test]
+fn the_persons_run_never_reaches_the_app() {
+    let mut env = inherited();
+    env.push((OUTER_VAR.into(), "{}".into()));
+    let d = Delivery::default();
+    assert!(!names(&child_env(&d, &env, None)).contains(&OUTER_VAR));
+}
+
+fn persons_run() -> Outer {
+    Outer::new(
+        "dev",
+        "web",
+        None,
+        &crate::cause::Invocation::from_cli(&[
+            "opv".into(),
+            "run".into(),
+            "dev".into(),
+            "--product".into(),
+            "web".into(),
+            "--".into(),
+            "npm".into(),
+        ]),
+    )
+}
+
+fn rendered(e: &Error, inv: &crate::cause::Invocation) -> String {
+    match e.cause() {
+        Some((c, _)) => crate::cause::render::render_text(c, None, inv, false, false, false),
+        None => e.to_string(),
+    }
+}
+
+/// 07.09, 07.17: no folder for file keys steps to the run's preview, never `opv doctor`.
+#[test]
+fn a_missing_ram_folder_steps_to_the_runs_preview() {
+    let o = persons_run();
+    let e = Outer::ram_dir_unavailable(Some(&o), false, crate::cause::RamDir::Unset);
+    assert!(rendered(&e, &o.invocation()).contains("Next: opv run dev --product web --preview"));
+}
+
+/// 07.17: the refusal says why the folder is unavailable.
+#[test]
+fn a_missing_ram_folder_says_why() {
+    let o = persons_run();
+    let e = Outer::ram_dir_unavailable(Some(&o), false, crate::cause::RamDir::NotTmpfs);
+    assert!(rendered(&e, &o.invocation()).contains("tmpfs"));
+}
+
+/// 07.18: the receiver's refusal names the remote host's folder.
+#[test]
+fn a_remote_missing_ram_folder_names_the_remote_host() {
+    let mut o = persons_run();
+    o.profile = Some("builder".into());
+    let e = Outer::ram_dir_unavailable(Some(&o), true, crate::cause::RamDir::Unset);
+    assert!(rendered(&e, &o.invocation()).contains("remote profile builder"));
+}
+
+/// 07.09: the step's re-run is the person's run, never the hidden step.
+#[test]
+fn the_steps_rerun_is_the_persons_run() {
+    let o = persons_run();
+    assert_eq!(
+        crate::cause::render::rerun_text(&o.invocation()),
+        "opv run dev --product web -- <command>"
+    );
+}
+
 fn names(env: &[(String, String)]) -> Vec<&str> {
     let mut n: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
     n.sort();

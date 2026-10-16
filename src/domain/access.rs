@@ -14,6 +14,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::cause::Cmd;
+use crate::cause::render::cmd_text;
+
 /// A service account that can read an environment's vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Reader {
@@ -110,19 +113,22 @@ fn reader(user: &serde_json::Map<String, Value>) -> Reader {
     }
 }
 
-/// Findings for the analysed environments, in input order, then by code order:
-/// access_not_visible, no_ci_reader, ci_reader_can_write, pending_revoke.
+/// Findings for the analysed vaults, in input order, then by code order:
+/// access_not_visible, no_ci_reader, ci_reader_can_write, pending_revoke. Each names the
+/// vault and the environment that needs it (07.10); a step is a typed opv command.
 pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
     let mut out = Vec::new();
     for access in envs {
+        let env = access.environment.as_str();
+        let vault = format!("vault {} (environment {env})", access.vault_id);
         if !access.visible {
+            // 07.36: what the person does is a Do for someone else, so there is no command.
             out.push(AccessFinding {
                 code: ACCESS_NOT_VISIBLE,
-                environment: access.environment.clone(),
+                environment: env.to_string(),
                 message: format!(
-                    "cannot see who can read the {} vault; managing the vault is needed to \
-                     view its access list",
-                    access.environment
+                    "cannot see who can read {vault}: viewing its access list needs the Manage \
+                     permission on it, so ask a manager of the vault to run opv access {env}"
                 ),
                 next: None,
             });
@@ -131,29 +137,25 @@ pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
         if access.deployed && !access.service_accounts.iter().any(|s| s.read_only) {
             out.push(AccessFinding {
                 code: NO_CI_READER,
-                environment: access.environment.clone(),
-                message: format!(
-                    "{} deploys but has no read-only service account for CI",
-                    access.environment
-                ),
+                environment: env.to_string(),
+                message: format!("{env} deploys but has no read-only service account for CI"),
                 // The token goes straight into the CI secret, never shown (0.9.0).
-                next: Some(format!(
-                    "opv access {} --create --github <owner/repo>",
-                    access.environment
-                )),
+                next: Some(format!("opv access {env} --create --github <owner/repo>")),
             });
         }
         for account in &access.service_accounts {
             if account.read_only {
                 continue;
             }
+            // 07.35: any writing service account, not only a CI reader, can be the one seen.
             out.push(AccessFinding {
                 code: CI_READER_CAN_WRITE,
-                environment: access.environment.clone(),
+                environment: env.to_string(),
                 message: format!(
-                    "the service account {} can write to the {} vault; CI only needs read \
-                     access",
-                    account.name, access.environment
+                    "service account {} can write to boundary {vault}; opv's readers need read \
+                     only. If {} is this project's CI reader, recreate it read-only (the Owner \
+                     runs: line below)",
+                    account.name, account.name
                 ),
                 next: None,
             });
@@ -165,14 +167,17 @@ pub fn findings(envs: &[EnvAccess]) -> Vec<AccessFinding> {
         for (name, n) in seen.into_iter().filter(|(_, n)| *n > 1) {
             out.push(AccessFinding {
                 code: PENDING_REVOKE,
-                environment: access.environment.clone(),
+                environment: env.to_string(),
                 message: format!(
-                    "{n} service accounts named {name} can read the {} vault: keep the newest \
-                     until its token has produced verified delivery evidence, then remove the \
-                     older ones in 1Password (Developer > Service accounts)",
-                    access.environment
+                    "{n} service accounts named {name} can read {vault}: keep the newest until \
+                     its token has produced verified delivery evidence, then remove the older \
+                     ones in 1Password (Developer > Service accounts)"
                 ),
-                next: Some(format!("opv delivery verify {}", access.environment)),
+                // 07.10: the environment, never the vault ID.
+                next: Some(cmd_text(&Cmd {
+                    command: vec!["delivery".into(), "verify".into()],
+                    args: vec![env.to_string()],
+                })),
             });
         }
     }

@@ -1,0 +1,20 @@
+# vault_locate__op_account_list__malformed_output: opv vault locate vE2ESHAREDDEV00000000000001 | fault malformed_output on op account list
+
+## text exit: 4
+## text stdout
+
+## text stderr
+opv: opv could not read the reply of op from 1Password
+  checked: op account list --format json (exit 0)
+Do: update op (opv doctor checks its version)
+Next: opv doctor
+
+## json exit: 4
+## json stdout
+{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor","do":"update op (opv doctor checks its version)","error":{"code":"unexpected_output","category":"source","message":"opv could not read the reply of op from 1Password","subject":{"during":"read","system":"one_password","at":null,"problem":{"problem":"unparseable"}},"evidence":{"checked":"op account list --format json","account":null,"upstream":null},"retry":"never","human_required":false,"do":"update op (opv doctor checks its version)","next":"opv doctor","next_kind":"run"}}
+
+## json stderr
+opv: opv could not read the reply of op from 1Password
+  checked: op account list --format json (exit 0)
+Do: update op (opv doctor checks its version)
+Next: opv doctor

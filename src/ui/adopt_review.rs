@@ -3,7 +3,7 @@
 //! `opv adopt ... --apply` argument list. Names, actions and decisions only; a secret value
 //! is never read or kept here.
 
-use serde_json::Value;
+use super::docs::AdoptDoc;
 
 /// What a person decided for one row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,36 +28,21 @@ pub struct ReviewRow {
     pub decision: Option<Decision>,
 }
 
-/// The found names of one document row.
-fn found_names(v: &Value) -> Vec<String> {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// One row per entry of `doc["rows"]` (fields: `found: [string]`, `product: string|null`,
-/// `key: string|null`, `action: string`). `label(product, key)` gives the display/CLI name;
-/// rows without a key get `label = found joined with ", "`. `immutable(product, key)` says
+/// One row per row of the document. `label(product, key)` gives the display/CLI name; rows
+/// without a key get `label = found joined with ", "`. `immutable(product, key)` says
 /// whether the key is immutable. `decision = default_decision(action)`.
 pub fn rows_from(
-    doc: &Value,
+    doc: &AdoptDoc,
     label: &dyn Fn(&str, &str) -> String,
     immutable: &dyn Fn(&str, &str) -> bool,
 ) -> Vec<ReviewRow> {
-    let Some(rows) = doc["rows"].as_array() else {
-        return Vec::new();
-    };
-    rows.iter()
+    doc.rows
+        .iter()
         .map(|r| {
-            let product = r["product"].as_str().map(str::to_string);
-            let key = r["key"].as_str().map(str::to_string);
-            let found = found_names(&r["found"]);
-            let action = r["action"].as_str().unwrap_or_default().to_string();
+            let product = r.product.clone();
+            let key = r.key.clone();
+            let found = r.found.clone();
+            let action = r.action.clone();
             let label = match &key {
                 Some(k) => label(product.as_deref().unwrap_or(""), k),
                 None => found.join(", "),

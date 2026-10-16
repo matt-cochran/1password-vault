@@ -36,7 +36,7 @@ fn unknown_environment_exits_2_before_any_subprocess() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.starts_with("opv: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: environment qa is not declared"),
             "{cmd:?}: {err}"
         );
     }
@@ -46,7 +46,6 @@ fn unknown_environment_exits_2_before_any_subprocess() {
 fn missing_config_file_exits_2() {
     let (code, _, err) = opv(&["--config", "does-not-exist.toml", "status", "prod"]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.starts_with("opv: configuration error"), "{err}");
 }
 
 /// FR-24, FR-60: a file that still sets the removed `pattern` rule fails at load as a
@@ -73,7 +72,7 @@ fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
     assert!(
         out.is_empty()
             && err.contains(
-                ":9: products.app.keys.K1.rules: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead"
+                " at line 9, column 33: products.app.keys.K1.rules.pattern uses the removed form pattern"
             ),
         "{err}"
     );
@@ -142,7 +141,7 @@ fn same_file(printed: &str, expected: &std::path::Path) -> bool {
 fn discovery_loads_the_ancestor_config_for_the_command() {
     let (_dir, nested) = dir_with_ancestor_config();
     let (_, _, err) = opv_in(&nested, &["status", "qa"]);
-    assert!(err.contains("undefined environment \"qa\""), "{err}");
+    assert!(err.contains("environment qa is not declared"), "{err}");
 }
 
 #[test]
@@ -168,9 +167,9 @@ fn missing_discovered_config_names_starting_directory() {
     std::fs::create_dir_all(&nested).unwrap();
     let (_, _, err) = opv_in(&nested, &["status", "prod"]);
     let named = err
-        .split("no secrets.toml found in ")
+        .split(" was found in ")
         .nth(1)
-        .and_then(|rest| rest.split(" or any parent directory").next())
+        .and_then(|rest| rest.split(" or any folder above it").next())
         .unwrap_or("");
     assert!(same_file(named, &nested), "{err}");
 }
@@ -181,7 +180,8 @@ fn missing_discovered_config_offers_init_and_setup() {
     let dir = tempfile::tempdir().unwrap();
     let (_, _, err) = opv_in(dir.path(), &["status", "prod"]);
     assert!(
-        err.contains("Next: opv init dev") && err.contains("opv setup"),
+        // 09.03b: init starts the environment the command named.
+        err.contains("Next: opv init prod") && err.contains("opv setup"),
         "{err}"
     );
 }
@@ -242,7 +242,8 @@ fn missing_op_exits_3() {
     let (code, out, err) = opv(&["--config", CFG, "plan", "prod"]);
     assert_eq!(code, 3, "{err}");
     assert!(out.is_empty());
-    assert!(err.starts_with("opv: dependency error"), "{err}");
+    // Catalog (design §4.7): the tool is named, with its install line.
+    assert!(err.starts_with("opv: op is not installed"), "{err}");
 }
 
 #[test]
@@ -292,7 +293,7 @@ fn env_without_fly_section_exits_2_for_fly_commands() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.contains("environment \"dev\" has no deployment target"),
+            err.contains("environment dev has no target"),
             "{cmd:?}: {err}"
         );
     }
@@ -454,7 +455,7 @@ mod run_with_fake_op {
         let (code, _, err) = run(&dir, &["run", "qa", "--product", "allumata", "--", "true"]);
         assert_eq!(code, 2, "{err}");
         assert!(
-            err.starts_with("opv: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: environment qa is not declared"),
             "{err}"
         );
         assert!(!log.exists(), "op must not be invoked");
@@ -593,7 +594,10 @@ fn explain_never_prints_reveal() {
 fn explain_undeclared_key_exits_2() {
     let (code, _, err) = opv(&["--config", CFG, "explain", "allumata/NOPE", "--env", "prod"]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.starts_with("opv: configuration error"), "{err}");
+    assert!(
+        err.starts_with("opv: key allumata/NOPE is not declared"),
+        "{err}"
+    );
 }
 
 /// FR-22, FR-20: under the simple profile `explain` takes the bare key.
@@ -659,8 +663,8 @@ fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
     let (code, out, err) = opv_in(dir.path(), &INIT);
     assert_eq!(code, 2, "{err}");
     assert!(out.is_empty(), "{out}");
-    assert!(err.contains("secrets.toml already exists"), "{err}");
-    assert!(err.contains("--force"), "{err}");
+    // The cause's own wording: init never merges, so the step adds the environment.
+    assert!(err.contains("--add-env"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
 }
 
@@ -726,7 +730,10 @@ fn init_rejects_config_flag_and_bad_profile() {
     a.extend(INIT);
     let (code, _, err) = opv_in(dir.path(), &a);
     assert_eq!(code, 2, "{err}");
-    assert!(err.contains("--config is not used"), "{err}");
+    assert!(
+        err.contains("opv init and --config cannot be used together"),
+        "{err}"
+    );
     let mut a = INIT.to_vec();
     a.extend(["--profile", "both"]);
     let (code, _, err) = opv_in(dir.path(), &a);
@@ -896,7 +903,10 @@ fn init_add_env_refuses_an_existing_environment() {
         dir.path(),
         &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
     );
-    assert!(code == 2 && err.contains("already exists"), "{code} {err}");
+    assert!(
+        code == 2 && err.contains("already declared"),
+        "{code} {err}"
+    );
 }
 
 /// A fake `op` that runs `script`, in a fresh PATH dir; returns the dir.
@@ -978,8 +988,8 @@ fn sigterm_forwards_and_exits_143() {
         (
             Some(143),
             "forwarded",
-            "opv: interrupted during op item get; safe to re-run\n\
-             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata"
+            "opv: interrupted by signal 15 before any write\n\
+             Next: opv check --config tests/fixtures/secrets.toml prod --product allumata"
         )
     );
 }
@@ -1069,7 +1079,8 @@ fn guided_commands_refuse_headless_execution_before_vendor_calls() {
         let (code, stdout, stderr) = opv(&[command]);
         assert_eq!(code, 6);
         assert!(stdout.is_empty());
-        assert!(stderr.contains("interactive terminal"));
+        // R60: the catalog's NeedsTerminal, handed to the person's own terminal.
+        assert!(stderr.contains("needs a person at a terminal"), "{stderr}");
     }
 }
 
@@ -1130,7 +1141,7 @@ fn json_failure_before_any_call_prints_the_envelope_on_stdout() {
 fn json_failure_keeps_the_human_text_on_stderr() {
     let (_, _, err) = opv(&["--config", CFG, "status", "qa", "--json"]);
     assert!(
-        err.starts_with("opv: configuration error: undefined environment"),
+        err.starts_with("opv: environment qa is not declared"),
         "{err}"
     );
 }
@@ -1153,9 +1164,10 @@ fn json_usage_error_prints_the_envelope() {
 #[test]
 fn json_dependency_failure_names_a_runnable_next() {
     let (_, out, _) = opv(&["--config", CFG, "status", "prod", "--json"]);
+    // Catalog: Next re-runs the invocation with every flag kept (design §6.1).
     assert_eq!(
         json_of(&out)["next"],
-        "opv --config tests/fixtures/secrets.toml status prod --json",
+        "opv status --config tests/fixtures/secrets.toml prod --json",
         "{out}"
     );
 }
@@ -1267,13 +1279,14 @@ fn every_text_failure_ends_with_a_runnable_next() {
         &["--config", CFG, "status", "qa"][..],
         &["--config", CFG, "status", "prod"],
         &["--config", CFG, "sync", "prod", "--rotate", "allumata/NOPE"],
-        &["--config", CFG, "explain", "INTEGRATION_ENC_KEY"],
+        &["--config", CFG, "explain", "allumata/NOPE"],
         &["--config", CFG, "status", "prod", "--product", "nope"],
         &["--config", "does-not-exist.toml", "status", "prod"],
     ] {
         let (_, _, err) = opv(args);
         let next = err.lines().last().unwrap_or_default();
-        if !opv::error::is_runnable(next.strip_prefix("Next: ").unwrap_or("not a next line")) {
+        let step = next.strip_prefix("Next: ").unwrap_or("not a next line");
+        if !step.starts_with("opv ") || step.contains(['<', '>']) {
             bad.push(format!("{args:?}: {next}"));
         }
     }

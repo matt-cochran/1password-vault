@@ -186,6 +186,16 @@ pub trait CommandRunner {
     /// [`Outcome::Unknown`]. `Err` only when the program could not be started (nothing ran).
     fn write(&self, call: &Call) -> io::Result<Outcome>;
 
+    /// Non-idempotent create (X5, design §5 "Creates are their own runner effect"): one
+    /// write attempt, never retried. Exit 0 is [`CreateOutcome::Done`]; a non-zero exit was
+    /// a definite refusal ([`CreateOutcome::Refused`], nothing was made). A timeout, a kill,
+    /// a lost reply, a signal or a spent budget is [`CreateOutcome::OutcomeUnknown`], never
+    /// an error a call site could word as "did not create". `Err` only when the program
+    /// could not be started (nothing ran).
+    fn create(&self, call: &Call, _kind: crate::cause::CreateKind) -> io::Result<CreateOutcome> {
+        runner_create::from_write(self.write(call), call)
+    }
+
     /// True once this run started a write to a target, which a later read that fails or
     /// never answers must not call "nothing was changed" (NR-2, NR-28). The 1Password tidy
     /// (FR-43) rewrites an item's layout, never a target, so `op` writes do not count. A
@@ -342,9 +352,27 @@ pub fn verbose_line(call: &Call, elapsed: Duration, outcome: &str) -> String {
 enum Attempt {
     Exited(Output),
     TimedOut,
-    Killed,
+    /// Ended by this signal (not opv's own timeout kill).
+    Killed(i32),
+    /// The call ran but its reply could not be collected (its stdout or stdin pipe failed,
+    /// or opv could not wait for it). Observed as [`ExitClass::Lost`](crate::cause::ExitClass),
+    /// whatever the child's own status, so no diagnosis reports it as a timeout or a kill.
     Lost,
-    OverCap,
+    /// stdout went past [`OUTPUT_CAP`]; the child ended as this.
+    OverCap(crate::cause::ExitClass),
+}
+
+/// How a child that opv itself ended (`Child::kill`, SIGKILL on Unix) is observed.
+const KILLED_BY_OPV: crate::cause::ExitClass = crate::cause::ExitClass::Signal { signal: 9 };
+
+/// How an exited child ended, as observed: the signal that ended it, else its exit code.
+fn exit_class_of(status: ExitStatus) -> crate::cause::ExitClass {
+    match killed_by_signal(status) {
+        Some(signal) => crate::cause::ExitClass::Signal { signal },
+        None => crate::cause::ExitClass::Code {
+            code: exit_code(status),
+        },
+    }
 }
 
 impl Attempt {
@@ -352,9 +380,9 @@ impl Attempt {
         match self {
             Attempt::Exited(o) => status_text(o.status),
             Attempt::TimedOut => "timeout".into(),
-            Attempt::Killed => "killed".into(),
+            Attempt::Killed(_) => "killed".into(),
             Attempt::Lost => "lost".into(),
-            Attempt::OverCap => status_text(OVER_CAP),
+            Attempt::OverCap(_) => status_text(OVER_CAP),
         }
     }
 }
@@ -409,11 +437,14 @@ fn attempt_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<(Attem
             &outcome,
         ));
         if let Ok((a, stderr)) = &res {
-            for line in crate::scrub::tail_lines(
-                &stderr.bytes,
-                stderr.truncated,
-                crate::scrub::VERBOSE_LINES,
-            ) {
+            // The whole reply, scrubbed (design §7.3); a reply past the cap says so.
+            if stderr.truncated {
+                e.note(&format!(
+                    "    stderr truncated: longer than {} KiB, only its end was kept",
+                    STDERR_CAP / 1024
+                ));
+            }
+            for line in crate::scrub::reply_lines(&stderr.bytes, stderr.truncated) {
                 e.note(&format!("    stderr: {line}"));
             }
             if let Attempt::Exited(o) = a {
@@ -529,6 +560,7 @@ mod failure {
     use std::cell::{Cell, RefCell};
 
     use super::Stderr;
+    use crate::cause::Observed;
 
     struct Failed {
         call: u64,
@@ -540,15 +572,24 @@ mod failure {
         static CALL: Cell<u64> = const { Cell::new(0) };
         static DIAGNOSING: Cell<u32> = const { Cell::new(0) };
         static LAST: RefCell<Option<Failed>> = const { RefCell::new(None) };
+        static OBSERVED: RefCell<Option<(u64, Observed)>> = const { RefCell::new(None) };
+        static ANSWERED: RefCell<Option<(u64, Observed)>> = const { RefCell::new(None) };
+    }
+
+    /// True inside [`diagnosing`](super::diagnosing).
+    pub(super) fn active() -> bool {
+        DIAGNOSING.with(Cell::get) > 0
     }
 
     /// A call starts: its id, after clearing the slot. `None` inside [`diagnosing`]: the
     /// probe is part of the failure being explained and leaves the slot alone.
     pub(super) fn begin() -> Option<u64> {
-        if DIAGNOSING.with(Cell::get) > 0 {
+        if active() {
             return None;
         }
         LAST.with(|l| l.borrow_mut().take());
+        OBSERVED.with(|o| o.borrow_mut().take());
+        ANSWERED.with(|o| o.borrow_mut().take());
         Some(CALL.with(|c| {
             c.set(c.get() + 1);
             c.get()
@@ -569,11 +610,82 @@ mod failure {
         });
     }
 
+    /// Call `call` failed as `seen`; kept only while it is still the latest call.
+    pub(super) fn observe(call: Option<u64>, seen: Observed) {
+        let Some(call) = call.filter(|id| *id == CALL.with(Cell::get)) else {
+            return;
+        };
+        OBSERVED.with(|o| *o.borrow_mut() = Some((call, seen)));
+    }
+
+    /// Call `call` answered with exit 0, as `seen`; kept only while it is still the latest
+    /// call, for a caller that finds the reply unusable.
+    pub(super) fn answered(call: Option<u64>, seen: Observed) {
+        let Some(call) = call.filter(|id| *id == CALL.with(Cell::get)) else {
+            return;
+        };
+        ANSWERED.with(|o| *o.borrow_mut() = Some((call, seen)));
+    }
+
+    pub(super) fn take_answered() -> Option<Observed> {
+        let (call, seen) = ANSWERED.with(|o| o.borrow_mut().take())?;
+        (call == CALL.with(Cell::get)).then_some(seen)
+    }
+
+    /// True when the latest call's failure is still held (not yet taken).
+    pub(super) fn failure_held() -> bool {
+        OBSERVED.with(|o| {
+            o.borrow()
+                .as_ref()
+                .is_some_and(|(call, _)| *call == CALL.with(Cell::get))
+        })
+    }
+
+    pub(super) fn take_observed() -> Option<Observed> {
+        let (call, seen) = OBSERVED.with(|o| o.borrow_mut().take())?;
+        (call == CALL.with(Cell::get)).then_some(seen)
+    }
+
     pub(super) fn not_found() -> bool {
         LAST.with(|l| {
             l.borrow().as_ref().is_some_and(|f| {
                 f.call == CALL.with(Cell::get) && super::says_not_found(&f.program, &f.stderr.bytes)
             })
+        })
+    }
+
+    pub(super) fn signed_out() -> bool {
+        LAST.with(|l| {
+            l.borrow().as_ref().is_some_and(|f| {
+                f.call == CALL.with(Cell::get)
+                    && super::says_signed_out(&f.program, &f.stderr.bytes)
+            })
+        })
+    }
+
+    /// The latest failed call: its observation, raw reply and scrubbed excerpt; taken once.
+    pub(super) fn take_failure() -> Option<super::Failure> {
+        let seen = take_observed()?;
+        let f = LAST
+            .with(|l| l.borrow_mut().take())
+            .filter(|f| f.call == CALL.with(Cell::get));
+        Some(match f {
+            Some(f) => super::Failure {
+                seen,
+                stderr: zeroize::Zeroizing::new(
+                    String::from_utf8_lossy(&f.stderr.bytes).into_owned(),
+                ),
+                excerpt: crate::scrub::Excerpt::from_stderr(
+                    &f.program,
+                    &f.stderr.bytes,
+                    f.stderr.truncated,
+                ),
+            },
+            None => super::Failure {
+                seen,
+                stderr: zeroize::Zeroizing::new(String::new()),
+                excerpt: None,
+            },
         })
     }
 
@@ -632,6 +744,13 @@ pub fn last_failure_not_found() -> bool {
     failure::not_found()
 }
 
+/// True when the last failed captured call on this thread (as for
+/// [`last_failure_not_found`]) said no one is signed in to its service (its CLI's
+/// [`crate::host::Tool::signed_out`] phrases), so the diagnosis is a sign-in, not an outage.
+pub fn last_failure_signed_out() -> bool {
+    failure::signed_out()
+}
+
 /// The scrubbed stderr excerpt of the failed call the error at hand came from (a read
 /// refused, a write or probe that exited non-zero), if it wrote any; taken once. Any call
 /// started after the failure (other than a [`diagnosing`] probe) drops it, so an excerpt
@@ -640,11 +759,292 @@ pub fn take_failure_excerpt() -> Option<crate::scrub::Excerpt> {
     failure::take()
 }
 
+/// The failed call the error at hand came from, for its system's diagnosis strategy (design
+/// §5): what the runner observed, the raw stderr and its scrubbed excerpt. The raw stderr
+/// is matched against the recorded phrases before scrubbing (scrubbing may change a phrase)
+/// and never leaves the strategy; it lives in zeroizing memory. The excerpt is the evidence.
+pub struct Failure {
+    pub seen: crate::cause::Observed,
+    stderr: Zeroizing<String>,
+    pub excerpt: Option<crate::scrub::Excerpt>,
+}
+
+impl Failure {
+    /// The call's raw stderr ("" when it wrote none), for the diagnosis only.
+    pub fn stderr(&self) -> &str {
+        &self.stderr
+    }
+}
+
+/// The one way a diagnosis gets a failed call (design §5, B1): its [`Failure`] (a non-zero
+/// exit, a timeout, a kill, a lost reply, a spawn failure, or a streamed child recorded with
+/// [`record_streamed`]); taken once, together with its excerpt, and dropped by any later
+/// call exactly like [`take_failure_excerpt`]. `None` when the runner observed no failure.
+pub fn take_failure() -> Option<Failure> {
+    failure::take_failure()
+}
+
+/// What the runner observed about the failed call the error at hand came from (a non-zero
+/// exit, a timeout, a signal or a spawn failure), with its [`CallId`](crate::cause::CallId)
+/// and the principal in effect; taken once, and dropped by any later call exactly like
+/// [`take_failure_excerpt`] (design §5 "Sealing").
+pub fn take_observed() -> Option<crate::cause::Observed> {
+    failure::take_observed()
+}
+
+/// The observation behind each example of [`crate::cause::codes::examples`] (the catalog's
+/// code table): a fixed failed `op vault get`, classified only, never rendered as an error.
+/// Built here so the runner stays the only builder of an observation (the seal).
+pub fn catalog_example_observed(principal: crate::cause::Principal) -> crate::cause::Observed {
+    crate::cause::Observed::from_failed_call(
+        crate::cause::CallId {
+            system: crate::cause::System::OnePassword,
+            program: "op".into(),
+            words: vec!["vault".into(), "get".into(), "vlt-example".into()],
+        },
+        crate::cause::ExitClass::Code { code: 1 },
+        principal,
+    )
+}
+
+/// The one way to observe a call that **answered** (exit 0, or stdout past the output cap)
+/// with a reply the call site cannot use (design §4.6/§4.7, A1): JSON it cannot read, an
+/// empty token, an unconfirmed or lost write reply. This is the runner's own observation of
+/// `call` (its real exit class and principal), taken once and only while no later call has
+/// started. A [`CommandRunner`] that answers without the runner's engine (an in-memory
+/// double) leaves none; `call` is then observed as having exited 0. `None` when the latest
+/// call failed (its failure is [`take_failure`]'s) or is outside the external systems.
+pub fn take_unusable_reply(call: &Call) -> Option<crate::cause::Observed> {
+    if let Some(seen) = failure::take_answered() {
+        return Some(seen);
+    }
+    if failure::failure_held() {
+        return None;
+    }
+    observe::answered(call, crate::cause::ExitClass::Code { code: 0 })
+}
+
+/// Run `f` with `principal` (an environment's deploy credentials, FR-40) in effect: every
+/// call made inside it that fails is observed under it instead of the person or a shell
+/// token. The runner that adds a deploy identity to calls (`EnvRunner`) wraps the calls of
+/// the programs its sign-in gives an environment to.
+pub fn under_deploy<T>(principal: crate::cause::Principal, f: impl FnOnce() -> T) -> T {
+    observe::under_deploy(principal, f)
+}
+
+/// The deploy credentials [`under_deploy`] put in effect, if any: a sign-in's own check of
+/// the item's values names that item.
+pub fn deploy_principal() -> Option<crate::cause::Principal> {
+    observe::deploy_principal()
+}
+
 /// Run `f`, the read-only diagnosis of the call that just failed (FR-26): its probes keep
 /// that call's excerpt instead of starting a new one (NR-31). Used only on failure paths.
 pub fn diagnosing<T>(f: impl FnOnce() -> T) -> T {
     let _scope = failure::Diagnosis::enter();
     f()
+}
+
+/// True inside [`diagnosing`]: a probe's failure is not recorded, so the held failure (if
+/// any) is still the call being diagnosed, never the probe's own.
+pub fn in_diagnosis() -> bool {
+    failure::active()
+}
+
+/// Names a failed call and the principal it ran under (design §5): the only place an
+/// [`Observed`](crate::cause::Observed) is built.
+mod observe {
+    use std::cell::RefCell;
+    use std::io;
+
+    use super::{Attempt, Call, Stderr};
+    use crate::cause::{CallId, ExitClass, Observed, Principal, System, VarName};
+
+    thread_local! {
+        static DEPLOY: RefCell<Option<Principal>> = const { RefCell::new(None) };
+    }
+
+    /// Restores the principal in effect before [`under_deploy`] when dropped.
+    struct Restore(Option<Principal>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            DEPLOY.with(|d| *d.borrow_mut() = prev);
+        }
+    }
+
+    pub(super) fn under_deploy<T>(principal: Principal, f: impl FnOnce() -> T) -> T {
+        let prev = DEPLOY.with(|d| d.borrow_mut().replace(principal));
+        let _restore = Restore(prev);
+        f()
+    }
+
+    pub(super) fn deploy_principal() -> Option<Principal> {
+        DEPLOY.with(|d| d.borrow().clone())
+    }
+
+    /// The external system `program` belongs to, from its file name (`op`, `op.exe`,
+    /// `/usr/bin/flyctl`); `None` for a program outside the external systems.
+    fn system(program: &str) -> Option<System> {
+        let name = std::path::Path::new(program)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or(program);
+        Some(match name {
+            "op" => System::OnePassword,
+            "flyctl" | "fly" => System::Fly,
+            "az" => System::Azure,
+            "kubectl" => System::Kubernetes,
+            "gh" => System::GitHub,
+            "ssh" => System::Ssh,
+            "opv" => System::RemoteOpv,
+            _ => return None,
+        })
+    }
+
+    /// The call's name (design §5): the program and its words up to `--` (so `op run`'s
+    /// child command is never part of it), each `name=value` word cut to its name. stdin is
+    /// never read. `None` for a program outside the external systems.
+    pub(super) fn call_id(call: &Call) -> Option<CallId> {
+        let system = system(call.program)?;
+        let words = call
+            .args
+            .iter()
+            .take_while(|w| **w != "--")
+            .map(|w| call_word(w))
+            .collect();
+        Some(CallId {
+            system,
+            program: call.program.to_string(),
+            words,
+        })
+    }
+
+    /// One argument as the call's identity shows it: a `NAME=value` argument by its name
+    /// only (a value is never shown), except a flag whose value is a setting opv chose and
+    /// that the call cannot be repeated without (`--request-timeout=60s`).
+    fn call_word(w: &str) -> String {
+        match w.split_once('=') {
+            Some((name, _)) if !KEEPS_VALUE.contains(&name) => name.to_string(),
+            _ => w.to_string(),
+        }
+    }
+
+    /// The flags whose `=value` is opv's own setting, kept in a call's identity.
+    const KEEPS_VALUE: &[&str] = &["--request-timeout"];
+
+    /// Shell tokens that override `program`'s own sign-in (design §5).
+    fn shell_tokens(program: &str) -> &'static [&'static str] {
+        match system(program) {
+            Some(System::Fly) => &["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"],
+            Some(System::GitHub) => &["GH_TOKEN", "GITHUB_TOKEN"],
+            Some(System::OnePassword) => &["OP_SERVICE_ACCOUNT_TOKEN"],
+            _ => &[],
+        }
+    }
+
+    /// True when `var` is set, non-empty, in the child's environment: the call's own env
+    /// (later entries win), then the program's pinned env, then opv's own. Only presence is
+    /// read; the value is never kept.
+    fn in_child_env(call: &Call, var: &str) -> bool {
+        let own = call
+            .env
+            .iter()
+            .rev()
+            .chain(super::pinned_env(call.program).iter())
+            .find(|(k, _)| *k == var)
+            .map(|(_, v)| !v.is_empty());
+        own.unwrap_or_else(|| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+    }
+
+    /// Who acted: the deploy credentials of [`under_deploy`], else a shell token present
+    /// for the program, else the person.
+    fn principal(call: &Call) -> Principal {
+        if let Some(p) = DEPLOY.with(|d| d.borrow().clone()) {
+            return p;
+        }
+        shell_tokens(call.program)
+            .iter()
+            .find(|var| in_child_env(call, var))
+            .map_or(Principal::Person { account: None }, |var| {
+                Principal::ShellToken {
+                    var: VarName::new(*var),
+                }
+            })
+    }
+
+    /// How a failed attempt ended; `None` for an answer (exit 0, or stdout over the cap),
+    /// which [`answered`] observes instead. A lost reply is a failure: the call ran, its
+    /// outcome is unknown.
+    fn exit_class(res: &io::Result<(Attempt, Stderr)>) -> Option<ExitClass> {
+        match res {
+            Err(_) => Some(ExitClass::SpawnFailed),
+            Ok((Attempt::Exited(o), _)) if o.status != 0 => {
+                Some(ExitClass::Code { code: o.status })
+            }
+            Ok((Attempt::TimedOut, _)) => Some(ExitClass::TimedOut),
+            Ok((Attempt::Killed(signal), _)) => Some(ExitClass::Signal { signal: *signal }),
+            Ok((Attempt::Lost, _)) => Some(ExitClass::Lost),
+            Ok(_) => None,
+        }
+    }
+
+    /// The observation of `call`'s attempt `res`, when it failed.
+    pub(super) fn failed(call: &Call, res: &io::Result<(Attempt, Stderr)>) -> Option<Observed> {
+        let exit = exit_class(res)?;
+        Some(Observed::from_failed_call(
+            call_id(call)?,
+            exit,
+            principal(call),
+        ))
+    }
+
+    /// The observation of a streamed child opv started itself, which ended as `exit`.
+    pub(super) fn ended(call: &Call, exit: ExitClass) -> Option<Observed> {
+        Some(Observed::from_failed_call(
+            call_id(call)?,
+            exit,
+            principal(call),
+        ))
+    }
+
+    /// The observation of `call`, which answered (ending as `exit`) with a reply the call
+    /// site may find unusable (design §4.6, §4.7, A1).
+    pub(super) fn answered(call: &Call, exit: ExitClass) -> Option<Observed> {
+        Some(Observed::from_unusable_reply(
+            call_id(call)?,
+            exit,
+            principal(call),
+        ))
+    }
+}
+
+/// Record that a long-lived, streamed child opv started itself (remote delivery's `ssh`,
+/// whose stdin carries the payload and heartbeats) ended as `exit` after writing `stderr`,
+/// so [`take_failure`] hands it to that system's diagnosis like any captured call (design
+/// §5).
+pub fn record_streamed(program: &str, args: &[&str], exit: crate::cause::ExitClass, stderr: &[u8]) {
+    let id = failure::begin();
+    let call = Call::new(program, args);
+    if let Some(seen) = observe::ended(&call, exit) {
+        failure::observe(id, seen);
+    }
+    let mut kept = Stderr::default();
+    kept.push(stderr);
+    failure::record(id, program, kept);
+}
+
+/// Keep what the runner saw of `call`'s attempt `res` (call `id`) when it failed.
+fn observe_attempt(id: Option<u64>, call: &Call, res: &io::Result<(Attempt, Stderr)>) {
+    observe_attempt_n(id, call, res, 1);
+}
+
+/// [`observe_attempt`] for a read's `n`-th attempt.
+fn observe_attempt_n(id: Option<u64>, call: &Call, res: &io::Result<(Attempt, Stderr)>, n: u32) {
+    if let Some(seen) = observe::failed(call, res) {
+        failure::observe(id, seen.on_attempt(n));
+    }
 }
 
 fn left(e: &dyn Engine) -> Duration {
@@ -665,9 +1065,14 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
         if limit.is_zero() {
             return Err(budget_spent(call));
         }
-        let (attempt, stderr) = attempt_on(e, call, limit)?;
+        let res = attempt_on(e, call, limit);
+        observe_attempt_n(id, call, &res, n);
+        let (attempt, stderr) = res?;
         let failed = match attempt {
-            Attempt::Exited(o) if o.status == 0 => return Ok(Outcome::Done(o)),
+            Attempt::Exited(o) if o.status == 0 => {
+                answered(id, call, crate::cause::ExitClass::Code { code: 0 });
+                return Ok(Outcome::Done(o));
+            }
             Attempt::Exited(o) if refused.contains(&o.status) => {
                 failure::record(id, call.program, stderr);
                 return Ok(Outcome::Refused(o));
@@ -689,12 +1094,19 @@ fn read_on(e: &dyn Engine, call: &Call, refused: &[i32]) -> io::Result<Outcome> 
                 failure::record(id, call.program, stderr);
                 Outcome::Refused(o)
             }
-            Attempt::OverCap => return Ok(Outcome::Refused(Output::failure(OVER_CAP))),
+            Attempt::OverCap(exit) => {
+                answered(id, call, exit);
+                return Ok(Outcome::Refused(Output::failure(OVER_CAP)));
+            }
             // opv's own interrupt never retries: the run is stopping (NR-12).
-            Attempt::Killed if signals::stopping() => return Ok(Outcome::unknown("killed")),
-            Attempt::Killed => Outcome::unknown("killed"),
-            Attempt::TimedOut => Outcome::unknown("timeout"),
-            Attempt::Lost => Outcome::unknown("lost"),
+            Attempt::Killed(_) if signals::stopping() => {
+                failure::record(id, call.program, stderr);
+                return Ok(Outcome::unknown("killed"));
+            }
+            unfinished => {
+                failure::record(id, call.program, stderr);
+                unfinished_outcome(&unfinished)
+            }
         };
         if n >= READ_ATTEMPTS {
             return Ok(failed);
@@ -789,10 +1201,15 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
     if limit.is_zero() {
         return Err(budget_spent(call));
     }
-    let (attempt, stderr) = attempt_on(e, call, limit)?;
+    let res = attempt_on(e, call, limit);
+    observe_attempt(id, call, &res);
+    let (attempt, stderr) = res?;
     e.wrote(call.program);
     Ok(match attempt {
-        Attempt::Exited(o) if o.status == 0 => Outcome::Done(o),
+        Attempt::Exited(o) if o.status == 0 => {
+            answered(id, call, crate::cause::ExitClass::Code { code: 0 });
+            Outcome::Done(o)
+        }
         Attempt::Exited(o) => {
             failure::record(id, call.program, stderr);
             Outcome::Unknown {
@@ -800,11 +1217,32 @@ fn write_on(e: &dyn Engine, call: &Call) -> io::Result<Outcome> {
                 status: Some(o.status),
             }
         }
-        Attempt::OverCap => Outcome::unknown("failed-write"),
-        Attempt::TimedOut => Outcome::unknown("timeout"),
-        Attempt::Killed => Outcome::unknown("killed"),
-        Attempt::Lost => Outcome::unknown("lost"),
+        Attempt::OverCap(exit) => {
+            answered(id, call, exit);
+            Outcome::unknown("failed-write")
+        }
+        unfinished => {
+            failure::record(id, call.program, stderr);
+            unfinished_outcome(&unfinished)
+        }
     })
+}
+
+/// The unknown outcome of an attempt that did not finish: a timeout, a kill or a lost reply.
+fn unfinished_outcome(attempt: &Attempt) -> Outcome {
+    match attempt {
+        Attempt::TimedOut => Outcome::unknown("timeout"),
+        Attempt::Killed(_) => Outcome::unknown("killed"),
+        _ => Outcome::unknown("lost"),
+    }
+}
+
+/// Keep, for [`take_unusable_reply`], what the runner saw of `call` (call `id`), which just
+/// answered as `exit`: the caller may still find its reply unusable (design §5, A1).
+fn answered(id: Option<u64>, call: &Call, exit: crate::cause::ExitClass) {
+    if let Some(seen) = observe::answered(call, exit) {
+        failure::answered(id, seen);
+    }
 }
 
 fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> {
@@ -823,18 +1261,30 @@ fn probe_on(e: &dyn Engine, call: &Call, limit: Duration) -> io::Result<Output> 
     if limit.is_zero() {
         return Err(timed_out());
     }
-    let (attempt, stderr) = attempt_on(e, call, limit)?;
+    let res = attempt_on(e, call, limit);
+    observe_attempt(id, call, &res);
+    let (attempt, stderr) = res?;
     match attempt {
         Attempt::Exited(o) => {
-            if o.status != 0 {
+            if o.status == 0 {
+                answered(id, call, crate::cause::ExitClass::Code { code: 0 });
+            } else {
                 failure::record(id, call.program, stderr);
             }
             Ok(o)
         }
-        Attempt::OverCap => Ok(Output::failure(OVER_CAP)),
-        Attempt::TimedOut => Err(timed_out()),
-        Attempt::Killed => Err(io::ErrorKind::Interrupted.into()),
-        Attempt::Lost => Err(io::ErrorKind::BrokenPipe.into()),
+        Attempt::OverCap(exit) => {
+            answered(id, call, exit);
+            Ok(Output::failure(OVER_CAP))
+        }
+        unfinished => {
+            failure::record(id, call.program, stderr);
+            Err(match unfinished {
+                Attempt::TimedOut => timed_out(),
+                Attempt::Killed(_) => io::ErrorKind::Interrupted.into(),
+                _ => io::ErrorKind::BrokenPipe.into(),
+            })
+        }
     }
 }
 
@@ -849,16 +1299,17 @@ fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(-1)
 }
 
-fn killed_by_signal(status: ExitStatus) -> bool {
+/// The signal that ended the child, if one did.
+fn killed_by_signal(status: ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        status.signal().is_some()
+        status.signal()
     }
     #[cfg(not(unix))]
     {
         let _ = status;
-        false
+        None
     }
 }
 
@@ -867,11 +1318,9 @@ fn killed_by_signal(status: ExitStatus) -> bool {
 /// drops the pipe, and that is the cap's refusal (NR-5), not an unknown kill.
 fn exited_early(status: ExitStatus, over: bool) -> Option<Attempt> {
     if over {
-        Some(Attempt::OverCap)
-    } else if killed_by_signal(status) {
-        Some(Attempt::Killed)
+        Some(Attempt::OverCap(exit_class_of(status)))
     } else {
-        None
+        killed_by_signal(status).map(Attempt::Killed)
     }
 }
 
@@ -994,7 +1443,7 @@ impl ProcessRunner {
         let held = lock(&self.account).clone();
         let env = self.with_default_account(call.program, call.env, &held);
         let mut child = command_for(&Call { env: &env, ..*call }).spawn()?;
-        signals::track(&child, call.step());
+        signals::track(&child);
         let child_stderr = child.stderr.take().expect("stderr is piped");
         // stderr is read on its own thread into a bounded, zeroizing buffer held in memory
         // only (NR-31). The buffer is shared so what arrived is kept even when a grandchild
@@ -1084,7 +1533,7 @@ impl ProcessRunner {
             }
             if over.load(Ordering::SeqCst) {
                 signals::kill(child);
-                return Ok(Attempt::OverCap);
+                return Ok(Attempt::OverCap(KILLED_BY_OPV));
             }
             if Instant::now() >= deadline {
                 signals::kill(child);
@@ -1101,7 +1550,7 @@ impl ProcessRunner {
         let remaining = || deadline.saturating_duration_since(Instant::now());
         let stdout = match rrx.recv_timeout(remaining()) {
             Ok(Ok(Some(out))) => out,
-            Ok(Ok(None)) => return Ok(Attempt::OverCap),
+            Ok(Ok(None)) => return Ok(Attempt::OverCap(exit_class_of(status))),
             Ok(Err(_)) => return Ok(Attempt::Lost),
             Err(_) => return Ok(Attempt::TimedOut),
         };
@@ -1231,6 +1680,19 @@ fn with_account<'a>(program: &str, args: &[&'a str], env: &[(&'a str, &'a str)])
     out
 }
 
+/// Observe an inherited call (`op run -- <cmd>`, FR-4) that failed to start or exited
+/// non-zero, like a captured one. Its child command after `--` is never named.
+/// An inherited call (`op run` and the person's command under it) is observed only when it
+/// could not be started: its exit code and signals are the person's own command's, never a
+/// 1Password failure.
+fn observe_inherited(call: &Call, env: &[(&str, &str)], status: &io::Result<ExitStatus>) {
+    let id = failure::begin();
+    if let Err(e) = status {
+        let res: io::Result<(Attempt, Stderr)> = Err(io::Error::from(e.kind()));
+        observe_attempt(id, &Call { env, ..*call }, &res);
+    }
+}
+
 /// Pseudo-random jitter without a dependency: a randomly keyed hash of the current instant.
 fn random_jitter() -> f64 {
     use std::hash::BuildHasher;
@@ -1251,6 +1713,22 @@ fn backoff_scale() -> f64 {
         return s.clamp(0.0, 1.0);
     }
     1.0
+}
+
+/// The time limit of one attempt. Builds with the `fake` feature (tests only; release builds
+/// never enable it) read `OPV_TEST_CALL_LIMIT` (seconds) and stop a call at the lower of it
+/// and `limit`, so the end-to-end matrix sees a hanging tool end as opv's own timeout, the
+/// runner fact a real hang produces, without waiting out the real limits.
+fn test_call_limit(limit: Duration) -> Duration {
+    #[cfg(feature = "fake")]
+    if let Some(s) = std::env::var("OPV_TEST_CALL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+    {
+        return limit.min(Duration::from_secs_f64(s));
+    }
+    limit
 }
 
 impl Engine for ProcessRunner {
@@ -1276,11 +1754,12 @@ impl Engine for ProcessRunner {
         self.verbose
     }
     fn attempt(&self, call: &Call, limit: Duration) -> io::Result<(Attempt, Stderr)> {
-        self.spawn_attempt(call, limit)
+        self.spawn_attempt(call, test_call_limit(limit))
     }
     fn wrote(&self, program: &str) {
         if target_write(program) {
             self.wrote.store(true, Ordering::SeqCst);
+            signals::note_write();
         }
     }
 }
@@ -1381,8 +1860,9 @@ impl CommandRunner for ProcessRunner {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
-        Ok(exit_code(status))
+            .status();
+        observe_inherited(&Call::new(program, args), env, &status);
+        Ok(exit_code(status?))
     }
 
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
@@ -1396,8 +1876,9 @@ impl CommandRunner for ProcessRunner {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
-        Ok(exit_code(status))
+            .status();
+        observe_inherited(&Call::new(program, args), env, &status);
+        Ok(exit_code(status?))
     }
 }
 
@@ -1405,8 +1886,8 @@ impl CommandRunner for ProcessRunner {
 /// running captured child (SIGQUIT as SIGTERM, so no core dump), which gets
 /// [`SIGNAL_GRACE`] before it is killed; the registered private directories are removed
 /// (SR-4); opv then exits 128 + the signal (130 for SIGINT, 143 for SIGTERM) with
-/// "interrupted during <step>; safe to re-run". Core dumps are disabled for opv and its
-/// children (SR-8). On Windows a console control handler (Ctrl-C, Ctrl-Break, closing the
+/// "interrupted during <step>; safe to re-run". Core dumps are disabled for every command by
+/// [`crate::hardening::harden`], the first statement of `main` (SR-8). On Windows a console control handler (Ctrl-C, Ctrl-Break, closing the
 /// console, log-off, shutdown) does the same: the console delivers the event to the child
 /// too, so opv waits for it, ends it after the grace period, cleans up and exits 130.
 pub mod signals {
@@ -1416,14 +1897,12 @@ pub mod signals {
 
     /// The captured child currently running, by pid.
     static CHILD: Mutex<Option<u32>> = Mutex::new(None);
-    /// The step of the most recent captured call.
-    static STEP: Mutex<String> = Mutex::new(String::new());
-    /// The command line to run again after an interruption (NR-19).
-    static RERUN: Mutex<String> = Mutex::new(String::new());
+    /// A target write started in this process: the interruption says so (design §4.6).
+    static WRITES_STARTED: AtomicBool = AtomicBool::new(false);
 
-    /// The command the interruption message names as the next step.
-    pub fn set_rerun(command: &str) {
-        *lock(&RERUN) = command.to_string();
+    /// Record that a target write started, for the interruption report.
+    pub fn note_write() {
+        WRITES_STARTED.store(true, Ordering::SeqCst);
     }
     /// Private directories to remove before the process exits on a signal (SR-4: the
     /// Azure CLI's RAM-only configuration directory of a deploy sign-in, FR-40).
@@ -1437,30 +1916,13 @@ pub mod signals {
         JSON.store(json, Ordering::SeqCst);
     }
 
-    /// The `--json` document for an interruption by signal `sig`.
-    pub fn interrupted_json(sig: i32, message: &str, rerun: &str) -> String {
-        let code = crate::error::Code::Interrupted;
-        let step = crate::error::Step {
-            action: None,
-            next: rerun.to_string(),
-        };
-        serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "ok": false,
-            "exit_code": 128 + sig,
-            "next": rerun,
-            "do": null,
-            "error": crate::error::error_object(
-                code.as_str(),
-                "interrupted",
-                message,
-                Vec::new(),
-                code.retry(),
-                code.human_required(),
-                &step,
-            ),
-        })
-        .to_string()
+    /// The interruption by signal `sig` as the catalog's cause.
+    pub fn interrupted(sig: i32) -> crate::error::Error {
+        crate::cause::Cause::Interrupted {
+            signal: sig,
+            writes_started: WRITES_STARTED.load(Ordering::SeqCst),
+        }
+        .into()
     }
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
@@ -1511,9 +1973,8 @@ pub mod signals {
         *lock(&CHILD)
     }
 
-    pub(super) fn track(child: &Child, step: String) {
+    pub(super) fn track(child: &Child) {
         *lock(&CHILD) = Some(child.id());
-        *lock(&STEP) = step;
     }
 
     /// `try_wait` under the lock, so the handler never signals a reaped (reusable) pid.
@@ -1566,15 +2027,6 @@ pub mod signals {
         });
     }
 
-    /// The line printed when opv is interrupted during `step` (empty: before any call).
-    pub fn interrupted_message(step: &str) -> String {
-        if step.is_empty() {
-            "interrupted; safe to re-run".to_string()
-        } else {
-            format!("interrupted during {step}; safe to re-run")
-        }
-    }
-
     /// The signals opv handles (I2: a closed terminal or dropped SSH session sends SIGHUP,
     /// Ctrl-\\ sends SIGQUIT; both would otherwise skip every cleanup).
     #[cfg(unix)]
@@ -1589,13 +2041,15 @@ pub mod signals {
         }
         forward(sig);
         run_cleanups();
-        let step = lock(&STEP).clone();
-        let rerun = lock(&RERUN).clone();
-        let message = interrupted_message(&step);
+        let e = interrupted(sig);
         if JSON.load(Ordering::SeqCst) {
-            stdout_unlocked(&format!("{}\n", interrupted_json(sig, &message, &rerun)));
+            stdout_unlocked(&String::from_utf8_lossy(&crate::json::finish(
+                b"",
+                Err(&e),
+                false,
+            )));
         }
-        eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
+        eprint!("{}", crate::error::report(&e));
         std::process::exit(128 + sig);
     }
 
@@ -1632,7 +2086,6 @@ pub mod signals {
     /// Install the handler (once, from `main`).
     #[cfg(unix)]
     pub fn install() -> std::io::Result<()> {
-        no_core_dumps();
         let mut signals = signal_hook::iterator::Signals::new(HANDLED)?;
         std::thread::spawn(move || {
             if let Some(sig) = signals.forever().find(|s| !ignored(*s)) {
@@ -1640,23 +2093,6 @@ pub mod signals {
             }
         });
         Ok(())
-    }
-
-    /// No core dump of opv's memory (or of a child's, which inherits the limit) can reach
-    /// the disk (SR-4, SR-8). Best effort.
-    #[cfg(unix)]
-    fn no_core_dumps() {
-        let zero = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: a plain syscall with a valid, initialised struct.
-        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) };
-        #[cfg(target_os = "linux")]
-        // SAFETY: a plain prctl with integer arguments.
-        unsafe {
-            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0)
-        };
     }
 
     /// Install the console control handler (once, from `main`): Ctrl-C, Ctrl-Break,
@@ -1770,7 +2206,7 @@ pub mod fake {
     use std::io;
     use std::time::{Duration, Instant};
 
-    use super::{Attempt, CommandRunner, Engine, Outcome, Output, Stderr};
+    use super::{Attempt, CommandRunner, Engine, KILLED_BY_OPV, Outcome, Output, Stderr};
 
     /// One recorded invocation, including env names and values so tests can assert what
     /// reached env versus argv. `Debug` shows argv but redacts stdin and env values.
@@ -1871,6 +2307,15 @@ pub mod fake {
             self.responses.borrow_mut().push_back(Ok(out));
         }
 
+        /// Queue an unknown outcome (`timeout`, `killed`, `lost`) whose child wrote `stderr`.
+        pub fn push_unknown_with_stderr(&self, reason: &str, stderr: &str) {
+            let index = self.calls.borrow().len() + self.responses.borrow().len();
+            self.stderr
+                .borrow_mut()
+                .insert(index, stderr.as_bytes().to_vec());
+            self.push_unknown(reason);
+        }
+
         /// The stderr queued for call `index`, if any.
         fn stderr_of(&self, index: usize) -> Stderr {
             let mut s = Stderr::default();
@@ -1931,6 +2376,21 @@ pub mod fake {
         }
     }
 
+    /// The signal a queued `Interrupted` (a kill) stands for: SIGKILL.
+    const FAKE_KILL_SIGNAL: i32 = 9;
+
+    /// The outcome a queued `io` error stands for (see the module docs); any other kind is a
+    /// spawn error.
+    fn attempt_for(kind: io::ErrorKind) -> io::Result<Attempt> {
+        Ok(match kind {
+            io::ErrorKind::TimedOut => Attempt::TimedOut,
+            io::ErrorKind::Interrupted => Attempt::Killed(FAKE_KILL_SIGNAL),
+            io::ErrorKind::ConnectionAborted => Attempt::Lost,
+            io::ErrorKind::OutOfMemory => Attempt::OverCap(KILLED_BY_OPV),
+            _ => return Err(kind.into()),
+        })
+    }
+
     impl Engine for FakeRunner {
         fn now(&self) -> Instant {
             self.start + self.elapsed.get()
@@ -1960,13 +2420,7 @@ pub mod fake {
             let index = self.calls.borrow().len();
             let attempt = match self.record(call.program, call.args, call.stdin, call.env, false) {
                 Ok(o) => Attempt::Exited(o),
-                Err(e) => match e.kind() {
-                    io::ErrorKind::TimedOut => Attempt::TimedOut,
-                    io::ErrorKind::Interrupted => Attempt::Killed,
-                    io::ErrorKind::ConnectionAborted => Attempt::Lost,
-                    io::ErrorKind::OutOfMemory => Attempt::OverCap,
-                    _ => return Err(e),
-                },
+                Err(e) => attempt_for(e.kind())?,
             };
             Ok((attempt, self.stderr_of(index)))
         }
@@ -1989,6 +2443,14 @@ pub mod fake {
             super::write_on(self, call)
         }
 
+        fn create(
+            &self,
+            call: &super::Call,
+            _kind: crate::cause::CreateKind,
+        ) -> io::Result<super::CreateOutcome> {
+            super::runner_create::from_write(super::write_on(self, call), call)
+        }
+
         /// A queued `TimedOut` comes back as that error, like a real probe timeout. A
         /// non-zero exit keeps its stderr for the failure excerpt, like the real probe.
         ///
@@ -2007,7 +2469,16 @@ pub mod fake {
             let id = super::failure::begin();
             self.elapsed.set(self.elapsed.get() + self.call_cost.get());
             let index = self.calls.borrow().len();
-            let out = self.record(call.program, call.args, call.stdin, call.env, false)?;
+            let res = self.record(call.program, call.args, call.stdin, call.env, false);
+            let seen = match &res {
+                Ok(o) => Ok((
+                    Attempt::Exited(Output::failure(o.status)),
+                    Stderr::default(),
+                )),
+                Err(e) => attempt_for(e.kind()).map(|a| (a, Stderr::default())),
+            };
+            super::observe_attempt(id, call, &seen);
+            let out = res?;
             let stderr = self.stderr_of(index);
             if out.status != 0 {
                 super::failure::record(id, call.program, stderr);
@@ -2061,6 +2532,15 @@ pub mod fake {
         }
     }
 }
+
+#[path = "runner_create.rs"]
+mod runner_create;
+
+pub use runner_create::CreateOutcome;
+
+#[cfg(test)]
+#[path = "runner_observed_tests.rs"]
+mod observed_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2367,7 +2847,7 @@ mod tests {
         let sigpipe = ExitStatus::from_raw(13);
         assert!(matches!(
             exited_early(sigpipe, true),
-            Some(Attempt::OverCap)
+            Some(Attempt::OverCap(_))
         ));
     }
 
@@ -2377,7 +2857,7 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         assert!(matches!(
             exited_early(ExitStatus::from_raw(9), false),
-            Some(Attempt::Killed)
+            Some(Attempt::Killed(9))
         ));
     }
 
@@ -2435,14 +2915,6 @@ mod tests {
             "exit 0",
         );
         assert_eq!(line, "op item get i (1.50 s): exit 0");
-    }
-
-    #[test]
-    fn interrupted_message_names_the_step() {
-        assert_eq!(
-            signals::interrupted_message("flyctl secrets deploy"),
-            "interrupted during flyctl secrets deploy; safe to re-run"
-        );
     }
 
     // Both tests below only ever set the flag (tests run in parallel).
@@ -2774,7 +3246,7 @@ mod tests {
     fn failed_read_excerpt_masks_a_registered_value() {
         crate::scrub::register("RnrMarker-91kq");
         failing_read_with_stderr("bad value RnrMarker-91kq\n");
-        assert_eq!(excerpt_lines(), ["bad value __SECRET__"]);
+        assert_eq!(excerpt_lines(), ["bad value ********"]);
     }
 
     #[test]
@@ -2831,46 +3303,6 @@ mod tests {
         assert_eq!(take_failure_excerpt(), None);
     }
 
-    fn failed_probe_then_successful_read() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(Output::failure(1), "[ERROR] probe went wrong\n");
-        r.push_with_stderr(Output::success("ok"), "");
-        let _ = r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT);
-        let _ = read_fake(&r);
-    }
-
-    #[test]
-    fn failed_probe_then_success_then_config_error_attaches_nothing() {
-        failed_probe_then_successful_read();
-        let e = crate::error::Error::Config("bad secrets.toml".into());
-        assert_eq!(
-            crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: configuration error: bad secrets.toml\nDo: fix the cause above\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn failed_probe_then_success_then_target_error_attaches_nothing() {
-        failed_probe_then_successful_read();
-        let e = crate::error::Error::Target("app is dead".into());
-        assert_eq!(
-            crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: target error: app is dead\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn failed_write_excerpt_attaches_to_its_own_error() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(Output::failure(2), "Error: app not found\n");
-        let _ = r.write(&Call::new("flyctl", &["secrets", "import"]));
-        let e = crate::error::Error::Unknown("flyctl secrets import failed (exit 2)".into());
-        assert_eq!(
-            crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: outcome unknown: flyctl secrets import failed (exit 2)\n  flyctl said: Error: app not found\nNext: opv doctor\n"
-        );
-    }
-
     #[test]
     fn excerpt_is_taken_once() {
         failing_read_with_stderr("x\n");
@@ -2907,7 +3339,35 @@ mod tests {
     #[test]
     fn verbose_stderr_is_scrubbed() {
         let notes = verbose_notes("", "Authorization: Bearer abc.def\n");
-        assert_eq!(notes[1], "    stderr: Authorization: Bearer __SECRET__");
+        assert_eq!(notes[1], "    stderr: Authorization: Bearer ********");
+    }
+
+    /// A 60-line reply whose first line is op's error and whose every line names `value`.
+    fn long_reply(value: &str) -> String {
+        let mut s = format!("[ERROR] 2026/10/16 10:00:00 refused {value}\n");
+        for i in 1..60 {
+            s.push_str(&format!("detail {i}: {value}\n"));
+        }
+        s
+    }
+
+    #[test]
+    fn verbose_shows_every_line_of_a_long_reply() {
+        let notes = verbose_notes("", &long_reply("plain"));
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| n.starts_with("    stderr: "))
+                .count(),
+            60
+        );
+    }
+
+    #[test]
+    fn verbose_masks_a_value_in_every_line_of_a_long_reply() {
+        crate::scrub::register("vbsLongValue-Q9");
+        let notes = verbose_notes("", &long_reply("vbsLongValue-Q9")).join("\n");
+        assert!(!notes.contains("vbsLongValue"), "{notes}");
     }
 
     /// I1: a value holding CR, BEL or ESC is masked in `--verbose` stderr too.
@@ -2948,7 +3408,7 @@ mod tests {
             ),
             &[],
         );
-        assert_eq!(crate::scrub::scrub("x m3ItemValueQ8z"), "x __SECRET__");
+        assert_eq!(crate::scrub::scrub("x m3ItemValueQ8z"), "x ********");
     }
 
     #[test]
@@ -2991,7 +3451,7 @@ mod tests {
             &Call::new("sh", &["-c", "echo 'warn PrcMarker-77xq' >&2; exit 3"]),
             &[3],
         );
-        assert_eq!(excerpt_lines(), ["warn __SECRET__"]);
+        assert_eq!(excerpt_lines(), ["warn ********"]);
     }
 
     /// More stderr than the cap neither blocks the child nor loses the last line.

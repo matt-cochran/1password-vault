@@ -160,8 +160,7 @@ personal = true
 fn run_without_a_personal_item() -> (FakeRunner, Error) {
     let r = FakeRunner::new([
         Output::failure(2),
-        Output::success(b"[]".to_vec()),
-        Output::success(b"[]".to_vec()),
+        Output::success(br#"[{"id":"vpriv0000000000000000000001","name":"Private"}]"#.to_vec()),
         Output::success(b"[]".to_vec()),
     ]);
     let e = crate::app::run::run(&personal_fleet(), "dev", "api", &["env".to_string()], &r)
@@ -181,9 +180,17 @@ fn run_stops_before_the_command_when_the_personal_item_is_missing() {
 }
 
 #[test]
-fn run_names_the_personal_key_and_bootstrap_when_the_personal_item_is_missing() {
+fn run_reports_personals_own_cause_when_the_personal_item_is_missing() {
+    // `run` passes on personal's own cause for the missing item, naming the keys (J6).
     let (_r, e) = run_without_a_personal_item();
-    assert!(e.mentions("OPENAI_API_KEY") && e.next_step() == Some("opv bootstrap"));
+    assert!(
+        matches!(
+            e.cause(),
+            Some((crate::cause::Cause::PersonalNotSetUp { then, .. }, _))
+                if matches!(**then, crate::cause::Cause::NotFound { .. })
+        ),
+        "{e}"
+    );
 }
 
 #[test]
@@ -287,7 +294,19 @@ fn locate_reports_setup_missing_when_the_item_does_not_exist() {
         .borrow_mut()
         .push(("vpriv0000000000000000000001".into(), "Private".into()));
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    assert_eq!(e.next_step(), Some("opv bootstrap"));
+    assert_eq!(e.code_str(), "item_not_found");
+}
+
+/// J6: a run stopped by a personal item that is not set up names the keys it holds.
+#[test]
+fn a_missing_personal_item_names_the_keys_a_run_needs() {
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vpriv0000000000000000000001".into(), "Private".into()));
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let e = naming_keys(e, "dev", &[("api", "MY_TOKEN")]);
+    assert!(e.to_string().contains("api/MY_TOKEN"), "{e}");
 }
 
 #[test]
@@ -304,4 +323,54 @@ personal = true
     )
     .unwrap();
     assert_eq!(item_title(&f.environments["dev"], "myapp"), "My Keys");
+}
+
+/// The `git` probe, then `op vault list` failing while nobody is signed in (`op whoami` and
+/// `op account list` fail too): the run's cause is the sign-in, not a missing item.
+#[test]
+fn a_signed_out_run_is_not_told_its_personal_item_is_missing() {
+    let mut replies = vec![Output::failure(2)];
+    replies.extend((0..12).map(|_| Output::failure(1)));
+    let r = FakeRunner::new(replies);
+    let e = crate::app::run::run(&personal_fleet(), "dev", "api", &["env".to_string()], &r)
+        .unwrap_err();
+    assert_ne!(e.code_str(), "item_not_found");
+}
+
+// --- audit 04.16: the setup error names what opv looked for; other failures surface ---
+
+#[test]
+fn a_missing_personal_item_is_named_by_its_title() {
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vpriv0000000000000000000001".into(), "Private".into()));
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let shown = crate::error::report(&e);
+    assert!(shown.contains("myapp · dev (personal)"), "{shown}");
+}
+
+#[test]
+fn a_missing_personal_vault_is_named_by_the_titles_tried() {
+    let op = FakeOp::default();
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let shown = crate::error::report(&e);
+    assert!(shown.contains("Private"), "{shown}");
+}
+
+/// C19, R34: a missing personal vault steps to the field that names another one.
+#[test]
+fn a_missing_personal_vault_names_the_personal_vault_field() {
+    let op = FakeOp::default();
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let shown = crate::error::report(&e);
+    assert!(shown.contains("environments.dev.personal_vault"), "{shown}");
+}
+
+#[test]
+fn merged_fields_reports_a_failure_that_is_not_a_missing_item() {
+    let op = FakeOp::default();
+    op.signed_in.set(false);
+    let team = vec![team_field("OPENAI_API_KEY", "sk-team")];
+    assert!(merged_fields(&op, &personal_fleet(), "dev", team, "myapp").is_err());
 }

@@ -84,20 +84,19 @@ fn import_never_deletes_the_file() {
 }
 
 #[test]
-fn import_ends_with_a_next_step_to_delete_the_file() {
+fn import_ends_with_a_typed_next_step_comparing_the_copy() {
     let (dir, op) = checkout();
     let mut out = Vec::new();
     import(&import_args(dir.path()), dir.path(), &op, &mut out).unwrap();
     let last = text(&out).lines().last().unwrap().to_string();
-    assert!(
-        last.starts_with("Next: ") && last.contains("config check") && last.contains("git rm"),
-        "{last}"
-    );
+    let file = crate::error::shell_word(&dir.path().join("secrets.toml").display().to_string());
+    assert_eq!(last, format!("Next: opv config check --file {file}"));
 }
 
-/// Found live: without a git remote there may be no repository, so the step is `rm`.
+/// Without a git remote the checkout finds the manifest only through a pointer: the Do
+/// says to write one before the typed Next.
 #[test]
-fn import_without_a_remote_next_step_uses_rm() {
+fn import_without_a_remote_says_to_write_the_pointer() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("secrets.toml"), TOML).unwrap();
     let args = ImportArgs {
@@ -106,8 +105,28 @@ fn import_without_a_remote_next_step_uses_rm() {
     };
     let mut out = Vec::new();
     import(&args, dir.path(), &FakeOp::default(), &mut out).unwrap();
-    let last = text(&out).lines().last().unwrap().to_string();
-    assert!(last.contains("&& rm "), "{last}");
+    assert!(
+        text(&out).contains("Do: write project = \"myapp\" in .opv"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// 03.11: a manifest that already exists is named with the local copy, so the step compares
+/// the two instead of editing the copy.
+#[test]
+fn import_beside_an_existing_manifest_names_the_local_copy() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    let e = import(&import_args(dir.path()), dir.path(), &op, &mut Vec::new()).unwrap_err();
+    assert!(
+        matches!(
+            e.cause(),
+            Some((Cause::ManifestExists { local_file: Some(f), .. }, _))
+                if *f == dir.path().join("secrets.toml")
+        ),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -148,7 +167,7 @@ fn check_of_an_identical_copy_passes() {
 }
 
 #[test]
-fn check_of_a_different_copy_exits_8() {
+fn check_of_a_different_copy_is_copies_differ() {
     let (dir, op) = checkout();
     put(&op, "myapp", &TOML.replace("dashboard", "console"));
     let found = manifest_of(dir.path(), &op);
@@ -159,7 +178,30 @@ fn check_of_a_different_copy_exits_8() {
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.exit_code(), 8);
+    assert_eq!(e.code_str(), "copies_differ");
+}
+
+/// 03.07: either copy may be the intended one; no step picks the direction for the person.
+#[test]
+fn check_of_a_different_copy_runs_nothing_next() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", &TOML.replace("dashboard", "console"));
+    let found = manifest_of(dir.path(), &op);
+    let e = check(
+        &found,
+        &dir.path().join("secrets.toml"),
+        &op,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "config".into(), "check".into()]);
+    assert!(
+        matches!(
+            e.cause().unwrap().0.step(&inv).1,
+            crate::cause::Next::None(_)
+        ),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -267,6 +309,29 @@ fn edit_never_saves_an_invalid_configuration() {
     }
     let _ = edit(&found, &op, &mut No, &mut Vec::new());
     assert_eq!(op.count(&["op", "item", "edit"]), 0);
+}
+
+/// 03.05: the re-edit loop shows the fix where the person is editing, before "Edit again?".
+#[test]
+fn edit_shows_the_fix_of_an_invalid_edit_before_asking_again() {
+    let (dir, op) = checkout();
+    put(&op, "myapp", TOML);
+    let found = manifest_of(dir.path(), &op);
+    struct Typo;
+    impl EditUi for Typo {
+        fn edit(&mut self, _: &str) -> Result<String, Error> {
+            Ok(TOML.replace(
+                "[environments.dev]\n",
+                "[environments.dev]\nconfrm_env = true\n",
+            ))
+        }
+        fn confirm(&mut self, _: &str) -> Result<bool, Error> {
+            Ok(false)
+        }
+    }
+    let mut out = Vec::new();
+    let _ = edit(&found, &op, &mut Typo, &mut out);
+    assert!(text(&out).contains("\nDo: "), "{}", text(&out));
 }
 
 #[test]
@@ -431,13 +496,6 @@ fn edit_to_an_env_file_never_shows_a_value() {
 
 const FLEET_TOML: &str = "[environments.dev]\nboundaries.api = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\n[products.api.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
 
-/// I7: `status --all` runs from anywhere, so its step names the project.
-#[test]
-fn status_all_next_names_the_project() {
-    let e = super::in_project(Error::findings(1, "opv check dev".to_string()), "myapp");
-    assert_eq!(e.next_step(), Some("env OPV_PROJECT=myapp opv check dev"));
-}
-
 /// I7: `--product` limits `status --all` to the projects that declare it.
 #[test]
 fn status_all_with_a_product_lists_only_projects_declaring_it() {
@@ -450,17 +508,19 @@ fn status_all_with_a_product_lists_only_projects_declaring_it() {
     assert_eq!(v["projects"].as_array().unwrap().len(), 1);
 }
 
+/// A command line with no placeholder for a person to fill in.
+fn runs_as_typed(next: &str) -> bool {
+    (next.starts_with("opv ") || next.starts_with("env OPV_PROJECT=")) && !next.contains(['<', '>'])
+}
+
 /// An environment `status --all` could not read: its `Next:` runs as typed.
 #[test]
 fn status_all_environment_error_next_is_runnable() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
     let e = status_all(&op, None, None, false, &mut Vec::new()).unwrap_err();
-    assert!(
-        crate::error::is_runnable(e.next_step().unwrap_or_default()),
-        "{:?}",
-        e.next_step()
-    );
+    let next = e.next_text().unwrap_or_default();
+    assert!(runs_as_typed(&next), "{:?}", next);
 }
 
 /// Each unread environment of `status --all --json` carries its runnable `next`.
@@ -474,7 +534,7 @@ fn status_all_json_environment_error_carries_a_runnable_next() {
     let next = v["projects"][0]["environments"][0]["next"]
         .as_str()
         .unwrap_or_default();
-    assert!(crate::error::is_runnable(next), "{next}");
+    assert!(runs_as_typed(next), "{next}");
 }
 
 // --- #135: discovery reports every account, and never an incomplete list as empty ---
@@ -554,14 +614,14 @@ mod discovery {
     fn a_selected_signed_out_account_is_op_not_signed_in() {
         let r = runner(vec![signed_out()]);
         let (res, _) = projects_json(&r, Some(B));
-        assert_eq!(res.unwrap_err().code().as_str(), "op_not_signed_in");
+        assert_eq!(res.unwrap_err().code_str(), "op_not_signed_in");
     }
 
     #[test]
     fn every_account_failing_is_inventory_incomplete() {
         let r = runner(vec![signed_out(), signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 
     #[test]
@@ -599,13 +659,29 @@ mod discovery {
     }
 
     #[test]
-    fn an_incomplete_inventory_names_a_sign_in_step_for_the_failed_account() {
+    fn an_incomplete_inventory_names_the_failed_account() {
         let r = runner(vec![vec![Output::success("[]")], signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(
-            res.unwrap_err().next_step(),
-            Some(format!("opv login --account {B} -- opv projects --account {B}").as_str())
+        let e = res.unwrap_err();
+        assert!(
+            matches!(
+                e.cause(),
+                Some((Cause::InventoryIncomplete { unlisted }, _))
+                    if unlisted.iter().map(|a| a.as_str()).collect::<Vec<_>>() == [B]
+            ),
+            "{e:?}"
         );
+    }
+
+    /// 03.08: following the sign-in step never re-points this checkout's .opv.
+    #[test]
+    fn an_incomplete_inventorys_sign_in_step_records_nothing() {
+        let r = runner(vec![vec![Output::success("[]")], signed_out()]);
+        let (res, _) = projects_json(&r, None);
+        let e = res.unwrap_err();
+        let inv = crate::cause::Invocation::from_cli(&["opv".into(), "projects".into()]);
+        let next = crate::cause::render::next_text(&e.cause().unwrap().0.step(&inv).1, &inv);
+        assert!(next.unwrap_or_default().contains("--no-record"), "{e:?}");
     }
 
     #[test]
@@ -619,7 +695,7 @@ mod discovery {
     fn a_partial_inventory_is_inventory_incomplete() {
         let r = runner(vec![vec![one_manifest()], signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 
     #[test]
@@ -677,6 +753,6 @@ mod discovery {
     fn status_all_with_an_incomplete_inventory_is_inventory_incomplete() {
         let r = runner(vec![vec![Output::success("[]")], signed_out()]);
         let res = status_all(&r, None, None, true, &mut Vec::new());
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 }

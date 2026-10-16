@@ -369,11 +369,26 @@ fn rebind_records_a_new_boundary_in_the_selected_account() {
 }
 
 #[test]
-fn a_boundary_from_another_account_stops_with_ids_not_in_account() {
+fn a_boundary_outside_the_account_stops_with_ops_not_found() {
     let (_dir, path, op) =
         workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
-    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+    let e = run_probed(&path, &Probed::new(op)).unwrap_err();
+    assert_eq!(e.code_str(), "resource_not_found");
+}
+
+/// The account comes from the `.opv` beside the configuration file, never from the
+/// process's working directory: a vault outside it is in another account.
+#[test]
+fn a_boundary_outside_the_projects_dot_opv_account_is_ids_not_in_account() {
+    let (dir, path, op) =
+        workspace_with(&FLEET.replace("vdev0000000000000000000001", OTHER_ACCOUNT));
+    std::fs::write(
+        dir.path().join(".opv"),
+        "account = \"AE2EDEVACCOUNT000000000001\"\n",
+    )
+    .unwrap();
+    let e = run_probed(&path, &Probed::new(op)).unwrap_err();
+    assert_eq!(e.code_str(), "ids_not_in_account");
 }
 
 #[test]
@@ -385,14 +400,14 @@ fn ids_from_another_account_stop_before_anything_is_created() {
 }
 
 #[test]
-fn a_state_vault_from_another_account_stops_with_ids_not_in_account() {
+fn a_state_vault_outside_the_account_stops_with_ops_not_found() {
     let text = FLEET.replace(
         "fly.app = \"myapp-prod\"",
         &format!("fly.app = \"myapp-prod\"\nstate_vault_id = \"{OTHER_ACCOUNT}\""),
     );
     let (_dir, path, op) = workspace_with(&text);
-    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::IdsNotInAccount);
+    let e = run_probed(&path, &Probed::new(op)).unwrap_err();
+    assert_eq!(e.code_str(), "resource_not_found");
 }
 
 #[test]
@@ -404,6 +419,31 @@ fn a_result_the_loader_refuses_creates_nothing() {
     let (_dir, path, op) = workspace_with(&text);
     let _ = run_with(&path, &op, &Opts::default());
     assert!(!wrote_to_1password(&op));
+}
+
+/// #157: signed out, a recorded vault is not reported as outside the account.
+#[test]
+fn a_signed_out_dry_run_is_op_not_signed_in() {
+    let (_dir, path, op) = workspace();
+    op.signed_in.set(false);
+    let e = run_with(&path, &op, &dry_run()).unwrap_err();
+    assert_eq!(e.code_str(), "op_not_signed_in");
+}
+
+/// #157: an environment's recorded vault is looked for in that environment's account.
+#[test]
+fn a_recorded_vault_is_looked_for_in_the_environments_account() {
+    let text = FLEET.replace(
+        "[environments.dev]\n",
+        "[environments.dev]\naccount = \"work.1password.com\"\n",
+    );
+    let r = crate::runner::fake::FakeRunner::new([crate::runner::Output::success("{}")]);
+    let _ = plan(&r, &text, "myapp", &BTreeSet::new());
+    assert!(
+        r.calls.borrow()[0]
+            .env
+            .contains(&("OP_ACCOUNT".to_string(), "work.1password.com".to_string()))
+    );
 }
 
 #[test]
@@ -482,7 +522,75 @@ fn ci_reader_steps_first_to_creating_it_without_showing_its_token() {
         ..Opts::default()
     };
     let out = run_with(&path, &op, &opts).unwrap();
-    assert!(out.contains("  opv access prod --create --github <owner/repo>"));
+    // The command now also names --project and --config (05.27), between env and --create.
+    assert!(out.contains(" --create --github <owner/repo>"));
+}
+
+/// 05.27: `opv access` would otherwise name the service account after the repository.
+#[test]
+fn ci_reader_access_command_names_the_project_bootstrap_used() {
+    let (_dir, path, op) = workspace_with(TWO);
+    let opts = Opts {
+        ci_reader: Some("prod".into()),
+        ..Opts::default()
+    };
+    let out = run_with(&path, &op, &opts).unwrap();
+    assert!(out.contains("  opv access prod --project myapp --config "));
+}
+
+/// X1: the closing step reads the same file bootstrap completed.
+#[test]
+fn bootstrap_ends_with_ready_on_the_same_file() {
+    let (_dir, path, op) = workspace();
+    let out = run_with(&path, &op, &Opts::default()).unwrap();
+    assert!(out.ends_with(&format!("Next: opv ready --config {}\n", path.display())));
+}
+
+/// 05.05: a create whose reply never came may have made the vault; it is never "did not
+/// create".
+#[test]
+fn an_unanswered_create_is_create_outcome_unknown() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_unknown("timeout");
+    let e = create(&r, &["vault", "create", "x"], None, CreateKind::Vault, "x").unwrap_err();
+    assert_eq!(e.code_str(), "create_outcome_unknown");
+}
+
+/// 05.06: bootstrap finds the vault by its title, so the step is the same command with
+/// every flag (--project, --file) kept, never a bare `opv bootstrap`.
+#[test]
+fn an_unanswered_create_steps_to_the_same_command() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_unknown("timeout");
+    let e = create(&r, &["vault", "create", "x"], None, CreateKind::Vault, "x").unwrap_err();
+    let (cause, _) = e.cause().unwrap();
+    assert_eq!(
+        cause.step(&crate::cause::Invocation::default()).1,
+        crate::cause::Next::Rerun
+    );
+}
+
+/// #159: op's reply decides; "not currently signed in" is a sign-in, never a vault
+/// outside the account.
+#[test]
+fn a_vault_get_op_answers_signed_out_is_op_not_signed_in() {
+    let r = crate::runner::fake::FakeRunner::default();
+    r.push_with_stderr(
+        crate::runner::Output::failure(1),
+        "[ERROR] 2026/10/16 00:04:44 You are not currently signed in. Please run `op signin --help` for instructions\n",
+    );
+    let e = plan(&r, FLEET, "myapp", &none()).unwrap_err();
+    assert_eq!(e.code_str(), "op_not_signed_in");
+}
+
+/// 05.06: the personal-vault refusal steps to the same command once the field is set.
+#[test]
+fn a_missing_personal_vault_names_no_bare_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secrets.toml");
+    std::fs::write(&path, TEAM).unwrap();
+    let e = run_with(&path, &FakeOp::default(), &Opts::default()).unwrap_err();
+    assert_ne!(e.next_text().as_deref(), Some("opv bootstrap"));
 }
 
 #[test]
@@ -547,7 +655,7 @@ fn a_service_account_cannot_bootstrap() {
         ),
         || run_with(&path, &op, &Opts::default()).unwrap_err(),
     );
-    assert_eq!(e.exit_code(), 6);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // A fresh account, end to end (#77): nothing exists; bootstrap, then the receipt says what
@@ -717,4 +825,94 @@ fn a_second_run_creates_no_delivery_item() {
     op.calls.borrow_mut().clear();
     bootstrap(&path, &op);
     assert_eq!(op.count(&["op", "item", "create"]), 0);
+}
+
+// --- 0.10.0 error catalog (C19, G3) -----------------------------------------------------------
+
+/// op 2.40.0's recorded reply to `op vault get <vault>` for a vault the account does not
+/// hold (tests/fixtures/op/failures, case 14).
+const NOT_A_VAULT_HERE: &str =
+    include_str!("../../tests/fixtures/op/failures/14-vault-in-other-account.stderr");
+
+/// The fake `op`, whose failed `op vault get` probes go through the observing fake runner
+/// with op's recorded reply, as the real runner observes them; `no_id` makes every create
+/// answer with a reply that holds no ID.
+struct Probed {
+    op: FakeOp,
+    get: crate::runner::fake::FakeRunner,
+    no_id: bool,
+}
+
+impl Probed {
+    fn new(op: FakeOp) -> Self {
+        Probed {
+            op,
+            get: crate::runner::fake::FakeRunner::default(),
+            no_id: false,
+        }
+    }
+}
+
+impl CommandRunner for Probed {
+    fn read(&self, call: &Call, refused: &[i32]) -> std::io::Result<crate::runner::Outcome> {
+        self.op.read(call, refused)
+    }
+    fn write(&self, call: &Call) -> std::io::Result<crate::runner::Outcome> {
+        self.op.write(call)
+    }
+    fn create(&self, call: &Call, kind: CreateKind) -> std::io::Result<CreateOutcome> {
+        if self.no_id {
+            return Ok(CreateOutcome::Done(crate::runner::Output::success("{}")));
+        }
+        self.op.create(call, kind)
+    }
+    fn probe(
+        &self,
+        call: &Call,
+        limit: std::time::Duration,
+    ) -> std::io::Result<crate::runner::Output> {
+        let answer = self.op.probe(call, limit)?;
+        match call.args {
+            ["vault", "get", vault, ..] if call.program == "op" && answer.status != 0 => {
+                self.get.push_with_stderr(
+                    crate::runner::Output::failure(1),
+                    &NOT_A_VAULT_HERE.replace("<VAULT_B>", vault),
+                );
+                self.get.probe(call, limit)
+            }
+            _ => Ok(answer),
+        }
+    }
+    fn pause(&self, _: std::time::Duration, _: &str) {}
+    fn note(&self, _: &str) {}
+    fn run_inherited(&self, _: &str, _: &[&str], _: &[(&str, &str)]) -> std::io::Result<i32> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+fn run_probed(path: &Path, r: &Probed) -> Result<String, Error> {
+    let mut out = Vec::new();
+    run(path, "myapp", &Opts::default(), r, &mut out)?;
+    Ok(String::from_utf8(out).unwrap())
+}
+
+/// C19: a create that answered with no ID may have made the object: its outcome is
+/// unknown and it is found again by title, never created twice (X5).
+#[test]
+fn a_create_whose_reply_has_no_id_is_create_outcome_unknown() {
+    let (_dir, path, op) = workspace();
+    let mut r = Probed::new(op);
+    r.no_id = true;
+    let e = run_probed(&path, &r).unwrap_err();
+    assert_eq!(e.code_str(), "create_outcome_unknown");
+}
+
+/// C19, R34: personal keys with no personal vault name the vaults looked for and the
+/// field that names another, never a bare configuration error.
+#[test]
+fn personal_keys_without_a_personal_vault_are_resource_not_found() {
+    let (_dir, path, op) = workspace_with(CORE);
+    op.vaults.borrow_mut().retain(|(_, name)| name != "Private");
+    let e = run_with(&path, &op, &Opts::default()).unwrap_err();
+    assert_eq!(e.code_str(), "resource_not_found");
 }

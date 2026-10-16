@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 
 use opv::domain::plan::{self, ItemField};
 use opv::domain::{Fleet, Kind, SecretValue, StoreEntry, SyncPlan};
-use opv::error::Error;
 use opv::runner::fake::FakeRunner;
 
 const FIXTURE: &str = "tests/fixtures/shared_records.toml";
@@ -79,18 +78,22 @@ fn an_unused_source_only_key_is_reported_as_unreferenced() {
 fn run_refuses_a_source_only_product() {
     let r = FakeRunner::new([]);
     let e = opv::app::run::run(&fleet(), "ci", "shared", &["env".to_string()], &r).unwrap_err();
-    assert!(matches!(e, Error::Config(m) if m.contains("is source-only")));
+    assert_eq!(e.code_str(), "source_only");
 }
 
 #[test]
 fn run_source_only_error_names_a_product_that_references_it() {
     let r = FakeRunner::new([]);
     let e = opv::app::run::run(&fleet(), "ci", "shared", &["env".to_string()], &r).unwrap_err();
-    assert!(e.next_step().is_some_and(|n| n.contains("--product api")));
+    assert!(
+        e.next_text()
+            .as_deref()
+            .is_some_and(|n| n.contains("--product api"))
+    );
 }
 
 #[test]
 fn local_selection_refuses_a_source_only_product() {
     let e = opv::app::local::select(&fleet(), "ci", Some("shared"), true).unwrap_err();
-    assert!(matches!(e, Error::Config(m) if m.contains("is source-only")));
+    assert_eq!(e.code_str(), "source_only");
 }

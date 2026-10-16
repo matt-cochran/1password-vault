@@ -1,0 +1,9 @@
+# child_start_failed: opv local-delivery --key A -- /nonexistent/cmd
+
+## text exit: 3
+## text stdout
+
+## text stderr
+opv: cannot start /nonexistent/cmd: it does not exist
+Do: check that /nonexistent/cmd is on PATH; <command> is /nonexistent/cmd and its arguments
+Next: opv run dev --product web --role serve -- <command>

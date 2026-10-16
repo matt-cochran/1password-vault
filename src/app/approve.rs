@@ -9,8 +9,20 @@
 //! gate: the 1Password app's own authorization of each write stays the binding control.
 
 use super::structure::{self, Scope};
-use crate::error::{Code, Error};
+use crate::cause::{
+    Cause, EnvName, KeyName, PlanId, PlanScope, ProductKey, ProductName, TargetName, UsageProblem,
+};
+use crate::error::Error;
 use crate::runner::CommandRunner;
+
+/// `n` and its noun, `s` added unless `n` is 1 (05.33).
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
 
 /// Stores one approval: plan id, project, account, now (unix seconds).
 pub type Record<'a> = dyn FnMut(&str, &str, &str, u64) -> Result<(), Error> + 'a;
@@ -36,29 +48,14 @@ pub fn run(
     record: &mut Record<'_>,
 ) -> Result<(), Error> {
     if !structure::is_plan_id(plan_id) {
-        return Err(Error::Config(
-            format!("{plan_id:?} is not a structural plan id (sp- and 16 hex digits)").into(),
-        )
-        .with_code(Code::Usage)
-        .with_next("opv approve --help"));
+        return Err(not_structural(plan_id));
     }
     let text = std::fs::read_to_string(&scope.path).map_err(|e| {
-        Error::Config(format!("Cannot read {} ({}).", scope.path.display(), e.kind()).into())
+        crate::config_store::unreadable(&scope.path, &e, crate::cause::GivenBy::Discovered)
     })?;
     let p = structure::plan(r, &text, &scope.project, &scope.account)?;
     if p.plan_id != plan_id {
-        return Err(Error::Policy(
-            format!(
-                "plan {plan_id} is stale: the configuration, the account or what exists in \
-                 1Password changed since it was prepared (the plan is now {}); nothing was \
-                 approved",
-                p.plan_id
-            )
-            .into(),
-        )
-        .with_code(Code::StalePlan)
-        .with_do("ask the assistant to prepare and show the plan again, then approve the new id")
-        .with_next(format!("opv approve {}", p.plan_id)));
+        return Err(structure::changed(plan_id, &p.plan_id));
     }
     if p.is_empty() {
         ui.show("nothing to approve: the structure is complete")?;
@@ -66,9 +63,12 @@ pub fn run(
     }
     let (vaults, items, fields) = p.counts();
     ui.show(&format!(
-        "structural plan {plan_id} for project {} in 1Password account {}: {vaults} vaults, \
-         {items} items, {fields} empty fields",
-        p.project, p.account_id
+        "structural plan {plan_id} for project {} in 1Password account {}: {}, {}, {}",
+        p.project,
+        p.account_id,
+        count(vaults, "vault"),
+        count(items, "item"),
+        count(fields, "empty field"),
     ))?;
     for line in structure::describe(&p) {
         ui.show(&format!("  {line}"))?;
@@ -93,7 +93,44 @@ pub fn run(
     record(plan_id, &scope.project, &scope.account, now)?;
     ui.show(&format!(
         "approved {plan_id} (single use, 15 minutes); the assistant can apply it now"
+    ))?;
+    // 05.33: the CLI path too; the plan id is the approved one, never an approval flag.
+    ui.show(&format!(
+        "Next: {} (or let the assistant apply it)",
+        crate::cause::render::cmd_text(&crate::cause::Cmd {
+            command: vec!["structure".into(), "apply".into()],
+            args: vec![plan_id.to_string()],
+        })
     ))
+}
+
+/// `plan_id` is not a structural plan id: a sync plan id is approved with `--sync` and the
+/// scope the assistant named (05.24), anything else is the wrong form.
+/// 09.27: a malformed structural plan id is a usage error, checked before anything asks
+/// for a terminal.
+pub fn check_structural_id(plan_id: &str) -> Result<(), Error> {
+    if structure::is_plan_id(plan_id) {
+        Ok(())
+    } else {
+        Err(not_structural(plan_id))
+    }
+}
+
+fn not_structural(plan_id: &str) -> Error {
+    let problem = if crate::approval::is_sync_id(plan_id) {
+        UsageProblem::NeedsFlag {
+            flag: format!("sync plan id {plan_id}"),
+            needs: "--sync <env> and the same --target, --product, --rotate, --deploy and \
+                    --prune the assistant named"
+                .into(),
+        }
+    } else {
+        UsageProblem::ValueFormat {
+            flag: "the plan id".into(),
+            format: crate::approval::PLAN_ID_FORMAT,
+        }
+    };
+    Cause::Usage { problem }.into()
 }
 
 /// What an approved sync may do (0.9.0): the environment, its targets, an optional
@@ -140,6 +177,29 @@ impl SyncScope {
         )
     }
 
+    /// The typed scope a step built from this approval carries (X1: every scope flag).
+    pub fn plan_scope(&self) -> PlanScope {
+        let mut rotate: Vec<ProductKey> = self
+            .rotate
+            .iter()
+            .filter_map(|k| {
+                k.split_once('/').map(|(p, k)| ProductKey {
+                    product: ProductName::new(p),
+                    key: KeyName::new(k),
+                })
+            })
+            .collect();
+        rotate.sort_by_key(ToString::to_string);
+        PlanScope::Sync {
+            env: EnvName::new(&self.env),
+            targets: self.targets.iter().map(TargetName::new).collect(),
+            product: self.product.as_deref().map(ProductName::new),
+            deploy: self.deploy,
+            prune: self.prune,
+            rotate,
+        }
+    }
+
     /// The `opv approve` command a person runs for this scope and plan.
     pub fn approve_command(&self, plan_id: &str) -> String {
         let mut c = format!("opv approve {plan_id} --sync {}", self.env);
@@ -182,18 +242,79 @@ pub fn sync_plan(
         &mut *buf,
         true,
     );
-    let fail = |res: Result<(), Error>, why: &str| {
-        res.err()
-            .unwrap_or_else(|| Error::Config(why.to_string().into()))
+    // The plan's own failure when it has one; a plan that printed no id is opv's bug.
+    let fail = |res: Result<(), Error>, site: &'static str| {
+        res.err().unwrap_or_else(|| Cause::Bug { site }.into())
     };
     let doc: serde_json::Value = match serde_json::from_slice(&buf) {
         Ok(d) => d,
-        Err(_) => return Err(fail(res, "opv plan printed no plan")),
+        Err(_) => return Err(fail(res, "approve: opv plan printed no plan")),
     };
     let Some(id) = doc["plan_id"].as_str().map(str::to_string) else {
-        return Err(fail(res, "the plan has no id"));
+        return Err(fail(res, "approve: the sync plan has no id"));
     };
     Ok((id, doc))
+}
+
+/// The review of a sync plan's rows (05.16): each write or unset, each row held back
+/// (immutable), and each row whose value is not ready, which the sync refuses until it is
+/// fixed. "Nothing to write" is said only when every row is ready and nothing is held.
+fn review_lines(rows: &[serde_json::Value], prune: bool) -> Vec<String> {
+    let s = |row: &serde_json::Value, f: &str, or: &'static str| -> String {
+        row[f].as_str().unwrap_or(or).to_string()
+    };
+    let name = |row: &serde_json::Value| {
+        format!(
+            "{}/{} on {}",
+            s(row, "product", "-"),
+            s(row, "key", "?"),
+            s(row, "target", "-")
+        )
+    };
+    let mut writes = Vec::new();
+    let mut held = Vec::new();
+    let mut blocked = Vec::new();
+    for row in rows {
+        match row["action"].as_str() {
+            Some("would_stage") => writes.push(format!(
+                "  {} {}",
+                if row["rotate"].as_bool() == Some(true) {
+                    "rotate"
+                } else {
+                    "write"
+                },
+                name(row)
+            )),
+            Some("would_prune") if prune => writes.push(format!("  unset {}", name(row))),
+            Some("held") => held.push(format!(
+                "  held {}: immutable, so this sync leaves it as it is",
+                name(row)
+            )),
+            _ => {}
+        }
+        match row["state"].as_str() {
+            None | Some("saved") | Some("skipped") => {}
+            Some(state) => blocked.push(format!(
+                "  {} {}/{}: the sync is refused until it is fixed in 1Password",
+                state.replace('_', " "),
+                s(row, "product", "-"),
+                s(row, "key", "?"),
+            )),
+        }
+    }
+    blocked.dedup();
+    let mut out = Vec::new();
+    if writes.is_empty() {
+        out.push(if held.is_empty() && blocked.is_empty() {
+            "  nothing to write: every managed name already matches".to_string()
+        } else {
+            "  nothing to write".to_string()
+        });
+    }
+    out.extend(writes);
+    out.extend(held);
+    out.extend(blocked);
+    out
 }
 
 /// `opv approve <plan_id> --sync <env> …`: review the current sync plan of `scope` and
@@ -212,16 +333,7 @@ pub fn run_sync(
 ) -> Result<(), Error> {
     let (current, doc) = sync_plan(fleet, scope, r)?;
     if current != plan_id {
-        return Err(Error::Policy(
-            format!(
-                "plan {plan_id} is stale: the item, the target or the configuration changed (the \
-                 plan is now {current}); nothing was approved"
-            )
-            .into(),
-        )
-        .with_code(Code::StalePlan)
-        .with_do("ask the assistant to show the new plan, then approve the new id")
-        .with_next(scope.approve_command(&current)));
+        return Err(sync_changed(plan_id, &current, scope));
     }
     ui.show(&format!(
         "sync plan {plan_id} for {} in project {project}{}{}:",
@@ -234,29 +346,8 @@ pub fn run_sync(
         },
     ))?;
     let rows = doc["rows"].as_array().cloned().unwrap_or_default();
-    let changes: Vec<&serde_json::Value> = rows
-        .iter()
-        .filter(|r| match r["action"].as_str() {
-            Some("would_stage") => true,
-            Some("would_prune") => scope.prune,
-            _ => false,
-        })
-        .collect();
-    if changes.is_empty() {
-        ui.show("  nothing to write: every managed name already matches")?;
-    }
-    for row in changes {
-        ui.show(&format!(
-            "  {} {}/{} on {}",
-            match row["action"].as_str() {
-                Some("would_prune") => "unset",
-                _ if row["rotate"].as_bool() == Some(true) => "rotate",
-                _ => "write",
-            },
-            row["product"].as_str().unwrap_or("-"),
-            row["key"].as_str().unwrap_or("?"),
-            row["target"].as_str().unwrap_or("-"),
-        ))?;
+    for line in review_lines(&rows, scope.prune) {
+        ui.show(&line)?;
     }
     ui.show(
         "Approving lets the assistant run exactly this sync once, within 15 minutes; any \
@@ -298,23 +389,11 @@ pub fn run_approved_sync(
 ) -> Result<(), Error> {
     let (current, _) = sync_plan(fleet, scope, r)?;
     if current != plan_id {
-        return Err(Error::Policy(
-            format!(
-                "plan {plan_id} is stale: the item, the target or the configuration changed (the \
-                 plan is now {current}); nothing was changed and the approval was not used"
-            )
-            .into(),
-        )
-        .with_code(Code::StalePlan)
-        .with_do(
-            "show the person the new plan and ask them to approve its id in their own terminal",
-        )
-        .with_next(scope.approve_command(&current)));
+        return Err(sync_changed(plan_id, &current, scope));
     }
-    consume(plan_id, &scope.key(), project, account, now).map_err(|e| {
-        e.with_do("ask the person to approve this plan in their own terminal")
-            .with_next(scope.approve_command(plan_id))
-    })?;
+    // A refusal is typed by the approval store with this scope (approval_required: a
+    // person approves; approval_used: a read of what remains).
+    consume(plan_id, &scope.key(), project, account, now)?;
     let opts = super::sync::SyncOpts {
         deploy: scope.deploy,
         prune: scope.prune,
@@ -328,6 +407,43 @@ pub fn run_approved_sync(
         targets: scope.targets.clone(),
     };
     super::sync::run(fleet, &scope.env, r, out, &opts)
+        .map_err(|e| after_used_approval(e, plan_id, scope))
+}
+
+/// The sync plan `plan_id` of `scope` is now `current`: nothing was approved or used, and
+/// the read of the new plan carries every scope flag.
+fn sync_changed(plan_id: &str, current: &str, scope: &SyncScope) -> Error {
+    Cause::PlanChanged {
+        old: PlanId::new(plan_id),
+        new: PlanId::new(current),
+        scope: scope.plan_scope(),
+    }
+    .into()
+}
+
+/// A failure after the approval was used up (X4, X20): whatever ran may have written, and the
+/// approval never applies again, so the next step is the read of what remains in the same
+/// scope, never `--approved` again. The cause keeps its message and evidence inside
+/// `Partial`.
+fn after_used_approval(e: Error, plan_id: &str, scope: &SyncScope) -> Error {
+    let plan = PlanId::new(plan_id);
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::ApprovalUsed { .. } => *cause,
+        Cause::Partial { done, then, .. } => Cause::Partial {
+            done,
+            approval_used: Some(plan),
+            approval_scope: Some(scope.plan_scope()),
+            then,
+        },
+        then => Cause::Partial {
+            done: Vec::new(),
+            approval_used: Some(plan),
+            approval_scope: Some(scope.plan_scope()),
+            then: Box::new(then),
+        },
+    };
+    Error::Catalog(Box::new(cause), upstream)
 }
 
 #[cfg(test)]

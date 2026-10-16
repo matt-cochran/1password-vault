@@ -1,0 +1,138 @@
+# opv managed configuration
+
+opv reads this note to know which keys the project **e2e-app** needs and where each environment keeps them. **No secret values are stored here.**
+
+- Values: in each environment's own item (its `vault_id` and `item_id` below). Open one with `opv open KEY --env ENV`.
+- Change keys with `opv add KEY` or `opv config edit`. Hand edits are fine inside the code block while it stays valid TOML; opv reads only the code block.
+- About opv: https://github.com/matt-cochran/1password-vault
+
+```toml
+# The end-to-end test application (design §13.2). It holds IDs, names and rules only,
+# never a value: every field in tests/e2e/app/world.json carries a marker.
+#
+# File route:     opv --config tests/e2e/app/secrets.toml config describe --json
+# Manifest route: OPV_PROJECT=e2e-app opv config describe --json
+#                 (the item "opv · e2e-app" lives in world.json and its notes hold this
+#                  same TOML; tests/e2e/app/manifest/ keeps the committed copy)
+
+# Local development: no targets here, so the personal key is allowed. The team values
+# live in the two boundary items recorded below.
+[environments.dev]
+title = "Local development"
+order = 1
+boundaries.shared = { vault_id = "vE2ESHAREDDEV00000000000001", item_id = "iE2ESHAREDDEV00000000000001" }
+boundaries.web    = { vault_id = "vE2EWEBDEV0000000000000001", item_id = "iE2EWEBDEV0000000000000001" }
+personal_vault = "e2e-dev-private"
+personal_item  = "e2e-app · dev (personal)"
+
+# Production: locked behind confirm_env, one target per provider, and a reviewed remote
+# execution profile for the builder host.
+[environments.prod]
+title = "Production"
+order = 2
+confirm_env = true
+boundaries.shared = { vault_id = "vE2ESHAREDPROD0000000000001", item_id = "iE2ESHAREDPROD0000000000001" }
+boundaries.web    = { vault_id = "vE2EWEBPROD000000000000001", item_id = "iE2EWEBPROD000000000000001" }
+
+# The Fly target: one secret per rendered name.
+[environments.prod.targets.fly]
+fly.app = "e2e-app-prod"
+fly.secret_name = "E2E__{PRODUCT}__{KEY}"
+state_vault_id = "vE2ESTATEFLY00000000000001"
+
+# The Kubernetes target: the Deployment reads names from the e2e-prod namespace.
+[environments.prod.targets.k8s]
+kubernetes.context = "e2e-cluster"
+kubernetes.namespace = "e2e-prod"
+kubernetes.deployment = "e2e-app"
+kubernetes.env_name = "E2E__{PRODUCT}__{KEY}"
+state_vault_id = "vE2ESTATEK8S00000000000001"
+
+# The GitHub target: repository secrets and variables, plus the production environment.
+[environments.prod.targets.gh]
+github.repo = "e2e-org/e2e-app"
+github.environment = "production"
+github.secret_name = "E2E__{PRODUCT}__{KEY}"
+state_vault_id = "vE2ESTATEGH000000000000001"
+
+# A source-only home for a value more than one product reads. It is never delivered.
+[products.shared]
+source_only = true
+boundary = "shared"
+
+[products.shared.keys.DATABASE_URL]
+kind = "secret"
+environments = ["dev", "prod"]
+guidance = "the one connection string the fleet reads"
+
+[products.shared.keys.FEATURE_FLAGS]
+kind = "config"
+environments = ["dev", "prod"]
+rules = { enum = ["on", "off"] }
+
+# The web product: its own keys, one shared key, two role-scoped keys, two file keys and
+# one personal key.
+[products.web]
+boundary = "web"
+
+[products.web.keys.DATABASE_URL]
+kind = "secret"
+from = "shared/DATABASE_URL"
+environments = ["dev", "prod"]
+
+[products.web.keys.API_KEY]
+kind = "secret"
+environments = ["dev", "prod"]
+guidance = "the service's own API key"
+
+[products.web.keys.LOG_LEVEL]
+kind = "config"
+environments = ["dev", "prod"]
+rules = { enum = ["debug", "info", "warn"] }
+
+# The serving process gets this; the migrating process does not.
+[products.web.keys.SESSION_SECRET]
+kind = "secret"
+environments = ["dev", "prod"]
+roles = ["serve"]
+
+# The migrating process gets this; the serving process does not.
+[products.web.keys.MIGRATION_TOKEN]
+kind = "secret"
+environments = ["dev", "prod"]
+roles = ["migrate"]
+
+# File keys: under `opv run`, their values are written into WEB_SECRETS_DIR at these
+# relative paths instead of the environment.
+[products.web.keys.TLS_CERTIFICATE]
+kind = "secret"
+environments = ["dev"]
+file = "tls/certificate"
+
+[products.web.keys.TLS_PRIVATE_KEY]
+kind = "secret"
+environments = ["dev"]
+file = "tls/private-key"
+
+# Each developer keeps their own LLM key in their own item.
+[products.web.keys.PERSONAL_LLM_KEY]
+kind = "secret"
+environments = ["dev"]
+personal = true
+guidance = "your own key, billed to you"
+
+[products.web.local]
+environment = "declared_only"
+secrets_dir_env = "WEB_SECRETS_DIR"
+
+# The reviewed remote profile: a pinned host, roles and command.
+[products.web.remotes.builder]
+host = "builder.example.test"
+user = "deploy"
+host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe2eMarkerHostKeyNotARealKey000000"
+environments = ["prod"]
+roles = ["serve", "migrate"]
+opv = "/usr/local/bin/opv"
+workdir = "/srv/e2e-app"
+command = ["/usr/local/bin/opv", "run", "--env", "prod", "--product", "web"]
+```

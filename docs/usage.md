@@ -36,7 +36,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>]` | 1Password and every target side by side, names only | nothing |
 | `opv plan <env> [--product <p>] [--rotate <product/KEY>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
 | `opv sync <env> [--deploy] [--prune] [--rotate <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
-| `opv run <env> [--product <p>] [--role <r>] [--confirm <env>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value; an environment with `confirm_env = true` needs `--confirm <env>` | nothing |
+| `opv run <env> [--product <p>] [--role <r>] [--confirm <env>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value; `--remote <profile>` runs the profile's pinned command on its pinned SSH host instead; an environment with `confirm_env = true` needs `--confirm <env>` | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
 | `opv init <env> [--vault <title>] [--item <title>] [--product <p>]` | configuration (boundaries and products) from an existing item; no target ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
@@ -70,7 +70,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | | `OP_ACCOUNT` | the 1Password account to find a manifest in (an environment's own `account` is used for its reads) |
 | | `OPV_PRODUCT` | default for `--product` on `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env`, never `sync`; stderr says `product <p> (from OPV_PRODUCT)` |
 | `--timeout <SECS>` | | budget for the whole run (default 1800); see [time limits](how-opv-handles-failures.md#time-limits-and-progress) |
-| `--verbose` | | one stderr line per call to `op` or the target CLI, with its scrubbed stderr |
+| `--verbose` | | one stderr line per call to `op` or the target CLI, with all of its scrubbed stderr; a failure's box and `evidence.upstream` hold the tool's complete reply, scrubbed |
 | `--color auto\|always\|never` | `NO_COLOR` | colour state words (`ok`, `warn`, `FAIL`, `saved`, `missing`, ...) on a terminal; JSON and values never |
 
 A typical session:
@@ -159,13 +159,15 @@ It reads each boundary item once per target, a run-only environment's too, so a 
 
 `--product <p>` (or `OPV_PRODUCT`) counts only that product's keys in every line. `--json` prints one document instead, with one entry per environment that adds up its targets:
 
+For example, `opv --config secrets.toml status --json` when `flyctl` fails with a reply opv does not recognise for both environments:
+
 ```json
-{"schema_version":1,"ok":false,"exit_code":4,"product":null,"environments":[{"name":"dev","target":null,"state":"run_only","keys":6,"saved":5,"skipped":0,"findings":1,"error_code":null,"error":null,"next":null},{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"vault_no_access","error":"source error: ...","next":"op vault get vprd0000000000000000000001"}],"totals":{"environments":2,"findings":1},"next":"op vault get vprd0000000000000000000001","do":"grant this identity access to the vault ..."}
+{"schema_version":2,"ok":false,"exit_code":5,"product":null,"environments":[{"name":"prod","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"},{"name":"staging","target":"fly","state":"not_checked","keys":null,"saved":null,"skipped":null,"findings":null,"error_code":"unrecognized_failure","error":"flyctl failed at Fly in a way opv does not recognise","next":"opv doctor --config secrets.toml"}],"totals":{"environments":2,"findings":0},"next":"opv doctor --config secrets.toml","do":"read the reply of flyctl shown above; opv does not recognise it"}
 ```
 
 (The failure's `error` object, last in the document, is left out above.)
 
-`target` is the target section (`fly`, `azure`, `kubernetes`) or `null` for run-only; `state` is `checked`, `run_only` or `not_checked`. An environment that could not be read has `null` counts, its error code in `error_code`, the first line of its error in `error`, and in `next` the one command that runs as typed to get past it.
+`target` is the target section (`fly`, `azure`, `kubernetes`) or `null` for run-only; `state` is `checked`, `run_only` or `not_checked`. An environment that could not be read has `null` counts, its catalog code in `error_code` and the catalog message in `error` (the same `code` and `message` as its [error object](#json-contract)), and in `next` the one command that runs as typed to get past it.
 
 ### Every project: `opv projects` and `opv status --all`
 
@@ -295,7 +297,7 @@ The line is always `summary: written N · unchanged N · held N · deployed <rev
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "environment": "prod",
   "product": null,
   "targets": [{"target": "web", "provider": "fly", "deployed": false, "revision": null}],
@@ -341,7 +343,7 @@ A `--confirm` that names another environment is refused everywhere, guarded or n
 
 ### Sync on GitHub Actions
 
-Secrets are written with `gh secret set` and config with `gh variable set`, values on stdin, in every listed repository (and GitHub environment). A write is live at once: `sync` prints no pending line, and `--deploy` prints `nothing to deploy: GitHub applies each write at once`. GitHub never shows a secret's value again, so every sync writes each ready secret (`unknown` in `status`); variables are compared and written only when they differ. `--prune` deletes managed secrets and variables that are no longer declared; other names in the repository are never touched. Setup: [configuration](configuration.md#github-actions-repository-and-environment-secrets), [example](../examples/github-ci/).
+Secrets are written with `gh secret set` and config with `gh variable set`, values on stdin, in every listed repository (and GitHub environment). It needs gh 2.43.0 or later, the first release with `gh variable list --json`; `opv doctor` warns about an older gh. A write is live at once: `sync` prints no pending line, and `--deploy` prints `nothing to deploy: GitHub applies each write at once`. GitHub never shows a secret's value again, so every sync writes each ready secret (`unknown` in `status`); variables are compared and written only when they differ. `--prune` deletes managed secrets and variables that are no longer declared; other names in the repository are never touched. Setup: [configuration](configuration.md#github-actions-repository-and-environment-secrets), [example](../examples/github-ci/).
 
 `plan` and `status` also list keys the environment does not deliver (`not delivered here: …`, JSON `undelivered`), when the target's `products` leaves their product out, and warn about a source-only value nothing points at (`unreferenced shared value …`, JSON `unreferenced_sources`).
 
@@ -411,7 +413,11 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 
 ### Delivery preview: `--preview`
 
-`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 1); the text form prints one line per key plus the summary lines.
+`opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 2); the text form prints one line per key plus the summary lines.
+
+### Remote development: `--remote`
+
+`opv run <env> [--product <p>] [--role <r>] --remote <profile>` delivers the same selection to a reviewed profile (`[products.<p>.remotes.<profile>]`) over pinned SSH and runs the profile's pinned command there; it takes no command after `--`. It needs an interactive terminal (refused under CI or with a service-account or Connect credential: `terminal_required`). An unknown profile is `usage`; an environment or role the profile does not allow is `policy_refused`; both before anything is read. The exit code is the remote app's, or 255 when SSH itself failed (connection, authentication or the pinned host key). Closing the terminal, Ctrl-C or a dropped connection stops the remote app and removes its secrets directory. `--preview --remote <profile>` adds `transport: remote` and the profile's pinned connection and command (identifiers only) to the preview. Design and limits: [remote delivery](design/remote-delivery.md).
 
 ## Doctor
 
@@ -500,7 +506,7 @@ opv delivery verify prod --receipt api.receipt.json      # is the receipt I kept
   - The evidence (each name's store version and a keyed fingerprint of its 1Password value) stays in the state item and is compared in memory. Fly digests included, it is never printed, logged or written to a file.
   - Give the state vault only to identities that can also read the values.
 - **Least privilege.** A target's deploy identity reads the boundary vaults that target's products need and writes only its own state vault. `opv access <env> --target <name>` prints its exact `op service-account create … --vault <boundary>:read_items --vault <state>:read_items,write_items` command, which you run yourself (1Password shows the token once).
-- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "target", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. A receipt is selected by its full scope, in any order; two with the same full scope are refused (`duplicate_scope`). `opv delivery verify --json` returns `{schema_version, environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
+- **Receipt file**: `{"schema": "opv.delivery/1", "deliveries": [{"revision", "scope": {"account_id", "environment", "product", "target", "provider", "locator"}, "bindings": [{"name", "source": {"item_id", "field"}}], "delivered_at", "plan_id", "opv_version"}]}`. A receipt is selected by its full scope, in any order; two with the same full scope are refused (`input_invalid`, naming the file). `opv delivery verify --json` returns `{schema_version, environment, placements: [{product, target, revision, state, reason, names: [{name, state}], deployed, receipt_revision?}]}`.
 - **Capability check**: an installed opv supports this when `opv schema` lists the command `delivery verify`.
 
 The four kinds of evidence are kept apart:
@@ -633,7 +639,9 @@ opv delivery verify prod --product p --json   # each placement's own state vault
 
 **Choosing the account.** Until the project records one (`.opv`, written by your first choice; commit it), `opv login` asks which 1Password account holds the project's secrets, even when only one is added to this CLI, so you always see which one it is; each entry says whether it is signed in, and the last one is **Add another 1Password account**. `opv login --add [--account <email>]` adds an account right away. You type the sign-in address, Secret Key and password only at 1Password's own prompt (your Emergency Kit has them). On Linux and WSL the CLI keeps its own accounts: in WSL, accounts that are only in the Windows 1Password app are not listed until you add them here. On macOS and Windows the CLI uses the app's accounts, so you add an account in the app.
 
-**When sign-in fails** opv says why in its own words, names the account, and gives one next step: the account is not added to this CLI (`account_not_registered`, `Next: opv login --add --account <email>`), no session (`op_not_signed_in`), the 1Password app is locked or its CLI integration is off (`desktop_app_unavailable`), what was typed was not accepted (`credential_rejected`), the prompt was cancelled (`sign_in_cancelled`), 1Password could not be reached (`provider_unavailable`, exit 9, nothing changed), or a reason opv does not recognise (`op_unexpected`, `Next: opv doctor`). It never guesses that a password was wrong, and 1Password's own CLI directions are not repeated.
+**When sign-in fails** opv says why in its own words, names the account, shows op's own reply (scrubbed), and gives one next step: the account is not added to this CLI (`account_not_registered`, `Next: opv login --add --account <email>`), no session, a cancelled prompt or a sign-in 1Password did not accept (`op_not_signed_in`: sign in again), the 1Password app is locked or its CLI integration is off (`op_not_signed_in`, naming the app), 1Password could not be reached (`provider_unavailable`, exit 9, nothing changed), or a reason opv does not recognise (`unrecognized_failure`, with op's reply). It never guesses that a password was wrong, and 1Password's own CLI directions are not repeated.
+
+`opv login --account <ID>` signs in to that account even when a session for another account is live; only a session for the account asked for counts as signed in. The `op signin` it runs ignores `OP_ACCOUNT` and every inherited `OP_SESSION_*`. It records the account in `.opv` only after the sign-in succeeds, and never outside a project. `opv login --account <ID> -- <command>` reads the account of the child's own `--file` or `--config`; when the sign-in fails before the child starts, a child run with `--json` still gets one failure document on stdout.
 
 `login`, `setup` and `config edit` need your own interactive terminal; without one they refuse (exit 6, `terminal_required`) and name themselves on `Next:`. Automation uses a 1Password service-account token (`OP_SERVICE_ACCOUNT_TOKEN`) instead, which decides the account. Per-environment `account` and `deploy_credentials`: [configuration](configuration.md#account-and-deploy-credentials).
 
@@ -673,80 +681,121 @@ Every command that takes `--json` (`doctor`, `check`, `status` including `status
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
-  "exit_code": 6,
-  "next": "opv explain api/OPENAI_API_KEY --env prod",
-  "do": "fix api/OPENAI_API_KEY in 1Password",
+  "exit_code": 2,
+  "next": "opv init nope",
+  "do": "start one with opv init, run opv setup when the project ships opv.setup.toml, point to one with --config <path>, or list the manifests in your other accounts with opv projects",
   "error": {
-    "code": "keys_blocking",
-    "category": "policy",
-    "message": "sync refused, nothing staged: api/OPENAI_API_KEY (missing)",
-    "detail": [],
+    "code": "config_not_found",
+    "category": "config",
+    "message": "no opv configuration for environment nope was found in /work/app or any folder above it, and there is no repository remote to match a 1Password manifest by",
+    "subject": {"manifest": {"repo": null, "account": null}, "searched_from": "/work/app", "env": "nope"},
+    "evidence": {"checked": null, "account": null, "upstream": null},
     "retry": "after_fix",
-    "human_required": true,
-    "do": "fix api/OPENAI_API_KEY in 1Password",
-    "next": "opv explain api/OPENAI_API_KEY --env prod"
+    "human_required": false,
+    "do": "start one with opv init, run opv setup when the project ships opv.setup.toml, point to one with --config <path>, or list the manifests in your other accounts with opv projects",
+    "next": "opv init nope",
+    "next_kind": "run"
   }
 }
 ```
 
 A failure after the command produced its document (findings, exit 8) keeps that document's fields between `exit_code` and `next`. `config export <ENV>` (and `config export --json`) prints the bare document on success and the failure document on failure. Usage errors (`--json` with an unknown flag) print the failure document with code `usage`.
 
-`retry` says whether to run the same command again: `safe` (now; nothing is known to be broken), `after_fix` (once `do` is done) or `never` (the command itself must change: run `next`). `human_required` is `true` when only a person can take the next step; an assistant then hands `do` and `next` to the user instead of acting. `code` is one of a closed list:
+The `error` object is the same for every failure: `code`, `category`, `message`, `subject` (the typed names and IDs the message was filled from), `evidence` (`checked`: the call opv made; `account`: the 1Password account it ran in; `upstream`: the tool's scrubbed reply, always marked `"untrusted": true`), `retry`, `human_required`, `do`, `next` and `next_kind`. Each field is described in [the failure document](how-opv-handles-failures.md#the-failure-document). The MCP server returns exactly this object as `{"ok": false, "error": {…}}`; only a re-run is worded differently there (`call <tool> again`).
 
-<!-- error-codes:begin (generated from src/error.rs by tests/docs_commands.rs) -->
+`retry` says whether to run the same command again: `safe` (now; nothing is known to be broken), `after_fix` (once `do` is done), `check_first` (something may already exist: run `next`, a read, before acting again) or `never` (the command itself must change: run `next`). `human_required` is `true` when only a person can take the next step; an assistant then hands `do` and `next` to the user instead of acting. `next_kind` says who may run `next`: `rerun`, `run` and `check` an assistant may run itself, `handoff` only a person runs, `vendor` is another tool's command, and `none` means there is nothing to run.
+
+`code` is one of a closed list. Every failure has exactly one; an external failure opv cannot diagnose is `unrecognized_failure`, never a guess. A row with two values (`4/5`, `after_fix/never`) is a code whose causes differ in that column; the document always carries the one that applies:
+
+<!-- error-codes:begin (generated from cause::codes::table() by tests/docs_commands.rs) -->
 | `code` | Exit | `retry` | Human | Meaning |
 |---|---|---|---|---|
-| `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument) |
-| `config_not_found` | 2 | after_fix | no | no secrets.toml in this directory or a parent, and no 1Password manifest for this checkout |
+| `declined` | 0 | safe | no | the person declined at opv's prompt; nothing was changed |
 | `account_required` | 2 | after_fix | yes | several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account |
-| `account_ambiguous` | 2 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
-| `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
+| `already_declared` | 2 | never | no | the name is already declared |
+| `ambiguous_name` | 2 | never | no | the name matches more than one declared name |
+| `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
+| `choice_required` | 2 | never | yes | the command needs a flag to choose between several candidates |
+| `config_changed` | 2 | safe | no | the configuration changed while opv was editing it; nothing was written and re-running is safe |
+| `config_invalid` | 2 | after_fix/never | no | secrets.toml, the manifest or a change opv proposed breaks a field rule |
+| `config_not_editable` | 2 | never | no | the configuration cannot be edited in place (generated, or a layout opv does not write) |
+| `config_not_found` | 2 | after_fix | no | no secrets.toml in this folder or a parent, and no 1Password manifest for this checkout |
+| `config_source_mismatch` | 2 | never | no | the command works on a secrets.toml, but this project's configuration is a 1Password manifest |
+| `config_unreadable` | 2 | after_fix | no | the configuration file could not be read |
+| `copies_differ` | 2 | never | no | a committed secrets.toml and the manifest differ; a person picks which is right |
+| `input_invalid` | 2 | after_fix | no/yes | an input file (a dotenv file, a setup recipe, a receipt) breaks a rule |
+| `input_unreadable` | 2 | after_fix | no | an input file (a dotenv file, a setup recipe, a receipt) could not be read |
 | `manifest_ambiguous` | 2 | after_fix | yes | several 1Password manifests match; a person keeps one and archives the others |
 | `manifest_exists` | 2 | never | no | a manifest for this project already exists; change it with opv config edit |
-| `config_changed` | 2 | safe | no | the configuration changed while opv was editing it: nothing was written and re-running is safe, or (when the error says so) another edit landed with opv's and a person checks the manifest's history |
-| `config_invalid` | 2 | after_fix | no | secrets.toml or a flag value is not valid |
-| `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
-| `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
-| `state_vault_wider_than_values` | 2 | after_fix | yes | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
-| `duplicate_scope` | 2 | never | no | a receipt file holds more than one entry for the same environment, product and target |
-| `unknown_env` | 2 | never | no | the environment is not defined in secrets.toml |
-| `unknown_product` | 2 | never | no | the product is not declared |
-| `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
+| `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
-| `dependency_missing` | 3 | after_fix | no | op or the target CLI is missing or unusable |
-| `source_error` | 4 | after_fix | no | 1Password could not be read |
-| `item_not_found` | 4 | after_fix | no | the item is not in the vault (moved, archived, deleted, or a wrong item_id) |
-| `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot access the vault |
-| `item_changed` | 4 | after_fix | yes | opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history) |
+| `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
+| `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
+| `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
+| `state_vault_wider_than_values` | 2 | after_fix | no | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
+| `title_ambiguous` | 2 | after_fix | no | more than one 1Password vault or item has exactly this title |
+| `title_not_found` | 2 | after_fix | no | no 1Password vault or item has exactly this title |
+| `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
+| `unknown_env` | 2 | never | no | the environment is not declared |
+| `unknown_product` | 2 | never | no | the product is not declared |
+| `unknown_profile` | 2 | never | no | the remote profile is not declared |
+| `unknown_role` | 2 | never | no | no key declares the process role |
+| `unknown_target` | 2 | never | no | the target is not declared for the environment |
+| `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument, a removed form) |
+| `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
+| `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
+| `remote_version_mismatch` | 3 | after_fix | no | opv on the remote host speaks another protocol version |
+| `tool_unusable` | 3 | after_fix | no | op or the target CLI is installed but cannot be used (an unreadable version, a Windows op.exe from WSL, ...) |
+| `concurrent_edit` | 4 | check_first | yes | another edit landed together with opv's; check the history before acting again |
 | `inventory_incomplete` | 4 | after_fix | yes | one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist |
-| `target_error` | 5 | after_fix | no | the target (Fly, Azure, Kubernetes) refused or failed |
+| `item_changed` | 4 | safe | no | the 1Password item changed while opv was writing it; nothing was written and re-running is safe |
+| `item_not_found` | 4 | after_fix | no | the 1Password item is not in the vault (moved, archived, deleted, or a wrong item_id) |
+| `item_unusable` | 4 | after_fix | no | a 1Password item opv was pointed at has a layout opv cannot use |
+| `resource_not_found` | 4/5 | after_fix | no | the vault, app, namespace or other resource named is not there |
+| `tidy_unverified` | 4 | after_fix | no | opv wrote the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history |
+| `unexpected_output` | 4/5 | never | no | a tool answered with output opv cannot use |
+| `unrecognized_failure` | 4/5 | after_fix | no | a tool failed for a reason opv does not recognise; what opv did establish is named |
+| `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot open the 1Password vault |
+| `owner_setup_required` | 5 | after_fix | yes | the target lacks something only its owner sets up (a GitHub environment, a ready external store, a single-revision app) |
+| `permission_denied` | 5 | after_fix | yes | signed in to the target, but this identity lacks a role or right there (or a network rule keeps it out); a person with access grants it |
+| `remote_disconnected` | 5 | after_fix | no | the SSH connection to the remote host ended or stalled after the payload was sent |
+| `remote_unreachable` | 5 | after_fix | no | the remote profile's host could not be reached over SSH (with its pinned host key) |
+| `target_changed` | 5 | safe | no | the target's object changed while opv was writing it; nothing was written and re-running is safe |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
-| `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |
-| `policy_refused` | 6 | after_fix | no | opv refused the operation |
-| `approval_required` | 6 | after_fix | yes | the structural plan has no unused, unexpired approval for this project and account; a person runs opv approve <plan_id> in their own terminal |
-| `keys_blocking` | 6 | after_fix | yes | sync refused: keys are missing or failing a rule; nothing was written |
-| `confirm_required` | 6 | never | yes | the environment sets confirm_env; pass --confirm <env> |
-| `confirm_mismatch` | 6 | never | no | --confirm names another environment |
-| `stale_plan` | 6 | never | no | sync --expect-plan: the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed; review the new plan |
-| `ram_dir_unavailable` | 6 | after_fix | no | deploy credentials for Azure need a private RAM-backed directory (XDG_RUNTIME_DIR on Linux, %LOCALAPPDATA%\Temp on Windows) and none is usable; nothing was read or changed |
-| `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
-| `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
-| `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
-| `ids_not_in_account` | 2 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind) |
-| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add |
-| `desktop_app_unavailable` | 7 | after_fix | yes | the 1Password app is locked, closed, or its CLI integration is off |
-| `credential_rejected` | 7 | after_fix | yes | 1Password did not accept what was typed at its prompt |
-| `sign_in_cancelled` | 7 | after_fix | yes | the 1Password sign-in prompt was cancelled |
-| `op_unexpected` | 7 | after_fix | yes | 1Password's CLI failed for a reason opv does not recognise; opv doctor checks it |
+| `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
+| `approval_required` | 6 | after_fix | yes | the plan has no unused, unexpired approval; a person runs opv approve <plan_id> in their own terminal |
+| `approval_used` | 6 | never | no | the approval was already used; read what remains, never re-run with it |
+| `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
+| `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
+| `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |
+| `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
+| `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
+| `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `plan_unknown` | 6 | never | no | no plan has this id |
+| `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
+| `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
+| `ram_dir_unavailable` | 6 | after_fix | no | a private RAM-backed folder is needed (Azure deploy credentials, a file opv run delivers) and none is usable; nothing was read or changed |
+| `stale_plan` | 6 | never | no | the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed |
+| `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
+| `account_ambiguous` | 7 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
+| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
+| `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
+| `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
+| `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |
+| `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
+| `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
+| `budget_spent` | 9 | after_fix/check_first | no | the run's --timeout budget was spent |
+| `create_outcome_unknown` | 9 | check_first/safe | no/yes | a create may or may not have happened; find it before creating again |
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer after its retries; nothing was changed |
-| `interrupted` | 130/143 | safe | no | interrupted by SIGINT (130) or SIGTERM (143); re-running is safe |
-| `tidy_conflict` | 4 | safe | no | the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); never a failure: reported in a document's tidy_error while the command reads the item as it is |
-| `tidy_unverified` | 4 | after_fix | yes | opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; never a failure: reported in a document's tidy_error |
+| `secret_not_stored` | 9 | never | yes | a secret-bearing object was made at the provider, but its secret was never stored; it is revoked, never made again |
+| `internal_error` | 70 | never | no | opv hit an internal error; report it |
+| `interrupted` | 129/130/131/143 | safe | no | interrupted by SIGINT (130), SIGHUP (129), SIGQUIT (131) or SIGTERM (143) |
 <!-- error-codes:end -->
 
 `opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); `target add`'s provider options (`--fly-app`, `--azure-key-vault`, `--kubernetes-context`, ...), each with its `provider` and `required_for_provider` (required for that provider); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:
@@ -762,12 +811,12 @@ opv schema | jq -r '.error_codes[] | "\(.code) \(.retry)"'
 and nothing else. It contains names, states and counts only: no value, no value fragment,
 no value length and no guidance. Exit codes are unchanged. Findings (exit 8) keep the rows
 and add `ok: false`, `exit_code` and `error`; an error before the rows exist prints the
-[failure document](#json-contract). The top-level `schema_version` is `1`; adding a field
+[failure document](#json-contract). The top-level `schema_version` is `2` (since 0.10.0, when the error document changed); adding a field
 keeps it, while renaming or removing a field, or changing its meaning, increments it.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "environment": "prod",
   "product": null,
@@ -837,16 +886,17 @@ SSH key or any other field type it does not rewrite exactly; it says so in one n
 |---|---|
 | 0 | success |
 | 2 | configuration or command-line usage error |
-| 3 | dependency: `op`, `flyctl`, `az` or `kubectl` missing or unusable (including a Windows `op.exe` for `run` under WSL), or output cannot be written |
+| 3 | dependency: `op`, `flyctl`, `az`, `kubectl`, `gh` or `ssh` missing or unusable (including a Windows `op.exe` for `run` under WSL), the command `opv run` starts could not be started, or the remote opv speaks another protocol version |
 | 4 | 1Password: the item or vault could not be read or written |
-| 5 | target (Fly, Azure, Kubernetes): refused or failed, including an unhealthy revision or rollout (the previous one keeps serving) and an update refused with nothing applied (`update_refused`) |
+| 5 | target (Fly, Azure, Kubernetes, GitHub, a remote host): refused or failed, including an unhealthy revision or rollout (the previous one keeps serving) and an update refused with nothing applied (`update_refused`) |
 | 6 | refused by policy: blocking keys, a missing or wrong `--confirm`, a stale `--expect-plan`, a command that needs your own terminal |
 | 7 | authentication: not signed in to 1Password or the target CLI, or `deploy_credentials` rejected |
 | 8 | findings: `status`, `plan`, `check` (or `doctor --env`) found keys missing or failing a rule |
 | 9 | outcome unknown, or a provider did not answer: nothing is known to be broken; re-run the same command ([exit 9](how-opv-handles-failures.md#exit-9-re-run-the-same-command)) |
-| 130 / 143 | interrupted by Ctrl-C (SIGINT) or SIGTERM; safe to re-run |
+| 70 | internal error: an opv bug; nothing to fix on your side. `Next: opv version`; report it with that output |
+| 129 / 130 / 131 / 143 | interrupted by SIGHUP (a closed terminal), Ctrl-C (SIGINT), SIGQUIT or SIGTERM (128 + the signal); safe to re-run |
 
-CI may retry a job that exited 9; codes 2 to 8 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
+CI may retry a job that exited 9 when `error.retry` is `safe`; codes 2 to 8 and 70 need a fix first. `run` exits with the child's own exit code, which can equal one of these; opv's own errors print `opv: ...` on stderr. A closed stdout (`status | head`) does not change the result. With `--json`, `error.code` names the cause within a category ([codes](#json-contract)).
 
 ## GitHub Actions example
 
@@ -857,7 +907,7 @@ jobs:
     env:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       OP_CACHE: "false"
-      OPV_VERSION: v0.9.0   # pin the release you tested; bump it deliberately
+      OPV_VERSION: v0.10.0  # pin the release you tested; bump it deliberately
     steps:
       - uses: actions/checkout@v4
       - name: Install the 1Password CLI
@@ -901,7 +951,7 @@ Rate limits: a cold whole-item read costs about 2 requests, so a fleet sync cost
 
 - Values travel only on stdin (on native Windows, a user-only named pipe for `az`) or in the environment of a child process. opv is designed to keep secret-kind values out of argv and reporting output; the private Azure credential-cache exception and other limits are described below.
 - One documented exception to "no files" (SR-4): with Azure `deploy_credentials`, the Azure CLI stores the service principal's secret in opv's private per-run `AZURE_CONFIG_DIR`, which is RAM-only on Linux/WSL, DPAPI-encrypted on Windows, and removed when the run ends. macOS is not supported for Azure deploy credentials.
-- The stderr of `op`, `flyctl`, `az` and `kubectl` is shown only scrubbed, at most 5 lines on failure (more with `--verbose`); their stdout and what opv sends on stdin are never shown ([details](how-opv-handles-failures.md#what-a-cli-said-without-the-secrets)).
+- The stderr of `op`, `flyctl`, `az` and `kubectl` is shown only scrubbed: on failure the error line plus the tail, at most 5 lines, and with `--verbose` all of it; their stdout and what opv sends on stdin are never shown ([details](how-opv-handles-failures.md#what-a-cli-said-without-the-secrets)).
 - `serde` can leave transient scratch copies of values in memory while parsing `op` output; opv wraps values in redacting, zeroizing types but cannot control those copies.
 - `config export` prints config-kind values by design, never secrets. A config key stored in a concealed field is accepted and delivered as a plain value, but opv never prints it: `config export` shows `<concealed in 1Password>` and `status` warns about it once per key.
 - `run` hands secret values to the child process through `op run`; the child can read them.

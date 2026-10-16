@@ -30,16 +30,24 @@ pub fn account_or(
     env: Option<&str>,
     ui: &mut dyn Interaction,
 ) -> Result<Option<String>, Error> {
+    let fallback = || fallback.map(str::to_string);
     let Some(fleet) = fleet else {
-        return Ok(fallback.map(str::to_string));
+        return Ok(fallback());
     };
+    // #160: an environment that names no account uses the project's recorded one, never
+    // op's default account.
     if let Some(e) = env {
-        return Ok(fleet.environment(e)?.account.clone());
+        return Ok(fleet.environment(e)?.account.clone().or_else(fallback));
     }
     let accounts: std::collections::BTreeSet<_> =
         fleet.environments.values().map(|e| &e.account).collect();
     if accounts.len() <= 1 {
-        return Ok(accounts.into_iter().next().cloned().flatten());
+        return Ok(accounts
+            .into_iter()
+            .next()
+            .cloned()
+            .flatten()
+            .or_else(fallback));
     }
     let label = |name: &str, account: &Option<String>| {
         format!(
@@ -62,7 +70,12 @@ pub fn account_or(
         .iter()
         .find(|(n, e)| label(n, &e.account) == picked)
         .map(|(_, e)| e.account.clone())
-        .ok_or_else(|| Error::Config("unknown choice".into()))
+        .ok_or_else(|| {
+            crate::cause::Cause::Bug {
+                site: "login: the menu returned a choice it did not offer",
+            }
+            .into()
+        })
 }
 
 /// Sign in for `env` and open a terminal (empty `command`) or run `command`; returns its
@@ -86,23 +99,131 @@ pub fn run_or(
     backend: &mut dyn Backend,
     ui: &mut dyn Interaction,
 ) -> Result<i32, Error> {
-    let account = account_or(fleet, fallback, env, ui)?;
+    run_recording(fleet, fallback, env, command, None, backend, ui)
+}
+
+/// [`run_or`] that records `record`'s account in the project's `.opv` (at or above the
+/// folder it names) only once the sign-in succeeded (H2, #160): a failed sign-in leaves
+/// `.opv` as it was.
+pub fn run_recording(
+    fleet: Option<&Fleet>,
+    fallback: Option<&str>,
+    env: Option<&str>,
+    command: &[String],
+    record: Option<(&std::path::Path, &str)>,
+    backend: &mut dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<i32, Error> {
+    // The account chosen for this login (`opv login --account`, the menu) when the
+    // configuration names none. An empty account is no account (H3): op is never asked
+    // about `--account ""`.
+    let account = account_or(fleet, fallback, env, ui)?
+        .or_else(|| backend.current_account())
+        .filter(|a| !a.trim().is_empty());
     backend.use_account(account.as_deref());
     prepare(account.as_deref(), backend, ui)?;
+    if let Some((start, uuid)) = record {
+        record_chosen(start, uuid, backend, ui)?;
+    }
     if command.is_empty() {
-        let account = account.as_deref().map(|a| backend.account_label(a));
-        let scope = match (env, &account) {
+        let label = account.as_deref().map(|a| backend.account_label(a));
+        let scope = match (env, &label) {
             (Some(e), Some(a)) => format!(" for {e} ({a})"),
             (Some(e), None) => format!(" for {e}"),
             (None, Some(a)) => format!(" to {a}"),
             (None, None) => String::new(),
         };
-        ui.show(&format!(
-            "Signed in{scope}. This terminal can run opv check, run, plan and sync. Type exit \
-             to leave."
-        ))?;
+        ui.show(&banner(&scope, account.as_deref()))?;
     }
     backend.child(command)
+}
+
+/// The signed-in terminal's banner. With an account, it says the terminal sets
+/// `OP_ACCOUNT`, which op reads as `--account` on every command, so `op signout --all`
+/// there fails with a flag conflict (recorded case 04) unless `OP_ACCOUNT` is unset for it.
+pub fn banner(scope: &str, account: Option<&str>) -> String {
+    let base = format!(
+        "Signed in{scope}. This terminal can run opv check, run, plan and sync. Type exit to \
+         leave."
+    );
+    match account {
+        Some(a) => format!(
+            "{base}\nIt sets OP_ACCOUNT={a}, which op reads as --account, so op and opv here \
+             use that account. To sign out of every account, run: env -u OP_ACCOUNT op \
+             signout --all"
+        ),
+        None => base,
+    }
+}
+
+/// `opv <command>` as the person typed it (opv's own arguments, which never hold a secret),
+/// for a step that runs it again inside `opv login`.
+/// Empty under the MCP server (`opv mcp serve`), which has no command line to repeat.
+pub fn this_command() -> Vec<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "mcp") {
+        return Vec::new();
+    }
+    args
+}
+
+/// The words of `opv <command>`, each quoted for a POSIX shell when it needs it.
+fn shell_words(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|w| {
+            let plain = !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+%".contains(c));
+            if plain {
+                w.clone()
+            } else {
+                format!("'{}'", w.replace('\'', r"'\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `opv login [--account <account>] -- opv <command>`: the command run again inside a login
+/// to the selected account (#150), the step the catalog's `NotSignedIn` renders.
+pub fn login_then(account: Option<&str>, command: &[String]) -> String {
+    let account = account.map_or(String::new(), |a| format!(" --account {a}"));
+    if command.is_empty() {
+        return format!("opv login{account}");
+    }
+    format!("opv login{account} -- opv {}", shell_words(command))
+}
+
+/// #150: a 1Password write found no session of a person's own. In a person's terminal,
+/// opv offers 1Password's sign-in prompt for this code (`op_not_signed_in`) and runs the
+/// command again, as its `--dry-run` did; elsewhere the step is the same command inside
+/// `opv login --account <account>`, since a sign-in inside an earlier opv command does not
+/// carry over.
+pub fn write_needs_session(what: &str, account: Option<&str>, command: &[String]) -> Error {
+    // The catalog renders the handoff `opv login [--account <id>] -- opv <same command>`.
+    let _ = (what, command);
+    crate::cause::Cause::NotSignedIn {
+        system: crate::cause::System::OnePassword,
+        account: account.map(crate::cause::AccountId::new),
+        state: crate::cause::SessionState::EndedWithEarlierCommand,
+    }
+    .into()
+}
+
+/// #150: what a `--dry-run` of a 1Password write says about the write itself: it needs a
+/// session of the person's own, which the dry run's sign-in does not leave behind.
+pub fn dry_run_session_note(account: Option<&str>, command: &[String]) -> String {
+    let write: Vec<String> = command
+        .iter()
+        .filter(|w| *w != "--dry-run")
+        .cloned()
+        .collect();
+    format!(
+        "note: the write itself needs your own 1Password login session; a sign-in during this \
+         dry run ends with it. Run it in this terminal (opv asks you to sign in), or: {}",
+        login_then(account, &write)
+    )
 }
 
 /// FR-40, FR-50: the 1Password account this checkout uses, chosen once, in one command.
@@ -144,10 +265,18 @@ pub fn choose_account_with(
     use crate::host::{Host, Platform};
     let host = Host::detect();
     let platform = host.platform;
-    // In WSL with the Windows `op.exe`, accounts live in the Windows app: op's own prompt
-    // is not reachable, so adding one is done in the app.
-    let own_op = matches!(platform, Platform::Linux | Platform::Wsl) && !host.op_is_windows_exe();
-    let accounts = manifest::accounts(r);
+    // On macOS and Windows, and in WSL with the Windows `op.exe`, accounts live in the
+    // 1Password app: op's own prompt is not reachable, so adding one is done in the app.
+    let own_op = !super::account::app_holds_accounts(platform, host.op_is_windows_exe());
+    // #157: an `op account list` that failed is not an empty list: never start adding an
+    // account because the list could not be read.
+    let accounts = match manifest::discover(r) {
+        manifest::Discovery::Listed(found) => found,
+        manifest::Discovery::OpMissing => {
+            return Err(crate::adapters::onepassword::op_missing(&host));
+        }
+        manifest::Discovery::Unavailable => return Err(super::account::account_list_failed()),
+    };
     const ADD: &str = "Add another 1Password account";
     let added = |now: &[manifest::Account]| {
         now.iter()
@@ -180,8 +309,10 @@ pub fn choose_account_with(
             return Ok(None);
         }
         None if accounts.is_empty() => {
+            // Audit 04.15: where the app holds the accounts and op sees none, the account is
+            // added in the app; signing in now could only fail.
             if !own_op {
-                return Ok(None);
+                return Err(add_in_app(None));
             }
             let now = add_account(r, backend, ui, None, &accounts)?;
             match now.as_slice() {
@@ -206,7 +337,8 @@ pub fn choose_account_with(
                 })
                 .collect();
             labels.push(ADD.to_string());
-            let wsl = if platform == Platform::Wsl {
+            // With the Windows `op.exe`, the Windows app's accounts are the ones listed.
+            let wsl = if platform == Platform::Wsl && own_op {
                 " Accounts in the Windows 1Password app are not listed here until you add them."
             } else {
                 ""
@@ -230,42 +362,64 @@ pub fn choose_account_with(
             }
         }
     };
-    if !record {
+    // This login signs in to the chosen account whatever is recorded (#160).
+    backend.use_account(Some(&uuid));
+    // #153: a one-off login outside a project (no repository, no `.opv` above `start`)
+    // records nothing: it never creates project configuration.
+    if !records(start, record) {
         ui.show(&format!(
             "Signing in to 1Password account {} for this login only; .opv is unchanged.",
             backend.account_label(&uuid)
         ))?;
-        return Ok(Some(uuid));
     }
-    let path = crate::config_store::record_account(start, &uuid)?;
-    ui.show(&format!(
-        "This project uses 1Password account {}; recorded in {} (commit it).",
-        backend.account_label(&uuid),
-        path.display()
-    ))?;
+    // Otherwise the account is recorded after its sign-in succeeds ([`run_recording`]).
     Ok(Some(uuid))
 }
 
-/// Where op shares the 1Password app's accounts (macOS, Windows), an account is added in the
-/// app, not here.
+/// Whether a login from `start` records its chosen account in `.opv`: asked to (`record`,
+/// not `--no-record`) and inside a project.
+pub fn records(start: &std::path::Path, record: bool) -> bool {
+    record && in_project(start)
+}
+
+/// Record `uuid` as the project's account in `.opv` (at or above `start`), after its
+/// sign-in succeeded (H2).
+pub fn record_chosen(
+    start: &std::path::Path,
+    uuid: &str,
+    backend: &dyn Backend,
+    ui: &mut dyn Interaction,
+) -> Result<(), Error> {
+    let path = crate::config_store::record_account(start, uuid)?;
+    ui.show(&format!(
+        "This project uses 1Password account {}; recorded in {} (commit it).",
+        backend.account_label(uuid),
+        path.display()
+    ))
+}
+
+/// Whether `start` is inside a project: a git repository, or a folder with a `.opv` at or
+/// above it.
+fn in_project(start: &std::path::Path) -> bool {
+    start
+        .ancestors()
+        // G4: test builds never look at or above the system temp folder, so a stray
+        // `/tmp/.opv` never decides a test (always true outside tests).
+        .take_while(|d| crate::config_store::hermetic(d))
+        .any(|d| d.join(".git").exists() || d.join(".opv").symlink_metadata().is_ok())
+}
+
+/// Where op shares the 1Password app's accounts (macOS, Windows, WSL with `op.exe`), an
+/// account is added in the app, not here: `account_not_registered`, whose step is the app
+/// and then `opv login`.
 fn add_in_app(who: Option<&str>) -> Error {
-    Error::Config(
-        format!(
-            "on this system the 1Password CLI uses the 1Password app's accounts, so {} is added \
-             in the app",
-            who.unwrap_or("another account")
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::AccountNotRegistered)
-    .with_do(
-        "add the account in the 1Password app and turn on Settings > Developer > Integrate \
-         with 1Password CLI",
-    )
-    .with_next(match who {
-        Some(w) => format!("opv login --account {w}"),
-        None => "opv login".to_string(),
-    })
+    use crate::cause::{AccountRef, AccountSource, Cause};
+    Cause::AccountNotOnMachine {
+        account: who.map_or(AccountRef::Unnamed, super::account::account_ref),
+        selected_by: AccountSource::Flag,
+        in_app: true,
+    }
+    .into()
 }
 
 /// Add an account at op's prompts (signed in in the same step); the accounts op knows after.

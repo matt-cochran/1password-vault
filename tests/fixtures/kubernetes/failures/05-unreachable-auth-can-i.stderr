@@ -1,0 +1,5 @@
+E<MMDD> <TIME> <PID> memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://127.0.0.1:9/api?timeout=1m0s\": dial tcp 127.0.0.1:9: connect: connection refused"
+E<MMDD> <TIME> <PID> memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://127.0.0.1:9/api?timeout=1m0s\": dial tcp 127.0.0.1:9: connect: connection refused"
+Warning: the server doesn't have a resource type 'secrets'
+
+The connection to the server 127.0.0.1:9 was refused - did you specify the right host or port?

@@ -11,8 +11,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::write_err;
-use crate::adapters::onepassword_manifest::{self as manifest, Account, Discovery};
-use crate::error::{Code, Error};
+use crate::adapters::onepassword_manifest::{self as manifest, Account, Discovery, Holds};
+use crate::cause::{AccountId, AccountRef, AccountSource, Cause, UsageProblem};
+use crate::error::Error;
 use crate::runner::{Call, CommandRunner, PROBE_TIMEOUT};
 
 /// What one account says about the vault.
@@ -39,32 +40,20 @@ fn row(a: &Account, result: &'static str) -> Row {
     }
 }
 
-/// Ask each account in turn whether it holds `vault`.
-pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Vec<Row> {
+/// Ask each account in turn whether it holds `vault` (the shared read-only probe,
+/// [`manifest::holds_vault`]).
+/// A check that never answered stops the inventory with the runner's cause (design §5): an
+/// account that could not be asked for that reason is not one to sign in to.
+pub fn rows(r: &dyn CommandRunner, accounts: &[Account], vault: &str) -> Result<Vec<Row>, Error> {
     accounts
         .iter()
         .map(|a| {
-            let args = [
-                "vault",
-                "get",
-                vault,
-                "--account",
-                a.account_uuid.as_str(),
-                "--format",
-                "json",
-            ];
-            let call = Call::new("op", &args);
-            match r.probe(&call, PROBE_TIMEOUT) {
-                Ok(o) if o.status == 0 => row(a, "found"),
-                Ok(_) => {
-                    let _ = crate::runner::take_failure_excerpt();
-                    match manifest::signed_in(r, &a.account_uuid) {
-                        Some(true) => row(a, "not_found"),
-                        _ => row(a, "unknown"),
-                    }
-                }
-                Err(_) => row(a, "unknown"),
-            }
+            let result = match manifest::holds_vault_or_why(r, &a.account_uuid, vault)? {
+                Holds::Found => "found",
+                Holds::NotFound => "not_found",
+                Holds::Unknown | Holds::Unanswered => "unknown",
+            };
+            Ok(row(a, result))
         })
         .collect()
 }
@@ -77,9 +66,18 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     if !crate::config::is_id(vault) {
-        return Err(Error::Config(format!("{vault:?} is not a vault ID").into())
-            .with_code(Code::Usage)
-            .with_next("opv vault locate --help"));
+        return Err(Cause::Usage {
+            problem: UsageProblem::ValueFormat {
+                flag: "VAULT_ID".into(),
+                format: "a 1Password vault ID (26 letters and digits)",
+            },
+        }
+        .into());
+    }
+    // Audit 04.13: a service account or Connect decides the account itself, and `op
+    // account list` says nothing about it: ask the credential once.
+    if crate::host::Host::detect().op_credential.is_some() {
+        return with_credential(r, vault, json, out);
     }
     let accounts = match manifest::discover(r) {
         Discovery::Listed(a) => a,
@@ -88,14 +86,9 @@ pub fn run(
                 &crate::host::Host::detect(),
             ));
         }
-        Discovery::Unavailable => {
-            return Err(Error::Source(
-                "op account list failed, so opv cannot tell which accounts to ask".into(),
-            )
-            .with_next("opv doctor"));
-        }
+        Discovery::Unavailable => return Err(super::account::account_list_failed()),
     };
-    let rows = rows(r, &accounts, vault);
+    let rows = rows(r, &accounts, vault)?;
     let found: Vec<&Row> = rows.iter().filter(|r| r.result == "found").collect();
     let unknown: Vec<&Row> = rows.iter().filter(|r| r.result == "unknown").collect();
     if json {
@@ -131,33 +124,111 @@ pub fn run(
         }
         return Ok(());
     }
-    if let Some(first) = unknown.first() {
-        return Err(Error::Auth(
-            format!(
-                "vault {vault} is not in any signed-in account; {} account(s) could not be \
-                 asked because they are not signed in",
-                unknown.len()
-            )
-            .into(),
-        )
-        .with_code(Code::InventoryIncomplete)
-        .with_do("sign in to that account for this check only (your project's .opv is not changed)")
-        .with_next(format!(
-            "opv login --account {} --no-record -- opv vault locate {vault}",
-            first.account_id
-        )));
+    // Audit 04.29: an account that could not be asked (not signed in, or the check did not
+    // finish) is unlisted, never "not signed in" by guess; the step signs in to it for this
+    // check only.
+    if !unknown.is_empty() {
+        return Err(Cause::InventoryIncomplete {
+            unlisted: unknown
+                .iter()
+                .map(|r| AccountId::new(r.account_id.clone()))
+                .collect(),
+        }
+        .into());
     }
-    Err(Error::Source(
-        format!(
-            "vault {vault} is in none of the {} accounts this 1Password CLI knows; it may \
-             have been deleted, or be in an account not added here",
-            rows.len()
+    // Every account op knows answered that it does not hold the vault: the account that
+    // does is not added here. It is added at op's prompt only where op keeps its own
+    // accounts (04.07), and the step never loops back to `opv vault locate`.
+    Err(Cause::AccountNotOnMachine {
+        account: AccountRef::Unnamed,
+        selected_by: AccountSource::OpDefault,
+        in_app: super::account::app_holds_accounts_here(),
+    }
+    .into())
+}
+
+/// `opv vault locate` under a service account or Connect (audit 04.13): one `op vault get`
+/// with the credential, which decides the account. Found, or the 1Password diagnosis of the
+/// failed call; never a sign-in step.
+fn with_credential(
+    r: &dyn CommandRunner,
+    vault: &str,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let args = ["vault", "get", vault, "--format", "json"];
+    let found = match r.probe(&Call::new("op", &args), PROBE_TIMEOUT) {
+        Ok(o) => o.status == 0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(crate::adapters::onepassword::op_missing(
+                &crate::host::Host::detect(),
+            ));
+        }
+        Err(_) => false,
+    };
+    if !found {
+        let excerpt = crate::runner::take_failure_excerpt();
+        if let Some(seen) = crate::runner::take_observed() {
+            let stderr = excerpt.map(|e| e.lines.join("\n")).unwrap_or_default();
+            let ctx = crate::cause::DiagnoseContext {
+                resource: Some(crate::cause::ResourceRef {
+                    kind: crate::cause::ResourceKind::Vault,
+                    name: crate::cause::ResourceName::new(vault),
+                    scope: None,
+                }),
+                named_by: Some(crate::cause::NamedBy::Flag {
+                    flag: "VAULT_ID".into(),
+                }),
+                ..crate::cause::DiagnoseContext::default()
+            };
+            let exit = seen.exit();
+            let cause = crate::adapters::onepassword_diagnose::diagnose(seen, &stderr, &ctx);
+            if stderr.is_empty() {
+                return Err(cause.into());
+            }
+            // op's own (scrubbed) reply is the evidence.
+            return Err(Error::with_evidence(
+                cause,
+                crate::cause::Upstream {
+                    source: crate::cause::System::OnePassword,
+                    tool: "1Password CLI".into(),
+                    version: None,
+                    exit,
+                    said: stderr.lines().map(str::to_string).collect(),
+                    removed_advice: false,
+                    truncated: false,
+                    untrusted: true,
+                },
+            ));
+        }
+    }
+    if json {
+        let doc = json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "vault_id": vault,
+            "accounts": [],
+            "credential": true,
+            "found": found,
+            "complete": true,
+        });
+        writeln!(out, "{doc}").map_err(write_err)?;
+    } else if found {
+        writeln!(
+            out,
+            "vault {vault} is readable with the 1Password credential set here (service account \
+             or Connect), which decides the account"
         )
-        .into(),
-    )
-    .with_code(Code::VaultNoAccess)
-    .with_do("check the vault ID in the configuration, or add the account that holds it")
-    .with_next("opv login --add"))
+        .map_err(write_err)?;
+    }
+    if found {
+        Ok(())
+    } else {
+        // Every failed probe is observed by the runner (design §5).
+        Err(Cause::Bug {
+            site: "vault locate: a failed credential probe left no observation",
+        }
+        .into())
+    }
 }
 
 #[cfg(test)]

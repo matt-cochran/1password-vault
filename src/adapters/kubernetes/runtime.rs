@@ -10,7 +10,7 @@
 //! `apply` edits only managed env entries of the managed container: `valueFrom.secretKeyRef
 //! {name: opv-<store>-<version>, key: value}` for secrets, `value` for config. Kubernetes
 //! rejects the `replace` when the Deployment changed since it was read (K3), which is reported
-//! as "changed while opv applied; nothing applied; safe to re-run".
+//! as "changed while opv applied; nothing applied" (outcome unknown, safe to re-run).
 //!
 //! A pod that cannot start leaves the rollout "progressing" until the 600 s progress deadline
 //! (K4), so `await_healthy` fails fast when a pod of the new ReplicaSet waits with
@@ -29,6 +29,7 @@ use super::{
     Effect, KubeTarget, Kubectl, LABEL_MANAGED, VALUE_KEY, container_env, container_index,
     digest_hex, secret_name, secret_ref, split_secret_name, store_name, text, valid_label_value,
 };
+use crate::cause::{Cause, EnvName, Guard, OutputProblem, Refusal, StoreObject, System};
 use crate::domain::{
     AccessFinding, Binding, Health, RawSpec, Revision, RuntimeChange, RuntimeSnapshot,
 };
@@ -135,12 +136,9 @@ pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 3] = [
     ("list", "pods"),
 ];
 
-/// Changed paths named in one error before "and N more".
-const MAX_PATHS: usize = 5;
-
 /// The JSON pointers under `spec`, `metadata.labels` and `metadata.annotations` that differ
 /// between two reads of a Deployment (FR-31): paths only, never values.
-fn changed_paths(before: &Value, after: &Value) -> String {
+fn changed_paths(before: &Value, after: &Value) -> Vec<String> {
     fn walk(a: &Value, b: &Value, at: &str, out: &mut Vec<String>) {
         match (a, b) {
             (Value::Object(x), Value::Object(y)) => {
@@ -172,16 +170,7 @@ fn changed_paths(before: &Value, after: &Value) -> String {
             &mut out,
         );
     }
-    if out.is_empty() {
-        return "only its resourceVersion moved".into();
-    }
-    let more = out.len().saturating_sub(MAX_PATHS);
-    out.truncate(MAX_PATHS);
-    let mut s = out.join(", ");
-    if more > 0 {
-        s.push_str(&format!(" and {more} more"));
-    }
-    s
+    out
 }
 
 /// How long an ExternalSecret that already showed `SecretSyncedError` on the first read
@@ -201,13 +190,10 @@ fn native_secrets(change: &RuntimeChange) -> Result<BTreeMap<String, String>, Er
                 || split_secret_name(&secret_name(store, version))
                     != Some((store.as_str(), version.as_str()))
             {
-                return Err(Error::Target(
-                    format!(
-                        "refusing to pin {name} to an invalid Secret version; nothing applied\n  \
-                     next: re-run the same command"
-                    )
-                    .into(),
-                ));
+                return Err(Cause::Bug {
+                    site: "kubernetes: a pin names an invalid Secret version",
+                }
+                .into());
             }
             Ok((name.clone(), secret_name(store, version)))
         })
@@ -374,7 +360,6 @@ impl<'a> KubeDeployment<'a> {
             what,
             &["get", "replicasets", "-o", "json"],
             None,
-            "get replicasets",
         )?;
         let sets = super::parse_json(&out, what)?;
         let newest = sets
@@ -409,7 +394,7 @@ impl<'a> KubeDeployment<'a> {
         }
         args.extend(["-o", PODS_PATH]);
         let what = "kubectl get pods";
-        let out = self.k.run(Effect::Read, what, &args, None, "get pods")?;
+        let out = self.k.run(Effect::Read, what, &args, None)?;
         for line in text(&out, what)?.lines() {
             let mut cols = line.splitn(3, '\t');
             let (pod, owner, reasons) = (
@@ -449,13 +434,10 @@ impl<'a> KubeDeployment<'a> {
         for (name, (remote, version)) in &change.pin {
             let store = store_name(remote);
             let Some(es) = external_name(&store, version) else {
-                return Err(Error::Target(
-                    format!(
-                        "refusing to pin {name} to a store version that cannot name an \
-                     ExternalSecret; nothing applied\n  next: re-run the same command"
-                    )
-                    .into(),
-                ));
+                return Err(Cause::Bug {
+                    site: "kubernetes: a pinned store version cannot name an ExternalSecret",
+                }
+                .into());
             };
             let body = external::manifest(
                 t,
@@ -517,31 +499,39 @@ impl<'a> KubeDeployment<'a> {
                 other => other,
             };
             first = false;
-            let last =
-                match state {
-                    None => {
-                        return Err(Error::Target(format!(
-                        "ExternalSecret {es} disappeared after opv applied it; deployment {d} \
-                         was not changed\n  next: re-run the same command"
-                    ).into()));
+            let last = match state {
+                // Someone removed it after opv applied it; the Deployment is unchanged.
+                None => {
+                    return Err(Cause::ConcurrentEdit {
+                        object: StoreObject::Resource {
+                            resource: self.t().external_ref(es),
+                            changed: Vec::new(),
+                        },
                     }
-                    Some(Sync::Synced) => return Ok(()),
-                    Some(Sync::Failed) => {
-                        return Err(external::diagnose_failed(
-                            &self.k, bridge, es, env_name, version,
-                        ));
-                    }
-                    Some(Sync::Waiting(state)) => state,
-                };
+                    .into());
+                }
+                Some(Sync::Synced) => return Ok(()),
+                Some(Sync::Failed) => {
+                    return Err(external::diagnose_failed(
+                        &self.k, bridge, es, env_name, version,
+                    ));
+                }
+                Some(Sync::Waiting(state)) => state,
+            };
             let waited = wait.elapsed(r);
             if wait.over(r, poll) {
-                return Err(Error::Target(format!(
-                    "ExternalSecret {es} was not Ready within {} s ({last}); deployment {d} was \
-                     not changed\n  next: `{}`, then run the same command again",
-                    waited.as_secs(),
-                    self.k
-                        .command(&format!("describe {} {es}", external::RESOURCE))
-                ).into()));
+                // Still syncing when the wait ended, as kubectl's own read shows it; the
+                // Deployment is unchanged.
+                let _ = (&last, d);
+                let what = format!("kubectl get {} {es}", external::RESOURCE);
+                return Err(super::unusable(&what, |seen| Cause::TargetRefused {
+                    system: System::Kubernetes,
+                    subject: self.t().external_ref(es),
+                    why: Refusal::InProgress { revision: None },
+                    env: Some(EnvName::new(env_name)),
+                    target: None,
+                    seen,
+                }));
             }
             if waited >= next_note {
                 (self.note)(&format!(
@@ -559,16 +549,14 @@ impl<'a> KubeDeployment<'a> {
     fn generation(&self, out: &[u8], what: &str) -> Result<Revision, Error> {
         let s = std::str::from_utf8(out).unwrap_or("").trim();
         if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || s.len() > 19 {
-            return Err(Error::Target(
-                format!(
-                    "{what} succeeded but returned no Deployment generation; the change was \
-                 applied and nothing was pruned\n  next: {}",
-                    self.k.command(&format!(
-                        "rollout status deployment/{}",
-                        self.t().deployment
-                    ))
-                )
-                .into(),
+            // The change was applied; its reply named no generation to watch (A1).
+            return Err(super::unusable_reply(
+                what,
+                None,
+                OutputProblem::Empty {
+                    what: "Deployment generation",
+                },
+                crate::cause::During::AppliedWrite,
             ));
         }
         Ok(Revision(s.to_string()))
@@ -715,25 +703,23 @@ impl PinnedRuntime for KubeDeployment<'_> {
             .chain(change.set.keys())
             .chain(change.unbind.iter());
         if let Some(bad) = names.clone().find(|n| !self.managed.contains(*n)) {
-            return Err(Error::Target(
-                format!(
-                    "refusing to change env name {bad} on deployment {d}: opv manages only the \
-                 names its template renders; nothing applied\n  next: run opv explain {bad}"
-                )
-                .into(),
-            ));
+            // opv manages only the names its template renders (06.28: no `opv explain` of an
+            // env name, which it does not take).
+            return Err(Cause::Guard {
+                guard: Guard::NotManagedByOpv {
+                    name: format!("env name {bad} on deployment {d}"),
+                },
+            }
+            .into());
         }
         let mut doc = snapshot.spec.0.clone();
-        let rv =
-            doc.pointer("/metadata/resourceVersion")
-                .and_then(Value::as_str)
-                .map(String::from)
-                .ok_or_else(|| {
-                    Error::Target(format!(
-                    "deployment {d} has no resourceVersion; nothing applied\n  next: re-run \
-                     the same command"
-                ).into())
-                })?;
+        let rv = doc
+            .pointer("/metadata/resourceVersion")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or(Cause::Bug {
+                site: "kubernetes: the deployment read back has no resourceVersion",
+            })?;
         let i = container_index(&doc, t)?;
         let secrets = match &self.external {
             None => native_secrets(change)?,
@@ -757,7 +743,9 @@ impl PinnedRuntime for KubeDeployment<'_> {
         let container = doc
             .pointer_mut(&format!("/spec/template/spec/containers/{i}"))
             .and_then(Value::as_object_mut)
-            .ok_or_else(|| Error::Target(format!("deployment {d} has no containers").into()))?;
+            .ok_or(Cause::Bug {
+                site: "kubernetes: the managed container is not an object",
+            })?;
         container.insert("env".into(), Value::Array(env));
         if let Some(o) = doc.as_object_mut() {
             o.remove("status");
@@ -784,27 +772,22 @@ impl PinnedRuntime for KubeDeployment<'_> {
         if let Outcome::Done(out) = outcome {
             return self.generation(&out.stdout, &what);
         }
-        // Reconcile by reading back (NR-2, K3); the read-back explains the failure, so the
-        // replace's excerpt stays (NR-31).
+        // Reconcile by reading back (NR-2, K3); the replace's failure is taken first, so the
+        // read-back's own calls never replace it (NR-31).
+        let failed = self.k.failed(Effect::Write);
         let Ok(fresh) = crate::runner::diagnosing(|| self.k.get_deployment()) else {
-            return Err(self.k.fail(
-                Effect::Write,
-                &what,
-                outcome,
-                "auth can-i update deployments",
-            ));
+            return Err(self
+                .k
+                .explain(failed, Effect::Write, self.t().deployment_ref()));
         };
         let moved = fresh
             .pointer("/metadata/resourceVersion")
             .and_then(Value::as_str)
             != Some(rv.as_str());
         if !moved {
-            return Err(self.k.fail(
-                Effect::Write,
-                &what,
-                outcome,
-                "auth can-i update deployments",
-            ));
+            return Err(self
+                .k
+                .explain(failed, Effect::Write, self.t().deployment_ref()));
         }
         if self.managed_env(&fresh)? == self.managed_env(&doc)? {
             let generation = fresh
@@ -814,14 +797,16 @@ impl PinnedRuntime for KubeDeployment<'_> {
                 .unwrap_or_default();
             return self.generation(generation.as_bytes(), &what);
         }
-        Err(Error::Target(
-            format!(
-                "deployment {d} changed while opv applied ({}); nothing applied; safe to re-run\n  \
-             next: re-run the same command",
-                changed_paths(&snapshot.spec.0, &fresh)
-            )
-            .into(),
-        ))
+        // Safe to re-run, so not a target refusal (06.39): the Deployment changed before
+        // opv's write, which therefore did not apply.
+        let _ = d;
+        Err(Cause::ChangedBeforeWrite {
+            object: StoreObject::Resource {
+                resource: self.t().deployment_ref(),
+                changed: changed_paths(&snapshot.spec.0, &fresh),
+            },
+        }
+        .into())
     }
 
     /// Polls the rollout of `revision` (a generation): healthy when rolled out as `kubectl
@@ -829,14 +814,8 @@ impl PinnedRuntime for KubeDeployment<'_> {
     /// pod of the new ReplicaSet is stuck (K4); a timeout is an error naming the last state.
     fn await_healthy(&self, revision: &Revision) -> Result<Health, Error> {
         let d = self.t().deployment.as_str();
-        let generation: u64 = revision.0.parse().map_err(|_| {
-            Error::Target(
-                format!(
-                    "deployment {d}: revision {} is not a generation",
-                    revision.0
-                )
-                .into(),
-            )
+        let generation: u64 = revision.0.parse().map_err(|_| Cause::Bug {
+            site: "kubernetes: a revision is not a deployment generation",
         })?;
         let r = self.k.runner;
         let wait = Wait::new(r, self.wait_max);
@@ -861,16 +840,10 @@ impl PinnedRuntime for KubeDeployment<'_> {
             }
             let waited = wait.elapsed(r);
             if wait.over(r, self.poll_every) {
-                return Err(Error::Target(
-                    format!(
-                        "deployment {d} did not finish rolling out generation {generation} within \
-                     {} s ({last}); the previous ReplicaSet keeps serving; nothing pruned\n  \
-                     next: {}",
-                        waited.as_secs(),
-                        self.k.command(&format!("rollout status deployment/{d}"))
-                    )
-                    .into(),
-                ));
+                // Still rolling out when the wait ended: the previous ReplicaSet keeps
+                // serving, and the sync flow reports it (as for Azure).
+                let _ = &last;
+                return Ok(Health::TimedOut);
             }
             if waited >= next_note {
                 (self.note)(&format!(
@@ -916,18 +889,20 @@ impl PinnedRuntime for KubeDeployment<'_> {
     /// `sync` checks [`DEPLOY_RIGHTS`] before its first write.
     fn check_access(&self, _names: &[String]) -> Result<Vec<AccessFinding>, Error> {
         missing_rights(&self.k, self.external.is_some(), |_, _| true)
+            .map(|found| found.into_iter().map(|(f, _)| f).collect())
     }
 }
 
 /// The rights of [`ACCESS`] (with a named store, the ExternalSecret rights instead of the
 /// Secret ones) that `pick` selects and the operator lacks (`kubectl auth can-i`, K5):
 /// exit 0 yes, exit 1 no. Pods need no Secret access of their own (the kubelet resolves
-/// `secretKeyRef`); each finding names the verb and resource.
+/// `secretKeyRef`); each finding names the verb and resource, with the typed refusal the
+/// kubectl strategy made of that "no" (a missing right, naming the grant).
 pub(crate) fn missing_rights(
     k: &Kubectl<'_>,
     external: bool,
     pick: impl Fn(&str, &str) -> bool,
-) -> Result<Vec<AccessFinding>, Error> {
+) -> Result<Vec<(AccessFinding, Error)>, Error> {
     let mut found = Vec::new();
     let rights: Vec<(&str, &str, &str)> = if external {
         ACCESS
@@ -954,20 +929,14 @@ pub(crate) fn missing_rights(
             Outcome::Done(_) => {}
             // Exit 1 with "no" is a denial (K5); exit 1 without it is a failed call (an
             // unreachable cluster also exits 1, K6), diagnosed below.
-            Outcome::Refused(o) if o.status == 1 && answered_no(&o.stdout) => {
-                found.push(AccessFinding {
+            Outcome::Refused(o) if o.status == 1 && answered_no(&o.stdout) => found.push((
+                AccessFinding {
                     store_name: format!("{verb} {resource}"),
                     reason: reason.into(),
-                })
-            }
-            other => {
-                return Err(k.fail(
-                    Effect::Read,
-                    &what,
-                    other,
-                    &format!("auth can-i {verb} {resource}"),
-                ));
-            }
+                },
+                k.fail(Effect::Read),
+            )),
+            _ => return Err(k.fail(Effect::Read)),
         }
     }
     Ok(found)
@@ -1210,25 +1179,59 @@ mod tests {
         assert!(with_rt(&r, |rt| rt.apply(&c, &snapshot())).is_err());
     }
 
+    /// The invariant refusal is opv's own bug, reported as one (its Do names the issues).
     #[test]
-    fn resource_version_conflict_is_safe_to_rerun_error() {
+    fn an_invalid_version_refusal_is_an_internal_error() {
+        let mut c = change();
+        c.pin.insert("K7".into(), ("k7".into(), "../x".into()));
+        let r = FakeRunner::default();
+        let e = with_rt(&r, |rt| rt.apply(&c, &snapshot())).unwrap_err();
+        assert_eq!(e.code_str(), "internal_error");
+    }
+
+    /// 06.39: the conflict is safe to re-run, and its code says so.
+    #[test]
+    fn resource_version_conflict_is_safe_to_rerun() {
         let moved = deployment_with(|d| d["metadata"]["resourceVersion"] = json!("990"));
         let r = FakeRunner::new([Output::failure(1), json(&moved)]);
         let e = with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap_err();
-        assert!(matches!(e, Error::Target(m)
-            if m.contains("deployment api changed while opv applied (") && m.contains("); nothing applied; safe to re-run")));
+        // The Deployment changed before opv's write, which did not apply: the step is to
+        // run the same command again.
+        let next = e
+            .cause()
+            .map(|(c, _)| c.step(&crate::cause::Invocation::default()).1);
+        assert_eq!(next, Some(crate::cause::Next::Rerun));
+    }
+
+    /// 06.28: an env name opv does not manage is refused as such, never sent to `opv
+    /// explain` (which takes a key, not an env name).
+    #[test]
+    fn an_unmanaged_env_name_is_not_managed_by_opv() {
+        let mut c = change();
+        c.set.insert("PATH".into(), "x".into());
+        let r = FakeRunner::default();
+        let e = with_rt(&r, |rt| rt.apply(&c, &snapshot())).unwrap_err();
+        assert!(matches!(
+            e.cause(),
+            Some((
+                Cause::Guard {
+                    guard: Guard::NotManagedByOpv { .. }
+                },
+                _
+            ))
+        ));
     }
 
     /// M5 (FR-31): the concurrent-change error names the paths that changed.
     #[test]
-    fn concurrent_change_names_the_changed_paths() {
+    fn concurrent_change_is_the_deployment_changed_before_the_write() {
         let moved = deployment_with(|d| {
             d["metadata"]["resourceVersion"] = json!("990");
             d["spec"]["replicas"] = json!(7);
         });
         let r = FakeRunner::new([Output::failure(1), json(&moved)]);
         let e = with_rt(&r, |rt| rt.apply(&change(), &snapshot())).unwrap_err();
-        assert!(e.mentions("(/spec/replicas)"), "{e}");
+        assert_eq!(e.code_str(), "target_changed", "{e}");
     }
 
     #[test]
@@ -1388,7 +1391,7 @@ mod tests {
     }
 
     #[test]
-    fn await_healthy_times_out_naming_the_rollout_command() {
+    fn await_healthy_times_out_as_timed_out() {
         let r = FakeRunner::default();
         for _ in 0..5 {
             r.responses.borrow_mut().extend([
@@ -1397,15 +1400,16 @@ mod tests {
                 Ok(pods("")),
             ]);
         }
-        let e = with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap_err();
-        assert!(matches!(e, Error::Target(m) if m.mentions("rollout status deployment/api")));
+        // Still rolling out when the wait ended: the sync flow reports it (as for Azure).
+        let h = with_rt(&r, |rt| rt.await_healthy(&Revision("6".into()))).unwrap();
+        assert_eq!(h, Health::TimedOut);
     }
 
     /// I3: the rollout wait has its own limit and counts the time its reads take, so with
     /// each read taking 60 s its own message (naming the rollout state) comes long before
     /// the run budget runs out.
     #[test]
-    fn slow_reads_end_the_rollout_wait_with_its_own_message() {
+    fn slow_reads_end_the_rollout_wait_before_the_budget() {
         let (t, m) = (target(), managed());
         let r = FakeRunner::default();
         r.call_cost.set(Duration::from_secs(60));
@@ -1416,11 +1420,10 @@ mod tests {
                 Ok(pods("")),
             ]);
         }
-        let e = KubeDeployment::new(&r, &t, m)
+        let h = KubeDeployment::new(&r, &t, m)
             .with_progress(|_| {})
-            .await_healthy(&Revision("6".into()))
-            .unwrap_err();
-        assert!(e.mentions("did not finish rolling out"), "{e}");
+            .await_healthy(&Revision("6".into()));
+        assert!(matches!(h, Ok(Health::TimedOut)), "{h:?}");
     }
 
     #[test]
@@ -1464,12 +1467,14 @@ mod tests {
 
     #[test]
     fn check_access_on_unreachable_cluster_exits_9() {
-        // `auth can-i` exits 1 without printing "no" when the API server is down (K6).
-        let r = FakeRunner::new([
+        // `auth can-i` exits 1 without printing "no" when the API server is down (K6;
+        // recorded: 05-unreachable-auth-can-i).
+        let r = FakeRunner::default();
+        r.push_with_stderr(
             Output::failure(1),
-            ok("context/kind-opv"),
-            Output::failure(1),
-        ]);
+            "err=\"dial tcp 127.0.0.1:9: connect: connection refused\"\n\
+             Warning: the server doesn't have a resource type 'secrets'\n",
+        );
         assert_eq!(
             with_rt(&r, |rt| rt.check_access(&[]))
                 .unwrap_err()
@@ -1512,7 +1517,7 @@ mod tests {
 
     #[test]
     fn unreachable_cluster_on_bindings_exits_9() {
-        let r = FakeRunner::new(failed_read(1).chain([ok("context/kind-opv"), Output::failure(1)]));
+        let r = FakeRunner::new(failed_read(1).chain([Output::failure(1)]));
         assert_eq!(with_rt(&r, |rt| rt.bindings()).unwrap_err().exit_code(), 9);
     }
 }

@@ -14,6 +14,7 @@ use serde_json::json;
 
 use super::{status, write_err};
 use crate::adapters::onepassword_manifest::{self as manifest, Row};
+use crate::cause::{AccountId, Cause, Cmd, GivenBy, UsageProblem};
 use crate::config;
 use crate::config_store::{
     self as store, ConfigStore, Found, ManifestStore, Matched, Replaced, Snapshot,
@@ -24,6 +25,32 @@ use crate::runner::CommandRunner;
 
 fn line(out: &mut dyn Write, s: impl AsRef<str>) -> Result<(), Error> {
     writeln!(out, "{}", s.as_ref()).map_err(write_err)
+}
+
+/// opv's own failure at `site` (never the person's).
+fn bug(site: &'static str) -> Error {
+    Cause::Bug { site }.into()
+}
+
+/// A file named with `--file` that could not be read.
+fn unreadable_file(path: &Path, e: &std::io::Error) -> Error {
+    Cause::ConfigUnreadable {
+        path: path.to_path_buf(),
+        io: e.kind().into(),
+        given_by: GivenBy::Flag {
+            flag: "--file".into(),
+        },
+    }
+    .into()
+}
+
+/// A typed `opv …` command line for a success-path `Next:` (design §10.1).
+fn next_line(command: &[&str], args: &[&str]) -> String {
+    let c = Cmd {
+        command: command.iter().map(|w| w.to_string()).collect(),
+        args: args.iter().map(|a| a.to_string()).collect(),
+    };
+    format!("Next: {}", crate::cause::render::cmd_text(&c))
 }
 
 /// `config export` output format.
@@ -46,17 +73,11 @@ pub fn export(
     match format {
         Format::Toml => out.write_all(snap.text.as_bytes()).map_err(write_err),
         Format::Json => {
-            let v: toml::Value = toml::from_str(&snap.text).map_err(|e| {
-                Error::Config(
-                    format!(
-                        "invalid configuration: {}",
-                        config::toml_error_inline(&snap.text, e.span(), e.message())
-                    )
-                    .into(),
-                )
-            })?;
-            let s = serde_json::to_string_pretty(&v)
-                .map_err(|_| Error::Config("cannot serialize the configuration".into()))?;
+            // The text was just validated as TOML: a failure here is opv's bug.
+            let v: toml::Value =
+                toml::from_str(&snap.text).map_err(|_| bug("config export: parse"))?;
+            let s =
+                serde_json::to_string_pretty(&v).map_err(|_| bug("config export: serialize"))?;
             line(out, s)
         }
     }
@@ -80,15 +101,18 @@ pub fn import(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let text = fs::read_to_string(&args.file)
-        .map_err(|e| Error::Config(format!("cannot read {}: {e}", args.file.display()).into()))?;
+    let text = fs::read_to_string(&args.file).map_err(|e| unreadable_file(&args.file, &e))?;
     config::parse_at(&text, config::Source::File(&args.file))?;
     let paths = normalize_paths(&args.paths)?;
     let repo = store::git_repo(r);
     if repo.is_none() && !paths.is_empty() {
-        return Err(Error::Config(
-            "--path needs a git remote origin to be relative to; none found".into(),
-        ));
+        return Err(Cause::Usage {
+            problem: UsageProblem::NeedsFlag {
+                flag: "--path".into(),
+                needs: "a git remote origin to be relative to, and none was found".into(),
+            },
+        }
+        .into());
     }
     let project = store::default_project(args.project.as_deref(), repo.as_deref(), dir)?;
     let m = store::create_manifest(
@@ -99,7 +123,8 @@ pub fn import(
         &paths,
         &text,
         None,
-    )?;
+    )
+    .map_err(|e| with_local_copy(e, &args.file))?;
     line(out, format!("created {}", m.describe()))?;
     match &repo {
         Some(repo) => {
@@ -130,29 +155,44 @@ pub fn import(
             args.file.display()
         ),
     )?;
-    // Without a git remote there may be no repository to `git rm` from (found live).
-    let rm = if repo.is_some() { "git rm" } else { "rm" };
-    line(
-        out,
-        format!(
-            "Next: OPV_PROJECT={project} opv config check --file {f} && {rm} {f}",
-            f = crate::error::shell_word(&args.file.display().to_string())
-        ),
-    )
+    // The typed Next compares the copy with the new manifest (§10.1); without a git remote
+    // the checkout finds the manifest only through the pointer named above.
+    let file = args.file.display().to_string();
+    if repo.is_none() {
+        line(
+            out,
+            format!("Do: write project = \"{project}\" in .opv (or set OPV_PROJECT={project})"),
+        )?;
+    }
+    line(out, next_line(&["config", "check"], &["--file", &file]))
+}
+
+/// `e` naming the local copy beside an existing manifest (03.11): the step then compares
+/// the two instead of editing the copy.
+fn with_local_copy(e: Error, file: &Path) -> Error {
+    match e.cause() {
+        Some((Cause::ManifestExists { title, .. }, None)) => Cause::ManifestExists {
+            title: title.clone(),
+            local_file: Some(file.to_path_buf()),
+        }
+        .into(),
+        _ => e,
+    }
 }
 
 /// Normalize `--path` values; an invalid one is a configuration error.
 fn normalize_paths(given: &[String]) -> Result<Vec<String>, Error> {
     let mut paths = Vec::new();
     for p in given {
-        let n = store::normalize_path(p).ok_or_else(|| {
-            Error::Config(
-                format!(
-                    "--path {p:?} must be a directory below the repository root \
-                     (segments of [A-Za-z0-9._-])"
-                )
-                .into(),
-            )
+        let n = store::normalize_path(p).ok_or_else(|| -> Error {
+            Cause::Usage {
+                problem: UsageProblem::ValueFormat {
+                    flag: "--path".into(),
+                    format: "a directory below the repository root, each part made of \
+                             letters, digits, ., _ and -",
+                },
+            }
+            .into()
         })?;
         if !paths.contains(&n) {
             paths.push(n);
@@ -169,8 +209,7 @@ pub fn check(
     r: &dyn CommandRunner,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let committed = fs::read_to_string(file)
-        .map_err(|e| Error::Config(format!("cannot read {}: {e}", file.display()).into()))?;
+    let committed = fs::read_to_string(file).map_err(|e| unreadable_file(file, &e))?;
     // The file must be a configuration before any of it is printed as a diff: a `.env`
     // given by mistake would otherwise reach stdout line by line (C1, SR-1).
     config::parse_at(&committed, config::Source::File(file))?;
@@ -190,16 +229,17 @@ pub fn check(
         format!("--- {}\n+++ {}", found.store().describe(), file.display()),
     )?;
     out.write_all(diff(&a, &b).as_bytes()).map_err(write_err)?;
-    Err(Error::Findings(
-        1,
-        format!(
-            "{} differs from {}\n  next: opv config export --toml > {}",
-            file.display(),
-            found.store().describe(),
-            file.display()
-        )
-        .into(),
-    ))
+    // 03.07: either copy may be the intended one (in a PR the committed copy often is); the
+    // person picks the direction. Not "keys are missing".
+    let manifest = match found.cause_source() {
+        crate::cause::ConfigSource::Manifest { title, .. } => title,
+        crate::cause::ConfigSource::File { path, .. } => path.display().to_string(),
+    };
+    Err(Cause::CopiesDiffer {
+        file: file.to_path_buf(),
+        manifest,
+    }
+    .into())
 }
 
 /// A line diff of `a` to `b`: `-` removed, `+` added, ` ` kept (longest common
@@ -263,6 +303,10 @@ pub fn edit(
         }
         if let Err(e) = store::parse_from(found, &edited) {
             line(out, e.to_string())?;
+            // 03.05: the fix is shown here, where the person is editing, not only on exit.
+            if let Some(fix) = fix_of(&e) {
+                line(out, format!("Do: {fix}"))?;
+            }
             if ui.confirm("Edit again?")? {
                 draft = edited;
                 continue;
@@ -289,6 +333,11 @@ pub fn edit(
     }
 }
 
+/// The fix (`Do:`) of a validation error: its cause's; never a step derived from prose.
+fn fix_of(e: &Error) -> Option<String> {
+    super::own_step(e).0
+}
+
 /// `config edit` in a terminal: `$VISUAL`, else `$EDITOR`, else `vi`, on a temporary copy
 /// (mode 0600, removed afterwards; it holds no secret), and a `[y/N]` prompt.
 pub struct TerminalUi;
@@ -311,17 +360,24 @@ impl EditUi for TerminalUi {
             .args(words)
             .arg(&tmp.path)
             .status()
-            .map_err(|e| {
-                Error::Dependency(format!("cannot start editor {program:?}: {}", e.kind()).into())
-                    .with_next("set EDITOR to your editor (for example EDITOR=nano)")
+            .map_err(|e| -> Error {
+                Cause::ChildStartFailed {
+                    program: program.clone(),
+                    workdir: None,
+                    io: e.kind().into(),
+                    remote: None,
+                }
+                .into()
             })?;
         if !status.success() {
-            return Err(Error::Config(
-                format!("editor {program:?} exited with {status}; nothing saved").into(),
-            ));
+            // The editor quit without success (`:cq`, a crash): the person's edit is
+            // abandoned and nothing is saved.
+            return Err(Cause::Guard {
+                guard: crate::cause::Guard::Declined,
+            }
+            .into());
         }
-        fs::read_to_string(&tmp.path)
-            .map_err(|e| Error::Config(format!("cannot read the edited copy: {e}").into()))
+        fs::read_to_string(&tmp.path).map_err(|e| tmp_failed(&e))
     }
 
     fn confirm(&mut self, question: &str) -> Result<bool, Error> {
@@ -331,7 +387,12 @@ impl EditUi for TerminalUi {
         let mut answer = String::new();
         std::io::stdin()
             .read_line(&mut answer)
-            .map_err(|e| Error::Config(format!("cannot read the answer: {e}").into()))?;
+            .map_err(|_| -> Error {
+                Cause::NeedsTerminal {
+                    why: crate::cause::NoTerminal::NoTty,
+                }
+                .into()
+            })?;
         Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
     }
 }
@@ -344,8 +405,7 @@ struct TempCopy {
 impl TempCopy {
     fn create(text: &str) -> Result<Self, Error> {
         let mut rnd = [0u8; 8];
-        getrandom::fill(&mut rnd)
-            .map_err(|_| Error::Dependency("no randomness for a temporary file name".into()))?;
+        getrandom::fill(&mut rnd).map_err(|_| bug("config edit: no randomness"))?;
         let path = std::env::temp_dir().join(format!("opv-config-{}.toml", hex::encode(rnd)));
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -354,15 +414,20 @@ impl TempCopy {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts
-            .open(&path)
-            .map_err(|e| Error::Config(format!("cannot create {}: {e}", path.display()).into()))?;
+        let mut f = opts.open(&path).map_err(|e| tmp_failed(&e))?;
         let copy = TempCopy { path };
-        f.write_all(text.as_bytes()).map_err(|e| {
-            Error::Config(format!("cannot write {}: {e}", copy.path.display()).into())
-        })?;
+        f.write_all(text.as_bytes()).map_err(|e| tmp_failed(&e))?;
         Ok(copy)
     }
+}
+
+/// The private temporary copy in the system temp folder could not be made or read.
+fn tmp_failed(e: &std::io::Error) -> Error {
+    Cause::PrivateDirFailed {
+        dir: std::env::temp_dir(),
+        io: e.kind().into(),
+    }
+    .into()
 }
 
 impl Drop for TempCopy {
@@ -399,7 +464,7 @@ impl AccountReport {
             Err(e) => (
                 "failed",
                 None,
-                Some(e.code().as_str()),
+                Some(e.code_str()),
                 Some(e.text().lines().next().unwrap_or_default().to_string()),
             ),
         };
@@ -441,32 +506,17 @@ impl Inventory {
             .iter()
             .filter(|a| a.status != "listed")
             .collect();
-        let first = failed.first()?;
-        let names = failed
-            .iter()
-            .map(|a| format!("{} ({})", a.sign_in, a.account_id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let id = &first.account_id;
+        failed.first()?;
+        // 03.08: the catalog's sign-in step carries --no-record, so following it never
+        // re-points the current checkout's .opv at another account.
         Some(
-            Error::Source(
-                format!(
-                    "the project inventory is incomplete: {} of {} 1Password accounts could \
-                     not be listed: {names}",
-                    failed.len(),
-                    self.accounts.len()
-                )
-                .into(),
-            )
-            .with_code(crate::error::Code::InventoryIncomplete)
-            .with_do(
-                "sign in to each account named above in your own terminal; until then, do not \
-                 treat a project missing from this list as absent and do not create a \
-                 replacement vault or manifest",
-            )
-            .with_next(format!(
-                "opv login --account {id} -- opv projects --account {id}"
-            )),
+            Cause::InventoryIncomplete {
+                unlisted: failed
+                    .iter()
+                    .map(|a| AccountId::new(a.account_id.clone()))
+                    .collect(),
+            }
+            .into(),
         )
     }
 }
@@ -621,7 +671,7 @@ pub fn projects(
             "projects": v,
             "notes": notes,
         }))
-        .map_err(|_| Error::Config("cannot serialize the project list".into()))?;
+        .map_err(|_| bug("projects: serialize"))?;
         line(out, s)?;
         return inv.incomplete().map_or(Ok(()), Err);
     }
@@ -697,7 +747,6 @@ pub fn status_all(
                     }
                 }
                 if let Err(e) = o.result(&fleet) {
-                    let e = in_project(e.map_text(|t| format!("{name}: {t}")), &name);
                     first.get_or_insert(e);
                 }
                 docs.push((
@@ -707,9 +756,9 @@ pub fn status_all(
                 ));
             }
             Err(e) => {
-                let why = e.text().lines().next().unwrap_or_default().to_string();
-                let code = e.code().as_str();
-                first.get_or_insert(in_project(e, &name));
+                let why = e.to_string();
+                let code = e.code_str();
+                first.get_or_insert(e);
                 docs.push((
                     name,
                     store::vault_label(&l.row).to_string(),
@@ -740,7 +789,7 @@ pub fn status_all(
             "projects": v,
             "notes": notes,
         }))
-        .map_err(|_| Error::Config("cannot serialize the status".into()))?;
+        .map_err(|_| bug("status --all: serialize"))?;
         line(out, s)?;
     } else {
         if docs.is_empty() {
@@ -762,18 +811,6 @@ pub fn status_all(
         }
     }
     first.or_else(|| inv.incomplete()).map_or(Ok(()), Err)
-}
-
-/// `e` with a `Next:` that runs as typed (its step split into `Do:` and a command, never
-/// the error's prose), run against project `name` from any directory.
-fn in_project(e: Error, name: &str) -> Error {
-    let step = e.step("opv status", "opv status --help");
-    let e = match step.action {
-        Some(a) if e.action().is_none() => e.with_do(a),
-        _ => e,
-    };
-    let next = project_step(&step.next, name);
-    e.with_next(next)
 }
 
 /// `next` run against project `name` from any directory, when it is an opv command.

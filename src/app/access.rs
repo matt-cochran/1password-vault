@@ -1,6 +1,8 @@
 //! `opv access [<env>] [--target <name>] [--project <p>] [--json]` (FR-52, FR-59): who
 //! needs which vault, per boundary and per target, and who can read it today. Read-only: it
-//! makes one `op vault user list <vault>` call per needed vault, compares the readers with
+//! makes one `op vault user list <vault>` call per needed vault (and, for a list it cannot
+//! read, one `op vault get` probe, both diagnosed in the environment's own account, #157),
+//! compares the readers with
 //! the configuration's needs, and prints the owner's exact commands for the missing grants
 //! (1Password fixes a service account's vaults at creation, so one command creates one
 //! principal with all its vaults). It never runs a create or grant command.
@@ -13,8 +15,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use super::write_err;
+use crate::adapters::onepassword_diagnose::{Facts, locate_owner};
+use crate::adapters::onepassword_diagnose_items::diagnose_item_call;
 use crate::adapters::onepassword_init;
-use crate::domain::access::{AccessFinding, Reader, analyse, findings};
+use crate::cause::render::next_text;
+use crate::cause::{
+    AccountId, Cause, DiagnoseContext, DottedPath, EnvName, ExitClass, NameKind, NamedBy, Observed,
+    ResourceKind, ResourceName, ResourceRef, Scope, System, TargetName, Upstream,
+};
+use crate::domain::access::{AccessFinding, Reader, VAULT_NOT_IN_ACCOUNT, analyse, findings};
 use crate::domain::access_plan::{
     AccessReport, CiNeeds, Grant, GrantCheck, GrantState, ObservedVault, Permission, Principal,
     TargetNeeds, compare, create_command, required,
@@ -27,10 +36,58 @@ use crate::runner::CommandRunner;
 type Observations = BTreeMap<String, Option<serde_json::Value>>;
 /// The service-account readers per vault id; `None` when the vault is not visible.
 type Readers = BTreeMap<String, Option<Vec<Reader>>>;
+/// The diagnosed cause per vault whose user list could not be read (#153, #157).
+type Unreadable = BTreeMap<String, VaultCause>;
+
+/// Why one needed vault's user list could not be read, as the 1Password diagnosis
+/// classified the failed calls in the environment's own account (#157, design §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultCause {
+    pub vault: String,
+    /// `op vault get` could not find the vault in this account: no owner command for an
+    /// identity that needs it could succeed here (#153).
+    pub elsewhere: bool,
+    pub cause: Cause,
+    pub upstream: Option<Upstream>,
+}
+
+impl VaultCause {
+    /// The cause as the command's error, with op's reply as its evidence.
+    pub fn error(&self) -> Error {
+        match &self.upstream {
+            Some(up) => Error::with_evidence(self.cause.clone(), up.clone()),
+            None => self.cause.clone().into(),
+        }
+    }
+
+    /// The cause as an access finding: its message and Do, and its typed Next.
+    fn finding(&self, environment: &str) -> AccessFinding {
+        let inv = crate::error::invocation();
+        let mut message = self.cause.message();
+        if let Some(action) = self.cause.do_text(&inv) {
+            message = format!("{message}; {action}");
+        }
+        AccessFinding {
+            code: if self.elsewhere {
+                VAULT_NOT_IN_ACCOUNT
+            } else {
+                self.cause.code()
+            },
+            environment: environment.to_string(),
+            message,
+            next: next_text(&self.cause.step(&inv).1, &inv),
+        }
+    }
+}
 
 /// What one environment needs: one entry per target and one CI reader (FR-59).
 struct Needs<'a> {
     name: &'a str,
+    /// The environment's configured account, which the checks run in (#157); `None`: the
+    /// run's (`OP_ACCOUNT`, the `.opv` pointer, else op's default).
+    account_id: Option<String>,
+    /// The configuration field that names each needed vault, for a diagnosis's Do.
+    fields: BTreeMap<&'a str, DottedPath>,
     targets: Vec<TargetNeeds<'a>>,
     ci: Vec<CiNeeds<'a>>,
 }
@@ -74,39 +131,39 @@ pub fn run(
             .iter()
             .flat_map(|(_, env)| env.targets.keys().map(String::as_str))
             .collect();
-        return Err(Error::Config(
-            format!(
-                "no target {t:?} in the selected environments (targets: {})",
-                known.join(", ")
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::Usage)
-        .with_next("opv access"));
+        return Err(target_not_declared(t, &known));
     }
     if let Some(t) = target {
         ordered.retain(|(_, env)| env.targets.contains_key(t));
     }
     let needs = plan_needs(fleet, &ordered, target)?;
-    let (observations, readers) = observe(r, &needs)?;
-    let missing = missing_vaults(r, &readers);
+    // #157: each environment's vaults are checked in its own 1Password account, and a
+    // missing session there is the cause, not every vault being outside the account.
+    let mut sessions: BTreeSet<Option<String>> = BTreeSet::new();
     let mut envs = Vec::with_capacity(needs.len());
     for need in &needs {
-        envs.push(build(need, &project, &observations, &readers, &missing));
+        let er = crate::app::signin::EnvRunner::with_account(r, need.account_id.clone());
+        if sessions.insert(need.account_id.clone()) {
+            crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
+        }
+        let (observations, readers, unreadable) = observe(&er, need)?;
+        envs.push(build(need, &project, &observations, &readers, &unreadable));
     }
     report(out, &envs, json)
 }
 
 /// One principal's identity (0.9.0, `opv access --create`): its service-account name, every
 /// grant it needs (1Password fixes a service account's vaults at creation), whether such an
-/// account already reads them all, and the vaults the selected account cannot find (then
-/// no account can be created here).
+/// account already reads them all, the account the vaults were checked in (the create runs
+/// there too), and the needed vaults that account cannot find (then no account can be
+/// created here), each with its diagnosed cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub service_account: String,
     pub grants: Vec<Grant>,
     pub already_present: bool,
-    pub not_in_account: Vec<String>,
+    pub account: Option<String>,
+    pub not_in_account: Vec<VaultCause>,
 }
 
 /// The identity of `target`'s deploy principal in `env`, or of `env`'s CI reader when
@@ -123,11 +180,8 @@ pub fn identity(
     if let Some(t) = target
         && !environment.targets.contains_key(t)
     {
-        return Err(
-            Error::Config(format!("environment {env} has no target {t:?}").into())
-                .with_code(crate::error::Code::Usage)
-                .with_next(format!("opv access {env}")),
-        );
+        let known: Vec<&str> = environment.targets.keys().map(String::as_str).collect();
+        return Err(target_not_declared(t, &known));
     }
     let name = fleet
         .environments
@@ -149,14 +203,23 @@ pub fn identity(
     };
     let grants: Vec<Grant> = all.into_iter().filter(|g| g.principal == wanted).collect();
     let Some(first) = grants.first() else {
-        return Err(Error::Config(
-            format!("{env} needs no vault for this identity; there is nothing to create").into(),
-        )
-        .with_next(format!("opv access {env}")));
+        // 07.34: the identity reads no vault, so there is nothing to create.
+        let what = match target {
+            Some(t) => Scope::NoTargetDelivers {
+                target: TargetName::new(t),
+            },
+            None => Scope::NoProductHasKeys,
+        };
+        return Err(Cause::NothingInScope {
+            env: EnvName::new(env),
+            what,
+        }
+        .into());
     };
     let service_account = first.service_account.clone();
-    let (_, readers) = observe(r, &needs)?;
-    let missing = missing_vaults(r, &readers);
+    let er = crate::app::signin::EnvRunner::with_account(r, need.account_id.clone());
+    crate::adapters::onepassword::require_session(&er, &Host::detect, "opv access")?;
+    let (_, readers, unreadable) = observe(&er, need)?;
     let observed: Vec<ObservedVault> = grants
         .iter()
         .map(|g| ObservedVault {
@@ -166,17 +229,33 @@ pub fn identity(
         .collect();
     let report = compare(&grants, &observed);
     let already_present = report.checks.iter().all(|c| c.state == GrantState::Present);
-    let not_in_account: Vec<String> = grants
-        .iter()
-        .filter(|g| missing.contains(&g.vault_id))
-        .map(|g| g.vault_id.clone())
-        .collect();
+    let mut not_in_account: Vec<VaultCause> = Vec::new();
+    for g in &grants {
+        if let Some(v) = unreadable.get(&g.vault_id).filter(|v| v.elsewhere)
+            && !not_in_account.contains(v)
+        {
+            not_in_account.push(v.clone());
+        }
+    }
     Ok(Identity {
         service_account,
         grants,
         already_present,
+        account: need.account_id.clone(),
         not_in_account,
     })
+}
+
+/// 07.34: a `--target` no selected environment declares; a unique close name is offered.
+fn target_not_declared(given: &str, known: &[&str]) -> Error {
+    let close = super::suggest::close(given, known.iter().copied());
+    Cause::NotDeclared {
+        kind: NameKind::Target,
+        given: given.to_string(),
+        candidates: known.iter().map(|k| (*k).to_string()).collect(),
+        closest: crate::cause::Closest::unique(&close),
+    }
+    .into()
 }
 
 /// Build each environment's needs from the configuration (FR-59): a target reads exactly
@@ -192,7 +271,16 @@ fn plan_needs<'a>(
     for (name, env) in ordered {
         let env_name = name.as_str();
         let mut targets = Vec::new();
+        let mut fields: BTreeMap<&str, DottedPath> = BTreeMap::new();
+        for (boundary, b) in &env.boundaries {
+            fields
+                .entry(b.vault_id.as_str())
+                .or_insert_with(|| field(&[env_name, "boundaries", boundary, "vault_id"]));
+        }
         for (target_name, spec) in &env.targets {
+            fields
+                .entry(spec.state_vault_id.as_str())
+                .or_insert_with(|| field(&[env_name, "targets", target_name, "state_vault_id"]));
             if target.is_some_and(|only| only != target_name) {
                 continue;
             }
@@ -231,6 +319,8 @@ fn plan_needs<'a>(
         };
         needs.push(Needs {
             name: env_name,
+            account_id: env.account.clone(),
+            fields,
             targets,
             ci,
         });
@@ -238,58 +328,147 @@ fn plan_needs<'a>(
     Ok(needs)
 }
 
-/// Observe each distinct needed vault once with `op vault user list <vault> --format json`
-/// (FR-59). A vault whose user list cannot be read has no readers (not visible).
-fn observe(r: &dyn CommandRunner, needs: &[Needs<'_>]) -> Result<(Observations, Readers), Error> {
+/// `environments.<path…>`, the configuration field a diagnosis names.
+fn field(path: &[&str]) -> DottedPath {
+    DottedPath(
+        std::iter::once("environments")
+            .chain(path.iter().copied())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Observe each distinct needed vault of one environment once with `op vault user list
+/// <vault> --format json` (FR-59). A vault whose user list cannot be read has no readers
+/// (not visible); its failure is then diagnosed (#153, #157) after one `op vault get` probe
+/// that tells "exists here, but its list needs the Manage permission" from "not in this
+/// account". A failure of the session itself stops the command: no vault was classified.
+fn observe(
+    r: &dyn CommandRunner,
+    need: &Needs<'_>,
+) -> Result<(Observations, Readers, Unreadable), Error> {
     let mut wanted: BTreeSet<&str> = BTreeSet::new();
-    for need in needs {
-        for target in &need.targets {
-            wanted.extend(target.boundary_vaults.iter().copied());
-            wanted.insert(target.state_vault);
-        }
-        for ci in &need.ci {
-            wanted.extend(ci.boundary_vaults.iter().copied());
-        }
+    for target in &need.targets {
+        wanted.extend(target.boundary_vaults.iter().copied());
+        wanted.insert(target.state_vault);
+    }
+    for ci in &need.ci {
+        wanted.extend(ci.boundary_vaults.iter().copied());
     }
     let mut observations = BTreeMap::new();
     let mut readers = BTreeMap::new();
+    let mut unreadable = BTreeMap::new();
     for vault in wanted {
         let users = onepassword_init::vault_users(r, vault, &Host::detect)?;
-        let access = analyse("", vault, false, users.as_ref());
+        let access = analyse(need.name, vault, false, users.as_ref());
+        if !access.visible
+            && let Some(diagnosed) = diagnose_vault(r, need, vault)
+        {
+            if is_session(&diagnosed.cause) {
+                return Err(diagnosed.error());
+            }
+            unreadable.insert(vault.to_string(), diagnosed);
+        }
         readers.insert(
             vault.to_string(),
             access.visible.then_some(access.service_accounts),
         );
         observations.insert(vault.to_string(), users);
     }
-    Ok((observations, readers))
+    Ok((observations, readers, unreadable))
 }
 
-/// #153: of the vaults whose user list could not be read, the ones `op vault get` cannot
-/// find either: not in the selected account, or not open to this person at all. A vault
-/// that exists but whose access list needs a manager stays `not visible`. One exit-status
-/// probe per such vault; its output names the vault and is dropped unread.
-fn missing_vaults(r: &dyn CommandRunner, readers: &Readers) -> BTreeSet<String> {
-    readers
-        .iter()
-        .filter(|(_, seen)| seen.is_none())
-        .filter(|(vault, _)| {
-            r.probe(
-                &crate::runner::Call::new(
-                    "op",
-                    &["vault", "get", vault.as_str(), "--format", "json"],
-                ),
-                crate::runner::PROBE_TIMEOUT,
-            )
-            .is_ok_and(|o| {
-                if o.status != 0 {
-                    let _ = crate::runner::take_failure_excerpt();
-                }
-                o.status != 0
-            })
+/// The failed call the runner observed last, with its scrubbed reply and whether that was
+/// truncated; taken once.
+fn failed_call() -> Option<(Observed, (Vec<String>, bool))> {
+    let seen = crate::runner::take_observed()?;
+    let said = crate::scrub::Excerpt::parts(crate::runner::take_failure_excerpt());
+    Some((seen, said))
+}
+
+/// #153, #157: diagnose an unreadable vault in the environment's own account. The user
+/// list's failure is taken first, then `op vault get` probes the vault: when it finds it,
+/// the list's refusal is a missing Manage permission; when it does not, op's reply says
+/// whether the vault is in another account (or nowhere). `None` when the runner observed
+/// neither call (nothing to diagnose: the vault stays unclassified, never guessed).
+fn diagnose_vault(r: &dyn CommandRunner, need: &Needs<'_>, vault: &str) -> Option<VaultCause> {
+    let list = failed_call();
+    let found = r
+        .probe(
+            &crate::runner::Call::new("op", &["vault", "get", vault, "--format", "json"]),
+            crate::runner::PROBE_TIMEOUT,
+        )
+        .is_ok_and(|o| o.status == 0);
+    let get = if found { None } else { failed_call() };
+    let account = checked_account(need.account_id.as_deref());
+    let ctx = DiagnoseContext {
+        env: Some(EnvName::new(need.name)),
+        resource: Some(ResourceRef {
+            kind: ResourceKind::Vault,
+            name: ResourceName::new(vault),
+            scope: account.as_ref().map(ToString::to_string),
+        }),
+        named_by: need
+            .fields
+            .get(vault)
+            .map(|path| NamedBy::ConfigField { path: path.clone() }),
+        account,
+        ..DiagnoseContext::default()
+    };
+    let facts = Facts {
+        vault_readable: found,
+        ..Facts::from_process_env()
+    };
+    let (seen, (said, truncated)) = get.or(list)?;
+    let exit = seen.exit();
+    // #153a: a vault in another account names that account.
+    let cause = locate_owner(r, diagnose_item_call(seen, &said.join("\n"), &ctx, &facts));
+    let elsewhere =
+        !found && matches!(cause, Cause::InOtherAccount { .. } | Cause::NotFound { .. });
+    let upstream = (!said.is_empty()).then(|| op_reply(exit, said, truncated));
+    Some(VaultCause {
+        vault: vault.to_string(),
+        elsewhere,
+        cause,
+        upstream,
+    })
+}
+
+/// A failure of the session or account itself: no vault of this environment can be
+/// classified, so it is the command's error (#157), never a per-vault finding.
+fn is_session(cause: &Cause) -> bool {
+    matches!(
+        cause,
+        Cause::NotSignedIn { .. }
+            | Cause::AccountNotOnMachine { .. }
+            | Cause::CredentialRejected { .. }
+    )
+}
+
+/// op's scrubbed reply, attributed and marked untrusted (design §7.3).
+fn op_reply(exit: ExitClass, said: Vec<String>, truncated: bool) -> Upstream {
+    Upstream {
+        source: System::OnePassword,
+        tool: "1Password CLI".to_string(),
+        version: None,
+        exit,
+        said,
+        removed_advice: false,
+        truncated,
+        untrusted: true,
+    }
+}
+
+/// The account a check runs in, as an ID when one is selected: the environment's, else
+/// `OP_ACCOUNT`, else the checkout's `.opv` pointer; `None`: op's default account.
+fn checked_account(configured: Option<&str>) -> Option<AccountId> {
+    configured
+        .map(str::to_string)
+        .or_else(crate::config_store::account_env)
+        .or_else(|| {
+            crate::config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
         })
-        .map(|(vault, _)| vault.clone())
-        .collect()
+        .map(AccountId::new)
 }
 
 /// Compare one environment's needs with what was observed, and collect the owner commands
@@ -299,7 +478,7 @@ fn build(
     project: &str,
     observations: &Observations,
     readers: &Readers,
-    missing: &BTreeSet<String>,
+    unreadable: &Unreadable,
 ) -> EnvReport {
     let grants = required(project, &need.targets, &need.ci);
     let boundary: BTreeSet<&str> = need
@@ -321,30 +500,25 @@ fn build(
             readers: readers.get(*vault).and_then(|r| r.as_deref()),
         })
         .collect();
+    let elsewhere = |vault: &str| unreadable.get(vault).is_some_and(|v| v.elsewhere);
     let mut report = compare(&grants, &observed);
     for check in &mut report.checks {
-        if check.state == GrantState::NotVisible && missing.contains(&check.grant.vault_id) {
+        if check.state == GrantState::NotVisible && elsewhere(&check.grant.vault_id) {
             check.state = GrantState::NotInAccount;
         }
     }
     let commands = owner_commands(&report.checks);
     let mut env_findings = Vec::new();
-    for vault in needed.iter().filter(|v| missing.contains(**v)) {
-        env_findings.push(crate::domain::access::AccessFinding {
-            code: crate::domain::access::VAULT_NOT_IN_ACCOUNT,
-            environment: need.name.to_string(),
-            message: format!(
-                "vault {vault} is not in the selected 1Password account, or you cannot open \
-                 it; no service-account command is printed for an identity that needs it, \
-                 because it could not succeed here. Find the account that holds it, then fix \
-                 the configured vault_id or select that account"
-            ),
-            next: Some(format!("opv vault locate {vault}")),
-        });
-    }
-    for vault in needed.iter().filter(|v| !missing.contains(**v)) {
+    for vault in &needed {
+        // #157: a vault the diagnosis classified carries that cause; no owner command is
+        // printed for an identity needing a vault outside this account (#153).
+        if let Some(diagnosed) = unreadable.get(*vault) {
+            env_findings.push(diagnosed.finding(need.name));
+            continue;
+        }
+        // 07.10: the environment is the environment, and the vault is named on its own.
         let access = analyse(
-            vault,
+            need.name,
             vault,
             false,
             observations.get(*vault).and_then(|o| o.as_ref()),
@@ -458,7 +632,7 @@ fn report(out: &mut dyn Write, envs: &[EnvReport], json: bool) -> Result<(), Err
         for finding in &env.findings {
             writeln!(out, "  {}: {}", finding.code, finding.message).map_err(write_err)?;
             if let Some(next) = &finding.next {
-                writeln!(out, "    {next}").map_err(write_err)?;
+                writeln!(out, "    next: {next}").map_err(write_err)?;
             }
         }
         writeln!(

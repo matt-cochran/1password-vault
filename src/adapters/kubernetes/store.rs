@@ -34,6 +34,7 @@ use crate::domain::{SecretValue, Stamp};
 
 /// The annotation keys of a stamp, in [`LIST_PATH`]'s order.
 const STAMP_KEYS: [&str; 4] = [STAMP_VERSION, STAMP_WRITTEN, STAMP_ENV, STAMP_PLAN];
+use crate::cause::{Cause, Guard};
 use crate::domain::plan::StoreEntry;
 use crate::error::Error;
 use crate::ports::{PinnedStore, Store};
@@ -111,7 +112,6 @@ impl<'a> KubeSecrets<'a> {
             what,
             &["get", "secret", "-l", selector, "-o", LIST_PATH],
             None,
-            "auth can-i list secrets",
         )?;
         Ok(text(&out, what)?
             .lines()
@@ -145,19 +145,19 @@ impl<'a> KubeSecrets<'a> {
                 VALUE_PATH,
             ],
             None,
-            &format!("get secret {name} -o name"),
         )?;
         let Some((env, b64)) = text(&out, &what)?.split_once('\t') else {
             return Ok(None);
         };
+        // Not a UTF-8 value under data.<VALUE_KEY>: it was changed outside opv.
         let unreadable = || {
-            Error::Target(
-                format!(
-                    "secret {name} does not hold a UTF-8 value under data.{VALUE_KEY} (it was \
-                 changed outside opv); nothing was changed\n  next: inspect it with `{}`",
-                    self.k.command(&format!("get secret {name} --show-labels"))
-                )
-                .into(),
+            super::unusable_reply(
+                &what,
+                None,
+                crate::cause::OutputProblem::InvalidValue {
+                    what: "Secret value",
+                },
+                crate::cause::During::Read,
             )
         };
         let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| unreadable())?);
@@ -266,7 +266,6 @@ pub(crate) fn referenced_names(k: &Kubectl<'_>) -> Result<BTreeSet<String>, Erro
         what,
         &["get", "replicasets", "-o", "json"],
         None,
-        "get replicasets",
     )?;
     strings(&super::parse_json(&out, what)?, &mut seen);
     Ok(seen)
@@ -368,8 +367,13 @@ impl PinnedStore for KubeSecrets<'_> {
     /// A lost write is reconciled by reading the new Secret back (NR-2); if that fails too, the
     /// next run writes another id and the unreferenced one is collected after a healthy rollout.
     fn write_one(&self, name: &str, value: &SecretValue, stamp: &Stamp) -> Result<String, Error> {
-        if let Some((rule, reason)) = refusal(name, value) {
-            return Err(Error::Policy(format!("{name}: {rule}: {reason}").into()));
+        // `sync` refuses every such value as a blocking row before any write (its pinned
+        // plan asks this store's `refusal`), so one that reaches here is opv's bug.
+        if refusal(name, value).is_some() {
+            return Err(crate::cause::Cause::Bug {
+                site: "kubernetes: a value the plan passed breaks a Secret rule",
+            }
+            .into());
         }
         if let Some((current, version)) = self.read(name)?
             && same(&current, value)
@@ -401,26 +405,29 @@ impl PinnedStore for KubeSecrets<'_> {
             Outcome::Done(out) => {
                 let echoed = text(&out, &what)?.trim();
                 if echoed != format!("secret/{secret}") {
-                    return Err(Error::Target(
-                        format!(
-                            "{what} did not confirm the secret it wrote; it may or may not \
-                         exist and nothing else was changed\n  next: check with `{}`, then \
-                         re-run the same command",
-                            self.k.command(&format!("get secret {secret} -o name"))
-                        )
-                        .into(),
-                    ));
+                    // The apply answered without confirming the Secret it wrote.
+                    let subject = crate::cause::ResourceRef {
+                        kind: crate::cause::ResourceKind::Secret,
+                        name: crate::cause::ResourceName::new(secret.clone()),
+                        scope: Some(t.namespace.clone()),
+                    };
+                    return Err(super::unusable(&what, |seen| Cause::WriteOutcomeUnknown {
+                        system: crate::cause::System::Kubernetes,
+                        subject,
+                        seen,
+                    }));
                 }
                 Ok(version)
             }
             // Reconcile by reading back (NR-2): the Secret may have been written. The
             // read-back explains the failure, so the apply's excerpt stays (NR-31).
-            other => match crate::runner::diagnosing(|| self.held(&secret)) {
-                Ok(Some((env, held))) if env == t.env && same(&held, value) => Ok(version),
-                _ => Err(self
-                    .k
-                    .fail(Effect::Write, &what, other, "auth can-i create secrets")),
-            },
+            _ => {
+                let failed = self.k.failed(Effect::Write);
+                match crate::runner::diagnosing(|| self.held(&secret)) {
+                    Ok(Some((env, held))) if env == t.env && same(&held, value) => Ok(version),
+                    _ => Err(self.k.explain(failed, Effect::Write, t.namespace_ref())),
+                }
+            }
         }
     }
 
@@ -448,13 +455,12 @@ impl KubeSecrets<'_> {
         let t = self.t();
         let store = store_name(name);
         if !valid_label_value(&store) {
-            return Err(Error::Config(
-                format!(
-                    "{name}: kubernetes-name-invalid: not a valid Kubernetes name, so opv never \
-                 wrote it; nothing was deleted\n  next: run opv explain {name}"
-                )
-                .into(),
-            ));
+            // Not a valid Kubernetes name, so opv never wrote it (06.28: no `opv explain` of
+            // an env name, which it does not take).
+            return Err(Cause::Guard {
+                guard: Guard::NotManagedByOpv { name: name.into() },
+            }
+            .into());
         }
         let kept = keep.map(|v| secret_name(&store, v));
         let selector = format!("{LABEL_MANAGED}={},{LABEL_KEY}={store}", t.env);
@@ -482,12 +488,15 @@ impl KubeSecrets<'_> {
         args.push("--ignore-not-found");
         match self.k.call(Effect::Write, &what, &args, None, &[])? {
             Outcome::Done(_) => Ok(kept),
-            other => match crate::runner::diagnosing(|| self.names(&selector)) {
-                Ok(left) if !left.iter().any(|(n, _)| doomed.contains(&n.as_str())) => Ok(kept),
-                _ => Err(self
-                    .k
-                    .fail(Effect::Write, &what, other, "auth can-i delete secrets")),
-            },
+            _ => {
+                let failed = self.k.failed(Effect::Write);
+                match crate::runner::diagnosing(|| self.names(&selector)) {
+                    Ok(left) if !left.iter().any(|(n, _)| doomed.contains(&n.as_str())) => Ok(kept),
+                    _ => Err(self
+                        .k
+                        .explain(failed, Effect::Write, self.k.target.namespace_ref())),
+                }
+            }
         }
     }
 }
@@ -707,6 +716,14 @@ mod tests {
         );
     }
 
+    /// "May or may not exist" is an unknown outcome (exit 9), not a target refusal.
+    #[test]
+    fn an_unconfirmed_apply_is_outcome_unknown() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
+        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap_err();
+        assert_eq!(e.code_str(), "outcome_unknown", "{e:?}");
+    }
+
     #[test]
     fn write_sends_manifest_on_stdin_and_no_value_in_argv() {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
@@ -727,11 +744,11 @@ mod tests {
         r.push_with_stderr(ok(""), "");
         r.push_with_stderr(ok("context/kind-opv\n"), "");
         r.push_with_stderr(ok("v1.36"), "");
-        let _ = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp()));
+        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap_err();
         assert_eq!(
-            crate::runner::take_failure_excerpt().map(|x| x.lines),
+            e.cause().and_then(|(_, up)| up).map(|u| u.said.clone()),
             Some(vec![
-                r#"error: invalid object {"data":{"value":"__SECRET__"}}"#.to_string()
+                r#"error: invalid object {"data":{"value":"********"}}"#.to_string()
             ])
         );
     }
@@ -894,7 +911,11 @@ mod tests {
     fn read_of_undecodable_secret_never_names_its_content() {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok(&format!("dev\t{MARK}"))]);
         let e = with_store(&r, |s| s.read("FLEET__API__DB_URL")).unwrap_err();
-        assert!(matches!(e, Error::Target(m) if m.contains(DB_URL_SECRET) && !m.contains(MARK)));
+        let shown = crate::error::report(&e);
+        assert!(
+            shown.contains(DB_URL_SECRET) && !shown.contains(MARK),
+            "{shown}"
+        );
     }
 
     #[test]

@@ -194,7 +194,13 @@ fn status_complete_item_is_clean_and_value_free() {
 fn status_missing_key_is_a_finding_naming_the_key_with_guidance() {
     let r = FakeRunner::new([prod_item_without("DATABASE_URL"), fly_empty()]);
     let (res, out) = status_of(&r, false);
-    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+    assert!(
+        res.as_ref()
+            .err()
+            .and_then(crate::app::testutil::findings_of)
+            == Some(1),
+        "{res:?}"
+    );
     assert!(
         out.contains("guidance: Fly Postgres / connection string"),
         "{out}"
@@ -225,7 +231,13 @@ fn status_mode_rule_failure_names_the_product_and_key() {
     ];
     let r = FakeRunner::new([item(&fs), fly_empty()]);
     let (res, out) = out_of(|o| status::run(&simple(), "staging", &r, o));
-    assert!(matches!(res, Err(Error::Findings(1, _))), "{res:?}");
+    assert!(
+        res.as_ref()
+            .err()
+            .and_then(crate::app::testutil::findings_of)
+            == Some(1),
+        "{res:?}"
+    );
     assert!(
         out.lines().any(|l| l.starts_with("app ")
             && l.contains("STRIPE_SECRET_KEY")
@@ -414,7 +426,7 @@ fn sync_refusal_names_the_product_and_key() {
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
         e.to_string()
-            .ends_with("nothing staged: app/JWT_KEY (missing)"),
+            .ends_with("it needs 1 value: app/JWT_KEY (missing)"),
         "{e}"
     );
 }
@@ -507,7 +519,7 @@ fn sync_refusal_names_the_product_and_key_with_rule_and_reason() {
     let e = sync_of(&r, &Default::default()).0.unwrap_err();
     assert!(
         e.to_string().ends_with(
-            "nothing staged: app/DATABASE_URL (failed prefix (expected prefix postgres://))"
+            "it needs 1 value: app/DATABASE_URL (does not meet its rule prefix: expected prefix postgres://)"
         ),
         "{e}"
     );

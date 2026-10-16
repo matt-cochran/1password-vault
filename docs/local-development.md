@@ -84,6 +84,28 @@ Each Worker or service is its own product, run with its own `--product`. A key t
 
 What opv cannot do: stop the app (or another process of the same user) from logging or copying what it receives. This narrows what reaches the app; it is not a sandbox.
 
+## Remote development: `run --remote`
+
+When the app builds and runs on a remote machine, do not copy a `.env` there. Declare a reviewed profile for the product, and let opv carry the values over SSH into the remote app's RAM:
+
+```toml
+[products.journeeze.remotes.builder]
+host = "builder.example.internal"
+user = "dev"
+host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA…"   # ssh-keyscan -t ed25519 builder.example.internal, without the host name
+environments = ["dev"]
+opv = "/usr/local/bin/opv"                          # install the same opv release there
+workdir = "/home/dev/src/journeeze"
+command = ["cargo", "run", "-p", "jz-serve"]
+```
+
+```sh
+opv run dev --product journeeze --role serve --remote builder --preview
+opv run dev --product journeeze --role serve --remote builder
+```
+
+The remote host needs the same opv release and, for `file` keys, a user-owned `$XDG_RUNTIME_DIR` on tmpfs (systemd-logind sets one for SSH sessions). opv connects with only the pinned host key, no SSH configuration of yours and no agent forwarding; the remote app gets the declared keys and files, never a 1Password session. Closing the terminal, Ctrl-C or a dropped connection stops the remote app and removes its files. The remote app does not read your terminal's input. What this cannot protect against, such as untrusted code in the remote source tree, is in the [design](design/remote-delivery.md#what-opv-enforces-and-what-it-cannot).
+
 ## Several products or checkouts
 
 - `OPV_PRODUCT=api` sets the default `--product` for `check`, `run`, `open`, `explain`, `status`, `plan` and `doctor --env` (never `sync`); stderr says `product api (from OPV_PRODUCT)`. A single-product repository in a fleet can export it once, for example in `.envrc`.

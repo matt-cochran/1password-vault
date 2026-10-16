@@ -1,36 +1,43 @@
 //! Owner-opted-in literal settings import. Never executes or expands shell code.
+use crate::cause::{Cause, FieldRule, InputKind, Location};
 use crate::domain::SecretValue;
 use crate::error::Error;
 use std::collections::BTreeMap;
+use std::path::Path;
 use zeroize::Zeroizing;
 
-/// The refusal with where it happened: the 1-based line and, once read, the key's name,
-/// and what to change. Names and line numbers only, never a value (SR-1).
-fn refused_at(input: &str, rest: &str, key: Option<&str>, why: &str) -> Error {
+/// The refusal of `path` with where it happened: the 1-based line and column and, once
+/// read, the key's name, and the rule the line breaks (05.41: the file is named). Names and
+/// positions only, never a value (SR-1).
+fn refused_at(path: &Path, input: &str, rest: &str, key: Option<&str>, rule: FieldRule) -> Error {
     let offset = input.len() - rest.len();
-    let line = input[..offset].matches('\n').count() + 1;
-    let place = match key {
-        Some(k) => format!("line {line} ({k})"),
-        None => format!("line {line}"),
-    };
-    Error::Config(
-        format!(
-            "This settings file is not a supported literal .env file: {place}: {why}. Nothing \
-             was imported. opv never executes shell commands or expands variables; a value you \
-             cannot write literally can be typed in 1Password instead."
-        )
-        .into(),
-    )
+    let before = &input[..offset];
+    let line = before.matches('\n').count() + 1;
+    let col = before.len() - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+    Cause::InputInvalid {
+        path: path.to_path_buf(),
+        kind: InputKind::Dotenv,
+        at: Some(Location {
+            line: u32::try_from(line).unwrap_or(u32::MAX),
+            col: u32::try_from(col).unwrap_or(u32::MAX),
+        }),
+        field: key.map_or_else(|| "this line".to_string(), str::to_string),
+        rule,
+    }
+    .into()
 }
 
 /// What to do about an unquoted value opv will not take as a literal.
-const QUOTE_IT: &str = "the value has a space or one of ' $ ` \\ ( ) < > ; & | \" outside quotes; \
-     put it in single quotes (KEY='value') so it is taken literally";
+const QUOTE_IT: &str = "in single quotes (KEY='value') to be taken literally: it has a space or \
+     one of ' $ ` \\ ( ) < > ; & | \" outside quotes";
 
-/// The literal assignments of a dotenv file. A line opv cannot take literally refuses the
-/// whole file, naming the line and key (never the value) and what to change.
-pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
-    let at = |rest: &str, key: Option<&str>, why: &str| refused_at(input, rest, key, why);
+/// The literal assignments of the dotenv file `path` holding `input`. A line opv cannot take
+/// literally refuses the whole file, naming the file, the line and key (never the value)
+/// and what to change. opv never executes shell commands or expands variables.
+pub fn parse_at(path: &Path, input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
+    let at = |rest: &str, key: Option<&str>, expected: &'static str| {
+        refused_at(path, input, rest, key, FieldRule::Type { expected })
+    };
     let mut rest = input;
     let mut values = BTreeMap::new();
     while !rest.is_empty() {
@@ -46,7 +53,7 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
             rest = tail.trim_start_matches([' ', '\t']);
         }
         let Some((key, tail)) = rest.split_once('=') else {
-            return Err(at(rest, None, "a line that is not KEY=value"));
+            return Err(at(rest, None, "KEY=value"));
         };
         let key = key.trim();
         if key.is_empty()
@@ -55,9 +62,9 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
             || key.chars().next().is_some_and(|c| c.is_ascii_digit())
         {
             let what = if key.contains('\n') {
-                "a line that is not KEY=value"
+                "KEY=value"
             } else {
-                "not a variable name (letters, digits and _, not starting with a digit)"
+                "KEY=value with a variable name of letters, digits and _, not starting with a digit"
             };
             return Err(at(rest, None, what));
         }
@@ -77,13 +84,17 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
                     return Err(at(
                         line_start,
                         Some(key),
-                        "$ or ` inside double quotes would expand in a shell; use single quotes \
-                         (KEY='value') for a literal value, or escape it as \\$",
+                        "a literal value: $ or ` inside double quotes would expand in a shell, \
+                         so use single quotes (KEY='value') or escape it as \\$",
                     ));
                 }
                 if quote == '"' && c == '\\' {
                     let Some(next) = rest.chars().next() else {
-                        return Err(at(line_start, Some(key), "the closing quote is missing"));
+                        return Err(at(
+                            line_start,
+                            Some(key),
+                            "closed by the quote it opens with",
+                        ));
                     };
                     if matches!(next, '\\' | '"' | '$' | '`' | '\n') {
                         rest = &rest[next.len_utf8()..];
@@ -98,7 +109,11 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
                 }
             }
             if !closed {
-                return Err(at(line_start, Some(key), "the closing quote is missing"));
+                return Err(at(
+                    line_start,
+                    Some(key),
+                    "closed by the quote it opens with",
+                ));
             }
             rest = rest.trim_start_matches([' ', '\t', '\r']);
             if rest.starts_with(';') {
@@ -113,7 +128,7 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
                 return Err(at(
                     line_start,
                     Some(key),
-                    "something follows the closing quote; only a # comment may",
+                    "followed by nothing but a # comment after its closing quote",
                 ));
             }
         } else {
@@ -140,10 +155,12 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
             )
             .is_some()
         {
-            return Err(at(
+            return Err(refused_at(
+                path,
+                input,
                 line_start,
                 Some(key),
-                "the key is set twice; keep one line",
+                FieldRule::DuplicateKey,
             ));
         }
     }
@@ -153,6 +170,10 @@ pub fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(input: &str) -> Result<BTreeMap<String, SecretValue>, Error> {
+        parse_at(Path::new("app.env"), input)
+    }
     #[test]
     fn preserves_literal_multiline_encryption_and_special_characters() {
         let text = "export TF_ENCRYPTION='key_provider \"pbkdf2\" \"state\" {\n  passphrase = \"$literal;value\"\n}'\nAWS_ACCESS_KEY_ID=synthetic-id\n";
@@ -177,13 +198,22 @@ mod tests {
         }
     }
     #[test]
-    fn a_refusal_names_the_line_and_key() {
+    fn a_refusal_names_the_line() {
         let error =
             parse("A=1\nDATABASE_URL=postgres://h/db?a=1&b=synthetic-private\n").unwrap_err();
-        assert!(
-            error.to_string().contains("line 2 (DATABASE_URL)"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("line 2,"), "{error}");
+    }
+    #[test]
+    fn a_refusal_names_the_key() {
+        let error =
+            parse("A=1\nDATABASE_URL=postgres://h/db?a=1&b=synthetic-private\n").unwrap_err();
+        assert!(error.to_string().contains("DATABASE_URL must"), "{error}");
+    }
+    // 05.41: the refusal names the file it is about.
+    #[test]
+    fn a_refusal_names_the_file() {
+        let error = parse("URL=a&b\n").unwrap_err();
+        assert!(error.to_string().contains("app.env"), "{error}");
     }
     #[test]
     fn a_refusal_never_holds_the_value() {
@@ -204,7 +234,12 @@ mod tests {
     #[test]
     fn a_repeated_key_is_named() {
         let error = parse("A=1\nA=2\n").unwrap_err();
-        assert!(error.to_string().contains("line 2 (A)"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("line 2, column 1: A is set more than once"),
+            "{error}"
+        );
     }
     #[test]
     fn single_quotes_keep_an_ampersand_literally() {

@@ -82,46 +82,79 @@ fn install_force_replaces_an_edited_copy() {
     assert!(!fs::read_to_string(&path).unwrap().contains("hand edit"));
 }
 
-#[test]
-fn refresh_rewrites_an_unedited_older_copy() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Target::Claude.path(dir.path());
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, skill::render("0.1.0")).unwrap();
+/// A copy as `status` reports it, without touching the disk.
+fn copy(scope: &str, root: &str, target: Target, edited: bool, current: bool) -> skill::Copy {
+    let root = std::path::PathBuf::from(root);
+    skill::Copy {
+        scope: scope.into(),
+        path: target.path(&root),
+        root,
+        target,
+        version: Some("0.1.0".into()),
+        edited,
+        current,
+    }
+}
 
-    let updated = skill::refresh_user_copies(dir.path(), V);
-    assert_eq!(updated, vec![path]);
+/// 02.11: an outdated project copy is updated with `--project <root>`, never `--user`.
+#[test]
+fn update_commands_name_the_project_root_for_an_outdated_project_copy() {
+    let copies = [copy("project", "/work/app", Target::Claude, false, false)];
+    assert_eq!(
+        skill::update_commands(&copies),
+        vec!["opv skill install --project /work/app --target claude"]
+    );
 }
 
 #[test]
-fn refresh_leaves_an_edited_copy_untouched() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Target::Claude.path(dir.path());
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, format!("{}hand edit\n", skill::render("0.1.0"))).unwrap();
-
-    let updated = skill::refresh_user_copies(dir.path(), V);
-    assert!(updated.is_empty(), "{updated:?}");
+fn update_commands_name_user_for_an_outdated_home_copy() {
+    let copies = [copy("user", "/home/x", Target::Codex, false, false)];
+    assert_eq!(
+        skill::update_commands(&copies),
+        vec!["opv skill install --user --target codex"]
+    );
 }
 
 #[test]
-fn refresh_does_not_create_a_missing_copy() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Target::Codex.path(dir.path());
-
-    skill::refresh_user_copies(dir.path(), V);
-    assert!(!path.exists(), "{} was created", path.display());
+fn update_commands_install_every_target_when_both_copies_of_a_root_are_outdated() {
+    let copies = [
+        copy("user", "/home/x", Target::Claude, false, false),
+        copy("user", "/home/x", Target::Codex, false, false),
+    ];
+    assert_eq!(
+        skill::update_commands(&copies),
+        vec!["opv skill install --user"]
+    );
 }
 
 #[test]
-fn refresh_leaves_a_current_copy_untouched() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = Target::Claude.path(dir.path());
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, skill::render(V)).unwrap();
+fn update_commands_leave_an_edited_copy_alone() {
+    let copies = [copy("user", "/home/x", Target::Claude, true, false)];
+    assert!(skill::update_commands(&copies).is_empty());
+}
 
-    let updated = skill::refresh_user_copies(dir.path(), V);
-    assert!(updated.is_empty(), "{updated:?}");
+#[test]
+fn update_commands_are_empty_when_every_copy_is_current() {
+    let copies = [copy("user", "/home/x", Target::Claude, false, true)];
+    assert!(skill::update_commands(&copies).is_empty());
+}
+
+#[test]
+fn status_document_names_the_update_as_its_next_step() {
+    let copies = [copy("project", "/work/app", Target::Claude, false, false)];
+    let doc: serde_json::Value =
+        serde_json::from_str(&skill::status_document(&copies).unwrap()).unwrap();
+    assert_eq!(
+        doc["next"],
+        "opv skill install --project /work/app --target claude"
+    );
+}
+
+#[test]
+fn status_document_names_install_when_nothing_is_installed() {
+    let doc: serde_json::Value =
+        serde_json::from_str(&skill::status_document(&[]).unwrap()).unwrap();
+    assert_eq!(doc["next"], "opv skill install");
 }
 
 #[test]

@@ -89,32 +89,17 @@ pub fn run_as(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    // A suggested `opv open` keeps this run's own output flag (M6).
-    let flag = if json {
-        " --json"
-    } else if opener.is_none() {
-        " --print"
-    } else {
-        ""
-    };
-    let with_flag = |e: Error| match e.next_step().filter(|n| n.starts_with("opv open ")) {
-        Some(n) => {
-            let next = format!("{n}{flag}");
-            e.with_next(next)
-        }
-        None => e,
-    };
     // D10/FR-34: a bare `KEY` uses the one product with keys desired in the environment,
     // the same rule as `check` and `run`; a `<product>/KEY` names its product. Resolve the
     // environment from the bare key first (as `explain` does), then pick.
     let resolved = if target.contains('/') {
         target.to_string()
     } else {
-        let (_, _, env_name) = explain::locate(fleet, target, env).map_err(with_flag)?;
-        let product = super::pick_product(fleet, env_name, None, "open")?;
+        let (_, _, env_name) = explain::locate(fleet, target, env)?;
+        let product = super::pick_product(fleet, env_name, None)?;
         format!("{product}/{target}")
     };
-    let (product, key, env_name) = explain::locate(fleet, &resolved, env).map_err(with_flag)?;
+    let (product, key, env_name) = explain::locate(fleet, &resolved, env)?;
     // A shared key (FR-45) has no field of its own: open its source's field.
     let (product, key) = match fleet.products[&product].keys[&key].source() {
         Some((p, k)) => (p.to_string(), k.to_string()),
@@ -162,9 +147,14 @@ pub fn run_as(
     } else {
         // The opener's own stderr is not opv's result (NR-31).
         let _ = crate::runner::take_failure_excerpt();
+        // 04.30: name every opener tried, never only the first.
+        let tried = if with == o.program {
+            o.program.to_string()
+        } else {
+            format!("{} and {with}", o.program)
+        };
         line(format!(
-            "{} could not open it: open the link above yourself",
-            o.program
+            "{tried} could not open it: open the link above yourself"
         ))
     }
 }
@@ -251,6 +241,20 @@ mod tests {
         assert!(out.contains("xdg-open could not open it"), "{out}");
     }
 
+    /// 04.30: when Windows' opener and wslview both fail, both are named.
+    #[test]
+    fn a_failed_wsl_fallback_names_both_openers() {
+        let wsl = Some(Opener {
+            program: "rundll32.exe",
+            args: &["url.dll,FileProtocolHandler"],
+        });
+        let (out, _) = open_out(wsl, vec![Output::failure(1), Output::failure(1)]);
+        assert!(
+            out.contains("rundll32.exe and wslview could not open it"),
+            "{out}"
+        );
+    }
+
     /// Found live: wslview missing in WSL; Windows' opener failing falls back to it.
     #[test]
     fn a_failed_windows_opener_in_wsl_falls_back_to_wslview() {
@@ -300,9 +304,9 @@ mod tests {
         );
     }
 
-    /// M6: with several environments, the step is the same `open --print` with `--env`.
+    /// M6, X2: with several environments, a person picks one; opv never picks for them.
     #[test]
-    fn open_print_without_env_suggests_open_print_with_env() {
+    fn open_print_without_env_needs_a_choice() {
         let r = FakeRunner::new([]);
         let e = run(
             &fleet(),
@@ -313,12 +317,7 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap_err();
-        assert!(
-            e.next_step().is_some_and(|n| n
-                .starts_with("opv open allumata/INTEGRATION_ENC_KEY --env ")
-                && n.ends_with(" --print")),
-            "{:?}",
-            e.next_step()
-        );
+        // A person picks the environment (R23): never the first one named for them (X2).
+        assert_eq!(e.code_str(), "choice_required");
     }
 }

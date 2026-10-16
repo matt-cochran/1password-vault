@@ -6,24 +6,61 @@ fn fleet() -> Fleet {
     crate::config::load("tests/fixtures/secrets.toml").unwrap()
 }
 
+/// The CLI invocation `opv <words>`, for rendering a cause's step.
+fn cli(words: &[&str]) -> crate::cause::Invocation {
+    let argv: Vec<String> = std::iter::once("opv")
+        .chain(words.iter().copied())
+        .map(str::to_string)
+        .collect();
+    crate::cause::Invocation::from_cli(&argv)
+}
+
+/// The Next an error renders against `inv`, as a command line.
+fn next_of(e: &Error, inv: &crate::cause::Invocation) -> Option<String> {
+    let (cause, _) = e.cause().expect("a catalog cause");
+    crate::cause::render::next_text(&cause.step(inv).1, inv)
+}
+
+// Pinned wording changed with the catalog (05.39): an undeclared or malformed entry is a
+// typed cause, not free text.
 #[test]
 fn replace_names_must_be_declared() {
     let e = pairs(&fleet(), &["allumata/NOPE".to_string()], "--replace").unwrap_err();
-    assert!(e.mentions("not a declared key"), "{e}");
+    assert_eq!(e.code_str(), "undeclared_key");
 }
 
 #[test]
 fn a_fleet_replace_needs_a_product() {
     let e = pairs(&fleet(), &["OPENAI_API_KEY".to_string()], "--replace").unwrap_err();
-    assert!(e.mentions("write product/KEY"), "{e}");
+    assert_eq!(e.code_str(), "usage");
 }
 
-/// Fly cannot show a secret's value: adopting from it says so before any read.
+/// Fly cannot show a secret's value: adopting from it is the provider-hides-values guard.
 #[test]
-fn a_target_that_hides_values_is_refused_with_the_manual_way() {
+fn a_target_that_hides_values_is_refused_by_its_guard() {
     let r = FakeRunner::default();
     let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv adopt staging --from <file.env>"));
+    assert!(matches!(
+        e.cause(),
+        Some((
+            Cause::Guard {
+                guard: Guard::ProviderHidesValues {
+                    system: crate::cause::System::Fly
+                }
+            },
+            _
+        ))
+    ));
+}
+
+/// 05.03 (S1): the refusal's Next never sends the person back to the adopt that refused.
+#[test]
+fn a_target_that_hides_values_never_names_the_same_adopt() {
+    let r = FakeRunner::default();
+    let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
+    let inv = cli(&["adopt", "staging", "--from", "target:portfolio"]);
+    // F2 (R46): its help, never the adopt itself.
+    assert!(!next_of(&e, &inv).is_some_and(|n| n.contains("--from")));
 }
 
 #[test]
@@ -39,17 +76,15 @@ fn the_refusal_names_no_value_and_reads_nothing() {
 #[test]
 fn the_bare_target_form_is_a_usage_error() {
     let e = source_from(&fleet(), "staging", "target").unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::Usage);
+    assert_eq!(e.code_str(), "usage");
 }
 
-/// The refusal names the environment's targets and the one working form.
+/// With one target, the refusal's command is the named form.
 #[test]
-fn the_bare_target_error_names_the_targets_and_the_named_form() {
+fn the_bare_target_error_names_the_named_form() {
     let e = source_from(&fleet(), "staging", "target").unwrap_err();
-    assert!(
-        e.mentions("target:portfolio") && e.mentions("portfolio"),
-        "{e}"
-    );
+    let inv = cli(&["adopt", "staging", "--from", "target"]);
+    assert!(next_of(&e, &inv).is_some_and(|n| n.contains("--from target:portfolio")));
 }
 
 #[test]
@@ -59,9 +94,9 @@ fn a_named_target_is_read_from_that_target() {
 }
 
 #[test]
-fn an_unknown_target_name_is_a_usage_error() {
+fn an_unknown_target_name_is_an_unknown_target() {
     let e = source_from(&fleet(), "staging", "target:nope").unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::Usage);
+    assert_eq!(e.code_str(), "unknown_target");
 }
 
 /// A dotenv path (anything not the `target:` form) stays a file source.
@@ -347,7 +382,7 @@ fn a_service_account_cannot_apply() {
         ),
         || run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap_err(),
     );
-    assert_eq!(e.exit_code(), 6);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // #94: --skip ---------------------------------------------------------------------------
@@ -387,4 +422,59 @@ fn skip_names_must_be_declared() {
     let mut o = opts(&dir, false, &[]);
     o.skip = vec!["api/NOPE".into()];
     assert!(run(&fleet, "dev", &o, &op, &mut Vec::new()).is_err());
+}
+
+// 05.04 (S1): the plan's Next applies exactly what was reviewed --------------------------
+
+fn narrowed() -> Opts {
+    Opts {
+        source: Source::Dotenv(PathBuf::from("my env/.env.staging")),
+        replace: vec!["api/X".into()],
+        rotate: vec!["api/X".into()],
+        skip: vec!["api/LEGACY_TOKEN".into()],
+        apply: false,
+        json: false,
+    }
+}
+
+#[test]
+fn the_plans_next_keeps_skip() {
+    let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
+    assert!(next.contains("--skip api/LEGACY_TOKEN"), "{next}");
+}
+
+#[test]
+fn the_plans_next_keeps_rotate() {
+    let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
+    assert!(next.contains("--rotate api/X"), "{next}");
+}
+
+#[test]
+fn the_plans_next_quotes_a_path_with_a_space() {
+    let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
+    // Quoted the way the platform's shell reads it: '…' on Unix, "…" on Windows.
+    let quoted = if cfg!(windows) {
+        "--from \"my env/.env.staging\""
+    } else {
+        "--from 'my env/.env.staging'"
+    };
+    assert!(next.contains(quoted), "{next}");
+}
+
+// 05.10 (S2): a read-back failure names the command that wrote ---------------------------
+
+#[test]
+fn a_read_back_failure_of_adopt_names_the_apply_command() {
+    let opts = Opts {
+        source: Source::Target("web".into()),
+        replace: Vec::new(),
+        rotate: Vec::new(),
+        skip: Vec::new(),
+        apply: false,
+        json: false,
+    };
+    assert_eq!(
+        crate::cause::render::cmd_text(&apply_command("dev", &opts)),
+        "opv adopt dev --from target:web --apply"
+    );
 }

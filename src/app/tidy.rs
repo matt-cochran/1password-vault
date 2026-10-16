@@ -32,7 +32,7 @@ use crate::domain::SecretValue;
 use crate::domain::convention::{self, Change, KeyId, Layout, TidyPlan};
 use crate::domain::plan::ItemField;
 use crate::domain::{Boundary, Environment, Fleet, key_label, rules};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
@@ -120,9 +120,23 @@ pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
     }
     match onepassword::diagnose(r, &Host::detect) {
         Ok(Session::SignedIn(IdentityType::User)) => Identity::Person,
-        Ok(Session::SignedIn(_)) => Identity::ReadOnly,
+        Ok(Session::SignedIn(IdentityType::ServiceAccount)) => Identity::ReadOnly,
+        // Audit 04.19: a whoami without a user type observed nobody in particular; it is
+        // never reported as a service account.
         _ => Identity::Unknown,
     }
+}
+
+/// The command a person runs in their own session, by its subcommand words: the process's
+/// own command line, else `what` (`opv target add`) without its `opv`.
+fn own_command(what: &str) -> crate::cause::CommandId {
+    let inv = crate::error::invocation();
+    let words = if inv.command.is_empty() || inv.command.first().is_some_and(|w| w == "mcp") {
+        what.trim_start_matches("opv ").to_string()
+    } else {
+        inv.command.join(" ")
+    };
+    crate::cause::CommandId(words)
 }
 
 /// Refuse a write to the project manifest (FR-44: `init` creating one, `add`, `init
@@ -131,61 +145,89 @@ pub(crate) fn identity(r: &dyn CommandRunner) -> Identity {
 /// `op whoami` cannot tell, 1Password stays read-only (FR-11, SR-5; requirements FR-23's
 /// `init` acceptance). Nothing is written; the error names `opv login`.
 pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Error> {
-    let why = match identity(r) {
-        Identity::Person => return Ok(()),
-        Identity::ReadOnly => {
-            "this run is a service account, Connect or CI, for which 1Password is read-only"
+    use crate::cause::{Cause, NoTerminal, Principal};
+    match identity(r) {
+        Identity::Person => Ok(()),
+        // #157: `opv login` refuses here too, so the step is a person's own terminal.
+        Identity::ReadOnly if Host::detect().ci && Host::detect().op_credential.is_none() => {
+            Err(Cause::NeedsTerminal {
+                why: NoTerminal::Ci,
+            }
+            .into())
         }
-        Identity::DeployCredentials => {
-            "this run signed in with deploy credentials, for which 1Password is read-only"
+        // A service account or Connect: 1Password is read-only for the run; a person runs
+        // the command in their own session (`own_session_required`, exit 7).
+        Identity::ReadOnly => Err(Cause::NeedsOwnSession {
+            command: own_command(what),
+            identity: match Host::detect().op_credential {
+                Some(c) => Principal::ShellToken {
+                    var: crate::cause::VarName::new(c.var()),
+                },
+                None => Principal::ServiceAccount {
+                    name: "of this run".into(),
+                },
+            },
         }
+        .into()),
+        // The deploy credentials are the target's; 1Password stays read-only for the run.
+        Identity::DeployCredentials => Err(Cause::NeedsOwnSession {
+            command: own_command(what),
+            identity: Principal::ServiceAccount {
+                name: "of this run's deploy credentials".into(),
+            },
+        }
+        .into()),
         Identity::Unknown => {
             // #150: nobody is signed in here (an op session started inside an earlier opv
             // command, such as a --dry-run, ends with that command). That is a sign-in,
             // not a policy refusal: in a person's terminal opv signs them in at op's own
             // prompt and runs the command again, which checks once more that a person is
             // signed in. Elsewhere the step names the project's account.
-            if matches!(
-                onepassword::diagnose(r, &Host::detect),
-                Ok(Session::NotSignedIn)
-            ) {
-                return Err(not_signed_in(what));
+            match onepassword::diagnose(r, &Host::detect) {
+                Ok(Session::NotSignedIn) => return Err(not_signed_in(what)),
+                // #157: no account on this machine is added first (`opv login --add`).
+                Ok(s @ (Session::NoAccount | Session::AccountAbsent(_))) => {
+                    if let Some(e) =
+                        onepassword::session_error(s, &Host::detect(), Some(what), None)
+                    {
+                        return Err(e);
+                    }
+                }
+                // Audit 04.19: `op whoami` did not finish (a slow op.exe start, the app
+                // busy): 1Password did not answer, which a sign-in cannot fix.
+                Ok(Session::Unknown) => {
+                    if let Some(seen) = crate::runner::take_observed().filter(|s| {
+                        matches!(
+                            s.exit(),
+                            crate::cause::ExitClass::TimedOut
+                                | crate::cause::ExitClass::Signal { .. }
+                        )
+                    }) {
+                        return Err(crate::adapters::onepassword_diagnose::diagnose(
+                            seen,
+                            "",
+                            &crate::cause::DiagnoseContext::default(),
+                        )
+                        .into());
+                    }
+                }
+                _ => {}
             }
-            "op whoami could not confirm a person signed in to 1Password"
+            // #150: a person's session could not be confirmed: the same sign-in as above,
+            // never a policy refusal with a bare `opv login`.
+            Err(not_signed_in(what))
         }
-    };
-    Err(Error::Policy(
-        format!(
-            "{what} writes to 1Password, which only a person signed in with their own \
-             session may do; {why}; nothing written"
-        )
-        .into(),
-    )
-    .with_next(crate::adapters::onepassword_manifest::LOGIN))
+    }
 }
 
-/// The sign-in a write needs (#150): `op_not_signed_in`, naming the project's account
-/// (`OP_ACCOUNT`, else `.opv`) so `opv login` cannot pick another account on a shared
-/// sign-in address.
+/// The sign-in a write needs (#150): `op_not_signed_in` (in a person's terminal, opv offers
+/// 1Password's prompt and runs the command again), whose step is this same command inside
+/// `opv login --account <the project's account>` (`OP_ACCOUNT`, else `.opv`), so the login
+/// cannot pick another account on a shared sign-in address.
 fn not_signed_in(what: &str) -> Error {
-    let account = crate::config_store::account_env().or_else(|| {
-        crate::config_store::pointer_account(&std::env::current_dir().unwrap_or_default())
-    });
-    let next = match &account {
-        Some(a) => format!("opv login --account {a}"),
-        None => crate::adapters::onepassword_manifest::LOGIN.to_string(),
-    };
-    Error::Auth(
-        format!(
-            "{what} writes to 1Password and needs your own 1Password session, which this run \
-             does not have (a sign-in inside an earlier opv command, such as --dry-run, ends \
-             with it); nothing written"
-        )
-        .into(),
-    )
-    .with_code(Code::OpNotSignedIn)
-    .with_do("sign in at 1Password's prompt in your own terminal, then run the command again (or run it inside that login: opv login --account <ID> -- opv …)")
-    .with_next(next)
+    let account =
+        crate::config_store::selected_account(&std::env::current_dir().unwrap_or_default());
+    super::login::write_needs_session(what, account.as_deref(), &super::login::this_command())
 }
 
 /// True when the item JSON carries the manifest tag (FR-44).
@@ -242,7 +284,10 @@ pub(crate) struct Read {
     pub normalized: BTreeMap<KeyId, SecretValue>,
     /// The error code of a tidy that was attempted and did not complete (`tidy_conflict`
     /// when the item changed twice meanwhile); the command still went on (FR-43).
-    pub tidy_error: Option<Code>,
+    pub tidy_error: Option<&'static str>,
+    /// The failure behind `tidy_error`, naming the item (and the fields a read-back lacked):
+    /// what `opv tidy` reports (01.02).
+    pub tidy_failure: Option<Error>,
     /// The item's `version` integer as last read (after a tidy, the tidied item's): an
     /// input of the plan id (FR-41).
     pub version: Option<u64>,
@@ -364,6 +409,7 @@ fn read_in(
         refs: BTreeMap::new(),
         normalized: BTreeMap::new(),
         tidy_error: None,
+        tidy_failure: None,
         version: None,
         needing_values: Vec::new(),
         identity: None,
@@ -377,6 +423,7 @@ fn merge(read: &mut Read, part: Read) {
     read.refs.extend(part.refs);
     read.normalized.extend(part.normalized);
     read.tidy_error = read.tidy_error.or(part.tidy_error);
+    read.tidy_failure = read.tidy_failure.take().or(part.tidy_failure);
     read.version = read.version.zip(part.version).map(|(a, b)| a + b);
     read.needing_values.extend(part.needing_values);
     read.identity = read.identity.or(part.identity);
@@ -397,7 +444,7 @@ fn read_item_as(
     let plan = convention::plan(&layout, fleet, env_name, &date);
     let done = |layout: Layout,
                 changes: Vec<Change>,
-                error: Option<Code>,
+                error: Option<&'static str>,
                 version: Option<u64>,
                 who: Option<Identity>| {
         let mut res = finish(layout, fleet, env_name, env, b, changes, error);
@@ -463,7 +510,7 @@ fn read_item_as(
     }
     match tidy(r, fleet, env_name, env, b, &date, stamp, plan) {
         Ok(Some(t)) => {
-            if !t.changes.is_empty() {
+            if !t.changes.is_empty() && t.failure.is_none() {
                 r.note(&format!(
                     "tidied 1Password ({env_name}): {}",
                     convention::summary(&t.changes)
@@ -474,17 +521,22 @@ fn read_item_as(
                     &needing_values(&t.layout, fleet, env_name, env),
                 );
             }
-            Ok(done(t.layout, t.changes, t.error, t.version, Some(who)))
+            let mut res = done(t.layout, t.changes, t.error, t.version, Some(who));
+            res.tidy_failure = t.failure;
+            Ok(res)
         }
         Ok(None) => Ok(done(layout, Vec::new(), None, first, Some(who))),
         Err(e) => {
+            // Audit 04.01: the note carries the message alone, never a category prefix.
             let text = e.to_string();
             r.note(&format!(
                 "could not tidy 1Password ({env_name}); read it as it is: {}",
                 text.lines().next().unwrap_or("")
             ));
-            let code = e.code();
-            Ok(done(layout, Vec::new(), Some(code), first, Some(who)))
+            let code = e.code_str();
+            let mut res = done(layout, Vec::new(), Some(code), first, Some(who));
+            res.tidy_failure = Some(e);
+            Ok(res)
         }
     }
 }
@@ -529,9 +581,11 @@ struct Tidied {
     changes: Vec<Change>,
     /// `tidy_conflict` (changed twice before the write, or another edit landed with it) or
     /// `tidy_unverified` (the item read back lacks a field opv wrote or kept).
-    error: Option<Code>,
+    error: Option<&'static str>,
     /// The item's version as last read.
     version: Option<u64>,
+    /// The typed failure behind `error`.
+    failure: Option<Error>,
 }
 
 /// Check, write, verify (module docs). Every read here bypasses `op`'s cache (C1), and
@@ -553,6 +607,20 @@ fn tidy(
             changes,
             error,
             version,
+            failure: None,
+        }))
+    };
+    let item = || crate::cause::StoreObject::Item {
+        vault: crate::cause::VaultId::new(&b.vault_id),
+        item: crate::cause::ItemId::new(&b.item_id),
+    };
+    let failed = |layout, changes, code, version, cause: crate::cause::Cause| {
+        Ok(Some(Tidied {
+            layout,
+            changes,
+            error: Some(code),
+            version,
+            failure: Some(cause.into()),
         }))
     };
     for attempt in 0..2 {
@@ -564,7 +632,8 @@ fn tidy(
                     "1Password ({env_name}) changed twice while opv was tidying it; nothing \
                      written. Re-run when nobody is editing the item."
                 ));
-                return tidied(seen, Vec::new(), Some(Code::TidyConflict), fresh.version);
+                let cause = crate::cause::Cause::ChangedBeforeWrite { object: item() };
+                return failed(seen, Vec::new(), "tidy_conflict", fresh.version, cause);
             }
             stamp = seen_stamp;
             plan = convention::plan(&seen, fleet, env_name, date);
@@ -597,29 +666,37 @@ fn tidy(
                     .map_or_else(|| "unknown".into(), |v| v.to_string()),
                 expected.unwrap_or_default()
             ));
-            return tidied(
-                layout,
-                plan.changes,
-                Some(Code::TidyConflict),
-                after.version,
-            );
+            let cause = crate::cause::Cause::ConcurrentEdit { object: item() };
+            return failed(layout, plan.changes, "tidy_conflict", after.version, cause);
         }
         // I4: every field opv wrote or kept (so every original label and value, in place or
         // in `opv · kept`) is in the item read back.
-        let lost = onepassword_tidy::lost(fresh.raw(), &template, after.raw())?;
-        drop(template);
-        if lost > 0 {
+        let fields = onepassword_tidy::lost(fresh.raw(), &template, after.raw())?;
+        if !fields.is_empty() {
+            drop(template);
             r.note(&format!(
-                "1Password ({env_name}) was tidied, but {lost} field(s) opv wrote or kept are \
-                 not in the item read back; restore them from the item's history in 1Password."
+                "1Password ({env_name}) was tidied, but {} field(s) opv wrote or kept are \
+                 not in the item read back; restore them from the item's history in 1Password.",
+                fields.len()
             ));
-            return tidied(
+            let cause = crate::cause::Cause::ReadBackMissing {
+                vault: crate::cause::VaultId::new(&b.vault_id),
+                item: crate::cause::ItemId::new(&b.item_id),
+                fields,
+                by: crate::cause::Cmd {
+                    command: vec!["tidy".into()],
+                    args: vec![env_name.to_string()],
+                },
+            };
+            return failed(
                 layout,
                 plan.changes,
-                Some(Code::TidyUnverified),
+                "tidy_unverified",
                 after.version,
+                cause,
             );
         }
+        drop(template);
         if !convention::plan(&layout, fleet, env_name, date).is_empty() {
             r.note(&format!(
                 "1Password ({env_name}) was written but is not fully tidy yet; the next run \
@@ -677,7 +754,7 @@ fn finish(
     env: &Environment,
     b: &Boundary,
     changes: Vec<Change>,
-    tidy_error: Option<Code>,
+    tidy_error: Option<&'static str>,
 ) -> Read {
     let res = convention::resolve(&layout, fleet);
     let mut refs = BTreeMap::new();
@@ -708,6 +785,7 @@ fn finish(
         refs,
         normalized,
         tidy_error,
+        tidy_failure: None,
         version: None,
         identity: None,
     }
