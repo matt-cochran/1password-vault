@@ -551,7 +551,7 @@ pub(crate) fn sync_approved(
         consume,
     );
     if let Err(e) = ran {
-        let code = e.code().as_str();
+        let code = e.code_str();
         let fallback = code_hint(code, SYNC_CLI);
         let human_action = match code {
             "stale_plan" => {
@@ -674,7 +674,11 @@ fn runnable_opv(step: Option<&str>) -> Option<&str> {
 /// and `do` when each is a runnable `opv` command. Never its message, which can quote
 /// upstream output.
 fn error_failure(e: &crate::error::Error, human_action: &str) -> Value {
-    let mut v = failure(e.code().as_str(), human_action);
+    let mut v = failure(e.code_str(), human_action);
+    // A cataloged cause derives its own (design §6.3); the table above covers the rest.
+    if e.human_required() {
+        v["human_required"] = json!(true);
+    }
     if let Some(next) = runnable_opv(e.next_step()) {
         v["next"] = json!(next);
     }
@@ -804,7 +808,7 @@ fn inspect(project: &std::path::Path, operation: Operation, env: Option<&str>) -
     let r = read_only(INSPECT_BUDGET);
     let fleet = match load_fleet(project, &r) {
         Ok(fleet) => fleet,
-        Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), cli)),
+        Err(e) => return error_failure(&e, &code_hint(e.code_str(), cli)),
     };
     if let Some(env) = env
         && !fleet.environments.contains_key(env)
@@ -838,14 +842,14 @@ fn receipt_answer<R: CommandRunner>(
         Ok(v) => v,
         Err(_) => {
             return match result {
-                Err(e) => error_failure(&e, &code_hint(e.code().as_str(), cli)),
+                Err(e) => error_failure(&e, &code_hint(e.code_str(), cli)),
                 Ok(()) => inspection_error("invalid_receipt", cli),
             };
         }
     };
     let mut response = project(&doc);
     if let Err(error) = result {
-        let code = error.code().as_str();
+        let code = error.code_str();
         response["ok"] = json!(false);
         response["code"] = json!(code);
         response["human_required"] = json!(human_required(code));
@@ -872,7 +876,7 @@ fn deployment_plan(project: &std::path::Path, args: &DeploymentPlanScope) -> Val
     let r = read_only(INSPECT_BUDGET);
     let fleet = match load_fleet(project, &r) {
         Ok(fleet) => fleet,
-        Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), PLAN_CLI)),
+        Err(e) => return error_failure(&e, &code_hint(e.code_str(), PLAN_CLI)),
     };
     deployment_plan_from_fleet(&fleet, args, &r)
 }
@@ -985,7 +989,7 @@ fn delivery_preview_doc(
     let r = read_only(INSPECT_BUDGET);
     let fleet = match load_fleet(project, &r) {
         Ok(fleet) => fleet,
-        Err(e) => return error_failure(&e, &code_hint(e.code().as_str(), PREVIEW_CLI)),
+        Err(e) => return error_failure(&e, &code_hint(e.code_str(), PREVIEW_CLI)),
     };
     delivery_preview_from_fleet(&fleet, environment, product, role, remote, &r)
 }
@@ -1020,7 +1024,7 @@ fn preview_failure(
     remote: Option<&str>,
     e: &crate::error::Error,
 ) -> Value {
-    let code = e.code().as_str();
+    let code = e.code_str();
     let products: Vec<&str> = fleet
         .products
         .iter()
@@ -1082,7 +1086,7 @@ fn preview_failure(
 /// `stale_plan`. Never its text, which can quote upstream output. `cli` is the command a
 /// person runs for details.
 fn structure_failure(e: &crate::error::Error, cli: &str) -> Value {
-    let code = e.code().as_str();
+    let code = e.code_str();
     let hint = match code {
         "approval_required" => {
             "No unused approval covers this plan: the person runs opv approve <plan_id> in their own terminal, then call opv_structure_apply again.".to_string()
@@ -1180,7 +1184,7 @@ fn access_projection(project: &std::path::Path, env: Option<&str>, target: Optio
 /// nothing), and its runnable `next` (such as the `opv login --account …` that signs the
 /// person in to the project's account).
 fn access_failure(e: &crate::error::Error) -> Value {
-    let code = e.code().as_str();
+    let code = e.code_str();
     let hint = match code {
         "policy_refused" => format!(
             "opv refused this check and changed nothing; the person runs {ACCESS_CLI} in their own terminal to see why."
@@ -1422,7 +1426,7 @@ fn generate_action(code: &str) -> String {
 /// `e`'s code with its fixed human action and runnable `next`; never its text, which can
 /// quote upstream output.
 fn generate_failure(e: &crate::error::Error) -> Value {
-    error_failure(e, &generate_action(e.code().as_str()))
+    error_failure(e, &generate_action(e.code_str()))
 }
 
 /// The next step an assistant may repeat for a finding: an `opv` command, or a 1Password
@@ -2426,5 +2430,28 @@ rules = { prefix = "sk_" }
             project_receipt(&doc, Operation::Ready)["findings"][0]["target"],
             "fleet"
         );
+    }
+
+    fn own_session() -> crate::error::Error {
+        crate::cause::Cause::NeedsOwnSession {
+            command: crate::cause::CommandId("approve".into()),
+            identity: crate::cause::Principal::ServiceAccount {
+                name: "sa-ci".into(),
+            },
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_catalog_failure_carries_its_cause_code() {
+        assert_eq!(
+            error_failure(&own_session(), "x")["code"],
+            "own_session_required"
+        );
+    }
+
+    #[test]
+    fn a_catalog_failure_carries_its_causes_human_required() {
+        assert_eq!(error_failure(&own_session(), "x")["human_required"], true);
     }
 }

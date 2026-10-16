@@ -157,6 +157,35 @@ pub enum Error {
     /// re-running the same command is safe (NR-2).
     #[error("outcome unknown: {0}")]
     Unknown(Msg),
+    /// A cataloged cause and the upstream tool's reply, when any (design
+    /// `docs/design/error-catalog.md` §3). Exit code, code, retry and `human_required` come
+    /// from the cause; text and documents from [`crate::cause::render`]. The variants above
+    /// are the Legacy arm of the same functions, removed once the ratchet reaches zero (§10).
+    #[error("{}", .0.message())]
+    Catalog(
+        Box<crate::cause::Cause>,
+        Option<Box<crate::cause::Upstream>>,
+    ),
+}
+
+impl From<crate::cause::Cause> for Error {
+    fn from(cause: crate::cause::Cause) -> Error {
+        Error::Catalog(Box::new(cause), None)
+    }
+}
+
+/// The text a Catalog error has none of: its message is rendered from the cause.
+static NO_MSG: Msg = Msg {
+    text: String::new(),
+    next: None,
+    code: None,
+    action: None,
+};
+
+/// The invocation a Catalog error renders its steps against: the process's own command
+/// line (one place, until every entry point passes its own).
+pub fn invocation() -> crate::cause::Invocation {
+    crate::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>())
 }
 
 /// Every category, in exit-code order (for tests that cover each one).
@@ -199,6 +228,38 @@ impl Error {
             Error::Auth(_) => 7,
             Error::Findings(..) => 8,
             Error::Unknown(_) => 9,
+            Error::Catalog(c, _) => c.exit_code(),
+        }
+    }
+
+    /// A cataloged cause with the upstream tool's reply as its evidence.
+    pub fn with_evidence(cause: crate::cause::Cause, upstream: crate::cause::Upstream) -> Error {
+        Error::Catalog(Box::new(cause), Some(Box::new(upstream)))
+    }
+
+    /// The cataloged cause and its evidence, for a Catalog error.
+    pub fn cause(&self) -> Option<(&crate::cause::Cause, Option<&crate::cause::Upstream>)> {
+        match self {
+            Error::Catalog(c, up) => Some((c, up.as_deref())),
+            _ => None,
+        }
+    }
+
+    /// The stable code as a string: the cause's own for a Catalog error (which may be
+    /// outside [`Code`]), else [`Error::code`]'s slug. Envelopes and MCP answers use this.
+    pub fn code_str(&self) -> &'static str {
+        match self {
+            Error::Catalog(c, _) => c.code(),
+            _ => self.code().as_str(),
+        }
+    }
+
+    /// True when only a person can take the next step (A9): derived from the cause for a
+    /// Catalog error, else from [`Error::code`].
+    pub fn human_required(&self) -> bool {
+        match self {
+            Error::Catalog(c, _) => c.human_required(&invocation()),
+            _ => self.code().human_required(),
         }
     }
 
@@ -230,10 +291,12 @@ impl Error {
             | Error::Policy(m)
             | Error::Findings(_, m)
             | Error::Unknown(m) => m,
+            Error::Catalog(..) => &NO_MSG,
         }
     }
 
-    fn msg_mut(&mut self) -> &mut Msg {
+    /// The free text of a Legacy error; `None` for a Catalog error, whose steps are typed.
+    fn msg_mut(&mut self) -> Option<&mut Msg> {
         match self {
             Error::Config(m)
             | Error::Dependency(m)
@@ -242,7 +305,8 @@ impl Error {
             | Error::Target(m)
             | Error::Policy(m)
             | Error::Findings(_, m)
-            | Error::Unknown(m) => m,
+            | Error::Unknown(m) => Some(m),
+            Error::Catalog(..) => None,
         }
     }
 
@@ -263,7 +327,9 @@ impl Error {
 
     /// This error with `next` as its step (replacing any it had).
     pub fn with_next(mut self, next: impl Into<String>) -> Error {
-        self.msg_mut().next = Some(next.into());
+        if let Some(m) = self.msg_mut() {
+            m.next = Some(next.into());
+        }
         self
     }
 
@@ -278,8 +344,10 @@ impl Error {
 
     /// The same category and next step with `f` applied to the text.
     pub fn map_text(mut self, f: impl FnOnce(String) -> String) -> Error {
-        let m = std::mem::replace(self.msg_mut(), Msg::from(String::new()));
-        *self.msg_mut() = m.map_text(f);
+        if let Some(slot) = self.msg_mut() {
+            let m = std::mem::replace(slot, Msg::from(String::new()));
+            *slot = m.map_text(f);
+        }
         self
     }
 
@@ -294,6 +362,7 @@ impl Error {
 
     fn default_step(&self, rerun: &str, help: &str) -> String {
         match self {
+            Error::Catalog(..) => self.catalog_step().next,
             Error::Unknown(_) => rerun.to_string(),
             Error::Findings(..) => format!("fix the keys above in 1Password, then {rerun}"),
             Error::Policy(_) => format!("fix the cause above, then {rerun}"),
@@ -315,7 +384,9 @@ impl Error {
 
     /// This error with a stable machine-readable cause (A2).
     pub fn with_code(mut self, code: Code) -> Error {
-        self.msg_mut().code = Some(code);
+        if let Some(m) = self.msg_mut() {
+            m.code = Some(code);
+        }
         self
     }
 
@@ -330,6 +401,7 @@ impl Error {
             Error::Auth(_) => Code::AuthRequired,
             Error::Findings(..) => Code::Findings,
             Error::Unknown(_) => Code::OutcomeUnknown,
+            Error::Catalog(c, _) => catalog_code(c),
         })
     }
 
@@ -340,13 +412,18 @@ impl Error {
 
     /// This error with a human-only action printed as `Do: <action>` before `Next:` (A3).
     pub fn with_do(mut self, action: impl Into<String>) -> Error {
-        self.msg_mut().action = Some(action.into());
+        if let Some(m) = self.msg_mut() {
+            m.action = Some(action.into());
+        }
         self
     }
 
     /// What to do next (A3): an optional human action and a command that runs as typed.
     /// `rerun` is the command that was run, `help` its `--help` command.
     pub fn step(&self, rerun: &str, help: &str) -> Step {
+        if let Error::Catalog(..) = self {
+            return self.catalog_step();
+        }
         let raw = match self.next_step() {
             Some(n) => n.to_string(),
             None => self.default_step(rerun, help),
@@ -369,6 +446,21 @@ impl Error {
             Error::Auth(_) => "auth",
             Error::Findings(..) => "findings",
             Error::Unknown(_) => "unknown",
+            Error::Catalog(c, _) => crate::cause::render::category(c.exit_code()),
+        }
+    }
+
+    /// A Catalog error's typed step in words, against [`invocation`]. Only called for a
+    /// Catalog error; any other gets the bare `opv` (never reached).
+    fn catalog_step(&self) -> Step {
+        let Error::Catalog(c, _) = self else {
+            return split_step("opv", "opv");
+        };
+        let inv = invocation();
+        let (_, next) = c.step(&inv);
+        Step {
+            action: c.do_text(&inv),
+            next: crate::cause::render::next_text(&next, &inv).unwrap_or_else(|| "none".into()),
         }
     }
 
@@ -683,6 +775,9 @@ pub fn report(e: &Error, rerun: &str, excerpt: Option<&crate::scrub::Excerpt>) -
 
 /// [`report`] with the step already worked out.
 pub fn report_with(e: &Error, step: &Step, excerpt: Option<&crate::scrub::Excerpt>) -> String {
+    if let Error::Catalog(c, up) = e {
+        return crate::cause::render::render_text(c, up.as_deref(), &invocation(), false, false);
+    }
     let msg = format!("opv: {e}");
     let (head, rest) = match msg.split_once('\n') {
         Some((h, r)) => (h, Some(r)),
@@ -721,6 +816,14 @@ pub fn next_line(step: &str) -> String {
 /// {code, category, message, detail, retry, human_required, do, next}}`. Names only, like
 /// the text (SR-1); the failed call's stderr excerpt is never included.
 pub fn envelope(e: &Error, step: &Step) -> serde_json::Value {
+    if let Error::Catalog(c, up) = e {
+        return serde_json::json!({
+            "schema_version": crate::json::SCHEMA_VERSION,
+            "ok": false,
+            "exit_code": e.exit_code(),
+            "error": crate::cause::render::document(c, up.as_deref(), &invocation(), false),
+        });
+    }
     let text = e.text();
     let mut lines = text.lines();
     let message = lines.next().unwrap_or_default().trim().to_string();
@@ -744,6 +847,25 @@ pub fn envelope(e: &Error, step: &Step) -> serde_json::Value {
             step,
         ),
     })
+}
+
+/// The [`Code`] a cause reports through [`Error::code`]: its own when the closed list has
+/// it, else its category's (the cause's own string is [`Error::code_str`]).
+fn catalog_code(c: &crate::cause::Cause) -> Code {
+    if let Some(code) = Code::ALL.iter().find(|k| k.as_str() == c.code()) {
+        return *code;
+    }
+    match c.exit_code() {
+        2 => Code::ConfigInvalid,
+        3 => Code::DependencyMissing,
+        4 => Code::SourceError,
+        5 => Code::TargetError,
+        6 => Code::PolicyRefused,
+        7 => Code::AuthRequired,
+        8 => Code::Findings,
+        n if n > 128 => Code::Interrupted,
+        _ => Code::OutcomeUnknown,
+    }
 }
 
 /// The `error` object of a failure document (A1, A9).
@@ -1190,5 +1312,52 @@ mod tests {
     #[test]
     fn owner_setup_needs_a_human() {
         assert!(Code::OwnerSetupRequired.human_required());
+    }
+
+    // --- the Catalog arm (design §3, §10 phase 1) ---------------------------------------
+
+    fn own_session() -> crate::cause::Cause {
+        crate::cause::Cause::NeedsOwnSession {
+            command: crate::cause::CommandId("approve".into()),
+            identity: crate::cause::Principal::ServiceAccount {
+                name: "sa-ci".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_catalog_error_exits_with_its_causes_code() {
+        assert_eq!(
+            Error::from(own_session()).exit_code(),
+            own_session().exit_code()
+        );
+    }
+
+    #[test]
+    fn a_catalog_error_reports_the_catalog_text() {
+        let want =
+            crate::cause::render::render_text(&own_session(), None, &invocation(), false, false);
+        assert_eq!(
+            report(&Error::from(own_session()), "opv approve", None),
+            want
+        );
+    }
+
+    #[test]
+    fn a_catalog_errors_envelope_carries_the_catalog_document() {
+        let e = Error::from(own_session());
+        let want = crate::cause::render::document(&own_session(), None, &invocation(), false);
+        assert_eq!(
+            envelope(&e, &e.step("opv approve", "opv approve --help"))["error"],
+            want
+        );
+    }
+
+    #[test]
+    fn a_catalog_errors_code_string_is_its_causes() {
+        assert_eq!(
+            Error::from(own_session()).code_str(),
+            "own_session_required"
+        );
     }
 }
