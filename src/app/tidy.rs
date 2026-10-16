@@ -155,22 +155,20 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
             }
             .into())
         }
-        // Catalog: `Cause::NeedsOwnSession` (own_session_required, exit 7). It stays the
-        // pre-catalog terminal_required refusal (exit 6) while tests outside this module
-        // (adopt, bootstrap, config_store) pin that code.
-        Identity::ReadOnly => Err(Error::Policy(
-            format!(
-                "{what} writes to 1Password, which only a person signed in with their own \
-                 session may do; this run uses a service account or Connect, for which \
-                 1Password is read-only; nothing written"
-            )
-            .into(),
-        )
-        .with_code(crate::error::Code::TerminalRequired)
-        .with_do(
-            "a person runs this in their own terminal, without OP_SERVICE_ACCOUNT_TOKEN or \
-             OP_CONNECT_* set",
-        )),
+        // A service account or Connect: 1Password is read-only for the run; a person runs
+        // the command in their own session (`own_session_required`, exit 7).
+        Identity::ReadOnly => Err(Cause::NeedsOwnSession {
+            command: own_command(what),
+            identity: match Host::detect().op_credential {
+                Some(c) => Principal::ShellToken {
+                    var: crate::cause::VarName::new(c.var()),
+                },
+                None => Principal::ServiceAccount {
+                    name: "of this run".into(),
+                },
+            },
+        }
+        .into()),
         // The deploy credentials are the target's; 1Password stays read-only for the run.
         Identity::DeployCredentials => Err(Cause::NeedsOwnSession {
             command: own_command(what),

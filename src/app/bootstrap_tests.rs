@@ -575,7 +575,7 @@ fn a_missing_personal_vault_names_no_bare_bootstrap() {
     let path = dir.path().join("secrets.toml");
     std::fs::write(&path, TEAM).unwrap();
     let e = run_with(&path, &FakeOp::default(), &Opts::default()).unwrap_err();
-    assert_eq!(e.next_step(), None);
+    assert_ne!(e.next_text().as_deref(), Some("opv bootstrap"));
 }
 
 #[test]
@@ -640,7 +640,7 @@ fn a_service_account_cannot_bootstrap() {
         ),
         || run_with(&path, &op, &Opts::default()).unwrap_err(),
     );
-    assert_eq!(e.exit_code(), 6);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // A fresh account, end to end (#77): nothing exists; bootstrap, then the receipt says what

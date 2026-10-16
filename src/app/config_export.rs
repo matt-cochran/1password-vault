@@ -23,7 +23,7 @@ pub fn run(
     // D10/FR-34: `config export` has no `--product`; with several products that have keys
     // desired here the exported product is ambiguous, and naming the first is a usage error.
     // With one, that product's config is exported (and no other product's).
-    let product = super::pick_product(fleet, env_name, None, "config export")?;
+    let product = super::pick_product(fleet, env_name, None)?;
     let none = BTreeSet::new();
     let (plan, _) = read_and_plan(fleet, env_name, None, r, None, &none, &none)?;
     // 03.06: each key that blocks the export, with why (missing, failing its rule, or kept

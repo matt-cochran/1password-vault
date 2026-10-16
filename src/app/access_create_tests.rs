@@ -414,7 +414,7 @@ fn an_empty_token_names_the_created_account() {
     w.created = String::new();
     let (res, _, _) = create(&w, Some("fleet"), true);
     let e = res.unwrap_err();
-    assert!(crate::error::report(&e, "-", None).contains("shop-staging-fleet-deploy"));
+    assert!(crate::error::report(&e).contains("shop-staging-fleet-deploy"));
 }
 
 /// C20, X5: a created account whose token was never printed is revoked, never made again.

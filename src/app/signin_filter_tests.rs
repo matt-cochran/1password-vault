@@ -179,7 +179,7 @@ fn an_unrecognised_failure_shows_ops_own_line() {
         &["something op said".to_string()],
         Some(1),
     );
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("something op said"), "{shown}");
 }
 

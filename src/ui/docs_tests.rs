@@ -148,9 +148,12 @@ mod documents_round_trip {
 
     #[test]
     fn findings_keep_their_rows() {
-        let e = crate::error::Error::findings(1, "opv status ci");
-        let step = e.step("opv status ci", "opv status ci");
-        let out = crate::json::finish(&status_document(), Err((&e, &step)), false);
+        let e: crate::error::Error = crate::cause::Cause::ValuesNeeded {
+            env: crate::cause::EnvName::new("ci"),
+            rows: Vec::new(),
+        }
+        .into();
+        let out = crate::json::finish(&status_document(), Err(&e), false);
         assert!(parse::<RowsDoc>(&out).is_ok());
     }
 
@@ -228,8 +231,7 @@ mod documents_round_trip {
         };
         let message = cause.message();
         let e = crate::error::Error::from(cause);
-        let step = e.step("opv ready", "opv ready");
-        let out = crate::json::finish(b"", Err((&e, &step)), false);
+        let out = crate::json::finish(b"", Err(&e), false);
         assert!(matches!(parse::<ReadyDoc>(&out), Err(Failure::Error(d)) if d.message == message));
     }
 }
@@ -245,7 +247,6 @@ fn a_failure_shows_its_steps() {
     let f = Failure::Error(ErrorDoc {
         code: "op_not_signed_in".into(),
         message: "1Password CLI is not signed in".into(),
-        detail: Vec::new(),
         act: Some("unlock the 1Password app".into()),
         next: Some("opv login".into()),
     });

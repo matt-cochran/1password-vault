@@ -218,8 +218,8 @@ fn a_failure_after_an_approved_sync_steps_to_the_plan_of_its_scope() {
     .into();
     assert_eq!(
         after_used_approval(e, "0a1b2c3d", &east())
-            .step("", "")
-            .next,
+            .next_text()
+            .unwrap_or_default(),
         "opv plan prod --target east --rotate api/JWT_KEY"
     );
 }

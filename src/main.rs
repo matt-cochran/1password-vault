@@ -1746,7 +1746,7 @@ fn main() -> ExitCode {
     // the tool's whole scrubbed reply, and the reply box is drawn in UTF-8 only when the
     // terminal's locale is (§7.3).
     let render = Render {
-        inv: opv::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>()),
+        inv: None,
         verbose: cli.verbose,
         utf8: locale_is_utf8(),
         // D2 (A8): the error is coloured only where stderr is a terminal that takes it.
@@ -1757,10 +1757,7 @@ fn main() -> ExitCode {
         ),
     };
     let target_options = target_fields(&matches);
-    let rerun = rerun_command(&cli.cmd);
-    let help = help_command();
     let json = cli.cmd.json_mode();
-    opv::runner::signals::set_rerun(&rerun);
     opv::runner::signals::set_json(json.is_some());
     // The MCP server owns stdin and stdout for the whole session: it runs before opv takes
     // the stdout lock below, which its runtime's writer thread would otherwise wait on
@@ -1769,8 +1766,7 @@ fn main() -> ExitCode {
         return match mcp_serve(project) {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {
-                let step = e.step(&rerun, &help);
-                let _ = write!(opv::output::stderr(), "{}", render.text(&e, &step, None));
+                let _ = write!(opv::output::stderr(), "{}", render.text(&e));
                 ExitCode::from(exit_byte(e.exit_code()))
             }
         };
@@ -1832,13 +1828,11 @@ fn main() -> ExitCode {
         }
         break res;
     };
-    let step = res.as_ref().err().map(|e| e.step(&rerun, &help));
     if let Some(raw) = json {
-        let framed = match (&res, &step) {
-            (Err(e), Some(step)) => {
-                render.document(e, opv::json::finish(&body, Err((e, step)), raw))
-            }
-            _ => opv::json::finish(&body, Ok(()), raw),
+        let inv = render.inv.clone().unwrap_or_else(opv::error::invocation);
+        let framed = match &res {
+            Err(e) => opv::json::finish_with(&body, Err(e), raw, &inv, render.verbose),
+            Ok(_) => opv::json::finish(&body, Ok(()), raw),
         };
         let _ = opv::output::OutputGuard::new(&mut stdout).write_all(&framed);
     }
@@ -1848,26 +1842,22 @@ fn main() -> ExitCode {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(exit_byte(code)),
         Err(e) => {
-            // Error messages never contain secret values (SR-1). The failed call's stderr
-            // follows the error's first line only as a scrubbed excerpt of at most 5 lines
-            // (NR-31); `Do:` (when a person must act) and the runnable `Next:` line are
-            // always last (NR-19, A3). Under `--json` the same text still goes to stderr.
-            let excerpt = opv::runner::take_failure_excerpt();
-            let step = step.unwrap_or_else(|| e.step(&rerun, &help));
-            let _ = write!(
-                opv::output::stderr(),
-                "{}",
-                render.text(&e, &step, excerpt.as_ref())
-            );
+            // Error messages never contain secret values (SR-1). The failed call's reply
+            // is the cause's scrubbed evidence box (NR-31, §7.3); `Do:` (when a person must
+            // act) and the `Next:` line are always last (NR-19, A3). Under `--json` the
+            // same text still goes to stderr.
+            let _ = write!(opv::output::stderr(), "{}", render.text(&e));
             ExitCode::from(exit_byte(e.exit_code()))
         }
     }
 }
 
-/// How a failure is shown: the invocation its steps are rendered against, and what the
-/// person asked for (`--verbose`) or the terminal supports (UTF-8). Built once in [`main`].
+/// How a failure is shown: the invocation its steps are rendered against (the process's
+/// own, [`opv::error::invocation`], when `None`: an internal step renders against the
+/// person's `opv run`, X25), and what the person asked for (`--verbose`) or the terminal
+/// supports (UTF-8). Built once in [`main`].
 struct Render {
-    inv: opv::cause::Invocation,
+    inv: Option<opv::cause::Invocation>,
     verbose: bool,
     utf8: bool,
     /// Whether stderr takes colour (`--color`, a terminal, `NO_COLOR`), A8.
@@ -1875,44 +1865,11 @@ struct Render {
 }
 
 impl Render {
-    /// The failure's text for stderr: a catalog cause through the one renderer with this
-    /// run's invocation, `--verbose` and UTF-8 support; a Legacy error as before.
-    fn text(
-        &self,
-        e: &Error,
-        step: &opv::error::Step,
-        excerpt: Option<&opv::scrub::Excerpt>,
-    ) -> String {
-        match e.cause() {
-            Some((cause, upstream)) => opv::cause::render::render_text(
-                cause,
-                upstream,
-                &self.inv,
-                self.verbose,
-                self.utf8,
-                self.colour,
-            ),
-            None => opv::error::report_with(e, step, excerpt),
-        }
-    }
-
-    /// The framed `--json` failure document with a catalog cause's `error` object rendered
-    /// against this run's invocation and `--verbose` (the full scrubbed upstream reply);
-    /// any other document is returned as framed.
-    fn document(&self, e: &Error, framed: Vec<u8>) -> Vec<u8> {
-        let Some((cause, upstream)) = e.cause() else {
-            return framed;
-        };
-        let Ok(serde_json::Value::Object(mut doc)) = serde_json::from_slice(&framed) else {
-            return framed;
-        };
-        let error = opv::cause::render::document(cause, upstream, &self.inv, self.verbose);
-        doc.insert("next".into(), error["next"].clone());
-        doc.insert("do".into(), error["do"].clone());
-        doc.insert("error".into(), error);
-        let mut text = serde_json::Value::Object(doc).to_string();
-        text.push('\n');
-        text.into_bytes()
+    /// The failure's text for stderr: its cause through the one renderer, with this run's
+    /// invocation, `--verbose`, UTF-8 support and colour.
+    fn text(&self, e: &Error) -> String {
+        let inv = self.inv.clone().unwrap_or_else(opv::error::invocation);
+        opv::error::render_text(e, &inv, self.verbose, self.utf8, self.colour)
     }
 }
 
@@ -2003,56 +1960,38 @@ fn usage_error(e: clap::Error) -> ExitCode {
             args.iter().any(|a| a == "--json"),
         );
     }
+    let json = args.iter().any(|a| a == "--json");
     // FR-60: a removed form names its replacement exactly.
-    let removed = removed_init_target(&args);
-    let help = match &removed {
-        Some((message, next)) => {
-            let _ = writeln!(opv::output::stderr(), "error: {message}");
-            next.clone()
-        }
-        None => {
-            let _ = e.print();
-            help_command()
-        }
-    };
-    let _ = write!(opv::output::stderr(), "{}", opv::error::next_line(&help));
-    // `--json` asked for one document on stdout even when the command line is wrong (A1).
-    if args.iter().any(|a| a == "--json") {
-        let text = e.render().to_string();
-        let message = match removed {
-            Some((message, _)) => message,
-            None => text
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim_start_matches("error: ")
-                .to_string(),
-        };
-        let code = opv::error::Code::Usage;
-        let step = opv::error::Step {
-            action: None,
-            next: help,
-        };
-        let doc = serde_json::json!({
-            "schema_version": opv::json::SCHEMA_VERSION,
-            "ok": false,
-            "exit_code": e.exit_code(),
-            "next": step.next,
-            "do": null,
-            "error": opv::error::error_object(
-                code.as_str(),
-                // Exit 2's category, as every other usage error reports it (02.20).
-                "config",
-                &message,
-                Vec::new(),
-                code.retry(),
-                code.human_required(),
-                &step,
-            ),
-        });
-        let _ = writeln!(opv::output::stdout(), "{doc}");
+    if let Some(instead) = removed_init_target(&args) {
+        return usage_cause(
+            opv::cause::Cause::Usage {
+                problem: opv::cause::UsageProblem::Removed {
+                    what: "opv init writes no target since 0.7.0: --target, --target-name and \
+                           the provider options were removed; add the target with opv target add",
+                    instead,
+                },
+            },
+            json,
+        );
     }
-    ExitCode::from(exit_byte(e.exit_code()))
+    // Any other command line clap refuses: clap's own first line (it names the argument it
+    // could not place), and the help of the deepest subcommand named (M10).
+    let text = e.render().to_string();
+    let message = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("error: ")
+        .to_string();
+    usage_cause(
+        opv::cause::Cause::Usage {
+            problem: opv::cause::UsageProblem::Rejected {
+                message,
+                help: help_path(&args),
+            },
+        },
+        json,
+    )
 }
 
 /// The command `args` meant, when clap's error names a fix that parses (09.03, 09.83): the
@@ -2148,7 +2087,7 @@ fn usage_cause(cause: opv::cause::Cause, json: bool) -> ExitCode {
 /// `opv init` given a target option removed in 0.7.0 (`--target`, `--target-name`, a
 /// provider option; FR-56, FR-60): the refusal and its replacement, `opv target add` with
 /// the same environment, name and options (its help when the name is not given).
-fn removed_init_target(args: &[String]) -> Option<(String, String)> {
+fn removed_init_target(args: &[String]) -> Option<opv::cause::Cmd> {
     use opv::adapters::registry;
     use opv::provider::init_flag;
     let at = args.iter().position(|a| a == "init")?;
@@ -2186,85 +2125,42 @@ fn removed_init_target(args: &[String]) -> Option<(String, String)> {
         match flag {
             "target" => provider = Some(value),
             "target-name" => name = Some(value),
-            _ => given.push(format!(" --{flag} {}", shell_word(&value))),
+            _ => given.extend([format!("--{flag}"), value]),
         }
     }
     if name.is_none() && provider.is_none() && given.is_empty() {
         return None;
     }
-    let next = match (env, name) {
+    let args = match (env, name) {
         (Some(env), Some(name)) => {
-            let mut c = format!("opv target add {} {}", shell_word(&env), shell_word(&name));
+            let mut a = vec![env, name];
             if let Some(p) = provider {
-                c.push_str(&format!(" --provider {}", shell_word(&p)));
+                a.extend(["--provider".to_string(), p]);
             }
-            c.extend(given);
-            c
+            a.extend(given);
+            a
         }
-        _ => "opv target add --help".to_string(),
+        _ => vec!["--help".to_string()],
     };
-    Some((
-        "opv init writes no target since 0.7.0: --target, --target-name and the provider \
-         options were removed; add the target with opv target add"
-            .to_string(),
-        next,
-    ))
+    Some(opv::cause::Cmd {
+        command: vec!["target".into(), "add".into()],
+        args,
+    })
 }
 
-/// `opv <command> --help` for the subcommand on the command line, else `opv --help`.
-fn help_command() -> String {
-    help_command_for(&std::env::args().skip(1).collect::<Vec<_>>())
-}
-
-/// [`help_command`] for `args`: the deepest subcommand named (`opv config check --help`,
-/// M10), in order.
-fn help_command_for(args: &[String]) -> String {
+/// The deepest subcommand `args` name, in order (`config check`, M10): the help a refused
+/// command line points to. Empty for none (`opv --help`).
+fn help_path(args: &[String]) -> Vec<String> {
     let root = cli_command();
     let mut cmd = &root;
-    let mut path = vec!["opv".to_string()];
+    let mut path = Vec::new();
     for a in args {
         if let Some(sub) = cmd.get_subcommands().find(|s| s.get_name() == a) {
             path.push(a.clone());
             cmd = sub;
         }
     }
-    path.push("--help".to_string());
-    path.join(" ")
-}
-
-/// The command line as typed, for "run it again" next steps. Arguments are names, flags
-/// and paths, never values (SR-3); `run` and `login` carry the user's own command, which
-/// is never repeated: for `run` the step is the `check` of the same keys, for `login` a
-/// plain `opv login` for the same environment.
-fn rerun_command(cmd: &Cmd) -> String {
-    match cmd {
-        Cmd::Run { env, product, .. } => {
-            let mut c = format!("opv check {}", shell_word(env));
-            if let Some(p) = product {
-                c.push_str(&format!(" --product {}", shell_word(p)));
-            }
-            return c;
-        }
-        // Internal steps under `op run` or SSH: the person never typed them (#157 sweep).
-        Cmd::LocalDelivery { .. } | Cmd::RemoteSend { .. } | Cmd::RemoteReceive => {
-            return "opv doctor".to_string();
-        }
-        Cmd::Login { env, .. } => {
-            return match env {
-                Some(e) => format!("opv login {}", shell_word(e)),
-                None => "opv login".to_string(),
-            };
-        }
-        // An approval is single use and is spent before the sync starts: the step reads
-        // what remains in the same scope, never `--approved <used id>` again (02.14).
-        Cmd::Sync(a) if a.approved.is_some() => {
-            if let Some(plan) = sync_as_plan(&std::env::args().skip(1).collect::<Vec<_>>()) {
-                return opv::cause::render::cmd_text(&plan);
-            }
-        }
-        _ => {}
-    }
-    typed_command()
+    path
 }
 
 /// The read form of a typed `opv sync …`: `opv plan` with its environment and every flag
@@ -2357,69 +2253,6 @@ fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
         }
     };
     Some(Cause::Usage { problem }.into())
-}
-
-/// The command line as the user typed it, each word quoted for this shell.
-fn typed_command() -> String {
-    let mut parts = vec!["opv".to_string()];
-    parts.extend(std::env::args().skip(1).map(|a| shell_word(&a)));
-    parts.join(" ")
-}
-
-/// The read-only command that loads the configuration again for the same environment, the
-/// `Next:` step once a configuration error is fixed (H10). A writing command is never
-/// repeated: `sync` becomes `plan`, `run` becomes `check`, `item skeleton` and `config
-/// export` become `doctor --env`. `config` is the `--config` path when one was given.
-fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
-    let mut c = "opv".to_string();
-    if let Some(p) = config {
-        c.push_str(" --config ");
-        c.push_str(&shell_word(&p.display().to_string()));
-    }
-    let with_product = |verb: &str, env: &str, product: &Option<String>| match product {
-        Some(p) => format!("{verb} {} --product {}", shell_word(env), shell_word(p)),
-        None => format!("{verb} {}", shell_word(env)),
-    };
-    let tail = match cmd {
-        Cmd::Sync(a) => with_product("plan", &a.env, &a.product),
-        Cmd::Plan(a) => with_product("plan", &a.env, &a.product),
-        Cmd::Run { env, product, .. } | Cmd::Check { env, product, .. } => {
-            with_product("check", env, product)
-        }
-        Cmd::Status {
-            env: Some(env),
-            product,
-            ..
-        } => with_product("status", env, product),
-        Cmd::Explain {
-            target,
-            target_name,
-            env,
-            ..
-        } => {
-            let mut c = match (target, target_name) {
-                (Some(t), _) => format!("explain {}", shell_word(t)),
-                (None, Some(n)) => format!("explain --target {}", shell_word(n)),
-                _ => "explain".to_string(),
-            };
-            if let Some(e) = env {
-                c.push_str(&format!(" --env {}", shell_word(e)));
-            }
-            c
-        }
-        Cmd::Item(ItemCmd::Skeleton { env, .. })
-        | Cmd::Config(ConfigCmd::Export { env: Some(env), .. }) => {
-            format!("doctor --env {}", shell_word(env))
-        }
-        _ => "status".to_string(),
-    };
-    // A `--json` run's re-check is read as a document too (09.22).
-    let json = if cmd.json_mode().is_some() {
-        " --json"
-    } else {
-        ""
-    };
-    format!("{c} {tail}{json}")
 }
 
 use opv::error::shell_word;
@@ -2665,7 +2498,7 @@ fn run(
     } = &cli.cmd
     {
         use opv::app::{login, setup_runtime};
-        setup_runtime::Console::require_terminal("login", &typed_command())?;
+        setup_runtime::Console::require_terminal("login")?;
         let here = std::env::current_dir().unwrap_or_default();
         let probe = ProcessRunner::new(
             Budget::starting_now(std::time::Duration::from_secs(cli.timeout)),
@@ -2749,7 +2582,7 @@ fn run(
     } = &cli.cmd
     {
         use opv::app::{setup, setup_recipe, setup_runtime};
-        setup_runtime::Console::require_terminal("setup", &typed_command())?;
+        setup_runtime::Console::require_terminal("setup")?;
         let start = std::env::current_dir().map_err(cwd_err)?;
         let recipe = recipe
             .clone()
@@ -2906,7 +2739,7 @@ fn run(
         } => {
             // 09.27: the input is checked before the terminal is asked for.
             opv::app::approve::check_structural_id(plan_id)?;
-            opv::app::setup_runtime::Console::require_terminal("approve", &typed_command())?;
+            opv::app::setup_runtime::Console::require_terminal("approve")?;
             let here = std::env::current_dir().unwrap_or_default();
             let scope = opv::app::structure::scope(&here, &r)?;
             r.use_account(Some(scope.account.clone()));
@@ -2967,7 +2800,7 @@ fn run(
     let source = found.as_ref().ok().map(|f| f.store().describe());
     if let (Cmd::Config(ConfigCmd::Edit), Ok(f)) = (&cli.cmd, &found) {
         use opv::app::setup_runtime;
-        setup_runtime::Console::require_terminal("config edit", &typed_command())?;
+        setup_runtime::Console::require_terminal("config edit")?;
         return config_cmd::edit(f, &r, &mut config_cmd::TerminalUi, out).map(|()| 0);
     }
     if let (
@@ -3011,10 +2844,7 @@ fn run(
             config_store::Found::File { store, .. } => store.path.clone(),
             config_store::Found::Manifest(m) => return Err(credentials_need_a_file(&m.title)),
         };
-        opv::app::setup_runtime::Console::require_terminal(
-            "target credentials --create",
-            &typed_command(),
-        )?;
+        opv::app::setup_runtime::Console::require_terminal("target credentials --create")?;
         let project =
             opv::app::personal::project_name(&r, &std::env::current_dir().unwrap_or_default());
         return target_credentials::run(
@@ -3029,7 +2859,6 @@ fn run(
         )
         .map(|()| 0);
     }
-    let manifest = matches!(found, Ok(config_store::Found::Manifest(_)));
     // D2 (A10): steps a manifest project refuses (file-only commands) are never rendered.
     if let Ok(config_store::Found::Manifest(m)) = &found {
         opv::cause::situation::note_config_source(opv::cause::ConfigSource::Manifest {
@@ -3061,18 +2890,6 @@ fn run(
     // 09.03b: no configuration at all starts the environment the command named.
     let env_named = cmd.env().map(|(e, _)| e.to_string());
     let loaded = loaded.map_err(|e| init_for(e, env_named.as_deref()));
-    // A file that does not load: re-check it with a read-only command (H10). A manifest
-    // has no file to fix in place: `opv config edit` opens it (FR-44).
-    let loaded = match loaded {
-        Err(e @ Error::Config(_)) if manifest => Err(e.or_next(|| "opv config edit".into())),
-        Err(e) if !matches!(cmd, Cmd::Doctor { .. }) => {
-            let flag = (config_source == ConfigSource::Flag)
-                .then_some(cli.config.as_deref())
-                .flatten();
-            Err(e.or_next(|| recheck_command(&cmd, flag)))
-        }
-        other => other,
-    };
     apply_product_env(&mut cmd, &loaded);
     // Every call for the environment uses its 1Password account, and commands that reach
     // the target sign in with its deploy credentials for this run only (FR-40). Dropped
@@ -3142,7 +2959,7 @@ fn run(
             // #139: values leave this machine only when a person runs it in their terminal;
             // no MCP tool or flag runs a remote delivery. 09.42: the profile is checked first.
             run_cmd::check_remote(&fleet, env, product.as_deref(), role.as_deref(), profile)?;
-            opv::app::setup_runtime::Console::require_terminal("run --remote", &typed_command())?;
+            opv::app::setup_runtime::Console::require_terminal("run --remote")?;
             let mut retry = confirm_retry(env, product.as_deref(), role.as_deref());
             retry.push_str(&format!(" --remote {}", shell_word(profile)));
             run_cmd::require_confirmation(&fleet, env, confirm.as_deref(), &retry)?;
@@ -3517,6 +3334,7 @@ fn bootstrap_without_file(
         _ => opv::cause::Cause::ConfigNotFound {
             searched_from: here.to_path_buf(),
             env: None,
+            manifest: None,
         }
         .into(),
     }
@@ -3616,10 +3434,7 @@ fn run_other(
             secret_name,
             ..
         } => {
-            opv::app::setup_runtime::Console::require_terminal(
-                "access --create",
-                &typed_command(),
-            )?;
+            opv::app::setup_runtime::Console::require_terminal("access --create")?;
             let dir = std::env::current_dir().unwrap_or_default();
             let project = match project.as_deref() {
                 Some(name) => config_store::default_project(Some(name), None, &dir)?,
@@ -3724,7 +3539,7 @@ fn run_other(
             prune,
             rotate,
         } => {
-            opv::app::setup_runtime::Console::require_terminal("approve", &typed_command())?;
+            opv::app::setup_runtime::Console::require_terminal("approve")?;
             let here = std::env::current_dir().unwrap_or_default();
             let (project, account) = opv::app::structure::binding(&here, r)?;
             let scope = opv::app::approve::SyncScope {
@@ -4123,7 +3938,7 @@ fn init_args(
 fn sign_in_here() -> Result<bool, Error> {
     use opv::app::setup::Backend as _;
     use opv::app::setup_runtime::{Console, Runtime};
-    if Console::require_terminal("", "").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
+    if Console::require_terminal("").is_err() || !io::IsTerminal::is_terminal(&io::stderr()) {
         return Ok(false);
     }
     let here = std::env::current_dir().unwrap_or_default();
@@ -4338,23 +4153,21 @@ fn init_for(e: Error, env: Option<&str>) -> Error {
     let Some(env) = env else {
         return e;
     };
-    if e.code() != opv::error::Code::ConfigNotFound {
-        return e;
-    }
     match e.cause() {
         Some((
             opv::cause::Cause::ConfigNotFound {
                 searched_from,
                 env: None,
+                manifest,
             },
             _,
         )) => opv::cause::Cause::ConfigNotFound {
             searched_from: searched_from.clone(),
             env: Some(opv::cause::EnvName::new(env)),
+            manifest: manifest.clone(),
         }
         .into(),
-        Some(_) => e,
-        None => e.with_next(format!("opv init {}", shell_word(env))),
+        _ => e,
     }
 }
 
@@ -4728,27 +4541,6 @@ mod tests {
         }
     }
 
-    /// H10: a configuration error after `sync` is re-checked with `plan`, never by writing.
-    #[test]
-    fn config_error_next_for_sync_is_plan() {
-        let cli =
-            Cli::try_parse_from(["opv", "sync", "prod", "--deploy", "--product", "api"]).unwrap();
-        assert_eq!(
-            recheck_command(&cli.cmd, None),
-            "opv plan prod --product api"
-        );
-    }
-
-    /// H10: the re-check keeps an explicit --config path.
-    #[test]
-    fn config_error_next_keeps_the_config_flag() {
-        let cli = Cli::try_parse_from(["opv", "status", "prod"]).unwrap();
-        assert_eq!(
-            recheck_command(&cli.cmd, Some(std::path::Path::new("ops/secrets.toml"))),
-            "opv --config ops/secrets.toml status prod"
-        );
-    }
-
     /// A10: the agent guide is a command.
     #[test]
     fn guide_agent_parses() {
@@ -4790,8 +4582,8 @@ mod tests {
     #[test]
     fn usage_help_names_the_nested_subcommand() {
         assert_eq!(
-            help_command_for(&words("config check --json")),
-            "opv config check --help"
+            help_path(&words("config check --json")),
+            ["config", "check"]
         );
     }
 
@@ -4826,7 +4618,7 @@ mod tests {
     #[test]
     fn credentials_create_on_a_manifest_points_at_the_manifest_editor() {
         let e = credentials_need_a_file("opv · app");
-        assert_eq!(e.step("", "").next, "opv config edit");
+        assert_eq!(e.next_text().unwrap_or_default(), "opv config edit");
     }
 
     /// 02.01 (S1): no fix makes the same command succeed on a manifest, so it is never
@@ -4869,7 +4661,7 @@ mod tests {
     fn skill_install_without_a_home_names_the_project_by_its_path() {
         let e = home_missing(std::path::Path::new("/work/app"), SkillTarget::All, false);
         assert_eq!(
-            e.step("opv skill install --user", "").next,
+            e.next_text().unwrap_or_default(),
             "opv skill install --project /work/app"
         );
     }
@@ -4957,13 +4749,6 @@ mod tests {
         assert!(help.contains("a write after 2 minutes"), "{help}");
     }
 
-    /// 09.22: a `--json` run's re-check keeps `--json`.
-    #[test]
-    fn config_error_next_keeps_json() {
-        let cli = Cli::try_parse_from(["opv", "status", "prod", "--json"]).unwrap();
-        assert_eq!(recheck_command(&cli.cmd, None), "opv status prod --json");
-    }
-
     /// 02.16: init and target add say they also create 1Password vaults or items.
     #[test]
     fn schema_says_init_also_writes_1password() {
@@ -4997,7 +4782,7 @@ mod tests {
 
     fn render_with(verbose: bool, utf8: bool) -> Render {
         Render {
-            inv: opv::cause::Invocation::from_cli(&words("opv status prod")),
+            inv: Some(opv::cause::Invocation::from_cli(&words("opv status prod"))),
             verbose,
             utf8,
             colour: false,
@@ -5005,11 +4790,7 @@ mod tests {
     }
 
     fn rendered(verbose: bool, utf8: bool) -> String {
-        let step = opv::error::Step {
-            action: None,
-            next: "opv status prod".into(),
-        };
-        render_with(verbose, utf8).text(&eight_line_failure(), &step, None)
+        render_with(verbose, utf8).text(&eight_line_failure())
     }
 
     /// --verbose shows the tool's whole scrubbed reply (design §7.3, owner decision).
@@ -5030,12 +4811,10 @@ mod tests {
 
     #[test]
     fn verbose_failure_document_carries_the_whole_upstream_reply() {
-        let framed =
-            br#"{"schema_version":1,"ok":false,"exit_code":70,"next":null,"do":null,"error":{}}"#;
-        let out = render_with(true, true).document(&eight_line_failure(), framed.to_vec());
-        let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let inv = opv::cause::Invocation::from_cli(&words("opv status prod"));
+        let error = opv::error::document(&eight_line_failure(), &inv, true);
         assert_eq!(
-            doc["error"]["evidence"]["upstream"]["said"]
+            error["evidence"]["upstream"]["said"]
                 .as_array()
                 .map(Vec::len),
             Some(8)

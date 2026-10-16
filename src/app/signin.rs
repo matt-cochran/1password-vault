@@ -137,7 +137,6 @@ fn deploy_failed(e: Error, reference: &ItemRef) -> Error {
             }
             Error::Catalog(Box::new(cause), upstream)
         }
-        e @ Error::Auth(_) => e.with_code(crate::error::Code::DeployCredentialsFailed),
         e => e,
     }
 }

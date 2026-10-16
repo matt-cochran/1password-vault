@@ -254,6 +254,8 @@ pub enum ResourceKind {
     KeyVaultSecret,
     /// An Azure subscription.
     Subscription,
+    /// A Kubernetes Secret (its scope names the namespace).
+    Secret,
 }
 
 /// Who acted: the advice addresses this principal (X22).

@@ -162,9 +162,6 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// How the error for a missing configuration starts; `doctor` keys its next step on it.
-pub const NOT_FOUND: &str = "no secrets.toml found in ";
-
 /// No `secrets.toml` in `start` or a parent (P3): the first-run router, offering both
 /// starting paths and the explicit `--config`.
 pub fn not_found(start: &Path) -> Error {
@@ -172,6 +169,7 @@ pub fn not_found(start: &Path) -> Error {
     crate::cause::Cause::ConfigNotFound {
         searched_from: start.to_path_buf(),
         env: None,
+        manifest: None,
     }
     .into()
 }

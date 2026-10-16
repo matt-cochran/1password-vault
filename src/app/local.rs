@@ -17,8 +17,8 @@ pub fn select(
     // lives in `super::pick_product`. `doctor` (required = false) keeps the whole
     // environment when the choice is ambiguous instead of failing.
     let chosen = match product {
-        Some(p) => Some(super::pick_product(fleet, env, Some(p), "check")?),
-        None => match super::pick_product(fleet, env, None, "check") {
+        Some(p) => Some(super::pick_product(fleet, env, Some(p))?),
+        None => match super::pick_product(fleet, env, None) {
             Ok(p) => Some(p),
             Err(_) if !required => None,
             Err(e) => return Err(e),
@@ -140,7 +140,7 @@ pub fn check(
         writeln!(out, "{line}").map_err(write_err)?;
     }
     if findings > 0 {
-        Err(super::findings_error(findings, &plan.rows, env))
+        Err(super::findings_error(&plan.rows, env))
     } else {
         Ok(())
     }
@@ -186,11 +186,7 @@ mod tests {
         );
         let r = FakeRunner::new([item(&[])]);
         let e = check(&f, "dev", Some("allumata"), &r, &mut Vec::new(), true).unwrap_err();
-        assert!(
-            e.step("", "")
-                .action
-                .is_some_and(|a| a.contains("click Edit"))
-        );
+        assert!(e.do_text().is_some_and(|a| a.contains("click Edit")));
     }
 
     #[test]

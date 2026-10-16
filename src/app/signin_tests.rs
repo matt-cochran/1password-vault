@@ -222,7 +222,7 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
     });
     let e = res.expect_err("signed out");
     assert_eq!(
-        e.step("opv status prod", "-").action.as_deref(),
+        e.do_text().as_deref(),
         Some("sign in to 1Password"),
         "{e:?}"
     );
@@ -251,19 +251,15 @@ fn doctor_deploy_failure_text_has_no_excerpt() {
 fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
     let e = doctor_signed_out_deploy_failure();
     assert_eq!(
-        e.step("opv doctor", "-").action.as_deref(),
+        e.do_text().as_deref(),
         Some("sign in to 1Password"),
         "{e:?}"
     );
 }
 
+/// What `doctor --env` gets from a failed per-target deploy sign-in: the error, with the
+/// failed call's scrubbed reply as its evidence (NR-31, M2).
 fn doctor_signed_out_deploy_failure() -> Error {
-    doctor_signed_out_failure().0
-}
-
-/// What `doctor --env` gets from a failed per-target deploy sign-in: the error, and the
-/// failed call's scrubbed excerpt taken right away, as doctor takes it (NR-31, M2).
-fn doctor_signed_out_failure() -> (Error, Option<crate::scrub::Excerpt>) {
     let fl = fleet_with_credentials();
     let r = FakeRunner::new([]);
     r.push_with_stderr(crate::runner::Output::failure(1), "[ERROR] not signed in");
@@ -276,12 +272,10 @@ fn doctor_signed_out_failure() -> (Error, Option<crate::scrub::Excerpt>) {
             br#"[{"url":"x"}]"#.to_vec(),
         )));
     let tty = Host::from_env(&FakeEnv::new("linux").shell("/bin/bash").tty());
-    let e = crate::host::with_test_host(tty, || {
+    crate::host::with_test_host(tty, || {
         open_targeted(&fl, "prod", None, &r, Reach::Target).err()
     })
-    .expect("signed out");
-    let excerpt = crate::runner::take_failure_excerpt().filter(|_| e.from_external_call());
-    (e, excerpt)
+    .expect("signed out")
 }
 
 // ---- FR-41 plan ids on deploy-credential runs and manifest configurations ----

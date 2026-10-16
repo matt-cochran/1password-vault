@@ -107,7 +107,11 @@ fn structure_plan_text_points_at_the_approve_command() {
 // structure apply --------------------------------------------------------------------------
 
 fn refuse(name: &str) -> Result<(), Error> {
-    Err(Error::Policy(format!("no approval for {name}").into()).with_code(Code::ApprovalRequired))
+    Err(crate::cause::Cause::ApprovalMissing {
+        plan: crate::cause::PlanId::new(name),
+        scope: crate::cause::PlanScope::Structural,
+    }
+    .into())
 }
 
 #[test]
@@ -218,7 +222,7 @@ fn a_stale_plan_steps_to_the_new_structural_plan() {
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.step("", "").next, "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }
 
 // config describe --------------------------------------------------------------------------
@@ -320,5 +324,5 @@ fn env_add_without_a_file_steps_to_init_of_that_environment() {
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.step("", "").next, "opv init staging");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv init staging");
 }

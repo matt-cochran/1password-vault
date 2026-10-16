@@ -745,6 +745,7 @@ fn resource_kind(k: ResourceKind) -> &'static str {
         ResourceKind::ExternalStore => "external store",
         ResourceKind::KeyVaultSecret => "Key Vault secret",
         ResourceKind::Subscription => "subscription",
+        ResourceKind::Secret => "Secret",
     }
 }
 
@@ -1226,16 +1227,39 @@ impl Cause {
     pub fn message(&self) -> String {
         use Cause::*;
         match self {
-            ConfigNotFound { searched_from, env } => match env {
-                Some(env) => format!(
-                    "no opv configuration for environment {env} was found in {} or any folder above it",
-                    searched_from.display()
-                ),
-                None => format!(
-                    "no opv configuration was found in {} or any folder above it",
-                    searched_from.display()
-                ),
-            },
+            ConfigNotFound {
+                searched_from,
+                env,
+                manifest,
+            } => {
+                let manifest = match manifest {
+                    None => String::new(),
+                    Some(ManifestSearch {
+                        repo: Some(repo),
+                        account: Some(a),
+                    }) => {
+                        format!(", and no 1Password manifest in account {a} is tagged for {repo}")
+                    }
+                    Some(ManifestSearch {
+                        repo: Some(repo),
+                        account: None,
+                    }) => format!(", and no 1Password manifest is tagged for {repo}"),
+                    Some(ManifestSearch { repo: None, .. }) => {
+                        ", and there is no repository remote to match a 1Password manifest by"
+                            .to_string()
+                    }
+                };
+                match env {
+                    Some(env) => format!(
+                        "no opv configuration for environment {env} was found in {} or any folder above it{manifest}",
+                        searched_from.display()
+                    ),
+                    None => format!(
+                        "no opv configuration was found in {} or any folder above it{manifest}",
+                        searched_from.display()
+                    ),
+                }
+            }
             ConfigSourceMismatch { command, manifest } => format!(
                 "opv {} works on a secrets.toml, but this project's configuration is the 1Password manifest {manifest}",
                 command.0
@@ -1415,6 +1439,8 @@ impl Cause {
                     "{} already exists, and opv replaces it only with --force",
                     path.display()
                 ),
+                UsageProblem::Removed { what, .. } => what.to_string(),
+                UsageProblem::Rejected { message, .. } => message.clone(),
             },
             AlreadyDeclared { kind, name } => {
                 format!("{} {name} is already declared", name_kind(*kind))
@@ -2045,6 +2071,37 @@ impl Cause {
                 system.label(),
                 create_kind(*kind)
             ),
+            SourceOnly { product, .. } => format!(
+                "product {product} is source-only (source_only = true): it holds shared values \
+                 for other products' keys and is never run on its own"
+            ),
+            TitleLookup {
+                kind,
+                title,
+                vault,
+                matches,
+                candidates,
+            } => {
+                let place = match vault {
+                    Some(v) => format!(" in vault {v}"),
+                    None => String::new(),
+                };
+                let listed = if candidates.is_empty() {
+                    "there are none to choose from".to_string()
+                } else {
+                    format!("candidates: {}", list(candidates))
+                };
+                match matches {
+                    0 => format!(
+                        "no {} is titled {title:?}{place} (exact, case-sensitive match); {listed}",
+                        resource_kind(*kind)
+                    ),
+                    n => format!(
+                        "{n} {}s are titled {title:?}{place}; {listed}",
+                        resource_kind(*kind)
+                    ),
+                }
+            }
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
     }
@@ -2244,8 +2301,14 @@ impl Cause {
             ConfigNotFound {
                 searched_from: _,
                 env,
+                manifest: _,
             } => plan(
-                None,
+                // P3: the first-run router's other starting paths.
+                inspect(
+                    "start one with opv init, run opv setup when the project ships opv.setup.toml, \
+                     point to one with --config <path>, or list the manifests in your other \
+                     accounts with opv projects",
+                ),
                 match env {
                     Some(e) => Next::Run(cmd(&["init"], &[e.as_str()])),
                     None => Next::Check(cmd(&["init"], &["--help"])),
@@ -2526,7 +2589,18 @@ impl Cause {
                         Some(cmd) => run_or_handoff(cmd),
                         None => help_of(inv),
                     },
-                    UsageProblem::UseInstead { command } => run_or_handoff(command.clone()),
+                    UsageProblem::UseInstead { command }
+                    | UsageProblem::Removed {
+                        instead: command, ..
+                    } => run_or_handoff(command.clone()),
+                    UsageProblem::Rejected { help, .. } => {
+                        let mut command = help.clone();
+                        command.push("--help".into());
+                        Next::Check(Cmd {
+                            command,
+                            args: Vec::new(),
+                        })
+                    }
                     // F4: replacing a file is the person's call.
                     UsageProblem::FileExists { .. } => {
                         Next::Handoff(with_child(with_flag(inv_cmd(inv), "--force"), inv))
@@ -2802,6 +2876,7 @@ impl Cause {
                     | ResourceKind::KubeContext
                     | ResourceKind::Repository
                     | ResourceKind::KeyVaultSecret
+                    | ResourceKind::Secret
                     | ResourceKind::Subscription => format!(
                         "ask an owner at {} to set up {}",
                         system.label(),
@@ -3744,6 +3819,51 @@ impl Cause {
                         }
                     }
                 },
+            ),
+            SourceOnly {
+                product,
+                env,
+                reader,
+            } => {
+                let substitute = reader
+                    .as_ref()
+                    .and_then(|q| substituted(inv, product.as_str(), q.as_str()))
+                    .and_then(read_form);
+                let next = match (substitute, env) {
+                    (Some(c), _) => run_or_handoff(c),
+                    (None, Some(e)) => {
+                        let mut args = vec![e.as_str()];
+                        if let Some(q) = reader {
+                            args.extend(["--product", q.as_str()]);
+                        }
+                        Next::Check(cmd(&["check"], &args))
+                    }
+                    (None, None) => Next::Check(cmd(&["config", "describe"], &[])),
+                };
+                plan(
+                    reader
+                        .as_ref()
+                        .and_then(|q| inspect(format!("name a product that reads it, such as {q}"))),
+                    next,
+                )
+            }
+            TitleLookup {
+                kind,
+                title,
+                matches,
+                ..
+            } => plan(
+                inspect(match matches {
+                    0 => format!(
+                        "create the {} {title:?} in 1Password (opv creates it only for a person signed in with their own account), or give the exact title of one that exists",
+                        resource_kind(*kind)
+                    ),
+                    _ => format!(
+                        "rename all but one {} titled {title:?} in 1Password",
+                        resource_kind(*kind)
+                    ),
+                }),
+                Next::Rerun,
             ),
             Bug { site: _ } => plan(
                 inspect(format!("report this as an opv bug: {ISSUES_URL}")),

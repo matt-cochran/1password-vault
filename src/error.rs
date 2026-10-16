@@ -1,91 +1,36 @@
-//! Typed errors with stable exit codes (FR-10, §6.6), each carrying an optional next step
-//! (NR-19).
+//! Typed errors with stable exit codes (FR-10, §6.6).
+//!
+//! Every failure is a cataloged cause ([`crate::cause::Cause`], design
+//! `docs/design/error-catalog.md`), rendered once by [`crate::cause::render`]: its text on
+//! stderr ([`render_text`]), its `--json` and MCP `error` object ([`document`]). Its `Do:`
+//! and `Next:` come from the cause alone; there is no step override (design §6.1).
 //!
 //! Messages may name keys, references and rules but never secret values (SR-1, FR-15).
-//! Variants therefore carry a [`Msg`] built by callers from plain strings, never a
-//! `SecretValue`.
-//!
-//! Every non-zero exit ends with exactly one `Next: <step>` line, the last line on stderr
-//! ([`report`]). The step is the error's own ([`Error::next_step`]) or, when the error has
-//! none, the category's default chosen by `main` ([`Error::default_next`]).
 
+use std::borrow::Cow;
 use std::fmt;
+
+use crate::cause::{Cause, Invocation, Upstream};
 
 /// Exit code for success, for completeness alongside [`Error::exit_code`].
 pub const EXIT_OK: i32 = 0;
 
-/// An error message and the runnable step that fixes it (NR-19). Names only, never a value.
-///
-/// Built from a `String` or `&str`. By convention a message may end with a line
-/// `  next: <step>` (any case); that line becomes the step and is not part of the text, so
-/// the step is printed once, last, by [`report`].
+/// The text of a Legacy error. Names only, never a value.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Msg {
     text: String,
-    next: Option<String>,
-    /// The stable machine-readable cause (A2); the category's default when `None`.
-    code: Option<Code>,
-    /// The human-only action that comes before `next` (A3), when the error names one.
-    action: Option<String>,
 }
 
 impl Msg {
-    /// The message without its next step.
+    /// The message.
     pub fn text(&self) -> &str {
         &self.text
     }
-
-    /// The next step, when the message names one.
-    pub fn next(&self) -> Option<&str> {
-        self.next.as_deref()
-    }
-
-    /// The human-only action set with [`Error::with_do`], when any.
-    pub fn action(&self) -> Option<&str> {
-        self.action.as_deref()
-    }
-
-    /// True when the text or the next step contains `pat`.
-    pub fn mentions(&self, pat: &str) -> bool {
-        self.text.contains(pat) || self.next.as_deref().is_some_and(|n| n.contains(pat))
-    }
-
-    /// The same message with `f` applied to its text; the next step is kept.
-    pub fn map_text(self, f: impl FnOnce(String) -> String) -> Msg {
-        Msg {
-            text: f(self.text),
-            ..self
-        }
-    }
 }
 
-/// The marker of a trailing next-step line inside a message string.
-const NEXT_MARK: &str = "\n  next: ";
-
 impl From<String> for Msg {
-    fn from(s: String) -> Self {
-        let lower = s.to_ascii_lowercase();
-        match lower.rfind(NEXT_MARK) {
-            Some(at) => {
-                let step = s[at + NEXT_MARK.len()..]
-                    .lines()
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                Msg {
-                    text: s[..at].to_string(),
-                    next: (!step.is_empty()).then_some(step),
-                    code: None,
-                    action: None,
-                }
-            }
-            None => Msg {
-                text: s,
-                next: None,
-                code: None,
-                action: None,
-            },
-        }
+    fn from(text: String) -> Self {
+        Msg { text }
     }
 }
 
@@ -110,28 +55,7 @@ impl fmt::Display for Msg {
 
 impl fmt::Debug for Msg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.next {
-            Some(n) => write!(f, "{:?} next {:?}", self.text, n),
-            None => write!(f, "{:?}", self.text),
-        }
-    }
-}
-
-impl PartialEq<str> for Msg {
-    fn eq(&self, other: &str) -> bool {
-        self.text == other
-    }
-}
-
-impl PartialEq<&str> for Msg {
-    fn eq(&self, other: &&str) -> bool {
-        self.text == *other
-    }
-}
-
-impl PartialEq<String> for Msg {
-    fn eq(&self, other: &String) -> bool {
-        &self.text == other
+        write!(f, "{:?}", self.text)
     }
 }
 
@@ -149,87 +73,51 @@ pub enum Error {
     Target(Msg),
     #[error("policy denied: {0}")]
     Policy(Msg),
-    /// `status` / `plan` / `check` found `n` blocking keys; the message is the count
-    /// (`1 finding`, `2 findings`) and its next step the command that shows the fix.
     #[error("{1}")]
     Findings(usize, Msg),
-    /// An external change may or may not have been applied; nothing is known to be broken;
-    /// re-running the same command is safe (NR-2).
     #[error("outcome unknown: {0}")]
     Unknown(Msg),
     /// A cataloged cause and the upstream tool's reply, when any (design
     /// `docs/design/error-catalog.md` §3). Exit code, code, retry and `human_required` come
     /// from the cause; text and documents from [`crate::cause::render`]. The variants above
-    /// are the Legacy arm of the same functions, removed once the ratchet reaches zero (§10).
+    /// are the Legacy arm: production code builds none (the ratchet), and they are removed
+    /// next (§10).
     #[error("{}", .0.message())]
-    Catalog(
-        Box<crate::cause::Cause>,
-        Option<Box<crate::cause::Upstream>>,
-    ),
+    Catalog(Box<Cause>, Option<Box<Upstream>>),
 }
 
-impl From<crate::cause::Cause> for Error {
-    fn from(cause: crate::cause::Cause) -> Error {
+impl From<Cause> for Error {
+    fn from(cause: Cause) -> Error {
         Error::Catalog(Box::new(cause), None)
     }
 }
 
-/// The text a Catalog error has none of: its message is rendered from the cause.
-static NO_MSG: Msg = Msg {
-    text: String::new(),
-    next: None,
-    code: None,
-    action: None,
-};
-
 /// The invocation a Catalog error renders its steps against: the process's own command
 /// line (one place, until every entry point passes its own).
-pub fn invocation() -> crate::cause::Invocation {
+pub fn invocation() -> Invocation {
     if let Some(outer) = OUTER_INVOCATION.get() {
         return outer.clone();
     }
-    crate::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>())
+    Invocation::from_cli(&std::env::args().collect::<Vec<_>>())
 }
 
 /// The person's `opv run` an internal step (`local-delivery`, `remote-send`,
 /// `remote-receive`) serves, set once by that step (design §6.1, X25): its errors render
 /// their steps against it, never against the hidden command itself.
-static OUTER_INVOCATION: std::sync::OnceLock<crate::cause::Invocation> = std::sync::OnceLock::new();
+static OUTER_INVOCATION: std::sync::OnceLock<Invocation> = std::sync::OnceLock::new();
 
 /// Set the invocation an internal step's errors render against (see [`invocation`]).
-pub fn set_outer_invocation(inv: crate::cause::Invocation) {
+pub fn set_outer_invocation(inv: Invocation) {
     let _ = OUTER_INVOCATION.set(inv);
 }
 
-/// Every category, in exit-code order (for tests that cover each one).
-pub const CATEGORIES: [&str; 8] = [
-    "config",
-    "dependency",
-    "source",
-    "target",
-    "policy",
-    "auth",
-    "findings",
-    "unknown",
-];
+/// The site a Legacy error renders as: opv's own fault, since production builds none.
+const LEGACY_SITE: &str = "an error without a cataloged cause";
 
 impl Error {
-    /// Stable process exit code per category. A public contract from v0.1.0 on.
-    ///
-    /// | code | category |
-    /// |---|---|
-    /// | 0 | success |
-    /// | 2 | configuration, and command-line usage (clap's own code) |
-    /// | 3 | dependency (`op` or the target CLI missing or unusable) |
-    /// | 4 | source (1Password) |
-    /// | 5 | target (a registered deployment provider) |
-    /// | 6 | policy (refused: blocking keys, refused values, denied destructive operation) |
-    /// | 7 | authentication (1Password or the target) |
-    /// | 8 | findings (`status` / `plan` / `check` found blocking keys) |
-    /// | 9 | outcome unknown (a change may or may not have been applied; safe to re-run) |
-    ///
-    /// 130 / 143: interrupted by SIGINT / SIGTERM (Unix).
-    ///
+    /// Stable process exit code: the cause's (design §4.11). A public contract from v0.1.0
+    /// on: 2 configuration and usage, 3 dependency, 4 1Password, 5 target, 6 policy, 7
+    /// authentication, 8 findings, 9 outcome unknown, 70 internal, 130/143 interrupted.
     /// `run` exits with the child's own code instead (FR-4); see its help.
     pub fn exit_code(&self) -> i32 {
         match self {
@@ -246,70 +134,38 @@ impl Error {
     }
 
     /// A cataloged cause with the upstream tool's reply as its evidence.
-    pub fn with_evidence(cause: crate::cause::Cause, upstream: crate::cause::Upstream) -> Error {
+    pub fn with_evidence(cause: Cause, upstream: Upstream) -> Error {
         Error::Catalog(Box::new(cause), Some(Box::new(upstream)))
     }
 
     /// The cataloged cause and its evidence, for a Catalog error.
-    pub fn cause(&self) -> Option<(&crate::cause::Cause, Option<&crate::cause::Upstream>)> {
+    pub fn cause(&self) -> Option<(&Cause, Option<&Upstream>)> {
         match self {
             Error::Catalog(c, up) => Some((c, up.as_deref())),
             _ => None,
         }
     }
 
-    /// The stable code as a string: the cause's own for a Catalog error (which may be
-    /// outside [`Code`]), else [`Error::code`]'s slug. Envelopes and MCP answers use this.
+    /// The cause the one renderer renders, and its evidence: a Legacy error renders as
+    /// opv's internal error.
+    fn rendered(&self) -> (Cow<'_, Cause>, Option<&Upstream>) {
+        match self {
+            Error::Catalog(c, up) => (Cow::Borrowed(c), up.as_deref()),
+            _ => (Cow::Owned(Cause::Bug { site: LEGACY_SITE }), None),
+        }
+    }
+
+    /// The stable code as a string: the cause's own. Documents and MCP answers use this.
     pub fn code_str(&self) -> &'static str {
-        match self {
-            Error::Catalog(c, _) => c.code(),
-            _ => self.code().as_str(),
-        }
+        self.rendered().0.code()
     }
 
-    /// True when only a person can take the next step (A9): derived from the cause for a
-    /// Catalog error, else from [`Error::code`].
+    /// True when only a person can take the next step (A9), derived from the cause.
     pub fn human_required(&self) -> bool {
-        match self {
-            Error::Catalog(c, _) => c.human_required(&invocation()),
-            _ => self.code().human_required(),
-        }
+        self.rendered().0.human_required(&invocation())
     }
 
-    /// `n` blocking keys found; `next` is the command that shows or fixes them.
-    pub fn findings(n: usize, next: impl Into<String>) -> Error {
-        let text = if n == 1 {
-            "1 finding".to_string()
-        } else {
-            format!("{n} findings")
-        };
-        Error::Findings(
-            n,
-            Msg {
-                text,
-                next: Some(next.into()),
-                code: None,
-                action: None,
-            },
-        )
-    }
-
-    fn msg(&self) -> &Msg {
-        match self {
-            Error::Config(m)
-            | Error::Dependency(m)
-            | Error::Auth(m)
-            | Error::Source(m)
-            | Error::Target(m)
-            | Error::Policy(m)
-            | Error::Findings(_, m)
-            | Error::Unknown(m) => m,
-            Error::Catalog(..) => &NO_MSG,
-        }
-    }
-
-    /// The free text of a Legacy error; `None` for a Catalog error, whose steps are typed.
-    fn msg_mut(&mut self) -> Option<&mut Msg> {
+    fn msg(&self) -> Option<&Msg> {
         match self {
             Error::Config(m)
             | Error::Dependency(m)
@@ -323,171 +179,78 @@ impl Error {
         }
     }
 
-    /// The runnable step that fixes this error, when it names one (NR-19).
-    pub fn next_step(&self) -> Option<&str> {
-        self.msg().next()
-    }
-
-    /// True when the message or its next step contains `pat`.
+    /// True when the message contains `pat`.
     pub fn mentions(&self, pat: &str) -> bool {
-        self.msg().mentions(pat)
+        self.text().contains(pat)
     }
 
-    /// The message without category prefix or next step.
+    /// The message without category prefix: a Legacy error's text, else empty.
     pub fn text(&self) -> &str {
-        self.msg().text()
+        self.msg().map_or("", Msg::text)
     }
 
-    /// This error with `next` as its step (replacing any it had).
-    pub fn with_next(mut self, next: impl Into<String>) -> Error {
-        if let Some(m) = self.msg_mut() {
-            m.next = Some(next.into());
-        }
-        self
-    }
-
-    /// This error with `next` as its step only when it has none yet.
-    pub fn or_next(self, next: impl FnOnce() -> String) -> Error {
-        if self.next_step().is_some() {
-            self
-        } else {
-            self.with_next(next())
-        }
-    }
-
-    /// The same category and next step with `f` applied to the text.
-    pub fn map_text(mut self, f: impl FnOnce(String) -> String) -> Error {
-        if let Some(slot) = self.msg_mut() {
-            let m = std::mem::replace(slot, Msg::from(String::new()));
-            *slot = m.map_text(f);
-        }
-        self
-    }
-
-    /// The category's step for an error that names none, before it is split into `Do:`
-    /// and `Next:` ([`Error::step`]). `rerun` is the command that was run; `help` the
-    /// command's `--help`, for a cause the same command can never get past (a misspelt
-    /// environment or product). A dependency or sign-in error already prints its install
-    /// or sign-in command on its first indented line (FR-26); that line is the step.
-    pub fn default_next(&self, rerun: &str) -> String {
-        self.default_step(rerun, rerun)
-    }
-
-    fn default_step(&self, rerun: &str, help: &str) -> String {
-        match self {
-            Error::Catalog(..) => self.catalog_step().next,
-            Error::Unknown(_) => rerun.to_string(),
-            Error::Findings(..) => format!("fix the keys above in 1Password, then {rerun}"),
-            Error::Policy(_) => format!("fix the cause above, then {rerun}"),
-            Error::Dependency(m) | Error::Auth(m) => m
-                .text()
-                .lines()
-                .skip(1)
-                .find_map(|l| l.strip_prefix("  "))
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map_or_else(|| rerun.to_string(), |l| format!("{l}, then {rerun}")),
-            _ if self.code().retry() == Retry::Never => help.to_string(),
-            // A refusal by the target repeats until its cause is fixed: never the bare
-            // command again.
-            Error::Config(_) | Error::Target(_) => format!("fix the cause above, then {rerun}"),
-            _ => rerun.to_string(),
-        }
-    }
-
-    /// This error with a stable machine-readable cause (A2).
-    pub fn with_code(mut self, code: Code) -> Error {
-        if let Some(m) = self.msg_mut() {
-            m.code = Some(code);
-        }
-        self
-    }
-
-    /// The stable cause: the one set with [`Error::with_code`], else the category's.
+    /// The stable cause as a [`Code`]: the cause's own when the closed list has it, else
+    /// its category's.
     pub fn code(&self) -> Code {
-        self.msg().code.unwrap_or(match self {
-            Error::Config(_) => Code::ConfigInvalid,
-            Error::Dependency(_) => Code::DependencyMissing,
-            Error::Source(_) => Code::SourceError,
-            Error::Target(_) => Code::TargetError,
-            Error::Policy(_) => Code::PolicyRefused,
-            Error::Auth(_) => Code::AuthRequired,
-            Error::Findings(..) => Code::Findings,
-            Error::Unknown(_) => Code::OutcomeUnknown,
-            Error::Catalog(c, _) => catalog_code(c),
-        })
+        catalog_code(&self.rendered().0)
     }
 
-    /// The human-only action set with [`Error::with_do`], when any.
-    pub fn action(&self) -> Option<&str> {
-        self.msg().action()
-    }
-
-    /// This error with a human-only action printed as `Do: <action>` before `Next:` (A3).
-    pub fn with_do(mut self, action: impl Into<String>) -> Error {
-        if let Some(m) = self.msg_mut() {
-            m.action = Some(action.into());
-        }
-        self
-    }
-
-    /// What to do next (A3): an optional human action and a command that runs as typed.
-    /// `rerun` is the command that was run, `help` its `--help` command.
-    pub fn step(&self, rerun: &str, help: &str) -> Step {
-        if let Error::Catalog(..) = self {
-            return self.catalog_step();
-        }
-        let raw = match self.next_step() {
-            Some(n) => n.to_string(),
-            None => self.default_step(rerun, help),
-        };
-        let mut step = split_step(&raw, rerun);
-        if let Some(a) = &self.msg().action {
-            step.action = Some(a.clone());
-        }
-        step
-    }
-
-    /// The category name, as in [`CATEGORIES`].
+    /// The category name, by exit code.
     pub fn category(&self) -> &'static str {
-        match self {
-            Error::Config(_) => "config",
-            Error::Dependency(_) => "dependency",
-            Error::Source(_) => "source",
-            Error::Target(_) => "target",
-            Error::Policy(_) => "policy",
-            Error::Auth(_) => "auth",
-            Error::Findings(..) => "findings",
-            Error::Unknown(_) => "unknown",
-            Error::Catalog(c, _) => crate::cause::render::category(c.exit_code()),
-        }
+        crate::cause::render::category(self.exit_code())
     }
 
-    /// A Catalog error's typed step in words, against [`invocation`]. Only called for a
-    /// Catalog error; any other gets the bare `opv` (never reached).
-    fn catalog_step(&self) -> Step {
-        let Error::Catalog(c, _) = self else {
-            return split_step("opv", "opv");
-        };
+    /// Its `Do:` in words, rendered from the cause against [`invocation`] (the document's
+    /// `do`); `None` when a person has nothing to do first.
+    pub fn do_text(&self) -> Option<String> {
+        let (cause, _) = self.rendered();
+        cause.do_text(&invocation())
+    }
+
+    /// Its `Next:` command line, rendered from the cause against [`invocation`] (the
+    /// document's `next`); `None` when there is no command to run.
+    pub fn next_text(&self) -> Option<String> {
+        let (cause, _) = self.rendered();
         let inv = invocation();
-        let (_, next) = c.step(&inv);
-        Step {
-            action: c.do_text(&inv),
-            next: crate::cause::render::next_text(&next, &inv).unwrap_or_else(|| "none".into()),
-        }
+        crate::cause::render::next_text(&cause.step(&inv).1, &inv)
     }
+}
 
-    /// True for the categories an external call can cause; only these show the failed
-    /// call's stderr excerpt (NR-31). Configuration, policy and findings never do.
-    pub fn from_external_call(&self) -> bool {
-        matches!(
-            self,
-            Error::Dependency(_)
-                | Error::Auth(_)
-                | Error::Source(_)
-                | Error::Target(_)
-                | Error::Unknown(_)
-        )
+/// What opv prints on stderr for `e` (§7.1), rendered against [`invocation`]: `opv:
+/// <message>`, the `checked:` line, the upstream box, `Do:`, and `Next:` last.
+pub fn report(e: &Error) -> String {
+    render_text(e, &invocation(), false, false, false)
+}
+
+/// [`report`] against `inv`, with `--verbose` (the whole scrubbed upstream reply), UTF-8
+/// box drawing and colour as the caller decides (§7.1, §7.3).
+pub fn render_text(e: &Error, inv: &Invocation, verbose: bool, utf8: bool, colour: bool) -> String {
+    let (cause, upstream) = e.rendered();
+    crate::cause::render::render_text(&cause, upstream, inv, verbose, utf8, colour)
+}
+
+/// The `error` object of the `--json` document and of an MCP answer (§7.2), rendered
+/// against `inv`. Names only, like the text (SR-1).
+pub fn document(e: &Error, inv: &Invocation, verbose: bool) -> serde_json::Value {
+    let (cause, upstream) = e.rendered();
+    crate::cause::render::document(&cause, upstream, inv, verbose)
+}
+
+/// The [`Code`] of a cause: its own when the closed list has it, else its category's.
+fn catalog_code(c: &Cause) -> Code {
+    if let Some(code) = Code::ALL.iter().find(|k| k.as_str() == c.code()) {
+        return *code;
+    }
+    match c.exit_code() {
+        2 => Code::ConfigInvalid,
+        3 => Code::DependencyMissing,
+        4 => Code::SourceError,
+        5 => Code::TargetError,
+        6 => Code::PolicyRefused,
+        7 => Code::AuthRequired,
+        8 => Code::Findings,
+        n if n > 128 => Code::Interrupted,
+        _ => Code::OutcomeUnknown,
     }
 }
 
@@ -619,41 +382,6 @@ codes! {
     TidyUnverified => "tidy_unverified", 4, AfterFix, true, "opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; a read reports it in its document's tidy_error and goes on, and opv tidy fails with it";
 }
 
-/// The end of a failure (A3): an optional human-only action (`Do:`) and one command that
-/// runs as typed (`Next:`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step {
-    pub action: Option<String>,
-    pub next: String,
-}
-
-/// Programs a `Next:` command may start with besides the CLIs opv runs
-/// ([`crate::host::tools`], which brings each provider's own).
-const PROGRAMS: [&str; 10] = [
-    "opv", "helm", "brew", "winget", "scoop", "npm", "cargo", "gh", "curl", "env",
-];
-
-/// Whether `p` is a program a `Next:` command may start with.
-fn known_program(p: &str) -> bool {
-    PROGRAMS.contains(&p) || crate::host::tools().any(|t| t.program == p || t.aliases.contains(&p))
-}
-
-/// Words that only prose has; a step containing one is an instruction, not a command.
-const PROSE: [&str; 33] = [
-    "the", "a", "an", "to", "and", "or", "then", "if", "it", "its", "lists", "shows", "with",
-    "for", "your", "is", "are", "see", "again", "that", "this", "from", "when", "until", "after",
-    "before", "once", "which", "so", "not", "ask", "wait", "re-run",
-];
-
-/// True when `step` is one command that runs as typed: a known program, then words that
-/// are neither placeholders (`<env>`), shell syntax (`$(...)`, `;`, backticks) nor prose.
-pub fn is_runnable(step: &str) -> bool {
-    let mut words = step.split_whitespace();
-    words.next().is_some_and(known_program)
-        && !step.contains(['<', '>', '`', ';', '(', ')', '$', '|', '&'])
-        && words.all(|w| !PROSE.contains(&w) && !w.ends_with([',', ':', '.']))
-}
-
 /// `a` as one word of a `Next:` command, quoted only when the shell would split or expand
 /// it, so the command still runs as typed. Unix shells: single quotes. Windows: `\` and
 /// `~` need no quoting (neither cmd.exe nor PowerShell treats them specially inside a
@@ -686,484 +414,9 @@ pub fn shell_word_for(a: &str, windows: bool) -> String {
     format!("'{}'", a.replace('\'', "'\\''"))
 }
 
-/// Split a free-form step into `Do:` and `Next:` (A3). A runnable step is the `Next:`
-/// alone. `<action>, then [run] <command>` splits at `then`. Anything else is the action,
-/// and `rerun` (the command that was run) is what to run once it is done.
-pub fn split_step(raw: &str, rerun: &str) -> Step {
-    let step = raw.lines().map(str::trim).collect::<Vec<_>>().join(" ");
-    let step = step
-        .trim()
-        .trim_end_matches(" (safe to re-run)")
-        .to_string();
-    if is_runnable(&step) {
-        return Step {
-            action: None,
-            next: step,
-        };
-    }
-    // "run opv again" is the command that was run, never a bare `opv`.
-    if is_rerun_phrase(&step) {
-        return Step {
-            action: None,
-            next: rerun.to_string(),
-        };
-    }
-    // `run <command> again; <why>`: the command, without the explanation.
-    let lead = step.split("; ").next().unwrap_or_default();
-    let lead = lead.strip_prefix("run ").unwrap_or(lead);
-    let lead = lead
-        .strip_suffix(" again")
-        .unwrap_or(lead)
-        .trim_matches('`');
-    if is_runnable(lead) {
-        return Step {
-            action: None,
-            next: lead.to_string(),
-        };
-    }
-    let split = step
-        .rsplit_once(", then ")
-        .or_else(|| step.rsplit_once(" then "));
-    if let Some((head, tail)) = split {
-        let tail = tail.trim().trim_end_matches('.');
-        if is_rerun_phrase(tail) {
-            return Step {
-                action: Some(head.to_string()),
-                next: rerun.to_string(),
-            };
-        }
-        let tail = tail.strip_prefix("run ").unwrap_or(tail);
-        let tail = tail.strip_suffix(" again").unwrap_or(tail);
-        let tail = tail.trim_matches('`');
-        if is_runnable(tail) {
-            return Step {
-                action: Some(head.to_string()),
-                next: tail.to_string(),
-            };
-        }
-        if is_rerun_phrase(tail) {
-            return Step {
-                action: Some(head.to_string()),
-                next: rerun.to_string(),
-            };
-        }
-    }
-    if is_rerun_phrase(&step) {
-        return Step {
-            action: None,
-            next: rerun.to_string(),
-        };
-    }
-    let action = match step.split_whitespace().next() {
-        // A command with placeholders: the person fills them in.
-        Some(p) if known_program(p) => format!("fill in and run: {step}"),
-        _ => step,
-    };
-    Step {
-        action: Some(action),
-        next: rerun.to_string(),
-    }
-}
-
-/// "re-run the same command", "run opv again" and similar.
-fn is_rerun_phrase(s: &str) -> bool {
-    let s = s.trim().trim_end_matches('.').to_ascii_lowercase();
-    matches!(
-        s.as_str(),
-        "re-run" | "rerun" | "re-run it" | "run opv again" | "run it again" | "re-run opv"
-    ) || s.ends_with("the same command")
-        || s.ends_with("the same command again")
-}
-
-/// What opv prints on stderr for `e` (NR-19, NR-31, SR-1, A3), in this order: `opv:
-/// <error>`'s first line; the failed call's scrubbed stderr `excerpt` (`  az said: …`, at
-/// most 5 lines, only for [`Error::from_external_call`] categories); the rest of the
-/// error's text; `Do: <action>` when a person must act first; then exactly one `Next:
-/// <command>` line, always last, that runs as typed. `rerun` is the command that was run;
-/// it is the `Next:` command when the error names none (see [`Error::step`]). The error's
-/// `Display` is unchanged.
-pub fn report(e: &Error, rerun: &str, excerpt: Option<&crate::scrub::Excerpt>) -> String {
-    report_with(e, &e.step(rerun, rerun), excerpt)
-}
-
-/// [`report`] with the step already worked out.
-pub fn report_with(e: &Error, step: &Step, excerpt: Option<&crate::scrub::Excerpt>) -> String {
-    if let Error::Catalog(c, up) = e {
-        return crate::cause::render::render_text(
-            c,
-            up.as_deref(),
-            &invocation(),
-            false,
-            false,
-            false,
-        );
-    }
-    let msg = format!("opv: {e}");
-    let (head, rest) = match msg.split_once('\n') {
-        Some((h, r)) => (h, Some(r)),
-        None => (msg.as_str(), None),
-    };
-    let mut out = format!("{head}\n");
-    if let Some(x) = excerpt.filter(|_| e.from_external_call()) {
-        out.push_str(&x.render());
-    }
-    if let Some(r) = rest {
-        out.push_str(r);
-        out.push('\n');
-    }
-    out.push_str(&step_lines(step));
-    out
-}
-
-/// `Do: <action>` (when any) and the one `Next:` line, newline-terminated.
-pub fn step_lines(step: &Step) -> String {
-    let mut out = String::new();
-    if let Some(a) = &step.action {
-        let a = a.lines().map(str::trim).collect::<Vec<_>>().join(" ");
-        out.push_str(&format!("Do: {a}\n"));
-    }
-    out.push_str(&next_line(&step.next));
-    out
-}
-
-/// The one `Next:` line, newline-terminated; a multi-line step is joined onto one line.
-pub fn next_line(step: &str) -> String {
-    let step = step.lines().map(str::trim).collect::<Vec<_>>().join(" ");
-    format!("Next: {step}\n")
-}
-
-/// The `--json` failure document (A1): `{schema_version, ok: false, exit_code, error:
-/// {code, category, message, detail, retry, human_required, do, next}}`. Names only, like
-/// the text (SR-1); the failed call's stderr excerpt is never included.
-pub fn envelope(e: &Error, step: &Step) -> serde_json::Value {
-    if let Error::Catalog(c, up) = e {
-        return serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "ok": false,
-            "exit_code": e.exit_code(),
-            "error": crate::cause::render::document(c, up.as_deref(), &invocation(), false),
-        });
-    }
-    let text = e.text();
-    let mut lines = text.lines();
-    let message = lines.next().unwrap_or_default().trim().to_string();
-    let detail: Vec<String> = lines
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect();
-    let code = e.code();
-    serde_json::json!({
-        "schema_version": crate::json::SCHEMA_VERSION,
-        "ok": false,
-        "exit_code": e.exit_code(),
-        "error": error_object(
-            code.as_str(),
-            e.category(),
-            &message,
-            detail,
-            code.retry(),
-            code.human_required(),
-            step,
-        ),
-    })
-}
-
-/// The [`Code`] a cause reports through [`Error::code`]: its own when the closed list has
-/// it, else its category's (the cause's own string is [`Error::code_str`]).
-fn catalog_code(c: &crate::cause::Cause) -> Code {
-    if let Some(code) = Code::ALL.iter().find(|k| k.as_str() == c.code()) {
-        return *code;
-    }
-    match c.exit_code() {
-        2 => Code::ConfigInvalid,
-        3 => Code::DependencyMissing,
-        4 => Code::SourceError,
-        5 => Code::TargetError,
-        6 => Code::PolicyRefused,
-        7 => Code::AuthRequired,
-        8 => Code::Findings,
-        n if n > 128 => Code::Interrupted,
-        _ => Code::OutcomeUnknown,
-    }
-}
-
-/// The `error` object of a failure document (A1, A9).
-pub fn error_object(
-    code: &str,
-    category: &str,
-    message: &str,
-    detail: Vec<String>,
-    retry: Retry,
-    human_required: bool,
-    step: &Step,
-) -> serde_json::Value {
-    serde_json::json!({
-        "code": code,
-        "category": category,
-        "message": message,
-        "detail": detail,
-        "retry": retry.as_str(),
-        "human_required": human_required,
-        "do": step.action,
-        "next": step.next,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn every_category() -> Vec<Error> {
-        let s = || Msg::from("x");
-        vec![
-            Error::Config(s()),
-            Error::Dependency(s()),
-            Error::Source(s()),
-            Error::Target(s()),
-            Error::Policy(s()),
-            Error::Auth(s()),
-            Error::findings(3, "opv status prod"),
-            Error::Unknown(s()),
-        ]
-    }
-
-    #[test]
-    fn exit_codes_are_stable() {
-        let codes: Vec<i32> = every_category().iter().map(Error::exit_code).collect();
-        assert_eq!(codes, vec![2, 3, 4, 5, 6, 7, 8, 9]);
-    }
-
-    #[test]
-    fn every_category_is_listed() {
-        let names: Vec<&str> = every_category().iter().map(Error::category).collect();
-        assert_eq!(names, CATEGORIES.to_vec());
-    }
-
-    /// NR-19: every category, with or without its own step, reports exactly one `Next:`
-    /// line, and it is the last line.
-    #[test]
-    fn every_category_reports_one_next_line_last() {
-        let mut bad = Vec::new();
-        for e in every_category().into_iter().chain(
-            every_category()
-                .into_iter()
-                .map(|e| e.with_next("opv doctor")),
-        ) {
-            let text = report(&e, &e.default_next("opv status prod"), Some(&excerpt()));
-            let lines: Vec<&str> = text.lines().collect();
-            let nexts = lines.iter().filter(|l| l.starts_with("Next: ")).count();
-            if nexts != 1 || !lines.last().is_some_and(|l| l.starts_with("Next: ")) {
-                bad.push(text);
-            }
-        }
-        assert!(bad.is_empty(), "{bad:?}");
-    }
-
-    #[test]
-    fn a_trailing_next_line_becomes_the_step() {
-        let m = Msg::from("refused\n  next: opv explain api/KEY --env prod");
-        assert_eq!(m.next(), Some("opv explain api/KEY --env prod"));
-    }
-
-    #[test]
-    fn a_trailing_next_line_leaves_the_text() {
-        let m = Msg::from("refused\n  Next: opv doctor");
-        assert_eq!(m.text(), "refused");
-    }
-
-    #[test]
-    fn report_never_repeats_an_embedded_next_line() {
-        let e = Error::Target("failed\n  next: az login".into());
-        assert_eq!(
-            report(&e, "opv doctor", None),
-            "opv: target error: failed\nNext: az login\n"
-        );
-    }
-
-    #[test]
-    fn report_uses_the_fallback_without_a_step() {
-        let e = Error::Source("x".into());
-        assert_eq!(
-            report(&e, "opv doctor", None),
-            "opv: source error: x\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn map_text_keeps_the_step() {
-        let e =
-            Error::Auth("signed out\n  next: opv login dev".into()).map_text(|t| t + "\n  more");
-        assert_eq!(e.next_step(), Some("opv login dev"));
-    }
-
-    #[test]
-    fn findings_name_their_count() {
-        assert_eq!(Error::findings(1, "x").to_string(), "1 finding");
-    }
-
-    fn excerpt() -> crate::scrub::Excerpt {
-        crate::scrub::Excerpt {
-            program: "az".into(),
-            lines: vec!["ERROR: (Forbidden) caller lacks get permission".into()],
-        }
-    }
-
-    #[test]
-    fn report_orders_error_line_then_excerpt_then_next() {
-        let e = Error::Target(
-            "az keyvault secret list failed (exit 1)\n  vault: kv-prod\n  next: az login".into(),
-        );
-        assert_eq!(
-            report(&e, "opv doctor", Some(&excerpt())),
-            "opv: target error: az keyvault secret list failed (exit 1)\n  az said: ERROR: (Forbidden) caller lacks get permission\n  vault: kv-prod\nNext: az login\n"
-        );
-    }
-
-    #[test]
-    fn report_without_excerpt_is_the_error_line_then_next() {
-        assert_eq!(
-            report(&Error::Source("x".into()), "opv doctor", None),
-            "opv: source error: x\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn report_never_attaches_an_excerpt_to_a_policy_error() {
-        assert_eq!(
-            report(
-                &Error::Policy("x".into()).with_next("opv doctor"),
-                "opv doctor",
-                Some(&excerpt())
-            ),
-            "opv: policy denied: x\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn unknown_error_exits_9() {
-        assert_eq!(Error::Unknown("fly secrets deploy".into()).exit_code(), 9);
-    }
-
-    #[test]
-    fn unknown_error_says_outcome_unknown() {
-        let e = Error::Unknown("deploy: the CLI was killed".into());
-        assert_eq!(e.to_string(), "outcome unknown: deploy: the CLI was killed");
-    }
-
-    #[test]
-    fn dependency_error_defaults_to_its_install_line() {
-        let e = Error::Dependency("op not found on PATH\n  install: brew install op".into());
-        assert_eq!(
-            e.step("opv status prod", "opv status --help")
-                .action
-                .as_deref(),
-            Some("install: brew install op")
-        );
-    }
-
-    #[test]
-    fn unknown_error_defaults_to_running_the_command_again() {
-        let e = Error::Unknown("x".into());
-        assert_eq!(
-            e.step("opv sync prod --deploy", "opv sync --help").next,
-            "opv sync prod --deploy"
-        );
-    }
-
-    // --- A3: `Do:` for a person, `Next:` that runs as typed ---
-
-    fn split(raw: &str) -> Step {
-        split_step(raw, "opv status prod")
-    }
-
-    #[test]
-    fn a_runnable_step_is_the_next_command_alone() {
-        assert_eq!(
-            split("opv explain api/KEY --env prod"),
-            Step {
-                action: None,
-                next: "opv explain api/KEY --env prod".into()
-            }
-        );
-    }
-
-    #[test]
-    fn fix_then_run_splits_into_do_and_next() {
-        assert_eq!(
-            split("fix the keys above in 1Password, then run opv status prod"),
-            Step {
-                action: Some("fix the keys above in 1Password".into()),
-                next: "opv status prod".into()
-            }
-        );
-    }
-
-    #[test]
-    fn a_rerun_phrase_becomes_the_command_that_was_run() {
-        assert_eq!(
-            split_step(
-                "check the vault, then re-run the same command",
-                "opv sync prod"
-            )
-            .next,
-            "opv sync prod"
-        );
-    }
-
-    #[test]
-    fn prose_becomes_the_action() {
-        assert_eq!(
-            split("sign in: eval $(op signin)").action.as_deref(),
-            Some("sign in: eval $(op signin)")
-        );
-    }
-
-    #[test]
-    fn a_command_with_placeholders_is_an_action_for_a_person() {
-        assert_eq!(
-            split("opv init <env> --vault <vault title> --item <item title>").next,
-            "opv status prod"
-        );
-    }
-
-    #[test]
-    fn the_safe_to_rerun_note_never_reaches_next() {
-        assert_eq!(
-            split("opv sync prod (safe to re-run)").next,
-            "opv sync prod"
-        );
-    }
-
-    #[test]
-    fn prose_after_a_command_is_not_runnable() {
-        assert!(!is_runnable(
-            "kubectl config get-contexts -o name lists the contexts"
-        ));
-    }
-
-    /// A3: every category's `Next:` is runnable, with and without its own step.
-    #[test]
-    fn every_category_reports_a_runnable_next() {
-        let bad: Vec<String> = every_category()
-            .into_iter()
-            .map(|e| e.step("opv status prod", "opv status --help").next)
-            .filter(|n| !is_runnable(n))
-            .collect();
-        assert!(bad.is_empty(), "{bad:?}");
-    }
-
-    #[test]
-    fn report_prints_do_right_before_next() {
-        let e = Error::findings(
-            1,
-            "fix the keys above in 1Password, then run opv status prod",
-        );
-        assert_eq!(
-            report(&e, "opv status prod", None),
-            "opv: 1 finding\nDo: fix the keys above in 1Password\nNext: opv status prod\n"
-        );
-    }
 
     #[test]
     fn a_unix_word_with_a_space_is_single_quoted() {
@@ -1203,141 +456,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_explicit_action_wins() {
-        let e = Error::Policy("needs a terminal".into())
-            .with_do("ask the user to run this in their own terminal")
-            .with_next("opv login");
-        assert_eq!(
-            e.step("x", "y").action.as_deref(),
-            Some("ask the user to run this in their own terminal")
-        );
-    }
+    // --- the one renderer (design §3, §7) -----------------------------------------------
 
-    #[test]
-    fn a_misspelt_environment_points_to_help() {
-        let e = Error::Config("undefined environment".into()).with_code(Code::UnknownEnv);
-        assert_eq!(
-            e.step("opv status qa", "opv status --help").next,
-            "opv status --help"
-        );
-    }
-
-    // --- A2: codes ---
-
-    #[test]
-    fn a_category_without_a_code_reports_its_default() {
-        assert_eq!(Error::Unknown("x".into()).code(), Code::OutcomeUnknown);
-    }
-
-    #[test]
-    fn every_category_default_code_exits_with_the_category() {
-        let bad: Vec<&str> = every_category()
-            .iter()
-            .filter(|e| e.code().exit_code() != e.exit_code())
-            .map(Error::category)
-            .collect();
-        assert!(bad.is_empty(), "{bad:?}");
-    }
-
-    #[test]
-    fn a_code_survives_map_text() {
-        let e = Error::Policy("x".into())
-            .with_code(Code::KeysBlocking)
-            .map_text(|t| t + " more");
-        assert_eq!(e.code(), Code::KeysBlocking);
-    }
-
-    #[test]
-    fn outcome_unknown_is_safe_to_retry() {
-        assert_eq!(Code::OutcomeUnknown.retry(), Retry::Safe);
-    }
-
-    #[test]
-    fn a_terminal_refusal_needs_a_human() {
-        assert!(Code::TerminalRequired.human_required());
-    }
-
-    // --- A1: the envelope ---
-
-    #[test]
-    fn envelope_carries_code_retry_do_and_next() {
-        let e = Error::Policy("sync refused".into())
-            .with_code(Code::KeysBlocking)
-            .with_do("fix api/KEY in 1Password")
-            .with_next("opv explain api/KEY --env prod");
-        let v = envelope(&e, &e.step("opv sync prod", "opv sync --help"));
-        assert_eq!(
-            v,
-            serde_json::json!({
-                "schema_version": 1,
-                "ok": false,
-                "exit_code": 6,
-                "error": {
-                    "code": "keys_blocking",
-                    "category": "policy",
-                    "message": "sync refused",
-                    "detail": [],
-                    "retry": "after_fix",
-                    "human_required": true,
-                    "do": "fix api/KEY in 1Password",
-                    "next": "opv explain api/KEY --env prod",
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn envelope_message_is_the_first_line_and_detail_the_rest() {
-        let e = Error::Source("item not found\n  vault: vprd".into());
-        let v = envelope(&e, &e.step("opv status prod", "h"));
-        assert_eq!(v["error"]["detail"], serde_json::json!(["vault: vprd"]));
-    }
-
-    #[test]
-    fn then_run_opv_again_is_the_command_that_was_run() {
-        assert_eq!(
-            split_step("sign in with az login, then run opv again", "opv sync prod").next,
-            "opv sync prod"
-        );
-    }
-
-    #[test]
-    fn run_opv_again_alone_is_the_command_that_was_run() {
-        assert_eq!(
-            split_step("run opv again", "opv sync prod").next,
-            "opv sync prod"
-        );
-    }
-
-    #[test]
-    fn a_target_error_without_a_step_asks_to_fix_the_cause_first() {
-        let e = Error::Target("az keyvault secret set failed for kv".into());
-        assert_eq!(
-            e.step("opv sync prod", "opv sync --help").action.as_deref(),
-            Some("fix the cause above")
-        );
-    }
-
-    #[test]
-    fn ram_dir_unavailable_covers_local_delivery_too() {
-        assert!(Code::RamDirUnavailable.meaning().contains("opv run"));
-    }
-
-    #[test]
-    fn a_missing_right_needs_a_human() {
-        assert!(Code::PermissionDenied.human_required());
-    }
-
-    #[test]
-    fn owner_setup_needs_a_human() {
-        assert!(Code::OwnerSetupRequired.human_required());
-    }
-
-    // --- the Catalog arm (design §3, §10 phase 1) ---------------------------------------
-
-    fn own_session() -> crate::cause::Cause {
-        crate::cause::Cause::NeedsOwnSession {
+    fn own_session() -> Cause {
+        Cause::NeedsOwnSession {
             command: crate::cause::CommandId("approve".into()),
             identity: crate::cause::Principal::ServiceAccount {
                 name: "sa-ci".into(),
@@ -1363,18 +485,14 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(
-            report(&Error::from(own_session()), "opv approve", None),
-            want
-        );
+        assert_eq!(report(&Error::from(own_session())), want);
     }
 
     #[test]
-    fn a_catalog_errors_envelope_carries_the_catalog_document() {
-        let e = Error::from(own_session());
+    fn a_catalog_errors_document_is_the_catalog_document() {
         let want = crate::cause::render::document(&own_session(), None, &invocation(), false);
         assert_eq!(
-            envelope(&e, &e.step("opv approve", "opv approve --help"))["error"],
+            document(&Error::from(own_session()), &invocation(), false),
             want
         );
     }
@@ -1385,5 +503,10 @@ mod tests {
             Error::from(own_session()).code_str(),
             "own_session_required"
         );
+    }
+
+    #[test]
+    fn a_catalog_errors_category_follows_its_exit_code() {
+        assert_eq!(Error::from(own_session()).category(), "auth");
     }
 }

@@ -167,9 +167,9 @@ fn missing_discovered_config_names_starting_directory() {
     std::fs::create_dir_all(&nested).unwrap();
     let (_, _, err) = opv_in(&nested, &["status", "prod"]);
     let named = err
-        .split("no secrets.toml found in ")
+        .split(" was found in ")
         .nth(1)
-        .and_then(|rest| rest.split(" or any parent directory").next())
+        .and_then(|rest| rest.split(" or any folder above it").next())
         .unwrap_or("");
     assert!(same_file(named, &nested), "{err}");
 }
@@ -988,8 +988,8 @@ fn sigterm_forwards_and_exits_143() {
         (
             Some(143),
             "forwarded",
-            "opv: interrupted during op item get; safe to re-run\n\
-             Next: opv --config tests/fixtures/secrets.toml check prod --product allumata"
+            "opv: interrupted by signal 15 before any write\n\
+             Next: opv check --config tests/fixtures/secrets.toml prod --product allumata"
         )
     );
 }
@@ -1285,7 +1285,8 @@ fn every_text_failure_ends_with_a_runnable_next() {
     ] {
         let (_, _, err) = opv(args);
         let next = err.lines().last().unwrap_or_default();
-        if !opv::error::is_runnable(next.strip_prefix("Next: ").unwrap_or("not a next line")) {
+        let step = next.strip_prefix("Next: ").unwrap_or("not a next line");
+        if !step.starts_with("opv ") || step.contains(['<', '>']) {
             bad.push(format!("{args:?}: {next}"));
         }
     }

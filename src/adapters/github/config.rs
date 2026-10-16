@@ -700,7 +700,7 @@ secret_name = "STATIC""#,
 
     /// The whole terminal report of `e`, as a person reads it.
     fn rendered(e: &Error) -> String {
-        crate::error::report(e, "opv doctor", None)
+        crate::error::report(e)
     }
 
     /// The recorded `Bad credentials` reply (`tests/fixtures/github/failures/02`).

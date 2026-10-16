@@ -333,13 +333,9 @@ pub fn edit(
     }
 }
 
-/// The fix (`Do:`) of a validation error: the catalog cause's, or the one a free-text
-/// error was given; never a step derived from its prose.
+/// The fix (`Do:`) of a validation error: its cause's; never a step derived from prose.
 fn fix_of(e: &Error) -> Option<String> {
-    match e.cause() {
-        Some((c, _)) => c.do_text(&crate::error::invocation()),
-        None => e.action().map(str::to_string),
-    }
+    super::own_step(e).0
 }
 
 /// `config edit` in a terminal: `$VISUAL`, else `$EDITOR`, else `vi`, on a temporary copy
@@ -751,7 +747,6 @@ pub fn status_all(
                     }
                 }
                 if let Err(e) = o.result(&fleet) {
-                    let e = in_project(e, &name);
                     first.get_or_insert(e);
                 }
                 docs.push((
@@ -761,9 +756,9 @@ pub fn status_all(
                 ));
             }
             Err(e) => {
-                let why = e.text().lines().next().unwrap_or_default().to_string();
-                let code = e.code().as_str();
-                first.get_or_insert(in_project(e, &name));
+                let why = e.to_string();
+                let code = e.code_str();
+                first.get_or_insert(e);
                 docs.push((
                     name,
                     store::vault_label(&l.row).to_string(),
@@ -816,23 +811,6 @@ pub fn status_all(
         }
     }
     first.or_else(|| inv.incomplete()).map_or(Ok(()), Err)
-}
-
-/// A free-text `e` named after project `name`, with a `Next:` that runs as typed (its step
-/// split into `Do:` and a command, never the error's prose) against that project from any
-/// directory. A catalog cause is returned as it is: its steps come from the cause alone.
-fn in_project(e: Error, name: &str) -> Error {
-    if e.cause().is_some() {
-        return e;
-    }
-    let e = e.map_text(|t| format!("{name}: {t}"));
-    let step = e.step("opv status", "opv status --help");
-    let e = match step.action {
-        Some(a) if e.action().is_none() => e.with_do(a),
-        _ => e,
-    };
-    let next = project_step(&step.next, name);
-    e.with_next(next)
 }
 
 /// `next` run against project `name` from any directory, when it is an opv command.

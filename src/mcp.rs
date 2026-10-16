@@ -232,80 +232,10 @@ impl ToolCall {
     }
 }
 
-/// The `error` object for `e` against `inv`: the catalog document (design §7.2) for a
-/// cataloged cause; for an error not yet cataloged, the same fields from the `--json`
-/// envelope's legacy arm ([`legacy_document`]).
+/// The `error` object for `e` against `inv`: the catalog document (design §7.2), the same
+/// one `--json` prints, with no separate hint table.
 fn error_document(e: &Error, inv: &Invocation, verbose: bool) -> Value {
-    match e.cause() {
-        Some((cause, upstream)) => render::document(cause, upstream, inv, verbose),
-        None => legacy_document(e, inv),
-    }
-}
-
-/// Flags only a person may add (design §6.2): a step carrying one is a handoff.
-const PERSON_ONLY_FLAGS: [&str; 4] = [
-    "--confirm",
-    "--approved",
-    "--expect-plan",
-    "--prune-immutable",
-];
-
-/// A not-yet-cataloged error as the catalog document's fields: its message and detail
-/// lines (names only, as the CLI prints them), its step split into `do` and `next`, and
-/// `next_kind` derived from the step as §6.3 derives it: a person-only command is a
-/// `handoff` and needs a person. A `next` that does not run as typed is left out.
-fn legacy_document(e: &Error, inv: &Invocation) -> Value {
-    let rerun = render::rerun_text(inv);
-    let help = render::cmd_text(&Cmd {
-        command: inv.command.clone(),
-        args: vec!["--help".into()],
-    });
-    let step = e.step(&rerun, &help);
-    let text = e.text();
-    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-    let message = lines.next().unwrap_or_default();
-    let detail: Vec<&str> = lines.collect();
-    let (next, kind) = legacy_next(&step.next, &rerun);
-    let code = e.code();
-    json!({
-        "code": e.code_str(),
-        "category": e.category(),
-        "message": message,
-        "detail": detail,
-        "subject": null,
-        "evidence": {"checked": null, "account": null, "upstream": null},
-        "retry": code.retry().as_str(),
-        "human_required": code.human_required() || kind == "handoff",
-        "do": step.action,
-        "next": next,
-        "next_kind": kind,
-    })
-}
-
-/// A legacy step's `next` and its kind: the tool call itself (`rerun`), an opv command
-/// (`run`, or `handoff` when only a person runs it), a vendor command (`vendor`), or
-/// nothing when the step does not run as typed (`none`).
-fn legacy_next(next: &str, rerun: &str) -> (Option<String>, &'static str) {
-    if next == rerun {
-        return (Some(next.to_string()), "rerun");
-    }
-    if next.len() > 300 || next.contains('\n') || !crate::error::is_runnable(next) {
-        return (None, "none");
-    }
-    let words: Vec<&str> = next.split_whitespace().collect();
-    if words.first() != Some(&"opv") {
-        return (Some(next.to_string()), "vendor");
-    }
-    let person_only = matches!(words.get(1), Some(&("approve" | "login" | "setup")))
-        || words.iter().any(|w| {
-            PERSON_ONLY_FLAGS
-                .iter()
-                .any(|f| w == f || w.starts_with(&format!("{f}=")))
-        });
-    (
-        Some(next.to_string()),
-        if person_only { "handoff" } else { "run" },
-    )
+    crate::error::document(e, inv, verbose)
 }
 
 /// What a name argument must be, in the refusal's message.
@@ -2888,7 +2818,11 @@ rules = { prefix = "sk_" }
 
     #[test]
     fn a_rerun_is_calling_the_tool_again() {
-        let e = crate::error::Error::Unknown("timed out".into());
+        let e: crate::error::Error = crate::cause::Cause::Interrupted {
+            signal: 2,
+            writes_started: false,
+        }
+        .into();
         assert_eq!(
             tool(&["sync"], &[]).failed(&e)["error"]["next"],
             "call opv_sync again"
@@ -2897,13 +2831,18 @@ rules = { prefix = "sk_" }
 
     // 08.02: a target CLI's sign-out gets its own sign-in step, not a 1Password hint.
     fn fly_signed_out() -> crate::error::Error {
-        crate::error::Error::Auth("fly is not logged in".into()).with_next("flyctl auth login")
+        crate::cause::Cause::NotSignedIn {
+            system: crate::cause::System::Fly,
+            account: None,
+            state: crate::cause::SessionState::SignedOut,
+        }
+        .into()
     }
 
     #[test]
     fn a_target_sign_out_answers_with_the_target_sign_in() {
         let v = tool(&["plan"], &["prod"]).failed(&fly_signed_out());
-        assert_eq!(v["error"]["next"], "flyctl auth login");
+        assert!(v["error"].to_string().contains("flyctl auth login"), "{v}");
     }
 
     #[test]
@@ -2912,19 +2851,23 @@ rules = { prefix = "sk_" }
         assert!(!v.to_string().contains("1Password"));
     }
 
-    // Live 09: a declaration's own mistake is named, not hidden.
-    #[test]
-    fn a_legacy_failure_carries_its_message() {
-        let e = crate::error::Error::Config("kind must be secret or config".into());
-        let v = tool(&["add"], &[]).failed(&e);
-        assert_eq!(v["error"]["message"], "kind must be secret or config");
-    }
-
-    // 08.05: a stale plan's approve step is a person's handoff, every scope flag kept.
-    fn stale(next: &str) -> crate::error::Error {
-        crate::error::Error::Policy("the plan changed".into())
-            .with_code(crate::error::Code::StalePlan)
-            .with_next(next)
+    // 08.05: an unapproved plan's approve step is a person's handoff, every scope flag kept.
+    fn stale(_next: &str) -> crate::error::Error {
+        crate::cause::Cause::ApprovalMissing {
+            plan: crate::cause::PlanId::new("0123abcd"),
+            scope: crate::cause::PlanScope::Sync {
+                env: crate::cause::EnvName::new("prod"),
+                targets: Vec::new(),
+                product: None,
+                deploy: false,
+                prune: false,
+                rotate: vec![crate::cause::ProductKey {
+                    product: crate::cause::ProductName::new("api"),
+                    key: crate::cause::KeyName::new("ENC_KEY"),
+                }],
+            },
+        }
+        .into()
     }
 
     const ROTATING_APPROVE: &str = "opv approve 0123abcd --sync prod --rotate api/ENC_KEY";
@@ -2945,15 +2888,6 @@ rules = { prefix = "sk_" }
     fn a_rotating_approve_step_keeps_its_rotation() {
         let v = tool(&["sync"], &[]).failed(&stale(ROTATING_APPROVE));
         assert_eq!(v["error"]["next"], ROTATING_APPROVE);
-    }
-
-    #[test]
-    fn a_legacy_step_with_a_placeholder_is_never_the_next() {
-        let e = crate::error::Error::Auth("x".into()).with_next("opv login --account <ID>");
-        assert_eq!(
-            tool(&["sync"], &[]).failed(&e)["error"]["next"],
-            "call opv_sync again"
-        );
     }
 
     fn sync_args() -> SyncScopeArgs {
@@ -2998,13 +2932,6 @@ rules = { prefix = "sk_" }
                 .unwrap()
                 .contains("approval 0123abcd is used up")
         );
-    }
-
-    #[test]
-    fn a_legacy_failure_after_the_approval_was_used_is_approval_used() {
-        let args = sync_args();
-        let e = after_used_approval(crate::error::Error::Target("refused".into()), &args);
-        assert_eq!(e.code_str(), "approval_used");
     }
 
     // 08.01: pruned, pending and held are objects in the sync document, not strings.
@@ -3128,10 +3055,11 @@ rules = { prefix = "sk_" }
             &tool(&["plan"], &["prod"]),
             &r,
             doc.as_bytes(),
-            Err(crate::error::Error::findings(
-                1,
-                "opv open api/KEY --env prod",
-            )),
+            Err(crate::cause::Cause::ValuesNeeded {
+                env: crate::cause::EnvName::new("prod"),
+                rows: Vec::new(),
+            }
+            .into()),
             |d| plan_receipt(d, &plan_scope(&[], None, &[])),
         );
         assert!(v.get("human_action").is_none());

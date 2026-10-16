@@ -402,33 +402,22 @@ pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::Cur
     }
 }
 
-/// An error's own Do and Next, in words (design §6.1: no step override). A Catalog error's
-/// come from its cause, rendered against the invocation; a Legacy error's from its own
-/// next step (split at ", then" against `rerun`, the command that was run) and `Do:`.
-/// `doctor` and `ready` show these and never a step of their own (07.06, 07.07).
-pub(crate) fn own_step(e: &Error, rerun: &str) -> (Option<String>, Option<String>) {
-    if let Some((c, _)) = e.cause() {
-        let inv = crate::error::invocation();
-        let (_, next) = c.step(&inv);
-        return (
-            c.do_text(&inv),
-            crate::cause::render::next_text(&next, &inv),
-        );
-    }
-    match e.next_step() {
-        Some(n) => {
-            let s = crate::error::split_step(n, rerun);
-            (
-                s.action.or_else(|| e.action().map(str::to_string)),
-                Some(s.next),
-            )
-        }
-        None => (e.action().map(str::to_string), None),
-    }
+/// An error's own Do and Next, in words (design §6.1: no step override): the document's
+/// `do` and `next`, rendered from its cause against the invocation. `doctor` and `ready`
+/// show these and never a step of their own (07.06, 07.07).
+pub(crate) fn own_step(e: &Error) -> (Option<String>, Option<String>) {
+    let doc = crate::error::document(e, &crate::error::invocation(), false);
+    let text = |k: &str| doc[k].as_str().map(str::to_string);
+    (text("do"), text("next"))
 }
 
 pub(crate) fn write_err(e: io::Error) -> Error {
-    Error::Dependency(format!("cannot write output ({})", e.kind()).into())
+    crate::cause::Cause::LocalIo {
+        op: crate::cause::LocalOp::Stdout,
+        path: std::path::PathBuf::new(),
+        io: e.kind().into(),
+    }
+    .into()
 }
 
 /// Additive fields of the FR-21 document.
@@ -584,8 +573,13 @@ pub(crate) fn write_json(
         }),
         next: extra.next.map(str::to_string),
     };
-    let text = serde_json::to_string(&doc)
-        .map_err(|e| Error::Dependency(format!("cannot serialize JSON ({e})").into()))?;
+    // The document is plain strings and numbers: serializing it cannot fail.
+    let text = serde_json::to_string(&doc).map_err(|_| -> Error {
+        crate::cause::Cause::Bug {
+            site: "the --json document did not serialize",
+        }
+        .into()
+    })?;
     writeln!(out, "{text}").map_err(write_err)
 }
 
@@ -1172,38 +1166,20 @@ pub(crate) fn rows_item_url(
     item_url(fleet, env_name, &row.product, r).map(Some)
 }
 
-/// The `Findings` error of `status`, `plan` and `check`: the fix is a person's (`Do:`, A3)
-/// and `Next:` opens the first blocking key in 1Password (H1).
-pub(crate) fn findings_error(n: usize, rows: &[Row], env_name: &str) -> Error {
-    // C4 (09.11, 09.18, 09.22): the blocking keys are the catalog's `ValuesNeeded` (exit 8),
-    // whose step opens the first of them with the invocation's `--config` kept; only
-    // findings without a blocking key keep the count.
-    let blocking: Vec<crate::cause::ValueRow> = rows
-        .iter()
-        .filter(|r| is_blocking(r))
-        .map(value_row)
-        .collect();
-    if !blocking.is_empty() {
-        return crate::cause::Cause::ValuesNeeded {
-            env: crate::cause::EnvName::new(env_name),
-            rows: blocking,
-        }
-        .into();
+/// The findings error of `status`, `plan` and `check` (C4, 09.11, 09.18, 09.22): the
+/// blocking keys of `rows` as the catalog's `ValuesNeeded` (exit 8), whose step opens the
+/// first of them with the invocation's `--config` kept. Callers pass rows with at least one
+/// blocking key.
+pub(crate) fn findings_error(rows: &[Row], env_name: &str) -> Error {
+    crate::cause::Cause::ValuesNeeded {
+        env: crate::cause::EnvName::new(env_name),
+        rows: rows
+            .iter()
+            .filter(|r| is_blocking(r))
+            .map(value_row)
+            .collect(),
     }
-    // Found live: 1Password shows an empty field only in edit mode, so "fix the keys" sent
-    // the person looking for a field that seemed not to exist.
-    let empty = rows.iter().any(|r| {
-        matches!(
-            r.state,
-            KeyState::Missing | KeyState::RuleFailed("nonempty", _)
-        )
-    });
-    let action = if empty {
-        "fix the keys above in 1Password (click Edit on the item: it hides empty fields until then)"
-    } else {
-        "fix the keys above in 1Password"
-    };
-    Error::findings(n, open_next(rows, env_name)).with_do(action)
+    .into()
 }
 
 /// One blocking row as the catalog names it: product, key and what is wrong, never a value.
@@ -1226,17 +1202,6 @@ pub(crate) fn value_row(row: &Row) -> crate::cause::ValueRow {
         key: KeyName::new(&row.key),
         target: None,
         state,
-    }
-}
-
-/// The next step for findings (H1): open the first blocking key's field in 1Password.
-pub(crate) fn open_next(rows: &[Row], env_name: &str) -> String {
-    match rows.iter().find(|r| is_blocking(r)) {
-        Some(r) => format!(
-            "opv open {} --env {env_name}",
-            key_label(&r.product, &r.key)
-        ),
-        None => format!("opv status {env_name}"),
     }
 }
 
@@ -1328,17 +1293,18 @@ fn json_names(pairs: &[(String, String)]) -> Vec<JsonName> {
         .collect()
 }
 
-/// FR-47: the one `Error::Config` message for naming a source-only product on its own. It
-/// holds canonical values for other products' keys and is never run, checked or planned on
-/// its own; callers attach a `Next:` step naming a product that reads it.
-pub(crate) fn source_only_message(product: &str) -> Error {
-    Error::Config(
-        format!(
-            "product {product} is source-only (source_only = true): it holds shared values \
-             for other products' keys and is never run on its own"
-        )
-        .into(),
-    )
+/// FR-47: a source-only product named on its own in `env`. It holds canonical values for
+/// other products' keys and is never run, checked or planned on its own; the cause's step
+/// names a product that reads it, when one does.
+pub(crate) fn source_only(fleet: &Fleet, product: &str, env: Option<&str>) -> Error {
+    crate::cause::Cause::SourceOnly {
+        product: crate::cause::ProductName::new(product),
+        env: env.map(crate::cause::EnvName::new),
+        reader: fleet
+            .referencing_product(product)
+            .map(crate::cause::ProductName::new),
+    }
+    .into()
 }
 
 /// `--product` on `status`, `plan` and `sync` (NR-16, P12, P20): refused for an undeclared
@@ -1348,30 +1314,16 @@ pub(crate) fn source_only_message(product: &str) -> Error {
 pub(crate) fn check_product(
     fleet: &Fleet,
     product: Option<&str>,
-    verb: &str,
     env: Option<&str>,
 ) -> Result<(), Error> {
     let Some(p) = product else { return Ok(()) };
-    let command = |product: Option<&str>| {
-        let mut c = format!("opv {verb}");
-        if let Some(e) = env {
-            c.push(' ');
-            c.push_str(&crate::error::shell_word(e));
-        }
-        if let Some(p) = product {
-            c.push_str(" --product ");
-            c.push_str(&crate::error::shell_word(p));
-        }
-        c
-    };
     if !fleet.products.contains_key(p) {
         // The cause's own step: the same command with a unique close product, else a
         // listing; never the first product (X2).
         return Err(undefined_product(fleet, p, env));
     }
     if fleet.products[p].source_only {
-        let pick = fleet.referencing_product(p);
-        return Err(source_only_message(p).with_next(command(pick)));
+        return Err(source_only(fleet, p, env));
     }
     Ok(())
 }
@@ -1379,16 +1331,10 @@ pub(crate) fn check_product(
 /// D10/FR-34: the product a command acts on in `env`. `given` (a `--product` value, or
 /// the product part of `open`'s target) is validated when present. Without it, exactly one
 /// product that is not source-only and has a key desired in `env` is used; otherwise
-/// [`product_choice`]'s cause. `verb` names the command a source-only product's error
-/// re-runs, e.g. `check`, `run`, `config export`.
-pub(crate) fn pick_product(
-    fleet: &Fleet,
-    env: &str,
-    given: Option<&str>,
-    verb: &str,
-) -> Result<String, Error> {
+/// [`product_choice`]'s cause.
+pub(crate) fn pick_product(fleet: &Fleet, env: &str, given: Option<&str>) -> Result<String, Error> {
     if let Some(p) = given {
-        check_product(fleet, Some(p), verb, Some(env))?;
+        check_product(fleet, Some(p), Some(env))?;
         return Ok(p.to_string());
     }
     let env_def = fleet.environment(env)?;
@@ -1469,32 +1415,6 @@ pub(crate) fn undefined_product(fleet: &Fleet, p: &str, _env: Option<&str>) -> E
         p,
         fleet.products.keys().map(String::as_str),
     )
-}
-
-/// `opv check <env> [--product <p>]`: a read-only look at one product's keys in `env` (the
-/// first environment declared when `env` is unknown), for `Next:` steps.
-pub(crate) fn check_command(fleet: &Fleet, env: Option<&str>, product: Option<&str>) -> String {
-    crate::cause::render::cmd_text(&check_cmd(fleet, env, product))
-}
-
-/// [`check_command`] as a typed command (design §10.1).
-pub(crate) fn check_cmd(
-    fleet: &Fleet,
-    env: Option<&str>,
-    product: Option<&str>,
-) -> crate::cause::Cmd {
-    let env = env
-        .filter(|e| fleet.environments.contains_key(*e))
-        .or_else(|| fleet.environments.keys().next().map(String::as_str))
-        .unwrap_or("<env>");
-    let mut args = vec![env.to_string()];
-    if let Some(p) = product {
-        args.extend(["--product".to_string(), p.to_string()]);
-    }
-    crate::cause::Cmd {
-        command: vec!["check".into()],
-        args,
-    }
 }
 
 /// The target names `product`'s declared keys render on target `target_name` of `env_name`
@@ -2083,7 +2003,7 @@ pub(crate) mod testutil {
 
     /// The Next of `e`, rendered for `opv` with no flags (C4: catalog errors too).
     pub fn next_of_error(e: &crate::error::Error) -> String {
-        e.step("opv", "opv").next
+        e.next_text().unwrap_or_default()
     }
 
     pub const MARKER: &str = "FIXTUREVALUE";

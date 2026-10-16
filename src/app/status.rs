@@ -76,7 +76,7 @@ pub fn run_targeted(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    check_product(fleet, product, "status", Some(env_name))?;
+    check_product(fleet, product, Some(env_name))?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let names = resolve_targets(fleet, env_name, targets, "status")?;
     let runners = target_runners(fleet, env_name, &names, r)?;
@@ -102,7 +102,7 @@ pub fn run_targeted(
     } else {
         None
     };
-    let findings = || findings_error(n, &all, env_name);
+    let findings = || findings_error(&all, env_name);
     let counts: Vec<String> = parts
         .iter()
         .map(|p| count_line(env_name, &p.name, &p.plan.rows, p.t.provider().label()))
@@ -334,7 +334,7 @@ pub fn overview(
     out: &mut dyn Write,
     json: bool,
 ) -> Result<(), Error> {
-    check_product(fleet, product, "status", None)?;
+    check_product(fleet, product, None)?;
     let o = overview_of(fleet, product, r);
     if json {
         let doc = OverviewDoc {
@@ -366,7 +366,6 @@ pub fn overview(
 pub struct Overview {
     pub lines: Vec<String>,
     pub(crate) envs: Vec<OverviewEnv>,
-    product: Option<String>,
     first_err: Option<(String, Error)>,
     findings: usize,
     /// The first environment with findings and its blocking rows: the failure names them,
@@ -378,13 +377,8 @@ impl Overview {
     /// The first error, else `ValuesNeeded` for the first environment with findings (its
     /// blocking keys, so the step opens one of them). `_fleet` is kept for the callers.
     pub fn result(self, _fleet: &Fleet) -> Result<(), Error> {
-        let product = self.product.as_deref();
-        let scoped = |cmd: String| match product {
-            Some(p) => format!("{cmd} --product {p}"),
-            None => cmd,
-        };
-        if let Some((name, e)) = self.first_err {
-            return Err(e.or_next(|| scoped(format!("opv status {name}"))));
+        if let Some((_, e)) = self.first_err {
+            return Err(e);
         }
         match self.first_finding {
             Some((name, rows)) => Err(Cause::ValuesNeeded {
@@ -402,7 +396,6 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
     let mut o = Overview {
         lines: Vec::new(),
         envs: Vec::new(),
-        product: product.map(str::to_string),
         first_err: None,
         findings: 0,
         first_finding: None,
@@ -470,11 +463,8 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
             }
             Err(e) => {
                 let first = e.to_string().lines().next().unwrap_or_default().to_string();
-                let rerun = match product {
-                    Some(p) => format!("opv status {name} --product {p}"),
-                    None => format!("opv status {name}"),
-                };
-                let next = e.step(&rerun, "opv status --help").next;
+                // The error's own step (design §6.1), never one rebuilt here.
+                let next = super::own_step(&e).1;
                 o.lines.push(format!("{name}: not checked ({first})"));
                 o.envs.push(OverviewEnv {
                     name: name.clone(),
@@ -484,9 +474,9 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
                     saved: None,
                     skipped: None,
                     findings: None,
-                    error_code: Some(e.code().as_str()),
+                    error_code: Some(e.code_str()),
                     error: Some(first),
-                    next: Some(next),
+                    next,
                 });
                 o.first_err.get_or_insert((name.clone(), e));
             }

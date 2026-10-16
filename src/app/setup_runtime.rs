@@ -401,17 +401,15 @@ impl PromptFailure {
     }
 }
 
-/// `e` with op's own last message kept (#142): a cataloged cause carries it as its
-/// evidence (map_text does nothing on a catalog error, so the line would be lost); a Legacy
-/// error keeps the "1Password said:" line in its text.
+/// `e` with op's own last message kept as its cause's evidence (#142), unless it carries
+/// evidence already.
 fn with_said(e: Error, messages: &[String], exit: Option<i32>) -> Error {
     let Some(line) = said(messages) else {
         return e;
     };
     match e.cause() {
         Some((cause, None)) => Error::with_evidence(cause.clone(), evidence(line, exit)),
-        Some(_) => e,
-        None => e.map_text(|t| format!("{t}\n1Password said: {line}")),
+        _ => e,
     }
 }
 
@@ -495,10 +493,8 @@ fn exit_code(status: &std::process::ExitStatus) -> Option<i32> {
 pub struct Console;
 impl Console {
     /// `command` (`setup`, `login` or `config edit`) needs the owner's own terminal. The
-    /// catalog's handoff is the command line as typed, every argument kept (review #8, I3),
-    /// so `next` is no longer used.
-    pub fn require_terminal(command: &str, next: &str) -> Result<(), Error> {
-        let _ = next;
+    /// catalog's handoff is the command line as typed, every argument kept (review #8, I3).
+    pub fn require_terminal(command: &str) -> Result<(), Error> {
         let ci = std::env::var_os("CI").is_some_and(|v| !v.is_empty() && v != "false" && v != "0")
             || std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true");
         if ci {

@@ -767,7 +767,7 @@ mod tests {
 
     /// The error as reported: its message and its `Next:` line.
     fn err_text(res: Result<Preflight, Error>) -> String {
-        crate::error::report(&res.unwrap_err(), "-", None)
+        crate::error::report(&res.unwrap_err())
     }
 
     #[test]
@@ -1134,7 +1134,7 @@ mod tests {
             .map(|c| {
                 (
                     c.name.to_string(),
-                    c.outcome.map_err(|e| crate::error::report(&e, "-", None)),
+                    c.outcome.map_err(|e| crate::error::report(&e)),
                 )
             })
             .collect()

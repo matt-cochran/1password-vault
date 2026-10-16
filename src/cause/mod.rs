@@ -380,6 +380,9 @@ pub enum Cause {
     ConfigNotFound {
         searched_from: PathBuf,
         env: Option<EnvName>,
+        /// The 1Password manifest search that found nothing too, when one ran (03.20: only
+        /// the selected account is searched).
+        manifest: Option<ManifestSearch>,
     },
     ConfigSourceMismatch {
         command: CommandId,
@@ -780,9 +783,38 @@ pub enum Cause {
         /// The provider's own listing that shows the object, when there is one.
         refind: Option<VendorCmd>,
     },
+    /// A source-only product (FR-47) named on its own: it holds shared values for other
+    /// products' keys and is never run, checked or planned by itself.
+    SourceOnly {
+        product: ProductName,
+        env: Option<EnvName>,
+        /// A product that reads it, when one does: the step names it instead.
+        reader: Option<ProductName>,
+    },
+    /// No 1Password vault or item, or more than one, has exactly this title (a lookup in a
+    /// listing that answered, never a failed call).
+    TitleLookup {
+        /// `Vault` or `Item`.
+        kind: ResourceKind,
+        title: String,
+        /// The vault searched, for an item.
+        vault: Option<VaultId>,
+        /// How many have the title: 0, or more than one.
+        matches: usize,
+        /// The candidates by title and ID: the listing's for none, the matches for several.
+        candidates: Vec<String>,
+    },
     Bug {
         site: &'static str,
     },
+}
+
+/// The manifest search behind a `ConfigNotFound`: the repository tag it looked for (none
+/// without a remote) and the one account it searched.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ManifestSearch {
+    pub repo: Option<String>,
+    pub account: Option<AccountId>,
 }
 
 /// Why an item cannot be used as it is (F4).
@@ -948,6 +980,17 @@ pub enum UsageProblem {
     /// A file the command would write already exists; `--force` replaces it (F4).
     FileExists {
         path: PathBuf,
+    },
+    /// A removed form (FR-60): what was removed, and the command that does it now.
+    Removed {
+        what: &'static str,
+        instead: Cmd,
+    },
+    /// A command line the parser refused: its own first line (it names the argument it
+    /// could not place), and the subcommand path whose help to read (empty: `opv --help`).
+    Rejected {
+        message: String,
+        help: Vec<String>,
     },
 }
 
@@ -1319,6 +1362,9 @@ impl Cause {
             InputUnreadable { .. } => "input_unreadable",
             ItemUnusable { .. } => "item_unusable",
             SecretNotStored { .. } => "secret_not_stored",
+            SourceOnly { .. } => "source_only",
+            TitleLookup { matches: 0, .. } => "title_not_found",
+            TitleLookup { .. } => "title_ambiguous",
             Bug { .. } => "internal_error",
         }
     }
@@ -1349,6 +1395,8 @@ impl Cause {
             | InputInvalid { .. }
             | ConfigProposalInvalid { .. }
             | InputUnreadable { .. }
+            | SourceOnly { .. }
+            | TitleLookup { .. }
             | AccountRequired { .. } => 2,
             ToolMissing { .. }
             | ToolUnusable { .. }
@@ -1455,6 +1503,7 @@ impl Cause {
             | UnexpectedOutput { .. }
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
+            | SourceOnly { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }

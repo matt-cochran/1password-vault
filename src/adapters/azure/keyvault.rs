@@ -1003,7 +1003,7 @@ mod tests {
         let err = kv
             .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
-        assert!(crate::error::report(&err, "-", None).contains(&format!(
+        assert!(crate::error::report(&err).contains(&format!(
             "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET --subscription {SUBSCRIPTION}"
         )));
     }
@@ -1017,7 +1017,7 @@ mod tests {
             .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
             .unwrap_err();
         assert!(
-            crate::error::report(&err, "-", None).contains(
+            crate::error::report(&err).contains(
                 "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET"
             )
         );

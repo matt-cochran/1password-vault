@@ -939,7 +939,7 @@ mod tests {
     /// The diagnosis when the store says `exists` and kubectl answers `outputs`.
     fn diagnosis(exists: Option<bool>, outputs: Vec<Output>) -> String {
         let e = diagnosis_error(exists, outputs);
-        crate::error::report(&e, "opv doctor", None)
+        crate::error::report(&e)
     }
 
     /// The diagnosis error itself.

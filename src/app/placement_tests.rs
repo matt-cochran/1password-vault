@@ -687,7 +687,7 @@ fn a_sync_without_an_approval_names_the_approve_command() {
     let id = plan_id(&w, &fleet, &["east"]);
     let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
     assert_eq!(
-        e.step("", "").next,
+        e.next_text().unwrap_or_default(),
         format!("opv approve {id} --sync prod --target east")
     );
 }

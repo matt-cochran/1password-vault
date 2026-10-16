@@ -1516,7 +1516,7 @@ fn opv_tidy_writes_one_edit_for_a_person() {
 fn opv_tidy_refuses_a_service_account_until_a_person_runs_it() {
     let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
     let (res, _) = repair(&op, false);
-    assert_eq!(res.unwrap_err().code(), Code::TerminalRequired);
+    assert_eq!(res.unwrap_err().code_str(), "own_session_required");
 }
 
 #[test]
@@ -1648,13 +1648,16 @@ fn service_account() -> crate::runner::fake::FakeRunner {
 #[test]
 fn a_write_by_a_service_account_needs_a_persons_terminal() {
     let e = require_person(&service_account(), "opv target add").unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::TerminalRequired);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 #[test]
 fn a_write_by_a_service_account_never_steps_to_login() {
     let e = require_person(&service_account(), "opv target add").unwrap_err();
-    assert_eq!(e.next_step(), None);
+    assert!(
+        !e.next_text().unwrap_or_default().starts_with("opv login"),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -1668,7 +1671,7 @@ fn a_write_with_no_account_on_this_machine_steps_to_login_add() {
     ]);
     let e = require_person(&r, "opv target add").unwrap_err();
     // Catalog error (04.07): the step comes from the cause.
-    assert_eq!(e.step("-", "-").next, "opv login --add");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv login --add");
 }
 
 // --- error-catalog lane (audit 04.01, 04.19) ---

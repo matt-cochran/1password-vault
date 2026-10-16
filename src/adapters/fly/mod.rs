@@ -1508,10 +1508,7 @@ mod tests {
         let r = FakeRunner::new([Output::success("[]")]);
         let _ = r.read(&Call::new(PROGRAM, &["releases"]), &[]);
         let e = deploy_still_running("app");
-        assert!(
-            !crate::error::report(&e, "-", None).contains("--timeout"),
-            "{e:?}"
-        );
+        assert!(!crate::error::report(&e).contains("--timeout"), "{e:?}");
     }
 
     /// NR-24: preflight reads the app status, then its releases; nothing else.

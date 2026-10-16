@@ -421,10 +421,10 @@ fn a_vault_opv_may_not_create_asks_the_person_to_create_it() {
     a.vault = "myapp-prod".into();
     let run = run_in(dir.path(), &a, vec![vaults()]);
     assert_eq!(
-        run.err().action(),
+        run.err().do_text().as_deref(),
         Some(
             "create the vault \"myapp-prod\" in 1Password (opv creates it only for a person \
-             signed in with their own account), then re-run"
+             signed in with their own account), or give the exact title of one that exists"
         )
     );
 }
@@ -1336,9 +1336,6 @@ fn the_product_advice_steps_to_init_help() {
 #[test]
 fn an_invalid_proposed_configuration_says_nothing_was_written() {
     // F2: text opv generated that fails validation is `ConfigProposalInvalid`.
-    let e = would_write(
-        config::parse("[environments.dev]\nbogus = 1\n").unwrap_err(),
-        "init",
-    );
+    let e = would_write(config::parse("[environments.dev]\nbogus = 1\n").unwrap_err());
     assert!(e.to_string().contains("nothing was written"), "{e}");
 }

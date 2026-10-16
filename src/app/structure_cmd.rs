@@ -60,6 +60,7 @@ pub fn env_add(
         Cause::ConfigNotFound {
             searched_from: start.to_path_buf(),
             env: Some(EnvName::new(environment)),
+            manifest: None,
         }
         .into()
     })?;

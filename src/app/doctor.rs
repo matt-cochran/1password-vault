@@ -166,7 +166,6 @@ fn run_request_on(
             .is_ok_and(|f| f.environments.values().all(|e| e.targets.is_empty()));
     let scope = Scope {
         env,
-        product,
         local_only,
         json,
         source,
@@ -199,8 +198,6 @@ pub fn run_with(
 struct Scope<'a> {
     /// `--env`: the item check reads this environment's item (P6).
     env: Option<&'a str>,
-    /// `--product` (with `--env`).
-    product: Option<&'a str>,
     /// Every environment in scope has no target (#54).
     local_only: bool,
     /// `--json` (P18).
@@ -271,33 +268,28 @@ impl Row {
         }
     }
 
-    /// The remediation for this row: the failure's own next step, or its first indented
-    /// line (the install, sign-in, `op account add` or log-in command the failure already
-    /// prints, FR-26). `None` for a row with nothing to do, and for a failure whose own step
-    /// is a Do only (a person picks). Never tool output or a value (SR-1).
-    fn next(&self) -> Option<String> {
+    /// The row's Do and Next: a failure's own (its cause's, design §6.1), or a warning's
+    /// own command (`fix`). A warning without one keeps its remediation in its text (its
+    /// first indented line: an upgrade or install line, FR-26), which is the person's Do;
+    /// it is never parsed into a command. Never tool output or a value (SR-1).
+    fn step(&self) -> (Option<String>, Option<String>) {
         if matches!(self.state, State::Ok | State::Skip) {
-            return None;
+            return (None, None);
         }
-        if let Some(f) = &self.fix {
-            return Some(f.clone());
+        let remediation = || {
+            self.text
+                .lines()
+                .skip(1)
+                .find_map(|l| l.strip_prefix("  "))
+                .map(|l| l.trim().to_string())
+                .filter(|h| !h.is_empty())
+        };
+        match (&self.act, &self.fix) {
+            (Some(a), f) => (Some(a.clone()), f.clone()),
+            (None, Some(f)) => (None, Some(f.clone())),
+            (None, None) if self.state == State::Warn => (remediation(), None),
+            (None, None) => (None, None),
         }
-        if self.act.is_some() {
-            return None;
-        }
-        self.text
-            .lines()
-            .skip(1)
-            .find_map(|l| l.strip_prefix("  "))
-            .map(|l| l.strip_prefix("next: ").unwrap_or(l).trim().to_string())
-            .filter(|h| !h.is_empty())
-    }
-
-    /// The `Next:` step for this row when it is the first failure of a Legacy error that
-    /// names none of its own (NR-19): `rerun` is doctor with the scope's flags (X1).
-    fn step(&self, rerun: &str) -> String {
-        self.next()
-            .unwrap_or_else(|| format!("fix the {} failure above, then {rerun}", self.label()))
     }
 }
 
@@ -309,8 +301,6 @@ struct Report {
     first: Option<(usize, Error)>,
     /// The target the checks pushed now are about (FR-56); `None` outside a target.
     target: Option<String>,
-    /// `opv doctor` with the scope's flags: what a Legacy step re-runs (X1).
-    rerun: String,
 }
 
 impl Report {
@@ -328,7 +318,7 @@ impl Report {
     /// A failing check whose line text differs from its error (the item check, P6). The
     /// row shows the error's own Do and Next (design §6.1).
     fn fail(&mut self, name: &str, text: String, e: Error) {
-        let (act, fix) = super::own_step(&e, &self.rerun);
+        let (act, fix) = super::own_step(&e);
         if self.first.is_none() {
             self.first = Some((self.rows.len(), e));
         }
@@ -392,10 +382,7 @@ fn run_on_with(
     scope: Scope<'_>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    let mut report = Report {
-        rerun: doctor_command(&scope),
-        ..Report::default()
-    };
+    let mut report = Report::default();
     let (fleet, config_line) = match config {
         Ok(f) => {
             let mut summary = config_summary(&f);
@@ -524,20 +511,10 @@ fn run_on_with(
         print_text(&report, out, &mut std::io::stderr())?;
     }
     // The first failure is the result, with its own Do and Next (design §6.1: no step
-    // override, 07.06). Only a Legacy error that names no step of its own gets the row's
-    // remediation (its first indented line, else the re-run with the scope's flags). The
-    // `Next:` line is printed once, last, by the error report on stderr.
+    // override, 07.06). The `Next:` line is printed once, last, by the error report on
+    // stderr.
     match report.first {
-        Some((index, e)) => {
-            let row = &report.rows[index];
-            Err(match e.cause() {
-                Some(_) => e,
-                None => {
-                    let step = row.step(&report.rerun);
-                    e.or_next(|| step)
-                }
-            })
-        }
+        Some((_, e)) => Err(e),
         None => {
             if !scope.json {
                 writeln!(out, "{}", closing_line(&report)).map_err(write_err)?;
@@ -589,21 +566,6 @@ fn print_text(report: &Report, out: &mut dyn Write, err: &mut dyn Write) -> Resu
     Ok(())
 }
 
-/// `opv doctor` with the scope's flags, the command to run again once a fix is done.
-fn doctor_command(scope: &Scope<'_>) -> String {
-    let mut c = "opv doctor".to_string();
-    if let Some(e) = scope.env {
-        c.push_str(&format!(" --env {e}"));
-    }
-    if let Some(p) = scope.product {
-        c.push_str(&format!(" --product {p}"));
-    }
-    for t in scope.targets {
-        c.push_str(&format!(" --target {t}"));
-    }
-    c
-}
-
 /// P18, A3: `{schema_version: 1, config_source, checks: [{name, target, status, detail,
 /// next, do}], next, do}`. `config_source` is where the configuration was found (FR-44), or
 /// null; `target` is the target a check is about (FR-56), null for a check that runs once.
@@ -612,23 +574,11 @@ fn doctor_command(scope: &Scope<'_>) -> String {
 /// and `next` (a command that runs as typed), both null otherwise; the top-level pair is
 /// the first failing check's.
 fn print_json(report: &Report, source: Option<&str>, out: &mut dyn Write) -> Result<(), Error> {
-    let rerun = report.rerun.as_str();
-    // The row's own Do and Next; a step lifted from the text is split at ", then".
-    let step = |row: &Row| -> (Option<String>, Option<String>) {
-        match (&row.act, row.next()) {
-            (Some(a), n) => (Some(a.clone()), n),
-            (None, Some(n)) => {
-                let s = crate::error::split_step(&n, rerun);
-                (s.action, Some(s.next))
-            }
-            (None, None) => (None, None),
-        }
-    };
     let checks: Vec<serde_json::Value> = report
         .rows
         .iter()
         .map(|row| {
-            let (act, next) = step(row);
+            let (act, next) = row.step();
             serde_json::json!({
                 "name": row.name,
                 "target": row.target,
@@ -639,19 +589,9 @@ fn print_json(report: &Report, source: Option<&str>, out: &mut dyn Write) -> Res
             })
         })
         .collect();
-    // The first failure's own step; a Legacy error naming none gets the re-run, as its
-    // error report does.
+    // The first failure's own step (its cause's).
     let (act, next) = match &report.first {
-        Some((i, e)) => {
-            let row = &report.rows[*i];
-            match (e.cause(), step(row)) {
-                (None, (a, None)) => {
-                    let s = crate::error::split_step(&row.step(rerun), rerun);
-                    (a.or(s.action), Some(s.next))
-                }
-                (_, pair) => pair,
-            }
-        }
+        Some((i, _)) => report.rows[*i].step(),
         None => (None, None),
     };
     let doc = serde_json::json!({
@@ -850,11 +790,12 @@ fn target_checks(
                 }
             }
             Err(e) => {
-                // Taken now, before more calls run: the failed call's scrubbed excerpt, for
-                // the text output only, under the FAIL line; never in `--json` (M2, NR-31).
-                let excerpt = crate::runner::take_failure_excerpt()
-                    .filter(|_| e.from_external_call())
-                    .map(|x| x.render());
+                // The failed call's scrubbed reply (the cause's evidence), for the text
+                // output only, under the FAIL line; never in `--json` (M2, NR-31).
+                let excerpt = e
+                    .cause()
+                    .and_then(|(_, up)| up)
+                    .map(|up| crate::cause::evidence::upstream_box(up, false, false));
                 report.push(DEPLOY_CHECK, Err(e));
                 if let Some(row) = report.rows.last_mut() {
                     row.excerpt = excerpt;
@@ -1291,7 +1232,7 @@ mod tests {
     fn terminal(res: &Result<(), Error>, out: &[u8]) -> String {
         let mut t = text_of(out);
         if let Err(e) = res {
-            t.push_str(&crate::error::report(e, "opv doctor", None));
+            t.push_str(&crate::error::report(e));
         }
         t
     }
@@ -1780,17 +1721,6 @@ mod tests {
         assert!(do_line(&out).starts_with("Do: sign in"), "{out}");
     }
 
-    /// 07.06: a configuration error without a step of its own gets the re-run of this
-    /// doctor, never a fixed "fix secrets.toml" step (a manifest project has no file).
-    const CONFIG_STEP: &str = "Do: fix the config failure above";
-
-    #[test]
-    fn next_step_for_invalid_config_is_fix_and_rerun() {
-        let r = FakeRunner::new(good());
-        let (_, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
-        assert_eq!(do_line(&out), CONFIG_STEP, "{out}");
-    }
-
     /// A real TOML syntax error carries its position; it is never the step.
     #[test]
     fn next_step_for_toml_syntax_error_is_fix_and_rerun() {
@@ -1825,24 +1755,6 @@ mod tests {
         let r = FakeRunner::new(g);
         let (_, out) = doctor(Ok(fleet()), &r);
         assert_eq!(do_line(&out), "Do: reinstall op", "{out}");
-    }
-
-    /// 07.06 (S1): a configuration error keeps its own step; doctor never replaces it.
-    #[test]
-    fn a_config_error_keeps_its_own_next_step() {
-        let r = FakeRunner::new(good());
-        let own = Error::Config("manifest is invalid".into()).with_next("opv config edit");
-        let (res, _) = doctor(Err(own), &r);
-        assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
-    }
-
-    /// 07.06 (S1): the config line shows the error's own step under it, not a fixed one.
-    #[test]
-    fn the_config_line_shows_the_errors_own_step() {
-        let r = FakeRunner::new(good());
-        let own = Error::Config("manifest is invalid".into()).with_next("opv config edit");
-        let (_, out) = doctor(Err(own), &r);
-        assert!(out.contains("\n  fix: opv config edit\n"), "{out}");
     }
 
     /// 07.06 (S1): a catalog cause from the configuration is returned as it is, so its
@@ -2756,7 +2668,10 @@ mod tests {
                     .into(),
             )),
         );
-        assert_eq!(report.rows[0].next().as_deref(), Some("opv skill install"));
+        assert_eq!(
+            report.rows[0].step().0.as_deref(),
+            Some("opv skill install")
+        );
     }
 }
 

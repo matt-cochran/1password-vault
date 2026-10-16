@@ -366,10 +366,7 @@ fn a_failed_store_never_leads_to_the_mint_again() {
     w.op.vaults.borrow_mut().retain(|(id, _)| id != "vstate");
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    let next = res
-        .unwrap_err()
-        .step("opv target credentials staging --target web --create", "")
-        .next;
+    let next = res.unwrap_err().next_text().unwrap_or_default();
     assert!(!next.contains("--create"), "{next}");
 }
 
@@ -446,7 +443,10 @@ fn a_recorded_credential_refusal_points_to_config_edit() {
     let deploy = Some(RECORDED_REFERENCE);
     let (_d, path) = file(&fleet_text(deploy));
     let (res, _, _) = create(&w, &fleet(deploy), &path, true);
-    assert_eq!(res.unwrap_err().step("", "").next, "opv config edit");
+    assert_eq!(
+        res.unwrap_err().next_text().unwrap_or_default(),
+        "opv config edit"
+    );
 }
 
 // ── Regressions of the audit findings (06-targets.md) ──────────────────────────
@@ -485,13 +485,8 @@ fn a_preflight_failure_keeps_its_do_unchanged() {
     w.fly_signed_in = false;
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    let step = res.unwrap_err().step("", "");
-    assert!(
-        !step
-            .action
-            .unwrap_or_default()
-            .contains("nothing was created")
-    );
+    let action = res.unwrap_err().do_text();
+    assert!(!action.unwrap_or_default().contains("nothing was created"));
 }
 
 #[test]
@@ -529,7 +524,7 @@ fn a_reference_that_cannot_be_recorded_never_leads_to_the_mint_again() {
         "web",
         vec!["Fly deploy token t".into()],
     );
-    assert!(!e.step("", "").next.contains("--create"));
+    assert!(!e.next_text().unwrap_or_default().contains("--create"));
 }
 
 #[test]
@@ -540,7 +535,7 @@ fn a_failed_store_fills_in_the_app_to_list_tokens() {
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
     // C21: Fly's own listing is the step that finds the token (Provider::mint_refind).
-    let next = res.unwrap_err().step("", "").next;
+    let next = res.unwrap_err().next_text().unwrap_or_default();
     assert_eq!(next, "flyctl tokens list --app shop-staging");
 }
 

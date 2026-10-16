@@ -102,7 +102,7 @@ fn read_fails(p: P, s: S) -> (Error, String, FakeRunner) {
     let r = fake_op(s, h.ci);
     let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
     // What the user sees: the message, then its `Next:` line (NR-19).
-    let t = crate::error::report(&e, "-", None);
+    let t = crate::error::report(&e);
     (e, t, r)
 }
 
@@ -127,12 +127,11 @@ fn expired(p: P) {
 fn no_account(p: P) {
     let (e, t, r) = read_fails(p, S::NoAccount);
     assert_eq!(e.code_str(), "account_not_registered", "{p:?}: {t}");
-    let step = e.step("-", "-");
     let want = match p {
         P::MacOs | P::WindowsPowerShell => "opv login",
         _ => "opv login --add",
     };
-    assert_eq!(step.next, want, "{p:?}: {t}");
+    assert_eq!(e.next_text().as_deref(), Some(want), "{p:?}: {t}");
     assert_no_values(&t);
     // FR-13: one item read; P16: diagnosed after its first attempt, so never retried here.
     assert_eq!(op_item_reads(&r), 1, "FR-13, P16");
@@ -274,7 +273,7 @@ fn rejected_or_unreachable_credential_is_credential_rejected() {
         let h = Host::from_env(&fake);
         let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
         let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
-        let t = crate::error::report(&e, "-", None);
+        let t = crate::error::report(&e);
         assert_eq!(e.code_str(), "credential_rejected", "{t}");
         assert!(t.contains(var), "{t}");
         assert!(!t.contains("op signin") && !t.contains("opv login"), "{t}");
@@ -305,7 +304,7 @@ fn connect_item_not_found_is_source_exit_4() {
     );
     let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
     // What the user sees: the message, then its `Next:` line (NR-19).
-    let t = crate::error::report(&e, "-", None);
+    let t = crate::error::report(&e);
     assert_eq!(e.code_str(), "item_not_found", "{t}");
 }
 
@@ -316,7 +315,7 @@ fn connect_whoami_failing_is_not_auth_with_interactive_command() {
         let h = Host::from_env(&FakeEnv::new("linux").shell(shell).var("OP_CONNECT_HOST"));
         let r = FakeRunner::new([Output::failure(1), Output::failure(1)]);
         let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
-        let t = crate::error::report(&e, "-", None);
+        let t = crate::error::report(&e);
         assert!(
             !t.contains("op signin") && !t.contains("eval") && !t.contains("opv login"),
             "{t}"
@@ -328,7 +327,10 @@ fn connect_whoami_failing_is_not_auth_with_interactive_command() {
 #[test]
 fn not_signed_in_steps_to_opv_login() {
     let (e, _, _) = read_fails(P::Linux, S::Expired);
-    assert!(e.step("-", "-").next.starts_with("opv login"), "{e}");
+    assert!(
+        e.next_text().unwrap_or_default().starts_with("opv login"),
+        "{e}"
+    );
 }
 
 /// An unrecognised `$SHELL` gets the same `opv login`: it needs no shell syntax.
@@ -338,6 +340,9 @@ fn unknown_shell_gets_the_same_login_command() {
         let h = Host::from_env(&FakeEnv::new("linux").shell(sh));
         let r = fake_op(S::Expired, false);
         let e = onepassword::read_item_with(&r, &env(), &at(), &h).unwrap_err();
-        assert!(e.step("-", "-").next.starts_with("opv login"), "{sh}: {e}");
+        assert!(
+            e.next_text().unwrap_or_default().starts_with("opv login"),
+            "{sh}: {e}"
+        );
     }
 }

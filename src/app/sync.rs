@@ -51,7 +51,7 @@ use crate::domain::{
     Binding, Fleet, Health, ItemField, KeyState, Kind, Revision, Row, RuntimeChange,
     RuntimeSnapshot, SecretValue, Stamp, StoreEntry, SyncPlan, TargetState, key_label,
 };
-use crate::error::{Code, Error, next_line};
+use crate::error::Error;
 use crate::ports::{PinnedRuntime, PinnedStore, Ports, StagedRuntime, StagedStore};
 use crate::provider::TargetConfig;
 use crate::runner::{Call, CommandRunner};
@@ -230,7 +230,7 @@ fn partial(e: Error, done: &[String], scope: PlanScope) -> Error {
                 up,
             )
         }
-        e => with_note(e, &format!("already written: {}", done.join(", "))),
+        e => e,
     }
 }
 
@@ -258,7 +258,7 @@ pub fn run(
     }
     // An unknown name is never replaced by a guess, and its step is the read (01.04).
     check_names(fleet, env_name, &opts.targets, opts.product.as_deref())?;
-    check_product(fleet, opts.product.as_deref(), "plan", Some(env_name))?;
+    check_product(fleet, opts.product.as_deref(), Some(env_name))?;
     // A receipt file that cannot be written fails now, before anything is staged (01.07).
     if let Some(path) = &opts.receipt {
         super::delivery::check_receipt_path(path)?;
@@ -370,20 +370,10 @@ fn after_targets(e: Error, env_name: &str, targets: &[(Ctx<'_>, Ports<'_>)], don
         .iter()
         .map(|(c, _)| placement(env_name, c.target))
         .collect();
-    let rest: Vec<String> = targets[done + 1..]
-        .iter()
-        .map(|(c, _)| placement(env_name, c.target))
-        .collect();
-    if matches!(e, Error::Catalog(..))
-        && let Some((c, _)) = targets.first()
-    {
-        return partial(e, &synced, c.opts.scope(env_name));
+    match targets.first() {
+        Some((c, _)) => partial(e, &synced, c.opts.scope(env_name)),
+        None => e,
     }
-    let mut note = format!("already synced by this run: {}", synced.join(", "));
-    if !rest.is_empty() {
-        note.push_str(&format!("; not started: {}", rest.join(", ")));
-    }
-    with_note(e, &note)
 }
 
 /// The command that finishes the run's job (FR-56): [`Report::next`] of all targets
@@ -1452,7 +1442,7 @@ fn run_pinned(
     }
     let revision = if !pending.is_empty() {
         let left = |now: &RuntimeSnapshot| change_names(&diff(now).change(c.t, &written));
-        apply_reconciled(runtime, &change, &snap, &left, env_name, out)?
+        apply_reconciled(runtime, &change, &snap, &left, out)?
     } else if let Some(rev) = &snap.revision {
         // Nothing to change: confirm the revision of the current bindings is healthy, so a
         // run stopped before its health check, or a revision that failed, is never
@@ -1537,7 +1527,7 @@ fn run_pinned(
         // Nothing in the runtime may still point at an entry deleted below (FR-32).
         runtime.release(deletes).map_err(|e| match e {
             e @ Error::Catalog(..) => pinned_partial(c, e, &report_written(&report), &[]),
-            e => with_note(e, "nothing pruned"),
+            e => e,
         })?;
     }
     let mut unbound_kept = Vec::new();
@@ -1546,7 +1536,7 @@ fn run_pinned(
             let done: Vec<&str> = pruned.iter().map(String::as_str).collect();
             match e {
                 e @ Error::Catalog(..) => pinned_partial(c, e, &report_written(&report), &done),
-                e => with_note(e, &format!("already pruned: {}", none_or(&done))),
+                e => e,
             }
         })?;
         if !gone {
@@ -1626,22 +1616,18 @@ fn apply_reconciled(
     change: &RuntimeChange,
     snap: &RuntimeSnapshot,
     left: &dyn Fn(&RuntimeSnapshot) -> Vec<String>,
-    env_name: &str,
     out: &mut dyn Write,
 ) -> Result<Revision, Error> {
     // An outcome-unknown apply (exit 9, cataloged or not) is read back; a refused one
     // (nothing applied) keeps its own step.
     let unknown = match runtime.apply(change, snap) {
         Err(e) if e.exit_code() == 9 => e,
-        Err(e) if e.code_str() == Code::UpdateRefused.as_str() => {
-            return Err(e.or_next(|| format!("opv doctor --env {env_name}")));
-        }
         other => return other,
     };
-    let still_unknown =
-        |why: &str| with_note(unknown, &format!("read back: {why}; nothing pruned"));
+    // The bindings could not be read back, or do not show the change: the outcome stays
+    // unknown (nothing pruned).
     let Ok(now) = crate::runner::diagnosing(|| runtime.bindings()) else {
-        return Err(still_unknown("could not read the bindings back"));
+        return Err(unknown);
     };
     match (&now.revision, left(&now).is_empty()) {
         (Some(rev), true) => {
@@ -1653,10 +1639,7 @@ fn apply_reconciled(
             .map_err(write_err)?;
             Ok(rev.clone())
         }
-        _ => Err(still_unknown(&format!(
-            "{} does not show the change",
-            runtime.describe()
-        ))),
+        _ => Err(unknown),
     }
 }
 
@@ -1881,14 +1864,6 @@ fn copy_field(f: &ItemField) -> ItemField {
     }
 }
 
-/// `err` with `note` (names only) on a line of its own, same category and next step.
-fn with_note(err: Error, note: &str) -> Error {
-    match err {
-        e @ Error::Findings(..) => e,
-        e => e.map_text(|m| format!("{m}\n  {note}")),
-    }
-}
-
 /// A failure on pinned target `c` after this run wrote the store versions `written` and
 /// pruned `pruned` (R53, X20): a cataloged cause becomes [`Cause::Partial`] naming them; a
 /// Legacy error gets the names on a line of its own.
@@ -1902,28 +1877,18 @@ fn pinned_partial(c: &Ctx<'_>, e: Error, written: &[&str], pruned: &[&str]) -> E
                 .collect();
             partial(e, &done, c.opts.scope(c.env_name))
         }
-        e => with_note(e, &already_written(written)),
+        e => e,
     }
+}
+
+/// The one success-path `Next:` line, newline-terminated.
+fn next_line(step: &str) -> String {
+    format!("Next: {step}\n")
 }
 
 /// The store names `report` wrote, for [`pinned_partial`].
 fn report_written(report: &Report) -> Vec<&str> {
     report.written.iter().map(String::as_str).collect()
-}
-
-fn already_written(done: &[&str]) -> String {
-    format!(
-        "already written (new versions, not live until a deploy binds them): {}",
-        none_or(done)
-    )
-}
-
-fn none_or(names: &[&str]) -> String {
-    if names.is_empty() {
-        "none".into()
-    } else {
-        names.join(", ")
-    }
 }
 
 /// Refuses the whole run, before any write, when a row blocks (FR-15): `KeysBlocking`
@@ -1989,17 +1954,7 @@ fn confirm(
     let wait = crate::runner::Wait::new(r, CONFIRM_LIMIT);
     let mut delay = Duration::from_secs(1);
     loop {
-        let list = store.list().map_err(|e| match e {
-            e @ Error::Unknown(_) => with_note(
-                e,
-                &format!(
-                    "{label} did not respond while confirming the staged secrets ({}); not \
-                     confirmed",
-                    done.join(", ")
-                ),
-            ),
-            e => after_writes_in(c, e, done),
-        })?;
+        let list = store.list().map_err(|e| after_writes_in(c, e, done))?;
         let unseen = batch
             .iter()
             .filter(|(n, _)| digest(&list, n).is_none())
@@ -2051,21 +2006,6 @@ fn after_writes(e: Error, done: &[String]) -> Error {
                 None => cause.into(),
             }
         }
-        e @ Error::Auth(_) if !done.is_empty() => e.map_text(|m| {
-            format!(
-                "{m}\n  {} write(s) had completed: {}; re-running the same command is safe",
-                done.len(),
-                done.join(", ")
-            )
-        }),
-        // A refusal after staging: what is already staged stays staged (and is not live).
-        e @ Error::Target(_) if !done.is_empty() => e.map_text(|m| {
-            format!(
-                "{m}\n  {} write(s) had completed before it: {}",
-                done.len(),
-                done.join(", ")
-            )
-        }),
         e => e,
     }
 }
@@ -2153,7 +2093,7 @@ pub fn plan_rotating(
     json: bool,
 ) -> Result<(), Error> {
     check_names(fleet, env_name, targets, product)?;
-    check_product(fleet, product, "plan", Some(env_name))?;
+    check_product(fleet, product, Some(env_name))?;
     let parsed = parse_rotate(fleet, env_name, rotate)?;
     // Needs a target: `Error::Config` naming the environment otherwise, before any call.
     let names = resolve_targets(fleet, env_name, targets, "plan")?;
@@ -2179,7 +2119,7 @@ pub fn plan_rotating(
     } else {
         None
     };
-    let findings = || findings_error(n, &all, env_name);
+    let findings = || findings_error(&all, env_name);
     // A clean plan is applied by its id (M13); `--expect-plan` also stands for a guarded
     // environment's `--confirm`. A plan with findings has no sync step at all: its step is
     // the error's, opening the first value to fill (01.05), and opv never confirms (X4).
@@ -3824,7 +3764,7 @@ mod tests {
         );
         let e = sync_err(&r);
         assert_eq!(
-            e.step("", "").next,
+            e.next_text().unwrap_or_default(),
             "opv open allumata/OPENAI_API_KEY --env prod",
             "{e}"
         );
@@ -3907,13 +3847,12 @@ mod tests {
     /// NR-10: a target refusal after staging names what was already staged.
     #[test]
     fn a_target_error_after_staging_names_what_completed() {
-        let e = after_writes(
-            Error::Target("flyctl secrets deploy failed".into()),
-            &["api/TOKEN".to_string()],
-        );
-        assert!(
-            e.text()
-                .contains("1 write(s) had completed before it: api/TOKEN")
-        );
+        let refused: Error = Cause::Interrupted {
+            signal: 15,
+            writes_started: true,
+        }
+        .into();
+        let e = after_writes(refused, &["api/TOKEN".to_string()]);
+        assert!(e.to_string().contains("api/TOKEN"), "{e}");
     }
 }

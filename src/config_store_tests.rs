@@ -337,7 +337,7 @@ fn the_first_run_router_names_the_account_searched() {
         Some("ALABS000000000000000000001"),
     );
     assert!(
-        e.text()
+        e.to_string()
             .contains("in account ALABS000000000000000000001 is tagged for github.com/acme/myapp"),
         "{e:?}"
     );
@@ -359,14 +359,17 @@ fn no_match_names_init_as_the_next_step() {
     let op = FakeOp::with_remote("https://github.com/acme/myapp.git");
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
-    assert!(e.next_step().unwrap().starts_with("opv init "), "{e:?}");
+    assert!(
+        e.next_text().as_deref().unwrap().starts_with("opv init "),
+        "{e:?}"
+    );
 }
 
 #[test]
 fn no_config_anywhere_keeps_the_not_found_prefix_for_doctor() {
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &FakeOp::default()).unwrap_err();
-    assert!(e.text().starts_with(config::NOT_FOUND), "{e:?}");
+    assert_eq!(e.code_str(), "config_not_found", "{e:?}");
 }
 
 #[test]
@@ -376,7 +379,10 @@ fn missing_session_gives_next_opv_login() {
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
     // Catalog error: the step is the cause's own sign-in handoff.
-    assert!(e.step("-", "-").next.starts_with("opv login"), "{e:?}");
+    assert!(
+        e.next_text().unwrap_or_default().starts_with("opv login"),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -654,7 +660,7 @@ fn a_manifest_write_under_a_service_account_is_refused() {
     let base = found.store().read(&op).unwrap();
     let env = crate::host::FakeEnv::new("linux").var_val("OP_SERVICE_ACCOUNT_TOKEN", "dummy");
     let e = under(env, || found.store().replace(&op, &base, &edited())).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::TerminalRequired);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 #[test]
@@ -674,7 +680,7 @@ fn a_refused_manifest_write_in_ci_never_names_opv_login() {
     let (_, found) = myapp(&op);
     let env = crate::host::FakeEnv::new("linux").var("CI");
     let e = under(env, || found.store().read_for_write(&op)).unwrap_err();
-    assert_ne!(e.next_step(), Some("opv login"));
+    assert_ne!(e.next_text().as_deref(), Some("opv login"));
 }
 
 #[test]
@@ -1017,7 +1023,7 @@ fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
         .unwrap_err()
     });
     assert_eq!(
-        e.step("-", "-").next,
+        e.next_text().unwrap_or_default(),
         "opv login --add --account new@labs.example"
     );
 }

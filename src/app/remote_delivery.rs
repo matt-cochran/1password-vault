@@ -740,8 +740,7 @@ fn remote_label() -> String {
 /// against the person's `opv run` ([`Outer::install`]), never `opv remote-receive`.
 #[cfg(unix)]
 fn report_remote(e: &Error) -> i32 {
-    let rerun = crate::cause::render::rerun_text(&crate::error::invocation());
-    let text = crate::error::report(e, &rerun, None);
+    let text = crate::error::report(e);
     let text = match text.strip_prefix("opv: ") {
         Some(rest) => format!("{}: {rest}", remote_label()),
         None => text,
@@ -892,6 +891,7 @@ pub fn receive(_input: Box<dyn Read + Send>) -> Result<i32, Error> {
         why: crate::cause::RamDir::NoneOnPlatform {
             os: std::env::consts::OS,
         },
+        purpose: crate::cause::RamPurpose::FileDelivery,
         env: None,
         product: None,
     }

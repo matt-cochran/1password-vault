@@ -105,8 +105,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             ConfigNotFound {
                 searched_from: PathBuf::from("/work/shop"),
                 env: Some(EnvName::new("env-stage")),
+                manifest: Some(ManifestSearch {
+                    repo: Some("repo-xyz".into()),
+                    account: Some(AccountId::new("ACC-XYZ")),
+                }),
             },
-            vec!["/work/shop", "env-stage"],
+            vec!["/work/shop", "env-stage", "repo-xyz", "ACC-XYZ"],
         ),
         (
             ConfigSourceMismatch {
@@ -774,6 +778,24 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["me@one.example", "ACC-ONE", "ACC-TWO"],
         ),
+        (
+            SourceOnly {
+                product: ProductName::new("shared-xyz"),
+                env: Some(EnvName::new("prod")),
+                reader: Some(ProductName::new("reader-xyz")),
+            },
+            vec!["shared-xyz", "reader-xyz"],
+        ),
+        (
+            TitleLookup {
+                kind: ResourceKind::Item,
+                title: "title-xyz".into(),
+                vault: Some(VaultId::new("vlt-atqr")),
+                matches: 0,
+                candidates: vec!["cand-xyz (id-xyz)".into()],
+            },
+            vec!["title-xyz", "vlt-atqr", "cand-xyz", "id-xyz"],
+        ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
     ]
 }
@@ -854,10 +876,12 @@ fn ordinal(c: &Cause) -> usize {
         ItemUnusable { .. } => 68,
         SecretNotStored { .. } => 69,
         AccountRequired { .. } => 70,
+        SourceOnly { .. } => 71,
+        TitleLookup { .. } => 72,
     }
 }
 
-const VARIANTS: usize = 71;
+const VARIANTS: usize = 73;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2907,6 +2931,7 @@ fn d3_a_built_step_keeps_the_project_flag() {
     let c = Cause::ConfigNotFound {
         searched_from: PathBuf::from("/work"),
         env: Some(EnvName::new("prod")),
+        manifest: None,
     };
     assert_eq!(
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),

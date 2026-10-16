@@ -128,7 +128,7 @@ pub fn build_for(
 ) -> Result<Value, Error> {
     let product_name = match product {
         Some(p) => p.to_string(),
-        None => super::pick_product(fleet, env_name, None, "run")?,
+        None => super::pick_product(fleet, env_name, None)?,
     };
     let env = fleet.environment(env_name)?;
     let prod = fleet
@@ -136,12 +136,8 @@ pub fn build_for(
         .get(&product_name)
         .ok_or_else(|| super::undefined_product(fleet, &product_name, Some(env_name)))?;
     if prod.source_only {
-        // 07.38: the preview of a product that reads it, when one does.
-        let next = match fleet.referencing_product(&product_name) {
-            Some(q) => format!("opv run {env_name} --product {q} --preview"),
-            None => super::check_command(fleet, Some(env_name), None),
-        };
-        return Err(super::source_only_message(&product_name).with_next(next));
+        // 07.38: the cause's step is the preview of a product that reads it, when one does.
+        return Err(super::source_only(fleet, &product_name, Some(env_name)));
     }
     let selection = select(env_name, env, &product_name, prod, role)?;
     let remote_doc = match remote {

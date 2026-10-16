@@ -382,7 +382,7 @@ fn a_service_account_cannot_apply() {
         ),
         || run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap_err(),
     );
-    assert_eq!(e.exit_code(), 6);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // #94: --skip ---------------------------------------------------------------------------

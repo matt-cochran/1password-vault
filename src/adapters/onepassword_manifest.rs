@@ -776,9 +776,9 @@ mod tests {
             account("ACCOUNTUUID000000000000BBB"),
         ]);
         assert!(
-            crate::error::report(&e, "-", None).contains("Next: opv account list"),
+            crate::error::report(&e).contains("Next: opv account list"),
             "{}",
-            crate::error::report(&e, "-", None)
+            crate::error::report(&e)
         );
     }
 
@@ -818,7 +818,7 @@ mod tests {
         let ci = || Host::from_env(&crate::host::FakeEnv::new("linux").var("CI"));
         let r = FakeRunner::new([Output::failure(1)]);
         let e = diagnosis(&r, &ci, None, &list_call(), None);
-        assert_ne!(e.next_step(), Some(LOGIN));
+        assert_ne!(e.next_text().as_deref(), Some(LOGIN));
     }
 
     /// Signed out at a person's terminal, the cause is the missing session.
@@ -871,12 +871,12 @@ mod tests {
         let e = crate::host::with_test_host(wsl_windows_op(), || {
             resolve(&[], "new@labs.example").unwrap_err()
         });
-        let step = e.step("opv", "opv");
+        let action = e.do_text();
         assert!(
-            step.action
+            action
                 .as_deref()
                 .is_some_and(|a| a.contains("in the 1Password app")),
-            "{step:?}"
+            "{action:?}"
         );
     }
 
@@ -887,7 +887,7 @@ mod tests {
             resolve(&[], "new@labs.example").unwrap_err()
         });
         assert_ne!(
-            e.next_step(),
+            e.next_text().as_deref(),
             Some("opv login --add --account new@labs.example")
         );
     }

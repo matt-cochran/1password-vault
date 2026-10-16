@@ -761,8 +761,10 @@ fn failed_revision_names_doctor_access_check() {
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     // The catalog's TargetRefused (unhealthy revision) steps to the scoped doctor check.
     assert!(
-        res.as_ref()
-            .is_err_and(|e| e.step("", "").next.starts_with("opv doctor --env prod")),
+        res.as_ref().is_err_and(|e| e
+            .next_text()
+            .unwrap_or_default()
+            .starts_with("opv doctor --env prod")),
         "{res:?}"
     );
 }

@@ -330,7 +330,7 @@ fn a_missing_personal_item_is_named_by_its_title() {
         .borrow_mut()
         .push(("vpriv0000000000000000000001".into(), "Private".into()));
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("myapp · dev (personal)"), "{shown}");
 }
 
@@ -338,7 +338,7 @@ fn a_missing_personal_item_is_named_by_its_title() {
 fn a_missing_personal_vault_is_named_by_the_titles_tried() {
     let op = FakeOp::default();
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("Private"), "{shown}");
 }
 
@@ -347,7 +347,7 @@ fn a_missing_personal_vault_is_named_by_the_titles_tried() {
 fn a_missing_personal_vault_names_the_personal_vault_field() {
     let op = FakeOp::default();
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("environments.dev.personal_vault"), "{shown}");
 }
 

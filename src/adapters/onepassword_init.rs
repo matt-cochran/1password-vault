@@ -24,7 +24,8 @@ use serde::Deserialize;
 
 use super::onepassword::{Failed, OP, failed_read, op_spawn_error, read_op, unreadable_reply};
 use crate::cause::{
-    Cause, CreateKind, DiagnoseContext, Refind, ResourceKind, ResourceName, ResourceRef, System,
+    Cause, CreateKind, DiagnoseContext, During, OutputProblem, Refind, ResourceKind, ResourceName,
+    ResourceRef, System, VaultId,
 };
 use crate::config;
 use crate::domain::SecretValue;
@@ -55,7 +56,8 @@ pub struct FieldShape {
 }
 
 /// The vault whose name is exactly `title` (case-sensitive). One `op vault list` call.
-/// No match or several matches is `Error::Config` listing the candidates by name and ID.
+/// No match, or several, is the catalog's `TitleLookup` listing the candidates by name and
+/// ID.
 #[cfg(test)]
 pub fn resolve_vault(
     r: &dyn CommandRunner,
@@ -88,7 +90,7 @@ pub fn find_vault(
             name: v.name,
         })
         .collect();
-    lookup(all, title, "vault", "")
+    lookup(all, title, ResourceKind::Vault, None, &args)
 }
 
 /// Who can use `vault_id` (#96): the JSON array of `op vault user list <vault_id> --format
@@ -156,7 +158,7 @@ pub fn find_item(
             name: i.title,
         })
         .collect();
-    lookup(all, title, "item", &format!(" in vault {vault_id}"))
+    lookup(all, title, ResourceKind::Item, Some(vault_id), &args)
 }
 
 /// Read the item once, by IDs, keeping only each field's section, label and type. Built-in
@@ -277,37 +279,65 @@ impl Lookup {
     }
 }
 
-/// Exactly one entry named `title`; none is [`Lookup::Missing`] (an `Error::Config` listing
-/// the candidates); several, or an invalid ID, is an error.
-fn lookup(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<Lookup, Error> {
+/// Exactly one entry named `title`; none is [`Lookup::Missing`] (`TitleLookup` listing the
+/// candidates); several (`TitleLookup` listing them), or an invalid ID in the reply of `op
+/// <args>` (`UnexpectedOutput`), is an error.
+fn lookup(
+    mut all: Vec<Named>,
+    title: &str,
+    kind: ResourceKind,
+    vault: Option<&str>,
+    args: &[&str],
+) -> Result<Lookup, Error> {
     all.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     let matches: Vec<&Named> = all.iter().filter(|n| n.name == title).collect();
+    let vault = vault.map(VaultId::new);
     match matches.as_slice() {
         // The ID goes into argv next: check it like a hand-written ID (§10.2, SR-7) and never
         // echo an ID that fails the check.
         [one] if config::is_id(&one.id) => Ok(Lookup::Found((*one).clone())),
-        [_] => Err(Error::Source(
-            format!(
-                "op returned an ID for the {what} titled {title:?}{scope} that is not a valid \
-             1Password ID (^[A-Za-z0-9][A-Za-z0-9._-]*$); not used"
-            )
+        [_] => Err(invalid_id(kind, args)),
+        [] => Ok(Lookup::Missing(
+            Cause::TitleLookup {
+                kind,
+                title: title.to_string(),
+                vault,
+                matches: 0,
+                candidates: candidates(all.iter()),
+            }
             .into(),
         )),
-        [] => Ok(Lookup::Missing(Error::Config(
-            format!(
-                "no {what} titled {title:?}{scope} (exact, case-sensitive match); candidates: {}",
-                candidates(all.iter())
-            )
-            .into(),
-        ))),
-        many => Err(Error::Config(
-            format!(
-                "{} {what}s are titled {title:?}{scope}; rename all but one in 1Password: {}",
-                many.len(),
-                candidates(many.iter().copied())
-            )
-            .into(),
-        )),
+        many => Err(Cause::TitleLookup {
+            kind,
+            title: title.to_string(),
+            vault,
+            matches: many.len(),
+            candidates: candidates(many.iter().copied()),
+        }
+        .into()),
+    }
+}
+
+/// op's listing answered with an ID that is not a 1Password ID: the reply of `op <args>`
+/// is unusable (the ID is never echoed).
+fn invalid_id(kind: ResourceKind, args: &[&str]) -> Error {
+    let what = match kind {
+        ResourceKind::Vault => "vault ID",
+        _ => "item ID",
+    };
+    match crate::runner::take_unusable_reply(&Call::new(OP, args)) {
+        Some(seen) => Cause::UnexpectedOutput {
+            system: System::OnePassword,
+            at: None,
+            problem: OutputProblem::InvalidValue { what },
+            during: During::Read,
+            seen,
+        }
+        .into(),
+        None => Cause::Bug {
+            site: "onepassword_init: an op listing with an invalid ID left no observation",
+        }
+        .into(),
     }
 }
 
@@ -490,11 +520,8 @@ fn unknown_create(kind: CreateKind, title: &str, refind: Refind, failed: Failed)
     })
 }
 
-fn candidates<'a>(it: impl ExactSizeIterator<Item = &'a Named>) -> String {
+fn candidates<'a>(it: impl ExactSizeIterator<Item = &'a Named>) -> Vec<String> {
     let n = it.len();
-    if n == 0 {
-        return "none".to_string();
-    }
     let mut s: Vec<String> = it
         .take(MAX_CANDIDATES)
         .map(|c| {
@@ -509,7 +536,7 @@ fn candidates<'a>(it: impl ExactSizeIterator<Item = &'a Named>) -> String {
     if n > MAX_CANDIDATES {
         s.push(format!("and {} more", n - MAX_CANDIDATES));
     }
-    s.join(", ")
+    s
 }
 
 #[cfg(test)]
@@ -562,7 +589,7 @@ mod tests {
         let e = resolve_vault(&r, "gamma", &linux).unwrap_err();
         assert_eq!(e.exit_code(), 2);
         let m = e.to_string();
-        assert!(m.contains("no vault titled \"gamma\""), "{m}");
+        assert!(m.contains("no vault is titled \"gamma\""), "{m}");
         assert!(m.contains("\"alpha\" (v1), \"beta\" (v2)"), "{m}");
     }
 
@@ -604,16 +631,14 @@ mod tests {
         for bad in ["-rf", "a b", "", "x;y"] {
             let r = FakeRunner::new([vaults(&[(bad, "app")])]);
             let e = resolve_vault(&r, "app", &linux).unwrap_err();
-            assert_eq!(e.exit_code(), 4, "{e}");
-            let m = e.to_string();
-            assert!(m.contains("vault titled \"app\""), "{m}");
+            assert_eq!(e.code_str(), "unexpected_output", "{e}");
+            let m = crate::error::report(&e);
             if !bad.is_empty() {
                 assert!(!m.contains(bad), "{m}");
             }
             let r = FakeRunner::new([items(&[(bad, "app")])]);
             let e = resolve_item(&r, "v1", "app", &linux).unwrap_err();
-            assert_eq!(e.exit_code(), 4, "{e}");
-            assert!(e.to_string().contains("item titled \"app\""), "{e}");
+            assert_eq!(e.code_str(), "unexpected_output", "{e}");
         }
         // In a candidate list, an invalid ID is replaced too.
         let r = FakeRunner::new([vaults(&[("--evil", "other")])]);
@@ -628,7 +653,7 @@ mod tests {
     fn empty_list_output_is_no_candidates() {
         let r = FakeRunner::new([Output::success(Vec::new())]);
         let m = resolve_item(&r, "v1", "x", &linux).unwrap_err().to_string();
-        assert!(m.contains("candidates: none"), "{m}");
+        assert!(m.contains("there are none to choose from"), "{m}");
     }
 
     /// Signed in, a listing that keeps failing is unrecognised, with what opv checked.
@@ -711,7 +736,7 @@ mod tests {
         let r = FakeRunner::default();
         r.push_unknown("timeout");
         let e = create_vault(&r, "acme-prod").unwrap_err();
-        assert_eq!(e.step("opv init", "-").action, None);
+        assert_eq!(e.do_text(), None);
     }
 
     /// 04.04: a create that printed no ID may have made the item.
@@ -735,6 +760,6 @@ mod tests {
     fn an_unreadable_vault_list_steps_to_doctor() {
         let r = FakeRunner::new([Output::success("not json")]);
         let e = resolve_vault(&r, "x", &linux).unwrap_err();
-        assert_eq!(e.step("-", "-").next, "opv doctor");
+        assert_eq!(e.next_text().unwrap_or_default(), "opv doctor");
     }
 }
