@@ -8,7 +8,7 @@ use std::io;
 
 use super::{FLYCTL, PROGRAM};
 use crate::domain::{Kind, SecretValue};
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::host::Host;
 use crate::provider::{CredentialField, DeployLogin};
 use crate::runner::{Call, CommandRunner, Outcome};
@@ -47,6 +47,7 @@ pub fn mint_preflight(r: &dyn CommandRunner) -> Result<(), Error> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Dependency(
             format!("{PROGRAM} not found on PATH\n  {}", host.install_hint(FLYCTL)).into(),
         )),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(super::whoami_unanswered(&e)),
         Err(e) => Err(Error::Dependency(
             format!("failed to run {PROGRAM} ({})", e.kind()).into(),
         )),
@@ -71,9 +72,21 @@ pub fn mint_deploy_credential(
     let out = match r.write(&Call::new(PROGRAM, &args)) {
         Ok(Outcome::Done(out)) => out,
         Ok(Outcome::Refused(out)) => {
+            // The sign-in was checked just before (`mint_preflight`): what is left is the
+            // app itself or this account's rights on it.
             return Err(Error::Target(
-                format!("{what} failed (exit {}); no token was stored", out.status).into(),
-            ));
+                format!(
+                    "{what} failed for app {app} (exit {}); no token was stored\n  the \
+                     logged-in Fly account was checked just before, so the app is missing \
+                     or this account cannot create tokens for it",
+                    out.status
+                )
+                .into(),
+            )
+            .with_do(format!(
+                "check that app {app} exists and that the logged-in Fly account is an admin \
+                 of its organization ({PROGRAM} apps list shows the apps it can see)"
+            )));
         }
         Ok(Outcome::Unknown {
             status: Some(status),
@@ -135,10 +148,18 @@ impl DeployLogin for FlyLogin {
         mut values: BTreeMap<String, SecretValue>,
         _r: &dyn CommandRunner,
     ) -> Result<(), Error> {
-        self.token =
-            Some(values.remove("FLY_API_TOKEN").ok_or_else(|| {
-                Error::Source("deploy credentials: FLY_API_TOKEN is missing".into())
-            })?);
+        self.token = Some(values.remove("FLY_API_TOKEN").ok_or_else(|| {
+            Error::Auth(
+                "deploy credentials: the deploy_credentials item has no FLY_API_TOKEN field; \
+                 nothing was changed"
+                    .into(),
+            )
+            .with_code(Code::DeployCredentialsFailed)
+            .with_do(
+                "add a FLY_API_TOKEN field holding a Fly deploy token to the environment's \
+                 deploy_credentials item in 1Password",
+            )
+        })?);
         Ok(())
     }
 

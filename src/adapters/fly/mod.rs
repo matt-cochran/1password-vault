@@ -540,6 +540,20 @@ pub fn auth_whoami(r: &dyn CommandRunner) -> io::Result<bool> {
         .map(|o| o.status == 0)
 }
 
+/// `flyctl auth whoami` did not answer within its limit: Fly or the network is not
+/// responding, which re-running can get past (NR-28); nothing was changed.
+pub(crate) fn whoami_unanswered(e: &io::Error) -> Error {
+    Error::Unknown(
+        format!(
+            "{PROGRAM} auth whoami did not answer ({e}); nothing was changed. Check {}, then \
+             re-run",
+            FLYCTL.status_page
+        )
+        .into(),
+    )
+    .with_code(crate::error::Code::ProviderUnavailable)
+}
+
 /// "not logged in to Fly" with the next step for `host` (FR-26): `flyctl auth login`
 /// interactively, or set FLY_API_TOKEN under CI. `failed` names what failed first, if
 /// anything before `flyctl auth whoami`. Text only, never a prompt (FR-9).
@@ -586,6 +600,25 @@ fn failure(
     hint: &[&str],
 ) -> Error {
     let failed = format!("{what} failed ({})", status_text(status));
+    // The environment's deploy credentials (FR-40) are an app-scoped token too, handed to
+    // each call rather than set in this process's environment: `auth whoami` fails under
+    // them, so it says nothing about a sign-in, and `flyctl auth login` cannot help.
+    if r.deploy_signed_in() {
+        return Error::Target(
+            format!(
+                "{failed}\n  {}",
+                check_app(
+                    app,
+                    "the FLY_API_TOKEN in this environment's deploy_credentials item"
+                )
+            )
+            .into(),
+        )
+        .with_do(format!(
+            "check that the token in the environment's deploy_credentials item is a deploy \
+             token for app {app} that has not expired (opv target credentials shows the item)"
+        ));
+    }
     let h = host();
     if let Some(var) = h.token(CREDENTIAL_VARS) {
         return Error::Target(
@@ -903,6 +936,70 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(!err_text(&e).contains(MARK));
+    }
+
+    /// A runner signed in with an environment's deploy credentials (FR-40).
+    pub(super) struct UnderDeployCredentials<'a>(pub(super) &'a FakeRunner);
+
+    impl CommandRunner for UnderDeployCredentials<'_> {
+        fn read(&self, call: &Call, refused: &[i32]) -> io::Result<Outcome> {
+            self.0.read(call, refused)
+        }
+        fn write(&self, call: &Call) -> io::Result<Outcome> {
+            self.0.write(call)
+        }
+        fn probe(&self, call: &Call, limit: std::time::Duration) -> io::Result<Output> {
+            self.0.probe(call, limit)
+        }
+        fn pause(&self, d: std::time::Duration, note: &str) {
+            self.0.pause(d, note)
+        }
+        fn note(&self, line: &str) {
+            self.0.note(line)
+        }
+        fn run_inherited(&self, p: &str, a: &[&str], e: &[(&str, &str)]) -> io::Result<i32> {
+            self.0.run_inherited(p, a, e)
+        }
+        fn deploy_signed_in(&self) -> bool {
+            true
+        }
+    }
+
+    /// A deploy token handed to each call fails `auth whoami`; the failure is never
+    /// diagnosed as a sign-out that `flyctl auth login` could fix.
+    #[test]
+    fn a_failure_under_deploy_credentials_is_a_target_error() {
+        let fake = FakeRunner::new([Output::failure(1), Output::failure(1)]);
+        let v = sv("x");
+        let e = stage(&UnderDeployCredentials(&fake), "app", &[("K".into(), &v)]).unwrap_err();
+        assert!(matches!(e, Error::Target(_)), "{e:?}");
+    }
+
+    #[test]
+    fn a_timed_out_whoami_is_provider_unavailable() {
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        assert_eq!(
+            login::mint_preflight(&r).unwrap_err().code(),
+            crate::error::Code::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn a_refused_token_mint_names_the_app() {
+        let r = FakeRunner::new([Output::failure(1)]);
+        let e = login::mint_deploy_credential(&r, "my-app", "opv-x").unwrap_err();
+        assert!(e.mentions("my-app"), "{e:?}");
+    }
+
+    #[test]
+    fn a_deploy_item_without_a_token_is_deploy_credentials_failed() {
+        use crate::provider::DeployLogin;
+        let mut l = login::FlyLogin::default();
+        let e = l
+            .sign_in(std::collections::BTreeMap::new(), &FakeRunner::default())
+            .unwrap_err();
+        assert_eq!(e.code(), crate::error::Code::DeployCredentialsFailed);
     }
 
     // ---------------------------------------------------------------- list

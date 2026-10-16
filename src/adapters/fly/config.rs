@@ -305,6 +305,11 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
         Ok(true) => Ok(Verdict::Ok("signed in".into())),
         // FR-26: app-scoped deploy tokens cannot run `auth whoami`, so with a Fly token in
         // the environment a failure here is not proof of being logged out.
+        Ok(false) if r.deploy_signed_in() => Ok(Verdict::Warn(format!(
+            "{PROGRAM} auth whoami failed under the environment's deploy_credentials (an \
+             app-scoped deploy token cannot run it); fly commands will show whether the token \
+             can access the app"
+        ))),
         Ok(false) => match host().token(CREDENTIAL_VARS) {
             Some(var) => Ok(Verdict::Warn(format!(
                 "{PROGRAM} auth whoami failed with {var} set (an app-scoped deploy token cannot \
@@ -319,6 +324,8 @@ fn fly_auth(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Verdict, E
             )
             .into(),
         )),
+        // No answer within the probe's limit: Fly or the network, not the install.
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(super::whoami_unanswered(&e)),
         Err(e) => Err(Error::Dependency(
             format!("failed to run {PROGRAM} ({})", e.kind()).into(),
         )),
@@ -368,5 +375,14 @@ mod tests {
                 .as_deref(),
             Some("fly.app = \"my-app\"\nfly.secret_name = \"FLEET__{PRODUCT}__{KEY}\"\n")
         );
+    }
+
+    /// Under deploy credentials a failed `auth whoami` is expected, not a sign-out.
+    #[test]
+    fn whoami_failing_under_deploy_credentials_is_a_warning() {
+        let fake = FakeRunner::new([crate::runner::Output::failure(1)]);
+        let r = super::super::tests::UnderDeployCredentials(&fake);
+        let host = || Host::from_env(&crate::host::FakeEnv::new("macos"));
+        assert!(matches!(fly_auth(&r, &host), Ok(Verdict::Warn(_))));
     }
 }
