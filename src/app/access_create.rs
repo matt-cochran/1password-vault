@@ -301,7 +301,7 @@ pub fn run(
             kind: CreateKind::ServiceAccount,
             name: id.service_account.clone(),
             env: EnvName::new(env),
-            target: TargetName::new(target.unwrap_or_default()),
+            target: target.map(TargetName::new),
             refind: None,
         }
         .into());

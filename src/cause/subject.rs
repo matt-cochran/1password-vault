@@ -446,6 +446,9 @@ pub enum NamedBy {
     ConfigField { path: DottedPath },
     /// A command-line flag (`--fly-app`).
     Flag { flag: String },
+    /// A configuration field that is not set, so opv looked for its default names
+    /// (`personal_vault` unset: Private, Employee, Personal); setting it names the right one.
+    UnsetField { path: DottedPath },
 }
 
 /// A configuration naming rule (§4.12). Each has plain words ([`PatternId::words`]); a

@@ -626,6 +626,9 @@ fn io_words(io: IoKind) -> &'static str {
         IoKind::NotFound => "it does not exist",
         IoKind::PermissionDenied => "permission denied",
         IoKind::IsADirectory => "it is a folder, not a file",
+        IoKind::NotAPlainFile => {
+            "it is a symbolic link or another kind of file, and opv writes only a plain file there"
+        }
         IoKind::Other => "an input or output error",
     }
 }
@@ -850,6 +853,28 @@ fn create_kind(k: CreateKind) -> &'static str {
         CreateKind::ServiceAccount => "service account",
         CreateKind::DeployToken => "deploy token",
         CreateKind::GitHubEnvironment => "GitHub environment",
+    }
+}
+
+/// `me@a.example (my.1password.com, AID1); …`, or how to add one when there is none.
+fn account_choices(accounts: &[AccountChoice]) -> String {
+    if accounts.is_empty() {
+        return "none (add one in the 1Password app)".into();
+    }
+    accounts
+        .iter()
+        .map(|a| {
+            let email = if a.email.is_empty() { "-" } else { &a.email };
+            format!("{email} ({}, {})", a.address, a.id)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn field_type_words(t: FieldType) -> &'static str {
+    match t {
+        FieldType::Concealed => "a concealed (password) field",
+        FieldType::Text => "a text field",
     }
 }
 
@@ -1425,6 +1450,11 @@ impl Cause {
                 "account {given} matches more than one 1Password account: {}",
                 list_of(candidates)
             ),
+            AccountRequired { accounts } => format!(
+                "{} 1Password accounts are on this machine and this project names none; opv uses only the account you choose, never op's default: {}",
+                accounts.len(),
+                account_choices(accounts)
+            ),
             InOtherAccount {
                 vault,
                 item,
@@ -1476,6 +1506,13 @@ impl Cause {
                     CredentialProblem::OverriddenByEnvironment { var } => {
                         format!("{var} in this shell overrides {cred} for {sys}")
                     }
+                    CredentialProblem::WrongType { field, expected } => format!(
+                        "field {field} of {cred} for {sys} is not {}",
+                        field_type_words(*expected)
+                    ),
+                    CredentialProblem::DuplicateField { field } => format!(
+                        "field {field} is in {cred} for {sys} more than once, so opv cannot tell which to use"
+                    ),
                 }
             }
             MissingRight {
@@ -2612,6 +2649,14 @@ impl Cause {
                     next,
                 )
             }
+            // Never a guessed account (X2): the person picks, in their own terminal.
+            AccountRequired { .. } => plan(
+                Some((
+                    Action::PickBetween,
+                    "pick the project's account: run opv login --account <email or account ID> in your own terminal".to_string(),
+                )),
+                Next::Check(cmd(&["account", "list"], &[])),
+            ),
             AccountAmbiguous { given, candidates } => plan(
                 Some((
                     Action::PickBetween,
@@ -2684,6 +2729,17 @@ impl Cause {
                     CredentialProblem::Unreadable => {
                         (Action::Inspect, format!("check that {cred} is readable"))
                     }
+                    CredentialProblem::WrongType { field, expected } => (
+                        Action::Inspect,
+                        format!(
+                            "make field {field} of {cred} {} in 1Password",
+                            field_type_words(*expected)
+                        ),
+                    ),
+                    CredentialProblem::DuplicateField { field } => (
+                        Action::Inspect,
+                        format!("keep one field {field} in {cred} and remove the others"),
+                    ),
                 };
                 let action = match (credential, &action.0) {
                     (CredentialRef::ShellToken { var }, Action::Inspect) => (
@@ -2779,6 +2835,11 @@ impl Cause {
                         NamedBy::Flag { flag } => {
                             format!("check the name given with {flag}, which names {what}")
                         }
+                        // The field is unset: opv looked for its default names, so the fix
+                        // is to set it, never to "check" a value nobody wrote.
+                        NamedBy::UnsetField { path } => format!(
+                            "set {path} to the name to use (opv config edit); with it unset, opv looked for {what}"
+                        ),
                     },
                     NotFoundState::SoftDeleted => match (system, resource.kind) {
                         (System::Azure, ResourceKind::KeyVault) => {
@@ -2873,6 +2934,11 @@ impl Cause {
                     },
                     (System::GitHub, _) => vendor("gh", &["repo", "list"]),
                     (System::OnePassword, _) => match (resource.kind, &resource.scope) {
+                        // Under `vault locate` itself, the step is op's own listing, never
+                        // the same command again.
+                        (ResourceKind::Vault, _) if inv.command == ["vault", "locate"] => {
+                            vendor("op", &["vault", "list"])
+                        }
                         (ResourceKind::Vault, _) => Next::Run(cmd(&["vault", "locate"], &[name])),
                         (_, Some(vault)) => vendor("op", &["item", "list", "--vault", vault]),
                         (_, None) => vendor("op", &["vault", "list"]),
@@ -3562,6 +3628,17 @@ impl Cause {
                 ),
                 Unverified::Unverifiable => plan(None, Next::None(NoNext::NothingToRun)),
             },
+            LocalIo {
+                path,
+                io: IoKind::NotAPlainFile,
+                ..
+            } => plan(
+                inspect(format!(
+                    "replace {} with a plain file: remove the link (or other file) there, and opv writes a new one",
+                    path.display()
+                )),
+                Next::Rerun,
+            ),
             LocalIo { op, path, io: _ } => plan(
                 inspect(match op {
                     LocalOp::Stdout => {
@@ -3651,10 +3728,21 @@ impl Cause {
                 )),
                 match refind {
                     Some(v) => Next::Vendor(v.clone()),
-                    None => Next::Check(cmd(
-                        &["target", "credentials"],
-                        &[env.as_str(), "--target", target.as_str()],
-                    )),
+                    None => {
+                        // The read that shows the object again, per kind; the target only
+                        // when the run named one.
+                        let mut args = vec![env.as_str()];
+                        if let Some(t) = target {
+                            args.extend(["--target", t.as_str()]);
+                        }
+                        match kind {
+                            CreateKind::DeployToken => {
+                                Next::Check(cmd(&["target", "credentials"], &args))
+                            }
+                            CreateKind::ServiceAccount => Next::Check(cmd(&["access"], &args)),
+                            _ => Next::Run(cmd(&["doctor"], &["--env", env.as_str()])),
+                        }
+                    }
                 },
             ),
             Bug { site: _ } => plan(

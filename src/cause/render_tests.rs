@@ -752,10 +752,27 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 kind: CreateKind::DeployToken,
                 name: "tok-web".into(),
                 env: EnvName::new("prod"),
-                target: TargetName::new("web"),
+                target: Some(TargetName::new("web")),
                 refind: None,
             },
             vec!["tok-web", "Fly"],
+        ),
+        (
+            AccountRequired {
+                accounts: vec![
+                    AccountChoice {
+                        email: "me@one.example".into(),
+                        address: "my.1password.com".into(),
+                        id: AccountId::new("ACC-ONE"),
+                    },
+                    AccountChoice {
+                        email: "me@two.example".into(),
+                        address: "my.1password.com".into(),
+                        id: AccountId::new("ACC-TWO"),
+                    },
+                ],
+            },
+            vec!["me@one.example", "ACC-ONE", "ACC-TWO"],
         ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
     ]
@@ -836,10 +853,11 @@ fn ordinal(c: &Cause) -> usize {
         InputUnreadable { .. } => 67,
         ItemUnusable { .. } => 68,
         SecretNotStored { .. } => 69,
+        AccountRequired { .. } => 70,
     }
 }
 
-const VARIANTS: usize = 70;
+const VARIANTS: usize = 71;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2604,7 +2622,7 @@ fn secret_not_stored(refind: Option<VendorCmd>) -> Cause {
         kind: CreateKind::DeployToken,
         name: "tok-web".into(),
         env: EnvName::new("prod"),
-        target: TargetName::new("web"),
+        target: Some(TargetName::new("web")),
         refind,
     }
 }
@@ -2894,4 +2912,155 @@ fn d3_a_built_step_keeps_the_project_flag() {
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),
         "opv init prod --project acme"
     );
+}
+
+// --- I6 ---
+
+fn op_vault_missing() -> Cause {
+    Cause::NotFound {
+        system: System::OnePassword,
+        resource: res(ResourceKind::Vault, "vlt-gone"),
+        named_by: NamedBy::Flag {
+            flag: "--vault".into(),
+        },
+        state: NotFoundState::Missing,
+        seen: person(),
+    }
+}
+
+/// I6: a missing vault under `vault locate` never steps to `vault locate` again.
+#[test]
+fn i6_a_missing_vault_under_vault_locate_does_not_step_to_itself() {
+    let inv = Invocation {
+        origin: Origin::Cli,
+        command: vec!["vault".into(), "locate".into()],
+        args: vec!["vlt-gone".into()],
+        has_child: false,
+    };
+    let (_, next) = op_vault_missing().step_in(&inv, &person_at_terminal());
+    assert_ne!(next, Next::Run(cmd(&["vault", "locate"], &["vlt-gone"])));
+}
+
+/// I6: elsewhere, a missing vault still steps to `vault locate`.
+#[test]
+fn i6_a_missing_vault_elsewhere_steps_to_vault_locate() {
+    let (_, next) = op_vault_missing().step_in(&inv(), &person_at_terminal());
+    assert_eq!(next, Next::Run(cmd(&["vault", "locate"], &["vlt-gone"])));
+}
+
+/// I6: an unset field's Do says to set it, never to check a value nobody wrote.
+#[test]
+fn i6_an_unset_field_is_to_be_set() {
+    let c = Cause::NotFound {
+        system: System::OnePassword,
+        resource: res(ResourceKind::PersonalVault, "Private, Employee, Personal"),
+        named_by: NamedBy::UnsetField {
+            path: DottedPath(vec![
+                "environments".into(),
+                "dev".into(),
+                "personal_vault".into(),
+            ]),
+        },
+        state: NotFoundState::Missing,
+        seen: person(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.starts_with("set environments.dev.personal_vault"), "{d}");
+}
+
+fn deploy_item_problem(problem: CredentialProblem) -> Cause {
+    Cause::CredentialRejected {
+        system: System::OnePassword,
+        credential: CredentialRef::DeployCredentials {
+            vault: VaultId::new("ops"),
+            item: ItemId::new("fly-prod"),
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+        },
+        problem,
+        seen: person(),
+    }
+}
+
+/// I6: a field of the wrong type is named with the type it must be.
+#[test]
+fn i6_a_wrong_type_field_names_the_type_it_must_be() {
+    let c = deploy_item_problem(CredentialProblem::WrongType {
+        field: FieldName::new("FLY_API_TOKEN"),
+        expected: FieldType::Concealed,
+    });
+    assert!(
+        c.message().contains("is not a concealed (password) field"),
+        "{}",
+        c.message()
+    );
+}
+
+/// I6: a duplicate field's Do keeps one.
+#[test]
+fn i6_a_duplicate_field_keeps_one() {
+    let c = deploy_item_problem(CredentialProblem::DuplicateField {
+        field: FieldName::new("FLY_API_TOKEN"),
+    });
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.starts_with("keep one field FLY_API_TOKEN"), "{d}");
+}
+
+fn not_stored(kind: CreateKind, target: Option<&str>) -> Cause {
+    Cause::SecretNotStored {
+        system: System::OnePassword,
+        kind,
+        name: "sa-ci".into(),
+        env: EnvName::new("prod"),
+        target: target.map(TargetName::new),
+        refind: None,
+    }
+}
+
+/// I6: without a target, the Next names none (never an empty `--target`).
+#[test]
+fn i6_a_service_account_without_a_target_steps_to_access() {
+    let (_, next) =
+        not_stored(CreateKind::ServiceAccount, None).step_in(&inv(), &person_at_terminal());
+    assert_eq!(next, Next::Check(cmd(&["access"], &["prod"])));
+}
+
+/// I6: a deploy token's Next is its target's credentials.
+#[test]
+fn i6_a_deploy_token_steps_to_its_target_credentials() {
+    let (_, next) =
+        not_stored(CreateKind::DeployToken, Some("web")).step_in(&inv(), &person_at_terminal());
+    assert_eq!(
+        next,
+        Next::Check(cmd(
+            &["target", "credentials"],
+            &["prod", "--target", "web"]
+        ))
+    );
+}
+
+/// I6: a symlinked `.opv` is named as such, not as an input or output error.
+#[test]
+fn i6_a_symlinked_dot_opv_is_named() {
+    let c = Cause::LocalIo {
+        op: LocalOp::Write,
+        path: PathBuf::from("/work/shop/.opv"),
+        io: IoKind::NotAPlainFile,
+    };
+    assert!(c.message().contains("symbolic link"), "{}", c.message());
+}
+
+/// I6: several accounts and none chosen keeps the public code `account_required`.
+#[test]
+fn i6_account_required_keeps_its_code() {
+    let c = Cause::AccountRequired { accounts: vec![] };
+    assert_eq!(c.code(), "account_required");
+}
+
+/// I6: and its Do is the person's pick, never a guessed account.
+#[test]
+fn i6_account_required_is_a_persons_pick() {
+    let (action, _) =
+        Cause::AccountRequired { accounts: vec![] }.step_in(&inv(), &person_at_terminal());
+    assert_eq!(action, Some(Action::PickBetween));
 }

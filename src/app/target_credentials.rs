@@ -315,7 +315,7 @@ fn stored_failed(
             kind: crate::cause::CreateKind::DeployToken,
             name: credential.to_string(),
             env: crate::cause::EnvName::new(env),
-            target: crate::cause::TargetName::new(name),
+            target: Some(crate::cause::TargetName::new(name)),
             refind: provider.mint_refind(target.config.as_ref()),
         }
         .into(),

@@ -162,8 +162,8 @@ fn token_of_the_wrong_type_is_refused() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("a text token must fail"),
     };
-    // R37: a field of another type cannot be read as the credential.
-    assert!(e.contains("cannot be read"), "{e}");
+    // R37, I6: a field of another type is named with the type it must be.
+    assert!(e.contains("is not a concealed (password) field"), "{e}");
 }
 
 /// A Kubernetes runtime keeping its secrets in a Key Vault (`secrets_in`) signs `az` in

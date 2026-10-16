@@ -52,8 +52,8 @@ use super::onepassword_diagnose::Facts;
 use super::onepassword_diagnose_items::diagnose_item_call;
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
-    DottedPath, EnvName, ExitClass, FieldName, GrantModel, IoKind, ItemId, Location, NamedBy,
-    NotFoundState, Observed, Principal, ResourceKind, ResourceName, ResourceRef, Right,
+    DottedPath, EnvName, ExitClass, FieldName, FieldType, GrantModel, IoKind, ItemId, Location,
+    NamedBy, NotFoundState, Observed, Principal, ResourceKind, ResourceName, ResourceRef, Right,
     SessionState, System, TargetName, Unanswered, Unusable, Upstream, VarName, VaultId,
 };
 use crate::domain::model::{Boundary, Environment, Kind};
@@ -942,18 +942,21 @@ fn read_deploy_credentials_on(
     };
     let mut found: std::collections::BTreeMap<String, SecretValue> = Default::default();
     // A field of another type, or one listed twice, is not a value opv can take as this
-    // credential: the item cannot be read as one.
-    let mut unusable = false;
+    // credential: the refusal names that field and what is wrong with it.
+    let mut unusable: Option<CredentialProblem> = None;
     for f in raw.fields {
         let Some(want) = fields.iter().find(|w| w.label == f.label) else {
             continue;
         };
-        let expected = match want.kind {
-            Kind::Secret => "CONCEALED",
-            Kind::Config => "STRING",
+        let (expected, words) = match want.kind {
+            Kind::Secret => ("CONCEALED", FieldType::Concealed),
+            Kind::Config => ("STRING", FieldType::Text),
         };
         if f.ty != expected {
-            unusable = true;
+            unusable.get_or_insert(CredentialProblem::WrongType {
+                field: FieldName::new(want.label),
+                expected: words,
+            });
             continue;
         }
         // An empty field is a missing one: no value to sign in with.
@@ -961,11 +964,13 @@ fn read_deploy_credentials_on(
             continue;
         };
         if found.insert(want.label.to_string(), value).is_some() {
-            unusable = true;
+            unusable.get_or_insert(CredentialProblem::DuplicateField {
+                field: FieldName::new(want.label),
+            });
         }
     }
-    if unusable {
-        return Err(refused(CredentialProblem::Unreadable));
+    if let Some(problem) = unusable {
+        return Err(refused(problem));
     }
     let missing: Vec<FieldName> = fields
         .iter()

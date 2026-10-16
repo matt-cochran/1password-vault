@@ -488,6 +488,12 @@ pub enum Cause {
         given: String,
         candidates: Vec<AccountId>,
     },
+    /// Several 1Password accounts are on this machine and this project names none (no
+    /// `.opv`, no `OP_ACCOUNT`, no `--account`): opv never uses op's default, so a person
+    /// picks one. Public code `account_required`.
+    AccountRequired {
+        accounts: Vec<AccountChoice>,
+    },
     InOtherAccount {
         vault: VaultId,
         item: Option<ItemId>,
@@ -769,7 +775,8 @@ pub enum Cause {
         kind: CreateKind,
         name: String,
         env: EnvName,
-        target: TargetName,
+        /// The target the run named, when it named one (a CI reader names none).
+        target: Option<TargetName>,
         /// The provider's own listing that shows the object, when there is one.
         refind: Option<VendorCmd>,
     },
@@ -858,6 +865,9 @@ pub enum IoKind {
     NotFound,
     PermissionDenied,
     IsADirectory,
+    /// A symbolic link (or another kind of file) where opv reads and writes only a plain file
+    /// (a symlinked `.opv`): opv never writes through it.
+    NotAPlainFile,
     Other,
 }
 
@@ -955,6 +965,35 @@ pub enum CredentialProblem {
     OverriddenByEnvironment {
         var: VarName,
     },
+    /// A field of the credential's item has another type than the one it must be.
+    WrongType {
+        field: FieldName,
+        expected: FieldType,
+    },
+    /// A field of the credential's item is there more than once, so opv cannot tell which.
+    DuplicateField {
+        field: FieldName,
+    },
+}
+
+/// One of the person's own 1Password accounts, shown so they can choose
+/// (`AccountRequired`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AccountChoice {
+    pub email: String,
+    /// The sign-in address (`my.1password.com`).
+    pub address: String,
+    pub id: AccountId,
+}
+
+/// The 1Password field type a credential's field must have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    /// A concealed (password) field.
+    Concealed,
+    /// A plain text field.
+    Text,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1210,6 +1249,7 @@ impl Cause {
             },
             AccountNotOnMachine { .. } => "account_not_registered",
             AccountAmbiguous { .. } => "account_ambiguous",
+            AccountRequired { .. } => "account_required",
             InOtherAccount { .. } => "ids_not_in_account",
             NeedsOwnSession { .. } => "own_session_required",
             CredentialRejected { credential, .. } => match credential {
@@ -1308,7 +1348,8 @@ impl Cause {
             | AlreadyDeclared { .. }
             | InputInvalid { .. }
             | ConfigProposalInvalid { .. }
-            | InputUnreadable { .. } => 2,
+            | InputUnreadable { .. }
+            | AccountRequired { .. } => 2,
             ToolMissing { .. }
             | ToolUnusable { .. }
             | RemoteVersionMismatch { .. }
