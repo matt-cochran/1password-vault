@@ -54,9 +54,11 @@ opv run dev --product journeeze --role serve --remote builder
 4. **The remote command is fixed:** `<opv> remote-receive`. `opv` is an absolute path made only of characters that need no quoting, so the remote shell never sees a value or anything from the run's arguments.
 5. **One framed payload on stdin.** The payload is laid out as follows:
    - the line `OPV-REMOTE 1`;
-   - the header length and the JSON header: key names, file paths, the directory variable, the working directory and the command;
+   - the header length and the JSON header: key names, file paths, the directory variable, the working directory and the command, plus `outer`, the person's own `opv run` (environment, product, profile, subcommand and flags; never the arguments after `--`, which are only marked as present). The receiver names that run in its messages, so a `Next:` step is the run to fix and re-run, never the hidden `opv remote-receive`;
    - each value, length-prefixed with its exact bytes;
    - the line `END`.
+
+   The receiver writes `OPV-REMOTE READY 1` (its protocol version) on stderr before it reads the payload, and `OPV-REMOTE DELIVERED` once the payload is checked and delivered, just before the app starts. The sender removes both lines from what it shows and uses them to place a failure: a receiver of another protocol version is `remote_version_mismatch` (exit 3); an SSH exit 255 before the handshake (or 127, no remote opv) is SSH's own failure, diagnosed from SSH's reply (for example `remote_unreachable` or `credential_rejected`, or `remote_disconnected` once the payload was sent); after `DELIVERED`, an exit code is the remote app's own unless SSH's reply explains it.
 
    The receiver reads the whole payload and re-checks the header on its own before it writes or starts anything. Key names must be valid and not `OP_*`. File paths must follow the `file` rules with no collisions. The directory variable is required for file keys. The working directory must be an absolute path. The command must contain no control characters other than newline and tab. A short, malformed, oversized (header over 64 KiB, value over 1 MiB, more than 256 keys) or unterminated payload is refused, and nothing is delivered.
 6. **Delivery on the remote host is local delivery.**

@@ -120,7 +120,7 @@ For a quick technical review, start with the [architecture and review map](docs/
 
 The application you start can access its credentials; opv does not sandbox it. Redaction and zeroizing types reduce accidental exposure but do not protect a compromised host or erase every transient parsing copy. The [security model](docs/usage.md#security-model-and-limits) documents the Azure credential-cache exception and what reporting can disclose.
 
-Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. When a CLI fails, its last few stderr lines are shown with every known value and secret-shaped token masked as `__SECRET__`. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [usage](docs/usage.md#security-model-and-limits).
+Values are held in redacting, zeroizing types and travel only on stdin or in a child process's environment. When a CLI fails, its last few stderr lines are shown with every known value and secret-shaped token masked as `********`, and every byte opv writes passes the same scrubbing. `config export` prints config-kind values by design, and `run` hands secrets to the process you start. The full model and its limits are in [usage](docs/usage.md#security-model-and-limits).
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
 
