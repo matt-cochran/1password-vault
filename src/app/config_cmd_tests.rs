@@ -456,11 +456,8 @@ fn status_all_environment_error_next_is_runnable() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
     let e = status_all(&op, None, None, false, &mut Vec::new()).unwrap_err();
-    assert!(
-        crate::error::is_runnable(e.next_step().unwrap_or_default()),
-        "{:?}",
-        e.next_step()
-    );
+    let next = e.step("-", "-").next;
+    assert!(crate::error::is_runnable(&next), "{:?}", next);
 }
 
 /// Each unread environment of `status --all --json` carries its runnable `next`.

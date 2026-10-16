@@ -255,7 +255,7 @@ fn prerequisites(runner: &dyn CommandRunner) -> Value {
             ("yes", "no")
         }
         Ok(Session::Unknown) => ("unknown", "unknown"),
-        Err(Error::Dependency(_)) => ("no", "unknown"),
+        Err(e) if e.code_str() == "dependency_missing" => ("no", "unknown"),
         Err(_) => ("unknown", "unknown"),
     };
     json!({"op": op, "signed_in": signed_in})

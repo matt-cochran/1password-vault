@@ -620,10 +620,10 @@ mod tests {
     fn missing_op_is_a_dependency_error() {
         let r = FakeRunner::new([]);
         r.push_io_error(io::ErrorKind::NotFound);
-        assert!(matches!(
-            run(&fleet(), "prod", "allumata", &cmd(&["env"]), &r),
-            Err(Error::Dependency(_))
-        ));
+        assert!(
+            run(&fleet(), "prod", "allumata", &cmd(&["env"]), &r)
+                .is_err_and(|e| e.code_str() == "dependency_missing")
+        );
     }
 
     #[test]

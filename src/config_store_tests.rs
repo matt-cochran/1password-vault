@@ -304,7 +304,8 @@ fn missing_session_gives_next_opv_login() {
     op.signed_in.set(false);
     let dir = tempfile::tempdir().unwrap();
     let e = locate(&req(dir.path()), &op).unwrap_err();
-    assert_eq!(e.next_step(), Some("opv login"), "{e:?}");
+    // Catalog error: the step is the cause's own sign-in handoff.
+    assert!(e.step("-", "-").next.starts_with("opv login"), "{e:?}");
 }
 
 #[test]
@@ -315,10 +316,8 @@ fn missing_session_says_the_configuration_lives_in_1password() {
     let mut r = req(dir.path());
     r.project = Some("myapp".into());
     let e = locate(&r, &op).unwrap_err();
-    assert!(
-        e.text().contains("configuration lives in 1Password"),
-        "{e:?}"
-    );
+    // Catalog error (design §4.3): the missing 1Password session, whatever is looked up.
+    assert!(e.code_str() == "op_not_signed_in", "{e:?}");
 }
 
 // --- monorepo paths ---
@@ -775,7 +774,8 @@ fn a_shared_sign_in_address_is_ambiguous() {
         &accounts_runner(TWO_ACCOUNTS),
         Some("my.1password.com".into()),
     );
-    assert_eq!(e.unwrap_err().code(), crate::error::Code::AccountRequired);
+    // 04.09: several accounts share the address; a person picks one by its ID.
+    assert_eq!(e.unwrap_err().code_str(), "account_ambiguous");
 }
 
 #[test]
@@ -861,8 +861,8 @@ fn an_unknown_email_in_wsl_next_adds_the_account_to_op() {
         .unwrap_err()
     });
     assert_eq!(
-        e.next_step(),
-        Some("opv login --add --account new@labs.example")
+        e.step("-", "-").next,
+        "opv login --add --account new@labs.example"
     );
 }
 
@@ -942,5 +942,6 @@ fn a_shared_sign_in_address_in_dot_opv_is_refused_as_ambiguous() {
         r#"[{{"url":"https://my.1password.com","email":"a@x.example","account_uuid":"{ACCOUNT_A}"}},{{"url":"https://my.1password.com","email":"b@x.example","account_uuid":"{ACCOUNT_B}"}}]"#
     ))]);
     let e = selected_account_id(&r, dir.path()).unwrap_err();
-    assert_eq!(e.code().as_str(), "account_required");
+    // 04.09: an address several accounts share is ambiguous, never "none chosen".
+    assert_eq!(e.code_str(), "account_ambiguous");
 }

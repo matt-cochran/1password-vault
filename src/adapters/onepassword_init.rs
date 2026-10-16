@@ -22,12 +22,15 @@
 
 use serde::Deserialize;
 
-use super::onepassword::{Session, diagnose, failed_op_error, json_error, read_op, session_error};
+use super::onepassword::{Failed, OP, failed_read, op_spawn_error, read_op, unreadable_reply};
+use crate::cause::{
+    Cause, CreateKind, DiagnoseContext, Refind, ResourceKind, ResourceName, ResourceRef, System,
+};
 use crate::config;
-use crate::domain::{Boundary, Environment, SecretValue};
+use crate::domain::SecretValue;
 use crate::error::Error;
 use crate::host::Host;
-use crate::runner::{CommandRunner, Output, status_text};
+use crate::runner::{Call, CommandRunner, CreateOutcome, Output};
 
 /// At most this many candidates are listed in a no-match or several-matches error.
 const MAX_CANDIDATES: usize = 20;
@@ -76,8 +79,8 @@ pub fn find_vault(
         name: String,
     }
     let args = ["vault", "list", "--format", "json"];
-    let out = list(r, &args, host, "op vault list", "the vault")?;
-    let rows: Vec<Row> = parse_list(&out)?;
+    let out = list(r, &args, host, None)?;
+    let rows: Vec<Row> = parse_list(&args, &out)?;
     let all = rows
         .into_iter()
         .map(|v| Named {
@@ -97,15 +100,23 @@ pub fn vault_users(
     host: &dyn Fn() -> Host,
 ) -> Result<Option<serde_json::Value>, Error> {
     let args = ["vault", "user", "list", vault_id, "--format", "json"];
-    match list(
-        r,
-        &args,
-        host,
-        "op vault user list",
-        "who can use the vault",
-    ) {
+    match list(r, &args, host, Some(vault_id)) {
         Ok(out) => Ok(serde_json::from_slice(&out.stdout).ok()),
-        Err(Error::Source(_)) => Ok(None),
+        // Signed in, the listing is refused or not understood: this person may not manage
+        // the vault. A session, account or credential problem is still reported.
+        Err(e)
+            if e.cause().is_some_and(|(c, _)| {
+                matches!(
+                    c,
+                    Cause::MissingRight { .. }
+                        | Cause::Unrecognized { .. }
+                        | Cause::NotFound { .. }
+                        | Cause::InOtherAccount { .. }
+                )
+            }) =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(e),
     }
 }
@@ -136,9 +147,8 @@ pub fn find_item(
         title: String,
     }
     let args = ["item", "list", "--vault", vault_id, "--format", "json"];
-    let failed = format!("op item list --vault {vault_id}");
-    let out = list(r, &args, host, &failed, "the vault's items")?;
-    let rows: Vec<Row> = parse_list(&out)?;
+    let out = list(r, &args, host, Some(vault_id))?;
+    let rows: Vec<Row> = parse_list(&args, &out)?;
     let all = rows
         .into_iter()
         .map(|i| Named {
@@ -185,20 +195,23 @@ pub fn read_field_shapes(
     ];
     let Output { status, stdout } = read_op(r, &args, host)?;
     if status != 0 {
-        let b = Boundary {
-            vault_id: vault_id.to_string(),
-            item_id: item_id.to_string(),
+        let ctx = DiagnoseContext {
+            resource: Some(ResourceRef {
+                kind: ResourceKind::Item,
+                name: ResourceName::new(item_id),
+                scope: Some(vault_id.to_string()),
+            }),
+            ..DiagnoseContext::default()
         };
-        return Err(failed_op_error(
+        return Err(failed_read(
             r,
-            &Environment::default(),
-            &b,
             host,
-            &format!("op item get failed ({})", status_text(status)),
-            "grant this identity access to the vault",
+            &ctx,
+            &Call::new(OP, &args),
+            Some(vault_id),
         ));
     }
-    let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| json_error(&e))?;
+    let raw: RawItem = serde_json::from_slice(&stdout).map_err(|e| unreadable_reply(&args, &e))?;
     Ok(raw
         .fields
         .into_iter()
@@ -214,43 +227,37 @@ pub fn read_field_shapes(
         .collect())
 }
 
-/// Run a list call; a non-zero exit is diagnosed (FR-26).
+/// Run a list call; a non-zero exit is diagnosed (FR-26, design §5), about `vault` when
+/// the listing is of one.
 fn list(
     r: &dyn CommandRunner,
     args: &[&str],
     host: &dyn Fn() -> Host,
-    failed: &str,
-    what: &str,
+    vault: Option<&str>,
 ) -> Result<Output, Error> {
     let out = read_op(r, args, host)?;
     if out.status == 0 {
         return Ok(out);
     }
-    let failed = format!("{failed} failed ({})", status_text(out.status));
-    Err(match crate::runner::diagnosing(|| diagnose(r, host)) {
-        Err(e) => e,
-        Ok(Session::SignedIn(t)) => Error::Source(
-            format!(
-                "{failed}: signed in to 1Password as {t}\n  next: check that this identity can \
-             see {what}"
-            )
-            .into(),
-        ),
-        Ok(Session::Unknown) => {
-            Error::Source(format!("{failed}; run `op {}` to see why", args.join(" ")).into())
-        }
-        Ok(s) => {
-            session_error(s, &host(), Some(&failed), None).expect("every other session is an error")
-        }
-    })
+    let ctx = DiagnoseContext {
+        resource: vault.map(|v| ResourceRef {
+            kind: ResourceKind::Vault,
+            name: ResourceName::new(v),
+            scope: None,
+        }),
+        ..DiagnoseContext::default()
+    };
+    // The vault is not probed here: callers that need to tell access apart probe it
+    // themselves (`opv ready`), and each probe is one more call against a rate limit.
+    Err(failed_read(r, host, &ctx, &Call::new(OP, args), None))
 }
 
-/// A JSON array of rows; empty output is an empty list.
-fn parse_list<T: for<'de> Deserialize<'de>>(out: &Output) -> Result<Vec<T>, Error> {
+/// A JSON array of rows (the reply of `op <args>`); empty output is an empty list.
+fn parse_list<T: for<'de> Deserialize<'de>>(args: &[&str], out: &Output) -> Result<Vec<T>, Error> {
     if out.stdout.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| json_error(&e))
+    serde_json::from_slice(&out.stdout).map_err(|e| unreadable_reply(args, &e))
 }
 
 /// A title lookup: the one match, or no match with the error that names the candidates.
@@ -309,14 +316,7 @@ fn lookup(mut all: Vec<Named>, title: &str, what: &str, scope: &str) -> Result<L
 /// refused create (the account may not allow it) names the manual step.
 pub fn create_vault(r: &dyn CommandRunner, title: &str) -> Result<Named, Error> {
     let args = ["vault", "create", title, "--format", "json"];
-    created(
-        r,
-        &args,
-        None,
-        "vault",
-        title,
-        "create the vault in the 1Password app (or ask an admin), then re-run opv init",
-    )
+    created(r, &args, None, CreateKind::Vault, title, None)
 }
 
 /// Create an empty Secure Note `title` in `vault_id` for a person running `init` (FR-43):
@@ -345,9 +345,9 @@ pub fn create_item_tagged(
         r,
         &args,
         Some(template),
-        "item",
+        CreateKind::Item,
         title,
-        "create the item in the 1Password app, then re-run opv init",
+        Some(vault_id),
     )
 }
 
@@ -401,47 +401,100 @@ pub fn create_item_with_secret_fields(
         tags,
     };
     let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(256));
-    serde_json::to_writer(&mut *buf, &template).map_err(|e| json_error(&e))?;
+    serde_json::to_writer(&mut *buf, &template).map_err(|_| Cause::Bug {
+        site: "onepassword_init: the item template does not serialize",
+    })?;
     created(
         r,
         &args,
         Some(buf.as_slice()),
-        "item",
+        CreateKind::ItemWithSecrets,
         title,
-        "create the item in the 1Password app, then re-run opv target credentials --create",
+        Some(vault_id),
     )
 }
 
+/// One non-idempotent create (X5): through [`CommandRunner::create`], never retried. A
+/// refusal is diagnosed like any failed call (nothing was made); an unknown outcome, or a
+/// create whose reply carries no ID, may have made the object (04.04): a vault or a plain
+/// item is found again by its title on the next run, so re-running is safe; an item holding
+/// secrets is checked first, never re-created.
 fn created(
     r: &dyn CommandRunner,
     args: &[&str],
     stdin: Option<&[u8]>,
-    what: &str,
+    kind: CreateKind,
     title: &str,
-    manual: &str,
+    vault: Option<&str>,
 ) -> Result<Named, Error> {
     #[derive(Deserialize)]
     struct Row {
         #[serde(default)]
         id: String,
     }
-    let call = crate::runner::Call::new("op", args).with_stdin(stdin);
-    let failed = || {
-        Error::Source(
-            format!("could not create the {what} {title:?} in 1Password\n  next: {manual}").into(),
-        )
-    };
-    let out = match r.write(&call) {
-        Ok(crate::runner::Outcome::Done(o)) => o,
-        _ => return Err(failed()),
-    };
-    let row: Row = serde_json::from_slice(&out.stdout).map_err(|e| json_error(&e))?;
-    if !config::is_id(&row.id) {
-        return Err(failed());
+    let call = Call::new(OP, args).with_stdin(stdin);
+    let unknown = |seen| unknown_create(kind, title, vault, seen);
+    match r.create(&call, kind) {
+        Ok(CreateOutcome::Done(o)) => match serde_json::from_slice::<Row>(&o.stdout) {
+            Ok(row) if config::is_id(&row.id) => Ok(Named {
+                id: row.id,
+                name: title.to_string(),
+            }),
+            _ => Err(unknown(Failed::of(&call))),
+        },
+        Ok(CreateOutcome::Refused(_)) => {
+            let ctx = DiagnoseContext {
+                resource: Some(ResourceRef {
+                    kind: match kind {
+                        CreateKind::Vault => ResourceKind::Vault,
+                        _ => ResourceKind::Item,
+                    },
+                    name: ResourceName::new(title),
+                    scope: vault.map(str::to_string),
+                }),
+                create: Some((kind, title.to_string(), Refind::ByTitle)),
+                ..DiagnoseContext::default()
+            };
+            let e = failed_read(r, &Host::detect, &ctx, &call, vault);
+            if kind.secret_bearing() {
+                // The caller adds the step that matters most here: the secret was minted
+                // elsewhere and must be revoked there. Until that caller reports a cause of
+                // its own, the diagnosis travels as its text.
+                return Err(Error::Source(e.to_string().into()));
+            }
+            Err(e)
+        }
+        Ok(CreateOutcome::OutcomeUnknown(seen)) => Err(unknown(Failed::with_reply(seen))),
+        Err(e) => Err(op_spawn_error(&e, &Host::detect)),
     }
-    Ok(Named {
-        id: row.id,
+}
+
+/// A create that may or may not have made `title` (X5, design §4.6).
+fn unknown_create(kind: CreateKind, title: &str, vault: Option<&str>, failed: Failed) -> Error {
+    if kind.secret_bearing() {
+        // No opv command lists a vault's items, so the check is op's own listing, and the
+        // orphan's secret was never recorded anywhere: a person checks before anything is
+        // minted or created again.
+        return Error::Unknown(
+            format!(
+                "opv cannot tell whether 1Password created the item {title:?}{}",
+                vault.map(|v| format!(" in vault {v}")).unwrap_or_default()
+            )
+            .into(),
+        )
+        .with_code(crate::error::Code::OutcomeUnknown)
+        .with_do(format!(
+            "check with op item list --vault {} whether {title:?} exists before creating it again",
+            vault.unwrap_or("<vault>")
+        ));
+    }
+    let seen = failed.seen().clone();
+    failed.report(Cause::CreateOutcomeUnknown {
+        system: System::OnePassword,
+        kind,
         name: title.to_string(),
+        refind: Refind::ByTitle,
+        seen,
     })
 }
 
@@ -586,24 +639,23 @@ mod tests {
         assert!(m.contains("candidates: none"), "{m}");
     }
 
+    /// Signed in, a listing that keeps failing is unrecognised, with what opv checked.
     #[test]
-    fn failed_list_is_diagnosed() {
-        // Signed in: Source (4) asking to check access.
+    fn failed_list_while_signed_in_is_unrecognized() {
         let r = FakeRunner::new(
             failed_read(1).chain([Output::success(br#"{"user_type":"USER"}"#.to_vec())]),
         );
         let e = resolve_vault(&r, "x", &linux).unwrap_err();
-        assert_eq!(e.exit_code(), 4, "{e}");
-        assert!(
-            e.to_string().contains("op vault list failed (exit 1)"),
-            "{e}"
-        );
-        // Not signed in: Auth (7) with the sign-in step.
+        assert_eq!(e.code_str(), "unrecognized_failure");
+    }
+
+    /// Not signed in, a failed listing is the missing session (exit 7).
+    #[test]
+    fn failed_list_signed_out_is_op_not_signed_in() {
         let r =
             FakeRunner::new(failed_read(1).chain([Output::failure(1), Output::success("[{}]")]));
         let e = resolve_item(&r, "v1", "x", &linux).unwrap_err();
-        assert_eq!(e.exit_code(), 7, "{e}");
-        assert!(e.to_string().contains("not signed in to 1Password"), "{e}");
+        assert_eq!(e.code_str(), "op_not_signed_in");
     }
 
     #[test]
@@ -648,10 +700,49 @@ mod tests {
             Output::success(b"{}".to_vec()),
         ]));
         let e = read_field_shapes(&r, "v1", "i1", &linux).unwrap_err();
-        assert_eq!(e.exit_code(), 4);
-        assert!(
-            e.to_string().contains("item i1 not found in vault v1"),
-            "{e}"
-        );
+        assert_eq!(e.to_string(), "item i1 in v1 was not found at 1Password");
+    }
+
+    /// 04.04: a vault create whose outcome is unknown is never "could not create".
+    #[test]
+    fn an_unfinished_vault_create_is_create_outcome_unknown() {
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        let e = create_vault(&r, "acme-prod").unwrap_err();
+        assert_eq!(e.code_str(), "create_outcome_unknown");
+    }
+
+    /// 04.04: its step is to re-run (opv finds the vault by title), never "create the vault
+    /// in the 1Password app", which would make a second one.
+    #[test]
+    fn an_unfinished_vault_create_has_no_manual_create_step() {
+        let r = FakeRunner::default();
+        r.push_unknown("timeout");
+        let e = create_vault(&r, "acme-prod").unwrap_err();
+        assert_eq!(e.step("opv init", "-").action, None);
+    }
+
+    /// 04.04: a create that printed no ID may have made the item.
+    #[test]
+    fn a_create_without_an_id_is_create_outcome_unknown() {
+        let r = FakeRunner::new([Output::success("{}")]);
+        let e = create_item(&r, "v1", "acme · prod").unwrap_err();
+        assert_eq!(e.code_str(), "create_outcome_unknown");
+    }
+
+    /// 04.26: a listing op answered with JSON opv cannot read is an unexpected output.
+    #[test]
+    fn an_unreadable_vault_list_is_unexpected_output() {
+        let r = FakeRunner::new([Output::success("not json")]);
+        let e = resolve_vault(&r, "x", &linux).unwrap_err();
+        assert_eq!(e.code_str(), "unexpected_output");
+    }
+
+    /// 09 (malformed op output): the step is opv doctor, never the same command again.
+    #[test]
+    fn an_unreadable_vault_list_steps_to_doctor() {
+        let r = FakeRunner::new([Output::success("not json")]);
+        let e = resolve_vault(&r, "x", &linux).unwrap_err();
+        assert_eq!(e.step("-", "-").next, "opv doctor");
     }
 }

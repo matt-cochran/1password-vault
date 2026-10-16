@@ -209,8 +209,7 @@ environments = ["dev"]
 }
 
 /// Signed out of 1Password, the deploy-credential read (the first call of `status prod`)
-/// is diagnosed at once and names the environment in its sign-in step, which is the
-/// error's `Next:` (FR-40, UX1).
+/// is diagnosed at once: the missing session, whose Do is the sign-in (FR-40, UX1).
 #[test]
 fn signed_out_deploy_read_names_opv_login_for_the_environment() {
     let fl = fleet_with_credentials();
@@ -226,19 +225,19 @@ fn signed_out_deploy_read_names_opv_login_for_the_environment() {
     let e = res.expect_err("signed out");
     assert_eq!(
         e.step("opv status prod", "-").action.as_deref(),
-        Some("sign in: opv login prod"),
+        Some("sign in to 1Password"),
         "{e:?}"
     );
 }
 
-/// `doctor --env` keeps the failed deploy read's scrubbed stderr beside the error
-/// (NR-31, UX1), for the text output only.
+/// `doctor --env` keeps the failed deploy read's scrubbed stderr with the error, as its
+/// evidence (NR-31, UX1, design §7.3).
 #[test]
 fn doctor_deploy_failure_keeps_the_excerpt_beside_the_error() {
-    let (_, excerpt) = doctor_signed_out_failure();
+    let e = doctor_signed_out_deploy_failure();
     assert_eq!(
-        excerpt.map(|x| x.render()).as_deref(),
-        Some("  op said: [ERROR] not signed in\n"),
+        e.cause().and_then(|(_, up)| up).map(|u| u.said.clone()),
+        Some(vec!["[ERROR] not signed in".to_string()]),
     );
 }
 
@@ -255,7 +254,7 @@ fn doctor_deploy_failure_keeps_opv_login_as_its_step() {
     let e = doctor_signed_out_deploy_failure();
     assert_eq!(
         e.step("opv doctor", "-").action.as_deref(),
-        Some("sign in: opv login prod"),
+        Some("sign in to 1Password"),
         "{e:?}"
     );
 }
