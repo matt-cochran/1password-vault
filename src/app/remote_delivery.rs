@@ -47,11 +47,25 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use super::local_delivery::Outer;
+use crate::cause::{Cause, DiagnoseContext, EnvName, ExitClass, Guard, IoKind, KeyName};
+use crate::cause::{ProductName, ProfileName};
 use crate::domain::model::Remote;
-use crate::error::{Code, Error};
+use crate::error::Error;
 
 /// The payload's first line: the protocol and its version.
 pub const MAGIC: &[u8] = b"OPV-REMOTE 1\n";
+/// The protocol version [`MAGIC`] names.
+pub const PROTOCOL: u32 = 1;
+/// The receiver's first stderr line, before it reads the payload: it runs and speaks
+/// protocol `<n>` (the handshake). The sender does not show it.
+pub const READY_PREFIX: &str = "OPV-REMOTE READY ";
+/// The receiver's stderr line once the payload is checked and delivered, just before the
+/// app starts. The sender does not show it.
+pub const DELIVERED: &str = "OPV-REMOTE DELIVERED";
+/// The refusal of a payload that does not start with [`MAGIC`].
+const OTHER_PROTOCOL: &str =
+    "the payload is not opv remote protocol 1 (is the remote opv the same release?)";
 /// The payload's last line, after the last value: the commit marker.
 pub const END: &[u8] = b"END\n";
 /// How often the sender proves it is still there, after the payload.
@@ -77,6 +91,10 @@ pub struct Header {
     pub dir_env: Option<String>,
     pub workdir: String,
     pub command: Vec<String>,
+    /// The person's `opv run` (names and flags only), so the receiver's messages name the
+    /// run to fix and re-run, never the hidden receiver (design §6.1, X25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer: Option<Outer>,
 }
 
 /// What `remote-send` gets from `opv run --remote` (on its command line, as JSON): the
@@ -96,13 +114,15 @@ pub struct Plan {
 
 impl Plan {
     /// The plan for `profile` of a product: `selected` key names in order, `files` the
-    /// `(key, path)` of each file key, `dir_env` the product's directory variable.
+    /// `(key, path)` of each file key, `dir_env` the product's directory variable, `outer`
+    /// the person's run (dropped when it is not valid).
     pub fn new(
         profile: &str,
         remote: &Remote,
         keys: Vec<String>,
         files: Vec<(String, String)>,
         dir_env: Option<String>,
+        outer: Option<Outer>,
     ) -> Self {
         Plan {
             profile: profile.to_string(),
@@ -118,8 +138,14 @@ impl Plan {
                 dir_env,
                 workdir: remote.workdir.clone(),
                 command: remote.command.clone(),
+                outer: outer.filter(Outer::is_valid),
             },
         }
+    }
+
+    /// The person's run this plan serves, when known.
+    fn outer(&self) -> Option<&Outer> {
+        self.header.outer.as_ref()
     }
 }
 
@@ -171,9 +197,7 @@ pub fn decode(r: &mut dyn Read) -> Result<Decoded, Refusal> {
     r.read_exact(&mut magic)
         .map_err(|_| refused("the payload ended before its first line"))?;
     if magic != MAGIC {
-        return Err(refused(
-            "the payload is not opv remote protocol 1 (is the remote opv the same release?)",
-        ));
+        return Err(refused(OTHER_PROTOCOL));
     }
     let n = read_len(r, "the header")?;
     if n > MAX_HEADER {
@@ -355,38 +379,38 @@ pub fn ssh_env(inherited: &[(String, String)]) -> Vec<(String, String)> {
 
 /// `opv remote-send --plan <json>`: the step `op run` starts. Reads the selected values from
 /// this process's environment, connects with the pinned SSH profile, sends the payload, then
-/// a heartbeat until SSH ends. Returns SSH's exit code (the remote app's, or 255 when SSH
-/// itself failed).
+/// a heartbeat until SSH ends. Returns the remote app's exit code. When SSH itself failed
+/// (255 before the receiver's handshake, a dropped session, a missing remote opv), the
+/// failure goes to the ssh diagnosis ([`super::remote_diagnose`]) and its errors name the
+/// person's `opv run`, never this hidden step (design §6.1, X25).
 pub fn send(plan: &Plan) -> Result<i32, Error> {
-    check_header(&plan.header).map_err(|r| {
-        Error::Config(format!("remote profile {}: {}; nothing was sent", plan.profile, r.0).into())
-    })?;
+    Outer::install(plan.outer());
+    let bug = |site: &'static str| -> Error { Cause::Bug { site }.into() };
+    check_header(&plan.header).map_err(|_| bug("remote-send: the plan opv run built"))?;
     let inherited: Zeroizing<Vec<(String, String)>> = Zeroizing::new(std::env::vars().collect());
     let mut values: Vec<&[u8]> = Vec::with_capacity(plan.header.keys.len());
     for key in &plan.header.keys {
+        // `op run` resolves every reference `opv run` gave it, or starts nothing.
         let Some((_, v)) = inherited.iter().find(|(k, _)| k == key) else {
-            return Err(Error::Source(
-                format!("{key} was not resolved by op run; nothing was sent").into(),
-            ));
+            return Err(bug("remote-send: a key op run did not resolve"));
         };
+        if v.len() > MAX_VALUE {
+            return Err(too_large(plan, key));
+        }
         values.push(v.as_bytes());
     }
-    let payload = encode(&plan.header, &values)
-        .map_err(|r| Error::Config(format!("{}; nothing was sent", r.0).into()))?;
+    let payload =
+        encode(&plan.header, &values).map_err(|_| bug("remote-send: the payload encoding"))?;
     drop(values);
 
     // The pinned host key, in a private directory removed when this step ends.
     let base =
         crate::app::local_delivery::runtime_dir_support().unwrap_or_else(|_| std::env::temp_dir());
-    let dir = crate::ramdir::PrivateDir::create(&base, "opv-ssh.").map_err(|e| {
-        Error::Dependency(
-            format!("cannot create the pinned known_hosts file ({})", e.kind()).into(),
-        )
-    })?;
+    let dir = crate::ramdir::PrivateDir::create(&base, "opv-ssh.")
+        .map_err(|e| super::local_delivery::private_dir_failed(&base, &e))?;
     let known = dir.path().join("known_hosts");
-    std::fs::write(&known, known_hosts_line(plan)).map_err(|e| {
-        Error::Dependency(format!("cannot write the pinned known_hosts file ({})", e.kind()).into())
-    })?;
+    std::fs::write(&known, known_hosts_line(plan))
+        .map_err(|e| super::local_delivery::private_dir_failed(dir.path(), &e))?;
 
     // Ctrl-C reaches SSH too; this step outlives it to remove the directory above.
     let stop = Arc::new(AtomicBool::new(false));
@@ -396,21 +420,22 @@ pub fn send(plan: &Plan) -> Result<i32, Error> {
     }
 
     let env = Zeroizing::new(ssh_env(&inherited));
+    let args = ssh_args(plan, &known);
     let mut child = std::process::Command::new("ssh")
-        .args(ssh_args(plan, &known))
+        .args(&args)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => Error::Dependency(
-                "ssh is not installed or not on PATH; remote delivery needs the OpenSSH client"
-                    .into(),
-            )
-            .with_code(Code::DependencyMissing),
-            k => Error::Dependency(format!("cannot start ssh ({k:?})").into()),
-        })?;
+        .map_err(|e| ssh_spawn_failed(&e))?;
     drop(inherited);
+    // SSH's own messages and the receiver's are shown as they come; the handshake lines
+    // are kept for the diagnosis below.
+    let relay = child
+        .stderr
+        .take()
+        .map(|mut err| std::thread::spawn(move || relay_stderr(&mut err, &mut io::stderr())));
     let mut stdin = child.stdin.take().expect("piped");
     let sent = stdin.write_all(&payload).and_then(|()| stdin.flush());
     drop(payload);
@@ -428,23 +453,187 @@ pub fn send(plan: &Plan) -> Result<i32, Error> {
     }
     let status = child
         .wait()
-        .map_err(|e| Error::Dependency(format!("cannot wait for ssh ({:?})", e.kind()).into()))?;
+        .map_err(|_| bug("remote-send: waiting for ssh"))?;
     drop(dir);
-    let code = exit_code(status);
-    if code == 255 {
-        let _ = writeln!(
-            io::stderr(),
-            "opv: ssh to remote profile {} ({}@{}:{}) exited 255: the connection, \
-             authentication or the pinned host key check failed (or the remote app itself \
-             exited 255). Check with: opv run --remote {} --preview",
-            plan.profile,
-            plan.user,
-            plan.host,
-            plan.port,
-            plan.profile
-        );
+    let seen = relay.and_then(|t| t.join().ok()).unwrap_or_default();
+    ssh_outcome(plan, &args, exit_code(status), &seen)
+}
+
+/// A value over the payload's limit for one key, named by the run it belongs to.
+fn too_large(plan: &Plan, key: &str) -> Error {
+    let (env, product) = plan
+        .outer()
+        .map(|o| (o.env.as_str(), o.product.as_str()))
+        .unwrap_or_default();
+    Cause::Guard {
+        guard: Guard::ValueTooLarge {
+            product: ProductName::new(product),
+            key: KeyName::new(key),
+            env: EnvName::new(env),
+            limit: MAX_VALUE as u64,
+        },
     }
-    Ok(code)
+    .into()
+}
+
+/// `ssh` could not be started on this machine.
+fn ssh_spawn_failed(e: &io::Error) -> Error {
+    if e.kind() == io::ErrorKind::NotFound {
+        let host = crate::host::Host::detect();
+        Cause::ToolMissing {
+            tool: "ssh".into(),
+            platform: host.platform,
+            shell: host.shell,
+            ci: host.ci,
+        }
+        .into()
+    } else {
+        Cause::ToolUnusable {
+            tool: "ssh".into(),
+            why: crate::cause::Unusable::SpawnFailed {
+                io: IoKind::from(e.kind()),
+            },
+        }
+        .into()
+    }
+}
+
+/// The run's result from SSH's exit `code` and what the receiver said on stderr (`seen`).
+/// A receiver of another protocol is a version mismatch, whatever the code. A 255 before the
+/// handshake, a 255 the session's end explains, or a 127 before the handshake (no remote
+/// opv) is SSH's own failure, diagnosed from its recorded wording; any other code, and a
+/// 255 after delivery that nothing explains, is the remote app's own exit (R77).
+fn ssh_outcome(plan: &Plan, args: &[String], code: i32, seen: &Relayed) -> Result<i32, Error> {
+    if let Some(p) = seen.protocol.filter(|p| *p != PROTOCOL) {
+        return Err(Cause::RemoteVersionMismatch {
+            profile: ProfileName::new(&plan.profile),
+            remote_protocol: p,
+        }
+        .into());
+    }
+    let handshake = seen.protocol.is_some();
+    if !(code == 255 || (code == 127 && !handshake)) {
+        return Ok(code);
+    }
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::runner::observe_streamed("ssh", &words, ExitClass::Code { code });
+    let Some(observed) = crate::runner::take_observed() else {
+        return Ok(code);
+    };
+    let known = pinned_check_file(plan);
+    let conn = super::remote_diagnose::Connection {
+        profile: &plan.profile,
+        user: &plan.user,
+        host: &plan.host,
+        port: plan.port,
+        known_hosts: &known,
+        identity_file: plan.identity_file.as_deref().map(Path::new),
+        remote_program: &plan.opv,
+        handshake_done: handshake,
+        payload_confirmed: seen.delivered,
+    };
+    let ctx = DiagnoseContext {
+        env: plan.outer().map(|o| EnvName::new(&o.env)),
+        ..DiagnoseContext::default()
+    };
+    let stderr = Zeroizing::new(String::from_utf8_lossy(&seen.tail).into_owned());
+    match super::remote_diagnose::diagnose(observed, &stderr, &conn, &ctx) {
+        Cause::Unrecognized { .. } if seen.delivered => Ok(code),
+        cause => Err(cause.into()),
+    }
+}
+
+/// A `known_hosts` file pinning the profile's host key under the host's own name, kept in
+/// opv's state directory so the connection check a failure names can be run as shown (the
+/// run's own pinned file is removed when the run ends). A public key only.
+fn pinned_check_file(plan: &Plan) -> std::path::PathBuf {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir);
+    let name: String = plan
+        .profile
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = state.join("opv").join("known_hosts");
+    let path = dir.join(name);
+    let host = if plan.port == 22 {
+        plan.host.clone()
+    } else {
+        format!("[{}]:{}", plan.host, plan.port)
+    };
+    let _ = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&path, format!("{host} {}\n", plan.host_key)));
+    path
+}
+
+/// What the sender saw on SSH's stderr: the receiver's handshake (its protocol), whether
+/// it confirmed the payload, and the last bytes (for the diagnosis; never shown again).
+#[derive(Default)]
+pub struct Relayed {
+    pub protocol: Option<u32>,
+    pub delivered: bool,
+    pub tail: Zeroizing<Vec<u8>>,
+}
+
+/// The most of SSH's stderr kept for the diagnosis.
+const TAIL: usize = 16 * 1024;
+
+fn keep(tail: &mut Vec<u8>, bytes: &[u8]) {
+    tail.extend_from_slice(bytes);
+    if tail.len() > TAIL {
+        let cut = tail.len() - TAIL;
+        tail.drain(..cut);
+    }
+}
+
+/// Copy SSH's stderr to `out` as it comes, leaving out the receiver's two handshake lines
+/// ([`READY_PREFIX`], [`DELIVERED`]). Line by line until the payload is confirmed (SSH's
+/// and the receiver's messages are whole lines), then the app's output unchanged.
+pub fn relay_stderr(input: &mut dyn Read, out: &mut dyn Write) -> Relayed {
+    use std::io::BufRead;
+    let mut r = io::BufReader::new(input);
+    let mut seen = Relayed::default();
+    let mut line = Zeroizing::new(Vec::new());
+    while !seen.delivered {
+        line.clear();
+        match r.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return seen,
+            Ok(_) => {}
+        }
+        let text = line.strip_suffix(b"\n").unwrap_or(&line);
+        if let Some(n) = text.strip_prefix(READY_PREFIX.as_bytes()) {
+            let n = std::str::from_utf8(n)
+                .ok()
+                .and_then(|n| n.trim().parse().ok());
+            seen.protocol = Some(n.unwrap_or(0));
+            continue;
+        }
+        if text == DELIVERED.as_bytes() {
+            seen.delivered = true;
+            continue;
+        }
+        let _ = out.write_all(&line).and_then(|()| out.flush());
+        keep(&mut seen.tail, &line);
+    }
+    let mut buf = Zeroizing::new(vec![0u8; 4096]);
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) | Err(_) => return seen,
+            Ok(n) => {
+                let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                keep(&mut seen.tail, &buf[..n]);
+            }
+        }
+    }
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
@@ -476,7 +665,7 @@ impl Stop {
         match self {
             Stop::Disconnected => "the connection to the local opv ended",
             Stop::Silent => "the local opv sent no heartbeat for 45 seconds",
-            Stop::Signal => "the receiver was signalled",
+            Stop::Signal => "the remote opv was stopped (SIGHUP, SIGTERM or SIGINT)",
         }
     }
 }
@@ -501,8 +690,8 @@ pub fn remote_env(
         }
         if v.contains(&0) {
             return Err(refused(format!(
-                "{key} holds a NUL byte, which an environment variable cannot carry; deliver it \
-                 as a file"
+                "{key} holds a NUL byte, which an environment variable cannot carry; give the \
+                 key file = \"<path>\" in the configuration"
             )));
         }
         out.retain(|(k, _)| k != key.as_str());
@@ -526,55 +715,95 @@ fn os_from_bytes(b: &[u8]) -> std::ffi::OsString {
     String::from_utf8_lossy(b).into_owned().into()
 }
 
+/// This host's name, for the label on the receiver's messages.
 #[cfg(unix)]
-fn receive_refused(r: Refusal) -> Error {
-    Error::Policy(
-        format!(
-            "remote delivery refused: {}; nothing was written or started",
-            r.0
-        )
-        .into(),
-    )
-    .with_code(Code::PolicyRefused)
+fn host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into the buffer it is given.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    match std::str::from_utf8(&buf[..end]) {
+        Ok(name) if ok && !name.is_empty() && !name.chars().any(char::is_control) => {
+            name.to_string()
+        }
+        _ => "the remote host".to_string(),
+    }
+}
+
+/// The label on every message the receiver writes: its stderr reaches the person's
+/// terminal through SSH, so each line says it comes from the remote host (07.18).
+#[cfg(unix)]
+fn remote_label() -> String {
+    format!("opv on {} (remote)", host_name())
+}
+
+/// Print `e` labelled as the remote host's and return its exit code: the steps render
+/// against the person's `opv run` ([`Outer::install`]), never `opv remote-receive`.
+#[cfg(unix)]
+fn report_remote(e: &Error) -> i32 {
+    let rerun = crate::cause::render::rerun_text(&crate::error::invocation());
+    let text = crate::error::report(e, &rerun, None);
+    let text = match text.strip_prefix("opv: ") {
+        Some(rest) => format!("{}: {rest}", remote_label()),
+        None => text,
+    };
+    let _ = write!(crate::output::stderr(), "{text}");
+    e.exit_code()
 }
 
 /// `opv remote-receive` on the remote host: read the payload from `input` (SSH's stdin),
-/// deliver it, run the pinned command, and stop it when the local side goes away.
+/// deliver it, run the pinned command, and stop it when the local side goes away. Its first
+/// stderr line is the handshake ([`READY_PREFIX`]); a refusal is printed here, labelled as
+/// the remote host's, and its exit code returned.
 #[cfg(unix)]
-pub fn receive(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
-    let (header, values) = decode(&mut *input).map_err(receive_refused)?;
+pub fn receive(input: Box<dyn Read + Send>) -> Result<i32, Error> {
+    let _ = writeln!(io::stderr(), "{READY_PREFIX}{PROTOCOL}");
+    match deliver(input) {
+        Ok(code) => Ok(code),
+        Err(e) => Ok(report_remote(&e)),
+    }
+}
+
+/// The receiver's work after the handshake.
+#[cfg(unix)]
+fn deliver(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
+    let bug = |site: &'static str| -> Error { Cause::Bug { site }.into() };
+    let (header, values) = match decode(&mut *input) {
+        Ok(d) => d,
+        // The sender saw this receiver's protocol in the handshake and reports the
+        // mismatch with the profile's name; nothing was written or started.
+        Err(r) if r.0 == OTHER_PROTOCOL => return Ok(3),
+        Err(_) => return Err(bug("remote-receive: the payload check")),
+    };
+    let outer = header.outer.clone().filter(Outer::is_valid);
+    Outer::install(outer.as_ref());
     let session: Zeroizing<Vec<(String, String)>> = Zeroizing::new(std::env::vars().collect());
     let mut dir = None;
     if !header.files.is_empty() {
         use crate::ramdir::{PrivateDir, sweep};
         let runtime = super::local_delivery::runtime_dir_support()
-            .map_err(|_| super::local_delivery::ram_dir_error())?;
+            .map_err(|why| Outer::ram_dir_unavailable(outer.as_ref(), true, why))?;
         sweep(&runtime, DIR_PREFIX);
         let private = PrivateDir::create(&runtime, DIR_PREFIX)
-            .map_err(|_| super::local_delivery::ram_dir_error())?;
+            .map_err(|e| super::local_delivery::private_dir_failed(&runtime, &e))?;
         for (key, rel) in &header.files {
             let i = header.keys.iter().position(|k| k == key).expect("checked");
-            super::local_delivery::write_file(private.path(), rel, &values[i]).map_err(|e| {
-                Error::Policy(
-                    format!(
-                        "cannot write {key}'s file in the private directory ({})",
-                        e.kind()
-                    )
-                    .into(),
-                )
-                .with_code(Code::PolicyRefused)
-            })?;
+            super::local_delivery::write_file(private.path(), rel, &values[i])
+                .map_err(|e| super::local_delivery::private_dir_failed(private.path(), &e))?;
         }
         dir = Some(private);
     }
+    // A NUL byte cannot reach `remote-send` through its environment, so only a faulty
+    // sender sends one.
     let env = remote_env(&header, &values, &session, dir.as_ref().map(|d| d.utf8()))
-        .map_err(receive_refused)?;
+        .map_err(|_| bug("remote-receive: a variable value holds a NUL byte"))?;
     drop(values);
 
     let signalled = Arc::new(AtomicBool::new(false));
     for sig in [libc::SIGHUP, libc::SIGTERM, libc::SIGINT] {
         let _ = signal_hook::flag::register(sig, Arc::clone(&signalled));
     }
+    let _ = writeln!(io::stderr(), "{DELIVERED}");
     use std::os::unix::process::CommandExt;
     let mut child = std::process::Command::new(&header.command[0])
         .args(&header.command[1..])
@@ -584,16 +813,19 @@ pub fn receive(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
         .stdin(std::process::Stdio::null())
         .process_group(0)
         .spawn()
-        .map_err(|e| {
-            Error::Dependency(
-                format!(
-                    "cannot start {} in {} ({:?}); nothing else was started",
-                    header.command[0],
-                    header.workdir,
-                    e.kind()
-                )
-                .into(),
-            )
+        .map_err(|e| -> Error {
+            Cause::ChildStartFailed {
+                program: header.command[0].clone(),
+                workdir: Some(std::path::PathBuf::from(&header.workdir)),
+                io: IoKind::from(e.kind()),
+                remote: Some(ProfileName::new(
+                    outer
+                        .as_ref()
+                        .and_then(|o| o.profile.clone())
+                        .unwrap_or_default(),
+                )),
+            }
+            .into()
         });
     drop(env);
     let mut child = match child.as_mut() {
@@ -622,9 +854,10 @@ pub fn receive(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
         });
     }
     let stop = loop {
-        if let Some(status) = child.try_wait().map_err(|e| {
-            Error::Dependency(format!("cannot wait for the app ({:?})", e.kind()).into())
-        })? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| bug("remote-receive: waiting for the app"))?
+        {
             drop(dir);
             return Ok(exit_code(status));
         }
@@ -645,7 +878,8 @@ pub fn receive(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
     drop(dir);
     let _ = writeln!(
         io::stderr(),
-        "opv: {}; stopped the app and removed its secrets directory",
+        "{}: {}; stopped the app and removed its secrets directory",
+        remote_label(),
         stop.reason()
     );
     Ok(status.map_or(1, exit_code))
@@ -654,9 +888,11 @@ pub fn receive(mut input: Box<dyn Read + Send>) -> Result<i32, Error> {
 #[cfg(not(unix))]
 pub fn receive(_input: Box<dyn Read + Send>) -> Result<i32, Error> {
     Err(Error::Policy(
-        "remote delivery receives on Linux only; nothing was written or started".into(),
+        "remote delivery receives on Linux and other Unix hosts only (file keys need Linux); \
+         nothing was written or started"
+            .into(),
     )
-    .with_code(Code::PolicyRefused))
+    .with_code(crate::error::Code::PolicyRefused))
 }
 
 /// SIGTERM to the app's process group, SIGKILL after [`STOP_GRACE`]; the app's status.

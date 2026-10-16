@@ -18,8 +18,9 @@ use std::io::{self, Write};
 use serde_json::{Value, json};
 
 use crate::adapters::onepassword::{self, Session};
+use crate::cause::{Cause, Closest, NameKind};
 use crate::domain::{Environment, Fleet, KeySpec, Product, rules};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
@@ -52,7 +53,9 @@ pub struct Selection<'a> {
 /// The keys of `prod` desired in `env_name` after rules and role filtering (#136). A key
 /// without `roles` is delivered to every role, `--role` or not; a key with `roles` only
 /// when `role` names one of them. Fail closed: no `--role` for a product with role-scoped
-/// keys, or a `--role` no key declares, is [`Code::Usage`] before any 1Password read.
+/// keys ([`Cause::ChoiceRequired`]), or a `--role` no key declares ([`Cause::NotDeclared`]),
+/// is refused before any 1Password read. Their steps are built from the person's own
+/// invocation, so a preview stays a preview and a remote run stays remote (07.11).
 pub fn select<'a>(
     env_name: &str,
     env: &Environment,
@@ -61,40 +64,22 @@ pub fn select<'a>(
     role: Option<&str>,
 ) -> Result<Selection<'a>, Error> {
     let declared = declared_roles(prod);
-    let listed = || {
-        if declared.is_empty() {
-            "none".to_string()
-        } else {
-            declared.join(", ")
-        }
-    };
     match role {
         None if !declared.is_empty() => {
-            return Err(Error::Config(
-                format!(
-                    "run --product {product}: this product's keys name roles ({}), so pick one \
-                     with --role; nothing was read",
-                    listed()
-                )
-                .into(),
-            )
-            .with_code(Code::Usage)
-            .with_next(format!(
-                "opv run {env_name} --product {product} --role {} -- <command>",
-                declared[0]
-            )));
+            return Err(Cause::ChoiceRequired {
+                flag: "--role".into(),
+                candidates: declared.iter().map(|r| r.to_string()).collect(),
+            }
+            .into());
         }
         Some(r) if !declared.contains(&r) => {
-            return Err(Error::Config(
-                format!(
-                    "run --product {product}: --role {r:?} is not a role any key declares \
-                     (declared: {}); nothing was read",
-                    listed()
-                )
-                .into(),
-            )
-            .with_code(Code::Usage)
-            .with_next(format!("opv run {env_name} --product {product} --preview")));
+            return Err(Cause::NotDeclared {
+                kind: NameKind::Role,
+                given: r.to_string(),
+                candidates: declared.iter().map(|r| r.to_string()).collect(),
+                closest: Closest::unique(&super::suggest::close(r, declared.iter().copied())),
+            }
+            .into());
         }
         _ => {}
     }
@@ -151,8 +136,12 @@ pub fn build_for(
         .get(&product_name)
         .ok_or_else(|| super::undefined_product(fleet, &product_name, Some(env_name)))?;
     if prod.source_only {
-        return Err(super::source_only_message(&product_name)
-            .with_next(format!("opv run {env_name} --preview")));
+        // 07.38: the preview of a product that reads it, when one does.
+        let next = match fleet.referencing_product(&product_name) {
+            Some(q) => format!("opv run {env_name} --product {q} --preview"),
+            None => super::check_command(fleet, Some(env_name), None),
+        };
+        return Err(super::source_only_message(&product_name).with_next(next));
     }
     let selection = select(env_name, env, &product_name, prod, role)?;
     let remote_doc = match remote {
@@ -191,7 +180,10 @@ pub fn build_for(
     };
     let file_delivery = match crate::app::local_delivery::runtime_dir_support() {
         Ok(_) => json!({"supported": true, "reason": Value::Null}),
-        Err(reason) => json!({"supported": false, "reason": reason}),
+        Err(why) => json!({
+            "supported": false,
+            "reason": crate::app::local_delivery::ram_dir_reason(&why),
+        }),
     };
     let keys: Vec<Value> = selection
         .delivered
@@ -276,8 +268,12 @@ pub fn preview_for(
 ) -> Result<(), Error> {
     let doc = build_for(fleet, env_name, product, role, remote, runner)?;
     if json_out {
-        let text = serde_json::to_string(&doc)
-            .map_err(|e| Error::Config(format!("cannot render the preview ({e})").into()))?;
+        let text = serde_json::to_string(&doc).map_err(|_| -> Error {
+            Cause::Bug {
+                site: "run --preview: the document",
+            }
+            .into()
+        })?;
         writeln!(out, "{text}").map_err(write_err)?;
     } else {
         write_text(&doc, out).map_err(write_err)?;
@@ -328,17 +324,27 @@ fn write_text(doc: &Value, out: &mut dyn Write) -> io::Result<()> {
         Some(v) => writeln!(out, "secrets directory: {v}")?,
         None => writeln!(out, "secrets directory: none")?,
     }
-    let fd = &doc["file_delivery"];
-    if fd["supported"].as_bool().unwrap_or(false) {
-        writeln!(out, "file delivery: supported")?;
-    } else {
-        writeln!(
-            out,
-            "file delivery: unsupported ({})",
-            fd["reason"].as_str().unwrap_or("unknown")
-        )?;
-    }
+    // 07.24: only when a key is a file, and for a remote run the remote host decides.
     let r = &doc["remote"];
+    let fd = &doc["file_delivery"];
+    let has_file = doc["keys"].as_array().into_iter().flatten().any(|k| {
+        k["destination"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("file:"))
+    });
+    if has_file {
+        if r.is_object() {
+            writeln!(out, "file delivery: checked on the remote host")?;
+        } else if fd["supported"].as_bool().unwrap_or(false) {
+            writeln!(out, "file delivery: supported")?;
+        } else {
+            writeln!(
+                out,
+                "file delivery: unsupported ({})",
+                fd["reason"].as_str().unwrap_or("unknown")
+            )?;
+        }
+    }
     if r.is_object() {
         writeln!(
             out,

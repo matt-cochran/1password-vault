@@ -36,6 +36,7 @@ fn header(workdir: &Path, script: &str) -> Header {
         dir_env: Some("JZ_VAULT_DIR".into()),
         workdir: workdir.to_str().unwrap().into(),
         command: vec!["sh".into(), "-c".into(), script.into()],
+        outer: None,
     }
 }
 
@@ -255,5 +256,66 @@ fn no_value_or_op_session_reaches_the_ssh_environment() {
     assert!(
         !env.contains(MARKER) && !env.contains("OP_SESSION"),
         "{env}"
+    );
+}
+
+// --- the receiver's messages (07.09, 07.18) ----------------------------------------------
+
+/// The receiver's stderr for `payload` with no runtime directory in its session.
+fn receiver_stderr_without_runtime(payload: &[u8]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_opv"))
+        .arg("remote-receive")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(payload).unwrap();
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr).into_owned()
+}
+
+fn refused_on_the_remote_host() -> String {
+    let work = tempfile::tempdir().unwrap();
+    let mut h = header(work.path(), "true");
+    h.outer = Some(opv::app::local_delivery::Outer {
+        env: "dev".into(),
+        product: "web".into(),
+        profile: Some("builder".into()),
+        command: vec!["run".into()],
+        args: vec![
+            "dev".into(),
+            "--product".into(),
+            "web".into(),
+            "--remote".into(),
+            "builder".into(),
+        ],
+        has_child: false,
+    });
+    let p = encode(&h, &[MARKER.as_bytes(), PEM.as_bytes()]).unwrap();
+    receiver_stderr_without_runtime(&p)
+}
+
+#[test]
+fn the_receiver_starts_with_its_handshake() {
+    let err = refused_on_the_remote_host();
+    assert!(err.starts_with("OPV-REMOTE READY 1\n"), "{err}");
+}
+
+/// 07.18: the receiver's message says it comes from the remote host.
+#[test]
+fn the_receivers_refusal_is_labelled_remote() {
+    let err = refused_on_the_remote_host();
+    assert!(err.contains("(remote): "), "{err}");
+}
+
+/// 07.09: the receiver's refusal steps to the person's remote preview, never doctor.
+#[test]
+fn the_receivers_refusal_steps_to_the_remote_preview() {
+    let err = refused_on_the_remote_host();
+    assert!(
+        err.contains("Next: opv run dev --product web --remote builder --preview"),
+        "{err}"
     );
 }

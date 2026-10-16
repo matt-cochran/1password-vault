@@ -5,7 +5,6 @@ use serde_json::json;
 
 use super::*;
 use crate::app::testutil::*;
-use crate::error::Code;
 use crate::runner::Output;
 use crate::runner::fake::FakeRunner;
 
@@ -77,7 +76,7 @@ fn a_run_without_a_role_is_refused_when_a_key_names_roles() {
         &r,
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::Usage);
+    assert_eq!(e.code_str(), "choice_required");
 }
 
 #[test]
@@ -106,7 +105,38 @@ fn a_run_naming_an_undeclared_role_is_refused() {
         &r,
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::Usage);
+    assert_eq!(e.code_str(), "unknown_role");
+}
+
+/// The role refusal rendered for the person's command line `argv`.
+fn role_refusal(argv: &[&str]) -> String {
+    let e = build(&role_fleet(), "prod", Some("allumata"), None, &signed_in()).unwrap_err();
+    let inv = crate::cause::Invocation::from_cli(&words(argv));
+    match e.cause() {
+        Some((c, _)) => crate::cause::render::render_text(c, None, &inv, false, false),
+        None => e.to_string(),
+    }
+}
+
+/// 07.11: a preview without --role is never told to run a command.
+#[test]
+fn a_preview_without_a_role_is_never_sent_to_a_real_run() {
+    let text = role_refusal(&["opv", "run", "prod", "--product", "allumata", "--preview"]);
+    assert!(!text.contains("-- <command>"), "{text}");
+}
+
+/// 07.11: a remote run without --role is never told to pass a command.
+#[test]
+fn a_remote_run_without_a_role_is_never_given_a_command() {
+    let text = role_refusal(&["opv", "run", "prod", "--remote", "builder"]);
+    assert!(!text.contains("-- <command>"), "{text}");
+}
+
+/// 07.11: the refusal names the roles to pick from.
+#[test]
+fn a_run_without_a_role_names_the_declared_roles() {
+    let text = role_refusal(&["opv", "run", "prod", "--preview"]);
+    assert!(text.contains("migrate, serve"), "{text}");
 }
 
 #[test]

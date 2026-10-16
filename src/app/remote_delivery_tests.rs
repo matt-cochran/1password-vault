@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app::testutil::*;
+use crate::error::Code;
 use crate::runner::fake::FakeRunner;
 
 const MARKER: &str = "test-marker-value-139";
@@ -20,6 +21,7 @@ fn header() -> Header {
         dir_env: Some("JZ_VAULT_DIR".into()),
         workdir: "/home/dev/src/app".into(),
         command: vec!["cargo".into(), "run".into()],
+        outer: None,
     }
 }
 
@@ -388,8 +390,9 @@ fn a_remote_run_for_a_role_the_profile_does_not_allow_is_refused() {
     assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
 }
 
+/// The catalog names the undeclared profile (`unknown_profile`, was `usage`).
 #[test]
-fn an_unknown_profile_is_a_usage_error() {
+fn an_unknown_profile_is_an_undeclared_name() {
     let r = FakeRunner::new([]);
     let res = crate::app::run::run_remote(
         &remote_fleet(),
@@ -399,7 +402,154 @@ fn an_unknown_profile_is_a_usage_error() {
         "elsewhere",
         &r,
     );
-    assert_eq!(res.unwrap_err().code(), Code::Usage);
+    assert_eq!(res.unwrap_err().code_str(), "unknown_profile");
+}
+
+fn refusal_text(env: &str, role: &str) -> String {
+    let (res, _) = remote_run(env, role);
+    match res.unwrap_err().cause() {
+        Some((c, _)) => crate::cause::render::render_text(
+            c,
+            None,
+            &crate::cause::Invocation::from_cli(&[
+                "opv".into(),
+                "run".into(),
+                env.into(),
+                "--remote".into(),
+                "builder".into(),
+            ]),
+            false,
+            false,
+        ),
+        None => String::new(),
+    }
+}
+
+/// 07.20: a profile's refusal never steps to the run it just refused.
+#[test]
+fn a_refused_environment_never_steps_to_the_same_run() {
+    assert!(!refusal_text("staging", "serve").contains("Next: opv run staging"));
+}
+
+/// 07.20: the refusal names what the profile allows.
+#[test]
+fn a_refused_environment_names_the_allowed_ones() {
+    assert!(refusal_text("staging", "serve").contains("it allows prod"));
+}
+
+// --- remote-send: SSH's stderr and the receiver's handshake (07.08, 07.19) -------------
+
+fn relayed(stderr: &str) -> (Relayed, String) {
+    let mut out = Vec::new();
+    let seen = relay_stderr(&mut stderr.as_bytes(), &mut out);
+    (seen, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn the_receivers_handshake_line_is_not_shown() {
+    let (_, shown) = relayed("OPV-REMOTE READY 1\nOPV-REMOTE DELIVERED\napp says hi\n");
+    assert_eq!(shown, "app says hi\n");
+}
+
+#[test]
+fn the_receivers_handshake_names_its_protocol() {
+    let (seen, _) = relayed("OPV-REMOTE READY 2\n");
+    assert_eq!(seen.protocol, Some(2));
+}
+
+#[test]
+fn ssh_messages_before_the_handshake_are_shown() {
+    let (_, shown) = relayed("ssh: connect to host h port 22: Connection refused\n");
+    assert!(shown.contains("Connection refused"));
+}
+
+#[test]
+fn the_payload_is_confirmed_by_the_delivered_line() {
+    let (seen, _) = relayed("OPV-REMOTE READY 1\nOPV-REMOTE DELIVERED\n");
+    assert!(seen.delivered);
+}
+
+/// 07.19: a receiver of another protocol is a version mismatch, whatever SSH's code.
+#[test]
+fn a_receiver_of_another_protocol_is_a_version_mismatch() {
+    let (seen, _) = relayed("OPV-REMOTE READY 2\n");
+    let e = ssh_outcome(&plan(), &args(), 3, &seen).unwrap_err();
+    assert_eq!(e.code_str(), "remote_version_mismatch");
+}
+
+/// R77: after delivery, a code SSH did not fail with is the remote app's own.
+#[test]
+fn the_remote_apps_own_exit_code_passes_through() {
+    let (seen, _) = relayed("OPV-REMOTE READY 1\nOPV-REMOTE DELIVERED\n");
+    assert_eq!(ssh_outcome(&plan(), &args(), 7, &seen).unwrap(), 7);
+}
+
+/// 07.08: a refused connection before the handshake is the pinned host's reachability.
+#[test]
+fn a_refused_connection_before_the_handshake_is_unreachable() {
+    let (seen, _) = relayed("ssh: connect to host h port 2222: Connection refused\n");
+    let e = ssh_outcome(&plan(), &args(), 255, &seen).unwrap_err();
+    assert_eq!(e.code_str(), "remote_unreachable");
+}
+
+/// The session's end after delivery is a disconnect, not the app's exit (RemoteDisconnected).
+#[test]
+fn a_session_closed_after_delivery_is_a_disconnect() {
+    let (seen, _) = relayed(
+        "OPV-REMOTE READY 1\nOPV-REMOTE DELIVERED\nConnection to h closed by remote host.\n",
+    );
+    let e = ssh_outcome(&plan(), &args(), 255, &seen).unwrap_err();
+    assert_eq!(e.code_str(), "remote_disconnected");
+}
+
+/// R77: an unexplained 255 after delivery is the remote app's own exit.
+#[test]
+fn an_unexplained_255_after_delivery_is_the_apps_exit() {
+    let (seen, _) = relayed("OPV-REMOTE READY 1\nOPV-REMOTE DELIVERED\n");
+    assert_eq!(ssh_outcome(&plan(), &args(), 255, &seen).unwrap(), 255);
+}
+
+/// A remote opv missing at the profile's path is a start failure on the remote host.
+#[test]
+fn a_missing_remote_opv_is_a_remote_start_failure() {
+    let (seen, _) = relayed(
+        "sh: 1: /usr/local/bin/opv: not found\nbash: /usr/local/bin/opv: No such file or directory\n",
+    );
+    let e = ssh_outcome(&plan(), &args(), 127, &seen).unwrap_err();
+    assert_eq!(e.code_str(), "child_start_failed");
+}
+
+/// The plan carries the person's run to the receiver (X25).
+#[test]
+fn the_plan_carries_the_persons_run() {
+    let (_, r) = remote_run("prod", "serve");
+    let plan: Plan = serde_json::from_str(&r.calls.borrow()[0].args[5]).unwrap();
+    assert_eq!(plan.header.outer.map(|o| o.env), Some("prod".to_string()));
+}
+
+/// 07.24: the text preview of a remote run never reports this machine's file support.
+#[test]
+fn the_remote_text_preview_never_reports_local_file_support() {
+    let r = FakeRunner::new([crate::runner::Output::success(
+        b"{\"user_type\":\"USER\"}".to_vec(),
+    )]);
+    let mut out = Vec::new();
+    crate::app::delivery_preview::preview_for(
+        &remote_fleet(),
+        "prod",
+        Some("allumata"),
+        Some("serve"),
+        Some("builder"),
+        false,
+        &r,
+        &mut out,
+    )
+    .unwrap();
+    assert!(
+        !String::from_utf8(out)
+            .unwrap()
+            .contains("file delivery: unsupported")
+    );
 }
 
 #[test]

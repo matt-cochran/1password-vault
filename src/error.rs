@@ -185,7 +185,20 @@ static NO_MSG: Msg = Msg {
 /// The invocation a Catalog error renders its steps against: the process's own command
 /// line (one place, until every entry point passes its own).
 pub fn invocation() -> crate::cause::Invocation {
+    if let Some(outer) = OUTER_INVOCATION.get() {
+        return outer.clone();
+    }
     crate::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>())
+}
+
+/// The person's `opv run` an internal step (`local-delivery`, `remote-send`,
+/// `remote-receive`) serves, set once by that step (design §6.1, X25): its errors render
+/// their steps against it, never against the hidden command itself.
+static OUTER_INVOCATION: std::sync::OnceLock<crate::cause::Invocation> = std::sync::OnceLock::new();
+
+/// Set the invocation an internal step's errors render against (see [`invocation`]).
+pub fn set_outer_invocation(inv: crate::cause::Invocation) {
+    let _ = OUTER_INVOCATION.set(inv);
 }
 
 /// Every category, in exit-code order (for tests that cover each one).

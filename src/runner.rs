@@ -835,6 +835,25 @@ mod observe {
             principal(call),
         ))
     }
+
+    /// The observation of a streamed child opv started itself, which ended as `exit`.
+    pub(super) fn ended(call: &Call, exit: ExitClass) -> Option<Observed> {
+        Some(Observed::from_failed_call(
+            call_id(call)?,
+            exit,
+            principal(call),
+        ))
+    }
+}
+
+/// Record that a long-lived, streamed child opv started itself (remote delivery's `ssh`,
+/// whose stdin carries the payload and heartbeats) ended as `exit`, so [`take_observed`]
+/// returns it for that system's diagnosis like any captured call (design §5).
+pub fn observe_streamed(program: &str, args: &[&str], exit: crate::cause::ExitClass) {
+    let id = failure::begin();
+    if let Some(seen) = observe::ended(&Call::new(program, args), exit) {
+        failure::observe(id, seen);
+    }
 }
 
 /// Keep what the runner saw of `call`'s attempt `res` (call `id`) when it failed.
