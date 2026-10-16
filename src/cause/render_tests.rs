@@ -3603,6 +3603,17 @@ fn an_unreadable_input_says_the_once() {
     assert!(!c.message().contains("the the"));
 }
 
+/// R2-3 (snapshot review): an unreadable input is fixed by hand, not by a command, so Next reruns.
+#[test]
+fn an_unreadable_input_reruns_the_command() {
+    let c = Cause::InputUnreadable {
+        path: PathBuf::from("missing.env"),
+        kind: InputKind::Dotenv,
+        io: IoKind::NotFound,
+    };
+    assert_eq!(c.step(&inv()).1, Next::Rerun);
+}
+
 /// L1: a built plan step keeps the global `--timeout` flag with its value.
 #[test]
 fn l1_a_built_step_keeps_the_timeout_flag_with_its_value() {
