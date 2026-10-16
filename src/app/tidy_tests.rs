@@ -961,7 +961,7 @@ fn an_item_edited_twice_reports_tidy_conflict() {
     let op = FakeOp::person(messy_item());
     op.editors.borrow_mut().push((2, someone_edits_session));
     op.editors.borrow_mut().push((3, someone_edits_session));
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_conflict"));
 }
 
 fn prefixed_fleet() -> Fleet {
@@ -1200,7 +1200,7 @@ fn every_read_a_tidy_writes_from_bypasses_the_cache() {
 fn an_edit_landing_with_the_tidy_reports_tidy_conflict() {
     let op = FakeOp::person(messy_item());
     op.racing.set(Some(someone_edits_session));
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_conflict"));
 }
 
 #[test]
@@ -1228,7 +1228,7 @@ fn an_edit_landing_with_the_tidy_is_found_by_a_fresh_re_read_without_an_echo() {
     let op = FakeOp::person(messy_item());
     op.echo.set(false);
     op.racing.set(Some(someone_edits_session));
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_conflict"));
 }
 
 #[test]
@@ -1241,7 +1241,7 @@ fn a_tidy_one_version_later_reports_no_error() {
 fn a_field_the_write_dropped_reports_tidy_unverified() {
     let op = FakeOp::person(messy_item());
     op.edit.set(Edit::Lossy);
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyUnverified));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_unverified"));
 }
 
 #[test]
@@ -1618,7 +1618,7 @@ fn a_write_with_nobody_signed_in_is_op_not_signed_in() {
     let op = crate::adapters::fake_op::FakeOp::default();
     op.signed_in.set(false);
     let e = require_person(&op, "opv target add").unwrap_err();
-    assert_eq!(e.code().as_str(), "op_not_signed_in");
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 #[test]

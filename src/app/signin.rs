@@ -124,21 +124,17 @@ fn open_at<'a>(
 /// this sign-in does (06.30).
 fn deploy_failed(e: Error, reference: &ItemRef) -> Error {
     use crate::cause::{Cause, CredentialRef, VaultId};
-    match e {
-        Error::Catalog(cause, upstream) => {
-            let mut cause = *cause;
-            if let Cause::CredentialRejected {
-                credential: CredentialRef::DeployCredentials { vault, .. },
-                ..
-            } = &mut cause
-                && vault.as_str().is_empty()
-            {
-                *vault = VaultId::new(reference.vault.clone());
-            }
-            Error::Catalog(Box::new(cause), upstream)
-        }
-        e => e,
+    let Error::Catalog(cause, upstream) = e;
+    let mut cause = *cause;
+    if let Cause::CredentialRejected {
+        credential: CredentialRef::DeployCredentials { vault, .. },
+        ..
+    } = &mut cause
+        && vault.as_str().is_empty()
+    {
+        *vault = VaultId::new(reference.vault.clone());
     }
+    Error::Catalog(Box::new(cause), upstream)
 }
 
 impl<'a> EnvRunner<'a> {

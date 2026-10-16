@@ -1706,12 +1706,10 @@ mod tests {
                 "https://VALUE-MARKER",
             )],
         ));
-        match e {
-            Error::Source(m) => {
-                assert_eq!(m.text(), "unsupported field type on allumata/BASE_URL");
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            e.to_string(),
+            strict_refusal("a field has a type opv does not read").to_string()
+        );
     }
 
     #[test]
@@ -1737,12 +1735,10 @@ mod tests {
                 ),
             ],
         ));
-        match e {
-            Error::Source(m) => {
-                assert_eq!(m.text(), "duplicate field allumata/OPENAI_API_KEY in item");
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            e.to_string(),
+            strict_refusal("two fields have the same section and label").to_string()
+        );
     }
 
     const WHOAMI_SA: &str = r#"{"url":"https://my.1password.com","email":"ci-OPHINTMARKER@example.com","user_uuid":"UOPHINTMARKER","account_uuid":"AOPHINTMARKER","user_type":"SERVICE_ACCOUNT"}"#;
@@ -2597,6 +2593,11 @@ mod tests {
 mod strict {
     use super::*;
 
+    /// An item the strict reader refuses (tests only): opv's own refusal, naming why.
+    pub fn strict_refusal(site: &'static str) -> Error {
+        Cause::Bug { site }.into()
+    }
+
     /// Read one boundary item `b` of `env` once, by vault ID and item ID (FR-13, FR-57). See
     /// the module docs. The host is detected only if the read fails.
     pub fn read_item(
@@ -2706,29 +2707,21 @@ mod strict {
             let section = match section.label {
                 Some(l) if !l.is_empty() => l,
                 _ => {
-                    return Err(Error::Source(
-                        format!("field {} is in a section without a label", f.label).into(),
-                    ));
+                    return Err(strict_refusal("a field is in a section without a label"));
                 }
             };
             if f.label.is_empty() {
-                return Err(Error::Source(
-                    format!("field without a label in section {section}").into(),
-                ));
+                return Err(strict_refusal("a field has no label"));
             }
             let kind = match f.ty.as_str() {
                 "CONCEALED" => Kind::Secret,
                 "STRING" => Kind::Config,
                 _ => {
-                    return Err(Error::Source(
-                        format!("unsupported field type on {section}/{}", f.label).into(),
-                    ));
+                    return Err(strict_refusal("a field has a type opv does not read"));
                 }
             };
             if !seen.insert((section.clone(), f.label.clone())) {
-                return Err(Error::Source(
-                    format!("duplicate field {section}/{} in item", f.label).into(),
-                ));
+                return Err(strict_refusal("two fields have the same section and label"));
             }
             out.push(ItemField {
                 section,
@@ -2746,6 +2739,6 @@ mod strict {
 }
 
 #[cfg(test)]
-use strict::read_item_on;
-#[cfg(test)]
 pub use strict::{read_item, read_item_in_sections, read_item_with};
+#[cfg(test)]
+use strict::{read_item_on, strict_refusal};

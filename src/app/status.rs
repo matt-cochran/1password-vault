@@ -77,7 +77,7 @@ pub fn run_targeted(
     json: bool,
 ) -> Result<(), Error> {
     check_product(fleet, product, Some(env_name))?;
-    // Needs a target: `Error::Config` naming the environment otherwise, before any call.
+    // Needs a target: `NothingInScope` naming the environment otherwise, before any call.
     let names = resolve_targets(fleet, env_name, targets, "status")?;
     let runners = target_runners(fleet, env_name, &names, r)?;
     let mut parts = Vec::new();
@@ -618,7 +618,7 @@ pub(crate) fn env_rows_keeping(
         &ledgers,
     )?;
     plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+    plan.tidy_error = read.tidy_error;
     if let Ports::Staged { store, .. } = &ports
         && let Some(v) = store.variables()
     {

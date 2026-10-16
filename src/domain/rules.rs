@@ -1212,9 +1212,6 @@ mod tests {
                 let _ = &shown;
                 // the regex case legitimately names no value; check all the same
                 assert!(!shown.contains(MARK), "leak in {shown}");
-                let err = crate::error::Error::Policy(e.to_string().into());
-                let shown = format!("{err} {err:?}");
-                assert!(!shown.contains(MARK), "leak in {shown}");
             }
         }
         assert!(n >= 15, "expected nearly every case to fail, got {n}");

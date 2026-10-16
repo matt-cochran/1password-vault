@@ -614,14 +614,14 @@ mod discovery {
     fn a_selected_signed_out_account_is_op_not_signed_in() {
         let r = runner(vec![signed_out()]);
         let (res, _) = projects_json(&r, Some(B));
-        assert_eq!(res.unwrap_err().code().as_str(), "op_not_signed_in");
+        assert_eq!(res.unwrap_err().code_str(), "op_not_signed_in");
     }
 
     #[test]
     fn every_account_failing_is_inventory_incomplete() {
         let r = runner(vec![signed_out(), signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 
     #[test]
@@ -695,7 +695,7 @@ mod discovery {
     fn a_partial_inventory_is_inventory_incomplete() {
         let r = runner(vec![vec![one_manifest()], signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 
     #[test]
@@ -753,6 +753,6 @@ mod discovery {
     fn status_all_with_an_incomplete_inventory_is_inventory_incomplete() {
         let r = runner(vec![vec![Output::success("[]")], signed_out()]);
         let res = status_all(&r, None, None, true, &mut Vec::new());
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 }

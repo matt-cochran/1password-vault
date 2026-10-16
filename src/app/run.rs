@@ -772,7 +772,7 @@ environments = ["prod", "dev"]
     #[test]
     fn a_guarded_environment_needs_its_name_again() {
         let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ConfirmRequired);
+        assert_eq!(e.code_str(), "confirm_required");
     }
 
     #[test]
@@ -783,7 +783,7 @@ environments = ["prod", "dev"]
     #[test]
     fn a_confirmation_naming_another_environment_is_refused() {
         let e = require_confirmation(&guarded(), "prod", Some("dev"), "retry").unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ConfirmMismatch);
+        assert_eq!(e.code_str(), "confirm_mismatch");
     }
 
     #[test]

@@ -73,7 +73,11 @@ fn an_incomplete_inventory_exits_as_its_code_says() {
         Output::success("{}"),
     ]);
     let e = res.unwrap_err();
-    assert_eq!(e.exit_code(), e.code().exit_code());
+    assert!(
+        crate::cause::codes::table()
+            .iter()
+            .any(|r| r.code == e.code_str() && r.exits.contains(&e.exit_code()))
+    );
 }
 
 #[test]
@@ -148,12 +152,12 @@ fn a_vault_in_no_account_is_account_not_registered() {
         Output::failure(1),
         Output::success("{}"),
     ]);
-    assert_eq!(res.unwrap_err().code().as_str(), "account_not_registered");
+    assert_eq!(res.unwrap_err().code_str(), "account_not_registered");
 }
 
 #[test]
 fn a_value_that_is_not_an_id_is_refused_before_any_call() {
     let r = FakeRunner::default();
     let e = run(&r, "not an id", false, &mut Vec::new()).unwrap_err();
-    assert_eq!(e.code().as_str(), "usage");
+    assert_eq!(e.code_str(), "usage");
 }

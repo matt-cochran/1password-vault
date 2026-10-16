@@ -61,7 +61,7 @@ pub fn check(
         // Planned without a target: check never reaches one.
         let mut plan = super::plan_item(&selected, env, None, fields, None, &none, &none)?.0;
         plan.tidy = read.changes;
-        plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+        plan.tidy_error = read.tidy_error;
         plan
     } else {
         read_and_plan_products(&selected, fleet, env, runner)?

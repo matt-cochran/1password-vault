@@ -423,36 +423,27 @@ fn sync_changed(plan_id: &str, current: &str, scope: &SyncScope) -> Error {
 
 /// A failure after the approval was used up (X4, X20): whatever ran may have written, and the
 /// approval never applies again, so the next step is the read of what remains in the same
-/// scope, never `--approved` again. A cataloged cause keeps its message and evidence inside
-/// `Partial`; one not yet cataloged is reported as the used approval.
+/// scope, never `--approved` again. The cause keeps its message and evidence inside
+/// `Partial`.
 fn after_used_approval(e: Error, plan_id: &str, scope: &SyncScope) -> Error {
     let plan = PlanId::new(plan_id);
-    match e {
-        Error::Catalog(cause, upstream) => {
-            let cause = match *cause {
-                Cause::ApprovalUsed { .. } => *cause,
-                Cause::Partial { done, then, .. } => Cause::Partial {
-                    done,
-                    approval_used: Some(plan),
-                    approval_scope: Some(scope.plan_scope()),
-                    then,
-                },
-                then => Cause::Partial {
-                    done: Vec::new(),
-                    approval_used: Some(plan),
-                    approval_scope: Some(scope.plan_scope()),
-                    then: Box::new(then),
-                },
-            };
-            Error::Catalog(Box::new(cause), upstream)
-        }
-        _ => Cause::ApprovalUsed {
-            plan,
-            scope: scope.plan_scope(),
-            partial: false,
-        }
-        .into(),
-    }
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::ApprovalUsed { .. } => *cause,
+        Cause::Partial { done, then, .. } => Cause::Partial {
+            done,
+            approval_used: Some(plan),
+            approval_scope: Some(scope.plan_scope()),
+            then,
+        },
+        then => Cause::Partial {
+            done: Vec::new(),
+            approval_used: Some(plan),
+            approval_scope: Some(scope.plan_scope()),
+            then: Box::new(then),
+        },
+    };
+    Error::Catalog(Box::new(cause), upstream)
 }
 
 #[cfg(test)]

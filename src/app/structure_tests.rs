@@ -317,7 +317,7 @@ fn a_stale_plan_id_is_refused() {
     let id = plan_of(&path, &op).plan_id;
     std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.code().as_str(), "stale_plan");
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 #[test]
@@ -336,7 +336,7 @@ fn a_plan_approved_for_another_account_is_stale() {
         .unwrap()
         .plan_id;
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.code().as_str(), "stale_plan");
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 #[test]
@@ -384,7 +384,7 @@ fn a_signed_out_plan_is_op_not_signed_in() {
     let (_d, path, op) = workspace();
     op.signed_in.set(false);
     let e = plan(&op, &text(&path), "myapp", ACCOUNT).unwrap_err();
-    assert_eq!(e.code().as_str(), "op_not_signed_in");
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 /// The fake `op`, signed in as a service account.

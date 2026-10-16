@@ -409,7 +409,7 @@ pub(crate) fn diagnose_failed(
 }
 
 /// `get --raw /apis/external-secrets.io/v1`: the operator's API is served at v1 (discovery,
-/// which every signed-in identity may read). Not served: [`Error::Dependency`] naming what
+/// which every signed-in identity may read). Not served: a cataloged cause naming what
 /// to install or upgrade.
 pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
     let what = "kubectl get --raw /apis/external-secrets.io/v1";

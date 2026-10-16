@@ -178,7 +178,7 @@ fn missing(call: &Call, resource: ResourceRef, env_name: &str, field: &str, set:
 /// Whether `e` says the personal item or its vault is not there (not set up yet), as
 /// opposed to a sign-in or 1Password not answering.
 fn not_set_up(e: &Error) -> bool {
-    e.code() == crate::error::Code::ItemNotFound
+    e.code_str() == "item_not_found"
         || matches!(
             e.cause(),
             Some((
@@ -226,7 +226,7 @@ pub fn merged_fields(
     let team = fleet.environment(env_name)?;
     let item = match onepassword::read_whole(r, team, &at) {
         Ok(item) => item,
-        Err(e) if e.code() == crate::error::Code::ItemNotFound => return Ok(out),
+        Err(e) if e.code_str() == "item_not_found" => return Ok(out),
         Err(e) => return Err(e),
     };
     let Ok((layout, _)) = onepassword_tidy::parse(item.raw()) else {

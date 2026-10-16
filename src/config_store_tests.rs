@@ -728,7 +728,7 @@ fn a_refused_manifest_write_is_a_definite_failure() {
         .store()
         .replace(&RefusedWrites(&op), &base, &edited())
         .unwrap_err();
-    assert_ne!(e.code(), crate::error::Code::OutcomeUnknown, "{e:?}");
+    assert_ne!(e.code_str(), "outcome_unknown", "{e:?}");
 }
 
 #[test]
@@ -837,7 +837,7 @@ fn accounts_runner(json: &str) -> crate::runner::fake::FakeRunner {
 #[test]
 fn several_accounts_and_none_chosen_is_account_required() {
     let e = pick_account(&accounts_runner(TWO_ACCOUNTS), None).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::AccountRequired);
+    assert_eq!(e.code_str(), "account_required");
 }
 
 /// opv never searches every account: the only call is `op account list`.

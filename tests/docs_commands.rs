@@ -403,28 +403,35 @@ fn github_actions_example_pins_this_version() {
 const CODES_BEGIN: &str = "<!-- error-codes:begin";
 const CODES_END: &str = "<!-- error-codes:end -->";
 
-/// The usage.md error-code table, rendered from `Code::ALL` (I8).
+/// The usage.md error-code table, generated from the catalog's `Cause` enum (I8, design
+/// §10 step 5): each code's exit codes, retry classes and `human_required`, from an example
+/// of every cause ([`opv::cause::codes::table`]).
 fn codes_table() -> String {
     let mut t =
         String::from("| `code` | Exit | `retry` | Human | Meaning |\n|---|---|---|---|---|\n");
-    for c in opv::error::Code::ALL {
-        let exit = match c.exit_code() {
-            130 => "130/143".to_string(),
-            n => n.to_string(),
-        };
+    for r in opv::cause::codes::table() {
+        let exit: Vec<String> = r.exits.iter().map(i32::to_string).collect();
+        let retry: Vec<&str> = r.retry.iter().map(|c| c.as_str()).collect();
+        let human: Vec<&str> = r
+            .human_required
+            .iter()
+            .map(|h| if *h { "yes" } else { "no" })
+            .collect();
         t.push_str(&format!(
-            "| `{}` | {exit} | {} | {} | {} |\n",
-            c.as_str(),
-            c.retry().as_str(),
-            if c.human_required() { "yes" } else { "no" },
-            c.meaning().replace('|', "\\|")
+            "| `{}` | {} | {} | {} | {} |\n",
+            r.code,
+            exit.join("/"),
+            retry.join("/"),
+            human.join("/"),
+            r.meaning.replace('|', "\\|")
         ));
     }
     t
 }
 
-/// I8: the closed list of error codes in usage.md is generated from the code. Regenerate it
-/// with `UPDATE_DOCS=1 cargo test --features fake --test docs_commands`.
+/// I8, `docs_table_is_generated` (design §11): the error-code table in usage.md is exactly
+/// the one generated from the `Cause` enum. Regenerate it with `UPDATE_DOCS=1 cargo
+/// nextest run --features fake --test docs_commands`.
 #[test]
 fn usage_error_code_table_matches_the_code() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/usage.md");

@@ -11,7 +11,7 @@
 //!   this run already wrote (NR-10). A listing in a GitHub environment that gh's reply does
 //!   not explain is checked against the repository's environments: a missing one is the
 //!   owner's setup.
-//! - A refused name or value: [`Error::Policy`] naming the key and rule, never the value.
+//! - A refused name or value: a `Guard` cause naming the key and rule, never the value.
 
 use std::collections::BTreeMap;
 use std::io;

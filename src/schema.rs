@@ -1,13 +1,12 @@
 //! `opv schema` (A4): a machine-readable description of the installed binary.
 //!
 //! Commands, arguments and flags come from the clap definitions passed in, the exit and
-//! error codes from [`crate::error::Code`], so neither can drift from the code. What clap
+//! error codes from the catalog ([`crate::cause::codes::table`]), so neither can drift from the code. What clap
 //! cannot know (what a command changes, whether it needs a person's terminal, whether to
 //! ask the user first) is the [`EFFECTS`] table; a test fails when a command has no entry.
 
 use serde_json::{Value, json};
 
-use crate::error::Code;
 use crate::json::SCHEMA_VERSION;
 
 /// Every MCP tool mapped to the CLI command that gives the same guarantee, in tool order
@@ -480,13 +479,7 @@ pub fn describe(root: &clap::Command, version: &str) -> Value {
         "commands": commands,
         "mcp_tools": MCP_TOOLS.iter().map(|(tool, cli)| json!({"tool": tool, "cli": cli})).collect::<Vec<_>>(),
         "exit_codes": exit_codes(),
-        "error_codes": Code::ALL.iter().map(|c| json!({
-            "code": c.as_str(),
-            "exit_code": c.exit_code(),
-            "retry": c.retry().as_str(),
-            "human_required": c.human_required(),
-            "meaning": c.meaning(),
-        })).collect::<Vec<_>>(),
+        "error_codes": error_codes(),
         "states": {
             "row_state": ["saved", "missing", "failing_rule", "skipped", "source_blocked"],
             "row_kind": ["secret", "config"],
@@ -735,17 +728,41 @@ fn documents() -> Value {
     })
 }
 
+/// The public error codes, generated from the catalog ([`crate::cause::codes::table`]):
+/// `exit_code`, `retry` and `human_required` are the code's first (its lowest exit code),
+/// and `exit_codes` and `retry_classes` list every one its causes have.
+fn error_codes() -> Vec<serde_json::Value> {
+    crate::cause::codes::table()
+        .iter()
+        .map(|r| {
+            json!({
+                "code": r.code,
+                "exit_code": r.exits[0],
+                "exit_codes": r.exits,
+                "retry": r.retry[0].as_str(),
+                "retry_classes": r.retry.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+                "human_required": r.human_required.contains(&true),
+                "meaning": r.meaning,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn every_error_code_is_listed_once() {
-        let mut slugs: Vec<&str> = Code::ALL.iter().map(|c| c.as_str()).collect();
-        let n = slugs.len();
-        slugs.sort_unstable();
-        slugs.dedup();
-        assert_eq!(slugs.len(), n);
+    fn every_error_code_is_the_catalogs() {
+        let listed: Vec<String> = error_codes()
+            .iter()
+            .map(|c| c["code"].as_str().unwrap_or_default().to_string())
+            .collect();
+        let catalog: Vec<String> = crate::cause::codes::table()
+            .iter()
+            .map(|r| r.code.to_string())
+            .collect();
+        assert_eq!(listed, catalog);
     }
 
     #[test]

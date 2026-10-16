@@ -8,7 +8,7 @@
 //! set and the local delivery step: process roles (#136) are applied where the keys are
 //! chosen, so a key withheld by role is neither resolved by `op` nor written to a file nor
 //! put in the child environment. A product whose keys declare roles and a run that gives no
-//! `--role`, or names a role no key declares, is `Code::Usage` before any 1Password read.
+//! `--role`, or names a role no key declares, is `"usage"` before any 1Password read.
 //!
 //! `build` is the one shared builder the CLI (`opv run --preview`) and the MCP tool call,
 //! so the document is identical wherever it is asked for.

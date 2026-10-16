@@ -464,7 +464,7 @@ impl AccountReport {
             Err(e) => (
                 "failed",
                 None,
-                Some(e.code().as_str()),
+                Some(e.code_str()),
                 Some(e.text().lines().next().unwrap_or_default().to_string()),
             ),
         };

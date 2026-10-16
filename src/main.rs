@@ -1813,7 +1813,7 @@ fn main() -> ExitCode {
             let _ = guard.flush();
             res
         };
-        let signed_out = matches!(&res, Err(e) if e.code() == opv::error::Code::OpNotSignedIn);
+        let signed_out = matches!(&res, Err(e) if e.code_str() == "op_not_signed_in");
         if may_sign_in && signed_out && !signed_in {
             match sign_in_here() {
                 // Once: a second failure is reported as it is.
@@ -3263,8 +3263,8 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
                 account: config_store::account_env(),
             };
             // The file is right here; what is missing is the manifest to compare it with (M9).
-            let found = config_store::locate(&req, r).map_err(|e| match e.code() {
-                opv::error::Code::ConfigNotFound => manifest_missing_for_check(&dir),
+            let found = config_store::locate(&req, r).map_err(|e| match e.code_str() {
+                "config_not_found" => manifest_missing_for_check(&dir),
                 _ => e,
             })?;
             config_cmd::check(&found, &file, r, out)

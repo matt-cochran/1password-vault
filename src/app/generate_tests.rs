@@ -76,7 +76,11 @@ fn a_provider_key_with_a_prefix_is_refused() {
 fn a_refused_key_exits_as_its_code_says() {
     let (fleet, _, _) = world();
     let e = recipe("api", "STRIPE_KEY", "dev", &spec(&fleet, "STRIPE_KEY")).unwrap_err();
-    assert_eq!(e.exit_code(), e.code().exit_code());
+    assert!(
+        crate::cause::codes::table()
+            .iter()
+            .any(|r| r.code == e.code_str() && r.exits.contains(&e.exit_code()))
+    );
 }
 
 #[test]
@@ -178,7 +182,7 @@ fn one_refused_key_writes_nothing_for_the_others() {
 fn an_undeclared_key_is_refused() {
     let (fleet, op, _) = world();
     let e = run(&fleet, "dev", &["api/NOPE".into()], &op, &mut Vec::new()).unwrap_err();
-    assert_eq!(e.code().as_str(), "undeclared_key");
+    assert_eq!(e.code_str(), "undeclared_key");
 }
 
 // 05.11 (S2): each refusal says its own reason ------------------------------------------

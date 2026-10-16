@@ -1233,7 +1233,7 @@ environments = ["dev"]
     fn sync_preflight_refusal_without_a_right_is_permission_denied() {
         let r = FakeRunner::new(deploy_rights("list pods"));
         let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::PermissionDenied);
+        assert_eq!(e.code_str(), "permission_denied");
     }
 
     #[test]

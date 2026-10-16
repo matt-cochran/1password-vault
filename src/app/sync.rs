@@ -202,36 +202,31 @@ fn check_names(
     }
 }
 
-/// `e` after this run already wrote `done` (R53, X20): a cataloged cause becomes
-/// [`Cause::Partial`], whose Next is the read of what remains in `scope`, never the write;
-/// a Legacy error gets the same names on a line of its own.
+/// `e` after this run already wrote `done` (R53, X20): its cause becomes
+/// [`Cause::Partial`], whose Next is the read of what remains in `scope`, never the write.
 fn partial(e: Error, done: &[String], scope: PlanScope) -> Error {
     if done.is_empty() {
         return e;
     }
-    match e {
-        Error::Catalog(c, up) => {
-            let (mut written, then) = match *c {
-                Cause::Partial { done, then, .. } => (done, then),
-                other => (Vec::new(), Box::new(other)),
-            };
-            for d in done {
-                if !written.contains(d) {
-                    written.push(d.clone());
-                }
-            }
-            Error::Catalog(
-                Box::new(Cause::Partial {
-                    done: written,
-                    approval_used: None,
-                    approval_scope: Some(scope),
-                    then,
-                }),
-                up,
-            )
+    let Error::Catalog(c, up) = e;
+    let (mut written, then) = match *c {
+        Cause::Partial { done, then, .. } => (done, then),
+        other => (Vec::new(), Box::new(other)),
+    };
+    for d in done {
+        if !written.contains(d) {
+            written.push(d.clone());
         }
-        e => e,
     }
+    Error::Catalog(
+        Box::new(Cause::Partial {
+            done: written,
+            approval_used: None,
+            approval_scope: Some(scope),
+            then,
+        }),
+        up,
+    )
 }
 
 pub fn run(
@@ -535,13 +530,8 @@ impl Ctx<'_> {
         let guarded = format!(
             "{env} is also guarded (confirm_env = true): syncing it needs a person's confirmation"
         );
-        match e {
-            e @ Error::Catalog(..) => {
-                self.r.note(&guarded);
-                e
-            }
-            e => e,
-        }
+        self.r.note(&guarded);
+        e
     }
 
     /// The guard itself (NR-20), after every read-only check and before the first write.
@@ -1525,19 +1515,15 @@ fn run_pinned(
     let mut pruned: Vec<String> = change.unbind.clone();
     if !deletes.is_empty() {
         // Nothing in the runtime may still point at an entry deleted below (FR-32).
-        runtime.release(deletes).map_err(|e| match e {
-            e @ Error::Catalog(..) => pinned_partial(c, e, &report_written(&report), &[]),
-            e => e,
-        })?;
+        runtime
+            .release(deletes)
+            .map_err(|e| pinned_partial(c, e, &report_written(&report), &[]))?;
     }
     let mut unbound_kept = Vec::new();
     for name in deletes {
         let gone = store.delete(name).map_err(|e| {
             let done: Vec<&str> = pruned.iter().map(String::as_str).collect();
-            match e {
-                e @ Error::Catalog(..) => pinned_partial(c, e, &report_written(&report), &done),
-                e => e,
-            }
+            pinned_partial(c, e, &report_written(&report), &done)
         })?;
         if !gone {
             // Kept for rollback by an older revision: unbound, not pruned (FR-32).
@@ -1865,20 +1851,14 @@ fn copy_field(f: &ItemField) -> ItemField {
 }
 
 /// A failure on pinned target `c` after this run wrote the store versions `written` and
-/// pruned `pruned` (R53, X20): a cataloged cause becomes [`Cause::Partial`] naming them; a
-/// Legacy error gets the names on a line of its own.
+/// pruned `pruned` (R53, X20): its cause becomes [`Cause::Partial`] naming them.
 fn pinned_partial(c: &Ctx<'_>, e: Error, written: &[&str], pruned: &[&str]) -> Error {
-    match e {
-        e @ Error::Catalog(..) => {
-            let done: Vec<String> = written
-                .iter()
-                .map(|n| format!("{n} (a new version)"))
-                .chain(pruned.iter().map(|n| format!("{n} (pruned)")))
-                .collect();
-            partial(e, &done, c.opts.scope(c.env_name))
-        }
-        e => e,
-    }
+    let done: Vec<String> = written
+        .iter()
+        .map(|n| format!("{n} (a new version)"))
+        .chain(pruned.iter().map(|n| format!("{n} (pruned)")))
+        .collect();
+    partial(e, &done, c.opts.scope(c.env_name))
 }
 
 /// The one success-path `Next:` line, newline-terminated.
@@ -1980,34 +1960,11 @@ fn confirm(
     }
 }
 
-/// [`after_writes`] on target `c`: a cataloged cause becomes [`Cause::Partial`] naming what
-/// had completed, whose Next reads what remains in the run's scope (R53, 01.07).
+/// NR-10, R53, 01.07: a failure on target `c` after this run's first write: its cause becomes
+/// [`Cause::Partial`] naming what had completed, whose Next reads what remains in the run's
+/// scope.
 fn after_writes_in(c: &Ctx<'_>, e: Error, done: &[String]) -> Error {
-    match e {
-        e @ Error::Catalog(..) => partial(e, done, c.opts.scope(c.env_name)),
-        e => after_writes(e, done),
-    }
-}
-
-/// NR-10: a sign-in lost after this run's first write names what had completed. Other
-/// errors already say what is known (NR-2).
-fn after_writes(e: Error, done: &[String]) -> Error {
-    match e {
-        // A cataloged cause names the completed writes as its `Partial` (design §4.6).
-        Error::Catalog(c, up) if !done.is_empty() => {
-            let cause = Cause::Partial {
-                done: done.to_vec(),
-                approval_used: None,
-                approval_scope: None,
-                then: c,
-            };
-            match up {
-                Some(up) => Error::with_evidence(cause, *up),
-                None => cause.into(),
-            }
-        }
-        e => e,
-    }
+    partial(e, done, c.opts.scope(c.env_name))
 }
 
 /// The per-key change lists, `product/KEY (NAME)` (P19).
@@ -2095,7 +2052,7 @@ pub fn plan_rotating(
     check_names(fleet, env_name, targets, product)?;
     check_product(fleet, product, Some(env_name))?;
     let parsed = parse_rotate(fleet, env_name, rotate)?;
-    // Needs a target: `Error::Config` naming the environment otherwise, before any call.
+    // Needs a target: `NothingInScope` naming the environment otherwise, before any call.
     let names = resolve_targets(fleet, env_name, targets, "plan")?;
     let runners = target_runners(fleet, env_name, &names, r)?;
     let mut parts = Vec::new();
@@ -3852,7 +3809,7 @@ mod tests {
             writes_started: true,
         }
         .into();
-        let e = after_writes(refused, &["api/TOKEN".to_string()]);
+        let e = partial(refused, &["api/TOKEN".to_string()], PlanScope::Structural);
         assert!(e.to_string().contains("api/TOKEN"), "{e}");
     }
 }

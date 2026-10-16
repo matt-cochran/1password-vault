@@ -6,7 +6,6 @@ use std::path::Path;
 
 use super::*;
 use crate::adapters::onepassword_manifest::{Account, Discovery};
-use crate::error::Code;
 use crate::host::Platform;
 
 fn acct(id: &str, email: &str, address: &str, shorthand: &str, user: &str) -> Account {
@@ -739,7 +738,7 @@ fn an_email_matching_several_accounts_is_ambiguous() {
         false,
     )
     .unwrap_err();
-    assert_eq!(err.code(), crate::error::Code::AccountAmbiguous);
+    assert_eq!(err.code_str(), "account_ambiguous");
 }
 
 /// The Next of a catalog error, rendered against `opv account use <who>`.
@@ -928,7 +927,7 @@ fn a_selection_matching_several_accounts_is_ambiguous_not_absent() {
 fn using_an_unknown_account_says_it_is_not_registered() {
     let dir = tempfile::tempdir().unwrap();
     let e = use_account(&two_at_one_address(), "nobody@x.example", dir.path(), false).unwrap_err();
-    assert_eq!(e.code(), Code::AccountNotRegistered);
+    assert_eq!(e.code_str(), "account_not_registered");
 }
 
 // --- #142: two accounts on one sign-in address, and session variables in the shell ---
@@ -1054,7 +1053,11 @@ fn the_shared_address_finding_has_no_login_step() {
 #[test]
 fn an_unknown_account_error_exits_as_its_code_says() {
     let err = use_account(&[owner()], "ghost@example.com", Path::new("."), false).unwrap_err();
-    assert_eq!(err.exit_code(), err.code().exit_code());
+    assert!(
+        crate::cause::codes::table()
+            .iter()
+            .any(|r| r.code == err.code_str() && r.exits.contains(&err.exit_code()))
+    );
 }
 
 #[test]

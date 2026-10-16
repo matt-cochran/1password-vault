@@ -4,7 +4,6 @@
 use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::app::structure;
-use crate::error::Code;
 use crate::runner::CommandRunner;
 use std::path::{Path, PathBuf};
 
@@ -128,7 +127,7 @@ fn structure_apply_without_approval_is_refused() {
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::ApprovalRequired);
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]
@@ -162,7 +161,7 @@ fn a_stale_plan_is_refused() {
         &mut Vec::new(),
     )
     .unwrap_err();
-    assert_eq!(e.code(), Code::StalePlan);
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 /// C2: an id never approved on this machine (the injected approval folder holds none) that

@@ -719,25 +719,18 @@ fn plan_scope(args: &SyncScopeArgs) -> PlanScope {
 /// inside `Partial`; one not yet cataloged is reported as the used approval.
 fn after_used_approval(e: Error, args: &SyncScopeArgs) -> Error {
     let plan = PlanId::new(&args.plan_id);
-    match e {
-        Error::Catalog(cause, upstream) => match *cause {
-            Cause::Partial { .. } | Cause::ApprovalUsed { .. } => Error::Catalog(cause, upstream),
-            then => Error::Catalog(
-                Box::new(Cause::Partial {
-                    done: Vec::new(),
-                    approval_used: Some(plan),
-                    approval_scope: Some(plan_scope(args)),
-                    then: Box::new(then),
-                }),
-                upstream,
-            ),
-        },
-        _ => Cause::ApprovalUsed {
-            plan,
-            scope: plan_scope(args),
-            partial: false,
-        }
-        .into(),
+    let Error::Catalog(cause, upstream) = e;
+    match *cause {
+        Cause::Partial { .. } | Cause::ApprovalUsed { .. } => Error::Catalog(cause, upstream),
+        then => Error::Catalog(
+            Box::new(Cause::Partial {
+                done: Vec::new(),
+                approval_used: Some(plan),
+                approval_scope: Some(plan_scope(args)),
+                then: Box::new(then),
+            }),
+            upstream,
+        ),
     }
 }
 

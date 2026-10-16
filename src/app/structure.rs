@@ -661,34 +661,25 @@ fn done(applied: &Applied) -> Vec<String> {
 fn after_approval(e: Error, applied: &Applied) -> Error {
     let plan = PlanId::new(&applied.plan_id);
     let mut written = done(applied);
-    match e {
-        Error::Catalog(cause, upstream) => {
-            let cause = match *cause {
-                Cause::Partial { done, then, .. } => {
-                    written.extend(done);
-                    Cause::Partial {
-                        done: written,
-                        approval_used: Some(plan),
-                        approval_scope: Some(PlanScope::Structural),
-                        then,
-                    }
-                }
-                then => Cause::Partial {
-                    done: written,
-                    approval_used: Some(plan),
-                    approval_scope: Some(PlanScope::Structural),
-                    then: Box::new(then),
-                },
-            };
-            Error::Catalog(Box::new(cause), upstream)
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::Partial { done, then, .. } => {
+            written.extend(done);
+            Cause::Partial {
+                done: written,
+                approval_used: Some(plan),
+                approval_scope: Some(PlanScope::Structural),
+                then,
+            }
         }
-        _ => Cause::ApprovalUsed {
-            plan,
-            scope: PlanScope::Structural,
-            partial: !written.is_empty(),
-        }
-        .into(),
-    }
+        then => Cause::Partial {
+            done: written,
+            approval_used: Some(plan),
+            approval_scope: Some(PlanScope::Structural),
+            then: Box::new(then),
+        },
+    };
+    Error::Catalog(Box::new(cause), upstream)
 }
 
 /// The writes of an approved plan `p`, recorded into `applied` as they complete.

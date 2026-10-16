@@ -82,7 +82,7 @@ fn any_other_answer_records_nothing() {
 fn a_stale_plan_id_is_refused() {
     let (_d, scope, op) = setup(FLEET);
     let (res, _) = approve(&scope, &op, "sp-0000000000000000", "sp-0000000000000000");
-    assert_eq!(res.unwrap_err().code().as_str(), "stale_plan");
+    assert_eq!(res.unwrap_err().code_str(), "stale_plan");
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn a_stale_plan_id_records_nothing() {
 fn a_malformed_plan_id_is_a_usage_error() {
     let (_d, scope, op) = setup(FLEET);
     let (res, _) = approve(&scope, &op, "approve-everything", "approve-everything");
-    assert_eq!(res.unwrap_err().code().as_str(), "usage");
+    assert_eq!(res.unwrap_err().code_str(), "usage");
 }
 
 #[test]

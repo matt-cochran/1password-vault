@@ -2,7 +2,7 @@
 //!
 //! Rules shared by every command:
 //! - The environment name is resolved with [`Fleet::environment`] before any subprocess
-//!   call, so an unknown name is `Error::Config` and `plan::build` never sees one.
+//!   call, so an unknown name is `NotDeclared` and `plan::build` never sees one.
 //! - A command that reads 1Password makes exactly one `op item get` (FR-13); a failed `op`
 //!   call adds only the free `op whoami` / `op account list` diagnosis (FR-26). The read is
 //!   tolerant, and a signed-in person's run may tidy the item (a check read, one edit, a
@@ -119,7 +119,7 @@ fn no_digest(_: &SecretValue) -> Option<String> {
 /// Read the environment's boundary items once each (FR-13, FR-57), list the store of target
 /// `target` once when `ports` are given, and build the plan for that target (`None`: no
 /// target). `env_name` must already be resolved, and the target opened, by the caller (so a
-/// missing target is `Error::Config` before any call).
+/// missing target is `NothingInScope` before any call).
 ///
 /// With a store, every ready secret is also checked against the store's own rules
 /// ([`Store::refusal`]), so `status` and `plan` show a value `sync` would refuse as a
@@ -148,7 +148,7 @@ pub(crate) fn read_and_plan(
         &ledgers,
     )?;
     plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+    plan.tidy_error = read.tidy_error;
     Ok((plan, listed))
 }
 
@@ -178,7 +178,7 @@ pub(crate) fn read_and_plan_versioned(
         &ledgers,
     )?;
     plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+    plan.tidy_error = read.tidy_error;
     Ok((plan, listed, read.version))
 }
 
@@ -243,7 +243,7 @@ pub(crate) fn read_and_plan_products(
     let none = BTreeSet::new();
     let mut plan = plan_item(fleet, env_name, None, read.fields, None, &none, &none)?.0;
     plan.tidy = read.changes;
-    plan.tidy_error = read.tidy_error.map(crate::error::Code::as_str);
+    plan.tidy_error = read.tidy_error;
     Ok(plan)
 }
 
@@ -1989,15 +1989,12 @@ pub(crate) mod testutil {
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
 
-    /// How many findings `e` reports: the blocking keys of a `ValuesNeeded` (C4), or the
-    /// count of a legacy `Findings`; `None` for any other error.
+    /// How many findings `e` reports: the blocking keys of a `ValuesNeeded` (C4); `None`
+    /// for any other error.
     pub fn findings_of(e: &crate::error::Error) -> Option<usize> {
-        match e {
-            crate::error::Error::Findings(n, _) => Some(*n),
-            _ => match e.cause() {
-                Some((crate::cause::Cause::ValuesNeeded { rows, .. }, _)) => Some(rows.len()),
-                _ => None,
-            },
+        match e.parts().0 {
+            crate::cause::Cause::ValuesNeeded { rows, .. } => Some(rows.len()),
+            _ => None,
         }
     }
 

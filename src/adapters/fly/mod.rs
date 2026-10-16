@@ -34,7 +34,7 @@
 //!   the recorded flyctl phrases. Only a phrase flyctl printed makes "signed out" (06.11);
 //!   an unknown reply is `Unrecognized`, shown with the reply.
 //! - A missing app and a signed-out CLI are not retried ([`FLYCTL`]'s phrases, 09.13).
-//! - A refused value or name: [`Error::Policy`] naming the key and the rule, never the value.
+//! - A refused value or name: a `Guard` cause naming the key and the rule, never the value.
 //!
 //! Child stderr is never echoed except through the scrubbed evidence box.
 
@@ -200,7 +200,7 @@ pub fn unset_staged(r: &dyn CommandRunner, app: &str, names: &[String]) -> Resul
 
 /// Deploy staged secrets: one `flyctl secrets deploy --app <app>` call (FR-7; S6 calls it
 /// only with `--deploy`). On an app with no machines flyctl exits 1 (D0), which maps to
-/// `Error::Target("fly secrets deploy failed (exit 1)".into())`.
+/// the cause the Fly diagnosis finds in its reply ([`diagnose`]).
 pub fn deploy(r: &dyn CommandRunner, app: &str) -> Result<(), Error> {
     run(
         r,
@@ -654,7 +654,7 @@ enum Effect {
 /// Mapping (NR-2): a read still failing after its retries, or a write that exited non-zero,
 /// is diagnosed as before (`auth whoami` is a definite read-back for sign-in); a write
 /// whose diagnosis cannot run, or that timed out, was killed or was lost, is
-/// `Error::Unknown` (exit 9, safe to re-run). A read that never finished after its retries
+/// `WriteOutcomeUnknown` (exit 9, safe to re-run). A read that never finished after its retries
 /// is the outage error naming the step and Fly's status page (NR-28, exit 9).
 fn run(
     r: &dyn CommandRunner,

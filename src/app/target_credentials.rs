@@ -227,46 +227,19 @@ pub(crate) fn recordable(config: &Path, env: &str, name: &str) -> Result<(), Err
 
 /// A failure after the provider token was minted (and perhaps stored): the cause says what
 /// was already made (`done`), and its Next is a read, never the mint again (X5, X20; 06.08,
-/// 06.09). `Err` gives the error back when it has no cause.
-pub(crate) fn after_mint(e: Error, done: Vec<String>) -> Result<Error, Error> {
-    let Some((then, _)) = e.cause() else {
-        return Err(e);
-    };
-    let then = then.clone();
-    Ok(Cause::Partial {
-        done,
-        approval_used: None,
-        approval_scope: None,
-        then: Box::new(then),
-    }
-    .into())
-}
-
-/// The failure to record `deploy_credentials` after the token was minted and stored: what
-/// exists, and the line to add by hand (06.08). A refusal with no cause means opv could not
-/// edit the target's section.
-pub(crate) fn not_recorded(
-    e: Error,
-    config: &Path,
-    env: &str,
-    name: &str,
-    done: Vec<String>,
-) -> Error {
-    match after_mint(e, done.clone()) {
-        Ok(e) => e,
-        Err(_) => Cause::Partial {
+/// 06.09). The failure to record `deploy_credentials` after the token was minted and stored
+/// is one: what exists, and the line to add by hand (06.08).
+pub(crate) fn after_mint(e: Error, done: Vec<String>) -> Error {
+    let Error::Catalog(then, upstream) = e;
+    Error::Catalog(
+        Box::new(Cause::Partial {
             done,
             approval_used: None,
             approval_scope: None,
-            then: Box::new(Cause::ConfigNotEditable {
-                source: file_source(config),
-                reason: NotEditable::UnsupportedLayout {
-                    section: target_section(env, name),
-                },
-            }),
-        }
-        .into(),
-    }
+            then,
+        }),
+        upstream,
+    )
 }
 
 /// The failure to store a token that was already minted (C21), never a step that mints
@@ -284,9 +257,7 @@ fn stored_failed(
     target: &Target,
 ) -> Error {
     match e.cause() {
-        Some((Cause::CreateOutcomeUnknown { .. }, _)) => {
-            after_mint(e, vec![minted.to_string()]).unwrap_or_else(|e| e)
-        }
+        Some((Cause::CreateOutcomeUnknown { .. }, _)) => after_mint(e, vec![minted.to_string()]),
         _ => Cause::SecretNotStored {
             system: crate::provider::system_of(provider),
             kind: crate::cause::CreateKind::DeployToken,
@@ -404,7 +375,7 @@ pub fn run(
                     target_section(env, name)
                 ),
             ];
-            not_recorded(e, config, env, name, done)
+            after_mint(e, done)
         },
     )?;
     writeln!(

@@ -395,8 +395,7 @@ fn run_on_with(
     };
     // No account chosen among several: any sign-in check would ask the 1Password app about
     // op's default account, which this project was never pointed at (found live).
-    let no_account =
-        matches!(&config_line, Err(e) if e.code() == crate::error::Code::AccountRequired);
+    let no_account = matches!(&config_line, Err(e) if e.code_str() == "account_required");
     report.push(CONFIG_CHECK, config_line);
     let op_check = op_version(r, host);
     let op_present = op_check.is_ok();
@@ -1410,18 +1409,23 @@ mod tests {
         assert!(out.lines().nth(3).unwrap().starts_with("FAIL"), "{out}");
     }
 
+    /// A configuration that breaks a field rule (`bogus` is no environment field).
+    fn invalid_config() -> Error {
+        crate::config::parse("[environments.dev]\nbogus = 1\n").unwrap_err()
+    }
+
     /// Invalid config is reported first (the first failing category) but the tool checks
     /// still run and print.
     #[test]
     fn invalid_config_is_config_error_and_other_checks_still_print() {
         let r = FakeRunner::new(good());
-        let (res, out) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
+        let (res, out) = doctor(Err(invalid_config()), &r);
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Config(_)), "{e}");
+        assert_eq!(e.exit_code(), 2, "{e}");
         let lines = checks(&out);
         assert_eq!(lines.len(), CHECK_LINES, "{out}");
         assert!(
-            lines[0].starts_with("FAIL") && lines[0].contains("boom"),
+            lines[0].starts_with("FAIL") && lines[0].contains("bogus"),
             "{out}"
         );
         assert!(lines[1].starts_with("ok"), "{out}");
@@ -2118,7 +2122,15 @@ mod tests {
     #[test]
     fn excerpt_row_prints_the_excerpt_on_stderr() {
         let mut report = Report::default();
-        report.push(DEPLOY_CHECK, Err(Error::Auth("az login failed".into())));
+        report.push(
+            DEPLOY_CHECK,
+            Err(Cause::NotSignedIn {
+                system: crate::cause::System::Azure,
+                account: None,
+                state: crate::cause::SessionState::SignedOut,
+            }
+            .into()),
+        );
         report.rows[0].excerpt = Some("  az said: ERROR: bad\n".into());
         let mut err = Vec::new();
         print_text(&report, &mut Vec::new(), &mut err).unwrap();
@@ -2375,8 +2387,8 @@ mod tests {
     #[test]
     fn returned_error_is_the_config_checks_own() {
         let r = FakeRunner::new(good());
-        let (res, _) = doctor(Err(Error::Config("invalid secrets.toml: boom".into())), &r);
-        assert!(res.unwrap_err().to_string().contains("boom"));
+        let (res, _) = doctor(Err(invalid_config()), &r);
+        assert!(res.unwrap_err().to_string().contains("bogus"));
     }
 
     /// #13: an older op gets an upgrade step, not an install link.

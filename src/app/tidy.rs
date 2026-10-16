@@ -32,7 +32,7 @@ use crate::domain::SecretValue;
 use crate::domain::convention::{self, Change, KeyId, Layout, TidyPlan};
 use crate::domain::plan::ItemField;
 use crate::domain::{Boundary, Environment, Fleet, key_label, rules};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::host::Host;
 use crate::runner::CommandRunner;
 
@@ -284,7 +284,7 @@ pub(crate) struct Read {
     pub normalized: BTreeMap<KeyId, SecretValue>,
     /// The error code of a tidy that was attempted and did not complete (`tidy_conflict`
     /// when the item changed twice meanwhile); the command still went on (FR-43).
-    pub tidy_error: Option<Code>,
+    pub tidy_error: Option<&'static str>,
     /// The failure behind `tidy_error`, naming the item (and the fields a read-back lacked):
     /// what `opv tidy` reports (01.02).
     pub tidy_failure: Option<Error>,
@@ -444,7 +444,7 @@ fn read_item_as(
     let plan = convention::plan(&layout, fleet, env_name, &date);
     let done = |layout: Layout,
                 changes: Vec<Change>,
-                error: Option<Code>,
+                error: Option<&'static str>,
                 version: Option<u64>,
                 who: Option<Identity>| {
         let mut res = finish(layout, fleet, env_name, env, b, changes, error);
@@ -528,15 +528,12 @@ fn read_item_as(
         Ok(None) => Ok(done(layout, Vec::new(), None, first, Some(who))),
         Err(e) => {
             // Audit 04.01: the note carries the message alone, never a category prefix.
-            let text = match e.cause() {
-                Some((cause, _)) => cause.message(),
-                None => e.text().to_string(),
-            };
+            let text = e.to_string();
             r.note(&format!(
                 "could not tidy 1Password ({env_name}); read it as it is: {}",
                 text.lines().next().unwrap_or("")
             ));
-            let code = e.code();
+            let code = e.code_str();
             let mut res = done(layout, Vec::new(), Some(code), first, Some(who));
             res.tidy_failure = Some(e);
             Ok(res)
@@ -584,7 +581,7 @@ struct Tidied {
     changes: Vec<Change>,
     /// `tidy_conflict` (changed twice before the write, or another edit landed with it) or
     /// `tidy_unverified` (the item read back lacks a field opv wrote or kept).
-    error: Option<Code>,
+    error: Option<&'static str>,
     /// The item's version as last read.
     version: Option<u64>,
     /// The typed failure behind `error`.
@@ -636,7 +633,7 @@ fn tidy(
                      written. Re-run when nobody is editing the item."
                 ));
                 let cause = crate::cause::Cause::ChangedBeforeWrite { object: item() };
-                return failed(seen, Vec::new(), Code::TidyConflict, fresh.version, cause);
+                return failed(seen, Vec::new(), "tidy_conflict", fresh.version, cause);
             }
             stamp = seen_stamp;
             plan = convention::plan(&seen, fleet, env_name, date);
@@ -670,13 +667,7 @@ fn tidy(
                 expected.unwrap_or_default()
             ));
             let cause = crate::cause::Cause::ConcurrentEdit { object: item() };
-            return failed(
-                layout,
-                plan.changes,
-                Code::TidyConflict,
-                after.version,
-                cause,
-            );
+            return failed(layout, plan.changes, "tidy_conflict", after.version, cause);
         }
         // I4: every field opv wrote or kept (so every original label and value, in place or
         // in `opv · kept`) is in the item read back.
@@ -700,7 +691,7 @@ fn tidy(
             return failed(
                 layout,
                 plan.changes,
-                Code::TidyUnverified,
+                "tidy_unverified",
                 after.version,
                 cause,
             );
@@ -763,7 +754,7 @@ fn finish(
     env: &Environment,
     b: &Boundary,
     changes: Vec<Change>,
-    tidy_error: Option<Code>,
+    tidy_error: Option<&'static str>,
 ) -> Read {
     let res = convention::resolve(&layout, fleet);
     let mut refs = BTreeMap::new();

@@ -412,7 +412,7 @@ fn a_signed_out_dry_run_is_op_not_signed_in() {
     let (_dir, path, op) = workspace();
     op.signed_in.set(false);
     let e = run_with(&path, &op, &dry_run()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::OpNotSignedIn);
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 /// #157: an environment's recorded vault is looked for in that environment's account.

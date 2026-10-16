@@ -8,6 +8,7 @@
 //! derived classifications. Rendering (`render`, `evidence`) and steps (`step`) are separate
 //! modules.
 
+pub mod codes;
 pub mod config_check;
 pub mod evidence;
 pub mod render;
@@ -17,7 +18,6 @@ pub mod subject;
 
 use std::path::PathBuf;
 
-use crate::error::Retry;
 pub use config_check::{ConfigCheck, Declared, StoreNameProblem};
 pub use subject::*;
 
@@ -1539,13 +1539,14 @@ pub enum RetryClass {
     CheckFirst,
 }
 
-impl From<RetryClass> for Retry {
-    /// The pre-catalog three-way retry, for the Legacy renderer arm.
-    fn from(r: RetryClass) -> Retry {
-        match r {
-            RetryClass::Safe => Retry::Safe,
-            RetryClass::AfterFix | RetryClass::CheckFirst => Retry::AfterFix,
-            RetryClass::Never => Retry::Never,
+impl RetryClass {
+    /// The document's `retry` word.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetryClass::Safe => "safe",
+            RetryClass::AfterFix => "after_fix",
+            RetryClass::Never => "never",
+            RetryClass::CheckFirst => "check_first",
         }
     }
 }

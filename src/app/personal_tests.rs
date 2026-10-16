@@ -318,7 +318,7 @@ fn a_signed_out_run_is_not_told_its_personal_item_is_missing() {
     let r = FakeRunner::new(replies);
     let e = crate::app::run::run(&personal_fleet(), "dev", "api", &["env".to_string()], &r)
         .unwrap_err();
-    assert_ne!(e.code(), crate::error::Code::ItemNotFound);
+    assert_ne!(e.code_str(), "item_not_found");
 }
 
 // --- audit 04.16: the setup error names what opv looked for; other failures surface ---

@@ -1031,7 +1031,7 @@ fn sync_with_rotate_and_a_plain_plan_id_is_stale() {
         ..expect(&id)
     };
     let (res, _) = sync_out(&fleet(), &r, &o);
-    assert_eq!(res.unwrap_err().code(), crate::error::Code::StalePlan);
+    assert_eq!(res.unwrap_err().code_str(), "stale_plan");
 }
 
 #[test]

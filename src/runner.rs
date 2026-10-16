@@ -784,6 +784,21 @@ pub fn take_observed() -> Option<crate::cause::Observed> {
     failure::take_observed()
 }
 
+/// The observation behind each example of [`crate::cause::codes::examples`] (the catalog's
+/// code table): a fixed failed `op vault get`, classified only, never rendered as an error.
+/// Built here so the runner stays the only builder of an observation (the seal).
+pub fn catalog_example_observed(principal: crate::cause::Principal) -> crate::cause::Observed {
+    crate::cause::Observed::from_failed_call(
+        crate::cause::CallId {
+            system: crate::cause::System::OnePassword,
+            program: "op".into(),
+            words: vec!["vault".into(), "get".into(), "vlt-example".into()],
+        },
+        crate::cause::ExitClass::Code { code: 1 },
+        principal,
+    )
+}
+
 /// The one way to observe a call that **answered** (exit 0, or stdout past the output cap)
 /// with a reply the call site cannot use (design §4.6/§4.7, A1): JSON it cannot read, an
 /// empty token, an unconfirmed or lost write reply. This is the runner's own observation of

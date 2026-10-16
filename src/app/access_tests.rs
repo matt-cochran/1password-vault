@@ -590,7 +590,7 @@ fn access_without_a_session_is_op_not_signed_in() {
         &mut out,
     )
     .unwrap_err();
-    assert_eq!(e.code().as_str(), "op_not_signed_in");
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 #[test]

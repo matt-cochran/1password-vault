@@ -2370,12 +2370,8 @@ mod tests {
     }
 
     /// The message of the configuration error `text` is refused with.
-    /// A provider section's own refusal is still free text (its lane migrates it).
     fn config_err(text: &str) -> String {
-        match parse(text) {
-            Err(Error::Config(m)) => m.to_string(),
-            _ => cause(text).message(),
-        }
+        cause(text).message()
     }
 
     /// The field and rule of the `ConfigInvalid` refusal of `text`.
@@ -3413,7 +3409,7 @@ environments = ["prod"]
         let f = parse(WEB).unwrap();
         assert!(matches!(
             f.boundary("prod", "api"),
-            Err(e) if e.code() == crate::error::Code::BoundaryMissing
+            Err(e) if e.code_str() == "boundary_missing"
         ));
     }
 

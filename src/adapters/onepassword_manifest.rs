@@ -666,7 +666,7 @@ mod tests {
     fn a_listing_for_a_signed_out_account_is_op_not_signed_in() {
         let r = signed_out_listing();
         let e = list(&r, Some("ACCOUNTBBB000000000000BBB"), &Host::detect).unwrap_err();
-        assert_eq!(e.code().as_str(), "op_not_signed_in");
+        assert_eq!(e.code_str(), "op_not_signed_in");
     }
 
     #[test]
@@ -790,7 +790,7 @@ mod tests {
             account("ACCOUNTUUID000000000000AAA"),
             account("ACCOUNTUUID000000000000BBB"),
         ]);
-        assert_eq!(e.code(), crate::error::Code::AccountRequired);
+        assert_eq!(e.code_str(), "account_required");
     }
 
     fn plain_linux() -> Host {

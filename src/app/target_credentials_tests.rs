@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
-use crate::error::Code;
 use crate::runner::{Call, Outcome, Output};
 
 const TOKEN: &str = "fo1_FAKEDEPLOYTOKENMARKER0123456789";
@@ -325,7 +324,7 @@ fn a_missing_provider_sign_in_is_reported_as_auth_required() {
     w.fly_signed_in = false;
     let (_d, path) = file(&fleet_text(None));
     let (res, _, _) = create(&w, &fleet(None), &path, true);
-    assert_eq!(res.unwrap_err().code(), Code::AuthRequired);
+    assert_eq!(res.unwrap_err().code_str(), "target_not_signed_in");
 }
 
 #[test]
@@ -498,18 +497,26 @@ fn a_generated_configuration_is_refused_before_a_token_is_minted() {
     assert!(!w.ran("flyctl", &["tokens"]));
 }
 
+/// opv could not edit the target's section of the configuration at `path`.
+fn not_editable(path: &std::path::Path) -> Error {
+    crate::cause::Cause::ConfigNotEditable {
+        source: crate::cause::ConfigSource::File {
+            path: path.to_path_buf(),
+            given_by: crate::cause::GivenBy::Discovered,
+        },
+        reason: crate::cause::NotEditable::UnsupportedLayout {
+            section: "environments.staging.targets.web".into(),
+        },
+    }
+    .into()
+}
+
 #[test]
 fn a_reference_that_cannot_be_recorded_names_the_stored_item() {
     // 06.08: the failure says what exists, so nothing is minted twice.
     let (_d, path) = file(&fleet_text(None));
     let done = vec!["1Password item i1 in vault vstate, to record as op://vstate/i1".into()];
-    let e = not_recorded(
-        Error::Config("could not edit".to_string().into()),
-        &path,
-        "staging",
-        "web",
-        done,
-    );
+    let e = after_mint(not_editable(&path), done);
     assert!(message(&e).contains("op://vstate/i1"));
 }
 
@@ -517,13 +524,7 @@ fn a_reference_that_cannot_be_recorded_names_the_stored_item() {
 fn a_reference_that_cannot_be_recorded_never_leads_to_the_mint_again() {
     // 06.08, X5: Next is a read, never the --create.
     let (_d, path) = file(&fleet_text(None));
-    let e = not_recorded(
-        Error::Config("could not edit".to_string().into()),
-        &path,
-        "staging",
-        "web",
-        vec!["Fly deploy token t".into()],
-    );
+    let e = after_mint(not_editable(&path), vec!["Fly deploy token t".into()]);
     assert!(!e.next_text().unwrap_or_default().contains("--create"));
 }
 
