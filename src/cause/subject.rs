@@ -202,6 +202,38 @@ pub struct ResourceRef {
     pub scope: Option<String>,
 }
 
+impl ResourceRef {
+    /// Secret `name` of Key Vault `vault` in `subscription` (06.29): the recover command
+    /// names both, so it acts on the vault opv wrote and never on the default subscription.
+    pub fn key_vault_secret(vault: &str, name: &str, subscription: &str) -> Self {
+        Self {
+            kind: ResourceKind::KeyVaultSecret,
+            name: ResourceName::new(name),
+            scope: Some(format!("Key Vault {vault} (subscription {subscription})")),
+        }
+    }
+
+    /// The Key Vault a [`ResourceKind::KeyVaultSecret`] lives in, from its scope.
+    pub fn key_vault(&self) -> Option<&str> {
+        if self.kind != ResourceKind::KeyVaultSecret {
+            return None;
+        }
+        let scope = self.scope.as_deref()?;
+        let scope = scope.strip_prefix("Key Vault ").unwrap_or(scope);
+        scope.split(" (subscription ").next()
+    }
+
+    /// The subscription its scope names: `subscription S`, or a trailing `(subscription S)`.
+    pub fn subscription(&self) -> Option<&str> {
+        let scope = self.scope.as_deref()?;
+        scope.strip_prefix("subscription ").or_else(|| {
+            scope
+                .rsplit_once("(subscription ")
+                .and_then(|(_, rest)| rest.strip_suffix(')'))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
@@ -217,7 +249,8 @@ pub enum ResourceKind {
     Repository,
     GitHubEnvironment,
     ExternalStore,
-    /// A secret in a Key Vault (`scope`: the vault's name).
+    /// A secret in a Key Vault ([`ResourceRef::key_vault_secret`]: its scope names the
+    /// vault and the subscription).
     KeyVaultSecret,
     /// An Azure subscription.
     Subscription,
@@ -446,6 +479,10 @@ pub enum PatternId {
     LocalFile,
     /// An environment's 1Password `account`.
     Account,
+    /// An Azure client (application) ID.
+    Guid,
+    /// An Azure tenant: its ID or its domain.
+    AzureTenant,
 }
 
 impl PatternId {
@@ -478,6 +515,10 @@ impl PatternId {
             }
             PatternId::Account => {
                 "a 1Password sign-in address (my.1password.com), an email or an account ID"
+            }
+            PatternId::Guid => "a GUID, such as 00000000-0000-0000-0000-000000000000",
+            PatternId::AzureTenant => {
+                "a tenant ID (a GUID) or a tenant domain, such as contoso.onmicrosoft.com"
             }
         }
     }

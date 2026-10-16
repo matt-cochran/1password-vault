@@ -35,7 +35,7 @@ use serde::Deserialize;
 
 use crate::cause::{
     Cause, DiagnoseContext, DottedPath, Guard, NamedBy, NotFoundState, Refusal, ResourceKind,
-    ResourceName, ResourceRef, System,
+    ResourceRef, System,
 };
 use crate::domain::plan::StoreEntry;
 use crate::domain::{SecretValue, Stamp};
@@ -45,7 +45,7 @@ use crate::runner::{CommandRunner, Outcome, Wait};
 
 use super::AzureTarget;
 use super::az::{self, Effect, invoke, read_output, write_output};
-use super::preflight::{missing_in_reply, unreadable_json, unusable};
+use super::preflight::{invalid_in_reply, unreadable_json, unusable};
 
 /// Largest value Key Vault accepts, in bytes (FR-30).
 pub const VALUE_LIMIT: usize = 25 * 1024;
@@ -255,7 +255,7 @@ impl KeyVault<'_> {
         };
         let entry: ShowEntry = unreadable_json(&out.stdout, OP)?;
         let version =
-            version_from_id(&entry.id).ok_or_else(|| missing_in_reply(OP, "version id"))?;
+            version_from_id(&entry.id).ok_or_else(|| invalid_in_reply(OP, "version id"))?;
         Ok(Some((SecretValue::new(entry.value), version)))
     }
 
@@ -657,11 +657,7 @@ impl KeyVault<'_> {
 impl KeyVault<'_> {
     /// Secret `name` (its Key Vault spelling) of this vault, as the subject of a cause.
     fn secret_ref(&self, name: &str) -> ResourceRef {
-        ResourceRef {
-            kind: ResourceKind::KeyVaultSecret,
-            name: ResourceName::new(name),
-            scope: Some(self.vault.to_string()),
-        }
+        ResourceRef::key_vault_secret(self.vault, name, self.subscription)
     }
 
     /// A write of `name` that Key Vault accepted without confirming the version it made
@@ -996,6 +992,20 @@ mod tests {
             err.to_string().contains("in Key Vault kv-opv-fixture"),
             "{err}"
         );
+    }
+
+    /// 06.29 regression: the recover command keeps the vault's subscription.
+    #[test]
+    fn soft_deleted_recover_command_names_the_subscription() {
+        let r = FakeRunner::new([Output::failure(1), Output::success("")]);
+        let templates = names(&[]);
+        let kv = vault(&r, "prod", &templates);
+        let err = kv
+            .write_one("MY-SECRET", &SecretValue::new(MARKER.into()), &stamp())
+            .unwrap_err();
+        assert!(crate::error::report(&err, "-", None).contains(&format!(
+            "az keyvault secret recover --vault-name kv-opv-fixture --name MY-SECRET --subscription {SUBSCRIPTION}"
+        )));
     }
 
     #[test]

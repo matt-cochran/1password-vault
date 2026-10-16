@@ -517,6 +517,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 system: System::OnePassword,
                 at: Some(Location { line: 4, col: 9 }),
                 problem: OutputProblem::Unparseable,
+                during: During::Read,
                 seen: person(),
             },
             vec!["op", "1Password", "line 4"],
@@ -621,6 +622,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             RamDirUnavailable {
                 remote: Some(ProfileName::new("prof-box")),
                 why: RamDir::NotTmpfs,
+                purpose: RamPurpose::FileDelivery,
                 env: Some(EnvName::new("env-prod")),
                 product: Some(ProductName::new("prod-api")),
             },
@@ -1641,6 +1643,7 @@ fn a1_an_empty_minted_token_is_named() {
         problem: OutputProblem::Empty {
             what: "deploy token",
         },
+        during: During::Read,
         seen: fly_seen(),
     };
     assert!(
@@ -2158,6 +2161,180 @@ fn a17_key_vault_recovery_names_the_subscription() {
     assert!(d.contains("--subscription sub-1"), "{d}");
 }
 
+fn soft_deleted_secret() -> Cause {
+    Cause::NotFound {
+        system: System::Azure,
+        resource: ResourceRef::key_vault_secret("kv-shop", "DB-URL", "sub-1"),
+        named_by: NamedBy::Flag {
+            flag: "--vault".into(),
+        },
+        state: NotFoundState::SoftDeleted,
+        seen: fly_seen(),
+    }
+}
+
+/// 06.29 regression: a soft-deleted Key Vault secret's recover Do names the subscription.
+#[test]
+fn a17_key_vault_secret_recovery_names_the_subscription() {
+    let d = soft_deleted_secret().do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.contains(
+            "az keyvault secret recover --vault-name kv-shop --name DB-URL --subscription sub-1"
+        ),
+        "{d}"
+    );
+}
+
+/// 06.29 regression: the Next that lists deleted secrets reads the same subscription.
+#[test]
+fn a17_key_vault_secret_recovery_next_reads_the_subscription() {
+    let (_, next) = soft_deleted_secret().step_in(&inv(), &person_at_terminal());
+    assert_eq!(
+        next_text(&next, &inv()).unwrap_or_default(),
+        "az keyvault secret list-deleted --vault-name kv-shop --subscription sub-1"
+    );
+}
+
+/// I5: a revision-mode refusal is the owner's step, naming set-mode.
+#[test]
+fn i5_revision_mode_do_names_set_mode() {
+    let c = Cause::TargetRefused {
+        system: System::Azure,
+        subject: res(ResourceKind::ContainerApp, "app-web"),
+        why: Refusal::RevisionMode {
+            mode: "multiple".into(),
+            resource_group: "rg-1".into(),
+            subscription: "sub-1".into(),
+        },
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.contains("az containerapp revision set-mode --mode single --resource-group rg-1 --name app-web --subscription sub-1"),
+        "{d}"
+    );
+}
+
+/// I5: changed settings are listed, at most five, with a count of the rest.
+#[test]
+fn i5_changed_outside_opv_lists_at_most_five_paths() {
+    let paths: Vec<String> = (1..=7).map(|i| format!("p{i}")).collect();
+    let c = Cause::TargetRefused {
+        system: System::Azure,
+        subject: res(ResourceKind::ContainerApp, "app-web"),
+        why: Refusal::ChangedOutsideOpv {
+            paths,
+            after_apply: false,
+        },
+        env: None,
+        target: None,
+        seen: fly_seen(),
+    };
+    assert!(
+        c.message()
+            .contains("(changed: p1, p2, p3, p4, p5 and 2 more)"),
+        "{}",
+        c.message()
+    );
+}
+
+/// I5: an invalid value in a reply is named as one, not as an empty reply.
+#[test]
+fn i5_an_invalid_value_in_a_reply_is_named() {
+    let c = Cause::UnexpectedOutput {
+        system: System::Azure,
+        at: None,
+        problem: OutputProblem::InvalidValue { what: "version id" },
+        during: During::Read,
+        seen: fly_seen(),
+    };
+    assert!(
+        c.message().contains("with a version id opv cannot use"),
+        "{}",
+        c.message()
+    );
+}
+
+/// I5: an unusable reply to an applied write says the change was made.
+#[test]
+fn i5_an_unusable_reply_to_an_applied_write_says_it_was_applied() {
+    let c = Cause::UnexpectedOutput {
+        system: System::Azure,
+        at: None,
+        problem: OutputProblem::Unparseable,
+        during: During::AppliedWrite,
+        seen: fly_seen(),
+    };
+    assert!(
+        c.message().contains("the change was applied at Azure"),
+        "{}",
+        c.message()
+    );
+}
+
+/// I5 (R74): az's missing in-memory folder is named for its sign-in, not a settings file.
+#[test]
+fn i5_ram_dir_for_azure_names_the_sign_in() {
+    let c = Cause::RamDirUnavailable {
+        remote: None,
+        why: RamDir::NotTmpfs,
+        purpose: RamPurpose::AzureDeployCredentials,
+        env: None,
+        product: None,
+    };
+    assert!(
+        c.message()
+            .contains("for az's sign-in with deploy credentials"),
+        "{}",
+        c.message()
+    );
+}
+
+/// I5 (R74): on macOS the Azure way out is another machine, never a settings-file change.
+#[test]
+fn i5_ram_dir_for_azure_on_macos_points_to_another_machine() {
+    let c = Cause::RamDirUnavailable {
+        remote: None,
+        why: RamDir::NoneOnPlatform { os: "macOS" },
+        purpose: RamPurpose::AzureDeployCredentials,
+        env: None,
+        product: None,
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(d.contains("from a Linux or Windows machine"), "{d}");
+}
+
+/// I5: az storing the secret unencrypted is its own cause, not a folder failure.
+#[test]
+fn i5_unencrypted_store_is_a_tool_cause() {
+    let c = Cause::ToolUnusable {
+        tool: "az".into(),
+        why: Unusable::StoredSecretUnencrypted,
+    };
+    assert!(c.message().contains("unencrypted"), "{}", c.message());
+}
+
+/// I5: a malformed ID in the deploy credentials item is fixed in 1Password, in that item.
+#[test]
+fn i5_invalid_deploy_credential_field_is_fixed_in_the_item() {
+    let c = Cause::InputInvalid {
+        path: PathBuf::from("op://ops/azure-prod"),
+        kind: InputKind::DeployCredentials,
+        at: None,
+        field: "AZURE_CLIENT_ID".into(),
+        rule: FieldRule::Pattern {
+            id: PatternId::Guid,
+        },
+    };
+    let d = c.do_text(&inv()).unwrap_or_default();
+    assert!(
+        d.contains("in 1Password, open the deploy credentials item op://ops/azure-prod and change AZURE_CLIENT_ID to a GUID"),
+        "{d}"
+    );
+}
+
 /// A17: an unanswered provider names its status page.
 #[test]
 fn a17_unavailable_names_the_status_page() {
@@ -2242,6 +2419,7 @@ fn e1_unexpected_output_under_doctor_does_not_step_to_plain_doctor() {
         system: System::OnePassword,
         at: None,
         problem: OutputProblem::Unparseable,
+        during: During::Read,
         seen: person(),
     };
     let (_, next) = c.step_in(&doctor_inv(&[]), &person_at_terminal());

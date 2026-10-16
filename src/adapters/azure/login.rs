@@ -27,7 +27,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::az::{self, Effect, ONLY_SHOW_ERRORS, PROGRAM, invoke_env};
-use crate::cause::{Cause, DiagnoseContext, IoKind, Principal, RamDir};
+use crate::cause::{
+    Cause, DiagnoseContext, FieldRule, InputKind, IoKind, PatternId, Principal, RamDir, RamPurpose,
+    Unusable,
+};
 use crate::domain::{Kind, SecretValue};
 use crate::error::Error;
 use crate::provider::{CredentialField, DeployLogin};
@@ -61,6 +64,7 @@ fn no_ram_dir(why: RamDir) -> Error {
     Cause::RamDirUnavailable {
         remote: None,
         why,
+        purpose: RamPurpose::AzureDeployCredentials,
         env: None,
         product: None,
     }
@@ -187,14 +191,72 @@ fn check_store(dir: &Path, windows: bool) -> Result<(), Error> {
     let encrypted = dir.join("service_principal_entries.bin").exists();
     if plain || !encrypted {
         // az kept the service principal unencrypted (or not at all) in opv's private
-        // directory, which is removed when the run ends; nothing was changed.
-        return Err(Cause::PrivateDirFailed {
-            dir: dir.to_path_buf(),
-            io: IoKind::PermissionDenied,
+        // directory, which is removed when the run ends; nothing was changed. This az does
+        // not keep the secret as opv requires: a cause of its own, never a folder failure.
+        return Err(Cause::ToolUnusable {
+            tool: PROGRAM.to_string(),
+            why: Unusable::StoredSecretUnencrypted,
         }
         .into());
     }
     Ok(())
+}
+
+/// Refuses a malformed tenant or client ID before az runs (opv's own check): the client
+/// ID is a GUID; the tenant is a GUID or a domain. `item`: the deploy credentials item,
+/// when known.
+fn check_ids(tenant: &str, client: &str, item: Option<String>) -> Result<(), Error> {
+    let bad = |field: &str, id: PatternId| -> Error {
+        Cause::InputInvalid {
+            path: PathBuf::from(item.clone().unwrap_or_default()),
+            kind: InputKind::DeployCredentials,
+            at: None,
+            field: field.to_string(),
+            rule: FieldRule::Pattern { id },
+        }
+        .into()
+    };
+    if !is_guid(tenant) && !is_domain(tenant) {
+        return Err(bad("AZURE_TENANT_ID", PatternId::AzureTenant));
+    }
+    if !is_guid(client) {
+        return Err(bad("AZURE_CLIENT_ID", PatternId::Guid));
+    }
+    Ok(())
+}
+
+/// `8-4-4-4-12` hex digits.
+fn is_guid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// A DNS name of two or more labels (`contoso.onmicrosoft.com`).
+fn is_domain(s: &str) -> bool {
+    let labels: Vec<&str> = s.split('.').collect();
+    s.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+/// The deploy credentials item the sign-in reads, as `op://<vault>/<item>`, when known.
+fn deploy_item() -> Option<String> {
+    match crate::runner::deploy_principal() {
+        Some(Principal::DeployCredentials { vault, item, .. }) => {
+            Some(format!("op://{vault}/{item}"))
+        }
+        _ => None,
+    }
 }
 
 impl DeployLogin for AzureLogin {
@@ -217,8 +279,9 @@ impl DeployLogin for AzureLogin {
             get("AZURE_CLIENT_ID")?,
             get("AZURE_CLIENT_SECRET")?,
         );
-        // The IDs are passed as `--name=value`, so no value is read as an option of az; a
-        // malformed ID is az's to reject, under the service principal's name (06.18).
+        // A malformed ID is opv's to refuse, naming the field, before az runs; the IDs are
+        // then passed as `--name=value`, so no value is read as an option of az.
+        check_ids(tenant.expose(), client.expose(), deploy_item())?;
         let user = format!("--username={}", client.expose());
         let tenant_arg = format!("--tenant={}", tenant.expose());
         // `--allow-no-subscriptions`: a service principal with no role on any subscription

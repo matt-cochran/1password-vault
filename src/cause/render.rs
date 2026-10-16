@@ -560,8 +560,22 @@ fn flag_listing(flag: &str, inv: &Invocation) -> Next {
 }
 
 /// The subscription of an Azure resource, from its scope (`subscription <id>`).
+/// ` (changed: a, b, …)` for the settings named, at most five; empty for none.
+fn changed_words(paths: &[String]) -> String {
+    const SHOWN: usize = 5;
+    match paths.len() {
+        0 => String::new(),
+        n if n <= SHOWN => format!(" (changed: {})", paths.join(", ")),
+        n => format!(
+            " (changed: {} and {} more)",
+            paths[..SHOWN].join(", "),
+            n - SHOWN
+        ),
+    }
+}
+
 fn subscription_of(r: &ResourceRef) -> Option<&str> {
-    r.scope.as_deref()?.strip_prefix("subscription ")
+    r.subscription()
 }
 
 fn doctor_for(principal: Option<&Principal>, credential: Option<&CredentialRef>) -> Next {
@@ -844,6 +858,17 @@ fn input_kind(k: InputKind) -> &'static str {
         InputKind::Dotenv => "the .env file",
         InputKind::SetupRecipe => "the setup recipe",
         InputKind::Receipt => "the delivery receipt",
+        InputKind::DeployCredentials => "the deploy credentials item",
+    }
+}
+
+/// `the deploy credentials item op://v/i` (or without the reference when not known), and
+/// `the .env file <path>` for a file.
+fn input_words(kind: InputKind, path: &std::path::Path) -> String {
+    if path.as_os_str().is_empty() {
+        input_kind(kind).to_string()
+    } else {
+        format!("{} {}", input_kind(kind), path.display())
     }
 }
 
@@ -1550,8 +1575,20 @@ impl Cause {
                     Refusal::InProgress => format!(
                         "{sys} refused the update to {what}: another change is still in progress"
                     ),
-                    Refusal::ChangedOutsideOpv => format!(
-                        "{what} at {sys} was changed outside opv since opv last wrote it, so opv did not overwrite it"
+                    Refusal::ChangedOutsideOpv { paths, after_apply } => {
+                        let changed = changed_words(paths);
+                        if *after_apply {
+                            format!(
+                                "{what} at {sys} was changed outside opv while opv's update was applied{changed}; opv's update is live, alongside that change"
+                            )
+                        } else {
+                            format!(
+                                "{what} at {sys} was changed outside opv since opv read it{changed}, so opv did not overwrite it"
+                            )
+                        }
+                    }
+                    Refusal::RevisionMode { mode, .. } => format!(
+                        "{what} at {sys} runs in {mode} revision mode; opv writes only to an app in single revision mode"
                     ),
                 }
             }
@@ -1707,26 +1744,44 @@ impl Cause {
                 Unusable::WindowsExeFromWsl => {
                     format!("{tool} is the Windows build, used from WSL")
                 }
+                Unusable::StoredSecretUnencrypted => format!(
+                    "{tool} stored the service principal's secret unencrypted on disk; opv removed it and stopped before any change"
+                ),
             },
             UnexpectedOutput {
                 system,
                 at,
                 problem,
+                during,
                 seen,
-            } => match problem {
-                OutputProblem::Unparseable => format!(
-                    "opv could not read the reply of {} from {}{}",
-                    exit_program(seen),
-                    system.label(),
-                    at_words(at)
-                ),
-                OutputProblem::Empty { what } => format!(
-                    "{} answered from {} with an empty {what}{}",
-                    exit_program(seen),
-                    system.label(),
-                    at_words(at)
-                ),
-            },
+            } => {
+                let line = match problem {
+                    OutputProblem::Unparseable => format!(
+                        "opv could not read the reply of {} from {}{}",
+                        exit_program(seen),
+                        system.label(),
+                        at_words(at)
+                    ),
+                    OutputProblem::Empty { what } => format!(
+                        "{} answered from {} with an empty {what}{}",
+                        exit_program(seen),
+                        system.label(),
+                        at_words(at)
+                    ),
+                    OutputProblem::InvalidValue { what } => format!(
+                        "{} answered from {} with a {what} opv cannot use{}",
+                        exit_program(seen),
+                        system.label(),
+                        at_words(at)
+                    ),
+                };
+                match during {
+                    During::Read => line,
+                    During::AppliedWrite => {
+                        format!("{line}; the change was applied at {}", system.label())
+                    }
+                }
+            }
             Unrecognized {
                 system,
                 established,
@@ -1785,12 +1840,7 @@ impl Cause {
                 rule,
             } => {
                 let (what, _) = rule_words(field, rule);
-                format!(
-                    "{} {}{}: {what}",
-                    input_kind(*kind),
-                    path.display(),
-                    at_words(at)
-                )
+                format!("{}{}: {what}", input_words(*kind, path), at_words(at))
             }
             ApprovalMissing { plan, scope: _ } => format!("plan {plan} is not approved yet"),
             ApprovalUsed {
@@ -1818,16 +1868,27 @@ impl Cause {
                 }
                 None => format!("no plan {plan} is known"),
             },
-            RamDirUnavailable { remote, why, .. } => match remote {
-                Some(p) => format!(
-                    "no in-memory folder for the settings file on the host of remote profile {p}: {}",
-                    ram_dir_words(why)
-                ),
-                None => format!(
-                    "no in-memory folder for the settings file on this machine: {}",
-                    ram_dir_words(why)
-                ),
-            },
+            RamDirUnavailable {
+                remote,
+                why,
+                purpose,
+                ..
+            } => {
+                let what = match purpose {
+                    RamPurpose::FileDelivery => "the settings file",
+                    RamPurpose::AzureDeployCredentials => "az's sign-in with deploy credentials",
+                };
+                match remote {
+                    Some(p) => format!(
+                        "no in-memory folder for {what} on the host of remote profile {p}: {}",
+                        ram_dir_words(why)
+                    ),
+                    None => format!(
+                        "no in-memory folder for {what} on this machine: {}",
+                        ram_dir_words(why)
+                    ),
+                }
+            }
             PrivateDirFailed { dir, io } => format!(
                 "cannot make a private folder in {}: {}",
                 dir.display(),
@@ -2730,14 +2791,25 @@ impl Cause {
                             }
                             line
                         }
-                        (System::Azure, ResourceKind::KeyVaultSecret) => match &resource.scope {
-                            Some(vault) => format!(
-                                "recover it: az keyvault secret recover --vault-name {} --name {}",
-                                shell_word(vault),
-                                shell_word(name)
-                            ),
-                            None => format!("recover {what} at {}", system.label()),
-                        },
+                        (System::Azure, ResourceKind::KeyVaultSecret) => {
+                            match resource.key_vault() {
+                                Some(vault) => {
+                                    let mut line = format!(
+                                        "recover it: az keyvault secret recover --vault-name {} --name {}",
+                                        shell_word(vault),
+                                        shell_word(name)
+                                    );
+                                    if let Some(sub) = subscription_of(resource) {
+                                        line.push_str(&format!(
+                                            " --subscription {}",
+                                            shell_word(sub)
+                                        ));
+                                    }
+                                    line
+                                }
+                                None => format!("recover {what} at {}", system.label()),
+                            }
+                        }
                         _ => format!("recover {what} at {}", system.label()),
                     },
                     NotFoundState::LocalContextMissing => {
@@ -2746,13 +2818,27 @@ impl Cause {
                 };
                 let next = match (system, state) {
                     (System::Azure, NotFoundState::SoftDeleted) => match resource.kind {
-                        ResourceKind::KeyVaultSecret => match &resource.scope {
-                            Some(vault) => vendor(
-                                "az",
-                                &["keyvault", "secret", "list-deleted", "--vault-name", vault],
-                            ),
-                            None => vendor("az", &["keyvault", "list"]),
-                        },
+                        ResourceKind::KeyVaultSecret => {
+                            match (resource.key_vault(), subscription_of(resource)) {
+                                (Some(vault), Some(sub)) => vendor(
+                                    "az",
+                                    &[
+                                        "keyvault",
+                                        "secret",
+                                        "list-deleted",
+                                        "--vault-name",
+                                        vault,
+                                        "--subscription",
+                                        sub,
+                                    ],
+                                ),
+                                (Some(vault), None) => vendor(
+                                    "az",
+                                    &["keyvault", "secret", "list-deleted", "--vault-name", vault],
+                                ),
+                                (None, _) => vendor("az", &["keyvault", "list"]),
+                            }
+                        }
                         _ => match subscription_of(resource) {
                             Some(sub) => {
                                 vendor("az", &["keyvault", "list-deleted", "--subscription", sub])
@@ -2820,14 +2906,38 @@ impl Cause {
                     Refusal::InProgress => {
                         format!("wait for the change in progress on {what} to finish")
                     }
-                    Refusal::ChangedOutsideOpv => format!(
+                    Refusal::ChangedOutsideOpv {
+                        after_apply: false,
+                        ..
+                    } => format!(
                         "check who changed {what} and whether opv's values should replace theirs"
                     ),
+                    Refusal::ChangedOutsideOpv {
+                        after_apply: true,
+                        ..
+                    } => format!("check who changed {what} and that both changes belong there"),
+                    Refusal::RevisionMode {
+                        resource_group,
+                        subscription,
+                        ..
+                    } => format!(
+                        "ask an owner of {what} to switch it to single revision mode: az containerapp revision set-mode --mode single --resource-group {} --name {} --subscription {}",
+                        shell_word(resource_group),
+                        shell_word(subject.name.as_str()),
+                        shell_word(subscription)
+                    ),
                 };
-                plan(
-                    inspect(text),
-                    doctor_scoped(env, target, Some(seen.principal())),
-                )
+                // Only an owner of the app changes its revision mode; opv never does.
+                let action = match why {
+                    Refusal::RevisionMode { .. } => Some((
+                        Action::OwnerSetup {
+                            object: subject.clone(),
+                        },
+                        text,
+                    )),
+                    _ => inspect(text),
+                };
+                plan(action, doctor_scoped(env, target, Some(seen.principal())))
             }
             Guard { guard } => match guard {
                 self::Guard::ValueTooLarge {
@@ -3095,6 +3205,12 @@ impl Cause {
                         Action::Install { tool: tool.clone() },
                         format!("install the Linux build of {tool} inside WSL"),
                     ),
+                    Unusable::StoredSecretUnencrypted => (
+                        Action::Install { tool: tool.clone() },
+                        format!(
+                            "update {tool} to a build that encrypts its stored credentials (AZURE_CORE_ENCRYPT_TOKEN_CACHE)"
+                        ),
+                    ),
                 };
                 plan(Some(action), Next::Run(cmd(&["doctor"], &[])))
             }
@@ -3199,6 +3315,23 @@ impl Cause {
             ),
             InputInvalid {
                 path,
+                kind: InputKind::DeployCredentials,
+                field,
+                rule,
+                ..
+            } => {
+                // A field of a 1Password item, which only a person edits.
+                let (_, fix) = rule_words(field, rule);
+                plan(
+                    inspect(format!(
+                        "in 1Password, open {} and {fix}",
+                        input_words(InputKind::DeployCredentials, path)
+                    )),
+                    Next::Rerun,
+                )
+            }
+            InputInvalid {
+                path,
                 kind: _,
                 at,
                 field,
@@ -3248,6 +3381,40 @@ impl Cause {
             RamDirUnavailable {
                 remote,
                 why,
+                purpose: RamPurpose::AzureDeployCredentials,
+                ..
+            } => {
+                // az keeps the service principal's secret in its configuration folder, so
+                // opv signs in only where that folder is held in memory (06.49): the way
+                // out is this machine's runtime folder, or a machine that has one; never a
+                // change to how everyone deploys the environment.
+                let host = match remote {
+                    Some(p) => format!("the host of remote profile {p}"),
+                    None => "this machine".to_string(),
+                };
+                let text = match why {
+                    RamDir::Unset => format!(
+                        "start a login session with a runtime folder (XDG_RUNTIME_DIR) on {host}; on WSL, enable systemd in /etc/wsl.conf"
+                    ),
+                    RamDir::NotAbsolute => {
+                        format!("set XDG_RUNTIME_DIR on {host} to an absolute path")
+                    }
+                    RamDir::NotOwned => {
+                        format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
+                    }
+                    RamDir::NotTmpfs => {
+                        format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
+                    }
+                    RamDir::NoneOnPlatform { os } => format!(
+                        "deploy to Azure with deploy credentials from a Linux or Windows machine; {os} has no in-memory folder for az's sign-in"
+                    ),
+                };
+                plan(inspect(text), Next::Rerun)
+            }
+            RamDirUnavailable {
+                remote,
+                why,
+                purpose: RamPurpose::FileDelivery,
                 env,
                 product,
             } => {

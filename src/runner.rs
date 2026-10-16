@@ -809,6 +809,12 @@ pub fn under_deploy<T>(principal: crate::cause::Principal, f: impl FnOnce() -> T
     observe::under_deploy(principal, f)
 }
 
+/// The deploy credentials [`under_deploy`] put in effect, if any: a sign-in's own check of
+/// the item's values names that item.
+pub fn deploy_principal() -> Option<crate::cause::Principal> {
+    observe::deploy_principal()
+}
+
 /// Run `f`, the read-only diagnosis of the call that just failed (FR-26): its probes keep
 /// that call's excerpt instead of starting a new one (NR-31). Used only on failure paths.
 pub fn diagnosing<T>(f: impl FnOnce() -> T) -> T {
@@ -843,6 +849,10 @@ mod observe {
         let prev = DEPLOY.with(|d| d.borrow_mut().replace(principal));
         let _restore = Restore(prev);
         f()
+    }
+
+    pub(super) fn deploy_principal() -> Option<Principal> {
+        DEPLOY.with(|d| d.borrow().clone())
     }
 
     /// The external system `program` belongs to, from its file name (`op`, `op.exe`,

@@ -94,6 +94,7 @@ fn unreadable_reply(args: &[&str]) -> Error {
             system: System::OnePassword,
             at: None,
             problem: crate::cause::OutputProblem::Unparseable,
+            during: crate::cause::During::Read,
             seen,
         }
         .into(),

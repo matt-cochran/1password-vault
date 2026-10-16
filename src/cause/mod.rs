@@ -611,6 +611,8 @@ pub enum Cause {
         system: System,
         at: Option<Location>,
         problem: OutputProblem,
+        /// A read's reply, or the reply of a write the provider applied (exit 0).
+        during: During,
         seen: Observed,
     },
     Unrecognized {
@@ -680,6 +682,8 @@ pub enum Cause {
     RamDirUnavailable {
         remote: Option<ProfileName>,
         why: RamDir,
+        /// What the folder was for: the settings file, or az's deploy sign-in (R74).
+        purpose: RamPurpose,
         /// The run whose preview checks the folder again, when known.
         env: Option<EnvName>,
         product: Option<ProductName>,
@@ -967,8 +971,20 @@ pub enum Refusal {
     NotRunning,
     /// Another change is still in progress at the provider.
     InProgress,
-    /// The object was changed outside opv since opv last wrote it.
-    ChangedOutsideOpv,
+    /// Settings opv does not manage changed outside opv: before opv's write (nothing
+    /// written), or while opv's write was applied (`after_apply`: opv's change is live).
+    /// `paths`: the changed settings, as JSON paths (never their values).
+    ChangedOutsideOpv {
+        paths: Vec<String>,
+        after_apply: bool,
+    },
+    /// The app runs more than one revision at a time; opv pins by replacing the one active
+    /// revision (NR-25), so only single-revision mode is written to.
+    RevisionMode {
+        mode: String,
+        resource_group: String,
+        subscription: String,
+    },
 }
 
 /// What was wrong with a call's output (`UnexpectedOutput`).
@@ -979,6 +995,19 @@ pub enum OutputProblem {
     Unparseable,
     /// It was empty where a value was due (`what`: "deploy token").
     Empty { what: &'static str },
+    /// It held `what`, but in a form opv cannot use (a version ID that is not one).
+    InvalidValue { what: &'static str },
+}
+
+/// Which call gave the reply of an `UnexpectedOutput`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum During {
+    /// A read: nothing was changed.
+    Read,
+    /// A write the provider applied (it exited 0): the change is made, only its reply is
+    /// unusable.
+    AppliedWrite,
 }
 
 /// Which of opv's own local operations failed (`LocalIo`).
@@ -1037,10 +1066,18 @@ pub enum Guard {
 pub enum Unusable {
     NotExecutable,
     WslInteropOff,
-    TooOld { have: String, min: String },
+    TooOld {
+        have: String,
+        min: String,
+    },
     VersionUnreadable,
-    SpawnFailed { io: IoKind },
+    SpawnFailed {
+        io: IoKind,
+    },
     WindowsExeFromWsl,
+    /// It kept a secret opv gave it unencrypted on disk (az's service principal store on
+    /// Windows); opv removed it with its private folder.
+    StoredSecretUnencrypted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1080,6 +1117,19 @@ pub enum InputKind {
     Dotenv,
     SetupRecipe,
     Receipt,
+    /// An environment's deploy credentials item in 1Password (`path`: its `op://`
+    /// reference, empty when not known).
+    DeployCredentials,
+}
+
+/// What an in-memory folder was needed for (R74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RamPurpose {
+    /// A key's settings file (`file = …`), delivered to a run.
+    FileDelivery,
+    /// az's private configuration folder for a sign-in with deploy credentials.
+    AzureDeployCredentials,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1179,6 +1229,8 @@ impl Cause {
             },
             TargetRefused { why, .. } => match why {
                 Refusal::Unhealthy { .. } => "target_unhealthy",
+                // Only the app's owner changes its revision mode: a person's step.
+                Refusal::RevisionMode { .. } => "owner_setup_required",
                 _ => "update_refused",
             },
             Guard { guard } => match guard {
