@@ -4,8 +4,8 @@ The owner reads every message opv 0.10.0 can print on failure and signs off belo
 
 ## What is here
 
-- **59 scenario snapshots** (`scenarios/*.snap`): one situation each, with the text run, the `--json` run and, where the command has an MCP tool, the MCP answer. Together they reach every error cause except six that are listed as unreachable in `tests/e2e/coverage.rs` (`UNREACHABLE`), each with its reason.
-- **472 matrix snapshots** (`<command>__<call>__<fault>.snap`): one recorded fault injected into one call opv makes. Many cells print the same message for a different vault or item. The table below groups them by error code and fault, so you can read one representative per group (66 groups) rather than all 472.
+- **61 scenario snapshots** (`scenarios/*.snap`): one situation each, with the text run, the `--json` run and, where the command has an MCP tool, the MCP answer. Together they reach every error cause except six that are listed as unreachable in `tests/e2e/coverage.rs` (`UNREACHABLE`), each with its reason.
+- **432 matrix snapshots** (`<command>__<call>__<fault>.snap`): one recorded fault injected into one call opv makes. Many cells print the same message for a different vault or item. The table below groups them by error code and fault, so you can read one representative per group (51 groups) rather than all 472.
 - `SKIPPED.md`: the cells not run, each with its reason (mostly: no recording of rate-limited, server-error or forbidden replies from op, flyctl and gh).
 - `COVERAGE.md`: which fault reached which call.
 
@@ -65,11 +65,13 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 - [ ] `scenarios/needs_terminal.snap` (terminal_required)
 - [ ] `scenarios/not_declared.snap` (unknown_env)
 - [ ] `scenarios/nothing_in_scope.snap` (no_target)
+- [ ] `scenarios/own_session_under_a_service_account.snap` (own_session_required)
 - [ ] `scenarios/owner_setup_required.snap` (owner_setup_required)
 - [ ] `scenarios/partial.snap` (resource_not_found)
 - [ ] `scenarios/personal_not_set_up.snap` (text only)
 - [ ] `scenarios/plan_changed.snap` (stale_plan)
 - [ ] `scenarios/plan_unknown.snap` (plan_unknown)
+- [ ] `scenarios/plan_unknown_under_an_op_session.snap` (plan_unknown)
 - [ ] `scenarios/private_dir_failed.snap` (private_dir_failed)
 - [ ] `scenarios/ram_dir_unavailable.snap` (text only)
 - [ ] `scenarios/read_back_missing.snap` (tidy_unverified)
@@ -91,57 +93,45 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 
 | | Code | Fault | Cells | Read |
 |---|---|---|---|---|
-| [ ] | `access_not_visible` | malformed_output | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__malformed_output.snap` |
 | [ ] | `access_not_visible` | not_found | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__not_found.snap` |
-| [ ] | `access_not_visible` | timeout | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__timeout.snap` |
-| [ ] | `access_not_visible` | tool_missing | 7 | `access__op_vault_user_list_ve2eshareddev00000000000001__tool_missing.snap` |
-| [ ] | `account_not_registered` | account_not_on_machine | 29 | `access__op_vault_user_list_ve2eshareddev00000000000001__account_not_on_machine.snap` |
+| [ ] | `account_not_registered` | account_not_on_machine | 31 | `access__op_vault_user_list_ve2eshareddev00000000000001__account_not_on_machine.snap` |
 | [ ] | `account_not_registered` | not_found | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__not_found.snap` |
-| [ ] | `account_not_registered` | timeout | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__timeout.snap` |
-| [ ] | `account_not_registered` | tool_missing | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__tool_missing.snap` |
 | [ ] | `confirm_required` | malformed_output | 4 | `sync_prod_unconfirmed__kubectl_auth_can_i_delete_secrets__malformed_output.snap` |
 | [ ] | `credential_rejected` | credential_rejected | 30 | `access__op_vault_user_list_ve2eshareddev00000000000001__credential_rejected.snap` |
+| [ ] | `dependency_missing` | tool_missing | 20 | `access__op_whoami__tool_missing.snap` |
 | [ ] | `discovery_unavailable` | applied_but_reply_lost | 2 | `account_list__op_account_list__applied_but_reply_lost.snap` |
 | [ ] | `discovery_unavailable` | credential_rejected | 2 | `account_list__op_account_list__credential_rejected.snap` |
 | [ ] | `discovery_unavailable` | malformed_output | 2 | `account_list__op_account_list__malformed_output.snap` |
 | [ ] | `discovery_unavailable` | timeout | 2 | `account_list__op_account_list__timeout.snap` |
-| [ ] | `discovery_unavailable` | tool_missing | 2 | `account_list__op_account_list__tool_missing.snap` |
 | [ ] | `findings` | malformed_output | 1 | `doctor_dev__op_whoami__malformed_output.snap` |
 | [ ] | `findings` | not_found | 1 | `check_dev__op_item_get_ie2epersonal00000000000001__not_found.snap` |
 | [ ] | `ids_not_in_account` | not_found | 7 | `bootstrap_dry_run__op_vault_get_ve2eshareddev00000000000001__not_found.snap` |
 | [ ] | `inventory_incomplete` | account_not_on_machine | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__account_not_on_machine.snap` |
-| [ ] | `inventory_incomplete` | applied_but_reply_lost | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__applied_but_reply_lost.snap` |
 | [ ] | `inventory_incomplete` | credential_rejected | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__credential_rejected.snap` |
 | [ ] | `inventory_incomplete` | other_account_session | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__other_account_session.snap` |
 | [ ] | `inventory_incomplete` | signed_out | 1 | `vault_locate__op_vault_get_ve2eshareddev00000000000001__signed_out.snap` |
 | [ ] | `item_not_found` | not_found | 12 | `check_dev__op_item_get_ie2eshareddev00000000000001__not_found.snap` |
 | [ ] | `no error document` | account_not_on_machine | 1 | `run_preview__op_whoami__account_not_on_machine.snap` |
-| [ ] | `no error document` | applied_but_reply_lost | 9 | `access__op_whoami__applied_but_reply_lost.snap` |
+| [ ] | `no error document` | applied_but_reply_lost | 2 | `access__op_whoami__applied_but_reply_lost.snap` |
 | [ ] | `no error document` | credential_rejected | 1 | `run_preview__op_whoami__credential_rejected.snap` |
-| [ ] | `no error document` | malformed_output | 11 | `access__op_whoami__malformed_output.snap` |
+| [ ] | `no error document` | malformed_output | 10 | `access__op_whoami__malformed_output.snap` |
 | [ ] | `no error document` | other_account_session | 1 | `run_preview__op_whoami__other_account_session.snap` |
 | [ ] | `no error document` | signed_out | 1 | `run_preview__op_whoami__signed_out.snap` |
-| [ ] | `no error document` | timeout | 1 | `run_preview__op_whoami__timeout.snap` |
+| [ ] | `no error document` | timeout | 2 | `access__op_whoami__timeout.snap` |
 | [ ] | `no error document` | tool_missing | 1 | `run_preview__op_whoami__tool_missing.snap` |
-| [ ] | `op_not_signed_in` | account_not_on_machine | 3 | `access__op_whoami__account_not_on_machine.snap` |
 | [ ] | `op_not_signed_in` | credential_rejected | 3 | `access__op_whoami__credential_rejected.snap` |
 | [ ] | `op_not_signed_in` | other_account_session | 32 | `access__op_vault_user_list_ve2eshareddev00000000000001__other_account_session.snap` |
 | [ ] | `op_not_signed_in` | signed_out | 32 | `access__op_vault_user_list_ve2eshareddev00000000000001__signed_out.snap` |
-| [ ] | `op_not_signed_in` | timeout | 3 | `access__op_whoami__timeout.snap` |
-| [ ] | `op_not_signed_in` | tool_missing | 3 | `access__op_whoami__tool_missing.snap` |
 | [ ] | `permission_denied` | forbidden | 4 | `plan_prod__kubectl_get_secret__forbidden.snap` |
-| [ ] | `permission_denied` | timeout | 3 | `sync_prod_unconfirmed__kubectl_auth_can_i_delete_secrets__timeout.snap` |
-| [ ] | `permission_denied` | tool_missing | 3 | `sync_prod_unconfirmed__kubectl_auth_can_i_delete_secrets__tool_missing.snap` |
-| [ ] | `provider_unavailable` | applied_but_reply_lost | 40 | `access__op_vault_user_list_ve2eshareddev00000000000001__applied_but_reply_lost.snap` |
+| [ ] | `provider_unavailable` | applied_but_reply_lost | 48 | `access__op_vault_user_list_ve2eshareddev00000000000001__applied_but_reply_lost.snap` |
+| [ ] | `provider_unavailable` | timeout | 48 | `access__op_vault_user_list_ve2eshareddev00000000000001__timeout.snap` |
 | [ ] | `provider_unavailable` | unreachable | 10 | `plan_prod__flyctl_secrets_list__unreachable.snap` |
-| [ ] | `resource_not_found` | malformed_output | 2 | `status_prod__kubectl_get_deployment_e2e_app__malformed_output.snap` |
+| [ ] | `resource_not_found` | malformed_output | 1 | `status_prod__kubectl_get_secret__malformed_output.snap` |
 | [ ] | `resource_not_found` | not_found | 5 | `check_dev__op_vault_list__not_found.snap` |
-| [ ] | `selected_signed_out` | account_not_on_machine | 1 | `account_list__op_whoami__account_not_on_machine.snap` |
+| [ ] | `selected_signed_out` | account_not_on_machine | 2 | `account_list__op_whoami__account_not_on_machine.snap` |
 | [ ] | `selected_signed_out` | credential_rejected | 1 | `account_list__op_whoami__credential_rejected.snap` |
 | [ ] | `selected_signed_out` | other_account_session | 1 | `account_list__op_whoami__other_account_session.snap` |
 | [ ] | `selected_signed_out` | signed_out | 1 | `account_list__op_whoami__signed_out.snap` |
-| [ ] | `selected_signed_out` | timeout | 1 | `account_list__op_whoami__timeout.snap` |
-| [ ] | `selected_signed_out` | tool_missing | 1 | `account_list__op_whoami__tool_missing.snap` |
 | [ ] | `shared_sign_in_address` | account_not_on_machine | 5 | `ready_dev__op_item_get_ie2epersonal00000000000001__account_not_on_machine.snap` |
 | [ ] | `shared_sign_in_address` | applied_but_reply_lost | 7 | `account_list__op_whoami__applied_but_reply_lost.snap` |
 | [ ] | `shared_sign_in_address` | credential_rejected | 5 | `ready_dev__op_item_get_ie2epersonal00000000000001__credential_rejected.snap` |
@@ -149,14 +139,11 @@ Each snapshot has the text run (stderr: `opv:` line, `checked:`, the tool's scru
 | [ ] | `shared_sign_in_address` | not_found | 4 | `ready_dev__op_item_get_ie2epersonal00000000000001__not_found.snap` |
 | [ ] | `shared_sign_in_address` | other_account_session | 5 | `ready_dev__op_item_get_ie2epersonal00000000000001__other_account_session.snap` |
 | [ ] | `shared_sign_in_address` | signed_out | 5 | `ready_dev__op_item_get_ie2epersonal00000000000001__signed_out.snap` |
-| [ ] | `shared_sign_in_address` | timeout | 5 | `ready_dev__op_item_get_ie2epersonal00000000000001__timeout.snap` |
-| [ ] | `shared_sign_in_address` | tool_missing | 5 | `ready_dev__op_item_get_ie2epersonal00000000000001__tool_missing.snap` |
+| [ ] | `shared_sign_in_address` | timeout | 7 | `account_list__op_whoami__timeout.snap` |
 | [ ] | `target_not_signed_in` | credential_rejected | 3 | `plan_prod__flyctl_secrets_list__credential_rejected.snap` |
 | [ ] | `target_not_signed_in` | signed_out | 16 | `plan_prod__flyctl_secrets_list__signed_out.snap` |
-| [ ] | `unexpected_output` | malformed_output | 25 | `check_dev__op_item_get_ie2epersonal00000000000001__malformed_output.snap` |
+| [ ] | `unexpected_output` | malformed_output | 32 | `access__op_vault_user_list_ve2eshareddev00000000000001__malformed_output.snap` |
 | [ ] | `unrecognized_failure` | not_found | 3 | `plan_prod__gh_secret_list__not_found.snap` |
-| [ ] | `unrecognized_failure` | timeout | 36 | `bootstrap_dry_run__op_vault_get_ve2eshareddev00000000000001__timeout.snap` |
-| [ ] | `unrecognized_failure` | tool_missing | 36 | `bootstrap_dry_run__op_vault_get_ve2eshareddev00000000000001__tool_missing.snap` |
 
 ## Findings
 
