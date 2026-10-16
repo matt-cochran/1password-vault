@@ -1,0 +1,5 @@
+# Simulator bookkeeping, created when the tests run opv-sim against this directory.
+.lock
+calls.log
+sim-state.json
+.world.json.tmp
