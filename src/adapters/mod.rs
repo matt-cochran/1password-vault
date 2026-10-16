@@ -14,6 +14,7 @@ pub mod kubernetes;
 pub mod onepassword;
 /// Diagnosis of op session and account failures (design §5), and the #160 session probe.
 pub mod onepassword_diagnose;
+pub mod onepassword_diagnose_items;
 /// Dev-time title lookup and value-free item read, for `opv init` only (FR-23).
 pub(crate) mod onepassword_init;
 /// The project manifest (configuration in 1Password, FR-44).

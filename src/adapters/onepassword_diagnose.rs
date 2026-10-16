@@ -37,6 +37,12 @@ pub struct Facts {
     pub live: Option<AccountId>,
     /// What a search for the vault across the machine's accounts found (`opv vault locate`).
     pub vault_search: VaultSearch,
+    /// `op item get` on the call's item succeeded, so a later write refusal is the missing
+    /// Write grant rather than "not available" (audit finding 04.01).
+    pub item_readable: bool,
+    /// `op vault get` on the call's vault succeeded, so a `vault user list` refusal is the
+    /// missing Manage grant.
+    pub vault_readable: bool,
 }
 
 /// The outcome of looking for a vault in every account on the machine.
