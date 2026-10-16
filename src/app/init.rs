@@ -37,6 +37,10 @@ use std::path::Path;
 
 use super::write_err;
 use crate::adapters::onepassword_init::{self, FieldShape};
+use crate::cause::{
+    Cause, Closest, Cmd, DottedPath, FieldRule, InputKind, NameKind, PatternId, StoreObject,
+    UsageProblem,
+};
 use crate::config;
 use crate::config_edit::{self, ConfigDoc};
 use crate::config_store::ConfigStore;
@@ -107,18 +111,22 @@ pub(crate) fn item_boundary<'a>(mut products: impl Iterator<Item = &'a str>) -> 
 pub fn read_from(from: &FromFile) -> Result<Imported, Error> {
     let found = super::setup::read_legacy(&from.path)?;
     if let Some(name) = from.config.iter().find(|n| from.secret.contains(n)) {
-        return Err(Error::Config(
-            format!("{name} is given with both --config-key and --secret-key; pick one").into(),
-        ));
+        return Err(usage(UsageProblem::ConflictsWith {
+            a: format!("--config-key {name}"),
+            b: format!("--secret-key {name}"),
+        }));
     }
-    for (flag, names) in [
-        ("--config-key", &from.config),
-        ("--secret-key", &from.secret),
-    ] {
+    for names in [&from.config, &from.secret] {
         if let Some(name) = names.iter().find(|n| !found.contains_key(n.as_str())) {
-            return Err(Error::Config(
-                format!("{flag} {name}: no such key in {}", from.path.display()).into(),
-            ));
+            // A key the file does not have: the one close name in the file, never a guess.
+            let close = super::suggest::close(name, found.keys().map(String::as_str));
+            return Err(Cause::NotDeclared {
+                kind: NameKind::Key,
+                given: name.clone(),
+                candidates: found.keys().cloned().collect(),
+                closest: Closest::unique(&close),
+            }
+            .into());
         }
     }
     let mut imported = Imported::default();
@@ -140,11 +148,24 @@ pub fn read_from(from: &FromFile) -> Result<Imported, Error> {
         }
     }
     if imported.kinds.is_empty() {
-        return Err(Error::Config(
-            format!("{} has no KEY=value line to declare", from.path.display()).into(),
-        ));
+        return Err(Cause::InputInvalid {
+            path: from.path.clone(),
+            kind: InputKind::Dotenv,
+            at: None,
+            field: "the file".into(),
+            rule: FieldRule::Type {
+                expected: "at least one KEY=value line whose KEY is upper-case letters, digits \
+                           and _",
+            },
+        }
+        .into());
     }
     Ok(imported)
+}
+
+/// A usage error of `opv init`: its step is init's help.
+fn usage(problem: UsageProblem) -> Error {
+    Cause::Usage { problem }.into()
 }
 
 /// `opv init <env> --from <file>` without `--apply`: the keys and kinds it would declare,
@@ -258,8 +279,8 @@ fn run_on(
     let p = prepare(args, imported.as_ref(), r, host)?;
     write_atomic(&target, &p.text, args.force)?;
     tidy_declared(args, &p, r);
-    let adopted = import_values(args, &p, r)?;
     let place = Place::File(target.display().to_string());
+    let adopted = import_values(args, &p, &place, r)?;
     if json {
         return write_json(out, args, &p, &place, adopted.as_ref());
     }
@@ -294,9 +315,9 @@ pub fn run_manifest(
         None,
     )?;
     tidy_declared(args, &p, r);
-    let adopted = import_values(args, &p, r)?;
     use crate::config_store::ConfigStore as _;
     let place = Place::Manifest(m.describe());
+    let adopted = import_values(args, &p, &place, r)?;
     if json {
         return write_json(out, args, &p, &place, adopted.as_ref());
     }
@@ -326,9 +347,10 @@ fn from_apply(args: &InitArgs) -> Result<Option<Imported>, Error> {
     match &args.from {
         None => Ok(None),
         Some(from) if from.apply => read_from(from).map(Some),
-        Some(_) => Err(Error::Config(
-            "init --from without --apply only shows its plan".into(),
-        )),
+        Some(_) => Err(Cause::Bug {
+            site: "init: --from without --apply reached the write path",
+        }
+        .into()),
     }
 }
 
@@ -338,20 +360,24 @@ fn from_apply(args: &InitArgs) -> Result<Option<Imported>, Error> {
 fn merge_imported(d: &mut Declared, imported: &Imported, args: &InitArgs) -> Result<(), Error> {
     let from = args.from.as_ref().expect("merged only with --from");
     let product = args.product.as_deref().ok_or_else(|| {
-        Error::Config("init --from needs --product <name>: the product its keys belong to".into())
+        usage(UsageProblem::NeedsFlag {
+            flag: "--from".into(),
+            needs: "--product <name>, the product its keys belong to".into(),
+        })
     })?;
-    if let Some(other) = d.keys.keys().find(|p| *p != product) {
-        return Err(Error::Config(
-            format!(
-                "init --from declares the keys of one product ({product}), and item {:?} holds \
-                 product {other} in its own section; declare these keys with opv add, then \
-                 opv adopt {} --from {}",
-                args.item,
-                args.env,
-                from.path.display()
-            )
-            .into(),
-        ));
+    if d.keys.keys().any(|p| p != product) {
+        // The item holds another product's section: `--from` declares one product's keys,
+        // so the file's values go in with adopt once the keys are declared (opv add).
+        return Err(usage(UsageProblem::UseInstead {
+            command: Cmd {
+                command: vec!["adopt".into()],
+                args: vec![
+                    args.env.clone(),
+                    "--from".into(),
+                    from.path.display().to_string(),
+                ],
+            },
+        }));
     }
     let keys = d.keys.entry(product.to_string()).or_default();
     let mut added = 0;
@@ -381,6 +407,7 @@ fn merge_imported(d: &mut Declared, imported: &Imported, args: &InitArgs) -> Res
 fn import_values(
     args: &InitArgs,
     p: &Prepared,
+    place: &Place,
     r: &dyn CommandRunner,
 ) -> Result<Option<crate::domain::adopt::AdoptPlan>, Error> {
     let Some(from) = args.from.as_ref().filter(|f| f.apply) else {
@@ -398,14 +425,23 @@ fn import_values(
     )
     .map(Some)
     .map_err(|e| {
-        // The configuration is already written: only the import is left to redo.
-        e.or_next(|| {
-            format!(
-                "opv adopt {} --from {} --apply",
-                args.env,
-                from.path.display()
-            )
-        })
+        // The configuration is already written (X20): the failure says so, with what was
+        // created in 1Password for it.
+        let Some((cause, upstream)) = e.cause() else {
+            return e;
+        };
+        let mut done = p.created.clone();
+        done.push(place.describe().to_string());
+        let partial = Cause::Partial {
+            done,
+            approval_used: None,
+            approval_scope: None,
+            then: Box::new(cause.clone()),
+        };
+        match upstream {
+            Some(up) => Error::with_evidence(partial, up.clone()),
+            None => partial.into(),
+        }
     })
 }
 
@@ -509,7 +545,7 @@ fn prepare(
     };
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
 
-    let mut decl = declare(&fields, args.product.as_deref(), &args.item)?;
+    let mut decl = declare(&fields, args.product.as_deref(), &args.vault, &args.item)?;
     if let Some(imported) = imported {
         merge_imported(&mut decl, imported, args)?;
     }
@@ -589,13 +625,34 @@ fn report(
             crate::error::shell_word(&args.env)
         ),
     )?;
-    w(out, format!("Next: {NEXT}"))
+    w(
+        out,
+        format!(
+            "Next: {}",
+            crate::cause::render::cmd_text(&next_after(args, p, place))
+        ),
+    )
 }
 
-/// The command after `init`, runnable as printed whatever the environment: it records every
-/// boundary the configuration declares and adds each declared key's empty field (FR-52),
-/// then points at `opv ready`.
-const NEXT: &str = "opv bootstrap";
+/// The command after `init` (05.01, X8), typed (§10.1). A `secrets.toml` goes on to `opv
+/// bootstrap`, which records every boundary it declares and adds each declared key's empty
+/// field (FR-52). A manifest project never gets `opv bootstrap` (it reads a secrets.toml
+/// only): init has recorded the item's boundary and declared its fields, so the step checks
+/// what it declared, as `--add-env` does, or says how to declare a first key.
+fn next_after(args: &InitArgs, p: &Prepared, place: &Place) -> Cmd {
+    let cmd = |words: &[&str], a: &[&str]| Cmd {
+        command: words.iter().map(|w| w.to_string()).collect(),
+        args: a.iter().map(|w| w.to_string()).collect(),
+    };
+    match place {
+        Place::File(_) => cmd(&["bootstrap"], &[]),
+        Place::Manifest(_) => match p.decl.keys.keys().collect::<Vec<_>>().as_slice() {
+            [] => cmd(&["add"], &["--help"]),
+            [one] => cmd(&["check"], &[&args.env, "--product", one]),
+            _ => cmd(&["doctor"], &["--env", &args.env]),
+        },
+    }
+}
 
 /// `init --json` (A5).
 fn write_json(
@@ -634,7 +691,7 @@ fn write_json(
         "created": p.created,
         "keys": keys,
         "skipped": decl.skipped,
-        "next": NEXT,
+        "next": crate::cause::render::cmd_text(&next_after(args, p, place)),
     });
     // `--from … --apply` (#90) adds what it imported; other runs keep the document as it was.
     if let Some(a) = adopted {
@@ -690,17 +747,17 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !env_ok {
-        return Err(Error::Config(
-            format!(
-                "environment name {:?} must match ^[A-Za-z0-9][A-Za-z0-9_-]*$",
-                args.env
-            )
-            .into(),
-        ));
+        return Err(usage(UsageProblem::ValueFormat {
+            flag: format!("the environment name {:?}", args.env),
+            format: "letters, digits, _ and -, starting with a letter or digit",
+        }));
     }
     for (flag, v) in [("--vault", &args.vault), ("--item", &args.item)] {
         if v.is_empty() {
-            return Err(Error::Config(format!("{flag} is empty").into()));
+            return Err(usage(UsageProblem::ValueFormat {
+                flag: flag.into(),
+                format: "a title that is not empty",
+            }));
         }
     }
     if let Some(p) = args
@@ -708,12 +765,10 @@ fn check_args(args: &InitArgs) -> Result<(), Error> {
         .as_deref()
         .filter(|p| !config::is_product_name(p))
     {
-        return Err(Error::Config(
-            format!(
-                "--product {p:?} must match ^[a-z][a-z0-9_-]*$ (the app's role, such as api or web)"
-            )
-            .into(),
-        ));
+        return Err(usage(UsageProblem::ValueFormat {
+            flag: format!("--product {p:?}"),
+            format: PatternId::ProductName.words(),
+        }));
     }
     Ok(())
 }
@@ -727,30 +782,17 @@ fn existing_refusal(args: &InitArgs, target: &Path) -> Error {
         .and_then(|t| crate::config::parse(&t).ok())
         .is_some_and(|f| f.environments.contains_key(&args.env));
     if declared {
-        return Error::Config(
-            format!(
-                "{} already declares environment {}; init never merges",
-                target.display(),
-                args.env
-            )
-            .into(),
-        )
-        .with_do(format!(
-            "change environment {} with opv config edit",
-            args.env
-        ))
-        .with_next("opv config edit");
+        // Its step is `opv config edit`, which changes a declared environment.
+        return Cause::AlreadyDeclared {
+            kind: NameKind::Environment,
+            name: args.env.clone(),
+        }
+        .into();
     }
-    Error::Config(
-        format!(
-            "{} already exists; init never merges: add environment {} to it with --add-env \
-             (or pass --force to replace the whole file)",
-            target.display(),
-            args.env
-        )
-        .into(),
-    )
-    .with_next(add_env_command(args))
+    // init never merges: a new environment is added to the file with --add-env.
+    usage(UsageProblem::UseInstead {
+        command: add_env_cmd(args),
+    })
 }
 
 /// The vault title `bootstrap` uses for an environment: `<project>-<env>`.
@@ -766,32 +808,34 @@ pub fn default_item(project: &str, env: &str) -> String {
 
 /// `opv init <env> --vault <v> --item <i> [--product <p>] --add-env`: this run's own
 /// arguments, as `--add-env`.
-pub(crate) fn add_env_command(args: &InitArgs) -> String {
-    use crate::error::shell_word;
-    let mut c = format!(
-        "opv init {} --vault {} --item {}",
-        shell_word(&args.env),
-        shell_word(&args.vault),
-        shell_word(&args.item)
-    );
+fn add_env_cmd(args: &InitArgs) -> Cmd {
+    let mut a = vec![
+        args.env.clone(),
+        "--vault".into(),
+        args.vault.clone(),
+        "--item".into(),
+        args.item.clone(),
+    ];
     if let Some(p) = &args.product {
-        c.push_str(&format!(" --product {}", shell_word(p)));
+        a.extend(["--product".into(), p.clone()]);
     }
-    c.push_str(" --add-env");
-    c
+    a.push("--add-env".into());
+    Cmd {
+        command: vec!["init".into()],
+        args: a,
+    }
 }
 
-/// The target exists (a file, directory or symlink) and `--force` was not given: exit 2,
-/// naming the path. `init` never merges.
+/// The target appeared (a file, directory or symlink) while init was working and `--force`
+/// was not given: nothing is written over it, and the re-run says what to do with it.
 fn refuse_existing(target: &Path, force: bool) -> Result<(), Error> {
     if !force && fs::symlink_metadata(target).is_ok() {
-        return Err(Error::Config(
-            format!(
-                "{} already exists; init never merges: pass --force to overwrite it",
-                target.display()
-            )
-            .into(),
-        ));
+        return Err(Cause::ChangedBeforeWrite {
+            object: StoreObject::File {
+                path: target.to_path_buf(),
+            },
+        }
+        .into());
     }
     Ok(())
 }
@@ -833,36 +877,45 @@ impl Declared {
 fn declare(
     fields: &[FieldShape],
     product: Option<&str>,
+    vault_title: &str,
     item_title: &str,
 ) -> Result<Declared, Error> {
     let (sectioned, unsectioned): (Vec<&FieldShape>, Vec<&FieldShape>) =
         fields.iter().partition(|f| f.section.is_some());
     if !sectioned.is_empty() && !unsectioned.is_empty() {
-        return Err(Error::Config(
-            format!(
-                "item {item_title:?} mixes {} and {}; init never guesses: move the unsectioned \
-                 fields into a section named after their product in 1Password, then run init \
-                 again",
+        // init never guesses which product unsectioned fields belong to.
+        return Err(usage(UsageProblem::NeedsFlag {
+            flag: format!(
+                "item {item_title:?}, with {} and {},",
                 super::plural(unsectioned.len(), "unsectioned field", "unsectioned fields"),
                 super::plural(sectioned.len(), "sectioned field", "sectioned fields")
-            )
-            .into(),
-        ));
+            ),
+            needs: "every field in a section named after its product: move the unsectioned \
+                    ones in 1Password"
+                .into(),
+        }));
     }
     let unsectioned_product = match (unsectioned.is_empty(), product) {
         (true, _) => "",
         (false, Some(p)) => p,
         (false, None) => {
+            // 05.07: --product alone changes init's default vault and item titles, so the
+            // advice keeps this vault and item (X1).
             let names: Vec<String> = unsectioned.iter().map(|f| display_name(f)).collect();
-            return Err(Error::Config(
-                format!(
-                    "item {item_title:?} has {} ({}); pass --product <name> to name the \
-                     product they belong to (the app's role, such as api or web)",
+            return Err(usage(UsageProblem::NeedsFlag {
+                flag: format!(
+                    "item {item_title:?}, with {} ({}),",
                     super::plural(names.len(), "unsectioned field", "unsectioned fields"),
                     names.join(", ")
-                )
-                .into(),
-            ));
+                ),
+                needs: format!(
+                    "the product they belong to: pass --product <name> (the app's role, such \
+                     as api or web) together with --vault {} --item {}, so init reads this \
+                     same item",
+                    crate::error::shell_word(vault_title),
+                    crate::error::shell_word(item_title)
+                ),
+            }));
         }
     };
     let mut d = Declared {
@@ -1054,32 +1107,22 @@ fn add_env_on(
     let base = store.read_for_write(r)?;
     let original = &base.text;
     let place = store.describe();
-    let fleet = store.parse(original).map_err(|e| match e {
-        e @ Error::Config(_) => e
-            .map_text(|m| super::on_first_line(&m, " (fix it first; nothing written)"))
-            .or_next(|| "opv config edit".into()),
-        other => other,
-    })?;
+    // A configuration that does not load is the loader's own cause (nothing is written).
+    let fleet = store.parse(original)?;
     if fleet.environments.contains_key(&args.env) {
-        return Err(Error::Config(
-            format!(
-                "environment {} already exists in {place}; --add-env never overwrites it",
-                args.env,
-            )
-            .into(),
-        )
-        .with_do(format!(
-            "change environment {} with opv config edit",
-            args.env
-        ))
-        .with_next("opv config edit"));
+        // --add-env never overwrites; the step is `opv config edit`.
+        return Err(Cause::AlreadyDeclared {
+            kind: NameKind::Environment,
+            name: args.env.clone(),
+        }
+        .into());
     }
 
     // The item must exist: its fields are what --add-env declares (nothing is created).
     let vault = onepassword_init::find_vault(r, &args.vault, host)?.found()?;
     let item = onepassword_init::find_item(r, &vault.id, &args.item, host)?.found()?;
     let fields = onepassword_init::read_field_shapes(r, &vault.id, &item.id, host)?;
-    let decl = declare(&fields, args.product.as_deref(), &args.item)?;
+    let decl = declare(&fields, args.product.as_deref(), &args.vault, &args.item)?;
 
     let mut doc = ConfigDoc::parse(original)?;
     let mut added: Vec<String> = Vec::new();
@@ -1130,19 +1173,21 @@ fn add_env_on(
     // The item is one boundary (FR-57): every product it gives the environment shares it.
     let boundaries: BTreeSet<&str> = products.iter().map(|p| fleet.boundary_of(p)).collect();
     if boundaries.len() > 1 {
-        let list: Vec<&str> = products.iter().map(String::as_str).collect();
-        return Err(Error::Config(
-            format!(
-                "item {:?} is one boundary, and products {} live in different boundaries \
-                 ({}); give them one with boundary = \"{SHARED_BOUNDARY}\" on each product, \
-                 then run init --add-env again",
-                args.item,
-                list.join(", "),
-                boundaries.into_iter().collect::<Vec<_>>().join(", ")
-            )
-            .into(),
-        )
-        .with_next("opv config edit"));
+        // The item is one boundary: every product it holds names the same one.
+        let first = products
+            .iter()
+            .next()
+            .expect("several boundaries, so a product");
+        return Err(Cause::ConfigInvalid {
+            source: store.cause_source(),
+            at: None,
+            field: DottedPath(vec!["products".into(), first.clone(), "boundary".into()]),
+            rule: FieldRule::Type {
+                expected: "\"core\" on every product of the item --add-env reads, which is one \
+                           boundary",
+            },
+        }
+        .into());
     }
     let boundary = boundaries.into_iter().next();
     doc.add_environment(
@@ -1166,18 +1211,31 @@ fn add_env_on(
         .map_err(|e| would_write(e, "init --add-env"))?;
     crate::config_store::save(store, r, &base, &text)?;
 
-    let next = match (added.is_empty(), undeclared.first()) {
-        (true, Some((name, kind))) => format!(
-            "opv add {name} --kind {} --env {}",
-            kind_word(*kind),
-            args.env
-        ),
-        (true, None) => format!("opv add <product>/<KEY> --kind secret --env {}", args.env),
-        (false, _) => match products.iter().collect::<Vec<_>>().as_slice() {
-            [one] => format!("opv check {} --product {one}", args.env),
-            _ => format!("opv doctor --env {}", args.env),
-        },
+    // Typed (§10.1): the declaring `opv add`, else the check of what was added.
+    let cmd = |words: &str, a: Vec<String>| Cmd {
+        command: vec![words.to_string()],
+        args: a,
     };
+    let next = crate::cause::render::cmd_text(&match (added.is_empty(), undeclared.first()) {
+        (true, Some((name, kind))) => cmd(
+            "add",
+            vec![
+                name.clone(),
+                "--kind".into(),
+                kind_word(*kind).into(),
+                "--env".into(),
+                args.env.clone(),
+            ],
+        ),
+        (true, None) => cmd("add", vec!["--help".into()]),
+        (false, _) => match products.iter().collect::<Vec<_>>().as_slice() {
+            [one] => cmd(
+                "check",
+                vec![args.env.clone(), "--product".into(), (*one).clone()],
+            ),
+            _ => cmd("doctor", vec!["--env".into(), args.env.clone()]),
+        },
+    });
     if json {
         let names: Vec<&str> = undeclared.iter().map(|(n, _)| n.as_str()).collect();
         let doc = serde_json::json!({

@@ -280,7 +280,7 @@ fn a_mixed_item_is_refused_naming_both_shapes() {
     assert!(
         run.err()
             .to_string()
-            .contains("mixes 3 unsectioned fields and 3 sectioned fields"),
+            .contains("with 3 unsectioned fields and 3 sectioned fields"),
         "{}",
         run.err()
     );
@@ -485,7 +485,7 @@ fn an_existing_file_refusal_names_add_env() {
     fs::write(dir.path().join(FILE_NAME), "# hand-written\n").unwrap();
     let run = run_in(dir.path(), &api_args(), vec![]);
     assert_eq!(
-        run.err().next_step(),
+        next_of(run.err(), &["opv", "init", "staging", "--product", "api"]).as_deref(),
         Some("opv init staging --vault myapp-staging --item myapp --product api --add-env")
     );
 }
@@ -1149,7 +1149,10 @@ fn add_env_on_a_manifest_refuses_an_existing_environment_naming_config_edit() {
     let mut a = args();
     a.env = "prod".into();
     let (res, _) = add_env_to_manifest(EXISTING, &a);
-    assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
+    assert_eq!(
+        next_of(&res.unwrap_err(), &["opv", "init", "prod", "--add-env"]).as_deref(),
+        Some("opv config edit")
+    );
 }
 
 // ---- A5: `init --json` ----
@@ -1238,7 +1241,7 @@ fn add_env_refuses_products_in_different_boundaries() {
             .as_ref()
             .unwrap_err()
             .to_string()
-            .contains("live in different boundaries (api, worker)"),
+            .contains("products.api.boundary must be \"core\""),
         "{:?}",
         run.res
     );
@@ -1253,4 +1256,79 @@ fn the_default_item_reads_apart_from_the_manifest() {
 #[test]
 fn the_default_vault_is_the_project_and_environment() {
     assert_eq!(default_vault("demo-app", "dev"), "demo-app-dev");
+}
+
+// ---- catalog steps (05.01, 05.07) ----
+
+/// The Next a catalog error renders for the command line `argv`.
+fn next_of(e: &Error, argv: &[&str]) -> Option<String> {
+    let inv =
+        crate::cause::Invocation::from_cli(&argv.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let (cause, _) = e.cause()?;
+    crate::cause::render::next_text(&cause.step(&inv).1, &inv)
+}
+
+/// What `init` prepared for the API item, as `run_manifest` has it before it reports.
+fn prepared_api() -> Prepared {
+    let r = FakeRunner::new(vec![vaults(), items(), item(&api_fields())]);
+    prepare(&args(), None, &r, &crate::host::Host::detect).unwrap()
+}
+
+// 05.01: a manifest project never gets `opv bootstrap`, which reads a secrets.toml only.
+#[test]
+fn a_manifest_init_never_steps_to_bootstrap() {
+    let next = next_after(
+        &args(),
+        &prepared_api(),
+        &Place::Manifest("opv · myapp".into()),
+    );
+    assert_ne!(next.command, ["bootstrap"]);
+}
+
+// 05.01: the manifest's step checks the one product init declared.
+#[test]
+fn a_manifest_init_steps_to_the_check_of_its_product() {
+    let next = next_after(
+        &args(),
+        &prepared_api(),
+        &Place::Manifest("opv · myapp".into()),
+    );
+    assert_eq!(
+        crate::cause::render::cmd_text(&next),
+        "opv check staging --product api"
+    );
+}
+
+#[test]
+fn a_file_init_steps_to_bootstrap() {
+    let next = next_after(
+        &args(),
+        &prepared_api(),
+        &Place::File("secrets.toml".into()),
+    );
+    assert_eq!(next.command, ["bootstrap"]);
+}
+
+// 05.07: the --product advice keeps the vault and item init read, so following it reaches
+// the same item (X1).
+#[test]
+fn the_product_advice_keeps_the_vault_and_item() {
+    let (_dir, run) = init_with(&unsectioned_fields(), &args());
+    assert!(
+        run.err()
+            .to_string()
+            .contains("together with --vault myapp-staging --item myapp"),
+        "{}",
+        run.err()
+    );
+}
+
+// 05.07: the step is init's help, never a rebuilt `init --product` that moves the titles.
+#[test]
+fn the_product_advice_steps_to_init_help() {
+    let (_dir, run) = init_with(&unsectioned_fields(), &args());
+    assert_eq!(
+        next_of(run.err(), &["opv", "init", "staging"]).as_deref(),
+        Some("opv init --help")
+    );
 }
