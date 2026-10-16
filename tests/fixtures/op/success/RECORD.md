@@ -24,14 +24,14 @@ echo "$OUT"
 
 ## 2. Scrub (structural, keeps the layout byte for byte)
 
-The script walks each JSON document and collects every identifying string: the values of `id`, `account_uuid`, `user_uuid`, `email`, `url`, `shorthand`, `name`, `title`, `tags`, `additional_information`, `created_at`, `updated_at`, `last_edited_by`. It then replaces each distinct value with a numbered marker, in the text, so whitespace, key order and the trailing newline stay exactly as op printed them. The marker names follow `../failures/`: the project account keeps `<ACCOUNT_2>`, the other `<ACCOUNT_1>`.
+The script walks each JSON document and collects every identifying string: the values of `id`, `account_uuid`, `user_uuid`, `email`, `url`, `shorthand`, `name`, `title`, `tags`, `additional_information`, `description`, `created_at`, `updated_at`, `last_edited_by`. It then replaces each distinct value with a numbered marker, in the text, so whitespace, key order and the trailing newline stay exactly as op printed them. The marker names follow `../failures/`: the project account keeps `<ACCOUNT_2>`, the other `<ACCOUNT_1>`.
 
 ```bash
 cat >scrub.py <<'EOF'
 import json, sys, pathlib, re
 KEYS = {"id": "ID", "account_uuid": "ACCOUNT", "user_uuid": "USER", "email": "EMAIL",
         "url": "ADDRESS", "shorthand": "SHORTHAND", "name": "NAME", "title": "TITLE",
-        "tags": "TAG", "additional_information": "INFO", "created_at": "TIME",
+        "tags": "TAG", "additional_information": "INFO", "description": "DESCRIPTION", "created_at": "TIME",
         "updated_at": "TIME", "last_edited_by": "USER"}
 project = sys.argv[1]
 seen = {project: "<ACCOUNT_2>"}
@@ -54,7 +54,7 @@ for f in sorted(pathlib.Path(".").glob("*.stdout")):
 for f in sorted(pathlib.Path(".").glob("*.std*")):
     text = f.read_text()
     for v in sorted(seen, key=len, reverse=True):
-        text = text.replace(json.dumps(v)[1:-1], seen[v])
+        text = text.replace(json.dumps(v, ensure_ascii=False)[1:-1], seen[v])
     f.with_suffix(f.suffix + ".scrubbed").write_text(text)
 print(len(seen), "values replaced")
 EOF
