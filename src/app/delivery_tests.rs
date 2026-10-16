@@ -920,3 +920,55 @@ fn a_product_with_a_mode_skipped_key_mints_a_revision() {
     sync_all(&w, &fleet).unwrap();
     assert_eq!(state_of(&verify_doc(&w, &fleet), "api"), "verified");
 }
+
+#[test]
+fn a_receipt_path_that_cannot_be_written_stages_nothing() {
+    let _person = crate::app::tidy::activate();
+    let (w, fleet) = world();
+    let dir = tempfile::tempdir().unwrap();
+    let opts = SyncOpts {
+        receipt: Some(dir.path().join("no-such-dir").join("prod.receipt.json")),
+        ..SyncOpts::default()
+    };
+    let _ = sync_with(&w, &fleet, opts);
+    assert!(w.fly.borrow().values().all(BTreeMap::is_empty));
+}
+
+#[test]
+fn a_receipt_path_that_is_a_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(check_receipt_path(dir.path()).is_err());
+}
+
+#[test]
+fn verify_of_a_misspelt_product_is_unknown_product() {
+    let (w, fleet) = delivered();
+    let mut out = Vec::new();
+    let e = verify(&fleet, "prod", Some("apii"), &[], None, &w, false, &mut out).unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::UnknownProduct);
+}
+
+#[test]
+fn verify_with_nothing_in_scope_fails() {
+    let (w, fleet) = delivered();
+    let mut out = Vec::new();
+    // `shared` is source-only: no target delivers it.
+    let res = verify(
+        &fleet,
+        "prod",
+        Some("shared"),
+        &[],
+        None,
+        &w,
+        false,
+        &mut out,
+    );
+    assert!(res.is_err());
+}
+
+/// A receipt is never minted or judged under a guessed account.
+#[test]
+fn an_account_whoami_cannot_name_is_an_error() {
+    let r = crate::runner::fake::FakeRunner::new([Output::success("{}")]);
+    assert!(account_id(&r).is_err());
+}

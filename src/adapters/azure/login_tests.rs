@@ -213,3 +213,36 @@ fn every_az_call_through_the_environment_runner_uses_the_config_dir() {
     let want = ("AZURE_CONFIG_DIR".to_string(), dir);
     assert!(r.calls.borrow().iter().all(|c| c.env.contains(&want)));
 }
+
+#[test]
+fn a_missing_credential_field_is_deploy_credentials_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.remove("AZURE_CLIENT_ID");
+    let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
+    assert_eq!(e.code(), Code::DeployCredentialsFailed);
+}
+
+#[test]
+fn a_malformed_tenant_id_is_deploy_credentials_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let mut v = values();
+    v.insert(
+        "AZURE_TENANT_ID".into(),
+        SecretValue::new("not an id!".into()),
+    );
+    let e = l.sign_in(v, &FakeRunner::default()).unwrap_err();
+    assert_eq!(e.code(), Code::DeployCredentialsFailed);
+}
+
+#[test]
+fn an_unanswered_az_login_is_provider_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut l = login_in(tmp.path());
+    let r = FakeRunner::default();
+    r.push_unknown("timeout");
+    let e = l.sign_in(values(), &r).unwrap_err();
+    assert_eq!(e.code(), Code::ProviderUnavailable);
+}

@@ -64,7 +64,8 @@ pub const KUBECTL: Tool = Tool {
     pinned_env: PINNED_ENV,
     // The API's `NotFound` reason.
     not_found: &["(NotFound)"],
-    signed_out: &[],
+    // kubectl's words for a 401 from the API server (expired or missing credentials).
+    signed_out: &["You must be logged in to the server", "(Unauthorized)"],
     aliases: &[],
     version_args: &["version", "--client"],
 };
@@ -106,6 +107,21 @@ pub struct KubeTarget {
     pub container: Option<String>,
     /// The opv environment name: the `opv-managed` label value.
     pub env: String,
+}
+
+/// The API server for `ctx` answered 401 (kubectl: "You must be logged in to the
+/// server"): the kubeconfig's credentials for it are missing or expired, which only a new
+/// sign-in fixes. `failed` says what failed and what is known about the change.
+pub(crate) fn unauthorized(ctx: &str, failed: &str) -> Error {
+    Error::Auth(
+        format!(
+            "the Kubernetes API server for context \"{ctx}\" refused your credentials \
+             (Unauthorized: missing or expired); {failed}\n  sign in to the cluster again (your \
+             provider's credentials command, such as az aks get-credentials or gcloud container \
+             clusters get-credentials)"
+        )
+        .into(),
+    )
 }
 
 /// The store name for an env name: lower case, `_` → `-` (`FLEET__API__DB_URL` →
@@ -314,6 +330,9 @@ impl<'a> Kubectl<'a> {
             Effect::Read => "nothing was changed by this step",
             Effect::Write => "the change may or may not have been applied",
         };
+        if !reachable && crate::runner::last_failure_signed_out() {
+            return unauthorized(ctx, &format!("{what} failed ({why}); {preserved}"));
+        }
         if !reachable {
             return Error::Unknown(
                 format!(
@@ -323,7 +342,8 @@ impl<'a> Kubectl<'a> {
                  the cause; fix it, then re-run the same command"
                 )
                 .into(),
-            );
+            )
+            .with_code(crate::error::Code::ProviderUnavailable);
         }
         // A read that never answered after its retries (NR-28): after this run's first
         // write the run stopped half way (NR-2); before it, the provider is unavailable.
@@ -678,6 +698,29 @@ mod tests {
         assert!(
             err_text(&kubectl_get_deployment(&r).unwrap_err()).contains("provider unavailable")
         );
+    }
+
+    #[test]
+    fn unreachable_cluster_error_is_coded_provider_unavailable() {
+        let r =
+            FakeRunner::new(failed_read(1).chain([ok("context/kind-opv\n"), Output::failure(1)]));
+        assert_eq!(
+            kubectl_get_deployment(&r).unwrap_err().code(),
+            crate::error::Code::ProviderUnavailable
+        );
+    }
+
+    /// A 401 is a sign-in to redo, never an outage that re-running gets past.
+    #[test]
+    fn unauthorized_cluster_is_an_auth_error() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            "error: You must be logged in to the server (Unauthorized)\n",
+        );
+        r.push_with_stderr(ok("context/kind-opv\n"), "");
+        r.push_with_stderr(Output::failure(1), "");
+        assert!(matches!(kubectl_get_deployment(&r), Err(Error::Auth(_))));
     }
 
     #[test]

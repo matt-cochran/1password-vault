@@ -401,7 +401,7 @@ impl PinnedStore for KubeSecrets<'_> {
             Outcome::Done(out) => {
                 let echoed = text(&out, &what)?.trim();
                 if echoed != format!("secret/{secret}") {
-                    return Err(Error::Target(
+                    return Err(Error::Unknown(
                         format!(
                             "{what} did not confirm the secret it wrote; it may or may not \
                          exist and nothing else was changed\n  next: check with `{}`, then \
@@ -705,6 +705,14 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// "May or may not exist" is an unknown outcome (exit 9), not a target refusal.
+    #[test]
+    fn an_unconfirmed_apply_is_outcome_unknown() {
+        let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
+        let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap_err();
+        assert!(matches!(e, Error::Unknown(_)), "{e:?}");
     }
 
     #[test]

@@ -35,7 +35,7 @@ use serde::Deserialize;
 
 use crate::domain::plan::StoreEntry;
 use crate::domain::{SecretValue, Stamp};
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::ports::{PinnedStore, Store};
 use crate::runner::{CommandRunner, Outcome, Wait, unknown_text};
 
@@ -372,25 +372,54 @@ impl KeyVault<'_> {
         ];
         let wait = Wait::new(self.runner, ACCESS_WAIT);
         loop {
-            if let Outcome::Done(_) = invoke(
+            let outcome = invoke(
                 self.runner,
                 Effect::Read,
                 OP,
                 &self.scoped(&args),
                 None,
                 &[],
-            )? {
-                return Ok(());
+            )?;
+            // A vault that is gone never starts answering: said at once (S2).
+            let missing =
+                matches!(outcome, Outcome::Refused(_)) && crate::runner::last_failure_not_found();
+            if missing {
+                return Err(Error::Target(
+                    format!(
+                        "Key Vault {} was not found in the subscription (deleted, or a wrong \
+                         azure.key_vault or azure.subscription); nothing was changed",
+                        self.vault
+                    )
+                    .into(),
+                )
+                .with_do("check azure.key_vault and azure.subscription in secrets.toml"));
             }
+            let answered = match outcome {
+                Outcome::Done(_) => return Ok(()),
+                Outcome::Refused(_) => true,
+                Outcome::Unknown { status, .. } => status.is_some(),
+            };
             if wait.over(self.runner, ACCESS_POLL) {
                 let waited = wait.elapsed(self.runner);
-                return Err(Error::Auth(format!(
-                    "Key Vault {vault} still refuses this account after {secs} s; nothing was \
-                     changed; ask an owner to grant access, then re-run: az role assignment \
+                if !answered {
+                    // The last poll never answered: Azure or the network, not a grant.
+                    return Err(az::AZ_CLI.outage(OP));
+                }
+                return Err(Error::Target(
+                    format!(
+                        "Key Vault {vault} still refuses this account after {secs} s (Azure RBAC \
+                         or access policy, or a firewall that keeps this machine out); nothing \
+                         was changed",
+                        vault = self.vault,
+                        secs = waited.as_secs()
+                    )
+                    .into(),
+                )
+                .with_code(Code::PermissionDenied)
+                .with_do(
+                    "ask an owner to grant access, or to allow this network: az role assignment \
                      create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>",
-                    vault = self.vault,
-                    secs = waited.as_secs()
-                ).into()));
+                ));
             }
             let waited = wait.elapsed(self.runner) + ACCESS_POLL;
             wait.pause(
@@ -1343,16 +1372,36 @@ mod tests {
     }
 
     #[test]
-    fn write_without_access_after_five_minutes_is_auth_error_naming_the_role() {
+    fn write_without_access_after_five_minutes_is_permission_denied() {
         let polls = (0..21).flat_map(|_| crate::runner::fake::failed_read(1));
         let r = FakeRunner::new(failed_set().into_iter().chain(polls));
         let templates = names(&[]);
         let err = vault(&r, "prod", &templates)
             .write_one(NAME, &secret(), &stamp())
             .unwrap_err();
-        assert!(matches!(err, Error::Auth(m) if m.contains(
-            "az role assignment create --role \"Key Vault Secrets Officer\" --assignee <you> --scope <vault id>"
-        )));
+        assert_eq!(err.code(), Code::PermissionDenied);
+    }
+
+    #[test]
+    fn write_to_a_vault_that_is_gone_says_so_without_waiting() {
+        let r = FakeRunner::new(failed_set());
+        r.push_with_stderr(Output::failure(1), "ERROR: (ResourceNotFound) no vault\n");
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret(), &stamp())
+            .unwrap_err();
+        assert!(err.text().contains("was not found"), "{err:?}");
+    }
+
+    #[test]
+    fn write_whose_access_polls_never_answer_is_provider_unavailable() {
+        let r = FakeRunner::new(failed_set());
+        r.push_unknowns("timeout", 200);
+        let templates = names(&[]);
+        let err = vault(&r, "prod", &templates)
+            .write_one(NAME, &secret(), &stamp())
+            .unwrap_err();
+        assert_eq!(err.code(), Code::ProviderUnavailable);
     }
 
     #[test]

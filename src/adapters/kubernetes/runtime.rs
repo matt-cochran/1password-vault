@@ -191,6 +191,13 @@ const STALE_GRACE: Duration = Duration::from_secs(30);
 /// Time between ExternalSecret readiness polls (the operator syncs within seconds, E1).
 const READY_POLL: Duration = Duration::from_secs(2);
 
+/// The step for a deterministic refusal: opv's own data was not what it must be, so a
+/// person investigates and reports it rather than retrying blindly.
+const REPORT_BUG: &str = "opv refused rather than guess; this is unexpected and the same \
+    data refuses the same way: report it at \
+    https://github.com/matt-cochran/1password-vault/issues with the command and its \
+    --verbose output";
+
 /// The Secret each pinned name binds in opv's own Secrets mode: `opv-<store>-<version>`.
 fn native_secrets(change: &RuntimeChange) -> Result<BTreeMap<String, String>, Error> {
     change
@@ -202,12 +209,10 @@ fn native_secrets(change: &RuntimeChange) -> Result<BTreeMap<String, String>, Er
                     != Some((store.as_str(), version.as_str()))
             {
                 return Err(Error::Target(
-                    format!(
-                        "refusing to pin {name} to an invalid Secret version; nothing applied\n  \
-                     next: re-run the same command"
-                    )
-                    .into(),
-                ));
+                    format!("refusing to pin {name} to an invalid Secret version; nothing applied")
+                        .into(),
+                )
+                .with_do(REPORT_BUG));
             }
             Ok((name.clone(), secret_name(store, version)))
         })
@@ -452,10 +457,11 @@ impl<'a> KubeDeployment<'a> {
                 return Err(Error::Target(
                     format!(
                         "refusing to pin {name} to a store version that cannot name an \
-                     ExternalSecret; nothing applied\n  next: re-run the same command"
+                     ExternalSecret; nothing applied"
                     )
                     .into(),
-                ));
+                )
+                .with_do(REPORT_BUG));
             };
             let body = external::manifest(
                 t,
@@ -724,16 +730,19 @@ impl PinnedRuntime for KubeDeployment<'_> {
             ));
         }
         let mut doc = snapshot.spec.0.clone();
-        let rv =
-            doc.pointer("/metadata/resourceVersion")
-                .and_then(Value::as_str)
-                .map(String::from)
-                .ok_or_else(|| {
-                    Error::Target(format!(
-                    "deployment {d} has no resourceVersion; nothing applied\n  next: re-run \
-                     the same command"
-                ).into())
-                })?;
+        let rv = doc
+            .pointer("/metadata/resourceVersion")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| {
+                Error::Target(
+                    format!("deployment {d} has no resourceVersion; nothing applied").into(),
+                )
+                .with_do(format!(
+                    "check the deployment as the API server returns it ({}); {REPORT_BUG}",
+                    self.k.command(&format!("get deployment {d} -o yaml"))
+                ))
+            })?;
         let i = container_index(&doc, t)?;
         let secrets = match &self.external {
             None => native_secrets(change)?,
@@ -1208,6 +1217,15 @@ mod tests {
         c.pin.insert("K7".into(), ("k7".into(), "../x".into()));
         let r = FakeRunner::default();
         assert!(with_rt(&r, |rt| rt.apply(&c, &snapshot())).is_err());
+    }
+
+    #[test]
+    fn an_invalid_version_refusal_says_to_report_it() {
+        let mut c = change();
+        c.pin.insert("K7".into(), ("k7".into(), "../x".into()));
+        let r = FakeRunner::default();
+        let e = with_rt(&r, |rt| rt.apply(&c, &snapshot())).unwrap_err();
+        assert!(e.action().is_some_and(|a| a.contains("report it")), "{e:?}");
     }
 
     #[test]

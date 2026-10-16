@@ -986,7 +986,9 @@ fn staged_not_deployed() -> FakeRunner {
 fn expect_plan_rerun_after_an_interrupted_deploy_succeeds() {
     let id = fly_plan_id(&fleet());
     let first = new_secrets();
-    first.responses.borrow_mut().truncate(8);
+    // Item, list A, two preflight reads, import, list B, then the receipt's `op whoami`
+    // (it names no account here, so no receipt is minted); the deploy is cut off.
+    first.responses.borrow_mut().truncate(7);
     first.push_unknown("timeout");
     let o = SyncOpts {
         deploy: true,

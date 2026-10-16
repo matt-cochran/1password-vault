@@ -34,11 +34,13 @@ use crate::runner::CommandRunner;
 const VALIDITY_DAYS: u32 = 90;
 
 /// The target `name` of environment `env`, or a configuration error naming it.
+/// A misspelt name is a usage error listing the targets ([`super::target`]); `no_target`
+/// is kept for an environment that has none.
 fn target_of<'a>(fleet: &'a Fleet, env: &str, name: &str) -> Result<&'a Target, Error> {
-    let environment = fleet.environment(env)?;
+    let (environment, _) = super::target(fleet, env, name)?;
     environment.targets.get(name).ok_or_else(|| {
         Error::Config(format!("environment {env}: no target named {name:?}").into())
-            .with_code(Code::NoTarget)
+            .with_code(Code::Usage)
     })
 }
 
@@ -47,14 +49,18 @@ fn cannot_mint(provider: &dyn Provider, env: &str, name: &str) -> Error {
     Error::Policy(
         format!(
             "{} targets do not mint deploy credentials here; create the credential at the \
-             provider and record its item with deploy_credentials (opv target add \
-             --deploy-credentials, or opv config edit)",
+             provider and record its item as deploy_credentials on the target (opv config \
+             edit)",
             provider.label()
         )
         .into(),
     )
     .with_code(Code::PolicyRefused)
-    .with_next(format!("opv explain --env {env} --target {name}"))
+    .with_do(format!(
+        "create the credential at the provider and store it in a 1Password item, then add \
+         deploy_credentials = \"op://<vault>/<item>\" under [environments.{env}.targets.{name}]"
+    ))
+    .with_next("opv config edit")
 }
 
 /// The current state: whether the target records `deploy_credentials`, and which provider
@@ -72,17 +78,40 @@ pub fn show(
         Some(item) => item.to_string(),
         None => "none".to_string(),
     };
-    let mint = match provider.mint_preflight(r) {
+    let preflight = provider.mint_preflight(r);
+    let mint = match &preflight {
         Some(Ok(())) => format!("{} can mint one (signed in)", provider.label()),
         Some(Err(_)) => format!("{} can mint one (sign in first)", provider.label()),
         None => format!("{} cannot mint one here", provider.label()),
     };
     writeln!(out, "{env}/{name}: deploy_credentials {recorded}; {mint}").map_err(write_err)?;
-    writeln!(
-        out,
-        "Next: opv target credentials {env} --target {name} --create"
-    )
-    .map_err(write_err)
+    let create = format!(
+        "opv target credentials {} --target {} --create",
+        crate::error::shell_word(env),
+        crate::error::shell_word(name)
+    );
+    // The one step that can work from here: `--create` refuses a recorded credential and a
+    // provider that cannot mint, and needs the provider's sign-in first.
+    let step = if target.deploy_credentials.is_some() {
+        crate::error::Step {
+            action: None,
+            next: format!(
+                "opv doctor --env {} --target {}",
+                crate::error::shell_word(env),
+                crate::error::shell_word(name)
+            ),
+        }
+    } else {
+        match preflight {
+            Some(Ok(())) => crate::error::Step {
+                action: None,
+                next: create,
+            },
+            Some(Err(e)) => e.step(&create, &create),
+            None => cannot_mint(provider, env, name).step(&create, &create),
+        }
+    };
+    write!(out, "{}", crate::error::step_lines(&step)).map_err(write_err)
 }
 
 /// Mint and store the credential, then record its reference on the target.
@@ -104,14 +133,14 @@ pub fn run(
         return Err(Error::Policy(
             format!(
                 "{} in {env} already has deploy_credentials; rotating one is a separate \
-                 reviewed step. Mint a new credential at the provider, then record it with \
-                 opv target add --deploy-credentials.",
+                 reviewed step. Mint a new credential at the provider, then record its item \
+                 as deploy_credentials on the target (opv config edit).",
                 target.name
             )
             .into(),
         )
         .with_code(Code::PolicyRefused)
-        .with_next(format!("opv explain --env {env} --target {name}")));
+        .with_next("opv config edit"));
     }
     // The capability gate and the provider's own read-only check, before asking anything.
     match provider.mint_preflight(r) {

@@ -726,6 +726,8 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `item_changed` | 4 | after_fix | yes | opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history) |
 | `inventory_incomplete` | 4 | after_fix | yes | one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist |
 | `target_error` | 5 | after_fix | no | the target (Fly, Azure, Kubernetes) refused or failed |
+| `permission_denied` | 5 | after_fix | yes | signed in to the target, but this identity lacks a role or right there (or a network rule keeps it out); a person with access grants it |
+| `owner_setup_required` | 5 | after_fix | yes | the target lacks something only its owner sets up (a GitHub environment and its protection rules); a person creates it |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
 | `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |
 | `policy_refused` | 6 | after_fix | no | opv refused the operation |
@@ -734,7 +736,7 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `confirm_required` | 6 | never | yes | the environment sets confirm_env; pass --confirm <env> |
 | `confirm_mismatch` | 6 | never | no | --confirm names another environment |
 | `stale_plan` | 6 | never | no | sync --expect-plan: the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed; review the new plan |
-| `ram_dir_unavailable` | 6 | after_fix | no | deploy credentials for Azure need a private RAM-backed directory (XDG_RUNTIME_DIR on Linux, %LOCALAPPDATA%\Temp on Windows) and none is usable; nothing was read or changed |
+| `ram_dir_unavailable` | 6 | after_fix | no | Azure deploy credentials, or a file opv run delivers locally, need a private RAM-backed directory (XDG_RUNTIME_DIR on Linux, %LOCALAPPDATA%\Temp on Windows) and none is usable; nothing was read or changed |
 | `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
 | `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
 | `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
@@ -749,8 +751,8 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer after its retries; nothing was changed |
 | `interrupted` | 130/143 | safe | no | interrupted by SIGINT (130) or SIGTERM (143); re-running is safe |
-| `tidy_conflict` | 4 | safe | no | the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); never a failure: reported in a document's tidy_error while the command reads the item as it is |
-| `tidy_unverified` | 4 | after_fix | yes | opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; never a failure: reported in a document's tidy_error |
+| `tidy_conflict` | 4 | safe | no | the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); a read reports it in its document's tidy_error and goes on with the item as it is, and opv tidy fails with it |
+| `tidy_unverified` | 4 | after_fix | yes | opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; a read reports it in its document's tidy_error and goes on, and opv tidy fails with it |
 <!-- error-codes:end -->
 
 `opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); `target add`'s provider options (`--fly-app`, `--azure-key-vault`, `--kubernetes-context`, ...), each with its `provider` and `required_for_provider` (required for that provider); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:

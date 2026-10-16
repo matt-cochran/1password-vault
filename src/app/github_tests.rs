@@ -752,8 +752,9 @@ fn missing_environment_offers_the_create_command() {
         .0
         .unwrap_err();
     assert!(
-        err.mentions("gh api -X PUT repos/example-org/a/environments/staging"),
-        "{err}"
+        err.action()
+            .is_some_and(|a| a.contains("gh api -X PUT repos/example-org/a/environments/staging")),
+        "{err:?}"
     );
 }
 

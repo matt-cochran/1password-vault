@@ -93,11 +93,17 @@ pub(crate) fn missing_environment_error(repo: &str, environment: &str) -> Error 
         format!(
             "GitHub environment {environment:?} is missing from repository {repo}; nothing \
              was changed\n  opv never creates GitHub environments because their protection \
-             rules are the owner's decision\n  next: {PROGRAM} api -X PUT \
-             repos/{repo}/environments/{environment}"
+             rules are the owner's decision"
         )
         .into(),
     )
+    .with_code(crate::error::Code::OwnerSetupRequired)
+    // A person decides, so the command is theirs to run, never an agent's `Next:`.
+    .with_do(format!(
+        "the repository owner creates the environment and sets its protection rules \
+         (repository Settings > Environments, or {PROGRAM} api -X PUT \
+         repos/{repo}/environments/{environment})"
+    ))
 }
 
 /// GitHub as both staged ports (FR-28, FR-46). Each method is the [`gh`] function of the

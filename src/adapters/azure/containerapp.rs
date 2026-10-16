@@ -118,6 +118,8 @@ pub struct ContainerApp<'a> {
     /// `latestRevisionName` just before the update, to tell a refused update from one
     /// whose outcome is unknown (NR-2).
     before_update: RefCell<Option<String>>,
+    /// The opv environment this app serves, for the commands an error names.
+    env: Option<&'a str>,
 }
 
 impl<'a> ContainerApp<'a> {
@@ -134,7 +136,24 @@ impl<'a> ContainerApp<'a> {
             wait_max: WAIT_MAX,
             applied_from: RefCell::new(None),
             before_update: RefCell::new(None),
+            env: None,
         }
+    }
+
+    /// The opv environment this app serves, named in the `opv plan` an error suggests.
+    pub fn for_env(mut self, env: &'a str) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    /// `opv plan <env>`, the read-only review an error points to.
+    fn plan_command(&self) -> String {
+        format!(
+            "opv plan {}",
+            self.env
+                .map(crate::error::shell_word)
+                .unwrap_or_else(|| "<env>".into())
+        )
     }
 
     /// Replaces the health-poll interval and limit ([`POLL_EVERY`], [`WAIT_MAX`]).
@@ -668,8 +687,9 @@ impl PinnedRuntime for ContainerApp<'_> {
             return Err(Error::Config(
                 format!(
                     "{name} is not a managed env name of container app {}; nothing was changed\n  \
-                 next: run opv plan to see the managed names, then run opv again",
-                    self.app()
+                 next: run {} to see the managed names, then run opv again",
+                    self.app(),
+                    self.plan_command()
                 )
                 .into(),
             ));
@@ -681,10 +701,11 @@ impl PinnedRuntime for ContainerApp<'_> {
             return Err(Error::Target(
                 format!(
                     "container app {} changed outside opv since it was read ({}); nothing was \
-                 changed\n  next: run opv plan to review the app as it is now, then run the \
+                 changed\n  next: run {} to review the app as it is now, then run the \
                  same command again",
                     self.app(),
-                    self.changed_paths(&snapshot.spec.0, &fresh.spec.0)?
+                    self.changed_paths(&snapshot.spec.0, &fresh.spec.0)?,
+                    self.plan_command()
                 )
                 .into(),
             ));
@@ -1735,6 +1756,20 @@ mod tests {
         c.set.insert("OTHER".into(), NEW_CONFIG.into());
         let (_, res) = apply_on(&show(), &show(), &c);
         assert!(matches!(res, Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn a_refused_unmanaged_name_names_the_plan_of_its_environment() {
+        let mut c = no_change();
+        c.set.insert("OTHER".into(), NEW_CONFIG.into());
+        let snap = snapshot_of(&show());
+        let (t, m) = (target(), managed());
+        let r = FakeRunner::default();
+        let e = adapter(&r, &t, &m)
+            .for_env("prod")
+            .apply(&c, &snap)
+            .unwrap_err();
+        assert!(e.mentions("opv plan prod "), "{e:?}");
     }
 
     #[test]

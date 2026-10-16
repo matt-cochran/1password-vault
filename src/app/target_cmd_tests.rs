@@ -266,6 +266,15 @@ fn a_duplicate_target_name_is_refused_naming_it() {
 }
 
 #[test]
+fn a_duplicate_target_name_points_to_config_edit() {
+    let a = add_to(WITH_TARGET, add_args("dev", "site"));
+    assert_eq!(
+        a.res.as_ref().unwrap_err().next_step(),
+        Some("opv config edit")
+    );
+}
+
+#[test]
 fn a_duplicate_target_name_writes_nothing() {
     let a = add_to(WITH_TARGET, add_args("dev", "site"));
     assert_eq!(a.text(), WITH_TARGET);

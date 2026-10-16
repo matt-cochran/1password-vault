@@ -385,3 +385,51 @@ fn show_names_the_next_command() {
             .contains("Next: opv target credentials staging --target web --create")
     );
 }
+
+fn shown(fleet: &Fleet, w: &World) -> String {
+    let mut out = Vec::new();
+    show(fleet, "staging", "web", w, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn show_never_suggests_create_when_credentials_are_recorded() {
+    let w = World::new();
+    assert!(!shown(&fleet(Some(RECORDED_REFERENCE)), &w).contains("--create"));
+}
+
+#[test]
+fn show_names_the_provider_sign_in_before_create() {
+    let mut w = World::new();
+    w.fly_signed_in = false;
+    assert!(shown(&fleet(None), &w).contains("Do: log in: flyctl auth login"));
+}
+
+#[test]
+fn show_never_suggests_create_where_the_provider_cannot_mint() {
+    let w = World::new();
+    let mut out = Vec::new();
+    show(&github_fleet(), "staging", "web", &w, &mut out).unwrap();
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("Next: opv config edit")
+    );
+}
+
+#[test]
+fn a_recorded_credential_refusal_points_to_config_edit() {
+    let w = World::new();
+    let deploy = Some(RECORDED_REFERENCE);
+    let (_d, path) = file(&fleet_text(deploy));
+    let (res, _, _) = create(&w, &fleet(deploy), &path, true);
+    assert_eq!(res.unwrap_err().next_step(), Some("opv config edit"));
+}
+
+#[test]
+fn a_misspelt_target_is_a_usage_error() {
+    let w = World::new();
+    let mut out = Vec::new();
+    let e = show(&fleet(None), "staging", "wbe", &w, &mut out).unwrap_err();
+    assert_eq!(e.code(), Code::Usage);
+}

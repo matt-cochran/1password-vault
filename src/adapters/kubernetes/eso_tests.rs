@@ -124,6 +124,8 @@ struct World {
     cluster_store: Option<Value>,
     /// The operator serves external-secrets.io/v1.
     operator: bool,
+    /// This identity may not read API discovery (a 403 on every `get --raw`).
+    forbid_discovery: bool,
     /// `auth can-i create externalsecrets` answers yes.
     may_create: bool,
     /// The store's identity cannot read anything (every sync fails, E3).
@@ -234,6 +236,7 @@ impl Sim {
                 reads_before_sync: 1,
                 cluster_store: Some(ready_store()),
                 operator: true,
+                forbid_discovery: false,
                 may_create: true,
                 denied: false,
                 keep_history: true,
@@ -443,6 +446,14 @@ impl Sim {
                 "groupVersion": "external-secrets.io/v1",
                 "resources": [{"name": "externalsecrets"}, {"name": "clustersecretstores"}],
             })),
+            // API discovery: the operator's group is listed only when it is installed.
+            ["get", "--raw", "/apis"] if !w.forbid_discovery => {
+                let mut groups = vec![json!({"name": "apps"})];
+                if w.operator {
+                    groups.push(json!({"name": "external-secrets.io"}));
+                }
+                ok_json(&json!({"kind": "APIGroupList", "groups": groups}))
+            }
             ["get", "--raw", _] => Output::failure(1),
             // The operator's events (diagnosis only): none recorded here.
             ["get", "events", "--field-selector", _, "-o", "json"] => {
@@ -1015,7 +1026,7 @@ fn operator_not_installed_is_a_dependency_error() {
 #[test]
 fn identity_that_cannot_create_external_secrets_is_refused_before_any_write() {
     let (sim, e) = refused(|w| w.may_create = false);
-    assert!(sim.writes() == 0 && e.exit_code() == 7, "{e}");
+    assert!(sim.writes() == 0 && e.exit_code() == 5, "{e}");
 }
 
 // ---- SecretSyncedError (E3) ----
@@ -1211,6 +1222,16 @@ fn doctor_checks_the_key_vault_of_the_store() {
         out.contains("ok    key vault: kv-opv-fixture answers at"),
         "{out}"
     );
+}
+
+/// A refused discovery read (403) is not proof that the operator is missing.
+#[test]
+fn a_forbidden_discovery_read_is_never_reported_as_a_missing_operator() {
+    let (_, e) = refused(|w| {
+        w.operator = false;
+        w.forbid_discovery = true;
+    });
+    assert_eq!(e.code(), crate::error::Code::PermissionDenied);
 }
 
 #[test]

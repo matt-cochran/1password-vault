@@ -408,7 +408,17 @@ fn read_failure(r: &dyn CommandRunner, what: &str, subject: &str, status: i32) -
     }
     let host = Host::detect();
     match crate::runner::diagnosing(|| auth_status(r)) {
-        Ok(true) => Error::Target(format!("{failed} for {subject}").into()),
+        // Signed in and not a 404: the token or account lacks a right on the repository,
+        // or GitHub refused the request itself (gh said why above).
+        Ok(true) => Error::Target(
+            format!(
+                "{failed} for {subject}: signed in to GitHub\n  check that this sign-in can \
+                 read and write Actions secrets and variables on {subject} (a fine-grained \
+                 token needs Secrets and Variables write; an account needs admin or write \
+                 access)"
+            )
+            .into(),
+        ),
         Ok(false) => not_signed_in(&host, Some(&failed)),
         Err(_) => Error::Target(
             format!("{failed} for {subject}; run `{PROGRAM} auth status` to see why").into(),
