@@ -1333,9 +1333,44 @@ fn the_product_advice_steps_to_init_help() {
     );
 }
 
+/// R2-4: a field the file does not hold came from opv's proposal.
+#[test]
+fn an_invalid_field_missing_from_the_file_is_marked_as_from_the_proposal() {
+    let e = would_write(Some("[environments.dev]\n"))(
+        config::parse("[environments.dev]\nbogus = 1\n").unwrap_err(),
+    );
+    assert!(matches!(
+        e.cause(),
+        Some((
+            crate::cause::Cause::ConfigProposalInvalid {
+                from_proposal: true,
+                ..
+            },
+            _
+        ))
+    ));
+}
+
+/// R2-4: a field the file already holds is the file's own.
+#[test]
+fn an_invalid_field_already_in_the_file_is_not_from_the_proposal() {
+    let file = "[environments.dev]\nbogus = 1\n";
+    let e = would_write(Some(file))(config::parse(file).unwrap_err());
+    assert!(matches!(
+        e.cause(),
+        Some((
+            crate::cause::Cause::ConfigProposalInvalid {
+                from_proposal: false,
+                ..
+            },
+            _
+        ))
+    ));
+}
+
 #[test]
 fn an_invalid_proposed_configuration_says_nothing_was_written() {
     // F2: text opv generated that fails validation is `ConfigProposalInvalid`.
-    let e = would_write(config::parse("[environments.dev]\nbogus = 1\n").unwrap_err());
+    let e = would_write(None)(config::parse("[environments.dev]\nbogus = 1\n").unwrap_err());
     assert!(e.to_string().contains("nothing was written"), "{e}");
 }

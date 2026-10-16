@@ -540,7 +540,7 @@ fn prepare(
     let ids = (vault.id.as_str(), item.id.as_str());
     let text = render(args, ids, &decl);
     // Validated exactly like a hand-written file (§10.2): IDs, key and product names.
-    let fleet = config::parse(&text).map_err(would_write)?;
+    let fleet = config::parse(&text).map_err(would_write(None))?;
     Ok(Prepared {
         vault,
         item,
@@ -700,7 +700,29 @@ fn write_json(
 }
 
 /// A configuration error in text opv generated: say so, and that nothing was written.
-fn would_write(e: Error) -> Error {
+/// `base` is the file the proposal changes (`None` when opv proposes the whole file): a field
+/// not in it came from the proposal (R2-4).
+fn would_write(base: Option<&str>) -> impl Fn(Error) -> Error + '_ {
+    move |e| proposal_invalid(e, base)
+}
+
+/// Whether the TOML `text` holds the field at `path`.
+fn holds_field(text: &str, path: &[String]) -> bool {
+    let Ok(doc) = text.parse::<toml::Table>() else {
+        return false;
+    };
+    let mut at = Some(&doc);
+    let (last, parents) = match path.split_last() {
+        Some(split) => split,
+        None => return false,
+    };
+    for part in parents {
+        at = at.and_then(|t| t.get(part)).and_then(toml::Value::as_table);
+    }
+    at.is_some_and(|t| t.contains_key(last))
+}
+
+fn proposal_invalid(e: Error, base: Option<&str>) -> Error {
     // F2: an invalid field in the proposed text is `ConfigProposalInvalid` (nothing written).
     if let Some((
         crate::cause::Cause::ConfigInvalid {
@@ -716,6 +738,7 @@ fn would_write(e: Error) -> Error {
             source: source.clone(),
             field: field.clone(),
             rule: rule.clone(),
+            from_proposal: base.is_none_or(|text| !holds_field(text, &field.0)),
         }
         .into();
     }
@@ -1207,7 +1230,7 @@ fn add_env_on(
         .collect();
 
     let text = doc.to_string();
-    store.parse(&text).map_err(would_write)?;
+    store.parse(&text).map_err(would_write(Some(original)))?;
     crate::config_store::save(store, r, &base, &text)?;
 
     // Typed (§10.1): the declaring `opv add`, else the check of what was added.

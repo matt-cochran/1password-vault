@@ -83,8 +83,9 @@ pub enum ConfigCheck {
     SourceOnlyWithoutKeys { product: String },
     /// A target lists a source-only product.
     SourceOnlyListed { product: String },
-    /// A recorded boundary no product with a key in the environment lives in.
-    BoundaryUnused { env: String },
+    /// A recorded boundary no product with a key in the environment lives in. `products`
+    /// are the products that live in it (their keys are not declared for `env`).
+    BoundaryUnused { env: String, products: Vec<String> },
     /// A delivery item for a product the target does not deliver.
     DeliveryItemUndelivered { product: String },
     /// A personal key declared for an environment with a deployment target.
@@ -212,7 +213,7 @@ impl ConfigCheck {
             SourceOnlyListed { product } => {
                 format!("lists product {product}, which is source-only and never delivered")
             }
-            BoundaryUnused { env } => {
+            BoundaryUnused { env, .. } => {
                 format!("is recorded, but no product with a key in {env} lives in it")
             }
             DeliveryItemUndelivered { product } => {
@@ -323,6 +324,28 @@ impl ConfigCheck {
         format!("{field} {p}")
     }
 
+    /// The edit that fixes it when the field is in opv's proposed change, not in the file
+    /// (R2-4): only what the person can change, never the proposed field itself. `None` when
+    /// [`ConfigCheck::fix`] already names only that.
+    pub fn proposal_fix(&self, field: &str) -> Option<String> {
+        match self {
+            ConfigCheck::BoundaryUnused { env, products } => {
+                let leaf = field.rsplit('.').next().unwrap_or(field);
+                Some(match products.as_slice() {
+                    [] => format!("declare keys for {env} in a product whose boundary is {leaf}"),
+                    [one] => format!(
+                        "declare product {one}'s keys for {env}: add \"{env}\" to their environments"
+                    ),
+                    many => format!(
+                        "declare the keys of product {} for {env}: add \"{env}\" to their environments",
+                        super::render::one_of(many)
+                    ),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The edit that fixes it.
     pub fn fix(&self, field: &str) -> String {
         use ConfigCheck::*;
@@ -374,7 +397,7 @@ impl ConfigCheck {
                 "remove {product} from {field}; list the products whose keys point at it with \
                  from"
             ),
-            BoundaryUnused { env } => {
+            BoundaryUnused { env, .. } => {
                 format!("remove {field}, or declare that product's keys for {env}")
             }
             DeliveryItemUndelivered { .. } => format!("remove {field}"),

@@ -786,6 +786,9 @@ pub enum Cause {
         source: ConfigSource,
         field: DottedPath,
         rule: FieldRule,
+        /// The field is in opv's proposed change only, not in the file it changes: the
+        /// person cannot remove it, so the Do names only what they can change (R2-4).
+        from_proposal: bool,
     },
     /// An input file (a dotenv file, a setup recipe, a receipt) could not be read (F4).
     InputUnreadable {
