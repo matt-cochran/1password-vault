@@ -464,10 +464,17 @@ fn the_plans_next_quotes_a_path_with_a_space() {
 // 05.10 (S2): a read-back failure names the command that wrote ---------------------------
 
 #[test]
-fn a_read_back_failure_of_adopt_names_its_plan() {
-    let by = plan_command("dev", &Source::Target("web".into()));
+fn a_read_back_failure_of_adopt_names_the_apply_command() {
+    let opts = Opts {
+        source: Source::Target("web".into()),
+        replace: Vec::new(),
+        rotate: Vec::new(),
+        skip: Vec::new(),
+        apply: false,
+        json: false,
+    };
     assert_eq!(
-        crate::cause::render::cmd_text(&by),
-        "opv adopt dev --from target:web"
+        crate::cause::render::cmd_text(&apply_command("dev", &opts)),
+        "opv adopt dev --from target:web --apply"
     );
 }
