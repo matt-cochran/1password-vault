@@ -1,0 +1,1095 @@
+//! The error catalog (design `docs/design/error-catalog.md`): every failure opv reports is a
+//! [`Cause`] — a closed set of variants whose fields are typed subjects ([`subject`]) — plus
+//! optional [`Upstream`] evidence. The stable `code`, the exit code and the retry class are
+//! derived here from the variant; the message, Do and Next are rendered by `render` from the
+//! same variant, so nothing about a failure is written as free text at a call site.
+//!
+//! This module is the contract the rest of the catalog builds against: the types and their
+//! derived classifications. Rendering (`render`, `evidence`) and steps (`step`) are separate
+//! modules.
+
+pub mod subject;
+
+use std::path::PathBuf;
+
+use crate::error::Retry;
+pub use subject::*;
+
+// --- external calls ------------------------------------------------------------------------
+
+/// Which external call failed: the program and its subcommand words, names only (never a
+/// value, never `op run`'s child arguments). Rendered in the evidence's `checked:` line.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct CallId {
+    pub system: System,
+    /// The program as run (`op`, `flyctl`, `az`, `kubectl`, `gh`, `ssh`).
+    pub program: String,
+    /// Subcommand words and identifier arguments (`vault get <vault id>`), names only.
+    pub words: Vec<String>,
+}
+
+/// What the runner observed about one failed call. Only the runner builds one, for a call it
+/// actually made and that failed (design §5 "Sealing"): external-system variants carry it, so
+/// a call site that made no call cannot build an external cause. The constructor is
+/// crate-visible and its single legitimate caller is the runner; a guard test enforces that.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Observed {
+    call: CallId,
+    exit: ExitClass,
+    /// Who was acting when the call failed (person, deploy credentials, a shell token).
+    principal: Principal,
+    #[serde(skip)]
+    _sealed: (),
+}
+
+impl Observed {
+    /// For the runner only (see the type's documentation).
+    #[doc(hidden)]
+    #[allow(dead_code)] // its one caller, the runner, arrives with `runner-observed`
+    pub(crate) fn from_failed_call(call: CallId, exit: ExitClass, principal: Principal) -> Self {
+        Self {
+            call,
+            exit,
+            principal,
+            _sealed: (),
+        }
+    }
+    pub fn call(&self) -> &CallId {
+        &self.call
+    }
+    pub fn exit(&self) -> ExitClass {
+        self.exit
+    }
+    pub fn principal(&self) -> &Principal {
+        &self.principal
+    }
+}
+
+/// How a failed call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExitClass {
+    Code { code: i32 },
+    Signal { signal: i32 },
+    TimedOut,
+    SpawnFailed,
+}
+
+/// The upstream tool's reply, shown in the evidence box (§7.3). Scrubbed and stripped before
+/// it is stored here; marked untrusted in every channel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Upstream {
+    pub source: System,
+    /// "1Password CLI", "Fly API via flyctl", …
+    pub tool: String,
+    pub version: Option<String>,
+    pub exit: ExitClass,
+    /// The error line plus the tail (all lines under `--verbose`), already scrubbed.
+    pub said: Vec<String>,
+    /// The vendor's own advice was cut (it conflicts with opv's steps).
+    pub removed_advice: bool,
+    /// Always true: third-party text is data, never instructions.
+    pub untrusted: bool,
+}
+
+// --- steps -----------------------------------------------------------------------------------
+
+/// The command line the person (or an MCP tool call) ran, as parsed. `Rerun` renders it
+/// exactly, with every flag; arguments after `--` are opaque and never rendered (design §6.1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct Invocation {
+    pub origin: Origin,
+    /// Subcommand path (`["run"]`, `["target", "add"]`).
+    pub command: Vec<String>,
+    /// Every flag and positional argument before `--`, in order, as the person gave them.
+    pub args: Vec<String>,
+    /// The person passed a child command after `--` (run, login); never rendered.
+    pub has_child: bool,
+}
+
+/// Where the invocation came from.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+    #[default]
+    Cli,
+    Mcp {
+        tool: String,
+    },
+}
+
+/// One opv command a step names: the subcommand path plus arguments. `step::to_argv`
+/// round-trips it through the real clap definition (tested for every renderable step).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Cmd {
+    pub command: Vec<String>,
+    pub args: Vec<String>,
+}
+
+/// A vendor command a step names (a sign-in, an install, a pinned connectivity check).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VendorCmd {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// What to run next (design §6).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "command", rename_all = "snake_case")]
+pub enum Next {
+    /// The invocation as typed, every flag kept.
+    Rerun,
+    /// An opv command opv built.
+    Run(Cmd),
+    /// A read that answers "did it happen?" or "what remains?".
+    Check(Cmd),
+    /// Only a person runs it (approve, `--confirm`, login in their own terminal).
+    Handoff(Cmd),
+    /// A typed vendor command.
+    Vendor(VendorCmd),
+    /// No command: the person decides (for example, which copy of a configuration wins).
+    None(NoNext),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoNext {
+    PersonPicksDirection,
+    NothingToRun,
+}
+
+/// What must be done before Next, typed so `human_required` can be derived (design §6.3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Action {
+    /// Fill a value in 1Password.
+    FillValue {
+        product: ProductName,
+        key: KeyName,
+        env: EnvName,
+    },
+    /// A grant someone with access must make.
+    Grant {
+        principal: Principal,
+        resource: ResourceRef,
+        grant: GrantModel,
+    },
+    /// Sign in at a vendor (typed command shown as the step).
+    SignIn {
+        system: System,
+        account: Option<AccountId>,
+    },
+    /// Unlock the 1Password app and approve its prompt.
+    UnlockApp,
+    /// Add an account (in the app or at op's prompt).
+    AddAccount { account: AccountRef },
+    /// Pick between candidates that only a person can tell apart.
+    PickBetween,
+    /// Approve a plan in the person's own terminal.
+    Approve { plan: PlanId },
+    /// Confirm the environment.
+    Confirm { env: EnvName },
+    /// Revoke an orphan whose secret was never stored.
+    Revoke { kind: CreateKind, name: String },
+    /// Owner setup at a provider (a GitHub environment, an operator).
+    OwnerSetup { object: ResourceRef },
+    /// Unset an overriding variable for the command.
+    Unset { var: VarName },
+    /// Change a file's mode.
+    Chmod { path: PathBuf, mode: u32 },
+    /// Edit a configuration field.
+    EditConfig {
+        source: ConfigSource,
+        field: DottedPath,
+    },
+    /// Install or update a tool.
+    Install { tool: String },
+    /// Free of person-only meaning: check something named by the subject.
+    Inspect,
+}
+
+impl Action {
+    /// True when only a person may do it (design §6.3).
+    pub fn person_only(&self) -> bool {
+        matches!(
+            self,
+            Action::FillValue { .. }
+                | Action::Grant { .. }
+                | Action::SignIn { .. }
+                | Action::UnlockApp
+                | Action::AddAccount { .. }
+                | Action::PickBetween
+                | Action::Approve { .. }
+                | Action::Confirm { .. }
+                | Action::Revoke { .. }
+                | Action::OwnerSetup { .. }
+        )
+    }
+}
+
+// --- the catalog ----------------------------------------------------------------------------
+
+/// Why a configuration field is invalid (§4.12); the Do is built from (field, rule).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "rule", rename_all = "snake_case")]
+pub enum FieldRule {
+    Syntax,
+    Pattern {
+        id: &'static str,
+    },
+    Reserved {
+        set: Vec<String>,
+    },
+    Empty,
+    Type {
+        expected: &'static str,
+    },
+    Unknown {
+        suggestion: Option<String>,
+    },
+    Missing,
+    ConflictsWith {
+        field: DottedPath,
+    },
+    DuplicateKey,
+    RemovedForm {
+        form: &'static str,
+        replacement: String,
+    },
+    NoEnvironment,
+    ModeUnmapped {
+        env: EnvName,
+        mode: String,
+        allowed: Vec<String>,
+    },
+    Collision {
+        rendered: String,
+        other: DottedPath,
+    },
+}
+
+/// What a `NotFound` resource's state is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotFoundState {
+    Missing,
+    SoftDeleted,
+    LocalContextMissing,
+}
+
+/// Why the 1Password or target session is missing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SessionState {
+    SignedOut,
+    Expired,
+    AppLocked,
+    AppPromptUnanswered {
+        waited_seconds: u64,
+    },
+    /// A live session exists, but for another account on the same sign-in address (#160).
+    OtherAccount {
+        live: AccountId,
+    },
+}
+
+/// Why a provider didn't answer (reads only).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum Unanswered {
+    Timeout,
+    RateLimited { retry_after_seconds: Option<u64> },
+    ServerError { status: u16 },
+    Network,
+}
+
+/// How opv will find a possibly-created object again (X5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "check", rename_all = "snake_case")]
+pub enum Refind {
+    /// opv finds it again by title on the next run: re-running is safe.
+    ByTitle,
+    /// A person checks with this command before anything is re-created.
+    Check(Cmd),
+}
+
+/// Every failure opv reports. Grouped as in design §4.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "cause", rename_all = "snake_case")]
+pub enum Cause {
+    // §4.1 configuration
+    ConfigNotFound {
+        searched_from: PathBuf,
+        env: Option<EnvName>,
+    },
+    ConfigSourceMismatch {
+        command: CommandId,
+        manifest: String,
+    },
+    ConfigUnreadable {
+        path: PathBuf,
+        io: IoKind,
+        given_by: GivenBy,
+    },
+    ConfigInvalid {
+        source: ConfigSource,
+        at: Option<Location>,
+        field: DottedPath,
+        rule: FieldRule,
+    },
+    BoundaryMissing {
+        env: EnvName,
+        product: ProductName,
+        source: ConfigSource,
+    },
+    StateVaultMissing {
+        env: EnvName,
+        target: TargetName,
+        source: ConfigSource,
+    },
+    StateVaultTooWide {
+        env: EnvName,
+        target: TargetName,
+        vault: VaultId,
+        shared_with: Vec<TargetName>,
+    },
+    ConfigNotEditable {
+        source: ConfigSource,
+        reason: NotEditable,
+    },
+    CopiesDiffer {
+        file: PathBuf,
+        manifest: String,
+    },
+    ManifestNotFound {
+        project: String,
+        account: Option<AccountId>,
+    },
+    ManifestAmbiguous {
+        candidates: Vec<String>,
+        person_picks: bool,
+    },
+    ManifestExists {
+        title: String,
+        local_file: Option<PathBuf>,
+    },
+    InventoryIncomplete {
+        unlisted: Vec<AccountId>,
+    },
+
+    // §4.2 names and usage
+    NotDeclared {
+        kind: NameKind,
+        given: String,
+        candidates: Vec<String>,
+        closest: Option<Closest>,
+    },
+    Ambiguous {
+        kind: NameKind,
+        given: String,
+        candidates: Vec<String>,
+    },
+    ChoiceRequired {
+        flag: String,
+        candidates: Vec<String>,
+    },
+    NothingInScope {
+        env: EnvName,
+        what: Scope,
+    },
+    Usage {
+        problem: UsageProblem,
+    },
+    AlreadyDeclared {
+        kind: NameKind,
+        name: String,
+    },
+
+    // §4.3 sessions, accounts, credentials
+    NotSignedIn {
+        system: System,
+        account: Option<AccountId>,
+        state: SessionState,
+    },
+    AccountNotOnMachine {
+        account: AccountRef,
+        selected_by: AccountSource,
+        in_app: bool,
+    },
+    AccountAmbiguous {
+        given: String,
+        candidates: Vec<AccountId>,
+    },
+    InOtherAccount {
+        vault: VaultId,
+        item: Option<ItemId>,
+        selected: AccountId,
+        owning: Option<AccountId>,
+        env: Option<EnvName>,
+        seen: Observed,
+    },
+    NeedsOwnSession {
+        command: CommandId,
+        identity: Principal,
+    },
+    CredentialRejected {
+        system: System,
+        credential: CredentialRef,
+        problem: CredentialProblem,
+        seen: Observed,
+    },
+
+    // §4.4 access and resources
+    MissingRight {
+        system: System,
+        resource: ResourceRef,
+        right: Right,
+        grant: GrantModel,
+        seen: Observed,
+    },
+    OwnerSetupRequired {
+        system: System,
+        object: ResourceRef,
+    },
+    NotFound {
+        system: System,
+        resource: ResourceRef,
+        state: NotFoundState,
+        seen: Observed,
+    },
+
+    // §4.5 target outcomes and guards
+    TargetRefused {
+        system: System,
+        subject: ResourceRef,
+        why: Refusal,
+        seen: Observed,
+    },
+    Guard {
+        guard: Guard,
+    },
+
+    // §4.6 outcomes, availability, budgets
+    CreateOutcomeUnknown {
+        system: System,
+        kind: CreateKind,
+        name: String,
+        refind: Refind,
+        seen: Observed,
+    },
+    WriteOutcomeUnknown {
+        system: System,
+        subject: ResourceRef,
+        seen: Observed,
+    },
+    Unavailable {
+        system: System,
+        why: Unanswered,
+        attempts: u32,
+        seen: Observed,
+    },
+    BudgetSpent {
+        budget_seconds: u64,
+        writes_started: bool,
+    },
+    Partial {
+        done: Vec<String>,
+        approval_used: Option<PlanId>,
+        then: Box<Cause>,
+    },
+    Interrupted {
+        signal: i32,
+        writes_started: bool,
+    },
+    ChangedBeforeWrite {
+        object: StoreObject,
+    },
+    ConcurrentEdit {
+        object: StoreObject,
+    },
+    ReadBackMissing {
+        vault: VaultId,
+        item: ItemId,
+        fields: Vec<FieldName>,
+        by: CommandId,
+    },
+
+    // §4.7 external tools
+    ToolMissing {
+        tool: String,
+    },
+    ToolUnusable {
+        tool: String,
+        why: Unusable,
+    },
+    UnexpectedOutput {
+        system: System,
+        at: Option<Location>,
+        seen: Observed,
+    },
+    Unrecognized {
+        system: System,
+        established: Vec<String>,
+        seen: Observed,
+    },
+
+    // §4.8 person-only steps, local inputs
+    NeedsTerminal {
+        why: NoTerminal,
+    },
+    NeedsConfirm {
+        env: EnvName,
+    },
+    ConfirmMismatch {
+        given: String,
+        env: EnvName,
+    },
+    ValuesNeeded {
+        env: EnvName,
+        rows: Vec<ValueRow>,
+    },
+    LocalFileTooOpen {
+        path: PathBuf,
+        mode: u32,
+        want: u32,
+    },
+    InputInvalid {
+        path: PathBuf,
+        kind: InputKind,
+        at: Option<Location>,
+        field: String,
+        rule: FieldRule,
+    },
+
+    // §4.9 approvals and plans
+    ApprovalMissing {
+        plan: PlanId,
+    },
+    ApprovalUsed {
+        plan: PlanId,
+        partial: bool,
+    },
+    PlanChanged {
+        old: PlanId,
+        new: PlanId,
+    },
+    PlanUnknown {
+        plan: String,
+    },
+
+    // §4.10 platform, delivery, internal
+    RamDirUnavailable {
+        remote: Option<ProfileName>,
+        why: RamDir,
+    },
+    PrivateDirFailed {
+        dir: PathBuf,
+        io: IoKind,
+    },
+    RemoteUnreachable {
+        profile: ProfileName,
+        user: String,
+        host: String,
+        port: u16,
+    },
+    /// The connection ended or stalled after the payload was sent: ssh itself exits 255
+    /// mid-session (recorded: "closed by remote host", "server not responding"), so a 255
+    /// after the handshake is not always the remote app's own exit.
+    RemoteDisconnected {
+        profile: ProfileName,
+        host: String,
+        during: RemotePhase,
+    },
+    RemoteVersionMismatch {
+        profile: ProfileName,
+        remote_protocol: u32,
+    },
+    ChildStartFailed {
+        program: String,
+        workdir: Option<PathBuf>,
+        io: IoKind,
+        remote: Option<ProfileName>,
+    },
+    DeliveryUnverified {
+        env: EnvName,
+        target: TargetName,
+        product: ProductName,
+        state: Unverified,
+    },
+    Bug {
+        site: &'static str,
+    },
+}
+
+/// Supporting enums of the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoKind {
+    NotFound,
+    PermissionDenied,
+    IsADirectory,
+    Other,
+}
+
+impl From<std::io::ErrorKind> for IoKind {
+    fn from(k: std::io::ErrorKind) -> Self {
+        match k {
+            std::io::ErrorKind::NotFound => IoKind::NotFound,
+            std::io::ErrorKind::PermissionDenied => IoKind::PermissionDenied,
+            std::io::ErrorKind::IsADirectory => IoKind::IsADirectory,
+            _ => IoKind::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum NotEditable {
+    Generated { path: PathBuf },
+    UnsupportedLayout { section: String },
+    ManifestItemAsBoundary { env: EnvName, boundary: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "what", rename_all = "snake_case")]
+pub enum Scope {
+    NoProductHasKeys,
+    NoTargetDelivers { target: TargetName },
+    NoTargets { products: Vec<ProductName> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "problem", rename_all = "snake_case")]
+pub enum UsageProblem {
+    UnknownFlag {
+        flag: String,
+        closest: Option<Closest>,
+    },
+    MisplacedBeforeDashDash {
+        flag: String,
+    },
+    ConflictsWith {
+        a: String,
+        b: String,
+    },
+    ValueFormat {
+        flag: String,
+        format: &'static str,
+    },
+    NeedsFlag {
+        flag: String,
+        needs: String,
+    },
+    UseInstead {
+        command: Cmd,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "problem", rename_all = "snake_case")]
+pub enum CredentialProblem {
+    Rejected {
+        needs: Vec<String>,
+    },
+    Incomplete {
+        missing_fields: Vec<FieldName>,
+    },
+    Unreadable,
+    /// A variable in the environment overrides what the person typed (OP_ACCOUNT, GH_TOKEN…).
+    OverriddenByEnvironment {
+        var: VarName,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum Refusal {
+    Validation,
+    Quota,
+    Unhealthy {
+        new_revision: String,
+        serving: Option<String>,
+    },
+    NoRevision,
+}
+
+/// opv's own refusals that are not person-only steps (§4.5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "guard", rename_all = "snake_case")]
+pub enum Guard {
+    ValueTooLarge {
+        key: KeyName,
+        limit: u64,
+    },
+    NotManagedByOpv {
+        name: String,
+    },
+    CredentialAsOption {
+        option: String,
+    },
+    ProviderHidesValues {
+        system: System,
+    },
+    ImmutableWithoutRotate {
+        key: KeyName,
+    },
+    GenerateRefused {
+        key: KeyName,
+        why: &'static str,
+    },
+    RemoteProfileRefuses {
+        profile: ProfileName,
+        asked: String,
+        allowed: Vec<String>,
+    },
+    Declined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum Unusable {
+    NotExecutable,
+    WslInteropOff,
+    TooOld { have: String, min: String },
+    VersionUnreadable,
+    SpawnFailed { io: IoKind },
+    WindowsExeFromWsl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoTerminal {
+    NoTty,
+    Ci,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ValueRow {
+    pub product: ProductName,
+    pub key: KeyName,
+    pub target: Option<TargetName>,
+    pub state: ValueState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ValueState {
+    Missing,
+    RuleFailed { rule: &'static str },
+    StoredAsText,
+    ConcealedConfig,
+    FieldNotCreated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputKind {
+    Dotenv,
+    SetupRecipe,
+    Receipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum RamDir {
+    Unset,
+    NotAbsolute,
+    NotOwned,
+    NotTmpfs,
+    NoneOnPlatform { os: &'static str },
+}
+
+/// When a remote session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemotePhase {
+    /// Before the receiver confirmed the payload: nothing was delivered.
+    Delivery,
+    /// While the app ran: the receiver stops it and removes its directory.
+    Running,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Unverified {
+    NotRecorded,
+    Superseded { receipt: PathBuf },
+    OtherAccount { account: AccountId },
+    ChangedOnTarget,
+    ChangedInOnePassword,
+    Unverifiable,
+}
+
+// --- derived classification -------------------------------------------------------------
+
+/// The exit code for internal errors (`EX_SOFTWARE`).
+pub const EXIT_INTERNAL: i32 = 70;
+
+impl Cause {
+    /// The stable machine-readable code (public contract, `schema_version` 2).
+    pub fn code(&self) -> &'static str {
+        use Cause::*;
+        match self {
+            ConfigNotFound { .. } => "config_not_found",
+            ConfigSourceMismatch { .. } => "config_source_mismatch",
+            ConfigUnreadable { .. } => "config_unreadable",
+            ConfigInvalid { .. } => "config_invalid",
+            BoundaryMissing { .. } => "boundary_missing",
+            StateVaultMissing { .. } => "state_vault_missing",
+            StateVaultTooWide { .. } => "state_vault_wider_than_values",
+            ConfigNotEditable { .. } => "config_not_editable",
+            CopiesDiffer { .. } => "copies_differ",
+            ManifestNotFound { .. } => "manifest_not_found",
+            ManifestAmbiguous { .. } => "manifest_ambiguous",
+            ManifestExists { .. } => "manifest_exists",
+            InventoryIncomplete { .. } => "inventory_incomplete",
+            NotDeclared { kind, .. } => match kind {
+                NameKind::Environment => "unknown_env",
+                NameKind::Target => "unknown_target",
+                NameKind::Product => "unknown_product",
+                NameKind::Key => "undeclared_key",
+                NameKind::Role => "unknown_role",
+                NameKind::RemoteProfile => "unknown_profile",
+                NameKind::Mode | NameKind::HelpTopic => "usage",
+            },
+            Ambiguous { .. } => "ambiguous_name",
+            ChoiceRequired { .. } => "choice_required",
+            NothingInScope { what, .. } => match what {
+                Scope::NoTargets { .. } => "no_target",
+                _ => "nothing_in_scope",
+            },
+            Usage { .. } => "usage",
+            AlreadyDeclared { .. } => "already_declared",
+            NotSignedIn { system, .. } => match system {
+                System::OnePassword => "op_not_signed_in",
+                _ => "target_not_signed_in",
+            },
+            AccountNotOnMachine { .. } => "account_not_registered",
+            AccountAmbiguous { .. } => "account_ambiguous",
+            InOtherAccount { .. } => "ids_not_in_account",
+            NeedsOwnSession { .. } => "own_session_required",
+            CredentialRejected { credential, .. } => match credential {
+                CredentialRef::DeployCredentials { .. } => "deploy_credentials_failed",
+                _ => "credential_rejected",
+            },
+            MissingRight { system, .. } => match system {
+                System::OnePassword => "vault_no_access",
+                _ => "permission_denied",
+            },
+            OwnerSetupRequired { .. } => "owner_setup_required",
+            NotFound {
+                system, resource, ..
+            } => match (system, resource.kind) {
+                (System::OnePassword, ResourceKind::Item) => "item_not_found",
+                _ => "resource_not_found",
+            },
+            TargetRefused { why, .. } => match why {
+                Refusal::Unhealthy { .. } => "target_unhealthy",
+                _ => "update_refused",
+            },
+            Guard { guard } => match guard {
+                self::Guard::Declined => "declined",
+                _ => "policy_refused",
+            },
+            CreateOutcomeUnknown { .. } => "create_outcome_unknown",
+            WriteOutcomeUnknown { .. } => "outcome_unknown",
+            Unavailable { .. } => "provider_unavailable",
+            BudgetSpent { .. } => "budget_spent",
+            Partial { then, .. } => then.code(),
+            Interrupted { .. } => "interrupted",
+            ChangedBeforeWrite { object } => match object {
+                StoreObject::File { .. } | StoreObject::Manifest { .. } => "config_changed",
+                StoreObject::Item { .. } => "item_changed",
+            },
+            ConcurrentEdit { .. } => "concurrent_edit",
+            ReadBackMissing { .. } => "tidy_unverified",
+            ToolMissing { .. } => "dependency_missing",
+            ToolUnusable { .. } => "tool_unusable",
+            UnexpectedOutput { .. } => "unexpected_output",
+            Unrecognized { .. } => "unrecognized_failure",
+            NeedsTerminal { .. } => "terminal_required",
+            NeedsConfirm { .. } => "confirm_required",
+            ConfirmMismatch { .. } => "confirm_mismatch",
+            ValuesNeeded { .. } => "findings",
+            LocalFileTooOpen { .. } => "file_too_open",
+            InputInvalid { .. } => "input_invalid",
+            ApprovalMissing { .. } => "approval_required",
+            ApprovalUsed { .. } => "approval_used",
+            PlanChanged { .. } => "stale_plan",
+            PlanUnknown { .. } => "plan_unknown",
+            RamDirUnavailable { .. } => "ram_dir_unavailable",
+            PrivateDirFailed { .. } => "private_dir_failed",
+            RemoteUnreachable { .. } => "remote_unreachable",
+            RemoteDisconnected { .. } => "remote_disconnected",
+            RemoteVersionMismatch { .. } => "remote_version_mismatch",
+            ChildStartFailed { .. } => "child_start_failed",
+            DeliveryUnverified { .. } => "delivery_unverified",
+            Bug { .. } => "internal_error",
+        }
+    }
+
+    /// The process exit code (public contract; the category of the cause).
+    pub fn exit_code(&self) -> i32 {
+        use Cause::*;
+        match self {
+            ConfigNotFound { .. }
+            | ConfigSourceMismatch { .. }
+            | ConfigUnreadable { .. }
+            | ConfigInvalid { .. }
+            | BoundaryMissing { .. }
+            | StateVaultMissing { .. }
+            | StateVaultTooWide { .. }
+            | ConfigNotEditable { .. }
+            | CopiesDiffer { .. }
+            | ManifestNotFound { .. }
+            | ManifestAmbiguous { .. }
+            | ManifestExists { .. }
+            | NotDeclared { .. }
+            | Ambiguous { .. }
+            | ChoiceRequired { .. }
+            | NothingInScope { .. }
+            | Usage { .. }
+            | AlreadyDeclared { .. }
+            | InputInvalid { .. } => 2,
+            ToolMissing { .. }
+            | ToolUnusable { .. }
+            | RemoteVersionMismatch { .. }
+            | ChildStartFailed { .. } => 3,
+            InventoryIncomplete { .. }
+            | ChangedBeforeWrite {
+                object: StoreObject::Item { .. },
+            }
+            | ConcurrentEdit { .. }
+            | ReadBackMissing { .. } => 4,
+            ChangedBeforeWrite { .. } => 2,
+            MissingRight { system, .. }
+            | NotFound { system, .. }
+            | UnexpectedOutput { system, .. }
+            | Unrecognized { system, .. } => {
+                if *system == System::OnePassword {
+                    4
+                } else {
+                    5
+                }
+            }
+            OwnerSetupRequired { .. }
+            | TargetRefused { .. }
+            | RemoteUnreachable { .. }
+            | RemoteDisconnected { .. } => 5,
+            Guard {
+                guard: self::Guard::Declined,
+            } => 0,
+            Guard { .. }
+            | NeedsTerminal { .. }
+            | NeedsConfirm { .. }
+            | ConfirmMismatch { .. }
+            | LocalFileTooOpen { .. }
+            | ApprovalMissing { .. }
+            | ApprovalUsed { .. }
+            | PlanChanged { .. }
+            | PlanUnknown { .. }
+            | RamDirUnavailable { .. }
+            | PrivateDirFailed { .. } => 6,
+            NotSignedIn { .. }
+            | AccountNotOnMachine { .. }
+            | AccountAmbiguous { .. }
+            | InOtherAccount { .. }
+            | NeedsOwnSession { .. }
+            | CredentialRejected { .. } => 7,
+            ValuesNeeded { .. } | DeliveryUnverified { .. } => 8,
+            CreateOutcomeUnknown { .. }
+            | WriteOutcomeUnknown { .. }
+            | Unavailable { .. }
+            | BudgetSpent { .. } => 9,
+            Partial { then, .. } => then.exit_code(),
+            Interrupted { signal, .. } => 128 + signal,
+            Bug { .. } => EXIT_INTERNAL,
+        }
+    }
+
+    /// Whether re-running the same command can help (§4).
+    pub fn retry(&self) -> RetryClass {
+        use Cause::*;
+        match self {
+            WriteOutcomeUnknown { .. }
+            | Unavailable { .. }
+            | Interrupted { .. }
+            | ChangedBeforeWrite { .. }
+            | Guard {
+                guard: self::Guard::Declined,
+            } => RetryClass::Safe,
+            CreateOutcomeUnknown {
+                refind: Refind::ByTitle,
+                ..
+            } => RetryClass::Safe,
+            CreateOutcomeUnknown { .. } | Partial { .. } | ConcurrentEdit { .. } => {
+                RetryClass::CheckFirst
+            }
+            NotDeclared { .. }
+            | Ambiguous { .. }
+            | ChoiceRequired { .. }
+            | NothingInScope { .. }
+            | Usage { .. }
+            | AlreadyDeclared { .. }
+            | ConfigSourceMismatch { .. }
+            | ConfigNotEditable { .. }
+            | CopiesDiffer { .. }
+            | ManifestExists { .. }
+            | NeedsOwnSession { .. }
+            | Guard { .. }
+            | NeedsTerminal { .. }
+            | NeedsConfirm { .. }
+            | ConfirmMismatch { .. }
+            | ApprovalUsed { .. }
+            | PlanChanged { .. }
+            | PlanUnknown { .. }
+            | UnexpectedOutput { .. }
+            | Bug { .. } => RetryClass::Never,
+            _ => RetryClass::AfterFix,
+        }
+    }
+
+    /// The external call this cause was diagnosed from, when it came from one.
+    pub fn observed(&self) -> Option<&Observed> {
+        use Cause::*;
+        match self {
+            InOtherAccount { seen, .. }
+            | CredentialRejected { seen, .. }
+            | MissingRight { seen, .. }
+            | NotFound { seen, .. }
+            | TargetRefused { seen, .. }
+            | CreateOutcomeUnknown { seen, .. }
+            | WriteOutcomeUnknown { seen, .. }
+            | Unavailable { seen, .. }
+            | UnexpectedOutput { seen, .. }
+            | Unrecognized { seen, .. } => Some(seen),
+            Partial { then, .. } => then.observed(),
+            _ => None,
+        }
+    }
+}
+
+/// The retry class (§4). `CheckFirst` means something may already exist: Next is a read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryClass {
+    Safe,
+    AfterFix,
+    Never,
+    CheckFirst,
+}
+
+impl From<RetryClass> for Retry {
+    /// The pre-catalog three-way retry, for the Legacy renderer arm.
+    fn from(r: RetryClass) -> Retry {
+        match r {
+            RetryClass::Safe => Retry::Safe,
+            RetryClass::AfterFix | RetryClass::CheckFirst => Retry::AfterFix,
+            RetryClass::Never => Retry::Never,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "contract_tests.rs"]
+mod tests;
