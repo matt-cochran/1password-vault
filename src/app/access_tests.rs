@@ -664,10 +664,12 @@ fn a_missing_vault_finding_names_the_account_it_checked() {
     );
 }
 
+/// #153a: op lists the machine's accounts and none holds the vault, so `vault locate` would
+/// only repeat the search: the step is the selected account's vault list.
 #[test]
-fn a_vault_in_another_account_steps_to_vault_locate() {
+fn a_vault_no_account_on_the_machine_holds_steps_to_the_selected_accounts_vaults() {
     let found = findings_in_account(&web_vault_unreadable(false));
-    assert_eq!(found[0]["next"], "opv vault locate vweb");
+    assert_eq!(found[0]["next"], "op vault list --account ACCTPROD");
 }
 
 #[test]

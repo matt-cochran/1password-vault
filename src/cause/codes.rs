@@ -533,6 +533,7 @@ fn one_of_each() -> Vec<Cause> {
             owning: Some(AccountId::new("ACC-OWNS")),
             env: Some(EnvName::new("env-stage")),
             unasked: Vec::new(),
+            searched: false,
             seen: person(),
         },
         NeedsOwnSession {

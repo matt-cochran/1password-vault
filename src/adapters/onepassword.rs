@@ -590,6 +590,7 @@ fn vault_unreachable(ctx: &DiagnoseContext, seen: &Observed, vault: &str) -> Cau
             selected,
             owning: None,
             unasked: Vec::new(),
+            searched: false,
             env: ctx.env.clone(),
             seen: seen.clone(),
         },

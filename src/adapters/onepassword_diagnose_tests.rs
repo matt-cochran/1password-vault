@@ -401,6 +401,42 @@ fn vault_in_other_account_found_leaves_no_account_unasked() {
 }
 
 #[test]
+fn vault_found_in_another_account_is_marked_searched() {
+    assert!(matches!(
+        located(VaultSearch::FoundIn(AccountId::new(B))),
+        Cause::InOtherAccount { searched: true, .. }
+    ));
+}
+
+#[test]
+fn vault_in_no_account_on_the_machine_is_marked_searched() {
+    assert!(matches!(
+        located(VaultSearch::Nowhere {
+            unasked: Vec::new()
+        }),
+        Cause::InOtherAccount { searched: true, .. }
+    ));
+}
+
+#[test]
+fn vault_in_no_account_on_the_machine_has_no_account_unasked() {
+    assert!(matches!(
+        located(VaultSearch::Nowhere {
+            unasked: Vec::new()
+        }),
+        Cause::InOtherAccount { unasked, .. } if unasked.is_empty()
+    ));
+}
+
+#[test]
+fn vault_not_searched_when_op_lists_no_accounts_is_not_marked_searched() {
+    assert!(matches!(
+        located(VaultSearch::NotSearched),
+        Cause::InOtherAccount { searched: false, .. }
+    ));
+}
+
+#[test]
 fn vault_no_askable_account_holds_has_no_owner() {
     assert!(matches!(
         located(VaultSearch::Nowhere {
