@@ -125,6 +125,9 @@ impl CommandRunner for WithEnv<'_> {
     fn note(&self, line: &str) {
         self.inner.note(line)
     }
+    fn writes_started(&self) -> bool {
+        self.inner.writes_started()
+    }
     fn run_inherited(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> io::Result<i32> {
         self.inner.run_inherited(program, args, env)
     }

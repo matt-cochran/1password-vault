@@ -316,6 +316,12 @@ impl CommandRunner for EnvRunner<'_> {
         self.inner.spawns_processes()
     }
 
+    /// A target write through this runner is the inner runner's (L2: a spent budget after
+    /// one never says "before any write").
+    fn writes_started(&self) -> bool {
+        self.inner.writes_started()
+    }
+
     fn step_summary(&self, markdown: &str) {
         self.inner.step_summary(markdown)
     }
