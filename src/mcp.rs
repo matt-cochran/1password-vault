@@ -987,7 +987,8 @@ fn load_fleet(
     let req = config_store::Request {
         start: project.into(),
         config: None,
-        project: None,
+        // L7: the CLI's choice of project (`OPV_PROJECT`), so a tool reads what `opv` does.
+        project: config_store::project_env(),
         manifest_only: false,
         account: config_store::account_env(),
     };

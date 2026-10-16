@@ -16,3 +16,6 @@ Next: opv projects
 opv: no 1Password manifest for project no-such-app in account AE2EDEVACCOUNT000000000001
 Do: check that project no-such-app is the one you mean, and that account AE2EDEVACCOUNT000000000001 holds its manifest
 Next: opv projects
+
+## mcp opv_configuration {}
+{"ok":false,"error":{"code":"manifest_not_found","category":"config","message":"no 1Password manifest for project no-such-app in account AE2EDEVACCOUNT000000000001","subject":{"account":"AE2EDEVACCOUNT000000000001","project":"no-such-app"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check that project no-such-app is the one you mean, and that account AE2EDEVACCOUNT000000000001 holds its manifest","next":"opv projects","next_kind":"check"}}

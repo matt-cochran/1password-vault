@@ -550,6 +550,8 @@ mod cases {
                 .var("OPV_PROJECT", "no-such-app"),
             &["config", "describe"],
         )
+        // L7: MCP honours OPV_PROJECT as the CLI does.
+        .mcp("opv_configuration", json!({}))
     }
 
     pub fn manifest_ambiguous() -> Case {
@@ -1452,6 +1454,7 @@ scenarios! {
         tool_unusable,
         owner_setup_required,
         signed_out_access,
+        manifest_not_found,
     ],
 }
 
