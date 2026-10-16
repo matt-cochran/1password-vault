@@ -271,6 +271,7 @@ fn issue_153_a_session_variable_for_the_other_account_is_not_used_for_the_projec
 
 /// A scratch directory with no `.opv` and no `.git` in it or above it (a stray `/tmp/.opv`
 /// on one machine would otherwise put every temporary directory "in a project").
+#[cfg(target_os = "linux")]
 fn outside_any_project() -> tempfile::TempDir {
     let clean = |d: &Path| {
         d.ancestors()

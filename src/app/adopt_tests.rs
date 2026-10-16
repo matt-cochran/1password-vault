@@ -452,7 +452,13 @@ fn the_plans_next_keeps_rotate() {
 #[test]
 fn the_plans_next_quotes_a_path_with_a_space() {
     let next = crate::cause::render::cmd_text(&next_step("staging", &narrowed(), 1));
-    assert!(next.contains("--from 'my env/.env.staging'"), "{next}");
+    // Quoted the way the platform's shell reads it: '…' on Unix, "…" on Windows.
+    let quoted = if cfg!(windows) {
+        "--from \"my env/.env.staging\""
+    } else {
+        "--from 'my env/.env.staging'"
+    };
+    assert!(next.contains(quoted), "{next}");
 }
 
 // 05.10 (S2): a read-back failure names the command that wrote ---------------------------

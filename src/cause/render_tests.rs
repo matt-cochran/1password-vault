@@ -1830,7 +1830,12 @@ fn a_command_is_rendered_from_its_argv_with_each_word_quoted() {
         command: vec!["open".into()],
         args: vec!["api/KEY".into(), "--env".into(), "my env".into()],
     };
-    assert_eq!(cmd_text(&c), "opv open api/KEY --env 'my env'");
+    let want = if cfg!(windows) {
+        "opv open api/KEY --env \"my env\""
+    } else {
+        "opv open api/KEY --env 'my env'"
+    };
+    assert_eq!(cmd_text(&c), want);
 }
 
 #[test]
@@ -3120,7 +3125,12 @@ fn f2_a_read_back_by_a_path_with_a_space_keeps_it_one_word() {
             args: vec!["dev".into(), "--from".into(), "my values.env".into()],
         },
     };
-    assert_eq!(next_in(&c, &inv()), "opv adopt dev --from 'my values.env'");
+    let want = if cfg!(windows) {
+        "opv adopt dev --from \"my values.env\""
+    } else {
+        "opv adopt dev --from 'my values.env'"
+    };
+    assert_eq!(next_in(&c, &inv()), want);
 }
 
 /// F2: the operating system's random source is named as such.
