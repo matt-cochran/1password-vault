@@ -16,8 +16,8 @@
 //! A candidate the simulator answers with exit 86 (no recording) or 87 (not modelled) is not
 //! a cell: it is listed in `snapshots/SKIPPED.md`, so the gaps in the recordings stay
 //! visible. A rule a not-yet-migrated path breaks is listed in `snapshots/KNOWN_LEGACY.txt`
-//! (`<cell> <rule>`); that list only shrinks ([`KNOWN_LEGACY_CEILING`]), and an entry whose
-//! rule now holds fails until it is removed.
+//! (`<cell> <rule>`); since every path is migrated it is empty, and stays empty
+//! ([`known_legacy_is_empty`]); an entry whose rule now holds fails until it is removed.
 #![cfg(all(unix, feature = "fake"))]
 
 #[path = "../sim/args.rs"]
@@ -37,9 +37,6 @@ const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 const OPV: &str = env!("CARGO_BIN_EXE_opv");
 const SIM: &str = env!("CARGO_BIN_EXE_opv-sim");
 const ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
-
-/// The most entries `KNOWN_LEGACY.txt` may hold. Lower it as lanes migrate; never raise it.
-const KNOWN_LEGACY_CEILING: usize = 12;
 
 /// The commands of the matrix: a slug and the arguments after `opv` (text mode; the `--json`
 /// run appends `--json`). Read-only commands and dry runs only.
@@ -696,7 +693,11 @@ impl Rule {
                     .collect();
                 let same = shell_words(&next).map(strip) == Some(strip(failing));
                 let safe = e.get("retry").and_then(Value::as_str) == Some("safe");
-                if same && !safe {
+                // Design §11 `no_loop`: a person-only Do before the same command changes
+                // what it meets (a sign-in), so that re-run is no loop.
+                let person_first = e.get("human_required").and_then(Value::as_bool) == Some(true)
+                    && e.get("do").is_some_and(|d| !d.is_null());
+                if same && !safe && !person_first {
                     Err(format!(
                         "next {next:?} reruns the failing command without a safe retry"
                     ))
@@ -985,7 +986,7 @@ fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
     );
     let mut legacy = String::from(
         "# Rules a not-yet-migrated path breaks: `<cell> <rule>`. This list only shrinks\n\
-         # (KNOWN_LEGACY_CEILING in tests/e2e/matrix.rs); remove an entry once its rule holds.\n",
+         # (empty since every path is migrated); remove an entry once its rule holds.\n",
     );
     let mut legacy_n = 0;
     let mut codes: BTreeMap<String, usize> = BTreeMap::new();
@@ -1062,13 +1063,13 @@ fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
     eprintln!("matrix: {live} live cells, {legacy_n} legacy rule failures");
 }
 
-/// The legacy list only shrinks.
+/// Every path is migrated: no cell may break a rule as a known exception (J1).
 #[test]
-fn known_legacy_never_grows() {
+fn known_legacy_is_empty() {
     assert!(
-        known_legacy().len() <= KNOWN_LEGACY_CEILING,
-        "KNOWN_LEGACY.txt has {} entries, over the ceiling {KNOWN_LEGACY_CEILING}",
-        known_legacy().len()
+        known_legacy().is_empty(),
+        "KNOWN_LEGACY.txt lists {:?}; fix the rule instead",
+        known_legacy()
     );
 }
 

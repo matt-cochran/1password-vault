@@ -1106,33 +1106,20 @@ pub fn project_of(r: &Row) -> Option<&str> {
     r.title.strip_prefix("opv · ")
 }
 
-/// No configuration anywhere: the first-run router. Starts with [`config::NOT_FOUND`] so
-/// `doctor` keys its first-run step on it.
+/// No configuration anywhere, and no manifest for this checkout (the catalog's
+/// `ConfigNotFound`).
 pub fn not_found(start: &Path, repo: Option<&str>, account: Option<&str>) -> Error {
-    // 03.20: only the selected account was searched; say so.
-    let manifest = match (repo, account) {
-        (Some(repo), Some(a)) => {
-            format!("no 1Password manifest in account {a} is tagged for {repo}")
-        }
-        (Some(repo), None) => format!("no 1Password manifest is tagged for {repo}"),
-        (None, _) => "no git remote to match a 1Password manifest".to_string(),
-    };
-    Error::Config(
-        format!(
-            "{}{} or any parent directory, and {manifest}.\n  \
-             New project?                    opv init dev\n  \
-             Have a secrets.toml elsewhere?  opv config import --file <path> --vault <vault>\n  \
-             Manifest for another project?   OPV_PROJECT=<name> opv <command>\n  \
-             Manifest in another account?    opv projects\n  \
-             Configured elsewhere?           opv --config <path> <command>\n  \
-             Project ships opv.setup.toml?   opv setup",
-            config::NOT_FOUND,
-            start.display()
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::ConfigNotFound)
-    .with_next("opv init dev")
+    // C16: no environment is guessed (`opv init dev` was one); a command naming one gets
+    // `opv init <env>` from `main`. 03.20: only the selected account was searched; say so.
+    crate::cause::Cause::ConfigNotFound {
+        searched_from: start.to_path_buf(),
+        env: None,
+        manifest: Some(crate::cause::ManifestSearch {
+            repo: repo.map(str::to_string),
+            account: account.map(crate::cause::AccountId::new),
+        }),
+    }
+    .into()
 }
 
 /// `git remote get-url origin`, normalized; `None` without git, a repository or a remote

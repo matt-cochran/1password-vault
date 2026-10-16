@@ -105,8 +105,12 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             ConfigNotFound {
                 searched_from: PathBuf::from("/work/shop"),
                 env: Some(EnvName::new("env-stage")),
+                manifest: Some(ManifestSearch {
+                    repo: Some("repo-xyz".into()),
+                    account: Some(AccountId::new("ACC-XYZ")),
+                }),
             },
-            vec!["/work/shop", "env-stage"],
+            vec!["/work/shop", "env-stage", "repo-xyz", "ACC-XYZ"],
         ),
         (
             ConfigSourceMismatch {
@@ -775,6 +779,41 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["me@one.example", "ACC-ONE", "ACC-TWO"],
         ),
+        (
+            SourceOnly {
+                product: ProductName::new("shared-xyz"),
+                env: Some(EnvName::new("prod")),
+                reader: Some(ProductName::new("reader-xyz")),
+            },
+            vec!["shared-xyz", "reader-xyz"],
+        ),
+        (
+            TitleLookup {
+                kind: ResourceKind::Item,
+                title: "title-xyz".into(),
+                vault: Some(VaultId::new("vlt-atqr")),
+                matches: 0,
+                candidates: vec!["cand-xyz (id-xyz)".into()],
+            },
+            vec!["title-xyz", "vlt-atqr", "cand-xyz", "id-xyz"],
+        ),
+        (
+            PersonalNotSetUp {
+                env: EnvName::new("env-dev"),
+                keys: vec![ProductKey {
+                    product: ProductName::new("prod-api"),
+                    key: KeyName::new("MY_TOKEN"),
+                }],
+                then: Box::new(TitleLookup {
+                    kind: ResourceKind::Item,
+                    title: "title-xyz".into(),
+                    vault: Some(VaultId::new("vlt-atqr")),
+                    matches: 0,
+                    candidates: Vec::new(),
+                }),
+            },
+            vec!["env-dev", "prod-api/MY_TOKEN", "title-xyz"],
+        ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
     ]
 }
@@ -855,10 +894,13 @@ fn ordinal(c: &Cause) -> usize {
         ItemUnusable { .. } => 68,
         SecretNotStored { .. } => 69,
         AccountRequired { .. } => 70,
+        SourceOnly { .. } => 71,
+        TitleLookup { .. } => 72,
+        PersonalNotSetUp { .. } => 73,
     }
 }
 
-const VARIANTS: usize = 71;
+const VARIANTS: usize = 74;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1929,9 +1971,52 @@ fn a7_a_deployment_changed_before_the_write_is_a_target_change() {
     let c = Cause::ChangedBeforeWrite {
         object: StoreObject::Resource {
             resource: res(ResourceKind::Deployment, "web"),
+            changed: Vec::new(),
         },
     };
     assert_eq!((c.code(), c.exit_code()), ("target_changed", 5));
+}
+
+/// J2: a deployment changed before the write names what changed in it.
+#[test]
+fn a_deployment_changed_before_the_write_names_the_changed_paths() {
+    let c = Cause::ChangedBeforeWrite {
+        object: StoreObject::Resource {
+            resource: res(ResourceKind::Deployment, "web"),
+            changed: vec!["/spec/template/spec/containers/0/image".into()],
+        },
+    };
+    assert!(
+        c.message()
+            .contains("/spec/template/spec/containers/0/image")
+    );
+}
+
+/// J4: a deployment is named with its namespace as a namespace.
+#[test]
+fn a_deployment_names_its_namespace() {
+    let r = ResourceRef {
+        kind: ResourceKind::Deployment,
+        name: ResourceName::new("app"),
+        scope: Some("e2e-prod".into()),
+    };
+    assert_eq!(resource_words(&r), "deployment app in namespace e2e-prod");
+}
+
+/// J2: a rollout still running when opv stopped waiting names its revision.
+#[test]
+fn a_rollout_still_in_progress_names_its_revision() {
+    let c = Cause::TargetRefused {
+        system: System::Kubernetes,
+        subject: res(ResourceKind::Deployment, "web"),
+        why: Refusal::InProgress {
+            revision: Some("rev-42".into()),
+        },
+        env: None,
+        target: None,
+        seen: person(),
+    };
+    assert!(c.message().contains("rev-42"));
 }
 
 /// A7: a Key Vault secret is a resource kind of its own.
@@ -3032,6 +3117,7 @@ fn d3_a_built_step_keeps_the_project_flag() {
     let c = Cause::ConfigNotFound {
         searched_from: PathBuf::from("/work"),
         env: Some(EnvName::new("prod")),
+        manifest: None,
     };
     assert_eq!(
         next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),

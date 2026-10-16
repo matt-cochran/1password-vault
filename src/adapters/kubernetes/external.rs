@@ -392,6 +392,7 @@ pub(crate) fn diagnose_failed(
             return Cause::ChangedBeforeWrite {
                 object: StoreObject::Resource {
                     resource: t.external_ref(es),
+                    changed: Vec::new(),
                 },
             }
             .into();
@@ -409,7 +410,7 @@ pub(crate) fn diagnose_failed(
 }
 
 /// `get --raw /apis/external-secrets.io/v1`: the operator's API is served at v1 (discovery,
-/// which every signed-in identity may read). Not served: [`Error::Dependency`] naming what
+/// which every signed-in identity may read). Not served: a cataloged cause naming what
 /// to install or upgrade.
 pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
     let what = "kubectl get --raw /apis/external-secrets.io/v1";
@@ -939,7 +940,7 @@ mod tests {
     /// The diagnosis when the store says `exists` and kubectl answers `outputs`.
     fn diagnosis(exists: Option<bool>, outputs: Vec<Output>) -> String {
         let e = diagnosis_error(exists, outputs);
-        crate::error::report(&e, "opv doctor", None)
+        crate::error::report(&e)
     }
 
     /// The diagnosis error itself.

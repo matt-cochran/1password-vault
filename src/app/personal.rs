@@ -175,10 +175,33 @@ fn missing(call: &Call, resource: ResourceRef, env_name: &str, field: &str, set:
     }
 }
 
+/// `e` naming the personal `keys` (product, key) the run needs when it says the person's
+/// item or its vault is not set up (J6); any other failure as it is.
+pub(crate) fn naming_keys(e: Error, env_name: &str, keys: &[(&str, &str)]) -> Error {
+    if !not_set_up(&e) {
+        return e;
+    }
+    let Error::Catalog(then, upstream) = e;
+    Error::Catalog(
+        Box::new(Cause::PersonalNotSetUp {
+            env: crate::cause::EnvName::new(env_name),
+            keys: keys
+                .iter()
+                .map(|(p, k)| crate::cause::ProductKey {
+                    product: crate::cause::ProductName::new(*p),
+                    key: crate::cause::KeyName::new(*k),
+                })
+                .collect(),
+            then,
+        }),
+        upstream,
+    )
+}
+
 /// Whether `e` says the personal item or its vault is not there (not set up yet), as
 /// opposed to a sign-in or 1Password not answering.
 fn not_set_up(e: &Error) -> bool {
-    e.code() == crate::error::Code::ItemNotFound
+    e.code_str() == "item_not_found"
         || matches!(
             e.cause(),
             Some((
@@ -226,7 +249,7 @@ pub fn merged_fields(
     let team = fleet.environment(env_name)?;
     let item = match onepassword::read_whole(r, team, &at) {
         Ok(item) => item,
-        Err(e) if e.code() == crate::error::Code::ItemNotFound => return Ok(out),
+        Err(e) if e.code_str() == "item_not_found" => return Ok(out),
         Err(e) => return Err(e),
     };
     let Ok((layout, _)) = onepassword_tidy::parse(item.raw()) else {

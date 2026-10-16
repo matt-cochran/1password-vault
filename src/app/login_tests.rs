@@ -514,7 +514,7 @@ fn login_add_where_the_app_holds_the_accounts_explains_where_to_add() {
         )
         .unwrap_err()
     });
-    assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
+    assert_eq!(e.code_str(), "account_not_registered");
 }
 
 fn wsl_windows_op() -> crate::host::Host {
@@ -541,7 +541,7 @@ fn login_add_in_wsl_with_windows_op_directs_to_the_windows_app() {
         )
         .unwrap_err()
     });
-    assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
+    assert_eq!(e.code_str(), "account_not_registered");
 }
 
 /// #160: `op whoami --account <id>` succeeds for the account while `op vault list` fails.
@@ -599,7 +599,7 @@ fn an_account_added_in_the_app_is_an_auth_error() {
         )
         .unwrap_err()
     });
-    assert_eq!(e.exit_code(), e.code().exit_code());
+    assert_eq!(e.exit_code(), 7);
 }
 
 /// `opv login` with an `op account list` that fails.
@@ -682,10 +682,7 @@ fn still_other_account() -> Error {
 
 #[test]
 fn a_failed_check_after_signing_in_is_op_not_signed_in() {
-    assert_eq!(
-        still_other_account().code(),
-        crate::error::Code::OpNotSignedIn
-    );
+    assert_eq!(still_other_account().code_str(), "op_not_signed_in");
 }
 
 #[test]
@@ -874,7 +871,7 @@ fn a_write_without_a_session_steps_to_the_same_command_inside_login() {
 #[test]
 fn a_write_without_a_session_is_op_not_signed_in() {
     let e = write_needs_session("opv target add", Some(B), &target_add());
-    assert_eq!(e.code(), crate::error::Code::OpNotSignedIn);
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 #[test]
@@ -923,7 +920,7 @@ fn no_accounts_on_macos_is_an_account_to_add_in_the_app() {
         )
         .unwrap_err()
     });
-    assert_eq!(e.code(), crate::error::Code::AccountNotRegistered);
+    assert_eq!(e.code_str(), "account_not_registered");
 }
 
 #[test]

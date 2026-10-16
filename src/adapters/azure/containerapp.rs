@@ -1813,7 +1813,7 @@ mod tests {
         let r = FakeRunner::default();
         let back = read_back("Failed", &latest_of(&show()));
         let e = failed_update(&r, &back).unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::UpdateRefused);
+        assert_eq!(e.code_str(), "update_refused");
     }
 
     /// NR-31: the read-back runs inside the diagnosis, so the update's stderr stays.
@@ -1832,7 +1832,7 @@ mod tests {
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = adapter(&r, &t, &m).bindings().unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ProviderUnavailable);
+        assert_eq!(e.code_str(), "provider_unavailable");
     }
 
     #[test]

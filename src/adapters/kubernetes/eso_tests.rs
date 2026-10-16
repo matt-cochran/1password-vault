@@ -1434,9 +1434,7 @@ fn status_json_carries_the_chain_beside_target_name() {
 fn cluster_secret_store_not_ready_refusal_names_a_next_step() {
     let (_, e) = refused(not_ready);
     assert!(
-        e.step("opv sync dev", "opv sync --help")
-            .next
-            .starts_with("opv ready"),
+        e.next_text().unwrap_or_default().starts_with("opv ready"),
         "{e:?}"
     );
 }

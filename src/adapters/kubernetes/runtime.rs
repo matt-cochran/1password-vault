@@ -136,12 +136,9 @@ pub(crate) const DEPLOY_RIGHTS: [(&str, &str); 3] = [
     ("list", "pods"),
 ];
 
-/// Changed paths named in one error before "and N more".
-const MAX_PATHS: usize = 5;
-
 /// The JSON pointers under `spec`, `metadata.labels` and `metadata.annotations` that differ
 /// between two reads of a Deployment (FR-31): paths only, never values.
-fn changed_paths(before: &Value, after: &Value) -> String {
+fn changed_paths(before: &Value, after: &Value) -> Vec<String> {
     fn walk(a: &Value, b: &Value, at: &str, out: &mut Vec<String>) {
         match (a, b) {
             (Value::Object(x), Value::Object(y)) => {
@@ -173,16 +170,7 @@ fn changed_paths(before: &Value, after: &Value) -> String {
             &mut out,
         );
     }
-    if out.is_empty() {
-        return "only its resourceVersion moved".into();
-    }
-    let more = out.len().saturating_sub(MAX_PATHS);
-    out.truncate(MAX_PATHS);
-    let mut s = out.join(", ");
-    if more > 0 {
-        s.push_str(&format!(" and {more} more"));
-    }
-    s
+    out
 }
 
 /// How long an ExternalSecret that already showed `SecretSyncedError` on the first read
@@ -517,6 +505,7 @@ impl<'a> KubeDeployment<'a> {
                     return Err(Cause::ConcurrentEdit {
                         object: StoreObject::Resource {
                             resource: self.t().external_ref(es),
+                            changed: Vec::new(),
                         },
                     }
                     .into());
@@ -538,7 +527,7 @@ impl<'a> KubeDeployment<'a> {
                 return Err(super::unusable(&what, |seen| Cause::TargetRefused {
                     system: System::Kubernetes,
                     subject: self.t().external_ref(es),
-                    why: Refusal::InProgress,
+                    why: Refusal::InProgress { revision: None },
                     env: Some(EnvName::new(env_name)),
                     target: None,
                     seen,
@@ -810,10 +799,11 @@ impl PinnedRuntime for KubeDeployment<'_> {
         }
         // Safe to re-run, so not a target refusal (06.39): the Deployment changed before
         // opv's write, which therefore did not apply.
-        let _ = (d, changed_paths(&snapshot.spec.0, &fresh));
+        let _ = d;
         Err(Cause::ChangedBeforeWrite {
             object: StoreObject::Resource {
                 resource: self.t().deployment_ref(),
+                changed: changed_paths(&snapshot.spec.0, &fresh),
             },
         }
         .into())

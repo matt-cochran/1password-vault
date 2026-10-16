@@ -15,7 +15,6 @@ use super::*;
 use crate::adapters::fake_op::FakeOp;
 use crate::app::sync::{self, SyncOpts};
 use crate::app::testutil::{fly_app_ok, fly_releases, ok};
-use crate::error::Code;
 use crate::runner::{Call, Outcome, Output};
 
 const MARK: &str = "PLACEMENTMARK";
@@ -371,7 +370,7 @@ fn expect_plan_refuses_a_plan_made_for_other_targets() {
         ..SyncOpts::default()
     };
     let err = sync_with(&w, &fleet, opts).0.unwrap_err();
-    assert_eq!(err.code(), Code::StalePlan);
+    assert_eq!(err.code_str(), "stale_plan");
 }
 
 #[test]
@@ -687,7 +686,7 @@ fn a_sync_without_an_approval_names_the_approve_command() {
     let id = plan_id(&w, &fleet, &["east"]);
     let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
     assert_eq!(
-        e.step("", "").next,
+        e.next_text().unwrap_or_default(),
         format!("opv approve {id} --sync prod --target east")
     );
 }
@@ -715,7 +714,7 @@ fn an_approval_without_deploy_does_not_cover_a_deploying_sync() {
         ..east_scope()
     };
     let e = approved_sync(dir.path(), &w, &fleet, &deploying, &id).unwrap_err();
-    assert_eq!(e.code(), Code::ApprovalRequired);
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]
@@ -745,7 +744,7 @@ fn a_stale_plan_is_refused_before_the_approval_is_used() {
         .keys
         .insert("OTHER".into(), other);
     let e = approved_sync(dir.path(), &w, &fleet, &east_scope(), &id).unwrap_err();
-    assert_eq!(e.code(), Code::StalePlan);
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 #[test]
@@ -957,7 +956,7 @@ fn an_approval_without_rotation_does_not_cover_a_rotating_approved_sync() {
         ..east_scope()
     };
     let e = approved_sync(dir.path(), &w, &fleet, &rotating, &id).unwrap_err();
-    assert_eq!(e.code(), Code::ApprovalRequired);
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]

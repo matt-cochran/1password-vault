@@ -250,26 +250,22 @@ pub fn run(
 /// A loader refusal of the text add would write. Its line number points into text that
 /// was never saved, so it is dropped; the field and the rule stay (C14).
 fn proposed(e: Error) -> Error {
-    match e {
-        Error::Catalog(cause, upstream) => {
-            let cause = match *cause {
-                Cause::ConfigInvalid {
-                    source,
-                    at: _,
-                    field,
-                    rule,
-                } => Cause::ConfigInvalid {
-                    source,
-                    at: None,
-                    field,
-                    rule,
-                },
-                other => other,
-            };
-            Error::Catalog(Box::new(cause), upstream)
-        }
+    let Error::Catalog(cause, upstream) = e;
+    let cause = match *cause {
+        Cause::ConfigInvalid {
+            source,
+            at: _,
+            field,
+            rule,
+        } => Cause::ConfigInvalid {
+            source,
+            at: None,
+            field,
+            rule,
+        },
         other => other,
-    }
+    };
+    Error::Catalog(Box::new(cause), upstream)
 }
 
 /// `opv check <env> --product <p>`, the read that adds the empty field for a person.

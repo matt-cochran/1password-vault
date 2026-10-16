@@ -172,5 +172,5 @@ fn a_key_for_an_undeclared_environment_steps_to_the_configuration() {
     let mut k = key_decl("billing", "STRIPE_KEY");
     k.environments = vec!["staging".into()];
     let e = key(&FakeRunner::default(), &path, &k).unwrap_err();
-    assert_eq!(e.step("", "").next, "opv config describe");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv config describe");
 }

@@ -253,7 +253,7 @@ fn set_variables_with_an_empty_batch_makes_no_call() {
 
 /// The whole terminal report of `e`, as a person reads it.
 fn rendered(e: &Error) -> String {
-    crate::error::report(e, "opv sync prod", None)
+    crate::error::report(e)
 }
 
 #[test]

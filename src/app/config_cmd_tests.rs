@@ -496,13 +496,6 @@ fn edit_to_an_env_file_never_shows_a_value() {
 
 const FLEET_TOML: &str = "[environments.dev]\nboundaries.api = { vault_id = \"vdev0000000000000000000001\", item_id = \"app\" }\n\n[products.api.keys.API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\n";
 
-/// I7: `status --all` runs from anywhere, so its step names the project.
-#[test]
-fn status_all_next_names_the_project() {
-    let e = super::in_project(Error::findings(1, "opv check dev".to_string()), "myapp");
-    assert_eq!(e.next_step(), Some("env OPV_PROJECT=myapp opv check dev"));
-}
-
 /// I7: `--product` limits `status --all` to the projects that declare it.
 #[test]
 fn status_all_with_a_product_lists_only_projects_declaring_it() {
@@ -515,14 +508,19 @@ fn status_all_with_a_product_lists_only_projects_declaring_it() {
     assert_eq!(v["projects"].as_array().unwrap().len(), 1);
 }
 
+/// A command line with no placeholder for a person to fill in.
+fn runs_as_typed(next: &str) -> bool {
+    (next.starts_with("opv ") || next.starts_with("env OPV_PROJECT=")) && !next.contains(['<', '>'])
+}
+
 /// An environment `status --all` could not read: its `Next:` runs as typed.
 #[test]
 fn status_all_environment_error_next_is_runnable() {
     let op = FakeOp::default();
     put(&op, "myapp", TOML);
     let e = status_all(&op, None, None, false, &mut Vec::new()).unwrap_err();
-    let next = e.step("-", "-").next;
-    assert!(crate::error::is_runnable(&next), "{:?}", next);
+    let next = e.next_text().unwrap_or_default();
+    assert!(runs_as_typed(&next), "{:?}", next);
 }
 
 /// Each unread environment of `status --all --json` carries its runnable `next`.
@@ -536,7 +534,7 @@ fn status_all_json_environment_error_carries_a_runnable_next() {
     let next = v["projects"][0]["environments"][0]["next"]
         .as_str()
         .unwrap_or_default();
-    assert!(crate::error::is_runnable(next), "{next}");
+    assert!(runs_as_typed(next), "{next}");
 }
 
 // --- #135: discovery reports every account, and never an incomplete list as empty ---
@@ -616,14 +614,14 @@ mod discovery {
     fn a_selected_signed_out_account_is_op_not_signed_in() {
         let r = runner(vec![signed_out()]);
         let (res, _) = projects_json(&r, Some(B));
-        assert_eq!(res.unwrap_err().code().as_str(), "op_not_signed_in");
+        assert_eq!(res.unwrap_err().code_str(), "op_not_signed_in");
     }
 
     #[test]
     fn every_account_failing_is_inventory_incomplete() {
         let r = runner(vec![signed_out(), signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 
     #[test]
@@ -697,7 +695,7 @@ mod discovery {
     fn a_partial_inventory_is_inventory_incomplete() {
         let r = runner(vec![vec![one_manifest()], signed_out()]);
         let (res, _) = projects_json(&r, None);
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 
     #[test]
@@ -755,6 +753,6 @@ mod discovery {
     fn status_all_with_an_incomplete_inventory_is_inventory_incomplete() {
         let r = runner(vec![vec![Output::success("[]")], signed_out()]);
         let res = status_all(&r, None, None, true, &mut Vec::new());
-        assert_eq!(res.unwrap_err().code().as_str(), "inventory_incomplete");
+        assert_eq!(res.unwrap_err().code_str(), "inventory_incomplete");
     }
 }

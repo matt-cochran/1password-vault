@@ -702,57 +702,90 @@ A failure after the command produced its document (findings, exit 8) keeps that 
 <!-- error-codes:begin (generated from src/error.rs by tests/docs_commands.rs) -->
 | `code` | Exit | `retry` | Human | Meaning |
 |---|---|---|---|---|
-| `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument) |
-| `config_not_found` | 2 | after_fix | no | no secrets.toml in this directory or a parent, and no 1Password manifest for this checkout |
+| `declined` | 0 | safe | no | the person declined at opv's prompt; nothing was changed |
 | `account_required` | 2 | after_fix | yes | several 1Password accounts are on this machine and none is chosen for this project; a person picks one with opv login --account |
-| `account_ambiguous` | 2 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
-| `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
+| `already_declared` | 2 | never | no | the name is already declared |
+| `ambiguous_name` | 2 | never | no | the name matches more than one declared name |
+| `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
+| `choice_required` | 2 | never | yes | the command needs a flag to choose between several candidates |
+| `config_changed` | 2 | safe | no | the configuration changed while opv was editing it; nothing was written and re-running is safe |
+| `config_invalid` | 2 | after_fix/never | no | secrets.toml, the manifest or a change opv proposed breaks a field rule |
+| `config_not_editable` | 2 | never | no | the configuration cannot be edited in place (generated, or a layout opv does not write) |
+| `config_not_found` | 2 | after_fix | no | no secrets.toml in this folder or a parent, and no 1Password manifest for this checkout |
+| `config_source_mismatch` | 2 | never | no | the command works on a secrets.toml, but this project's configuration is a 1Password manifest |
+| `config_unreadable` | 2 | after_fix | no | the configuration file could not be read |
+| `copies_differ` | 2 | never | no | a committed secrets.toml and the manifest differ; a person picks which is right |
+| `input_invalid` | 2 | after_fix | no | an input file (a dotenv file, a setup recipe, a receipt) breaks a rule |
+| `input_unreadable` | 2 | after_fix | no | an input file (a dotenv file, a setup recipe, a receipt) could not be read |
 | `manifest_ambiguous` | 2 | after_fix | yes | several 1Password manifests match; a person keeps one and archives the others |
 | `manifest_exists` | 2 | never | no | a manifest for this project already exists; change it with opv config edit |
-| `config_changed` | 2 | safe | no | the configuration changed while opv was editing it: nothing was written and re-running is safe, or (when the error says so) another edit landed with opv's and a person checks the manifest's history |
-| `config_invalid` | 2 | after_fix | no | secrets.toml or a flag value is not valid |
-| `boundary_missing` | 2 | after_fix | no | a product has a key desired in an environment whose boundary (vault and item) is not recorded |
-| `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
-| `state_vault_wider_than_values` | 2 | after_fix | yes | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
-| `duplicate_scope` | 2 | never | no | a receipt file holds more than one entry for the same environment, product and target |
-| `unknown_env` | 2 | never | no | the environment is not defined in secrets.toml |
-| `unknown_product` | 2 | never | no | the product is not declared |
-| `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
+| `manifest_not_found` | 2 | after_fix | no | no 1Password manifest has the project's title (OPV_PROJECT or .opv) |
 | `no_target` | 2 | never | no | the environment has no deployment target (run-only) |
-| `dependency_missing` | 3 | after_fix | no | op or the target CLI is missing or unusable |
-| `source_error` | 4 | after_fix | no | 1Password could not be read |
-| `item_not_found` | 4 | after_fix | no | the item is not in the vault (moved, archived, deleted, or a wrong item_id) |
-| `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot access the vault |
-| `item_changed` | 4 | after_fix | yes | opv setup: the 1Password item changed while setup was saving it: again after setup re-read it (nothing was written; run opv setup again), or another edit landed with setup's or a field setup wrote is missing (a person checks the item's history) |
+| `nothing_in_scope` | 2 | never | no | nothing in the environment matches the scope the command was given |
+| `source_only` | 2 | never | no | the product is source-only: it holds shared values for other products' keys and is never run, checked or planned on its own |
+| `state_vault_missing` | 2 | after_fix | no | a target has no state vault recorded for its delivery evidence |
+| `state_vault_wider_than_values` | 2 | after_fix | no | a state vault shared by targets could be readable more widely than the values its evidence describes; a person gives one target its own |
+| `title_ambiguous` | 2 | after_fix | no | more than one 1Password vault or item has exactly this title |
+| `title_not_found` | 2 | after_fix | no | no 1Password vault or item has exactly this title |
+| `undeclared_key` | 2 | never | no | the key is not declared (for this environment) |
+| `unknown_env` | 2 | never | no | the environment is not declared |
+| `unknown_product` | 2 | never | no | the product is not declared |
+| `unknown_profile` | 2 | never | no | the remote profile is not declared |
+| `unknown_role` | 2 | never | no | no key declares the process role |
+| `unknown_target` | 2 | never | no | the target is not declared for the environment |
+| `usage` | 2 | never | no | the command line is not valid (unknown flag, missing argument, a removed form) |
+| `child_start_failed` | 3 | after_fix | no | the command opv run starts could not be started |
+| `dependency_missing` | 3 | after_fix | no | op or the target CLI is not installed or not on PATH |
+| `remote_version_mismatch` | 3 | after_fix | no | opv on the remote host speaks another protocol version |
+| `tool_unusable` | 3 | after_fix | no | op or the target CLI is installed but cannot be used (an unreadable version, a Windows op.exe from WSL, ...) |
+| `concurrent_edit` | 4 | check_first | yes | another edit landed together with opv's; check the history before acting again |
 | `inventory_incomplete` | 4 | after_fix | yes | one or more 1Password accounts could not be listed, so the project inventory is incomplete; a project missing from it is not evidence that it does not exist |
-| `target_error` | 5 | after_fix | no | the target (Fly, Azure, Kubernetes) refused or failed |
+| `item_changed` | 4 | safe | no | the 1Password item changed while opv was writing it; nothing was written and re-running is safe |
+| `item_not_found` | 4 | after_fix | no | the 1Password item is not in the vault (moved, archived, deleted, or a wrong item_id) |
+| `item_unusable` | 4 | after_fix | no | a 1Password item opv was pointed at has a layout opv cannot use |
+| `resource_not_found` | 4/5 | after_fix | no | the vault, app, namespace or other resource named is not there |
+| `tidy_unverified` | 4 | after_fix | no | opv wrote the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history |
+| `unexpected_output` | 4/5 | never | no | a tool answered with output opv cannot use |
+| `unrecognized_failure` | 4/5 | after_fix | no | a tool failed for a reason opv does not recognise; what opv did establish is named |
+| `vault_no_access` | 4 | after_fix | yes | the signed-in identity cannot open the 1Password vault |
+| `owner_setup_required` | 5 | after_fix | yes | the target lacks something only its owner sets up (a GitHub environment, a ready external store, a single-revision app) |
 | `permission_denied` | 5 | after_fix | yes | signed in to the target, but this identity lacks a role or right there (or a network rule keeps it out); a person with access grants it |
-| `owner_setup_required` | 5 | after_fix | yes | the target lacks something only its owner sets up (a GitHub environment and its protection rules); a person creates it |
+| `remote_disconnected` | 5 | after_fix | no | the SSH connection to the remote host ended or stalled after the payload was sent |
+| `remote_unreachable` | 5 | after_fix | no | the remote profile's host could not be reached over SSH (with its pinned host key) |
+| `target_changed` | 5 | safe | no | the target's object changed while opv was writing it; nothing was written and re-running is safe |
 | `target_unhealthy` | 5 | after_fix | no | the new revision did not become healthy; the previous one keeps serving |
-| `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; the previous revision keeps serving; re-running repeats the refusal |
-| `policy_refused` | 6 | after_fix | no | opv refused the operation |
-| `approval_required` | 6 | after_fix | yes | the structural plan has no unused, unexpired approval for this project and account; a person runs opv approve <plan_id> in their own terminal |
-| `keys_blocking` | 6 | after_fix | yes | sync refused: keys are missing or failing a rule; nothing was written |
-| `confirm_required` | 6 | never | yes | the environment sets confirm_env; pass --confirm <env> |
-| `confirm_mismatch` | 6 | never | no | --confirm names another environment |
-| `stale_plan` | 6 | never | no | sync --expect-plan: the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed; review the new plan |
-| `ram_dir_unavailable` | 6 | after_fix | no | Azure deploy credentials, or a file opv run delivers locally, need a private RAM-backed directory (XDG_RUNTIME_DIR on Linux, %LOCALAPPDATA%\Temp on Windows) and none is usable; nothing was read or changed |
-| `terminal_required` | 6 | never | yes | the command needs the user's own interactive terminal |
-| `auth_required` | 7 | after_fix | yes | not signed in to 1Password or the target CLI |
-| `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
-| `ids_not_in_account` | 2 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment (opv bootstrap --rebind) |
-| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it at 1Password's prompt with opv login --add |
-| `desktop_app_unavailable` | 7 | after_fix | yes | the 1Password app is locked, closed, or its CLI integration is off |
-| `credential_rejected` | 7 | after_fix | yes | 1Password did not accept what was typed at its prompt |
-| `sign_in_cancelled` | 7 | after_fix | yes | the 1Password sign-in prompt was cancelled |
-| `op_unexpected` | 7 | after_fix | yes | 1Password's CLI failed for a reason opv does not recognise; opv doctor checks it |
+| `update_refused` | 5 | after_fix | no | the target refused the update and applied nothing; re-running repeats the refusal |
+| `approval_required` | 6 | after_fix | yes | the plan has no unused, unexpired approval; a person runs opv approve <plan_id> in their own terminal |
+| `approval_used` | 6 | never | no | the approval was already used; read what remains, never re-run with it |
+| `confirm_mismatch` | 6 | never | yes | --confirm names another environment |
+| `confirm_required` | 6 | never | yes | the environment sets confirm_env; a person passes --confirm <env> |
+| `file_too_open` | 6 | after_fix | no | a local file opv reads is readable by others |
+| `handoff_refused` | 6 | after_fix | no | another process connected to opv's private hand-off pipe; opv refused it and sent nothing |
+| `keys_blocking` | 6 | after_fix | yes | a write refused: keys are missing or failing a rule; nothing was written |
+| `local_io_failed` | 6 | after_fix | no | opv's own local input or output failed (a file, the current folder, standard output, ...) |
+| `plan_unknown` | 6 | never | no | no plan has this id |
+| `policy_refused` | 6 | never | no | opv refused the operation (a value too large, a name opv does not manage, a credential given as an option, ...) |
+| `private_dir_failed` | 6 | after_fix | no | opv could not make its private folder |
+| `ram_dir_unavailable` | 6 | after_fix | no | a private RAM-backed folder is needed (Azure deploy credentials, a file opv run delivers) and none is usable; nothing was read or changed |
+| `stale_plan` | 6 | never | no | the plan changed since it was reviewed (the item, the target or the configuration); nothing was changed |
+| `terminal_required` | 6 | never | yes | the command needs the person's own interactive terminal |
+| `account_ambiguous` | 7 | after_fix | yes | an email or sign-in address names several 1Password accounts; a person picks one by its account ID |
+| `account_not_registered` | 7 | after_fix | yes | the 1Password account is not added to this 1Password CLI; a person adds it (opv login --add, or in the app) |
+| `credential_rejected` | 7 | after_fix | yes | a credential (a token, a sign-in) was not accepted |
 | `deploy_credentials_failed` | 7 | after_fix | yes | the environment's deploy credentials in 1Password were rejected or are incomplete; nothing was changed |
+| `ids_not_in_account` | 7 | after_fix | yes | an environment's recorded vault is not in the selected 1Password account; a person selects the owning account or rebinds the environment |
+| `op_not_signed_in` | 7 | after_fix | yes | not signed in to 1Password |
+| `own_session_required` | 7 | never | yes | the command writes 1Password, which only a person signed in with their own session may do (not a service account, Connect or deploy credentials) |
+| `target_not_signed_in` | 7 | after_fix | yes | not signed in to the target CLI |
+| `delivery_unverified` | 8 | after_fix | yes | a placement no longer holds what opv delivered, or could not be checked |
 | `findings` | 8 | after_fix | yes | keys are missing or failing a rule (values are filled in 1Password by a person) |
+| `budget_spent` | 9 | after_fix/check_first | no | the run's --timeout budget was spent |
+| `create_outcome_unknown` | 9 | check_first/safe | no/yes | a create may or may not have happened; find it before creating again |
 | `outcome_unknown` | 9 | safe | no | a change may or may not have been applied; re-running is safe |
 | `provider_unavailable` | 9 | safe | no | a provider did not answer after its retries; nothing was changed |
-| `interrupted` | 130/143 | safe | no | interrupted by SIGINT (130) or SIGTERM (143); re-running is safe |
-| `tidy_conflict` | 4 | safe | no | the 1Password item changed while opv was tidying it: twice before the write (nothing was written), or another edit landed with opv's (check the item's history; opv never retries); a read reports it in its document's tidy_error and goes on with the item as it is, and opv tidy fails with it |
-| `tidy_unverified` | 4 | after_fix | yes | opv tidied the 1Password item but the item read back lacks a field opv wrote or kept; a person restores it from the item's history; a read reports it in its document's tidy_error and goes on, and opv tidy fails with it |
+| `secret_not_stored` | 9 | never | yes | a secret-bearing object was made at the provider, but its secret was never stored; it is revoked, never made again |
+| `internal_error` | 70 | never | no | opv hit an internal error; report it |
+| `interrupted` | 129/130/131/143 | safe | no | interrupted by SIGINT (130), SIGHUP (129), SIGQUIT (131) or SIGTERM (143) |
 <!-- error-codes:end -->
 
 `opv schema` prints a description of the installed binary as one JSON document: every command with its arguments, flags, whether it takes `--json`, what it changes (`effect`: `none`, `reads`, `opens_browser`, `writes_file`, `writes_1password`, `writes_target`, `runs_command`, `interactive`), whether it needs the user's terminal and whether to ask the user first, and the flags that add an effect of their own (`--deploy`: `deploys`, `--prune`: `deletes`, `--rotate`, `--prune-immutable`, `--confirm`, `init --force`); `target add`'s provider options (`--fly-app`, `--azure-key-vault`, `--kubernetes-context`, ...), each with its `provider` and `required_for_provider` (required for that provider); the exit codes, the error codes above, the state words and the fields of each document. It is generated from the binary itself, so it always matches the version you run:

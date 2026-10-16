@@ -622,7 +622,7 @@ pub fn verify(
 ) -> Result<(), Error> {
     // A misspelt product would otherwise match nothing and pass (exit 0) having checked
     // nothing.
-    super::check_product(fleet, only, "delivery verify", Some(env_name))?;
+    super::check_product(fleet, only, Some(env_name))?;
     let names = super::resolve_targets(fleet, env_name, targets, "delivery verify")?;
     let from_file: Vec<Receipt> = match receipt_file {
         Some(p) => read_receipt_file(p)?,

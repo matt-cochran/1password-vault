@@ -14,7 +14,7 @@ use crate::cause::{
     AccountId, AccountRef, Cause, DiagnoseContext, ExitClass, NoTerminal, SessionState, System,
     Upstream,
 };
-use crate::error::{Code, Error};
+use crate::error::Error;
 
 /// op's error prefix: `[ERROR] YYYY/MM/DD HH:MM:SS <message>`.
 const ERROR_TAG: &[u8] = b"[ERROR] ";
@@ -192,20 +192,6 @@ pub fn classify(messages: &[String], status: Option<i32>) -> Failure {
 }
 
 impl Failure {
-    /// The stable error code (FR-50).
-    pub fn code(self) -> Code {
-        match self {
-            Failure::AccountNotRegistered => Code::AccountNotRegistered,
-            Failure::NotSignedIn => Code::OpNotSignedIn,
-            Failure::DesktopAppUnavailable => Code::DesktopAppUnavailable,
-            Failure::CredentialRejected => Code::CredentialRejected,
-            Failure::Cancelled => Code::SignInCancelled,
-            Failure::ProviderUnavailable => Code::ProviderUnavailable,
-            Failure::NoTerminal => Code::TerminalRequired,
-            Failure::Unexpected => Code::OpUnexpected,
-        }
-    }
-
     /// The cataloged cause of this failure for `account` (as the person named it, or
     /// `None`). `None` for a failure the catalog cannot name without the failed call's
     /// observation (`op signin` runs on the terminal, outside the runner): 1Password not

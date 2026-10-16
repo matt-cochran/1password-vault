@@ -64,7 +64,7 @@ pub fn run_for(
 ) -> Result<i32, Error> {
     let product = match product {
         Some(p) => p.to_string(),
-        None => super::pick_product(fleet, env_name, None, "run")?,
+        None => super::pick_product(fleet, env_name, None)?,
     };
     run_with_role(fleet, env_name, &product, role, command, runner)
 }
@@ -121,7 +121,7 @@ pub fn run_remote(
 ) -> Result<i32, Error> {
     let product = match product {
         Some(p) => p.to_string(),
-        None => super::pick_product(fleet, env_name, None, "run")?,
+        None => super::pick_product(fleet, env_name, None)?,
     };
     launch(
         fleet,
@@ -144,7 +144,7 @@ pub fn check_remote(
 ) -> Result<(), Error> {
     let product = match product {
         Some(p) => p.to_string(),
-        None => super::pick_product(fleet, env_name, None, "run")?,
+        None => super::pick_product(fleet, env_name, None)?,
     };
     remote_profile(fleet, env_name, &product, role, remote).map(|_| ())
 }
@@ -215,7 +215,7 @@ fn launch(
         .get(product)
         .ok_or_else(|| super::undefined_product(fleet, product, Some(env_name)))?;
     if prod.source_only {
-        return Err(source_only_error(fleet, env_name, product, to));
+        return Err(super::source_only(fleet, product, Some(env_name)));
     }
     let remote = match to {
         Launch::Local([]) => {
@@ -243,8 +243,16 @@ fn launch(
         match personal::locate(runner, fleet, env_name, &project) {
             Ok(Some(e)) => Some(e),
             // A missing personal vault or item is personal's own cause (its step sets it
-            // up); a sign-in, network or op failure is its own cause too.
-            Err(e) => return Err(e),
+            // up), naming the personal keys this run needs (J6); a sign-in, network or op
+            // failure is its own cause.
+            Err(e) => {
+                let keys: Vec<(&str, &str)> = selected
+                    .iter()
+                    .filter(|(_, spec)| personal::is_personal(fleet, spec))
+                    .map(|(key, _)| (product, key.as_str()))
+                    .collect();
+                return Err(personal::naming_keys(e, env_name, &keys));
+            }
             // `locate` answers `None` only when the environment declares no personal key,
             // and a personal key was just selected for it.
             Ok(None) => {
@@ -460,22 +468,6 @@ fn delivery_args(
     }
     a.push("--".to_string());
     Ok(a)
-}
-
-/// FR-47: `product` holds canonical values for other products' keys and is never run on
-/// its own. The `Next:` step names a product that reads it, when one does, in a form the
-/// transport takes (07.11: a remote run takes no `-- <command>`).
-fn source_only_error(fleet: &Fleet, env_name: &str, product: &str, to: Launch<'_>) -> Error {
-    let e = super::source_only_message(product);
-    match (fleet.referencing_product(product), to) {
-        (Some(q), Launch::Local(_)) => {
-            e.with_next(format!("opv run {env_name} --product {q} -- <command>"))
-        }
-        (Some(q), Launch::Remote(_)) => {
-            e.with_next(format!("opv run {env_name} --product {q} --preview"))
-        }
-        (None, _) => e.with_next(super::check_command(fleet, Some(env_name), None)),
-    }
 }
 
 /// Windows op.exe can read metadata from WSL, but cannot execute a Linux child.
@@ -758,7 +750,7 @@ environments = ["ci"]
     fn run_refuses_a_source_only_product() {
         let r = FakeRunner::new([]);
         let e = run(&source_only_fleet(), "ci", "shared", &cmd(&["env"]), &r).unwrap_err();
-        assert!(matches!(e, Error::Config(m) if m.contains("is source-only")));
+        assert_eq!(e.code_str(), "source_only");
     }
 
     #[test]
@@ -788,7 +780,7 @@ environments = ["prod", "dev"]
     #[test]
     fn a_guarded_environment_needs_its_name_again() {
         let e = require_confirmation(&guarded(), "prod", None, "retry").unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ConfirmRequired);
+        assert_eq!(e.code_str(), "confirm_required");
     }
 
     #[test]
@@ -799,7 +791,7 @@ environments = ["prod", "dev"]
     #[test]
     fn a_confirmation_naming_another_environment_is_refused() {
         let e = require_confirmation(&guarded(), "prod", Some("dev"), "retry").unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::ConfirmMismatch);
+        assert_eq!(e.code_str(), "confirm_mismatch");
     }
 
     #[test]

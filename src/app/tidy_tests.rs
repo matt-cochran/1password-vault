@@ -961,7 +961,7 @@ fn an_item_edited_twice_reports_tidy_conflict() {
     let op = FakeOp::person(messy_item());
     op.editors.borrow_mut().push((2, someone_edits_session));
     op.editors.borrow_mut().push((3, someone_edits_session));
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_conflict"));
 }
 
 fn prefixed_fleet() -> Fleet {
@@ -1200,7 +1200,7 @@ fn every_read_a_tidy_writes_from_bypasses_the_cache() {
 fn an_edit_landing_with_the_tidy_reports_tidy_conflict() {
     let op = FakeOp::person(messy_item());
     op.racing.set(Some(someone_edits_session));
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_conflict"));
 }
 
 #[test]
@@ -1228,7 +1228,7 @@ fn an_edit_landing_with_the_tidy_is_found_by_a_fresh_re_read_without_an_echo() {
     let op = FakeOp::person(messy_item());
     op.echo.set(false);
     op.racing.set(Some(someone_edits_session));
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyConflict));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_conflict"));
 }
 
 #[test]
@@ -1241,7 +1241,7 @@ fn a_tidy_one_version_later_reports_no_error() {
 fn a_field_the_write_dropped_reports_tidy_unverified() {
     let op = FakeOp::person(messy_item());
     op.edit.set(Edit::Lossy);
-    assert_eq!(tidied(&op).tidy_error, Some(Code::TidyUnverified));
+    assert_eq!(tidied(&op).tidy_error, Some("tidy_unverified"));
 }
 
 #[test]
@@ -1516,7 +1516,7 @@ fn opv_tidy_writes_one_edit_for_a_person() {
 fn opv_tidy_refuses_a_service_account_until_a_person_runs_it() {
     let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
     let (res, _) = repair(&op, false);
-    assert_eq!(res.unwrap_err().code(), Code::TerminalRequired);
+    assert_eq!(res.unwrap_err().code_str(), "own_session_required");
 }
 
 #[test]
@@ -1618,7 +1618,7 @@ fn a_write_with_nobody_signed_in_is_op_not_signed_in() {
     let op = crate::adapters::fake_op::FakeOp::default();
     op.signed_in.set(false);
     let e = require_person(&op, "opv target add").unwrap_err();
-    assert_eq!(e.code().as_str(), "op_not_signed_in");
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 #[test]
@@ -1648,13 +1648,16 @@ fn service_account() -> crate::runner::fake::FakeRunner {
 #[test]
 fn a_write_by_a_service_account_needs_a_persons_terminal() {
     let e = require_person(&service_account(), "opv target add").unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::TerminalRequired);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 #[test]
 fn a_write_by_a_service_account_never_steps_to_login() {
     let e = require_person(&service_account(), "opv target add").unwrap_err();
-    assert_eq!(e.next_step(), None);
+    assert!(
+        !e.next_text().unwrap_or_default().starts_with("opv login"),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -1668,7 +1671,7 @@ fn a_write_with_no_account_on_this_machine_steps_to_login_add() {
     ]);
     let e = require_person(&r, "opv target add").unwrap_err();
     // Catalog error (04.07): the step comes from the cause.
-    assert_eq!(e.step("-", "-").next, "opv login --add");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv login --add");
 }
 
 // --- error-catalog lane (audit 04.01, 04.19) ---

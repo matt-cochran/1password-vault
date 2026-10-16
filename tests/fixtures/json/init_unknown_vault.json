@@ -3,15 +3,30 @@
   "ok": false,
   "exit_code": 2,
   "next": "opv init staging --json",
-  "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), then re-run",
+  "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), or give the exact title of one that exists",
   "error": {
-    "code": "config_invalid",
+    "code": "title_not_found",
     "category": "config",
-    "message": "no vault titled \"no-such-vault\" (exact, case-sensitive match); candidates: \"Private\" (othervault), \"myapp-staging\" (vaultid01)",
-    "detail": [],
+    "message": "no vault is titled \"no-such-vault\" (exact, case-sensitive match); candidates: \"Private\" (othervault), \"myapp-staging\" (vaultid01)",
+    "subject": {
+      "candidates": [
+        "\"Private\" (othervault)",
+        "\"myapp-staging\" (vaultid01)"
+      ],
+      "kind": "vault",
+      "title": "no-such-vault",
+      "vault": null,
+      "matches": 0
+    },
+    "evidence": {
+      "checked": null,
+      "account": null,
+      "upstream": null
+    },
     "retry": "after_fix",
     "human_required": false,
-    "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), then re-run",
-    "next": "opv init staging --json"
+    "do": "create the vault \"no-such-vault\" in 1Password (opv creates it only for a person signed in with their own account), or give the exact title of one that exists",
+    "next": "opv init staging --json",
+    "next_kind": "rerun"
   }
 }

@@ -789,6 +789,21 @@ pub fn take_observed() -> Option<crate::cause::Observed> {
     failure::take_observed()
 }
 
+/// The observation behind each example of [`crate::cause::codes::examples`] (the catalog's
+/// code table): a fixed failed `op vault get`, classified only, never rendered as an error.
+/// Built here so the runner stays the only builder of an observation (the seal).
+pub fn catalog_example_observed(principal: crate::cause::Principal) -> crate::cause::Observed {
+    crate::cause::Observed::from_failed_call(
+        crate::cause::CallId {
+            system: crate::cause::System::OnePassword,
+            program: "op".into(),
+            words: vec!["vault".into(), "get".into(), "vlt-example".into()],
+        },
+        crate::cause::ExitClass::Code { code: 1 },
+        principal,
+    )
+}
+
 /// The one way to observe a call that **answered** (exit 0, or stdout past the output cap)
 /// with a reply the call site cannot use (design §4.6/§4.7, A1): JSON it cannot read, an
 /// empty token, an unconfirmed or lost write reply. This is the runner's own observation of
@@ -1407,7 +1422,7 @@ impl ProcessRunner {
         let held = lock(&self.account).clone();
         let env = self.with_default_account(call.program, call.env, &held);
         let mut child = command_for(&Call { env: &env, ..*call }).spawn()?;
-        signals::track(&child, call.step());
+        signals::track(&child);
         let child_stderr = child.stderr.take().expect("stderr is piped");
         // stderr is read on its own thread into a bounded, zeroizing buffer held in memory
         // only (NR-31). The buffer is shared so what arrived is kept even when a grandchild
@@ -1707,6 +1722,7 @@ impl Engine for ProcessRunner {
     fn wrote(&self, program: &str) {
         if target_write(program) {
             self.wrote.store(true, Ordering::SeqCst);
+            signals::note_write();
         }
     }
 }
@@ -1844,14 +1860,12 @@ pub mod signals {
 
     /// The captured child currently running, by pid.
     static CHILD: Mutex<Option<u32>> = Mutex::new(None);
-    /// The step of the most recent captured call.
-    static STEP: Mutex<String> = Mutex::new(String::new());
-    /// The command line to run again after an interruption (NR-19).
-    static RERUN: Mutex<String> = Mutex::new(String::new());
+    /// A target write started in this process: the interruption says so (design §4.6).
+    static WRITES_STARTED: AtomicBool = AtomicBool::new(false);
 
-    /// The command the interruption message names as the next step.
-    pub fn set_rerun(command: &str) {
-        *lock(&RERUN) = command.to_string();
+    /// Record that a target write started, for the interruption report.
+    pub fn note_write() {
+        WRITES_STARTED.store(true, Ordering::SeqCst);
     }
     /// Private directories to remove before the process exits on a signal (SR-4: the
     /// Azure CLI's RAM-only configuration directory of a deploy sign-in, FR-40).
@@ -1865,30 +1879,13 @@ pub mod signals {
         JSON.store(json, Ordering::SeqCst);
     }
 
-    /// The `--json` document for an interruption by signal `sig`.
-    pub fn interrupted_json(sig: i32, message: &str, rerun: &str) -> String {
-        let code = crate::error::Code::Interrupted;
-        let step = crate::error::Step {
-            action: None,
-            next: rerun.to_string(),
-        };
-        serde_json::json!({
-            "schema_version": crate::json::SCHEMA_VERSION,
-            "ok": false,
-            "exit_code": 128 + sig,
-            "next": rerun,
-            "do": null,
-            "error": crate::error::error_object(
-                code.as_str(),
-                "interrupted",
-                message,
-                Vec::new(),
-                code.retry(),
-                code.human_required(),
-                &step,
-            ),
-        })
-        .to_string()
+    /// The interruption by signal `sig` as the catalog's cause.
+    pub fn interrupted(sig: i32) -> crate::error::Error {
+        crate::cause::Cause::Interrupted {
+            signal: sig,
+            writes_started: WRITES_STARTED.load(Ordering::SeqCst),
+        }
+        .into()
     }
     static STOPPING: AtomicBool = AtomicBool::new(false);
 
@@ -1939,9 +1936,8 @@ pub mod signals {
         *lock(&CHILD)
     }
 
-    pub(super) fn track(child: &Child, step: String) {
+    pub(super) fn track(child: &Child) {
         *lock(&CHILD) = Some(child.id());
-        *lock(&STEP) = step;
     }
 
     /// `try_wait` under the lock, so the handler never signals a reaped (reusable) pid.
@@ -1994,15 +1990,6 @@ pub mod signals {
         });
     }
 
-    /// The line printed when opv is interrupted during `step` (empty: before any call).
-    pub fn interrupted_message(step: &str) -> String {
-        if step.is_empty() {
-            "interrupted; safe to re-run".to_string()
-        } else {
-            format!("interrupted during {step}; safe to re-run")
-        }
-    }
-
     /// The signals opv handles (I2: a closed terminal or dropped SSH session sends SIGHUP,
     /// Ctrl-\\ sends SIGQUIT; both would otherwise skip every cleanup).
     #[cfg(unix)]
@@ -2017,13 +2004,15 @@ pub mod signals {
         }
         forward(sig);
         run_cleanups();
-        let step = lock(&STEP).clone();
-        let rerun = lock(&RERUN).clone();
-        let message = interrupted_message(&step);
+        let e = interrupted(sig);
         if JSON.load(Ordering::SeqCst) {
-            stdout_unlocked(&format!("{}\n", interrupted_json(sig, &message, &rerun)));
+            stdout_unlocked(&String::from_utf8_lossy(&crate::json::finish(
+                b"",
+                Err(&e),
+                false,
+            )));
         }
-        eprint!("opv: {message}\n{}", crate::error::next_line(&rerun));
+        eprint!("{}", crate::error::report(&e));
         std::process::exit(128 + sig);
     }
 
@@ -2891,14 +2880,6 @@ mod tests {
         assert_eq!(line, "op item get i (1.50 s): exit 0");
     }
 
-    #[test]
-    fn interrupted_message_names_the_step() {
-        assert_eq!(
-            signals::interrupted_message("flyctl secrets deploy"),
-            "interrupted during flyctl secrets deploy; safe to re-run"
-        );
-    }
-
     // Both tests below only ever set the flag (tests run in parallel).
     #[cfg(unix)]
     #[test]
@@ -3283,46 +3264,6 @@ mod tests {
         r.probe(&Call::new("az", &["version"]), PROBE_TIMEOUT)
             .unwrap();
         assert_eq!(take_failure_excerpt(), None);
-    }
-
-    fn failed_probe_then_successful_read() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(Output::failure(1), "[ERROR] probe went wrong\n");
-        r.push_with_stderr(Output::success("ok"), "");
-        let _ = r.probe(&Call::new("op", &["whoami"]), PROBE_TIMEOUT);
-        let _ = read_fake(&r);
-    }
-
-    #[test]
-    fn failed_probe_then_success_then_config_error_attaches_nothing() {
-        failed_probe_then_successful_read();
-        let e = crate::error::Error::Config("bad secrets.toml".into());
-        assert_eq!(
-            crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: configuration error: bad secrets.toml\nDo: fix the cause above\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn failed_probe_then_success_then_target_error_attaches_nothing() {
-        failed_probe_then_successful_read();
-        let e = crate::error::Error::Target("app is dead".into());
-        assert_eq!(
-            crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: target error: app is dead\nDo: fix the cause above\nNext: opv doctor\n"
-        );
-    }
-
-    #[test]
-    fn failed_write_excerpt_attaches_to_its_own_error() {
-        let r = FakeRunner::default();
-        r.push_with_stderr(Output::failure(2), "Error: app not found\n");
-        let _ = r.write(&Call::new("flyctl", &["secrets", "import"]));
-        let e = crate::error::Error::Unknown("flyctl secrets import failed (exit 2)".into());
-        assert_eq!(
-            crate::error::report(&e, "opv doctor", take_failure_excerpt().as_ref()),
-            "opv: outcome unknown: flyctl secrets import failed (exit 2)\n  flyctl said: Error: app not found\nNext: opv doctor\n"
-        );
     }
 
     #[test]

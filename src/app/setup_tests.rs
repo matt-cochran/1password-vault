@@ -737,8 +737,8 @@ mod stateful {
         ui.on_confirm.insert(2, hook(&op, &id, "NOTE", "again"));
         let e = setup(&op, &mut ui, false).unwrap_err();
         assert_eq!(
-            (e.code(), op.count(&["op", "item", "edit"])),
-            (crate::error::Code::ItemChanged, 0)
+            (e.code_str(), op.count(&["op", "item", "edit"])),
+            ("item_changed", 0)
         );
     }
 

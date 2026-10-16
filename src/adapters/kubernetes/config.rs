@@ -1052,10 +1052,7 @@ environments = ["dev"]
             .map(|c| match c.outcome {
                 Ok(Verdict::Ok(d)) => format!("{}: ok {d}", c.name),
                 Ok(Verdict::Warn(d)) => format!("{}: warn {d}", c.name),
-                Err(e) => match e.next_step() {
-                    Some(n) => format!("{}: FAIL {e}\n  fix: {n}", c.name),
-                    None => format!("{}: FAIL {e}", c.name),
-                },
+                Err(e) => format!("{}: FAIL {e}", c.name),
             })
             .collect()
     }
@@ -1153,13 +1150,8 @@ environments = ["dev"]
     /// 06.26: the Do never edits the shared `kubernetes.context`.
     #[test]
     fn doctor_never_asks_to_change_the_shared_context() {
-        let step = doctor_failure(1, CONTEXT_MISSING).step("opv doctor", "opv doctor");
-        assert!(
-            !step
-                .action
-                .unwrap_or_default()
-                .contains("kubernetes.context")
-        );
+        let action = doctor_failure(1, CONTEXT_MISSING).do_text();
+        assert!(!action.unwrap_or_default().contains("kubernetes.context"));
     }
 
     #[test]
@@ -1241,7 +1233,7 @@ environments = ["dev"]
     fn sync_preflight_refusal_without_a_right_is_permission_denied() {
         let r = FakeRunner::new(deploy_rights("list pods"));
         let e = target().preflight(&r, PreflightMode::Mutate).unwrap_err();
-        assert_eq!(e.code(), crate::error::Code::PermissionDenied);
+        assert_eq!(e.code_str(), "permission_denied");
     }
 
     #[test]

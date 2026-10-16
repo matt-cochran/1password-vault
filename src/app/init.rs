@@ -497,16 +497,6 @@ struct Prepared {
     created: Vec<String>,
 }
 
-/// A missing vault or item opv may not create (not a person signed in with their own
-/// account, FR-43): the person creates it, then re-runs (found live: the bare error's step
-/// was the same command, which could not succeed).
-fn not_created(e: Error, what: &str, title: &str) -> Error {
-    e.with_do(format!(
-        "create the {what} {title:?} in 1Password (opv creates it only for a person signed in \
-         with their own account), then re-run"
-    ))
-}
-
 /// Resolve (creating a missing vault or item for a signed-in person, FR-43), read field
 /// shapes, declare, render and validate (steps 2 to 6).
 fn prepare(
@@ -525,9 +515,9 @@ fn prepare(
     };
     let vault = match onepassword_init::find_vault(r, &args.vault, host)? {
         onepassword_init::Lookup::Found(v) => v,
-        onepassword_init::Lookup::Missing(e) if !may_create(r) => {
-            return Err(not_created(e, "vault", &args.vault));
-        }
+        // A missing vault or item opv may not create (FR-43): the cause's Do has the person
+        // create it (found live: the bare error's step was the same command).
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
         onepassword_init::Lookup::Missing(_) => {
             created.push(format!("vault {:?}", args.vault));
             onepassword_init::create_vault(r, &args.vault)?
@@ -535,9 +525,7 @@ fn prepare(
     };
     let item = match onepassword_init::find_item(r, &vault.id, &args.item, host)? {
         onepassword_init::Lookup::Found(i) => i,
-        onepassword_init::Lookup::Missing(e) if !may_create(r) => {
-            return Err(not_created(e, "item", &args.item));
-        }
+        onepassword_init::Lookup::Missing(e) if !may_create(r) => return Err(e),
         onepassword_init::Lookup::Missing(_) => {
             created.push(format!("item {:?}", args.item));
             onepassword_init::create_item(r, &vault.id, &args.item)?
@@ -552,7 +540,7 @@ fn prepare(
     let ids = (vault.id.as_str(), item.id.as_str());
     let text = render(args, ids, &decl);
     // Validated exactly like a hand-written file (§10.2): IDs, key and product names.
-    let fleet = config::parse(&text).map_err(|e| would_write(e, "init"))?;
+    let fleet = config::parse(&text).map_err(would_write)?;
     Ok(Prepared {
         vault,
         item,
@@ -712,7 +700,7 @@ fn write_json(
 }
 
 /// A configuration error in text opv generated: say so, and that nothing was written.
-fn would_write(e: Error, command: &str) -> Error {
+fn would_write(e: Error) -> Error {
     // F2: an invalid field in the proposed text is `ConfigProposalInvalid` (nothing written).
     if let Some((
         crate::cause::Cause::ConfigInvalid {
@@ -731,12 +719,7 @@ fn would_write(e: Error, command: &str) -> Error {
         }
         .into();
     }
-    match e {
-        e @ Error::Config(_) => e.map_text(|m| {
-            format!("{m} (in the configuration {command} would write; nothing written)")
-        }),
-        other => other,
-    }
+    e
 }
 
 /// When a parent directory already holds a `secrets.toml` (the FR-25 discovery walk from
@@ -1224,9 +1207,7 @@ fn add_env_on(
         .collect();
 
     let text = doc.to_string();
-    store
-        .parse(&text)
-        .map_err(|e| would_write(e, "init --add-env"))?;
+    store.parse(&text).map_err(would_write)?;
     crate::config_store::save(store, r, &base, &text)?;
 
     // Typed (§10.1): the declaring `opv add`, else the check of what was added.

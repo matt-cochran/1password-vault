@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::app::testutil::*;
-use crate::error::Code;
 use crate::runner::fake::FakeRunner;
 
 const MARKER: &str = "test-marker-value-139";
@@ -375,7 +374,7 @@ fn a_remote_run_never_sends_another_roles_key() {
 #[test]
 fn a_remote_run_for_an_environment_the_profile_does_not_allow_is_refused() {
     let (res, _) = remote_run("staging", "serve");
-    assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
+    assert_eq!(res.unwrap_err().code_str(), "policy_refused");
 }
 
 #[test]
@@ -387,7 +386,7 @@ fn a_refused_remote_run_reads_nothing() {
 #[test]
 fn a_remote_run_for_a_role_the_profile_does_not_allow_is_refused() {
     let (res, _) = remote_run("prod", "migrate");
-    assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
+    assert_eq!(res.unwrap_err().code_str(), "policy_refused");
 }
 
 /// The catalog names the undeclared profile (`unknown_profile`, was `usage`).

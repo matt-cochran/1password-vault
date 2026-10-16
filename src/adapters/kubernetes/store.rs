@@ -149,14 +149,15 @@ impl<'a> KubeSecrets<'a> {
         let Some((env, b64)) = text(&out, &what)?.split_once('\t') else {
             return Ok(None);
         };
+        // Not a UTF-8 value under data.<VALUE_KEY>: it was changed outside opv.
         let unreadable = || {
-            Error::Target(
-                format!(
-                    "secret {name} does not hold a UTF-8 value under data.{VALUE_KEY} (it was \
-                 changed outside opv); nothing was changed\n  next: inspect it with `{}`",
-                    self.k.command(&format!("get secret {name} --show-labels"))
-                )
-                .into(),
+            super::unusable_reply(
+                &what,
+                None,
+                crate::cause::OutputProblem::InvalidValue {
+                    what: "Secret value",
+                },
+                crate::cause::During::Read,
             )
         };
         let bytes = Zeroizing::new(STANDARD.decode(b64.trim()).map_err(|_| unreadable())?);
@@ -404,15 +405,17 @@ impl PinnedStore for KubeSecrets<'_> {
             Outcome::Done(out) => {
                 let echoed = text(&out, &what)?.trim();
                 if echoed != format!("secret/{secret}") {
-                    return Err(Error::Unknown(
-                        format!(
-                            "{what} did not confirm the secret it wrote; it may or may not \
-                         exist and nothing else was changed\n  next: check with `{}`, then \
-                         re-run the same command",
-                            self.k.command(&format!("get secret {secret} -o name"))
-                        )
-                        .into(),
-                    ));
+                    // The apply answered without confirming the Secret it wrote.
+                    let subject = crate::cause::ResourceRef {
+                        kind: crate::cause::ResourceKind::Secret,
+                        name: crate::cause::ResourceName::new(secret.clone()),
+                        scope: Some(t.namespace.clone()),
+                    };
+                    return Err(super::unusable(&what, |seen| Cause::WriteOutcomeUnknown {
+                        system: crate::cause::System::Kubernetes,
+                        subject,
+                        seen,
+                    }));
                 }
                 Ok(version)
             }
@@ -718,7 +721,7 @@ mod tests {
     fn an_unconfirmed_apply_is_outcome_unknown() {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok("secret/x")]);
         let e = with_store(&r, |s| s.write_one("NEW_KEY", &sv(MARK), &stamp())).unwrap_err();
-        assert!(matches!(e, Error::Unknown(_)), "{e:?}");
+        assert_eq!(e.code_str(), "outcome_unknown", "{e:?}");
     }
 
     #[test]
@@ -908,7 +911,11 @@ mod tests {
     fn read_of_undecodable_secret_never_names_its_content() {
         let r = FakeRunner::new([ok(DEPLOYMENT), ok(&format!("dev\t{MARK}"))]);
         let e = with_store(&r, |s| s.read("FLEET__API__DB_URL")).unwrap_err();
-        assert!(matches!(e, Error::Target(m) if m.contains(DB_URL_SECRET) && !m.contains(MARK)));
+        let shown = crate::error::report(&e);
+        assert!(
+            shown.contains(DB_URL_SECRET) && !shown.contains(MARK),
+            "{shown}"
+        );
     }
 
     #[test]

@@ -1088,7 +1088,7 @@ fn verify_of_a_misspelt_product_is_unknown_product() {
     let (w, fleet) = delivered();
     let mut out = Vec::new();
     let e = verify(&fleet, "prod", Some("apii"), &[], None, &w, false, &mut out).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::UnknownProduct);
+    assert_eq!(e.code_str(), "unknown_product");
 }
 
 #[test]

@@ -9,16 +9,19 @@ use super::{local, skeleton, status};
 use crate::error::Error;
 use crate::runner::fake::FakeRunner;
 
-/// stdout as `main` prints it for `--json`: the command's body, framed with its result.
-/// `rerun` is the command line; the help command follows from its first word.
+/// stdout as `main` prints it for `--json`: the command's body, framed with its result,
+/// whose steps render against `rerun`, the command line.
 pub(crate) fn framed(body: &[u8], res: &Result<(), Error>, rerun: &str) -> String {
-    let sub = rerun.split_whitespace().nth(1).unwrap_or_default();
-    let help = format!("opv {sub} --help");
-    let out = match res {
-        Ok(()) => crate::json::finish(body, Ok(()), false),
-        Err(e) => crate::json::finish(body, Err((e, &e.step(rerun, &help))), false),
-    };
-    String::from_utf8(out).unwrap()
+    let words: Vec<String> = rerun.split_whitespace().map(str::to_string).collect();
+    let inv = crate::cause::Invocation::from_cli(&words);
+    String::from_utf8(crate::json::finish_with(
+        body,
+        res.as_ref().map(|_| ()),
+        false,
+        &inv,
+        false,
+    ))
+    .unwrap()
 }
 
 /// `framed` with the temporary directory `dir` replaced by `<dir>` and the rest of each such

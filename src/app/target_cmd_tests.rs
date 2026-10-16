@@ -269,7 +269,7 @@ fn a_duplicate_target_name_is_refused_naming_it() {
 fn a_duplicate_target_name_points_to_config_edit() {
     let a = add_to(WITH_TARGET, add_args("dev", "site"));
     assert_eq!(
-        a.res.as_ref().unwrap_err().step("", "").next,
+        a.res.as_ref().unwrap_err().next_text().unwrap_or_default(),
         "opv config edit"
     );
 }
@@ -286,7 +286,7 @@ fn an_inline_targets_table_points_to_config_edit() {
     // 06.27: a configuration-shape refusal leads to `opv config edit`, never `--help`.
     let original = "[environments.dev]\ntargets = {}\n";
     let e = insert_target(original, "dev", "site", &site_body(), "# c").unwrap_err();
-    assert_eq!(e.step("", "").next, "opv config edit");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv config edit");
 }
 
 #[test]

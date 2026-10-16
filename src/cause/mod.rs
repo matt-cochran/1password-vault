@@ -8,6 +8,7 @@
 //! derived classifications. Rendering (`render`, `evidence`) and steps (`step`) are separate
 //! modules.
 
+pub mod codes;
 pub mod config_check;
 pub mod evidence;
 pub mod render;
@@ -17,7 +18,6 @@ pub mod subject;
 
 use std::path::PathBuf;
 
-use crate::error::Retry;
 pub use config_check::{ConfigCheck, Declared, StoreNameProblem};
 pub use subject::*;
 
@@ -380,6 +380,9 @@ pub enum Cause {
     ConfigNotFound {
         searched_from: PathBuf,
         env: Option<EnvName>,
+        /// The 1Password manifest search that found nothing too, when one ran (03.20: only
+        /// the selected account is searched).
+        manifest: Option<ManifestSearch>,
     },
     ConfigSourceMismatch {
         command: CommandId,
@@ -785,9 +788,46 @@ pub enum Cause {
         /// The provider's own listing that shows the object, when there is one.
         refind: Option<VendorCmd>,
     },
+    /// A source-only product (FR-47) named on its own: it holds shared values for other
+    /// products' keys and is never run, checked or planned by itself.
+    SourceOnly {
+        product: ProductName,
+        env: Option<EnvName>,
+        /// A product that reads it, when one does: the step names it instead.
+        reader: Option<ProductName>,
+    },
+    /// The person's own item for `env` is not set up (`then`: its vault or item not found),
+    /// so the personal `keys` a run needs have no value (FR-55, J6). Code, exit code, retry
+    /// and steps are `then`'s.
+    PersonalNotSetUp {
+        env: EnvName,
+        keys: Vec<ProductKey>,
+        then: Box<Cause>,
+    },
+    /// No 1Password vault or item, or more than one, has exactly this title (a lookup in a
+    /// listing that answered, never a failed call).
+    TitleLookup {
+        /// `Vault` or `Item`.
+        kind: ResourceKind,
+        title: String,
+        /// The vault searched, for an item.
+        vault: Option<VaultId>,
+        /// How many have the title: 0, or more than one.
+        matches: usize,
+        /// The candidates by title and ID: the listing's for none, the matches for several.
+        candidates: Vec<String>,
+    },
     Bug {
         site: &'static str,
     },
+}
+
+/// The manifest search behind a `ConfigNotFound`: the repository tag it looked for (none
+/// without a remote) and the one account it searched.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ManifestSearch {
+    pub repo: Option<String>,
+    pub account: Option<AccountId>,
 }
 
 /// Why an item cannot be used as it is (F4).
@@ -954,6 +994,17 @@ pub enum UsageProblem {
     FileExists {
         path: PathBuf,
     },
+    /// A removed form (FR-60): what was removed, and the command that does it now.
+    Removed {
+        what: &'static str,
+        instead: Cmd,
+    },
+    /// A command line the parser refused: its own first line (it names the argument it
+    /// could not place), and the subcommand path whose help to read (empty: `opv --help`).
+    Rejected {
+        message: String,
+        help: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1013,8 +1064,11 @@ pub enum Refusal {
     NoRevision,
     /// The app is not running (a dead app).
     NotRunning,
-    /// Another change is still in progress at the provider.
-    InProgress,
+    /// A change is still in progress at the provider: opv's own `revision` still rolling
+    /// out, or (`None`) someone else's change.
+    InProgress {
+        revision: Option<String>,
+    },
     /// Settings opv does not manage changed outside opv: before opv's write (nothing
     /// written), or while opv's write was applied (`after_apply`: opv's change is live).
     /// `paths`: the changed settings, as JSON paths (never their values).
@@ -1065,6 +1119,12 @@ pub enum LocalOp {
     CurrentExe,
     HomeDir,
     Stdout,
+    /// Standard input (a prompt's answer).
+    Stdin,
+    /// The MCP session with its client over standard input and output: the handshake.
+    McpHandshake,
+    /// The MCP session after the handshake.
+    McpSession,
     /// The operating system's random source (F2).
     RandomSource,
 }
@@ -1122,6 +1182,10 @@ pub enum Unusable {
     /// It kept a secret opv gave it unencrypted on disk (az's service principal store on
     /// Windows); opv removed it with its private folder.
     StoredSecretUnencrypted,
+    /// This build of it leaves out a feature the command needs (opv without its MCP server).
+    FeatureNotBuilt {
+        feature: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1286,7 +1350,7 @@ impl Cause {
             WriteOutcomeUnknown { .. } => "outcome_unknown",
             Unavailable { .. } => "provider_unavailable",
             BudgetSpent { .. } => "budget_spent",
-            Partial { then, .. } => then.code(),
+            Partial { then, .. } | PersonalNotSetUp { then, .. } => then.code(),
             Interrupted { .. } => "interrupted",
             ChangedBeforeWrite { object } => match object {
                 StoreObject::File { .. } | StoreObject::Manifest { .. } => "config_changed",
@@ -1324,6 +1388,9 @@ impl Cause {
             InputUnreadable { .. } => "input_unreadable",
             ItemUnusable { .. } => "item_unusable",
             SecretNotStored { .. } => "secret_not_stored",
+            SourceOnly { .. } => "source_only",
+            TitleLookup { matches: 0, .. } => "title_not_found",
+            TitleLookup { .. } => "title_ambiguous",
             Bug { .. } => "internal_error",
         }
     }
@@ -1354,6 +1421,8 @@ impl Cause {
             | InputInvalid { .. }
             | ConfigProposalInvalid { .. }
             | InputUnreadable { .. }
+            | SourceOnly { .. }
+            | TitleLookup { .. }
             | AccountRequired { .. } => 2,
             ToolMissing { .. }
             | ToolUnusable { .. }
@@ -1414,7 +1483,7 @@ impl Cause {
             | Unavailable { .. }
             | BudgetSpent { .. }
             | SecretNotStored { .. } => 9,
-            Partial { then, .. } => then.exit_code(),
+            Partial { then, .. } | PersonalNotSetUp { then, .. } => then.exit_code(),
             Interrupted { signal, .. } => 128 + signal,
             Bug { .. } => EXIT_INTERNAL,
         }
@@ -1424,6 +1493,7 @@ impl Cause {
     pub fn retry(&self) -> RetryClass {
         use Cause::*;
         match self {
+            PersonalNotSetUp { then, .. } => then.retry(),
             WriteOutcomeUnknown { .. }
             | Unavailable { .. }
             | Interrupted { .. }
@@ -1460,6 +1530,7 @@ impl Cause {
             | UnexpectedOutput { .. }
             | ConfigProposalInvalid { .. }
             | SecretNotStored { .. }
+            | SourceOnly { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }
@@ -1479,7 +1550,7 @@ impl Cause {
             | Unavailable { seen, .. }
             | UnexpectedOutput { seen, .. }
             | Unrecognized { seen, .. } => Some(seen),
-            Partial { then, .. } => then.observed(),
+            Partial { then, .. } | PersonalNotSetUp { then, .. } => then.observed(),
             _ => None,
         }
     }
@@ -1495,13 +1566,14 @@ pub enum RetryClass {
     CheckFirst,
 }
 
-impl From<RetryClass> for Retry {
-    /// The pre-catalog three-way retry, for the Legacy renderer arm.
-    fn from(r: RetryClass) -> Retry {
-        match r {
-            RetryClass::Safe => Retry::Safe,
-            RetryClass::AfterFix | RetryClass::CheckFirst => Retry::AfterFix,
-            RetryClass::Never => Retry::Never,
+impl RetryClass {
+    /// The document's `retry` word.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RetryClass::Safe => "safe",
+            RetryClass::AfterFix => "after_fix",
+            RetryClass::Never => "never",
+            RetryClass::CheckFirst => "check_first",
         }
     }
 }

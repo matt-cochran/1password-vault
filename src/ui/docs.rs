@@ -27,8 +27,6 @@ pub struct ErrorDoc {
     pub code: String,
     #[serde(default)]
     pub message: String,
-    #[serde(default)]
-    pub detail: Vec<String>,
     /// What a person does first, when anything.
     #[serde(rename = "do", default)]
     pub act: Option<String>,
@@ -38,10 +36,9 @@ pub struct ErrorDoc {
 }
 
 impl ErrorDoc {
-    /// The lines the CLI prints for it: the message, its detail, `Do:` and `Next:`.
+    /// The lines the CLI prints for it: the message, `Do:` and `Next:`.
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![self.message.clone()];
-        out.extend(self.detail.iter().cloned());
         if let Some(a) = &self.act {
             out.push(format!("Do: {a}"));
         }

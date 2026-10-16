@@ -363,7 +363,7 @@ fn is_finding_state(state: &KeyState) -> bool {
 fn target_missing(t: &TargetInput) -> Option<String> {
     t.grants_missing
         .clone()
-        .or_else(|| t.rows.as_ref().err().map(|e| e.text().to_string()))
+        .or_else(|| t.rows.as_ref().err().map(|e| e.to_string()))
 }
 
 /// The FR-56 `grants_missing` finding for one target: what an owner must grant, and the
@@ -388,22 +388,32 @@ fn grants_missing(env: &str, target: &str, reason: &str) -> Finding {
 
 /// True for the codes that mean a vault or item could not be opened: a grant to give.
 fn is_no_access(e: &Error) -> bool {
-    matches!(e.code().as_str(), "vault_no_access" | "item_not_found")
+    matches!(e.code_str(), "vault_no_access" | "item_not_found")
+}
+
+/// Whether the cause's own Next is `opv ready` (typed: its re-run under `ready`, or a built
+/// `ready` command), which is the finding's verify rather than a step toward it.
+fn next_is_ready(e: &Error) -> bool {
+    use crate::cause::Next;
+    let Some((cause, _)) = e.cause() else {
+        return false;
+    };
+    let inv = crate::error::invocation();
+    match cause.step(&inv).1 {
+        Next::Rerun => inv.command == ["ready"],
+        Next::Run(c) | Next::Check(c) => c.command == ["ready"],
+        _ => false,
+    }
 }
 
 /// What `opv ready` re-runs to verify a finding.
 const VERIFY: &str = "opv ready --json";
 
-/// The codes whose cause `opv doctor` checks (the CLIs, their sign-ins and grants): only
-/// these may fall back to it, never a cause doctor cannot see (07.07, X7).
-const DOCTOR_SEES: [&str; 3] = ["dependency_missing", "auth_required", "permission_denied"];
-
 /// The finding for an error that stopped reading an environment (or one target of it): the
-/// error's own code, actor, effect, Do and next step (#157). The prerequisite is the
-/// error's own Next; when it has none, or its Next is `ready` itself (the verify), its Do
-/// is the prerequisite, so an owner's step is never dropped (07.07). Only an error with
-/// neither falls back: to doctor for a cause doctor checks, else to the `status` read of
-/// what failed.
+/// error's own code, actor, effect, Do and next step (#157), all from its cause (design
+/// §6.1: no step override). The prerequisite is the cause's Next; a cause whose Next is no
+/// command, or is `ready` itself again, has its Do as the prerequisite, so an owner's step
+/// is never dropped (07.07).
 fn error_finding(env: &str, target: Option<&str>, e: &Error) -> Finding {
     let code = e.code_str();
     let effect = match code {
@@ -412,19 +422,11 @@ fn error_finding(env: &str, target: Option<&str>, e: &Error) -> Finding {
         }
         _ => "none",
     };
-    let (act, next) = super::own_step(e, "opv ready");
-    let next = next.filter(|n| !n.starts_with("opv ready"));
-    let prerequisite = match (&next, &act) {
-        (Some(n), _) => n.clone(),
-        (None, Some(a)) => a.clone(),
-        (None, None) => match target {
-            Some(t) if DOCTOR_SEES.contains(&code) => {
-                format!("opv doctor --env {env} --target {t}")
-            }
-            Some(t) => format!("opv status {env} --target {t}"),
-            None => format!("opv status {env}"),
-        },
-    };
+    let (act, next) = super::own_step(e);
+    // The cause's own Next, unless it is `ready` itself (this finding's verify): then its
+    // Do is what to do first.
+    let next = next.filter(|_| !next_is_ready(e));
+    let prerequisite = next.clone().or_else(|| act.clone()).unwrap_or_default();
     Finding {
         code: code.into(),
         scope: Scope {
@@ -433,12 +435,7 @@ fn error_finding(env: &str, target: Option<&str>, e: &Error) -> Finding {
             ..Scope::default()
         },
         blocking: true,
-        actor: if e.human_required() || act.is_some() && next.is_none() {
-            "owner"
-        } else {
-            "agent"
-        }
-        .into(),
+        actor: if e.human_required() { "owner" } else { "agent" }.into(),
         effect: effect.into(),
         // The Do is shown on its own line only when it is not the prerequisite already.
         act: act.filter(|a| *a != prerequisite),

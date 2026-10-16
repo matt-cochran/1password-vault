@@ -76,7 +76,7 @@ fn the_refusal_names_no_value_and_reads_nothing() {
 #[test]
 fn the_bare_target_form_is_a_usage_error() {
     let e = source_from(&fleet(), "staging", "target").unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::Usage);
+    assert_eq!(e.code_str(), "usage");
 }
 
 /// With one target, the refusal's command is the named form.
@@ -382,7 +382,7 @@ fn a_service_account_cannot_apply() {
         ),
         || run(&fleet, "dev", &opts(&dir, true, &[]), &op, &mut Vec::new()).unwrap_err(),
     );
-    assert_eq!(e.exit_code(), 6);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // #94: --skip ---------------------------------------------------------------------------

@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use super::*;
 use crate::adapters::fake_op::FakeOp;
-use crate::error::Code;
 use crate::runner::fake::FakeRunner;
 use crate::runner::{Call, Outcome, Output};
 
@@ -318,7 +317,7 @@ fn a_stale_plan_id_is_refused() {
     let id = plan_of(&path, &op).plan_id;
     std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.code().as_str(), "stale_plan");
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 #[test]
@@ -337,7 +336,7 @@ fn a_plan_approved_for_another_account_is_stale() {
         .unwrap()
         .plan_id;
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.code().as_str(), "stale_plan");
+    assert_eq!(e.code_str(), "stale_plan");
 }
 
 #[test]
@@ -345,7 +344,11 @@ fn a_refused_authorization_creates_nothing() {
     let (_d, path, op) = workspace();
     let id = plan_of(&path, &op).plan_id;
     let mut refuse = |_: &Plan| -> Result<(), Error> {
-        Err(Error::Policy("no approval".into()).with_code(Code::PolicyRefused))
+        Err(crate::cause::Cause::ApprovalMissing {
+            plan: crate::cause::PlanId::new("p"),
+            scope: crate::cause::PlanScope::Structural,
+        }
+        .into())
     };
     let _ = apply(&op, &path, "myapp", ACCOUNT, &id, &mut refuse);
     assert_eq!(op.count(&["op", "vault", "create"]), 0);
@@ -381,7 +384,7 @@ fn a_signed_out_plan_is_op_not_signed_in() {
     let (_d, path, op) = workspace();
     op.signed_in.set(false);
     let e = plan(&op, &text(&path), "myapp", ACCOUNT).unwrap_err();
-    assert_eq!(e.code().as_str(), "op_not_signed_in");
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 /// The fake `op`, signed in as a service account.
@@ -727,7 +730,7 @@ fn a_stale_plan_id_steps_to_the_new_structural_plan() {
     let id = plan_of(&path, &op).plan_id;
     std::fs::write(&path, text(&path) + "\n# changed after review\n").unwrap();
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut approve_all).unwrap_err();
-    assert_eq!(e.step("", "").next, "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }
 
 /// 05.14, X4: after the approval was used, the step reads the new plan, never this apply
@@ -742,7 +745,7 @@ fn a_configuration_changed_during_apply_steps_to_the_new_plan() {
         Ok(())
     };
     let e = apply(&op, &path, "myapp", ACCOUNT, &id, &mut edit_during).unwrap_err();
-    assert_eq!(e.step("", "").next, "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }
 
 /// 05.14, X20: the failure says the approval is used up.
@@ -764,7 +767,7 @@ fn a_configuration_changed_during_apply_says_the_approval_is_used() {
 fn a_partial_apply_steps_to_the_new_plan() {
     let (_d, path, r) = failing_at(3);
     let e = apply_reviewed(&path, &r).unwrap_err();
-    assert_eq!(e.step("", "").next, "opv structure plan");
+    assert_eq!(e.next_text().unwrap_or_default(), "opv structure plan");
 }
 
 /// X20: a partial apply names what it already created.
@@ -780,7 +783,7 @@ fn a_partial_apply_names_what_it_created() {
 fn a_checkout_without_a_file_never_steps_to_bootstrap() {
     let dir = tempfile::tempdir().unwrap();
     let e = scope(dir.path(), &FakeOp::default()).unwrap_err();
-    assert!(!e.step("", "").next.contains("bootstrap"));
+    assert!(!e.next_text().unwrap_or_default().contains("bootstrap"));
 }
 
 #[test]

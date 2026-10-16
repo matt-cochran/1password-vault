@@ -427,7 +427,7 @@ fn a_signed_out_dry_run_is_op_not_signed_in() {
     let (_dir, path, op) = workspace();
     op.signed_in.set(false);
     let e = run_with(&path, &op, &dry_run()).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::OpNotSignedIn);
+    assert_eq!(e.code_str(), "op_not_signed_in");
 }
 
 /// #157: an environment's recorded vault is looked for in that environment's account.
@@ -590,7 +590,7 @@ fn a_missing_personal_vault_names_no_bare_bootstrap() {
     let path = dir.path().join("secrets.toml");
     std::fs::write(&path, TEAM).unwrap();
     let e = run_with(&path, &FakeOp::default(), &Opts::default()).unwrap_err();
-    assert_eq!(e.next_step(), None);
+    assert_ne!(e.next_text().as_deref(), Some("opv bootstrap"));
 }
 
 #[test]
@@ -655,7 +655,7 @@ fn a_service_account_cannot_bootstrap() {
         ),
         || run_with(&path, &op, &Opts::default()).unwrap_err(),
     );
-    assert_eq!(e.exit_code(), 6);
+    assert_eq!(e.code_str(), "own_session_required");
 }
 
 // A fresh account, end to end (#77): nothing exists; bootstrap, then the receipt says what

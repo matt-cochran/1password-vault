@@ -1,14 +1,2 @@
 # Rules a not-yet-migrated path breaks: `<cell> <rule>`. This list only shrinks
-# (KNOWN_LEGACY_CEILING in tests/e2e/matrix.rs); remove an entry once its rule holds.
-plan_prod__flyctl_secrets_list__credential_rejected next_does_not_loop
-plan_prod__flyctl_secrets_list__signed_out next_does_not_loop
-plan_prod__gh_secret_list__signed_out next_does_not_loop
-plan_prod__gh_variable_list__signed_out next_does_not_loop
-status_prod__flyctl_secrets_list__credential_rejected next_does_not_loop
-status_prod__flyctl_secrets_list__signed_out next_does_not_loop
-status_prod__gh_secret_list__signed_out next_does_not_loop
-status_prod__gh_variable_list__signed_out next_does_not_loop
-sync_prod_unconfirmed__flyctl_secrets_list__credential_rejected next_does_not_loop
-sync_prod_unconfirmed__flyctl_secrets_list__signed_out next_does_not_loop
-sync_prod_unconfirmed__gh_secret_list__signed_out next_does_not_loop
-sync_prod_unconfirmed__gh_variable_list__signed_out next_does_not_loop
+# (empty since every path is migrated); remove an entry once its rule holds.

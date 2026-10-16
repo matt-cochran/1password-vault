@@ -181,10 +181,14 @@ fn run_stops_before_the_command_when_the_personal_item_is_missing() {
 
 #[test]
 fn run_reports_personals_own_cause_when_the_personal_item_is_missing() {
-    // `run` passes on personal's own cause for the missing item, never one of its own.
+    // `run` passes on personal's own cause for the missing item, naming the keys (J6).
     let (_r, e) = run_without_a_personal_item();
     assert!(
-        matches!(e.cause(), Some((crate::cause::Cause::NotFound { .. }, _))),
+        matches!(
+            e.cause(),
+            Some((crate::cause::Cause::PersonalNotSetUp { then, .. }, _))
+                if matches!(**then, crate::cause::Cause::NotFound { .. })
+        ),
         "{e}"
     );
 }
@@ -293,6 +297,18 @@ fn locate_reports_setup_missing_when_the_item_does_not_exist() {
     assert_eq!(e.code_str(), "item_not_found");
 }
 
+/// J6: a run stopped by a personal item that is not set up names the keys it holds.
+#[test]
+fn a_missing_personal_item_names_the_keys_a_run_needs() {
+    let op = FakeOp::default();
+    op.vaults
+        .borrow_mut()
+        .push(("vpriv0000000000000000000001".into(), "Private".into()));
+    let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
+    let e = naming_keys(e, "dev", &[("api", "MY_TOKEN")]);
+    assert!(e.to_string().contains("api/MY_TOKEN"), "{e}");
+}
+
 #[test]
 fn item_title_uses_personal_item_when_set() {
     let f = crate::config::parse(
@@ -318,7 +334,7 @@ fn a_signed_out_run_is_not_told_its_personal_item_is_missing() {
     let r = FakeRunner::new(replies);
     let e = crate::app::run::run(&personal_fleet(), "dev", "api", &["env".to_string()], &r)
         .unwrap_err();
-    assert_ne!(e.code(), crate::error::Code::ItemNotFound);
+    assert_ne!(e.code_str(), "item_not_found");
 }
 
 // --- audit 04.16: the setup error names what opv looked for; other failures surface ---
@@ -330,7 +346,7 @@ fn a_missing_personal_item_is_named_by_its_title() {
         .borrow_mut()
         .push(("vpriv0000000000000000000001".into(), "Private".into()));
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("myapp · dev (personal)"), "{shown}");
 }
 
@@ -338,7 +354,7 @@ fn a_missing_personal_item_is_named_by_its_title() {
 fn a_missing_personal_vault_is_named_by_the_titles_tried() {
     let op = FakeOp::default();
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("Private"), "{shown}");
 }
 
@@ -347,7 +363,7 @@ fn a_missing_personal_vault_is_named_by_the_titles_tried() {
 fn a_missing_personal_vault_names_the_personal_vault_field() {
     let op = FakeOp::default();
     let e = locate(&op, &personal_fleet(), "dev", "myapp").unwrap_err();
-    let shown = crate::error::report(&e, "-", None);
+    let shown = crate::error::report(&e);
     assert!(shown.contains("environments.dev.personal_vault"), "{shown}");
 }
 

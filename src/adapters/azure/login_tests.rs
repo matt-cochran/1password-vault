@@ -359,5 +359,5 @@ fn an_unanswered_az_login_is_provider_unavailable() {
     let r = FakeRunner::default();
     r.push_unknown("timeout");
     let e = l.sign_in(values(), &r).unwrap_err();
-    assert_eq!(e.code(), crate::error::Code::ProviderUnavailable);
+    assert_eq!(e.code_str(), "provider_unavailable");
 }

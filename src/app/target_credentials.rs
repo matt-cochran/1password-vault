@@ -35,8 +35,8 @@ use crate::cause::{
     UsageProblem, VendorCmd,
 };
 use crate::domain::{Fleet, SecretValue, Target};
-use crate::error::{Error, Step};
-use crate::provider::{Provider, TargetConfig};
+use crate::error::Error;
+use crate::provider::Provider;
 use crate::runner::CommandRunner;
 
 /// The validity requested from the provider, in the confirmation: 90 days.
@@ -100,30 +100,29 @@ fn already_recorded(env: &str, name: &str) -> Error {
 /// An error's headline, for the summary line of `show` (06.06): a cause's own message, else
 /// the first line of the text.
 fn headline(e: &Error) -> String {
-    match e.cause() {
-        Some((c, _)) => c.message(),
-        None => e.text().lines().next().unwrap_or_default().to_string(),
-    }
+    e.to_string()
+}
+
+/// What `show` ends with: an optional `Do:` and one `Next:` (A3).
+struct Step {
+    action: Option<String>,
+    next: String,
 }
 
 /// The step of a preflight failure, rendered against `create` rather than against `show`
 /// itself: once the cause is fixed, what runs next is the `--create` (the target's state
 /// decides the step, never the command that only reported it).
 fn step_toward(e: &Error, create: &Cmd) -> Step {
-    let Some((c, _)) = e.cause() else {
-        let text = crate::cause::render::cmd_text(create);
-        return e.step(&text, &text);
-    };
     let inv = Invocation {
         origin: Origin::Cli,
         command: create.command.clone(),
         args: create.args.clone(),
         has_child: false,
     };
-    let (_, next) = c.step(&inv);
+    let doc = crate::error::document(e, &inv, false);
     Step {
-        action: c.do_text(&inv),
-        next: crate::cause::render::next_text(&next, &inv).unwrap_or_else(|| "none".into()),
+        action: doc["do"].as_str().map(str::to_string),
+        next: doc["next"].as_str().unwrap_or("none").to_string(),
     }
 }
 
@@ -172,7 +171,10 @@ pub fn show(
             None => step_toward(&cannot_mint(), &create),
         }
     };
-    write!(out, "{}", crate::error::step_lines(&step)).map_err(write_err)
+    if let Some(a) = &step.action {
+        writeln!(out, "Do: {a}").map_err(write_err)?;
+    }
+    writeln!(out, "Next: {}", step.next).map_err(write_err)
 }
 
 /// Where the configuration at `config` is, as the catalog names it.
@@ -223,73 +225,21 @@ pub(crate) fn recordable(config: &Path, env: &str, name: &str) -> Result<(), Err
     Ok(())
 }
 
-/// The provider's revoke hint for a minted credential with the target filled in (06.09):
-/// a `<kind>` placeholder takes the value the target's locator gives for that kind (a
-/// locator `app shop` fills `<app>` with `shop`). Core never names the provider (FR-37).
-pub(crate) fn cleanup_hint(provider: &dyn Provider, target: &dyn TargetConfig) -> Option<String> {
-    let hint = provider.mint_cleanup_hint()?;
-    let locator = target.target_locator();
-    Some(match locator.split_once(' ') {
-        Some((kind, value)) => hint.replace(&format!("<{kind}>"), value),
-        None => hint.to_string(),
-    })
-}
-
-/// What a cause-less failure to store the minted token still reports: the credential was
-/// made, and how to find and revoke it, with every name filled in (06.09).
-fn legacy_after_mint(e: Error, credential: &str, hint: Option<String>) -> Error {
-    let check =
-        hint.unwrap_or_else(|| format!("check the provider for a credential named {credential:?}"));
-    e.map_text(|t| {
-        format!(
-            "{t}\n  the credential {credential:?} was minted but could not be stored; revoke it \
-             at the provider: {check}"
-        )
-    })
-}
-
 /// A failure after the provider token was minted (and perhaps stored): the cause says what
 /// was already made (`done`), and its Next is a read, never the mint again (X5, X20; 06.08,
-/// 06.09). `Err` gives the error back when it has no cause.
-pub(crate) fn after_mint(e: Error, done: Vec<String>) -> Result<Error, Error> {
-    let Some((then, _)) = e.cause() else {
-        return Err(e);
-    };
-    let then = then.clone();
-    Ok(Cause::Partial {
-        done,
-        approval_used: None,
-        approval_scope: None,
-        then: Box::new(then),
-    }
-    .into())
-}
-
-/// The failure to record `deploy_credentials` after the token was minted and stored: what
-/// exists, and the line to add by hand (06.08). A refusal with no cause means opv could not
-/// edit the target's section.
-pub(crate) fn not_recorded(
-    e: Error,
-    config: &Path,
-    env: &str,
-    name: &str,
-    done: Vec<String>,
-) -> Error {
-    match after_mint(e, done.clone()) {
-        Ok(e) => e,
-        Err(_) => Cause::Partial {
+/// 06.09). The failure to record `deploy_credentials` after the token was minted and stored
+/// is one: what exists, and the line to add by hand (06.08).
+pub(crate) fn after_mint(e: Error, done: Vec<String>) -> Error {
+    let Error::Catalog(then, upstream) = e;
+    Error::Catalog(
+        Box::new(Cause::Partial {
             done,
             approval_used: None,
             approval_scope: None,
-            then: Box::new(Cause::ConfigNotEditable {
-                source: file_source(config),
-                reason: NotEditable::UnsupportedLayout {
-                    section: target_section(env, name),
-                },
-            }),
-        }
-        .into(),
-    }
+            then,
+        }),
+        upstream,
+    )
 }
 
 /// The failure to store a token that was already minted (C21), never a step that mints
@@ -307,10 +257,8 @@ fn stored_failed(
     target: &Target,
 ) -> Error {
     match e.cause() {
-        Some((Cause::CreateOutcomeUnknown { .. }, _)) => {
-            after_mint(e, vec![minted.to_string()]).unwrap_or_else(|e| e)
-        }
-        Some(_) => Cause::SecretNotStored {
+        Some((Cause::CreateOutcomeUnknown { .. }, _)) => after_mint(e, vec![minted.to_string()]),
+        _ => Cause::SecretNotStored {
             system: crate::provider::system_of(provider),
             kind: crate::cause::CreateKind::DeployToken,
             name: credential.to_string(),
@@ -319,11 +267,6 @@ fn stored_failed(
             refind: provider.mint_refind(target.config.as_ref()),
         }
         .into(),
-        None => legacy_after_mint(
-            e,
-            credential,
-            cleanup_hint(provider, target.config.as_ref()),
-        ),
     }
 }
 
@@ -432,7 +375,7 @@ pub fn run(
                     target_section(env, name)
                 ),
             ];
-            not_recorded(e, config, env, name, done)
+            after_mint(e, done)
         },
     )?;
     writeln!(

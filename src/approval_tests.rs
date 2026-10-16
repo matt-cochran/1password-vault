@@ -3,7 +3,6 @@
 //! directory, and no process-wide environment variable is set.
 
 use super::*;
-use crate::error::Code;
 
 const PLAN: &str = "sp-0123456789abcdef";
 const OTHER_PLAN: &str = "sp-fedcba9876543210";
@@ -49,7 +48,7 @@ fn consume_at_exactly_the_expiry_instant_is_refused() {
     let dir = approvals(&t);
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     let refused = consume_in(&dir, PLAN, "proj", "acct", NOW + TTL.as_secs()).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_required");
 }
 
 #[test]
@@ -58,7 +57,7 @@ fn consume_with_another_project_is_refused() {
     let dir = approvals(&t);
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     let refused = consume_in(&dir, PLAN, "other", "acct", NOW + 1).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_required");
 }
 
 #[test]
@@ -67,7 +66,7 @@ fn consume_with_another_account_is_refused() {
     let dir = approvals(&t);
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     let refused = consume_in(&dir, PLAN, "proj", "other", NOW + 1).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_required");
 }
 
 #[test]
@@ -76,7 +75,7 @@ fn consume_for_another_plan_id_is_refused() {
     let dir = approvals(&t);
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     let refused = consume_in(&dir, OTHER_PLAN, "proj", "acct", NOW + 1).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_required");
 }
 
 #[test]
@@ -84,7 +83,7 @@ fn consume_with_no_record_is_refused() {
     let t = tempdir();
     let dir = approvals(&t);
     let refused = consume_in(&dir, PLAN, "proj", "acct", NOW).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_required");
 }
 
 #[test]
@@ -92,7 +91,7 @@ fn a_refusals_next_step_names_the_approve_command() {
     let t = tempdir();
     let dir = approvals(&t);
     let refused = consume_in(&dir, OTHER_PLAN, "proj", "acct", NOW).unwrap_err();
-    assert_eq!(refused.step("", "").next, OTHER_PLAN_APPROVE);
+    assert_eq!(refused.next_text().unwrap_or_default(), OTHER_PLAN_APPROVE);
 }
 
 #[test]
@@ -100,7 +99,7 @@ fn a_malformed_plan_id_is_refused_with_usage() {
     let t = tempdir();
     let dir = approvals(&t);
     let refused = record_in(&dir, "not-a-plan", "proj", "acct", NOW).unwrap_err();
-    assert_eq!(refused.code(), Code::Usage);
+    assert_eq!(refused.code_str(), "usage");
 }
 
 #[test]
@@ -127,7 +126,7 @@ fn a_malformed_record_is_refused() {
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     std::fs::write(dir.join(format!("{PLAN}.json")), b"not json").unwrap();
     let refused = consume_in(&dir, PLAN, "proj", "acct", NOW + 1).unwrap_err();
-    assert_eq!(refused.code(), Code::ApprovalRequired);
+    assert_eq!(refused.code_str(), "approval_required");
 }
 
 #[test]
@@ -235,7 +234,7 @@ fn a_sync_approval_is_used_only_for_its_exact_scope() {
         NOW + 1,
     )
     .unwrap_err();
-    assert_eq!(e.code().as_str(), "approval_required");
+    assert_eq!(e.code_str(), "approval_required");
 }
 
 #[test]
@@ -274,7 +273,10 @@ fn a_used_approval_steps_to_the_structural_plan() {
     record_in(&dir, PLAN, "proj", "acct", NOW).unwrap();
     consume_in(&dir, PLAN, "proj", "acct", NOW + 1).unwrap();
     let refused = consume_in(&dir, PLAN, "proj", "acct", NOW + 2).unwrap_err();
-    assert_eq!(refused.step("", "").next, "opv structure plan");
+    assert_eq!(
+        refused.next_text().unwrap_or_default(),
+        "opv structure plan"
+    );
 }
 
 /// X1: a sync approval's refusal carries every scope flag of the approval.
@@ -292,7 +294,7 @@ fn a_sync_refusal_names_the_approve_command_with_its_scope() {
     )
     .unwrap_err();
     assert_eq!(
-        refused.step("", "").next,
+        refused.next_text().unwrap_or_default(),
         "opv approve 0a1b2c3d --sync prod --deploy --target east"
     );
 }
@@ -317,8 +319,7 @@ fn an_open_approvals_directory_steps_to_chmod() {
     let refused = record_in(&dir, PLAN, "proj", "acct", NOW).unwrap_err();
     assert!(
         refused
-            .step("", "")
-            .action
+            .do_text()
             .is_some_and(|a| a.starts_with("chmod 700"))
     );
 }

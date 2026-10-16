@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn env_file_error_json_envelope_never_shows_the_value() {
         let e = env_file_error(&format!("OPENAI_API_KEY=\"{MARKER}\"\n"));
-        let v = crate::error::envelope(&e, &e.step("opv status prod", "opv status --help"));
+        let v = crate::error::document(&e, &crate::error::invocation(), true);
         assert!(!v.to_string().contains("C1MARKER"), "{v}");
     }
 }

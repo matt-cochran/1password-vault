@@ -162,9 +162,6 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// How the error for a missing configuration starts; `doctor` keys its next step on it.
-pub const NOT_FOUND: &str = "no secrets.toml found in ";
-
 /// No `secrets.toml` in `start` or a parent (P3): the first-run router, offering both
 /// starting paths and the explicit `--config`.
 pub fn not_found(start: &Path) -> Error {
@@ -172,6 +169,7 @@ pub fn not_found(start: &Path) -> Error {
     crate::cause::Cause::ConfigNotFound {
         searched_from: start.to_path_buf(),
         env: None,
+        manifest: None,
     }
     .into()
 }
@@ -2372,12 +2370,8 @@ mod tests {
     }
 
     /// The message of the configuration error `text` is refused with.
-    /// A provider section's own refusal is still free text (its lane migrates it).
     fn config_err(text: &str) -> String {
-        match parse(text) {
-            Err(Error::Config(m)) => m.to_string(),
-            _ => cause(text).message(),
-        }
+        cause(text).message()
     }
 
     /// The field and rule of the `ConfigInvalid` refusal of `text`.
@@ -3415,7 +3409,7 @@ environments = ["prod"]
         let f = parse(WEB).unwrap();
         assert!(matches!(
             f.boundary("prod", "api"),
-            Err(e) if e.code() == crate::error::Code::BoundaryMissing
+            Err(e) if e.code_str() == "boundary_missing"
         ));
     }
 

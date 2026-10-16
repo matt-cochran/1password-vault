@@ -761,8 +761,10 @@ fn failed_revision_names_doctor_access_check() {
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
     // The catalog's TargetRefused (unhealthy revision) steps to the scoped doctor check.
     assert!(
-        res.as_ref()
-            .is_err_and(|e| e.step("", "").next.starts_with("opv doctor --env prod")),
+        res.as_ref().is_err_and(|e| e
+            .next_text()
+            .unwrap_or_default()
+            .starts_with("opv doctor --env prod")),
         "{res:?}"
     );
 }
@@ -1087,11 +1089,10 @@ fn timed_out_revision_names_revision_and_keeps_previous_serving() {
     let sim = api_changed();
     sim.world.borrow_mut().stall_revisions = true;
     let (res, _) = sync_on(&sim, &fleet_a(), &deploy());
-    // Still rolling out when the wait ended: the app's change is in progress.
+    // Still rolling out when the wait ended: the message names that revision (J2).
     assert!(
         res.as_ref().is_err_and(|e| e.code_str() == "update_refused"
-            && e.to_string()
-                .contains("another change is still in progress")),
+            && e.to_string().contains("opv-fixture-app--0000007")),
         "{res:?}"
     );
 }
