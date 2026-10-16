@@ -71,6 +71,14 @@ fn a_provider_key_with_a_prefix_is_refused() {
     assert!(recipe("api/STRIPE_KEY", &spec(&fleet, "STRIPE_KEY")).is_err());
 }
 
+/// #157: policy_refused exits 6 (policy), as its code says.
+#[test]
+fn a_refused_key_exits_as_its_code_says() {
+    let (fleet, _, _) = world();
+    let e = recipe("api/STRIPE_KEY", &spec(&fleet, "STRIPE_KEY")).unwrap_err();
+    assert_eq!(e.exit_code(), e.code().exit_code());
+}
+
 #[test]
 fn a_key_without_a_byte_length_is_refused() {
     let (fleet, _, _) = world();

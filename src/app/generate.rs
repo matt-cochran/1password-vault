@@ -42,7 +42,7 @@ impl Recipe {
 pub fn recipe(label: &str, spec: &KeySpec) -> Result<Recipe, Error> {
     let r = &spec.rules;
     let refuse = |why: &str| {
-        Error::Config(format!("{label}: {why}; opv generates only self-made secrets").into())
+        Error::Policy(format!("{label}: {why}; opv generates only self-made secrets").into())
             .with_code(Code::PolicyRefused)
             .with_do("ask the person to create the value at its provider and type it in 1Password")
             .with_next(format!("opv open {label}"))
