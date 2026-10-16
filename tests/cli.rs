@@ -662,8 +662,8 @@ fn init_refuses_an_existing_file_without_force_exit_2_naming_the_path() {
     let (code, out, err) = opv_in(dir.path(), &INIT);
     assert_eq!(code, 2, "{err}");
     assert!(out.is_empty(), "{out}");
-    assert!(err.contains("secrets.toml already exists"), "{err}");
-    assert!(err.contains("--force"), "{err}");
+    // The cause's own wording: init never merges, so the step adds the environment.
+    assert!(err.contains("--add-env"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
 }
 
@@ -902,7 +902,10 @@ fn init_add_env_refuses_an_existing_environment() {
         dir.path(),
         &["init", "prod", "--vault", "v", "--item", "i", "--add-env"],
     );
-    assert!(code == 2 && err.contains("already exists"), "{code} {err}");
+    assert!(
+        code == 2 && err.contains("already declared"),
+        "{code} {err}"
+    );
 }
 
 /// A fake `op` that runs `script`, in a fresh PATH dir; returns the dir.

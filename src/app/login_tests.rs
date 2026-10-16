@@ -541,7 +541,11 @@ fn a_failed_vault_list_under_a_live_session_never_steps_to_login() {
         &mut Ui::default(),
     )
     .unwrap_err();
-    assert_eq!(e.next_step(), Some("opv account list"));
+    // The cause comes from op's reply (#159), so the step is the cause's own: never login.
+    let inv = crate::cause::Invocation::from_cli(&["opv".into(), "access".into(), "dev".into()]);
+    let (cause, _) = e.cause().expect("a cataloged cause");
+    let next = crate::cause::render::next_text(&cause.step(&inv).1, &inv).unwrap_or_default();
+    assert!(!next.starts_with("opv login"), "{next}");
 }
 
 /// #157: account_not_registered exits 7 (auth), as its code says.

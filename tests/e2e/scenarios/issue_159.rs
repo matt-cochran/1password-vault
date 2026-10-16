@@ -216,3 +216,39 @@ fn a_login_that_fails_before_its_json_child_answers_with_an_error_code() {
         .find_map(|d| d["error"]["code"].as_str().map(str::to_string));
     assert!(code.is_some(), "{transcript}");
 }
+
+/// #159 (mig-setup-init): login's own `op vault list` failing with op's "not currently signed
+/// in" reply is diagnosed from that reply, `op_not_signed_in`, no longer a Legacy
+/// `source_error` worded by setup.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_login_whose_vault_list_is_signed_out_is_op_not_signed_in() {
+    let s = Scenario::new(
+        "[[fault]]\nprogram = \"op\"\ncall = \"vault list\"\nkind = \"signed_out\"\n",
+    );
+    let opv = env!("CARGO_BIN_EXE_opv");
+    let mut line = format!(
+        "env -i PATH={} HOME={} OPV_NO_SKILL=1 OPV_SIM_WORLD={} {opv} login --account {SELECTED} -- {opv}",
+        s.path(),
+        s.root.path().join("home").display(),
+        s.world().display()
+    );
+    for a in REBOUND {
+        line.push(' ');
+        line.push_str(a);
+    }
+    let Ok(out) = Command::new("script")
+        .args(["-qec", &line, "/dev/null"])
+        .current_dir(s.project())
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return; // no `script` on this machine: nothing to run the terminal under
+    };
+    let transcript = String::from_utf8_lossy(&out.stdout).into_owned();
+    let code = transcript
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .find_map(|d| d["error"]["code"].as_str().map(str::to_string));
+    assert_eq!(code.as_deref(), Some("op_not_signed_in"), "{transcript}");
+}

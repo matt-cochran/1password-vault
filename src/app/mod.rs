@@ -402,16 +402,6 @@ pub(crate) fn compare(current: &SecretValue, desired: &SecretValue) -> plan::Cur
     }
 }
 
-/// A failed write to the output stream. A closed pipe never gets here: `main` swallows
-/// `BrokenPipe` so the command still returns its own result (e.g. `status | head`).
-/// `text` with `note` appended to its first line (before a snippet or `fix:` lines).
-pub(crate) fn on_first_line(text: &str, note: &str) -> String {
-    match text.split_once('\n') {
-        Some((first, rest)) => format!("{first}{note}\n{rest}"),
-        None => format!("{text}{note}"),
-    }
-}
-
 /// An error's own Do and Next, in words (design §6.1: no step override). A Catalog error's
 /// come from its cause, rendered against the invocation; a Legacy error's from its own
 /// next step (split at ", then" against `rerun`, the command that was run) and `Do:`.
