@@ -334,6 +334,7 @@ fn a_rejected_deploy_credential_names_the_vault_of_its_item() {
         Principal, System, TargetName, VaultId,
     };
     let principal = Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
         item: ItemId::new("fly"),
         env: EnvName::new("prod"),
         target: TargetName::new("web"),

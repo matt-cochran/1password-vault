@@ -54,6 +54,7 @@ fn shell_token(var: &str) -> Principal {
 
 fn deploy_credentials() -> Principal {
     Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
         item: ItemId::new("itm-deploy"),
         env: EnvName::new("prod"),
         target: TargetName::new("ci"),
@@ -243,4 +244,14 @@ fn spike_q9_secret_list_with_a_rejected_deploy_token_is_deploy_credentials_faile
         &DiagnoseContext::default(),
     );
     assert_eq!(cause.code(), "deploy_credentials_failed");
+}
+
+/// D5/B3: a rejected deploy credential names the vault that holds its item, never "(vault )".
+#[test]
+fn a_rejected_deploy_credential_names_its_vault() {
+    assert!(
+        diagnosed("02-invalid-token", deploy_credentials())
+            .message()
+            .contains("(vault vlt-deploy)")
+    );
 }

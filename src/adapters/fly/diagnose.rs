@@ -13,7 +13,6 @@
 use crate::cause::{
     Cause, CredentialProblem, CredentialRef, DiagnoseContext, ExitClass, NamedBy, NotFoundState,
     Observed, Principal, ResourceKind, ResourceName, ResourceRef, SessionState, System, Unanswered,
-    VaultId,
 };
 
 /// Classify one failed `flyctl` call (design §5).
@@ -156,12 +155,15 @@ fn credential_rejected(seen: &Observed, ctx: &DiagnoseContext) -> Cause {
             problem: CredentialProblem::Rejected { needs: Vec::new() },
             seen: seen.clone(),
         },
-        Principal::DeployCredentials { item, env, target } => Cause::CredentialRejected {
+        Principal::DeployCredentials {
+            vault,
+            item,
+            env,
+            target,
+        } => Cause::CredentialRejected {
             system: System::Fly,
             credential: CredentialRef::DeployCredentials {
-                // The runner's principal does not carry the item's vault; the renderer names
-                // the item, environment and target that identify the credential.
-                vault: VaultId::new(""),
+                vault: vault.clone(),
                 item: item.clone(),
                 env: env.clone(),
                 target: target.clone(),

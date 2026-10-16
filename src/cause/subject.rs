@@ -242,7 +242,9 @@ pub enum Principal {
     StoreIdentity {
         name: String,
     },
+    /// An environment's deploy credentials: the item and the vault that holds it (D5).
     DeployCredentials {
+        vault: VaultId,
         item: ItemId,
         env: EnvName,
         target: TargetName,

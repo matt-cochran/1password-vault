@@ -694,7 +694,10 @@ fn tidy(
                 vault: crate::cause::VaultId::new(&b.vault_id),
                 item: crate::cause::ItemId::new(&b.item_id),
                 fields,
-                by: crate::cause::CommandId(format!("tidy {env_name}")),
+                by: crate::cause::Cmd {
+                    command: vec!["tidy".into()],
+                    args: vec![env_name.to_string()],
+                },
             };
             return failed(
                 layout,

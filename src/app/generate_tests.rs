@@ -187,10 +187,10 @@ fn why_of(e: &Error) -> &'static str {
     match e.cause() {
         Some((
             Cause::Guard {
-                guard: Guard::GenerateRefused { why, .. },
+                guard: Guard::GenerateRefused { reason, .. },
             },
             _,
-        )) => why,
+        )) => reason.words(),
         _ => "",
     }
 }

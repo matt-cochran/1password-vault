@@ -718,6 +718,7 @@ secret_name = "STATIC""#,
 
     fn deploy() -> crate::cause::Principal {
         crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new("vlt-deploy"),
             item: crate::cause::ItemId::new("gh-deploy"),
             env: crate::cause::EnvName::new("prod"),
             target: crate::cause::TargetName::new("ci"),

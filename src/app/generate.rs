@@ -18,7 +18,7 @@ use base64::Engine as _;
 
 use super::write_err;
 use crate::cause::{
-    Cause, CommandId, EnvName, Guard, IoKind, KeyName, NameKind, ProductName, Unusable,
+    Cause, EnvName, GenerateRefusal, Guard, IoKind, KeyName, NameKind, ProductName, Unusable,
     UsageProblem,
 };
 use crate::domain::{KeySpec, SecretValue, key_label};
@@ -45,13 +45,13 @@ impl Recipe {
 /// Why opv does not generate `product/key` in `env`, as the catalog's guard (R64). Each
 /// reason is said apart (05.11): a provider-issued key, a personal one, a shared one, a
 /// byte count out of range, a field that already holds a value.
-fn refused(product: &str, key: &str, env: &str, why: &'static str) -> Error {
+fn refused(product: &str, key: &str, env: &str, reason: GenerateRefusal) -> Error {
     Cause::Guard {
         guard: Guard::GenerateRefused {
             product: ProductName::new(product),
             key: KeyName::new(key),
             env: EnvName::new(env),
-            why,
+            reason,
         },
     }
     .into()
@@ -60,25 +60,23 @@ fn refused(product: &str, key: &str, env: &str, why: &'static str) -> Error {
 /// The recipe a key's rules give, or why opv will not generate `product/key` in `env`.
 pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Recipe, Error> {
     let r = &spec.rules;
-    let refuse = |why: &'static str| Err(refused(product, key, env, why));
+    let refuse = |reason: GenerateRefusal| Err(refused(product, key, env, reason));
     if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
-        return refuse("its prefix rule says the provider issues it");
+        return refuse(GenerateRefusal::ProviderIssued);
     }
     if spec.personal {
-        return refuse("it is a personal key, so each person has their own value");
+        return refuse(GenerateRefusal::Personal);
     }
-    if spec.from.is_some() {
-        return refuse("it is a shared key, so its value comes from the key it reads from");
+    if let Some(from) = &spec.from {
+        return refuse(GenerateRefusal::Shared { from: from.clone() });
     }
     match (r.base64_bytes, r.hex_bytes) {
         (Some(n), None) if (16..=1024).contains(&n) => Ok(Recipe::Base64(n)),
         (None, Some(n)) if (16..=1024).contains(&n) => Ok(Recipe::Hex(n)),
         (Some(_) | None, Some(_) | None) if r.base64_bytes.is_some() || r.hex_bytes.is_some() => {
-            refuse("its rules must give one of base64_bytes or hex_bytes, between 16 and 1024")
+            refuse(GenerateRefusal::ByteCountOutOfRange)
         }
-        _ => refuse(
-            "its rules give no byte length (base64_bytes or hex_bytes), so the provider issues it",
-        ),
+        _ => refuse(GenerateRefusal::NoByteCount),
     }
 }
 
@@ -122,13 +120,7 @@ pub fn run(
             .iter()
             .any(|f| f.section == *product && f.label == *key && !f.value.expose().is_empty());
         if filled {
-            return Err(refused(
-                product,
-                key,
-                env_name,
-                "its field already holds a value, and opv generate never replaces one \
-                 (rotation is a reviewed step)",
-            ));
+            return Err(refused(product, key, env_name, GenerateRefusal::HasValue));
         }
     }
     let writes: Vec<(String, String, SecretValue)> = chosen
@@ -137,7 +129,12 @@ pub fn run(
         .collect::<Result<_, _>>()?;
     // A read-back failure names this command (05.10): run again, a value that landed is
     // refused as already there, never replaced.
-    let by = CommandId(format!("generate {env_name} {}", keys.join(" ")));
+    let by = crate::cause::Cmd {
+        command: vec!["generate".into()],
+        args: std::iter::once(env_name.to_string())
+            .chain(keys.iter().cloned())
+            .collect(),
+    };
     super::adopt::write_values(fleet, env, &writes, &by, r)?;
     for (p, k, rcp) in &chosen {
         writeln!(

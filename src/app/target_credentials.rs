@@ -24,7 +24,7 @@
 //! made, and its Next is a read, never the mint again (X5, X20).
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::setup::Interaction;
 use super::tidy::require_person;
@@ -200,9 +200,7 @@ pub(crate) fn recordable(config: &Path, env: &str, name: &str) -> Result<(), Err
     if super::bootstrap::is_generated(&text) {
         return Err(Cause::ConfigNotEditable {
             source: file_source(config),
-            reason: NotEditable::Generated {
-                path: PathBuf::from("its generator's input"),
-            },
+            reason: NotEditable::Generated { generator: None },
         }
         .into());
     }

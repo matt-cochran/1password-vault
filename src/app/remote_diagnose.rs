@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::cause::{
     Cause, CredentialProblem, CredentialRef, DiagnoseContext, ExitClass, IoKind, Observed,
     Principal, ProfileName, RemotePhase, ResourceKind, ResourceName, ResourceRef, System,
-    Unanswered, VaultId,
+    Unanswered,
 };
 
 /// What the caller knows about the pinned connection and the session when ssh failed. The
@@ -225,8 +225,13 @@ fn classify_code(
 fn credential_from(seen: &Observed, conn: &Connection<'_>) -> CredentialRef {
     match seen.principal() {
         Principal::ShellToken { var } => CredentialRef::ShellToken { var: var.clone() },
-        Principal::DeployCredentials { item, env, target } => CredentialRef::DeployCredentials {
-            vault: VaultId::new(""),
+        Principal::DeployCredentials {
+            vault,
+            item,
+            env,
+            target,
+        } => CredentialRef::DeployCredentials {
+            vault: vault.clone(),
             item: item.clone(),
             env: env.clone(),
             target: target.clone(),

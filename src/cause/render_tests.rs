@@ -486,7 +486,10 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 vault: VaultId::new("vlt-atqr"),
                 item: ItemId::new("itm-1"),
                 fields: vec![FieldName::new("fld-api")],
-                by: CommandId("tidy".into()),
+                by: Cmd {
+                    command: vec!["tidy".into()],
+                    args: vec!["prod".into()],
+                },
             },
             vec!["vlt-atqr", "itm-1", "fld-api", "tidy"],
         ),
@@ -717,6 +720,41 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             },
             vec!["Azure"],
         ),
+        (
+            ConfigProposalInvalid {
+                source: file_source(),
+                field: DottedPath(vec!["products".into(), "prod-api".into()]),
+                rule: FieldRule::Missing,
+            },
+            vec!["cfg/secrets.toml", "nothing was written"],
+        ),
+        (
+            InputUnreadable {
+                path: PathBuf::from("/work/in.env"),
+                kind: InputKind::Dotenv,
+                io: IoKind::PermissionDenied,
+            },
+            vec!["/work/in.env"],
+        ),
+        (
+            ItemUnusable {
+                vault: Some(VaultId::new("vlt-atqr")),
+                title: "title-xyz".into(),
+                problem: ItemProblem::WrongCategory,
+            },
+            vec!["vlt-atqr", "title-xyz"],
+        ),
+        (
+            SecretNotStored {
+                system: System::Fly,
+                kind: CreateKind::DeployToken,
+                name: "tok-web".into(),
+                env: EnvName::new("prod"),
+                target: TargetName::new("web"),
+                refind: None,
+            },
+            vec!["tok-web", "Fly"],
+        ),
         (Bug { site: "site-xyz" }, vec!["site-xyz"]),
     ]
 }
@@ -792,10 +830,14 @@ fn ordinal(c: &Cause) -> usize {
         LocalIo { .. } => 63,
         StoreNotReady { .. } => 64,
         HandoffPipeContested { .. } => 65,
+        ConfigProposalInvalid { .. } => 66,
+        InputUnreadable { .. } => 67,
+        ItemUnusable { .. } => 68,
+        SecretNotStored { .. } => 69,
     }
 }
 
-const VARIANTS: usize = 66;
+const VARIANTS: usize = 70;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -1519,7 +1561,7 @@ fn a_refused_generate_is_filled_in_by_a_person() {
             product: ProductName::new("api"),
             key: KeyName::new("CERT"),
             env: EnvName::new("prod"),
-            why: "it is issued by a vendor",
+            reason: GenerateRefusal::ProviderIssued,
         },
     };
     assert!(c.human_required(&inv()));
@@ -2149,5 +2191,369 @@ fn a21_no_account_at_all_has_its_own_words() {
     assert_eq!(
         c.message(),
         "no 1Password account is added to op on this machine"
+    );
+}
+
+// --- FOLLOWUPS F, D, E1: one regression test per item, each citing it -------------------
+
+fn no_terminal() -> Situation {
+    Situation {
+        terminal: false,
+        ..person_at_terminal()
+    }
+}
+
+fn next_under(c: &Cause, inv: &Invocation, sit: &Situation) -> String {
+    next_text(&c.step_in(inv, sit).1, inv).unwrap_or_default()
+}
+
+/// F1 (X11): a refused step falls back to the command's help, never to an empty Next.
+#[test]
+fn f1_a_refused_setup_falls_back_to_its_help() {
+    let c = Cause::NeedsTerminal {
+        why: NoTerminal::Ci,
+    };
+    let inv = cli(&["opv", "setup", "--product", "api"]);
+    assert_eq!(next_under(&c, &inv, &under_ci()), "opv setup --help");
+}
+
+/// E1: a kube context that needs a credential refresh never steps back to the same read
+/// when this run has no terminal.
+#[test]
+fn e1_kube_signed_out_without_a_terminal_does_not_rerun_the_read() {
+    let inv = cli(&["opv", "plan", "prod"]);
+    assert_eq!(
+        next_under(&not_signed_in(System::Kubernetes), &inv, &no_terminal()),
+        "opv doctor --env prod"
+    );
+}
+
+/// E1: under CI a kube sign-in is the job's own credential, not a refresh by a person.
+#[test]
+fn e1_kube_signed_out_under_ci_names_the_ci_credential() {
+    let inv = cli(&["opv", "plan", "prod"]);
+    assert!(
+        not_signed_in(System::Kubernetes)
+            .do_text_in(&inv, &under_ci())
+            .unwrap_or_default()
+            .contains("give this CI job a kubeconfig")
+    );
+}
+
+fn generate_refused(reason: GenerateRefusal) -> Cause {
+    Cause::Guard {
+        guard: Guard::GenerateRefused {
+            product: ProductName::new("web"),
+            key: KeyName::new("TOKEN"),
+            env: EnvName::new("prod"),
+            reason,
+        },
+    }
+}
+
+fn partial(then: Cause, done: &[&str]) -> Cause {
+    Cause::Partial {
+        done: done.iter().map(|d| d.to_string()).collect(),
+        approval_used: None,
+        approval_scope: None,
+        then: Box::new(then),
+    }
+}
+
+fn secret_not_stored(refind: Option<VendorCmd>) -> Cause {
+    Cause::SecretNotStored {
+        system: System::Fly,
+        kind: CreateKind::DeployToken,
+        name: "tok-web".into(),
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+        refind,
+    }
+}
+
+/// F2 (R21): `opv add` into an undeclared environment steps to declaring it.
+#[test]
+fn f2_an_undeclared_environment_from_add_steps_to_env_add() {
+    let c = Cause::NotDeclared {
+        kind: NameKind::Environment,
+        given: "staging".into(),
+        candidates: vec!["prod".into()],
+        closest: None,
+    };
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "add", "staging", "web/KEY"])),
+        "opv env add staging"
+    );
+}
+
+/// F2: a proposed configuration that would be invalid says nothing was written.
+#[test]
+fn f2_an_invalid_proposal_says_nothing_was_written() {
+    let c = Cause::ConfigProposalInvalid {
+        source: file_source(),
+        field: DottedPath(vec!["products".into(), "web".into()]),
+        rule: FieldRule::Missing,
+    };
+    assert!(c.message().contains("nothing was written"));
+}
+
+/// F2 (R64): a shared key steps to generating its source.
+#[test]
+fn f2_a_shared_key_steps_to_generating_its_source() {
+    let c = generate_refused(GenerateRefusal::Shared {
+        from: "api/TOKEN".into(),
+    });
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        "opv generate prod api/TOKEN"
+    );
+}
+
+/// F2 (R64): a byte count out of range steps to the configuration.
+#[test]
+fn f2_a_byte_count_out_of_range_steps_to_config_edit() {
+    let c = generate_refused(GenerateRefusal::ByteCountOutOfRange);
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        "opv config edit"
+    );
+}
+
+/// F2 (R64): a field that already holds a value steps to the reviewed rotation plan.
+#[test]
+fn f2_a_field_with_a_value_steps_to_the_rotation_plan() {
+    let c = generate_refused(GenerateRefusal::HasValue);
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "generate", "prod", "web/TOKEN"])),
+        "opv plan prod --rotate web/TOKEN"
+    );
+}
+
+/// F2 (R46): a provider that hides values steps to adopt's help for the environment.
+#[test]
+fn f2_a_provider_that_hides_values_steps_to_adopt_help() {
+    let c = Cause::Guard {
+        guard: Guard::ProviderHidesValues {
+            system: System::Fly,
+        },
+    };
+    assert_eq!(
+        next_in(
+            &c,
+            &cli(&["opv", "adopt", "staging", "--from", "target:portfolio"])
+        ),
+        "opv adopt staging --help"
+    );
+}
+
+/// F2: the command that wrote keeps a path with a space as one word.
+#[test]
+fn f2_a_read_back_by_a_path_with_a_space_keeps_it_one_word() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["adopt".into()],
+            args: vec!["dev".into(), "--from".into(), "my values.env".into()],
+        },
+    };
+    assert_eq!(next_in(&c, &inv()), "opv adopt dev --from 'my values.env'");
+}
+
+/// F2: the operating system's random source is named as such.
+#[test]
+fn f2_a_random_source_failure_is_named() {
+    let c = Cause::LocalIo {
+        op: LocalOp::RandomSource,
+        path: PathBuf::new(),
+        io: IoKind::Other,
+    };
+    assert!(c.message().contains("random source"));
+}
+
+/// F3: a plan id may never have been approved, so a change never says it was.
+#[test]
+fn f3_a_changed_plan_does_not_claim_an_approval() {
+    let c = Cause::PlanChanged {
+        old: PlanId::new("aaaa1111"),
+        new: PlanId::new("bbbb2222"),
+        scope: PlanScope::Structural,
+    };
+    assert!(!c.message().contains("approved"));
+}
+
+/// F3: next to what was already written, a change before the rest never says "wrote nothing".
+#[test]
+fn f3_a_partial_change_before_write_does_not_say_nothing_was_written() {
+    let c = partial(
+        Cause::ChangedBeforeWrite {
+            object: StoreObject::File {
+                path: PathBuf::from("cfg/secrets.toml"),
+            },
+        },
+        &["vault prod-web"],
+    );
+    assert!(!c.message().contains("wrote nothing"));
+}
+
+/// F3: an unknown plan id names the kind of plan it was given as.
+#[test]
+fn f3_an_unknown_plan_names_its_kind() {
+    let c = Cause::PlanUnknown {
+        plan: "zz".into(),
+        scope: Some(PlanScope::Structural),
+    };
+    assert!(c.message().contains("structure plan"));
+}
+
+/// F4: an input file that cannot be read has its own code.
+#[test]
+fn f4_an_unreadable_input_file_is_input_unreadable() {
+    let c = Cause::InputUnreadable {
+        path: PathBuf::from("/work/in.env"),
+        kind: InputKind::Dotenv,
+        io: IoKind::NotFound,
+    };
+    assert_eq!(c.code(), "input_unreadable");
+}
+
+/// F4: an item of the wrong category is an item problem, not an input problem.
+#[test]
+fn f4_an_item_of_the_wrong_category_is_item_unusable() {
+    let c = Cause::ItemUnusable {
+        vault: None,
+        title: "app".into(),
+        problem: ItemProblem::WrongCategory,
+    };
+    assert_eq!(c.code(), "item_unusable");
+}
+
+/// F4: setup's near product name is the person's own command to run.
+#[test]
+fn f4_setups_near_product_is_a_handoff() {
+    let c = Cause::NotDeclared {
+        kind: NameKind::Product,
+        given: "apu".into(),
+        candidates: vec!["api".into(), "web".into()],
+        closest: Some(Closest::unique(&["api"]).expect("one")),
+    };
+    let inv = cli(&["opv", "setup", "--product", "apu"]);
+    assert_eq!(
+        next_kind(&c.step_in(&inv, &person_at_terminal()).1),
+        "handoff"
+    );
+}
+
+/// F4: an unknown `--product` is `unknown_product`.
+#[test]
+fn f4_an_unknown_product_is_unknown_product() {
+    let c = Cause::NotDeclared {
+        kind: NameKind::Product,
+        given: "apu".into(),
+        candidates: vec!["api".into()],
+        closest: None,
+    };
+    assert_eq!(c.code(), "unknown_product");
+}
+
+/// F4: what remains after a partial setup is read by doctor, not a structure plan.
+#[test]
+fn f4_a_partial_setup_steps_to_doctor() {
+    let c = partial(
+        Cause::Interrupted {
+            signal: 2,
+            writes_started: true,
+        },
+        &["item app"],
+    );
+    assert_eq!(next_in(&c, &cli(&["opv", "setup"])), "opv doctor");
+}
+
+/// F4: a file that exists is replaced only by the person's own `--force`.
+#[test]
+fn f4_a_file_that_exists_hands_off_with_force() {
+    let c = Cause::Usage {
+        problem: UsageProblem::FileExists {
+            path: PathBuf::from("secrets.toml"),
+        },
+    };
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "init", "dev"])),
+        "opv init dev --force"
+    );
+}
+
+/// A22: a secret-bearing object whose secret was never stored is revoked by a person.
+#[test]
+fn a22_a_secret_never_stored_is_revoked_by_a_person() {
+    assert!(secret_not_stored(None).human_required_in(&inv(), &person_at_terminal()));
+}
+
+/// A22: its Next is the provider's own listing that finds it, never a second mint (X5).
+#[test]
+fn a22_a_secret_never_stored_steps_to_the_vendor_refind() {
+    let refind = VendorCmd {
+        program: "flyctl".into(),
+        args: vec![
+            "tokens".into(),
+            "list".into(),
+            "--app".into(),
+            "app-web".into(),
+        ],
+    };
+    assert_eq!(
+        next_in(&secret_not_stored(Some(refind)), &inv()),
+        "flyctl tokens list --app app-web"
+    );
+}
+
+/// A22: a generated configuration whose generator is unknown says so without a made-up path.
+#[test]
+fn a22_a_generated_config_without_a_known_generator_names_none() {
+    let c = Cause::ConfigNotEditable {
+        source: file_source(),
+        reason: NotEditable::Generated { generator: None },
+    };
+    assert!(c.message().ends_with("it is generated"));
+}
+
+/// A22: a partial `target credentials --create` steps to its show form.
+#[test]
+fn a22_a_partial_credentials_create_steps_to_its_show() {
+    let c = partial(
+        Cause::Interrupted {
+            signal: 2,
+            writes_started: true,
+        },
+        &["deploy token tok-web"],
+    );
+    assert_eq!(
+        next_in(
+            &c,
+            &cli(&[
+                "opv",
+                "target",
+                "credentials",
+                "prod",
+                "--target",
+                "web",
+                "--create"
+            ])
+        ),
+        "opv target credentials prod --target web"
+    );
+}
+
+/// D3 (A14): a built step keeps the invocation's `--project` when it takes one.
+#[test]
+fn d3_a_built_step_keeps_the_project_flag() {
+    let c = Cause::ConfigNotFound {
+        searched_from: PathBuf::from("/work"),
+        env: Some(EnvName::new("prod")),
+    };
+    assert_eq!(
+        next_in(&c, &cli(&["opv", "access", "prod", "--project", "acme"])),
+        "opv init prod --project acme"
     );
 }

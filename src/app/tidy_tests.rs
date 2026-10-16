@@ -1765,8 +1765,8 @@ fn a_field_the_write_dropped_steps_to_opv_tidy() {
     assert_eq!(
         tidy_cause(&op).step(&inv).1,
         crate::cause::Next::Run(crate::cause::Cmd {
-            command: vec!["tidy".into(), "dev".into()],
-            args: vec![],
+            command: vec!["tidy".into()],
+            args: vec!["dev".into()],
         })
     );
 }

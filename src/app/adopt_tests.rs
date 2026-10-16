@@ -59,7 +59,8 @@ fn a_target_that_hides_values_never_names_the_same_adopt() {
     let r = FakeRunner::default();
     let e = read_source(&fleet(), "staging", &Source::Target("portfolio".into()), &r).unwrap_err();
     let inv = cli(&["adopt", "staging", "--from", "target:portfolio"]);
-    assert!(!next_of(&e, &inv).is_some_and(|n| n.contains("adopt")));
+    // F2 (R46): its help, never the adopt itself.
+    assert!(!next_of(&e, &inv).is_some_and(|n| n.contains("--from")));
 }
 
 #[test]
@@ -459,5 +460,8 @@ fn the_plans_next_quotes_a_path_with_a_space() {
 #[test]
 fn a_read_back_failure_of_adopt_names_its_plan() {
     let by = plan_command("dev", &Source::Target("web".into()));
-    assert_eq!(by.0, "adopt dev --from target:web");
+    assert_eq!(
+        crate::cause::render::cmd_text(&by),
+        "opv adopt dev --from target:web"
+    );
 }

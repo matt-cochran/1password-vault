@@ -237,6 +237,7 @@ fn a_rejected_shell_token_names_the_variable() {
 #[test]
 fn a_rejected_deploy_credential_names_the_deploy_credential() {
     let principal = Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
         item: ItemId::new("itm-deploy"),
         env: EnvName::new("prod"),
         target: TargetName::new("web"),
@@ -249,4 +250,20 @@ fn a_rejected_deploy_credential_names_the_deploy_credential() {
             ..
         }
     ));
+}
+
+/// D5/B3: a rejected deploy credential names the vault that holds its item, never "(vault )".
+#[test]
+fn a_rejected_deploy_credential_names_its_vault() {
+    let principal = Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
+        item: ItemId::new("itm-deploy"),
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+    };
+    assert!(
+        diagnosed("03-invalid-token-whoami", principal)
+            .message()
+            .contains("(vault vlt-deploy)")
+    );
 }

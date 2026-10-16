@@ -554,7 +554,8 @@ pub enum Cause {
         vault: VaultId,
         item: ItemId,
         fields: Vec<FieldName>,
-        by: CommandId,
+        /// The command that wrote, as a command line (never split from text: F2).
+        by: Cmd,
     },
 
     // §4.7 external tools
@@ -707,9 +708,88 @@ pub enum Cause {
     HandoffPipeContested {
         system: System,
     },
+    /// A configuration change opv proposed (and did not write) would be invalid (F2).
+    ConfigProposalInvalid {
+        source: ConfigSource,
+        field: DottedPath,
+        rule: FieldRule,
+    },
+    /// An input file (a dotenv file, a setup recipe, a receipt) could not be read (F4).
+    InputUnreadable {
+        path: PathBuf,
+        kind: InputKind,
+        io: IoKind,
+    },
+    /// A 1Password item opv was pointed at has a layout opv cannot use (F4).
+    ItemUnusable {
+        vault: Option<VaultId>,
+        title: String,
+        problem: ItemProblem,
+    },
+    /// A secret-bearing object was made at the provider, but its secret was never stored
+    /// (A22): nobody holds it, so it is revoked, never made again (X5).
+    SecretNotStored {
+        system: System,
+        kind: CreateKind,
+        name: String,
+        env: EnvName,
+        target: TargetName,
+        /// The provider's own listing that shows the object, when there is one.
+        refind: Option<VendorCmd>,
+    },
     Bug {
         site: &'static str,
     },
+}
+
+/// Why an item cannot be used as it is (F4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemProblem {
+    /// The item with this title is another category than opv needs.
+    WrongCategory,
+    /// More than one object has this title.
+    DuplicateTitle,
+}
+
+/// Why opv does not generate a key's value (R64, F2): each reason has its own step.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum GenerateRefusal {
+    /// A prefix rule says the provider issues it.
+    ProviderIssued,
+    /// The rules give no byte length.
+    NoByteCount,
+    /// The rules give a byte count outside 16..=1024, or both forms.
+    ByteCountOutOfRange,
+    /// A personal key: each person keeps their own value.
+    Personal,
+    /// A shared key: its value comes from the key it reads from (`PRODUCT/KEY`).
+    Shared { from: String },
+    /// Its field already holds a value; generate never replaces one.
+    HasValue,
+}
+
+impl GenerateRefusal {
+    /// The reason in words.
+    pub fn words(&self) -> &'static str {
+        match self {
+            GenerateRefusal::ProviderIssued => "its prefix rule says the provider issues it",
+            GenerateRefusal::NoByteCount => {
+                "its rules give no byte length (base64_bytes or hex_bytes), so the provider issues it"
+            }
+            GenerateRefusal::ByteCountOutOfRange => {
+                "its rules must give one of base64_bytes or hex_bytes, between 16 and 1024"
+            }
+            GenerateRefusal::Personal => "it is a personal key, so each person has their own value",
+            GenerateRefusal::Shared { .. } => {
+                "it is a shared key, so its value comes from the key it reads from"
+            }
+            GenerateRefusal::HasValue => {
+                "its field already holds a value, and opv generate never replaces one (rotation is a reviewed step)"
+            }
+        }
+    }
 }
 
 /// `ToolMissing.platform` in the document (`host::Platform` has no serde form of its own).
@@ -759,9 +839,17 @@ impl From<std::io::ErrorKind> for IoKind {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum NotEditable {
-    Generated { path: PathBuf },
-    UnsupportedLayout { section: String },
-    ManifestItemAsBoundary { env: EnvName, boundary: String },
+    /// Generated from `generator`, when opv knows what generates it (A22).
+    Generated {
+        generator: Option<PathBuf>,
+    },
+    UnsupportedLayout {
+        section: String,
+    },
+    ManifestItemAsBoundary {
+        env: EnvName,
+        boundary: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -810,6 +898,10 @@ pub enum UsageProblem {
     },
     UseInstead {
         command: Cmd,
+    },
+    /// A file the command would write already exists; `--force` replaces it (F4).
+    FileExists {
+        path: PathBuf,
     },
 }
 
@@ -868,6 +960,8 @@ pub enum LocalOp {
     CurrentExe,
     HomeDir,
     Stdout,
+    /// The operating system's random source (F2).
+    RandomSource,
 }
 
 /// opv's own refusals that are not person-only steps (§4.5).
@@ -896,7 +990,7 @@ pub enum Guard {
         product: ProductName,
         key: KeyName,
         env: EnvName,
-        why: &'static str,
+        reason: GenerateRefusal,
     },
     RemoteProfileRefuses {
         profile: ProfileName,
@@ -1091,6 +1185,10 @@ impl Cause {
             LocalIo { .. } => "local_io_failed",
             StoreNotReady { .. } => "owner_setup_required",
             HandoffPipeContested { .. } => "handoff_refused",
+            ConfigProposalInvalid { .. } => "config_invalid",
+            InputUnreadable { .. } => "input_unreadable",
+            ItemUnusable { .. } => "item_unusable",
+            SecretNotStored { .. } => "secret_not_stored",
             Bug { .. } => "internal_error",
         }
     }
@@ -1118,7 +1216,9 @@ impl Cause {
             | NothingInScope { .. }
             | Usage { .. }
             | AlreadyDeclared { .. }
-            | InputInvalid { .. } => 2,
+            | InputInvalid { .. }
+            | ConfigProposalInvalid { .. }
+            | InputUnreadable { .. } => 2,
             ToolMissing { .. }
             | ToolUnusable { .. }
             | RemoteVersionMismatch { .. }
@@ -1128,7 +1228,8 @@ impl Cause {
                 object: StoreObject::Item { .. },
             }
             | ConcurrentEdit { .. }
-            | ReadBackMissing { .. } => 4,
+            | ReadBackMissing { .. }
+            | ItemUnusable { .. } => 4,
             ChangedBeforeWrite {
                 object: StoreObject::Resource { .. },
             } => 5,
@@ -1175,7 +1276,8 @@ impl Cause {
             CreateOutcomeUnknown { .. }
             | WriteOutcomeUnknown { .. }
             | Unavailable { .. }
-            | BudgetSpent { .. } => 9,
+            | BudgetSpent { .. }
+            | SecretNotStored { .. } => 9,
             Partial { then, .. } => then.exit_code(),
             Interrupted { signal, .. } => 128 + signal,
             Bug { .. } => EXIT_INTERNAL,
@@ -1220,6 +1322,8 @@ impl Cause {
             | PlanChanged { .. }
             | PlanUnknown { .. }
             | UnexpectedOutput { .. }
+            | ConfigProposalInvalid { .. }
+            | SecretNotStored { .. }
             | Bug { .. } => RetryClass::Never,
             _ => RetryClass::AfterFix,
         }

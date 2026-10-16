@@ -1365,6 +1365,7 @@ mod tests {
         let templates = names(&[]);
         // Under deploy credentials, so no probe of the person's own sign-in follows.
         let deploy = crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new("vlt-deploy"),
             item: crate::cause::ItemId::new("azure-deploy"),
             env: crate::cause::EnvName::new("prod"),
             target: crate::cause::TargetName::new("web"),

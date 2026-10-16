@@ -846,6 +846,7 @@ mod tests {
     fn vault_refusal_under_deploy_credentials_addresses_them() {
         let r = FakeRunner::new(refused_by(&vault_show()));
         let deploy = crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new("vlt-deploy"),
             item: crate::cause::ItemId::new("azure-deploy"),
             env: crate::cause::EnvName::new("prod"),
             target: crate::cause::TargetName::new("web"),

@@ -119,7 +119,7 @@ impl Situation {
         if self.ci && is_vendor_signin(cmd) {
             return Some(RefusedBecause::Ci);
         }
-        if is_interactive_only(cmd) {
+        if is_interactive_only(cmd) && !is_help(cmd) {
             if self.ci {
                 return Some(RefusedBecause::Ci);
             }
@@ -182,6 +182,11 @@ fn is_interactive_only(cmd: &Cmd) -> bool {
         cmd.command.first().map(String::as_str),
         Some("login" | "approve" | "setup")
     )
+}
+
+/// `opv <command> --help` reads the command's help: nothing about it needs a person (F1).
+fn is_help(cmd: &Cmd) -> bool {
+    cmd.args.iter().any(|a| a == "--help")
 }
 
 fn is_login(cmd: &Cmd) -> bool {

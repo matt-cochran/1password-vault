@@ -63,6 +63,7 @@ fn call_with_gh_token_in_its_env_is_observed_under_that_shell_token() {
 fn call_under_deploy_credentials_is_observed_under_them() {
     let r = FakeRunner::new([Output::failure(1)]);
     let deploy = Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
         item: ItemId::new("abc123"),
         env: EnvName::new("prod"),
         target: TargetName::new("web"),

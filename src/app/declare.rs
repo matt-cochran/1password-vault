@@ -64,9 +64,7 @@ fn store(path: &Path) -> Result<Declaring, Error> {
                 path: PathBuf::from(path),
                 given_by: GivenBy::Discovered,
             },
-            reason: NotEditable::Generated {
-                path: PathBuf::from(path),
-            },
+            reason: NotEditable::Generated { generator: None },
         }
         .into());
     }
