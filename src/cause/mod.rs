@@ -8,6 +8,7 @@
 //! derived classifications. Rendering (`render`, `evidence`) and steps (`step`) are separate
 //! modules.
 
+pub mod config_check;
 pub mod evidence;
 pub mod render;
 pub mod situation;
@@ -17,6 +18,7 @@ pub mod subject;
 use std::path::PathBuf;
 
 use crate::error::Retry;
+pub use config_check::{ConfigCheck, Declared, StoreNameProblem};
 pub use subject::*;
 
 // --- external calls ------------------------------------------------------------------------
@@ -268,6 +270,10 @@ pub enum FieldRule {
     Collision {
         rendered: String,
         other: DottedPath,
+    },
+    /// A check between fields (`config_check`), with its own words.
+    Check {
+        check: ConfigCheck,
     },
 }
 

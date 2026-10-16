@@ -20,6 +20,10 @@ use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
 use crate::adapters::registry;
+use crate::cause::{
+    Cause, ConfigCheck, ConfigSource, Declared, DottedPath, FieldRule, GivenBy, Location,
+    PatternId, StoreNameProblem,
+};
 use crate::domain::rules::{SIGNOZ_BODY, SIGNOZ_PREFIX};
 use crate::domain::{
     Boundary, Environment, Fleet, ItemRef, KeySpec, Product, Target, boundary_missing, key_label,
@@ -29,16 +33,34 @@ use crate::provider::{NameRules, Section, StoreConfig, StoreNameRules, TargetCon
 
 mod locate;
 
-/// Read and validate the configuration at `path`. An error names the file, the line and
-/// the field, and the fix when the message names what is allowed (H10, FR-2).
+/// Read and validate the configuration at `path`, found by discovery. An error names the
+/// file, the line and the field the validator checked, and the fix built from the field and
+/// its rule (H10, FR-2, audit 03.01).
 pub fn load(path: impl AsRef<Path>) -> Result<Fleet, Error> {
+    load_given(path, GivenBy::Discovered)
+}
+
+/// [`load`] for a path given by `given_by` (`--config`, `OPV_CONFIG`), so an unreadable file
+/// names where the path came from (audit 03.12).
+pub fn load_given(path: impl AsRef<Path>, given_by: GivenBy) -> Result<Fleet, Error> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|e| {
-        Error::Config(format!("cannot read {}: {e}", path.display()).into())
-            .with_code(crate::error::Code::ConfigNotFound)
-            .with_do("check the path given with --config or OPV_CONFIG")
+        Error::from(Cause::ConfigUnreadable {
+            path: path.to_path_buf(),
+            io: e.kind().into(),
+            given_by: given_by.clone(),
+        })
     })?;
-    parse(&text).map_err(|e| locate::relocate(e, &text, path))
+    parse(&text).map_err(|e| {
+        locate::relocate_at(
+            e,
+            &text,
+            ConfigSource::File {
+                path: path.to_path_buf(),
+                given_by,
+            },
+        )
+    })
 }
 
 /// Where a configuration text came from, for its error messages (H10, FR-44).
@@ -49,11 +71,79 @@ pub enum Source<'a> {
     /// A project manifest in 1Password, by title: errors read
     /// `manifest "opv · app": <field>: …`.
     Manifest(&'a str),
+    /// A project manifest in 1Password, by title and vault ID: the source a cause names.
+    ManifestIn { title: &'a str, vault: &'a str },
 }
 
-/// [`parse`] with errors naming `source`, the line and the field, with `fix:` lines.
+impl Source<'_> {
+    /// The catalog's [`ConfigSource`] for this source. A manifest's project is its title
+    /// without the `opv · ` prefix.
+    fn config_source(self) -> ConfigSource {
+        let manifest = |title: &str, vault: &str| ConfigSource::Manifest {
+            title: title.to_string(),
+            vault: crate::cause::VaultId::new(vault),
+            project: title.strip_prefix("opv · ").unwrap_or(title).to_string(),
+        };
+        match self {
+            Source::File(path) => ConfigSource::File {
+                path: path.to_path_buf(),
+                given_by: GivenBy::Discovered,
+            },
+            Source::Manifest(title) => manifest(title, ""),
+            Source::ManifestIn { title, vault } => manifest(title, vault),
+        }
+    }
+}
+
+/// [`parse`] with errors naming `source`, the line and the field.
 pub fn parse_at(text: &str, source: Source<'_>) -> Result<Fleet, Error> {
-    parse(text).map_err(|e| locate::relocate_at(e, text, source))
+    let source = source.config_source();
+    match parse(text) {
+        Ok(mut fleet) => {
+            fleet.read_from.0 = source;
+            Ok(fleet)
+        }
+        Err(e) => Err(locate::relocate_at(e, text, source)),
+    }
+}
+
+/// `parse`'s errors name this source until [`locate::relocate_at`] names the real one.
+fn parsing_source() -> ConfigSource {
+    crate::domain::model::ReadFrom::default().0
+}
+
+/// A dotted configuration path from its parts.
+fn dotted<S: AsRef<str>>(parts: &[S]) -> DottedPath {
+    DottedPath(parts.iter().map(|p| p.as_ref().to_string()).collect())
+}
+
+/// The unique close candidate to `given`, when there is exactly one (X2).
+fn closest<'a>(given: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    match crate::app::suggest::close(given, candidates).as_slice() {
+        [one] => Some(one.to_string()),
+        _ => None,
+    }
+}
+
+/// [`ConfigCheck::Undeclared`].
+fn undeclared<'a>(
+    kind: Declared,
+    name: &str,
+    declared: impl IntoIterator<Item = &'a str>,
+) -> FieldRule {
+    let declared: Vec<&str> = declared.into_iter().collect();
+    FieldRule::Check {
+        check: ConfigCheck::Undeclared {
+            kind,
+            name: name.to_string(),
+            closest: closest(name, declared.iter().copied()),
+            declared: declared.iter().map(|d| d.to_string()).collect(),
+        },
+    }
+}
+
+fn check(check: ConfigCheck) -> FieldRule {
+    FieldRule::Check { check }
 }
 
 /// Walk up from `start`, returning the first directory that holds `secrets.toml`.
@@ -94,15 +184,7 @@ pub fn not_found(start: &Path) -> Error {
 /// Parse and validate configuration text. A removed form (FR-60) fails before anything else
 /// is read, showing the form to write instead.
 pub fn parse(text: &str) -> Result<Fleet, Error> {
-    let invalid = |e: toml::de::Error| {
-        Error::Config(
-            format!(
-                "invalid secrets.toml: {}",
-                toml_error(text, e.span(), e.message())
-            )
-            .into(),
-        )
-    };
+    let invalid = |e: toml::de::Error| toml_invalid(text, &e);
     let doc = Doc::parse(text).map_err(invalid)?;
     removed_forms(&doc)?;
     // The removed `pattern` rule must be reported as such, rather than as the
@@ -112,6 +194,135 @@ pub fn parse(text: &str) -> Result<Fleet, Error> {
     validate(raw, &doc)
 }
 
+/// A TOML parse or deserialize error as [`Cause::ConfigInvalid`]: the field is the document
+/// path the error's span falls in, and the rule is the parser's own classification of the
+/// error (missing, unknown, one of, type, duplicate, syntax). Never a value (C1, SR-1).
+fn toml_invalid(text: &str, e: &toml::de::Error) -> Error {
+    let span = e.span();
+    let msg = sanitize_toml_message(e.message());
+    let first = msg.lines().next().unwrap_or_default();
+    // An empty span is the document itself (a missing top-level table).
+    let mut path = span
+        .clone()
+        .filter(|s| !s.is_empty())
+        .map(|s| path_at(text, s.start))
+        .unwrap_or_default();
+    let names = |marker: &str| -> Vec<String> {
+        first
+            .find(marker)
+            .map(|at| {
+                first[at..]
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let rule = if let Some(missing) = ticked_after(first, "missing field ") {
+        path.push(missing);
+        if path == ["environments"] {
+            FieldRule::NoEnvironment
+        } else {
+            FieldRule::Missing
+        }
+    } else if let Some(bad) = ticked_after(first, "unknown field ") {
+        if path.last() != Some(&bad) {
+            path.push(bad.clone());
+        }
+        let allowed = names("expected");
+        FieldRule::Unknown {
+            suggestion: closest(&bad, allowed.iter().map(String::as_str)),
+        }
+    } else if let Some(bad) = ticked_after(first, "unknown variant ") {
+        let allowed = names("expected");
+        check(ConfigCheck::NotOneOf {
+            closest: closest(&bad, allowed.iter().map(String::as_str)),
+            allowed,
+        })
+    } else if first.starts_with("duplicate key") {
+        if path.is_empty()
+            && let Some(k) = ticked_after(first, "duplicate key ")
+        {
+            path.push(k);
+        }
+        FieldRule::DuplicateKey
+    } else if first.starts_with("invalid type") || first.starts_with("invalid value") {
+        FieldRule::Type {
+            expected: expected_words(first),
+        }
+    } else {
+        FieldRule::Syntax
+    };
+    if path.is_empty() {
+        path.push("the TOML".into());
+    }
+    Cause::ConfigInvalid {
+        source: parsing_source(),
+        at: span.and_then(|s| location(text, s.start)),
+        field: DottedPath(path),
+        rule,
+    }
+    .into()
+}
+
+/// The name in backticks after `marker`.
+fn ticked_after(s: &str, marker: &str) -> Option<String> {
+    let rest = &s[s.find(marker)? + marker.len()..];
+    let inner = rest.strip_prefix('`')?;
+    Some(inner[..inner.find('`')?].to_string())
+}
+
+/// The type a serde `invalid type` error expected, in words.
+fn expected_words(msg: &str) -> &'static str {
+    let expected = msg.split("expected ").nth(1).unwrap_or_default();
+    match expected {
+        e if e.starts_with("a sequence") => "a list, for example [\"prod\"]",
+        e if e.starts_with("a boolean") => "true or false",
+        e if e.starts_with("a string") => "a string in quotes",
+        e if e.starts_with("i64") || e.starts_with("u16") || e.contains("integer") => {
+            "a whole number"
+        }
+        e if e.starts_with("struct") || e.starts_with("a map") || e.contains("table") => "a table",
+        _ => "of another type",
+    }
+}
+
+/// The 1-based line and column of byte offset `at`.
+fn location(text: &str, at: usize) -> Option<Location> {
+    line_column(text, at).map(|(line, col)| Location {
+        line: u32::try_from(line).unwrap_or(u32::MAX),
+        col: u32::try_from(col).unwrap_or(u32::MAX),
+    })
+}
+
+/// The document path whose key or value holds byte offset `at`: the deepest entry found
+/// by walking the parsed tables (never the line's text, audit 03.01).
+fn path_at(text: &str, at: usize) -> Vec<String> {
+    /// The deepest entry under `t` whose key or value holds `at` (a header table's span
+    /// covers only its header, so every table is searched, not only those holding `at`).
+    fn find(t: &DeTable<'_>, at: usize) -> Option<Vec<String>> {
+        for (k, v) in t.iter() {
+            let name = k.get_ref().to_string();
+            if let Some(inner) = v.get_ref().as_table()
+                && let Some(mut rest) = find(inner, at)
+            {
+                rest.insert(0, name);
+                return Some(rest);
+            }
+            if k.span().contains(&at) || v.span().contains(&at) {
+                return Some(vec![name]);
+            }
+        }
+        None
+    }
+    DeTable::parse(text)
+        .ok()
+        .and_then(|root| find(root.get_ref(), at))
+        .unwrap_or_default()
+}
+
 /// FR-24, FR-60: the `pattern` rule is removed (0.7.0); a file that still sets it must
 /// fail at load with the key and the equivalent `regex` rule. The typed parse cannot do
 /// this (its `deny_unknown_fields` reports only "unknown field"), so the raw document is
@@ -119,8 +330,8 @@ pub fn parse(text: &str) -> Result<Fleet, Error> {
 /// entry's line and column. The replacement is built from configuration (the prefix and
 /// the pattern) and never from a value. A top-level `[keys]` table is [`removed_forms`]'s.
 fn reject_removed_pattern(doc: &Doc<'_>) -> Result<(), Error> {
-    // (owner label, path to the rules table) for every declared key.
-    let mut rules_tables: Vec<(String, Vec<String>)> = Vec::new();
+    // Path to the rules table of every declared key.
+    let mut rules_tables: Vec<Vec<String>> = Vec::new();
     let root = doc.root.get_ref();
     if let Some(products) = table(root, "products") {
         for (product, pv) in products.iter() {
@@ -133,20 +344,17 @@ fn reject_removed_pattern(doc: &Doc<'_>) -> Result<(), Error> {
             };
             for (key, _) in keys.iter() {
                 let (product, key) = (product.get_ref().as_ref(), key.get_ref().as_ref());
-                rules_tables.push((
-                    key_label(product, key),
-                    vec![
-                        "products".into(),
-                        product.into(),
-                        "keys".into(),
-                        key.into(),
-                        "rules".into(),
-                    ],
-                ));
+                rules_tables.push(vec![
+                    "products".into(),
+                    product.into(),
+                    "keys".into(),
+                    key.into(),
+                    "rules".into(),
+                ]);
             }
         }
     }
-    for (owner, base) in rules_tables {
+    for base in rules_tables {
         let mut path = base.clone();
         path.push("pattern".into());
         let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
@@ -161,11 +369,13 @@ fn reject_removed_pattern(doc: &Doc<'_>) -> Result<(), Error> {
             .and_then(|v| v.get_ref().as_str())
             .unwrap_or_default();
         let regex = format!("{}(?:{pattern})", regex::escape(prefix));
-        let msg = format!(
-            "{owner}: the pattern rule was removed; use regex = {} instead",
-            toml::Value::String(regex)
-        );
-        return Err(doc.at_path(&path_refs, msg));
+        return Err(doc.invalid(
+            &path_refs,
+            FieldRule::RemovedForm {
+                form: "pattern",
+                replacement: format!("regex = {}", toml::Value::String(regex)),
+            },
+        ));
     }
     Ok(())
 }
@@ -192,61 +402,38 @@ impl<'t> Doc<'t> {
         })
     }
 
-    /// `msg` located at the declaration of key `key` of `product` (`[products.<p>.keys.<K>]`),
-    /// like [`Doc::at`].
-    fn key_at(&self, product: &str, key: &str, msg: String) -> Error {
-        fn find<'a, 't>(
-            t: &'a DeTable<'t>,
-            name: &str,
-        ) -> Option<(std::ops::Range<usize>, Option<&'a DeTable<'t>>)> {
-            t.iter()
-                .find(|(n, _)| n.get_ref().as_ref() == name)
-                .map(|(n, v)| (n.span(), v.get_ref().as_table()))
-        }
-        let root = self.root.get_ref();
-        let keys = find(root, "products")
-            .and_then(|(_, t)| t)
-            .and_then(|t| find(t, product))
-            .and_then(|(_, t)| t)
-            .and_then(|t| find(t, "keys"))
-            .and_then(|(_, t)| t);
-        match keys.and_then(|t| find(t, key)) {
-            Some((span, _)) => cfg(format!(
-                "invalid secrets.toml: {}",
-                located(self.text, span, &msg)
-            )),
-            None => cfg(msg),
-        }
-    }
-
-    /// `msg` located at the key `environments.<env>.<key>` the way the TOML parser reports
-    /// its own errors (line, column, the line itself), so every configuration error points
-    /// at the file (FR-2). Just `msg` if the key cannot be found.
-    fn at(&self, env: &str, key: &str, msg: String) -> Error {
-        self.at_path(&["environments", env, key], msg)
-    }
-
-    /// `msg` located at the key `path` (e.g. `["stores", "prod-vault"]`), like [`Doc::at`].
-    fn at_path(&self, path: &[&str], msg: String) -> Error {
+    /// The place of the deepest declared part of `path` (its key's line and column).
+    fn location(&self, path: &[&str]) -> Option<Location> {
         let mut table = Some(self.root.get_ref());
         let mut span = None;
         for part in path {
             let Some((n, v)) =
                 table.and_then(|t| t.iter().find(|(n, _)| n.get_ref().as_ref() == *part))
             else {
-                span = None;
                 break;
             };
             span = Some(n.span());
             table = v.get_ref().as_table();
         }
-        match span {
-            Some(span) => cfg(format!(
-                "invalid secrets.toml: {}",
-                located(self.text, span, &msg)
-            )),
-            None => cfg(msg),
+        span.and_then(|s| location(self.text, s.start))
+    }
+
+    /// [`Cause::ConfigInvalid`] for the field `path`, placed at it (or at its deepest
+    /// declared part), with `rule` from the check that refused it (audit 03.01).
+    fn invalid(&self, path: &[&str], rule: FieldRule) -> Error {
+        self.invalid_at(dotted(path), path, rule)
+    }
+
+    /// [`Doc::invalid`] for `field`, placed at `place` (when the field itself is not
+    /// written, e.g. a template field a key's rendered name comes from).
+    fn invalid_at(&self, field: DottedPath, place: &[&str], rule: FieldRule) -> Error {
+        Cause::ConfigInvalid {
+            source: parsing_source(),
+            at: self.location(place),
+            field,
+            rule,
         }
+        .into()
     }
 
     /// The value at `path`, with its place in the file.
@@ -263,13 +450,6 @@ impl<'t> Doc<'t> {
         }
         Some(v)
     }
-}
-
-/// `msg` placed at `span`: `TOML parse error at line L, column C` and the message, never
-/// the source line (C1, SR-1). A file given by mistake may hold values (a `.env`), so no
-/// configuration error quotes the text it came from.
-fn located(text: &str, span: std::ops::Range<usize>, msg: &str) -> String {
-    format!("{}\n", toml_error(text, Some(span), msg))
 }
 
 /// A TOML parse or deserialize error as text that quotes nothing from `text` (C1, SR-1):
@@ -360,60 +540,78 @@ fn table_keys<'d>(doc: &'d Doc<'_>, path: &[&str]) -> Vec<&'d str> {
 /// Every removed configuration form fails here, before the typed parse, at its line and
 /// column, naming the exact current form to write instead (FR-60). Nothing is converted.
 fn removed_forms(doc: &Doc<'_>) -> Result<(), Error> {
+    let removed = |path: &[&str], form: &'static str, replacement: String| {
+        Err(doc.invalid(path, FieldRule::RemovedForm { form, replacement }))
+    };
     let root = table_keys(doc, &[]);
     if root.contains(&"profile") {
-        return Err(doc.at_path(
+        return removed(
             &["profile"],
-            "[profile] was removed in 0.7.0 (FR-60): there is one form; delete [profile] and \
-             declare each key under its product as [products.<name>.keys.<KEY>]"
-                .into(),
-        ));
+            "[profile]",
+            "one key per product, as [products.<name>.keys.<KEY>]".into(),
+        );
     }
     if root.contains(&"keys") {
         let first = table_keys(doc, &["keys"])
             .first()
             .copied()
             .unwrap_or("<KEY>");
-        return Err(doc.at_path(
+        return removed(
             &["keys"],
-            format!(
-                "top-level [keys] was removed in 0.7.0 (FR-60): declare each key under its \
-                 product, as [products.<name>.keys.{first}]"
-            ),
-        ));
+            "top-level [keys]",
+            format!("[products.<name>.keys.{first}]"),
+        );
     }
     for env in table_keys(doc, &["environments"]) {
         for field in table_keys(doc, &["environments", env]) {
-            let msg = match field {
-                "vault_id" | "item_id" => format!(
-                    "environment {env}: {field} was removed in 0.7.0 (FR-57, FR-60): record one \
-                     boundary per product instead, boundaries.<product> = {{ vault_id = \"...\", \
-                     item_id = \"...\" }} (opv bootstrap records them)"
+            let path = ["environments", env, field];
+            return match field {
+                "vault_id" => removed(
+                    &path,
+                    "an environment's vault_id",
+                    "one boundary per product, boundaries.<product> = { vault_id = \"...\", \
+                     item_id = \"...\" } (opv bootstrap records them)"
+                        .into(),
                 ),
-                "deploy_credentials" | "state_vault_id" => format!(
-                    "environment {env}: {field} was removed at the environment level in 0.7.0 \
-                     (FR-56, FR-60): set it on the target, under \
-                     [environments.{env}.targets.<name>] as {field} = \"...\""
+                "item_id" => removed(
+                    &path,
+                    "an environment's item_id",
+                    "one boundary per product, boundaries.<product> = { vault_id = \"...\", \
+                     item_id = \"...\" } (opv bootstrap records them)"
+                        .into(),
+                ),
+                "deploy_credentials" => removed(
+                    &path,
+                    "an environment's deploy_credentials",
+                    format!(
+                        "deploy_credentials = \"...\" under [environments.{env}.targets.<name>]"
+                    ),
+                ),
+                "state_vault_id" => removed(
+                    &path,
+                    "an environment's state_vault_id",
+                    format!("state_vault_id = \"...\" under [environments.{env}.targets.<name>]"),
                 ),
                 section if registry::find(section).is_some() => {
                     let fields: Vec<String> = table_keys(doc, &["environments", env, section])
                         .iter()
                         .map(|f| format!("{section}.{f} = ..."))
                         .collect();
-                    format!(
-                        "environment {env}: an environment-level {section} section was removed \
-                         in 0.7.0 (FR-56, FR-60): declare a named target and put the section \
-                         under it, [environments.{env}.targets.<name>] with {}",
-                        if fields.is_empty() {
-                            format!("{section}.<field> = ...")
-                        } else {
-                            fields.join(", ")
-                        }
+                    removed(
+                        &path,
+                        "an environment-level provider section",
+                        format!(
+                            "a named target, [environments.{env}.targets.<name>] with {}",
+                            if fields.is_empty() {
+                                format!("{section}.<field> = ...")
+                            } else {
+                                fields.join(", ")
+                            }
+                        ),
                     )
                 }
                 _ => continue,
             };
-            return Err(doc.at(env, field, msg));
         }
         for target in table_keys(doc, &["environments", env, "targets"]) {
             let at = ["environments", env, "targets", target];
@@ -423,14 +621,11 @@ fn removed_forms(doc: &Doc<'_>) -> Result<(), Error> {
                 }
                 let path = [&at[..], &[section, "products"]].concat();
                 if doc.value(&path).is_some() {
-                    return Err(doc.at_path(
+                    return removed(
                         &path,
-                        format!(
-                            "environment {env}: {section}.products was removed in 0.7.0 (FR-48, \
-                             FR-60): list the products on the target, \
-                             targets.{target}.products = [...]"
-                        ),
-                    ));
+                        "a provider section's products",
+                        format!("targets.{target}.products = [...]"),
+                    );
                 }
             }
         }
@@ -513,10 +708,6 @@ struct RawTarget {
     sections: BTreeMap<String, toml::Value>,
 }
 
-fn cfg(msg: String) -> Error {
-    Error::Config(msg.into())
-}
-
 /// The named stores of a file (FR-39), by name.
 type Stores = BTreeMap<String, Box<dyn StoreConfig>>;
 
@@ -526,18 +717,26 @@ type Stores = BTreeMap<String, Box<dyn StoreConfig>>;
 fn stores(raw: &BTreeMap<String, toml::Value>, doc: &Doc<'_>) -> Result<Stores, Error> {
     let mut out = Stores::new();
     for (name, value) in raw {
-        let at = |msg: String| doc.at_path(&["stores", name], msg);
+        let path = ["stores", name.as_str()];
         if !is_store_name(name) {
-            return Err(at(format!(
-                "store {name:?}: name must match ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ (at most 63 \
-                 characters)"
-            )));
+            return Err(doc.invalid(
+                &path,
+                FieldRule::Pattern {
+                    id: PatternId::StoreName,
+                },
+            ));
         }
-        let known = registry::store_kinds().join(", ");
+        let known: Vec<String> = registry::store_kinds()
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
         let Some(table) = value.as_table() else {
-            return Err(at(format!(
-                "store {name}: must be a table, e.g. [stores.{name}] with one of: {known}"
-            )));
+            return Err(doc.invalid(
+                &path,
+                FieldRule::Type {
+                    expected: "a table",
+                },
+            ));
         };
         let kinds: Vec<&str> = table
             .keys()
@@ -547,20 +746,21 @@ fn stores(raw: &BTreeMap<String, toml::Value>, doc: &Doc<'_>) -> Result<Stores, 
         let kind = match kinds.as_slice() {
             [kind] => *kind,
             [] => {
-                return Err(at(format!(
-                    "store {name}: names no store kind; add one of: {known}"
-                )));
+                return Err(doc.invalid(&path, check(ConfigCheck::NoStoreKind { known })));
             }
             [a, b, ..] => {
-                return Err(at(format!(
-                    "store {name}: declares both {a} and {b}; a store has one kind"
-                )));
+                return Err(doc.invalid(
+                    &["stores", name, a],
+                    FieldRule::ConflictsWith {
+                        field: dotted(&["stores", name, b]),
+                    },
+                ));
             }
         };
         let provider = registry::store_kind(kind).expect("kind found above");
         let value = doc
-            .value(&["stores", name])
-            .ok_or_else(|| cfg(format!("store {name}: table not found")))?;
+            .value(&path)
+            .ok_or_else(|| doc.invalid(&path, FieldRule::Missing))?;
         let store = provider.parse_store(kind, &Section::new(name, value, doc.text))?;
         out.insert(name.clone(), store);
     }
@@ -577,6 +777,22 @@ fn is_store_name(s: &str) -> bool {
         && b.last().is_some_and(alnum)
 }
 
+/// The field of `t`'s provider section whose template renders the names the target manages,
+/// for the fixes that name it (03.17): the provider's own `<x>_name` option (core names no
+/// provider, FR-37), or the section itself when it declares none.
+fn template_path<'a>(env: &'a str, target: &'a str, t: &'a dyn TargetConfig) -> Vec<&'a str> {
+    let provider = t.provider();
+    let mut path = vec!["environments", env, "targets", target, provider.section()];
+    if let Some(f) = provider
+        .init_fields()
+        .iter()
+        .find(|f| f.field.ends_with("_name"))
+    {
+        path.push(f.field);
+    }
+    path
+}
+
 /// A target's provider section, parsed by its provider (FR-28, FR-37): an unknown section
 /// names the registered ones; none or two are refused. `secrets_in` binds it to a named
 /// store when the registry declares the pair (FR-39).
@@ -588,21 +804,14 @@ fn target_of(
     doc: &Doc<'_>,
 ) -> Result<Box<dyn TargetConfig>, Error> {
     let base = ["environments", env, "targets", name];
-    let known = registry::sections().join(", ");
-    if let Some((unknown, v)) = sections.iter().find(|(s, _)| registry::find(s).is_none()) {
-        return Err(doc.at_path(
+    let known: Vec<&str> = registry::sections();
+    if let Some((unknown, _)) = sections.iter().find(|(s, _)| registry::find(s).is_none()) {
+        let mut allowed = vec!["products", "deploy_credentials", "state_vault_id"];
+        allowed.extend(known.iter().copied());
+        return Err(doc.invalid(
             &[&base[..], &[unknown.as_str()]].concat(),
-            if v.is_table() {
-                format!(
-                    "environment {env}: target {name}: unknown target section {unknown:?}; \
-                     known: {known}"
-                )
-            } else {
-                format!(
-                    "environment {env}: target {name}: unknown field {unknown:?}; expected \
-                     products, deploy_credentials, state_vault_id or one provider section \
-                     ({known})"
-                )
+            FieldRule::Unknown {
+                suggestion: closest(unknown, allowed),
             },
         ));
     }
@@ -613,34 +822,27 @@ fn target_of(
     let p = match present.as_slice() {
         [p] => p,
         [] => {
-            return Err(doc.at_path(
+            return Err(doc.invalid(
                 &base,
-                format!(
-                    "environment {env}: target {name} names no provider; add one provider \
-                     section ({known}) under [environments.{env}.targets.{name}]"
-                ),
+                check(ConfigCheck::NoProvider {
+                    known: known.iter().map(|k| k.to_string()).collect(),
+                }),
             ));
         }
         [a, b, ..] => {
-            return Err(doc.at_path(
+            return Err(doc.invalid(
                 &[&base[..], &[b.section()]].concat(),
-                format!(
-                    "environment {env}: target {name} declares both {} and {}; a target has \
-                     one provider (declare another target for the other)",
-                    a.section(),
-                    b.section()
-                ),
+                FieldRule::ConflictsWith {
+                    field: dotted(&[&base[..], &[a.section()]].concat()),
+                },
             ));
         }
     };
     let section = p.section();
+    let section_path = [&base[..], &[section]].concat();
     let value = doc
-        .value(&[&base[..], &[section]].concat())
-        .ok_or_else(|| {
-            cfg(format!(
-                "environment {env}: target {name}: {section} not found"
-            ))
-        })?;
+        .value(&section_path)
+        .ok_or_else(|| doc.invalid(&section_path, FieldRule::Missing))?;
     // `secrets_in` is generic (FR-39): taken out here, the rest goes to the provider.
     let mut rest = value.clone();
     let secrets_in = match rest.get_mut() {
@@ -651,40 +853,56 @@ fn target_of(
     let Some(secrets_in) = secrets_in else {
         return Ok(target);
     };
-    let at = |msg: String| doc.at_path(&[&base[..], &[section, "secrets_in"]].concat(), msg);
+    let path = [&base[..], &[section, "secrets_in"]].concat();
     let Some(store_name) = secrets_in.get_ref().as_str() else {
-        return Err(at(format!(
-            "environment {env}: {section}.secrets_in must be the name of a [stores.<name>] table"
-        )));
+        return Err(doc.invalid(
+            &path,
+            FieldRule::Type {
+                expected: "the name of a [stores.<name>] table",
+            },
+        ));
     };
     let Some(store) = stores.get(store_name) else {
-        let defined: Vec<&str> = stores.keys().map(String::as_str).collect();
-        return Err(at(format!(
-            "environment {env}: {section}.secrets_in = {store_name:?} names no store; {}",
-            if defined.is_empty() {
-                format!("declare it as [stores.{store_name}]")
-            } else {
-                format!("defined: {}", defined.join(", "))
-            }
-        )));
+        return Err(doc.invalid(
+            &path,
+            undeclared(
+                Declared::Store,
+                store_name,
+                stores.keys().map(String::as_str),
+            ),
+        ));
     };
     if !registry::binds(section, store.kind()) {
-        return Err(at(format!(
-            "environment {env}: {section} cannot keep its secrets in store {store_name:?} \
-             ({}); supported secrets_in pairs: {}",
-            store.kind(),
-            registry::supported_pairs().join("; ")
-        )));
+        return Err(doc.invalid(
+            &path,
+            check(ConfigCheck::StoreBinding {
+                section: section.to_string(),
+                kind: store.kind().to_string(),
+                supported: registry::supported_pairs(),
+            }),
+        ));
     }
     p.bind(target, store.as_ref())
 }
 
-/// `e` (a configuration error from a check that does not know the file) located at `path`.
-fn located_at(doc: &Doc<'_>, path: &[&str], e: Error) -> Error {
-    match e {
-        Error::Config(m) => doc.at_path(path, m.text().to_string()),
-        other => other,
+/// One identifier at `path`: non-empty, unpadded, and accepted by `ok` (safe in argv).
+fn ident(
+    doc: &Doc<'_>,
+    path: &[&str],
+    value: &str,
+    ok: fn(&str) -> bool,
+    pattern: PatternId,
+) -> Result<(), Error> {
+    if value.trim().is_empty() {
+        return Err(doc.invalid(path, FieldRule::Empty));
     }
+    if value.trim() != value {
+        return Err(doc.invalid(path, check(ConfigCheck::Whitespace)));
+    }
+    if !ok(value) {
+        return Err(doc.invalid(path, FieldRule::Pattern { id: pattern }));
+    }
+    Ok(())
 }
 
 /// Validate one environment's generic fields, its boundaries and its targets.
@@ -697,34 +915,33 @@ fn environment(
     if let Some(account) = &e.account
         && !is_account(account)
     {
-        return Err(doc.at(
-            name,
-            "account",
-            format!(
-                "environment {name}: account must be a 1Password sign-in address (for example \
-                 my.1password.com), an email or an account ID"
-            ),
+        return Err(doc.invalid(
+            &["environments", name, "account"],
+            FieldRule::Pattern {
+                id: PatternId::Account,
+            },
         ));
     }
     let mut boundaries = BTreeMap::new();
     for (b, raw) in e.boundaries {
         let path = ["environments", name, "boundaries", b.as_str()];
         if !is_product_name(&b) {
-            return Err(doc.at_path(
+            return Err(doc.invalid(
                 &path,
-                format!(
-                    "environment {name}: boundary name {b:?} must match ^[a-z][a-z0-9_-]*$ (a \
-                     product or a product's boundary group)"
-                ),
+                FieldRule::Pattern {
+                    id: PatternId::ProductName,
+                },
             ));
         }
-        check_ids(
-            name,
-            &format!("boundaries.{b}"),
-            &raw.vault_id,
-            &raw.item_id,
-        )
-        .map_err(|err| located_at(doc, &path, err))?;
+        for (field, value) in [("vault_id", &raw.vault_id), ("item_id", &raw.item_id)] {
+            ident(
+                doc,
+                &[&path[..], &[field]].concat(),
+                value,
+                is_id,
+                PatternId::Id,
+            )?;
+        }
         boundaries.insert(
             b,
             Boundary {
@@ -771,19 +988,18 @@ fn target(
 ) -> Result<Target, Error> {
     let base = ["environments", env, "targets", name];
     if !is_target_name(name) {
-        return Err(doc.at_path(
+        return Err(doc.invalid(
             &base,
-            format!("environment {env}: target name {name:?} must match ^[a-z][a-z0-9-]*$"),
+            FieldRule::Pattern {
+                id: PatternId::TargetName,
+            },
         ));
     }
     let config = target_of(env, name, &raw.sections, stores, doc)?;
     if raw.products.as_ref().is_some_and(Vec::is_empty) {
-        return Err(doc.at_path(
+        return Err(doc.invalid(
             &[&base[..], &["products"]].concat(),
-            format!(
-                "environment {env}: target {name}: products must not be empty; remove it to \
-                 deliver every product with a key in {env}"
-            ),
+            check(ConfigCheck::EmptyProducts),
         ));
     }
     let deploy_credentials = match &raw.deploy_credentials {
@@ -791,38 +1007,29 @@ fn target(
         Some(r) => Some(deploy_credentials(env, name, r, config.as_ref(), doc)?),
     };
     let Some(state_vault_id) = raw.state_vault_id else {
-        return Err(doc
-            .at_path(
-                &base,
-                format!("target {name} in {env} needs state_vault_id"),
-            )
-            .with_code(crate::error::Code::StateVaultMissing)
-            .with_next("opv bootstrap"));
+        return Err(Cause::StateVaultMissing {
+            env: crate::cause::EnvName::new(env),
+            target: crate::cause::TargetName::new(name),
+            source: parsing_source(),
+        }
+        .into());
     };
-    check_ident(
-        env,
-        &format!("targets.{name}.state_vault_id"),
+    ident(
+        doc,
+        &[&base[..], &["state_vault_id"]].concat(),
         &state_vault_id,
         is_id,
-        "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-    )
-    .map_err(|e| located_at(doc, &[&base[..], &["state_vault_id"]].concat(), e))?;
+        PatternId::Id,
+    )?;
     let delivery_items = raw.delivery_items.unwrap_or_default();
     for (product, id) in &delivery_items {
-        check_ident(
-            env,
-            &format!("targets.{name}.delivery_items.{product}"),
+        ident(
+            doc,
+            &[&base[..], &["delivery_items", product.as_str()]].concat(),
             id,
             is_id,
-            "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-        )
-        .map_err(|e| {
-            located_at(
-                doc,
-                &[&base[..], &["delivery_items", product.as_str()]].concat(),
-                e,
-            )
-        })?;
+            PatternId::Id,
+        )?;
     }
     Ok(Target {
         name: name.to_string(),
@@ -843,17 +1050,19 @@ fn deploy_credentials(
     target: &dyn TargetConfig,
     doc: &Doc<'_>,
 ) -> Result<ItemRef, Error> {
-    let at = |msg: String| {
-        doc.at_path(
-            &["environments", env, "targets", name, "deploy_credentials"],
-            msg,
-        )
-    };
+    let path = ["environments", env, "targets", name, "deploy_credentials"];
     let reference = ItemRef::parse(raw)
-        .map_err(|why| at(format!("environment {env}: deploy_credentials {why}")))?;
+        .map_err(|_| doc.invalid(&path, check(ConfigCheck::DeployCredentialsRef)))?;
     crate::provider::deploy_provider(target)
         .deploy_credential_fields()
-        .map_err(|why| at(format!("environment {env}: {why}")))?;
+        .map_err(|_| {
+            doc.invalid(
+                &path,
+                check(ConfigCheck::DeployCredentialsUnsupported {
+                    provider: target.provider().label().to_string(),
+                }),
+            )
+        })?;
     Ok(reference)
 }
 
@@ -869,7 +1078,7 @@ pub(crate) fn is_account(s: &str) -> bool {
 
 fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
     if raw.environments.is_empty() {
-        return Err(cfg("no environments defined".into()));
+        return Err(doc.invalid(&["environments"], FieldRule::NoEnvironment));
     }
 
     let stores = stores(&raw.stores, doc)?;
@@ -878,37 +1087,40 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         let env = environment(&name, e, &stores, doc)?;
         environments.insert(name, env);
     }
-    check_shared_targets(&environments)?;
+    check_shared_targets(&environments, doc)?;
 
     for (product, p) in &raw.products {
         if !is_product_name(product) {
-            return Err(cfg(format!(
-                "product {product:?}: name must match ^[a-z][a-z0-9_-]*$"
-            )));
+            return Err(doc.invalid(
+                &["products", product],
+                FieldRule::Pattern {
+                    id: PatternId::ProductName,
+                },
+            ));
         }
         if let Some(b) = &p.boundary
             && !is_product_name(b)
         {
-            return Err(doc.at_path(
+            return Err(doc.invalid(
                 &["products", product, "boundary"],
-                format!("product {product:?}: boundary {b:?} must match ^[a-z][a-z0-9_-]*$"),
+                FieldRule::Pattern {
+                    id: PatternId::ProductName,
+                },
             ));
         }
         if p.source_only && p.keys.is_empty() {
-            return Err(doc.at_path(
-                &["products", product],
-                format!(
-                    "product {product:?}: source_only = true needs at least one key; declare a \
-                     key under [products.{product}.keys], or remove source_only"
-                ),
+            return Err(doc.invalid(
+                &["products", product, "source_only"],
+                check(ConfigCheck::SourceOnlyWithoutKeys {
+                    product: product.clone(),
+                }),
             ));
         }
         for (key, spec) in &p.keys {
-            validate_key(&format!("{product}/{key}"), key, spec, &environments)?;
+            validate_key(doc, product, key, spec, &environments)?;
         }
-        validate_local(product, p).map_err(|m| doc.at_path(&["products", product], m))?;
-        validate_remotes(product, p, &environments)
-            .map_err(|m| doc.at_path(&["products", product, "remotes"], m))?;
+        validate_local(doc, product, p)?;
+        validate_remotes(doc, product, p, &environments)?;
     }
 
     let mut products = raw.products;
@@ -917,12 +1129,13 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
         environments,
         products,
         origin: Default::default(),
+        read_from: Default::default(),
     };
     check_scopes(&fleet, doc)?;
     check_boundaries(&fleet, doc)?;
     check_names(&fleet, doc)?;
-    check_personal(&fleet)?;
-    check_evidence_width(&fleet)?;
+    check_personal(&fleet, doc)?;
+    check_evidence_width(&fleet, doc)?;
     check_delivery_items(&fleet, doc)?;
     Ok(fleet)
 }
@@ -934,7 +1147,7 @@ fn check_delivery_items(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
         for (name, target) in &env.targets {
             for product in target.delivery_items.keys() {
                 if !fleet.delivers(env_name, name, product) {
-                    return Err(doc.at_path(
+                    return Err(doc.invalid(
                         &[
                             "environments",
                             env_name,
@@ -943,11 +1156,9 @@ fn check_delivery_items(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
                             "delivery_items",
                             product,
                         ],
-                        format!(
-                            "environment {env_name}: target {name} records a delivery item for \
-                             {product:?}, a product it does not deliver; remove \
-                             delivery_items.{product}"
-                        ),
+                        check(ConfigCheck::DeliveryItemUndelivered {
+                            product: product.clone(),
+                        }),
                     ));
                 }
             }
@@ -960,8 +1171,8 @@ fn check_delivery_items(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
 /// the values its evidence describes (`state_vault_wider_than_values`).
 /// Each target reads the boundaries of the products it delivers and of their `from`
 /// sources (FR-59), named `<boundary> (<vault id>)` so boundaries of different environments
-/// never compare equal.
-fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
+/// never compare equal. Placed at the target's `state_vault_id` (audit 03.04).
+fn check_evidence_width(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     use crate::domain::placement::{TargetReads, wider_than_values};
     let mut reads: Vec<(&str, &str, &str, BTreeSet<String>)> = Vec::new();
     for (env_name, env) in &fleet.environments {
@@ -998,46 +1209,53 @@ fn check_evidence_width(fleet: &Fleet) -> Result<(), Error> {
         })
         .collect();
     match wider_than_values(&targets).first() {
-        Some(w) => Err(cfg(w.sentence()).with_code(crate::error::Code::StateVaultWiderThanValues)),
+        Some(w) => Err(Cause::StateVaultTooWide {
+            env: crate::cause::EnvName::new(w.environment.as_str()),
+            target: crate::cause::TargetName::new(w.target.as_str()),
+            vault: crate::cause::VaultId::new(w.state_vault_id.as_str()),
+            shared_with: w
+                .targets
+                .iter()
+                .filter(|t| **t != format!("{}/{}", w.environment, w.target))
+                .map(|t| crate::cause::TargetName::new(t.as_str()))
+                .collect(),
+            source: parsing_source(),
+            at: doc.location(&[
+                "environments",
+                &w.environment,
+                "targets",
+                &w.target,
+                "state_vault_id",
+            ]),
+        }
+        .into()),
         None => Ok(()),
     }
 }
 
-/// FR-57: every boundary [`Fleet::needed_boundaries`] names is recorded in its environment (personal keys live in each
-/// person's own item, FR-55, so they need none) (`boundary_missing`, next step
-/// `opv bootstrap`); a recorded boundary no such product uses is refused, so the
+/// FR-57: every boundary [`Fleet::needed_boundaries`] names is recorded in its environment
+/// (personal keys live in each person's own item, FR-55, so they need none)
+/// ([`Cause::BoundaryMissing`]); a recorded boundary no such product uses is refused, so the
 /// configuration never names a vault nothing reads.
 fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (env_name, env) in &fleet.environments {
         let needed = fleet.needed_boundaries(env_name);
-        if let Some((b, needer)) = needed
+        if let Some((_, needer)) = needed
             .iter()
             .find(|(b, _)| !env.boundaries.contains_key(**b))
         {
-            let msg = boundary_missing(env_name, needer, b);
-            return Err((if doc
-                .value(&["environments", env_name, "boundaries"])
-                .is_some()
-            {
-                doc.at(env_name, "boundaries", msg)
-            } else {
-                doc.at_path(&["environments", env_name], msg)
-            })
-            .with_code(crate::error::Code::BoundaryMissing)
-            .with_next("opv bootstrap"));
+            return Err(boundary_missing(env_name, needer, parsing_source()).into());
         }
         if let Some(b) = env
             .boundaries
             .keys()
             .find(|b| !needed.contains_key(b.as_str()))
         {
-            return Err(doc.at_path(
+            return Err(doc.invalid(
                 &["environments", env_name, "boundaries", b],
-                format!(
-                    "environment {env_name}: boundaries.{b} is recorded but no product with a \
-                     key in {env_name} lives in it; remove it, or declare that product's keys \
-                     for {env_name}"
-                ),
+                check(ConfigCheck::BoundaryUnused {
+                    env: env_name.clone(),
+                }),
             ));
         }
     }
@@ -1047,10 +1265,9 @@ fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
 /// FR-55: a personal key lives only in environments without a target (it is never
 /// deployed), and personal and team values never meet through `from`: a personal key's
 /// source is personal, a team key's source is not.
-fn check_personal(fleet: &Fleet) -> Result<(), Error> {
+fn check_personal(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     for (product, p) in &fleet.products {
         for (key, spec) in &p.keys {
-            let owner = key_label(product, key);
             if spec.personal
                 && let Some(env) = spec.environments.iter().find(|e| {
                     fleet
@@ -1059,11 +1276,10 @@ fn check_personal(fleet: &Fleet) -> Result<(), Error> {
                         .is_some_and(|x| !x.targets.is_empty())
                 })
             {
-                return Err(cfg(format!(
-                    "{owner}: personal = true is for local environments only, and {env} has a \
-                     deployment target (a person's own value is never deployed); declare a \
-                     team key for {env}"
-                )));
+                return Err(doc.invalid(
+                    &["products", product, "keys", key, "personal"],
+                    check(ConfigCheck::PersonalOnTarget { env: env.clone() }),
+                ));
             }
             if let Some((sp, sk)) = spec.source() {
                 let src_personal = fleet
@@ -1072,15 +1288,13 @@ fn check_personal(fleet: &Fleet) -> Result<(), Error> {
                     .and_then(|x| x.keys.get(sk))
                     .is_some_and(|x| x.personal);
                 if src_personal != spec.personal {
-                    let (what, why) = if spec.personal {
-                        ("a personal key", "a team value")
-                    } else {
-                        ("a team key", "a personal value")
-                    };
-                    return Err(cfg(format!(
-                        "{owner}: {what} cannot read {why} with from = \"{sp}/{sk}\"; personal and \
-                         team values never mix"
-                    )));
+                    return Err(doc.invalid(
+                        &["products", product, "keys", key, "from"],
+                        check(ConfigCheck::PersonalMix {
+                            source: key_label(sp, sk),
+                            personal: spec.personal,
+                        }),
+                    ));
                 }
             }
         }
@@ -1096,29 +1310,24 @@ fn check_scopes(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
             let Some(listed) = &t.products else {
                 continue;
             };
-            let at = |msg: String| {
-                doc.at_path(
-                    &["environments", env_name, "targets", name, "products"],
-                    msg,
-                )
-            };
+            let path = ["environments", env_name, "targets", name, "products"];
             for p in listed {
                 match fleet.products.get(p) {
                     None => {
-                        let declared: Vec<&str> =
-                            fleet.products.keys().map(String::as_str).collect();
-                        return Err(at(format!(
-                            "environment {env_name}: target {name}: products names {p:?}, which \
-                             is not a declared product (declared: {})",
-                            declared.join(", ")
-                        )));
+                        return Err(doc.invalid(
+                            &path,
+                            undeclared(
+                                Declared::Product,
+                                p,
+                                fleet.products.keys().map(String::as_str),
+                            ),
+                        ));
                     }
                     Some(prod) if prod.source_only => {
-                        return Err(at(format!(
-                            "environment {env_name}: target {name}: products names {p:?}, which \
-                             is source-only and never delivered; list the products whose keys \
-                             point at it with from instead"
-                        )));
+                        return Err(doc.invalid(
+                            &path,
+                            check(ConfigCheck::SourceOnlyListed { product: p.clone() }),
+                        ));
                     }
                     Some(_) => {}
                 }
@@ -1128,8 +1337,9 @@ fn check_scopes(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// One identifier: non-empty, unpadded, and accepted by `ok` (safe in argv). Shared with
-/// the providers' section parsers.
+/// One identifier: non-empty, unpadded, and accepted by `ok` (safe in argv). For the
+/// providers' section parsers, which word `shape` themselves; the loader's own checks use
+/// [`ident`].
 pub(crate) fn check_ident(
     name: &str,
     field: &str,
@@ -1137,35 +1347,16 @@ pub(crate) fn check_ident(
     ok: fn(&str) -> bool,
     shape: &str,
 ) -> Result<(), Error> {
-    if value.trim().is_empty() {
-        return Err(cfg(format!("environment {name}: {field} is empty")));
-    }
-    if value.trim() != value {
-        return Err(cfg(format!(
-            "environment {name}: {field} has leading or trailing whitespace"
-        )));
-    }
-    if !ok(value) {
-        return Err(cfg(format!(
-            "environment {name}: {field} {value:?} must match {shape}"
-        )));
-    }
-    Ok(())
-}
-
-/// A boundary's IDs (`<owner>.vault_id`, `<owner>.item_id`) are non-empty, unpadded and
-/// safe in argv.
-fn check_ids(name: &str, owner: &str, vault_id: &str, item_id: &str) -> Result<(), Error> {
-    for (field, value) in [("vault_id", vault_id), ("item_id", item_id)] {
-        check_ident(
-            name,
-            &format!("{owner}.{field}"),
-            value,
-            is_id,
-            "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-        )?;
-    }
-    Ok(())
+    let problem = if value.trim().is_empty() {
+        format!("environment {name}: {field} is empty")
+    } else if value.trim() != value {
+        format!("environment {name}: {field} has leading or trailing whitespace")
+    } else if !ok(value) {
+        format!("environment {name}: {field} {value:?} must match {shape}")
+    } else {
+        return Ok(());
+    };
+    Err(Error::Config(problem.into()))
 }
 
 /// The SSH host key types a pinned `host_key` may name (#139), as `known_hosts` spells them.
@@ -1191,22 +1382,25 @@ pub(crate) fn is_remote_path(s: &str) -> bool {
 /// profile that could reach the shell, an unknown environment or an undeclared role never
 /// loads.
 fn validate_remotes(
+    doc: &Doc<'_>,
     product: &str,
     p: &crate::domain::Product,
     environments: &BTreeMap<String, crate::domain::Environment>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let declared = crate::app::delivery_preview::declared_roles(p);
     for (name, r) in &p.remotes {
-        let at = format!("product {product:?}: remote {name:?}");
+        let base = ["products", product, "remotes", name.as_str()];
+        let invalid = |field: &'static str, rule: FieldRule| {
+            Err(doc.invalid(&[&base[..], &[field]].concat(), rule))
+        };
+        let pattern = |id: PatternId| FieldRule::Pattern { id };
         let name_ok = name.len() <= 32
             && name.starts_with(|c: char| c.is_ascii_lowercase())
             && name
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         if !name_ok {
-            return Err(format!(
-                "{at}: the name must match ^[a-z][a-z0-9-]{{0,31}}$"
-            ));
+            return Err(doc.invalid(&base, pattern(PatternId::RemoteName)));
         }
         let host_ok = !r.host.is_empty()
             && r.host.len() <= 253
@@ -1215,14 +1409,15 @@ fn validate_remotes(
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
         if !host_ok {
-            return Err(format!(
-                "{at}: host {:?} must be a host name or address (letters, digits, '.', '-', \
-                 ':'), not starting with '-'",
-                r.host
-            ));
+            return invalid("host", pattern(PatternId::RemoteHost));
         }
         if r.port == 0 {
-            return Err(format!("{at}: port must be 1-65535"));
+            return invalid(
+                "port",
+                FieldRule::Type {
+                    expected: "a port number from 1 to 65535",
+                },
+            );
         }
         let user_ok = r.user.len() <= 32
             && r.user
@@ -1231,10 +1426,7 @@ fn validate_remotes(
                 c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')
             });
         if !user_ok {
-            return Err(format!(
-                "{at}: user {:?} must match ^[a-z_][a-z0-9_.-]{{0,31}}$",
-                r.user
-            ));
+            return invalid("user", pattern(PatternId::RemoteUser));
         }
         let key_ok = match r.host_key.split(' ').collect::<Vec<_>>().as_slice() {
             [ty, b64] => {
@@ -1247,94 +1439,107 @@ fn validate_remotes(
             _ => false,
         };
         if !key_ok {
-            return Err(format!(
-                "{at}: host_key must be the host's public key as \"<type> <base64>\" (types: \
-                 {}), for example the output of ssh-keyscan without the host name",
-                HOST_KEY_TYPES.join(", ")
-            ));
+            return invalid("host_key", pattern(PatternId::HostKey));
         }
         if r.environments.is_empty() {
-            return Err(format!(
-                "{at}: environments must name at least one environment whose values may go \
-                 to this host"
-            ));
+            return invalid("environments", check(ConfigCheck::EmptyRemoteEnvironments));
         }
         if let Some(e) = r
             .environments
             .iter()
             .find(|e| !environments.contains_key(*e))
         {
-            return Err(format!("{at}: environment {e:?} is not defined"));
+            return invalid(
+                "environments",
+                undeclared(
+                    Declared::Environment,
+                    e,
+                    environments.keys().map(String::as_str),
+                ),
+            );
         }
         if let Some(roles) = &r.roles {
             if roles.is_empty() {
-                return Err(format!(
-                    "{at}: roles = [] allows nothing; list the roles that may run there, or \
-                     remove roles"
-                ));
+                return invalid("roles", check(ConfigCheck::EmptyRemoteRoles));
             }
             if let Some(x) = roles.iter().find(|x| !declared.contains(&x.as_str())) {
-                return Err(format!(
-                    "{at}: role {x:?} is not a role any of the product's keys declares"
-                ));
+                return invalid(
+                    "roles",
+                    undeclared(Declared::Role, x, declared.iter().copied()),
+                );
             }
         }
         for (field, v) in [("opv", &r.opv), ("workdir", &r.workdir)] {
             if !is_remote_path(v) {
-                return Err(format!(
-                    "{at}: {field} {v:?} must be an absolute path without '..', using only \
-                     letters, digits and . _ / + -"
-                ));
+                return invalid(field, pattern(PatternId::RemotePath));
             }
         }
         if r.command.is_empty() {
-            return Err(format!("{at}: command must name the program to run"));
+            return invalid("command", FieldRule::Empty);
         }
         if r.command
             .iter()
             .any(|a| a.len() > 4096 || crate::app::remote_delivery::has_control(a))
         {
-            return Err(format!(
-                "{at}: command arguments must be at most 4096 characters, with no control \
-                 characters other than newline and tab"
-            ));
+            return invalid("command", check(ConfigCheck::CommandArguments));
         }
         if let Some(f) = &r.identity_file
             && (f.is_empty() || f.chars().any(char::is_control))
         {
-            return Err(format!("{at}: identity_file must be a file path"));
+            return invalid(
+                "identity_file",
+                FieldRule::Type {
+                    expected: "a file path",
+                },
+            );
         }
     }
     Ok(())
 }
 
+/// The names `local.secrets_dir_env` may not take: the 1Password CLI's own environment.
+const RESERVED_DIR_ENV: [&str; 4] = ["PATH", "HOME", "XDG_CONFIG_HOME", "OP_*"];
+
 /// `[products.<p>.local]` and the keys' `file` paths (#136, #137): the directory variable
 /// is a plain, unreserved name; each path is relative, at most four `/`-separated
 /// components matching `^[a-z0-9]+(-[a-z0-9]+)*$`, unique, and never inside another key's
 /// file.
-fn validate_local(product: &str, p: &crate::domain::Product) -> Result<(), String> {
+fn validate_local(doc: &Doc<'_>, product: &str, p: &crate::domain::Product) -> Result<(), Error> {
     let files: Vec<(&String, &str)> = p
         .keys
         .iter()
         .filter_map(|(k, spec)| spec.file.as_deref().map(|f| (k, f)))
         .collect();
+    let dir_path = ["products", product, "local", "secrets_dir_env"];
     let dir_env = p.local.as_ref().and_then(|l| l.secrets_dir_env.as_deref());
     if let Some(v) = dir_env {
-        if !is_env_name(v)
-            || matches!(v, "PATH" | "HOME" | "XDG_CONFIG_HOME")
-            || v.starts_with("OP_")
-            || p.keys.contains_key(v)
-        {
-            return Err(format!(
-                "product {product:?}: local.secrets_dir_env {v:?} must match ^[A-Z][A-Z0-9_]*$, \
-                 and be neither PATH, HOME, XDG_CONFIG_HOME, OP_* nor one of its keys"
+        // Split by cause (audit 03.01): the shape, a reserved name, or one of its keys.
+        if !is_env_name(v) {
+            return Err(doc.invalid(
+                &dir_path,
+                FieldRule::Pattern {
+                    id: PatternId::KeyName,
+                },
+            ));
+        }
+        if matches!(v, "PATH" | "HOME" | "XDG_CONFIG_HOME") || v.starts_with("OP_") {
+            return Err(doc.invalid(
+                &dir_path,
+                FieldRule::Reserved {
+                    set: RESERVED_DIR_ENV.iter().map(|s| s.to_string()).collect(),
+                },
+            ));
+        }
+        if p.keys.contains_key(v) {
+            return Err(doc.invalid(
+                &dir_path,
+                FieldRule::ConflictsWith {
+                    field: dotted(&["products", product, "keys", v]),
+                },
             ));
         }
         if files.is_empty() {
-            return Err(format!(
-                "product {product:?}: local.secrets_dir_env is set but no key has file = \
-                 \"<path>\"; add file to the keys the app reads from that directory, or remove it"
-            ));
+            return Err(doc.invalid(&dir_path, check(ConfigCheck::DirEnvWithoutFiles)));
         }
     }
     let segment = |s: &str| {
@@ -1344,68 +1549,93 @@ fn validate_local(product: &str, p: &crate::domain::Product) -> Result<(), Strin
                     .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
         })
     };
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
     for (key, path) in &files {
+        let file_path = ["products", product, "keys", key.as_str(), "file"];
         if dir_env.is_none() {
-            return Err(format!(
-                "product {product:?}: key {key} has file = {path:?} but the product sets no \
-                 local.secrets_dir_env (the variable that names the directory)"
-            ));
+            return Err(doc.invalid_at(dotted(&dir_path), &file_path, FieldRule::Missing));
         }
         let parts: Vec<&str> = path.split('/').collect();
         if path.len() > 128 || parts.len() > 4 || !parts.iter().all(|c| segment(c)) {
-            return Err(format!(
-                "product {product:?}: key {key}: file {path:?} must be a relative path of at \
-                 most four slash-separated parts, each matching ^[a-z0-9]+(-[a-z0-9]+)*$ \
-                 (lower-case letters and digits, with '-' only between them)"
+            return Err(doc.invalid(
+                &file_path,
+                FieldRule::Pattern {
+                    id: PatternId::LocalFile,
+                },
             ));
         }
-        if let Some(other) = seen.iter().find(|o| {
-            **o == *path || path.starts_with(&format!("{o}/")) || o.starts_with(&format!("{path}/"))
+        if let Some((other_key, other)) = seen.iter().find(|(_, o)| {
+            *o == *path || path.starts_with(&format!("{o}/")) || o.starts_with(&format!("{path}/"))
         }) {
-            return Err(format!(
-                "product {product:?}: key {key}: file {path:?} collides with {other:?}"
+            return Err(doc.invalid(
+                &file_path,
+                FieldRule::Collision {
+                    rendered: other.to_string(),
+                    other: dotted(&["products", product, "keys", other_key, "file"]),
+                },
             ));
         }
-        seen.push(path);
+        seen.push((key.as_str(), path));
     }
     Ok(())
 }
 
-/// Per-key checks (FR-14 to FR-16, FR-24). `owner` names the key in errors: `product/KEY`.
+/// The names a key may not take: `run` removes every declared name from the inherited
+/// environment (#53), so a key named after `op`'s own context would strip it.
+const RESERVED_KEYS: [&str; 4] = ["PATH", "HOME", "XDG_CONFIG_HOME", "OP_*"];
+
+/// Per-key checks (FR-14 to FR-16, FR-24), each refusing the field it checks.
 fn validate_key(
-    owner: &str,
+    doc: &Doc<'_>,
+    product: &str,
     key: &str,
     spec: &KeySpec,
     environments: &BTreeMap<String, Environment>,
 ) -> Result<(), Error> {
+    let base = ["products", product, "keys", key];
+    let path = |field: &[&str]| -> Vec<String> {
+        base.iter()
+            .chain(field)
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    };
+    let invalid = |field: &[&str], rule: FieldRule| -> Error {
+        let p = path(field);
+        let refs: Vec<&str> = p.iter().map(String::as_str).collect();
+        doc.invalid(&refs, rule)
+    };
     if !is_env_name(key) {
-        return Err(cfg(format!(
-            "{owner}: key name must match ^[A-Z][A-Z0-9_]*$"
-        )));
+        return Err(invalid(
+            &[],
+            FieldRule::Pattern {
+                id: PatternId::KeyName,
+            },
+        ));
     }
-    // `run` removes every declared name from the inherited environment (#53), so a key named
-    // after `op`'s own context would strip it: PATH finds `op`, HOME and XDG_CONFIG_HOME
-    // locate its configuration, OP_* holds its sign-in.
+    // PATH finds `op`, HOME and XDG_CONFIG_HOME locate its configuration, OP_* holds its
+    // sign-in.
     if matches!(key, "PATH" | "HOME" | "XDG_CONFIG_HOME") || key.starts_with("OP_") {
-        return Err(cfg(format!(
-            "{owner}: key name is reserved (PATH, HOME, XDG_CONFIG_HOME and OP_* are the \
-             1Password CLI's own environment)"
-        )));
+        return Err(invalid(
+            &[],
+            FieldRule::Reserved {
+                set: RESERVED_KEYS.iter().map(|s| s.to_string()).collect(),
+            },
+        ));
     }
+    let declared = || environments.keys().map(String::as_str);
     for env in &spec.environments {
         if !environments.contains_key(env) {
-            return Err(cfg(format!("{owner}: undefined environment {env:?}")));
+            return Err(invalid(
+                &["environments"],
+                undeclared(Declared::Environment, env, declared()),
+            ));
         }
     }
     // Process roles (#136): an empty list is refused (it would silently deliver nothing),
     // and every name is a lower-case word so a shell never has to quote it.
     if let Some(roles) = &spec.roles {
         if roles.is_empty() {
-            return Err(cfg(format!(
-                "{owner}: roles must name at least one role; remove it to deliver the key to \
-                 every role, or list roles like [\"serve\", \"migrate\"]"
-            )));
+            return Err(invalid(&["roles"], check(ConfigCheck::EmptyRoles)));
         }
         for role in roles {
             let ok = !role.is_empty()
@@ -1414,64 +1644,99 @@ fn validate_key(
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
             if !ok {
-                return Err(cfg(format!(
-                    "{owner}: role {role:?} must match ^[a-z0-9-]{{1,32}}$ (lower-case letters, \
-                     digits and '-')"
-                )));
+                return Err(invalid(
+                    &["roles"],
+                    FieldRule::Pattern {
+                        id: PatternId::RoleName,
+                    },
+                ));
             }
         }
     }
     for env in &spec.rules.refuse_in {
         if !environments.contains_key(env) {
-            return Err(cfg(format!(
-                "{owner}: rule refuse_in names undefined environment {env:?}"
-            )));
+            return Err(invalid(
+                &["rules", "refuse_in"],
+                undeclared(Declared::Environment, env, declared()),
+            ));
         }
         if spec.environments.contains(env) {
-            return Err(cfg(format!(
-                "{owner}: environment {env:?} is in both environments and refuse_in"
-            )));
+            return Err(invalid(
+                &["rules", "refuse_in"],
+                FieldRule::ConflictsWith {
+                    field: dotted(&path(&["environments"])),
+                },
+            ));
         }
     }
     if spec.rules.prefix.as_deref() == Some("") {
-        return Err(cfg(format!(
-            "{owner}: rule prefix must be a non-empty string"
-        )));
+        return Err(invalid(&["rules", "prefix"], FieldRule::Empty));
     }
     if let Some(np) = &spec.rules.not_prefix
         && !np.is_valid()
     {
-        return Err(cfg(format!(
-            "{owner}: rule not_prefix must be a non-empty string or non-empty list of non-empty strings"
-        )));
+        return Err(invalid(&["rules", "not_prefix"], FieldRule::Empty));
     }
     if let Some(p) = &spec.rules.prefix_by_mode {
         for (mode, v) in &p.values {
             if !v.is_valid() {
-                return Err(cfg(format!(
-                    "{owner}: rule prefix_by_mode value for {mode:?} must be a non-empty string or non-empty list of non-empty strings"
-                )));
+                return Err(invalid(
+                    &["rules", "prefix_by_mode", "values", mode],
+                    FieldRule::Empty,
+                ));
             }
         }
+        check_modes(doc, product, p, spec, environments)?;
     }
-    if let Some(re) = &spec.rules.regex {
-        regex::Regex::new(re)
-            .map_err(|e| cfg(format!("{owner}: rule regex does not compile: {e}")))?;
+    if let Some(re) = &spec.rules.regex
+        && regex::Regex::new(re).is_err()
+    {
+        return Err(invalid(&["rules", "regex"], FieldRule::Syntax));
     }
     if let Some(p) = &spec.rules.ensure_prefix
         && p.is_empty()
     {
-        return Err(cfg(format!(
-            "{owner}: rule ensure_prefix must be a non-empty string"
-        )));
+        return Err(invalid(&["rules", "ensure_prefix"], FieldRule::Empty));
     }
     if spec.rules.transform.as_deref() == Some("signoz_ingestion_header") {
         let regex =
             toml::Value::String(format!("{}(?:{SIGNOZ_BODY})", regex::escape(SIGNOZ_PREFIX)));
-        return Err(cfg(format!(
-            "{owner}: transform = \"signoz_ingestion_header\" was removed in 0.4.0; \
-             use ensure_prefix = \"{SIGNOZ_PREFIX}\" with regex = {regex}"
-        )));
+        return Err(invalid(
+            &["rules", "transform"],
+            FieldRule::RemovedForm {
+                form: "transform = \"signoz_ingestion_header\"",
+                replacement: format!("ensure_prefix = \"{SIGNOZ_PREFIX}\" with regex = {regex}"),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// `prefix_by_mode` (audit 03.03, R08): every environment the key is declared for sets
+/// `modes.<product>.<mode>` to a mapped or skipped value, checked at load, so the cause is
+/// the configuration and never a value finding sent to 1Password.
+fn check_modes(
+    doc: &Doc<'_>,
+    product: &str,
+    p: &crate::domain::PrefixByMode,
+    spec: &KeySpec,
+    environments: &BTreeMap<String, Environment>,
+) -> Result<(), Error> {
+    for env_name in &spec.environments {
+        let Some(env) = environments.get(env_name) else {
+            continue;
+        };
+        let field = ["environments", env_name, "modes", product, p.mode.as_str()];
+        let rule = match env.modes.get(product).and_then(|m| m.get(&p.mode)) {
+            None => FieldRule::Missing,
+            Some(value) if p.values.contains_key(value) || p.skip.contains(value) => continue,
+            Some(_) => FieldRule::ModeUnmapped {
+                env: crate::cause::EnvName::new(env_name.as_str()),
+                mode: p.mode.clone(),
+                allowed: p.values.keys().chain(&p.skip).cloned().collect(),
+            },
+        };
+        return Err(doc.invalid(&field, rule));
     }
     Ok(())
 }
@@ -1484,78 +1749,71 @@ fn validate_key(
 /// here so every later check (rotate, prune, hold) treats both alike. Errors point at the
 /// `from` line.
 fn check_shared(products: &mut BTreeMap<String, Product>, doc: &Doc<'_>) -> Result<(), Error> {
-    let at = |product: &str, key: &str, field: &str, msg: String| {
-        doc.at_path(&["products", product, "keys", key, field], msg)
-    };
-    let shape = "\"<product>/<KEY>\"";
     let mut follow: Vec<(String, String, bool)> = Vec::new();
     for (product, p) in products.iter() {
         for (key, spec) in &p.keys {
             let Some(from) = spec.from.as_deref() else {
                 continue;
             };
-            let owner = key_label(product, key);
-            let err = |msg: String| {
-                at(
-                    product,
-                    key,
-                    "from",
-                    format!("{owner}: from = {from:?}: {msg}"),
-                )
-            };
+            let err =
+                |rule: FieldRule| doc.invalid(&["products", product, "keys", key, "from"], rule);
             let slashes = from.matches('/').count();
             if from.contains("://") || slashes > 1 {
-                return Err(err(format!(
-                    "a shared key reads another key of the same environment; write from = \
-                     {shape} (cross-environment references are not supported)"
-                )));
+                return Err(err(check(ConfigCheck::FromCrossEnvironment)));
             }
             let Some((sp, sk)) = spec.source() else {
-                return Err(err(format!(
-                    "a bare key was removed in 0.7.0 (FR-60): name the source's product too, \
-                     from = \"<product>/{from}\""
-                )));
+                return Err(err(FieldRule::RemovedForm {
+                    form: "a bare key in from",
+                    replacement: format!("from = \"<product>/{from}\""),
+                }));
             };
             let well_formed = is_env_name(sk) && is_product_name(sp);
             if !well_formed {
-                return Err(err(format!("must be {shape}")));
+                return Err(err(check(ConfigCheck::FromShape)));
             }
             if (sp, sk) == (product.as_str(), key.as_str()) {
-                return Err(err("a key cannot share its own value (cycle)".into()));
+                return Err(err(check(ConfigCheck::FromSelf)));
             }
             let Some(src) = products.get(sp).and_then(|q| q.keys.get(sk)) else {
-                return Err(err("names no declared key; declare the source first".into()));
+                let declared: Vec<String> = products
+                    .iter()
+                    .flat_map(|(dp, q)| q.keys.keys().map(move |dk| key_label(dp, dk)))
+                    .collect();
+                return Err(err(undeclared(
+                    Declared::Key,
+                    from,
+                    declared.iter().map(String::as_str),
+                )));
             };
             let source = key_label(sp, sk);
             if let Some((tp, tk)) = src.source() {
-                return Err(err(if (tp, tk) == (product.as_str(), key.as_str()) {
-                    format!(
-                        "{source} is shared from {owner} (cycle); keep the field on one of them"
-                    )
-                } else {
-                    format!(
-                        "{source} is itself shared from {} (no chains); write from = {:?}",
-                        key_label(tp, tk),
-                        src.from.as_deref().unwrap_or_default()
-                    )
-                }));
+                return Err(err(check(
+                    if (tp, tk) == (product.as_str(), key.as_str()) {
+                        ConfigCheck::FromCycle { source }
+                    } else {
+                        ConfigCheck::FromChain {
+                            source,
+                            its_from: key_label(tp, tk),
+                        }
+                    },
+                )));
             }
             if src.kind != spec.kind {
-                return Err(err(format!(
-                    "{source} is a {} key, {owner} a {} key; a shared key has its source's kind",
-                    kind_name(src.kind),
-                    kind_name(spec.kind)
-                )));
+                return Err(err(check(ConfigCheck::FromKind {
+                    source,
+                    source_kind: kind_name(src.kind),
+                    kind: kind_name(spec.kind),
+                })));
             }
             if let Some(env) = spec
                 .environments
                 .iter()
                 .find(|e| !src.environments.contains(e))
             {
-                return Err(err(format!(
-                    "{source} is not declared for environment {env:?}, which {owner} uses; add \
-                     {env:?} to its environments (the value is read from the same environment)"
-                )));
+                return Err(err(check(ConfigCheck::FromEnvironment {
+                    source,
+                    env: env.clone(),
+                })));
             }
             if let Some(env) = spec
                 .rules
@@ -1563,21 +1821,23 @@ fn check_shared(products: &mut BTreeMap<String, Product>, doc: &Doc<'_>) -> Resu
                 .iter()
                 .find(|e| src.environments.contains(e))
             {
-                return Err(err(format!(
-                    "refuse_in {env:?} would refuse the value {source} provides there"
-                )));
+                return Err(doc.invalid(
+                    &["products", product, "keys", key, "rules", "refuse_in"],
+                    check(ConfigCheck::FromRefused {
+                        source,
+                        env: env.clone(),
+                    }),
+                ));
             }
             if doc
                 .value(&["products", product, "keys", key, "immutable"])
                 .is_some()
             {
-                return Err(at(
-                    product,
-                    key,
-                    "immutable",
-                    format!(
-                        "{owner}: immutable follows the source of a shared key ({source}); remove it here"
-                    ),
+                return Err(doc.invalid(
+                    &["products", product, "keys", key, "immutable"],
+                    FieldRule::ConflictsWith {
+                        field: dotted(&["products", product, "keys", key, "from"]),
+                    },
                 ));
             }
             follow.push((product.clone(), key.clone(), src.immutable));
@@ -1604,9 +1864,12 @@ fn kind_name(k: crate::domain::Kind) -> &'static str {
 /// Two targets on the same deployment target would manage the same names, and each would
 /// prune what the other stages (FR-8). Within one environment a `(provider, locator)`
 /// belongs to one target (FR-56); across environments the provider decides what "same"
-/// means and words the error (a Fly app may serve two environments with different
-/// templates).
-fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<(), Error> {
+/// means (a Fly app may serve two environments with different templates). Placed at the
+/// second target's provider section (audit 03.04).
+fn check_shared_targets(
+    environments: &BTreeMap<String, Environment>,
+    doc: &Doc<'_>,
+) -> Result<(), Error> {
     let targets: Vec<(&str, &str, &dyn TargetConfig)> = environments
         .iter()
         .flat_map(|(e, env)| {
@@ -1616,25 +1879,32 @@ fn check_shared_targets(environments: &BTreeMap<String, Environment>) -> Result<
         })
         .collect();
     for (i, (env, name, t)) in targets.iter().enumerate() {
+        let section = t.provider().section();
         for (prev_env, prev, p) in &targets[..i] {
             if prev_env == env {
-                let same_provider = p.provider().section() == t.provider().section();
+                let same_provider = p.provider().section() == section;
                 if same_provider && (p.target_locator() == t.target_locator() || t.same_target(*p))
                 {
-                    return Err(cfg(format!(
-                        "environment {env}: targets {prev} and {name} both deliver to {} {}; \
-                         within an environment a {} target belongs to one target\n  next: \
-                         merge them into one target, with products listing what it delivers",
-                        t.provider().label(),
-                        t.target_locator(),
-                        t.provider().label(),
-                    )));
+                    return Err(doc.invalid(
+                        &["environments", env, "targets", name],
+                        check(ConfigCheck::SameTarget {
+                            label: t.provider().label().to_string(),
+                            locator: t.target_locator(),
+                            other: prev.to_string(),
+                        }),
+                    ));
                 }
             } else if t.same_target(*p) {
-                return Err(cfg(t.shared_target_error(
-                    &format!("{prev_env} (target {prev})"),
-                    &format!("{env} (target {name})"),
-                )));
+                return Err(doc.invalid_at(
+                    dotted(&template_path(env, name, *t)),
+                    &["environments", env, "targets", name, section],
+                    check(ConfigCheck::SharedAcrossEnvironments {
+                        label: t.provider().label().to_string(),
+                        locator: t.target_locator(),
+                        other_env: prev_env.to_string(),
+                        other_target: prev.to_string(),
+                    }),
+                ));
             }
         }
     }
@@ -1659,7 +1929,8 @@ fn check_names(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// [`check_names`] for one target.
+/// [`check_names`] for one target. Each refusal names the target's name template field,
+/// the field a person changes (audit 03.01, 03.17), placed at the key.
 fn check_target_names<'f>(
     fleet: &'f Fleet,
     env_name: &str,
@@ -1669,9 +1940,7 @@ fn check_target_names<'f>(
     doc: &Doc<'_>,
 ) -> Result<(), Error> {
     let t = target.config.as_ref();
-    let here = format!("{env_name} (target {target_name})");
-    // Messages read `environment <env>: target <name>: …`.
-    let scope = format!("{env_name}: target {target_name}");
+    let template = template_path(env_name, target_name, t);
     let rules = t.name_rules();
     let store = t.secrets_in();
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
@@ -1683,92 +1952,82 @@ fn check_target_names<'f>(
             continue;
         }
         for key in p.keys.keys() {
+            let refuse = |c: ConfigCheck| {
+                doc.invalid_at(
+                    dotted(&template),
+                    &["products", product, "keys", key],
+                    check(c),
+                )
+            };
             let name = t.env_name(product, key);
             let owner = key_label(product, key);
             if !is_env_name(&name) {
-                return Err(cfg(format!(
-                    "environment {scope}: {owner} renders {} {name:?}, which must match \
-                     ^[A-Z][A-Z0-9_]*$",
-                    rules.env_label
-                )));
+                return Err(refuse(ConfigCheck::RenderedName {
+                    owner,
+                    label: rules.env_label.to_string(),
+                    rendered: name,
+                    pattern: PatternId::KeyName,
+                }));
             }
-            let at = Place {
-                env_name: &scope,
-                product,
-                key,
-                owner: &owner,
-            };
             let id = match &rules.store {
                 None => name.clone(),
-                Some(s) => store_id(&at, &t.store_name(&name), s, doc)?,
+                Some(s) => store_id(&owner, &t.store_name(&name), s).map_err(|c| refuse(*c))?,
             };
-            check_unique(&mut seen, &scope, &rules, id, &owner)?;
+            check_unique(&mut seen, &rules, id, &owner).map_err(|c| refuse(*c))?;
             if let Some(store) = store {
                 let s = store.name_rules();
-                let id = store_id(&at, &store.store_name(&name), &s, doc)?;
+                let id = store_id(&owner, &store.store_name(&name), &s).map_err(|c| refuse(*c))?;
                 let named = NameRules {
                     env_label: rules.env_label,
                     store: Some(s),
                 };
-                check_unique(&mut seen_in_store, &scope, &named, id.clone(), &owner)?;
+                check_unique(&mut seen_in_store, &named, id.clone(), &owner)
+                    .map_err(|c| refuse(*c))?;
+                let here = env_name.to_string();
                 if let Some((_, _, other, prev)) = shared
                     .iter()
                     .find(|(st, i, e, _)| st.same_store(store) && *i == id && *e != here)
                 {
-                    return Err(cfg(format!(
-                        "environments {other} and {here} both keep {} {id} in {} ({prev} and \
-                         {owner}); each would overwrite and prune the other's value\n  next: \
-                         give one of them its own store, or an env_name template that renders \
-                         different names",
-                        s.label,
-                        store.describe()
-                    )));
+                    return Err(refuse(ConfigCheck::StoreShared {
+                        owner: owner.clone(),
+                        label: s.label.to_string(),
+                        name: id.clone(),
+                        store: store.describe(),
+                        other_env: other.clone(),
+                        other_owner: prev.clone(),
+                    }));
                 }
-                shared.push((store, id, here.clone(), owner.clone()));
+                shared.push((store, id, here, owner.clone()));
             }
         }
     }
     Ok(())
 }
 
-/// Where a rendered name comes from, for messages.
-struct Place<'a> {
-    env_name: &'a str,
-    product: &'a str,
-    key: &'a str,
-    owner: &'a str,
-}
-
 /// A rendered store name checked against `s` (FR-30): its identity for collisions,
 /// case-folded when the store ignores case.
-fn store_id(
-    at: &Place<'_>,
-    store: &str,
-    s: &StoreNameRules,
-    doc: &Doc<'_>,
-) -> Result<String, Error> {
-    let (env_name, owner) = (at.env_name, at.owner);
-    if store.is_empty() || store.len() > s.max_len || !store.chars().all(s.allowed) {
-        return Err(cfg(format!(
-            "environment {env_name}: {owner} renders {} of {} characters, which must match {}",
-            s.label,
-            store.len(),
-            s.pattern
-        )));
-    }
-    // The first and last characters, e.g. a key ending in `_` renders a Kubernetes name
-    // ending in `-`: refused here, never at sync.
-    let edges = [store.chars().next(), store.chars().last()];
-    if !edges.into_iter().flatten().all(s.edge) {
-        return Err(doc.key_at(
-            at.product,
-            at.key,
-            format!(
-                "environment {env_name}: {owner} renders {} {store:?}, which must start and end \
-                 with a letter or digit ({})",
-                s.label, s.pattern
-            ),
-        ));
+fn store_id(owner: &str, store: &str, s: &StoreNameRules) -> Result<String, Box<ConfigCheck>> {
+    let problem = if store.is_empty() {
+        Some(StoreNameProblem::Empty)
+    } else if store.len() > s.max_len {
+        Some(StoreNameProblem::TooLong {
+            len: store.len(),
+            max: s.max_len,
+        })
+    } else if !store.chars().all(s.allowed) {
+        Some(StoreNameProblem::Character)
+    } else {
+        // The first and last characters, e.g. a key ending in `_` renders a Kubernetes
+        // name ending in `-`: refused here, never at sync.
+        let edges = [store.chars().next(), store.chars().last()];
+        (!edges.into_iter().flatten().all(s.edge)).then_some(StoreNameProblem::Edge)
+    };
+    if let Some(problem) = problem {
+        return Err(Box::new(ConfigCheck::RenderedStoreName {
+            owner: owner.to_string(),
+            label: s.label.to_string(),
+            problem,
+        }));
     }
     Ok(if s.case_insensitive {
         store.to_ascii_lowercase()
@@ -1777,27 +2036,26 @@ fn store_id(
     })
 }
 
-/// Two keys of one target must not render the same name (FR-8, FR-30): the error names both
-/// keys and the two ways out (FR-20).
+/// Two keys of one target must not render the same name (FR-8, FR-30): the refusal names
+/// both keys, and its fix the two ways out (FR-20).
 fn check_unique(
     seen: &mut BTreeMap<String, String>,
-    env_name: &str,
     rules: &NameRules,
     id: String,
     owner: &str,
-) -> Result<(), Error> {
+) -> Result<(), Box<ConfigCheck>> {
     let Some(prev) = seen.insert(id.clone(), owner.to_string()) else {
         return Ok(());
     };
-    let what = match &rules.store {
-        None => format!("both render {} {id}", rules.env_label),
-        Some(s) => format!("both map to {} {id}", s.label),
-    };
-    Err(cfg(format!(
-        "environment {env_name}: {prev} and {owner} {what}\n  next: render different names \
-         with {{PRODUCT}} in the template, or deliver one product from a target of its own \
-         (products = [...])"
-    )))
+    Err(Box::new(ConfigCheck::NameTaken {
+        owner: owner.to_string(),
+        other: prev,
+        label: match &rules.store {
+            None => rules.env_label.to_string(),
+            Some(s) => s.label.to_string(),
+        },
+        name: id,
+    }))
 }
 
 /// IDs and app names go into argv, so they must not start with `-` (read as a flag) and
@@ -2039,19 +2297,60 @@ mod tests {
         )
     }
 
-    fn config_err(text: &str) -> String {
+    /// The cause `text` is refused with.
+    fn cause(text: &str) -> Cause {
         match parse(text) {
-            Err(Error::Config(m)) => m.to_string(),
-            other => panic!("expected Config error, got {other:?}"),
+            Err(e) => match e.cause() {
+                Some((c, _)) => c.clone(),
+                None => panic!("expected a catalog cause, got {e:?}"),
+            },
+            Ok(_) => panic!("expected a refusal"),
         }
     }
 
-    /// The stable code of the configuration error `text` is refused with (A2).
-    fn config_code(text: &str) -> crate::error::Code {
+    /// The message of the configuration error `text` is refused with.
+    /// A provider section's own refusal is still free text (its lane migrates it).
+    fn config_err(text: &str) -> String {
         match parse(text) {
-            Err(e @ Error::Config(_)) => e.code(),
-            other => panic!("expected Config error, got {other:?}"),
+            Err(Error::Config(m)) => m.to_string(),
+            _ => cause(text).message(),
         }
+    }
+
+    /// The field and rule of the `ConfigInvalid` refusal of `text`.
+    fn invalid(text: &str) -> (String, FieldRule) {
+        match cause(text) {
+            Cause::ConfigInvalid { field, rule, .. } => (field.to_string(), rule),
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
+    }
+
+    /// The field the refusal of `text` names.
+    fn field_of(text: &str) -> String {
+        invalid(text).0
+    }
+
+    /// The rule the refusal of `text` names.
+    fn rule_of(text: &str) -> FieldRule {
+        invalid(text).1
+    }
+
+    /// The check the refusal of `text` names.
+    fn check_of(text: &str) -> ConfigCheck {
+        match rule_of(text) {
+            FieldRule::Check { check } => check,
+            other => panic!("expected a check, got {other:?}"),
+        }
+    }
+
+    /// The Do of the refusal of `text`.
+    fn do_of(text: &str) -> Option<String> {
+        cause(text).do_text(&crate::cause::Invocation::default())
+    }
+
+    /// The stable code of the configuration error `text` is refused with (A2).
+    fn config_code(text: &str) -> &'static str {
+        cause(text).code()
     }
 
     /// One environment `prod` with boundary `web`, target `site` (Fly, `{KEY}`) and one key.
@@ -2097,14 +2396,17 @@ environments = ["prod"]
     fn load_names_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.toml");
-        assert!(matches!(load(&missing), Err(Error::Config(m)) if m.contains("nope.toml")));
+        assert!(matches!(
+            load(&missing).unwrap_err().cause(),
+            Some((Cause::ConfigUnreadable { path, .. }, _)) if path == &missing
+        ));
     }
 
     #[test]
     fn rejects_a_configuration_without_environments() {
         assert_eq!(
-            config_err("[products.web.keys.K]\nkind = \"secret\"\nenvironments = []\n"),
-            "invalid secrets.toml: TOML parse error at line 1, column 1\nmissing field `environments`"
+            invalid("[products.web.keys.K]\nkind = \"secret\"\nenvironments = []\n"),
+            ("environments".to_string(), FieldRule::NoEnvironment)
         );
     }
 
@@ -2265,55 +2567,78 @@ environments = ["prod"]
 
     #[test]
     fn rejects_a_key_for_an_undefined_environment() {
-        let m = config_err(&mutate(
-            r#"environments = ["prod"]"#,
-            r#"environments = ["qa"]"#,
-        ));
-        assert!(m.contains("undefined environment \"qa\""), "{m}");
+        let text = mutate(r#"environments = ["prod"]"#, r#"environments = ["qa"]"#);
+        assert_eq!(
+            field_of(&text),
+            "products.allumata.keys.OPENAI_API_KEY.environments"
+        );
     }
 
     #[test]
     fn rejects_a_key_name_that_is_not_an_env_name() {
-        let m = config_err(&mutate(
+        let text = mutate(
             "[products.allumata.keys.OPENAI_API_KEY]",
             "[products.allumata.keys.openai-key]",
-        ));
-        assert!(m.contains("key name must match"), "{m}");
+        );
+        assert_eq!(
+            rule_of(&text),
+            FieldRule::Pattern {
+                id: PatternId::KeyName
+            }
+        );
     }
 
     #[test]
     fn rejects_an_unknown_key_field() {
-        let m = config_err(&mutate("immutable = true", "immutible = true"));
-        assert!(m.contains("unknown field `immutible`"), "{m}");
+        let text = mutate("immutable = true", "immutible = true");
+        assert_eq!(
+            rule_of(&text),
+            FieldRule::Unknown {
+                suggestion: Some("immutable".into())
+            }
+        );
     }
 
     #[test]
     fn rejects_an_unknown_rule() {
-        let m = config_err(&mutate("base64_bytes = 32", "base64_len = 32"));
-        assert!(m.contains("unknown field `base64_len`"), "{m}");
+        let text = mutate("base64_bytes = 32", "base64_len = 32");
+        assert!(
+            field_of(&text).ends_with(".rules.base64_len"),
+            "{}",
+            field_of(&text)
+        );
     }
 
     #[test]
     fn rejects_an_unknown_kind() {
-        let m = config_err(&mutate(r#"kind = "config""#, r#"kind = "text""#));
-        assert!(m.contains("unknown variant `text`"), "{m}");
+        let text = mutate(r#"kind = "config""#, r#"kind = "text""#);
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::NotOneOf {
+                allowed: vec!["secret".into(), "config".into()],
+                closest: None
+            }
+        );
     }
 
     #[test]
     fn rejects_a_bad_product_name() {
-        let m = config_err(&mutate("products.allumata.", "products.Allumata."));
-        assert!(m.contains("product \"Allumata\": name must match"), "{m}");
+        let text = mutate("products.allumata.", "products.Allumata.");
+        assert_eq!(field_of(&text), "products.Allumata");
     }
 
     #[test]
     fn rejects_a_regex_that_does_not_compile_naming_the_key() {
-        let m = config_err(&mutate(
+        let text = mutate(
             r#"rules = { base64_bytes = 32 }"#,
             r#"rules = { regex = "([a-z" }"#,
-        ));
-        assert!(
-            m.contains("allumata/INTEGRATION_ENC_KEY: rule regex does not compile"),
-            "{m}"
+        );
+        assert_eq!(
+            invalid(&text),
+            (
+                "products.allumata.keys.INTEGRATION_ENC_KEY.rules.regex".to_string(),
+                FieldRule::Syntax
+            )
         );
     }
 
@@ -2345,77 +2670,89 @@ environments = ["prod"]
     /// load with the key and the equivalent `regex` rule.
     #[test]
     fn the_pattern_rule_fails_at_load_with_the_equivalent_regex() {
-        let m = config_err(&with_prod_key(
+        let text = with_prod_key(
             "p",
             "K1",
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        ));
-        assert!(
-            m.ends_with(
-                "\np/K1: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead\n"
-            ),
-            "{m}"
+        );
+        assert_eq!(
+            rule_of(&text),
+            FieldRule::RemovedForm {
+                form: "pattern",
+                replacement: "regex = 'p\\-(?:[a-z]+)'".into()
+            }
         );
     }
 
     #[test]
     fn the_pattern_rule_error_points_at_the_pattern() {
-        let m = config_err(&with_prod_key(
+        let text = with_prod_key(
             "p",
             "K1",
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        ));
-        assert!(m.contains("TOML parse error at line 48, column 33"), "{m}");
+        );
+        assert!(
+            config_err(&text).contains(" at line 48, column 33: "),
+            "{}",
+            config_err(&text)
+        );
     }
 
     #[test]
     fn path_is_a_reserved_key_name() {
-        let m = config_err(&with_prod_key("p", "PATH", ""));
-        assert!(m.contains("p/PATH: key name is reserved"), "{m}");
+        assert!(matches!(
+            rule_of(&with_prod_key("p", "PATH", "")),
+            FieldRule::Reserved { .. }
+        ));
     }
 
     #[test]
     fn op_variables_are_reserved_key_names() {
-        let m = config_err(&with_prod_key("p", "OP_SERVICE_ACCOUNT_TOKEN", ""));
-        assert!(m.contains("key name is reserved"), "{m}");
+        assert!(matches!(
+            rule_of(&with_prod_key("p", "OP_SERVICE_ACCOUNT_TOKEN", "")),
+            FieldRule::Reserved { .. }
+        ));
     }
 
     #[test]
     fn the_signoz_transform_is_refused_with_its_replacement() {
-        let m = config_err(&with_prod_key(
+        let text = with_prod_key(
             "p",
             "K1",
             "rules = { transform = \"signoz_ingestion_header\" }\n",
-        ));
+        );
         assert_eq!(
-            m,
-            "p/K1: transform = \"signoz_ingestion_header\" was removed in 0.4.0; use \
-             ensure_prefix = \"signoz-ingestion-key=\" with regex = \
-             'signoz\\-ingestion\\-key=(?:[A-Za-z0-9._~+/-]+={0,2})'"
+            rule_of(&text),
+            FieldRule::RemovedForm {
+                form: "transform = \"signoz_ingestion_header\"",
+                replacement: "ensure_prefix = \"signoz-ingestion-key=\" with regex = \
+                              'signoz\\-ingestion\\-key=(?:[A-Za-z0-9._~+/-]+={0,2})'"
+                    .into()
+            }
         );
     }
 
     #[test]
     fn rejects_an_empty_not_prefix_list() {
-        let m = config_err(&mutate(
+        let text = mutate(
             r#"rules = { base64_bytes = 32 }"#,
             r#"rules = { not_prefix = [] }"#,
-        ));
-        assert!(
-            m.contains("allumata/INTEGRATION_ENC_KEY: rule not_prefix"),
-            "{m}"
+        );
+        assert_eq!(
+            field_of(&text),
+            "products.allumata.keys.INTEGRATION_ENC_KEY.rules.not_prefix"
         );
     }
 
     #[test]
     fn rejects_an_empty_prefix_by_mode_value() {
-        let m = config_err(&mutate(
+        let text = mutate(
             r#"values = { test = "sk_test_", live = "sk_live_" }"#,
             r#"values = { test = "", live = "sk_live_" }"#,
-        ));
-        assert!(
-            m.contains("allumata/STRIPE_SECRET_KEY: rule prefix_by_mode"),
-            "{m}"
+        );
+        assert_eq!(
+            field_of(&text),
+            "products.allumata.keys.STRIPE_SECRET_KEY.rules.prefix_by_mode.values.test"
         );
     }
 
@@ -2430,32 +2767,35 @@ environments = ["prod"]
 
     #[test]
     fn rejects_an_empty_prefix() {
-        let m = config_err(&mutate(r#"prefix = "sk-""#, r#"prefix = """#));
-        assert!(
-            m.contains("allumata/OPENAI_API_KEY: rule prefix must be"),
-            "{m}"
+        let text = mutate(r#"prefix = "sk-""#, r#"prefix = """#);
+        assert_eq!(
+            invalid(&text),
+            (
+                "products.allumata.keys.OPENAI_API_KEY.rules.prefix".to_string(),
+                FieldRule::Empty
+            )
         );
     }
 
     #[test]
     fn rejects_refuse_in_naming_an_undefined_environment() {
-        let m = config_err(&mutate(
+        let text = mutate(
             r#"not_prefix = "sk-or-" }"#,
             r#"not_prefix = "sk-or-", refuse_in = ["qa"] }"#,
-        ));
-        assert!(
-            m.contains("refuse_in names undefined environment \"qa\""),
-            "{m}"
         );
+        assert!(matches!(
+            check_of(&text),
+            ConfigCheck::Undeclared { kind: Declared::Environment, name, .. } if name == "qa"
+        ));
     }
 
     #[test]
     fn rejects_refuse_in_overlapping_environments() {
-        let m = config_err(&mutate(
+        let text = mutate(
             r#"not_prefix = "sk-or-" }"#,
             r#"not_prefix = "sk-or-", refuse_in = ["prod"] }"#,
-        ));
-        assert!(m.contains("is in both environments and refuse_in"), "{m}");
+        );
+        assert!(matches!(rule_of(&text), FieldRule::ConflictsWith { .. }));
     }
 
     #[test]
@@ -2503,10 +2843,14 @@ environments = ["prod"]
             "prod",
             "api",
         );
-        let m = config_err(&text);
-        assert!(
-            m.contains("api/DATABASE_URL and web/DATABASE_URL both render Fly name DATABASE_URL"),
-            "{m}"
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::NameTaken {
+                owner: "web/DATABASE_URL".into(),
+                other: "api/DATABASE_URL".into(),
+                label: "Fly name".into(),
+                name: "DATABASE_URL".into()
+            }
         );
     }
 
@@ -2517,14 +2861,13 @@ environments = ["prod"]
             "prod",
             "api",
         );
-        assert!(
-            parse(&text)
-                .unwrap_err()
-                .next_step()
-                .is_some_and(|n| n.starts_with(
-                    "render different names with {PRODUCT} in the template, or deliver one \
-                     product from a target of its own"
-                ))
+        assert_eq!(
+            do_of(&text).as_deref(),
+            Some(
+                "set environments.prod.targets.site.fly.secret_name with {PRODUCT} so the names \
+                 differ, or deliver one product from a target of its own (products = [...]) in \
+                 secrets.toml at line 10, column 20"
+            )
         );
     }
 
@@ -2551,11 +2894,11 @@ environments = ["prod"]
 
     #[test]
     fn rejects_a_template_rendering_an_invalid_fly_name() {
-        let m = config_err(&mutate(
-            "FLEET__{PRODUCT}__{KEY}",
-            "fleet__{PRODUCT}__{KEY}",
+        let text = mutate("FLEET__{PRODUCT}__{KEY}", "fleet__{PRODUCT}__{KEY}");
+        assert!(matches!(
+            check_of(&text),
+            ConfigCheck::RenderedName { rendered, .. } if rendered.starts_with("fleet__ALLUMATA__")
         ));
-        assert!(m.contains("renders Fly name \"fleet__ALLUMATA__"), "{m}");
     }
 
     /// FR-2, FR-37: an unknown field in a provider section reports line, column and the
@@ -2575,80 +2918,66 @@ environments = ["prod"]
 
     #[test]
     fn an_unknown_target_section_lists_the_known_providers() {
-        let m = config_err(&web("fly.app", "flyy.app = \"x\"\nfly.app"));
-        assert!(
-            m.ends_with(
-                "\nenvironment prod: target site: unknown target section \"flyy\"; known: \
-                 azure, fly, github, kubernetes\n"
-            ),
-            "{m}"
+        let text = web("fly.app", "flyy.app = \"x\"\nfly.app");
+        assert_eq!(
+            rule_of(&text),
+            FieldRule::Unknown {
+                suggestion: Some("fly".into())
+            }
         );
     }
 
     #[test]
     fn an_unknown_target_field_names_the_expected_fields() {
-        let m = config_err(&web("fly.app", "vault = \"x\"\nfly.app"));
-        assert!(
-            m.ends_with(
-                "\nenvironment prod: target site: unknown field \"vault\"; expected products, \
-                 deploy_credentials, state_vault_id or one provider section (azure, fly, \
-                 github, kubernetes)\n"
-            ),
-            "{m}"
-        );
+        let text = web("fly.app", "vault = \"x\"\nfly.app");
+        assert_eq!(field_of(&text), "environments.prod.targets.site.vault");
     }
 
     #[test]
     fn a_target_with_two_provider_sections_is_refused() {
-        let m = config_err(&web("fly.app", "azure.key_vault = \"kv\"\nfly.app"));
-        assert!(
-            m.ends_with(
-                "\nenvironment prod: target site declares both fly and azure; a target has one \
-                 provider (declare another target for the other)\n"
-            ),
-            "{m}"
-        );
+        let text = web("fly.app", "azure.key_vault = \"kv\"\nfly.app");
+        assert!(matches!(rule_of(&text), FieldRule::ConflictsWith { .. }));
     }
 
     #[test]
     fn a_target_without_a_provider_is_refused() {
-        let m = config_err(&web(
-            "fly.app = \"web-prod\"\nfly.secret_name = \"{KEY}\"\n",
-            "",
-        ));
-        assert!(m.contains("target site names no provider"), "{m}");
+        let text = web("fly.app = \"web-prod\"\nfly.secret_name = \"{KEY}\"\n", "");
+        assert!(matches!(check_of(&text), ConfigCheck::NoProvider { .. }));
     }
 
     #[test]
     fn rejects_a_target_name_that_is_not_lowercase() {
-        let m = config_err(&web("targets.site]", "targets.Site]"));
-        assert!(
-            m.contains("target name \"Site\" must match ^[a-z][a-z0-9-]*$"),
-            "{m}"
+        assert_eq!(
+            invalid(&web("targets.site]", "targets.Site]")),
+            (
+                "environments.prod.targets.Site".to_string(),
+                FieldRule::Pattern {
+                    id: PatternId::TargetName
+                }
+            )
         );
     }
 
     #[test]
     fn rejects_a_target_name_with_an_underscore() {
-        let m = config_err(&web("targets.site]", "targets.my_site]"));
-        assert!(m.contains("target name \"my_site\" must match"), "{m}");
+        assert_eq!(
+            field_of(&web("targets.site]", "targets.my_site]")),
+            "environments.prod.targets.my_site"
+        );
     }
 
     #[test]
     fn a_target_without_state_vault_id_is_state_vault_missing() {
         let text = web("state_vault_id = \"sweb\"\n", "");
-        assert_eq!(config_code(&text), crate::error::Code::StateVaultMissing);
-        assert!(
-            config_err(&text).contains("target site in prod needs state_vault_id"),
-            "{}",
-            config_err(&text)
-        );
+        assert_eq!(config_code(&text), "state_vault_missing");
     }
 
     #[test]
-    fn state_vault_missing_points_at_the_target() {
-        let m = config_err(&web("state_vault_id = \"sweb\"\n", ""));
-        assert!(m.contains("TOML parse error at line 4, column 28"), "{m}");
+    fn state_vault_missing_names_the_target() {
+        assert!(matches!(
+            cause(&web("state_vault_id = \"sweb\"\n", "")),
+            Cause::StateVaultMissing { target, .. } if target.as_str() == "site"
+        ));
     }
 
     #[test]
@@ -2666,36 +2995,38 @@ environments = ["prod"]
 
     #[test]
     fn a_delivery_item_for_a_product_the_target_does_not_deliver_is_refused() {
-        let m = config_err(&web(
+        let text = web(
             "state_vault_id = \"sweb\"\n",
             "state_vault_id = \"sweb\"\ndelivery_items = { api = \"dapi\" }\n",
-        ));
-        assert!(
-            m.contains(
-                "target site records a delivery item for \"api\", a product it does not deliver"
-            ),
-            "{m}"
+        );
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::DeliveryItemUndelivered {
+                product: "api".into()
+            }
         );
     }
 
     #[test]
     fn rejects_a_delivery_item_id_that_reads_as_a_flag() {
-        let m = config_err(&web(
+        let text = web(
             "state_vault_id = \"sweb\"\n",
             "state_vault_id = \"sweb\"\ndelivery_items = { web = \"-d\" }\n",
-        ));
-        assert!(
-            m.contains("targets.site.delivery_items.web \"-d\" must match"),
-            "{m}"
+        );
+        assert_eq!(
+            field_of(&text),
+            "environments.prod.targets.site.delivery_items.web"
         );
     }
 
     #[test]
     fn rejects_a_state_vault_id_that_reads_as_a_flag() {
-        let m = config_err(&web("\"sweb\"", "\"-s\""));
-        assert!(
-            m.contains("targets.site.state_vault_id \"-s\" must match"),
-            "{m}"
+        assert_eq!(
+            invalid(&web("\"sweb\"", "\"-s\"")),
+            (
+                "environments.prod.targets.site.state_vault_id".to_string(),
+                FieldRule::Pattern { id: PatternId::Id }
+            )
         );
     }
 
@@ -2710,19 +3041,23 @@ environments = ["prod"]
 
     #[test]
     fn rejects_empty_target_products() {
-        let m = config_err(&web("state_vault_id", "products = []\nstate_vault_id"));
-        assert!(m.contains("target site: products must not be empty"), "{m}");
+        assert_eq!(
+            check_of(&web("state_vault_id", "products = []\nstate_vault_id")),
+            ConfigCheck::EmptyProducts
+        );
     }
 
     #[test]
     fn rejects_target_products_naming_an_undeclared_product() {
-        let m = config_err(&web(
-            "state_vault_id",
-            "products = [\"wbe\"]\nstate_vault_id",
-        ));
-        assert!(
-            m.contains("products names \"wbe\", which is not a declared product (declared: web)"),
-            "{m}"
+        let text = web("state_vault_id", "products = [\"wbe\"]\nstate_vault_id");
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::Undeclared {
+                kind: Declared::Product,
+                name: "wbe".into(),
+                declared: vec!["web".into()],
+                closest: None
+            }
         );
     }
 
@@ -2736,26 +3071,32 @@ environments = ["prod"]
             "prod",
             "shared",
         );
-        let m = config_err(&replaced(
+        let text = replaced(
             &text,
             "state_vault_id",
             "products = [\"shared\"]\nstate_vault_id",
-        ));
-        assert!(
-            m.contains("products names \"shared\", which is source-only"),
-            "{m}"
+        );
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::SourceOnlyListed {
+                product: "shared".into()
+            }
         );
     }
 
     #[test]
     fn two_targets_of_one_environment_on_one_app_are_refused() {
-        let m = config_err(&web_plus(
+        let text = web_plus(
             "[environments.prod.targets.other]\nfly.app = \"web-prod\"\nfly.secret_name = \
              \"X__{KEY}\"\nstate_vault_id = \"s2\"\n",
-        ));
-        assert!(
-            m.contains("environment prod: targets other and site both deliver to Fly app web-prod"),
-            "{m}"
+        );
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::SameTarget {
+                label: "Fly".into(),
+                locator: "app web-prod".into(),
+                other: "other".into()
+            }
         );
     }
 
@@ -2770,16 +3111,13 @@ environments = ["prod"]
 
     #[test]
     fn two_environments_on_one_app_and_template_are_refused() {
-        let m = config_err(&mutate(
+        let text = mutate(
             r#"fly.app = "mcproductlabs-portfolio-staging""#,
             r#"fly.app = "mcproductlabs-portfolio-production""#,
-        ));
-        assert!(
-            m.contains(
-                "environments prod (target portfolio) and staging (target portfolio) both use \
-                 Fly app \"mcproductlabs-portfolio-production\""
-            ),
-            "{m}"
+        );
+        assert_eq!(
+            field_of(&text),
+            "environments.staging.targets.portfolio.fly.secret_name"
         );
     }
 
@@ -2814,11 +3152,7 @@ environments = ["prod"]
             "state_vault_id",
             "deploy_credentials = \"op://v/i/FLY_API_TOKEN\"\nstate_vault_id",
         );
-        let m = config_err(&text);
-        assert!(
-            m.contains("line 7, column 1") && m.contains("not a field"),
-            "{m}"
-        );
+        assert_eq!(check_of(&text), ConfigCheck::DeployCredentialsRef);
     }
 
     #[test]
@@ -2827,10 +3161,9 @@ environments = ["prod"]
             "state_vault_id",
             "deploy_credentials = \"vault/item\"\nstate_vault_id",
         );
-        let m = config_err(&text);
-        assert!(
-            m.contains("must be an op://<vault>/<item> reference"),
-            "{m}"
+        assert_eq!(
+            field_of(&text),
+            "environments.prod.targets.site.deploy_credentials"
         );
     }
 
@@ -2842,8 +3175,12 @@ environments = ["prod"]
              kubernetes.namespace = \"app\"\nkubernetes.deployment = \"web\"\n\
              kubernetes.env_name = \"{KEY}\"\n",
         );
-        let m = config_err(&text);
-        assert!(m.contains("kubeconfig"), "{m}");
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::DeployCredentialsUnsupported {
+                provider: "Kubernetes".into()
+            }
+        );
     }
 
     #[test]
@@ -2879,8 +3216,7 @@ environments = ["prod"]
             "[environments.prod]\n",
             "[environments.prod]\nvault = \"x\"\n",
         );
-        let m = config_err(&text);
-        assert!(m.contains("unknown field `vault`"), "{m}");
+        assert_eq!(field_of(&text), "environments.prod.vault");
     }
 
     /// Targets `site` (web) and `other` (api only) sharing state vault `sweb`.
@@ -2903,19 +3239,28 @@ environments = ["prod"]
 
     #[test]
     fn a_state_vault_shared_by_targets_reading_other_boundaries_is_refused() {
-        let text = replaced(
+        assert_eq!(config_code(&too_wide()), "state_vault_wider_than_values");
+    }
+
+    /// [`shared_state_vault`] with target `site` delivering only `web`.
+    fn too_wide() -> String {
+        replaced(
             &shared_state_vault(),
             "fly.app = \"web-prod\"",
             "fly.app = \"web-prod\"\nproducts = [\"web\"]",
-        );
-        assert_eq!(
-            config_code(&text),
-            crate::error::Code::StateVaultWiderThanValues
-        );
-        let m = config_err(&text);
+        )
+    }
+
+    /// 03.04: the refusal is placed at the target's state_vault_id line.
+    #[test]
+    fn a_too_wide_state_vault_is_placed_at_its_line() {
         assert!(
-            m.starts_with("state vault sweb is shared by targets prod/other, prod/site"),
-            "{m}"
+            matches!(
+                cause(&too_wide()),
+                Cause::StateVaultTooWide { at: Some(_), .. }
+            ),
+            "{:?}",
+            cause(&too_wide())
         );
     }
 
@@ -3013,12 +3358,7 @@ environments = ["prod"]
     #[test]
     fn a_product_without_its_boundary_is_boundary_missing() {
         let text = key(WEB, "api", "K", r#"["prod"]"#, "");
-        assert_eq!(config_code(&text), crate::error::Code::BoundaryMissing);
-        assert!(
-            config_err(&text).contains("product api in prod needs boundary api"),
-            "{}",
-            config_err(&text)
-        );
+        assert_eq!(config_code(&text), "boundary_missing");
     }
 
     #[test]
@@ -3028,74 +3368,84 @@ environments = ["prod"]
              \"secret\"\nenvironments = [\"prod\"]\n[products.web.keys.TOKEN]\nkind = \
              \"secret\"\nenvironments = [\"prod\"]\nfrom = \"shared/TOKEN\"\n"
         );
-        assert_eq!(config_code(&text), crate::error::Code::BoundaryMissing);
-        assert!(
-            config_err(&text).contains("product shared in prod needs boundary shared"),
-            "{}",
-            config_err(&text)
-        );
+        assert!(matches!(
+            cause(&text),
+            Cause::BoundaryMissing { product, .. } if product.as_str() == "shared"
+        ));
     }
 
     #[test]
-    fn boundary_missing_points_at_the_boundaries() {
-        let m = config_err(&key(WEB, "api", "K", r#"["prod"]"#, ""));
-        assert!(m.contains("TOML parse error at line 2, column 1"), "{m}");
+    fn boundary_missing_names_the_environment() {
+        assert!(matches!(
+            cause(&key(WEB, "api", "K", r#"["prod"]"#, "")),
+            Cause::BoundaryMissing { env, .. } if env.as_str() == "prod"
+        ));
     }
 
     #[test]
     fn a_recorded_boundary_nothing_uses_is_refused() {
-        let m = config_err(&bound(WEB, "prod", "old"));
-        assert!(
-            m.contains("environment prod: boundaries.old is recorded but no product with a key in prod lives in it"),
-            "{m}"
+        assert_eq!(
+            invalid(&bound(WEB, "prod", "old")),
+            (
+                "environments.prod.boundaries.old".to_string(),
+                FieldRule::Check {
+                    check: ConfigCheck::BoundaryUnused { env: "prod".into() }
+                }
+            )
         );
     }
 
     #[test]
     fn rejects_a_boundary_vault_id_that_reads_as_a_flag() {
-        let m = config_err(&web("\"vweb\"", "\"-v\""));
-        assert!(
-            m.contains("boundaries.web.vault_id \"-v\" must match"),
-            "{m}"
+        assert_eq!(
+            field_of(&web("\"vweb\"", "\"-v\"")),
+            "environments.prod.boundaries.web.vault_id"
         );
     }
 
     #[test]
     fn rejects_a_padded_boundary_item_id() {
-        let m = config_err(&web("\"iweb\"", "\" iweb\""));
-        assert!(
-            m.contains("boundaries.web.item_id has leading or trailing whitespace"),
-            "{m}"
+        assert_eq!(
+            check_of(&web("\"iweb\"", "\" iweb\"")),
+            ConfigCheck::Whitespace
         );
     }
 
     #[test]
     fn rejects_a_boundary_item_id_with_a_slash() {
-        let m = config_err(&web("\"iweb\"", "\"i/web\""));
-        assert!(
-            m.contains("boundaries.web.item_id \"i/web\" must match"),
-            "{m}"
+        assert_eq!(
+            invalid(&web("\"iweb\"", "\"i/web\"")),
+            (
+                "environments.prod.boundaries.web.item_id".to_string(),
+                FieldRule::Pattern { id: PatternId::Id }
+            )
         );
     }
 
     #[test]
     fn rejects_a_boundary_without_an_item_id() {
-        let m = config_err(&web(", item_id = \"iweb\"", ""));
-        assert!(m.contains("missing field `item_id`"), "{m}");
+        assert_eq!(
+            invalid(&web(", item_id = \"iweb\"", "")),
+            (
+                "environments.prod.boundaries.web.item_id".to_string(),
+                FieldRule::Missing
+            )
+        );
     }
 
     #[test]
     fn rejects_a_bad_boundary_name() {
-        let m = config_err(&web("boundaries.web", "boundaries.Web"));
-        assert!(m.contains("boundary name \"Web\" must match"), "{m}");
+        assert_eq!(
+            field_of(&web("boundaries.web", "boundaries.Web")),
+            "environments.prod.boundaries.Web"
+        );
     }
 
     #[test]
     fn rejects_a_bad_product_boundary_group() {
-        let m = config_err(&web_plus("[products.web]\nboundary = \"Core\"\n"));
-        assert!(
-            m.contains("product \"web\": boundary \"Core\" must match"),
-            "{m}"
+        assert_eq!(
+            field_of(&web_plus("[products.web]\nboundary = \"Core\"\n")),
+            "products.web.boundary"
         );
     }
 
@@ -3103,142 +3453,127 @@ environments = ["prod"]
 
     #[test]
     fn a_profile_table_is_refused_showing_the_products_form() {
-        let m = config_err(&format!("[profile]\nkind = \"fleet\"\n{WEB}"));
-        assert!(
-            m.contains("[profile] was removed in 0.7.0")
-                && m.contains("[products.<name>.keys.<KEY>]"),
-            "{m}"
-        );
+        assert!(matches!(
+            rule_of(&format!("[profile]\nkind = \"fleet\"\n{WEB}")),
+            FieldRule::RemovedForm { form: "[profile]", replacement }
+                if replacement.contains("[products.<name>.keys.<KEY>]")
+        ));
     }
 
     #[test]
     fn a_removed_form_points_at_its_line_and_column() {
         let m = config_err(&format!("{WEB}[profile]\nkind = \"simple\"\n"));
-        assert!(m.contains("TOML parse error at line 12, column 2"), "{m}");
+        assert!(m.contains(" at line 12, column 2: "), "{m}");
     }
 
     #[test]
     fn top_level_keys_are_refused_showing_the_products_form() {
-        let m = config_err(&format!(
-            "{WEB}[keys.JWT_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
-        ));
-        assert!(
-            m.contains("top-level [keys] was removed in 0.7.0")
-                && m.contains("[products.<name>.keys.JWT_KEY]"),
-            "{m}"
+        assert_eq!(
+            rule_of(&format!(
+                "{WEB}[keys.JWT_KEY]\nkind = \"secret\"\nenvironments = [\"prod\"]\n"
+            )),
+            FieldRule::RemovedForm {
+                form: "top-level [keys]",
+                replacement: "[products.<name>.keys.JWT_KEY]".into()
+            }
         );
     }
 
     #[test]
     fn an_environment_vault_id_is_refused_showing_the_boundaries_form() {
-        let m = config_err(&web(
+        let text = web(
             "[environments.prod]\n",
             "[environments.prod]\nvault_id = \"v\"\n",
-        ));
-        assert!(
-            m.contains(
-                "environment prod: vault_id was removed in 0.7.0 (FR-57, FR-60): record one \
-                 boundary per product instead, boundaries.<product> = { vault_id = \"...\", \
-                 item_id = \"...\" }"
-            ),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. }
+                if replacement.contains("boundaries.<product> = { vault_id = \"...\", item_id = \"...\" }")
+        ));
     }
 
     #[test]
     fn an_environment_item_id_is_refused_showing_the_boundaries_form() {
-        let m = config_err(&web(
+        let text = web(
             "[environments.prod]\n",
             "[environments.prod]\nitem_id = \"i\"\n",
-        ));
-        assert!(
-            m.contains("item_id was removed in 0.7.0") && m.contains("boundaries.<product> = {"),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. } if replacement.contains("boundaries.<product> = {")
+        ));
     }
 
     #[test]
     fn an_environment_fly_section_is_refused_showing_the_target_form() {
-        let m = config_err(&web(
+        let text = web(
             "[environments.prod]\n",
             "[environments.prod]\nfly.app = \"a\"\nfly.secret_name = \"{KEY}\"\n",
-        ));
-        assert!(
-            m.contains(
-                "declare a named target and put the section under it, \
-                 [environments.prod.targets.<name>] with fly.app = ..., fly.secret_name = ..."
-            ),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. } if replacement
+                == "a named target, [environments.prod.targets.<name>] with fly.app = ..., fly.secret_name = ..."
+        ));
     }
 
     #[test]
     fn an_environment_azure_table_is_refused_showing_the_target_form() {
-        let m = config_err(&format!(
-            "{WEB}[environments.prod.azure]\nkey_vault = \"kv\"\n"
+        let text = format!("{WEB}[environments.prod.azure]\nkey_vault = \"kv\"\n");
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. }
+                if replacement.ends_with("with azure.key_vault = ...")
         ));
-        assert!(
-            m.contains(
-                "an environment-level azure section was removed in 0.7.0 (FR-56, FR-60): \
-                 declare a named target and put the section under it, \
-                 [environments.prod.targets.<name>] with azure.key_vault = ..."
-            ),
-            "{m}"
-        );
     }
 
     #[test]
     fn an_environment_deploy_credentials_is_refused_showing_the_target_form() {
-        let m = config_err(&web(
+        let text = web(
             "[environments.prod]\n",
             "[environments.prod]\ndeploy_credentials = \"op://v/i\"\n",
-        ));
-        assert!(
-            m.contains(
-                "deploy_credentials was removed at the environment level in 0.7.0 (FR-56, \
-                 FR-60): set it on the target, under [environments.prod.targets.<name>] as \
-                 deploy_credentials = \"...\""
-            ),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. } if replacement
+                == "deploy_credentials = \"...\" under [environments.prod.targets.<name>]"
+        ));
     }
 
     #[test]
     fn an_environment_state_vault_id_is_refused_showing_the_target_form() {
-        let m = config_err(&web(
+        let text = web(
             "[environments.prod]\n",
             "[environments.prod]\nstate_vault_id = \"s\"\n",
-        ));
-        assert!(
-            m.contains("under [environments.prod.targets.<name>] as state_vault_id = \"...\""),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. } if replacement
+                == "state_vault_id = \"...\" under [environments.prod.targets.<name>]"
+        ));
     }
 
     #[test]
     fn github_products_is_refused_showing_the_target_products() {
-        let m = config_err(&web(
+        let text = web(
             "fly.app = \"web-prod\"\nfly.secret_name = \"{KEY}\"\n",
             "github.repo = \"org/web\"\ngithub.products = [\"web\"]\n",
-        ));
-        assert!(
-            m.contains(
-                "github.products was removed in 0.7.0 (FR-48, FR-60): list the products on the \
-                 target, targets.site.products = [...]"
-            ),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. } if replacement == "targets.site.products = [...]"
+        ));
     }
 
     #[test]
     fn a_bare_from_is_refused_showing_the_product_form() {
-        let m = config_err(&web_plus(
+        let text = web_plus(
             "[products.web.keys.PRISMA_URL]\nkind = \"secret\"\nenvironments = [\"prod\"]\nfrom = \"DATABASE_URL\"\n",
-        ));
-        assert!(
-            m.contains("name the source's product too, from = \"<product>/DATABASE_URL\""),
-            "{m}"
         );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::RemovedForm { replacement, .. } if replacement == "from = \"<product>/DATABASE_URL\""
+        ));
     }
 
     // ---- name collisions (FR-8, FR-30) ------------------------------------------------
@@ -3252,11 +3587,10 @@ environments = ["prod"]
             r#"["prod"]"#,
             "",
         );
-        let m = config_err(&bound(&text, "prod", "my_app"));
-        assert!(
-            m.contains("my-app/K and my_app/K both render Fly name FLEET__MY_APP__K"),
-            "{m}"
-        );
+        assert!(matches!(
+            check_of(&bound(&text, "prod", "my_app")),
+            ConfigCheck::NameTaken { other, owner, .. } if other == "my-app/K" && owner == "my_app/K"
+        ));
     }
 
     #[test]
@@ -3268,8 +3602,10 @@ environments = ["prod"]
             r#"["prod"]"#,
             "",
         );
-        let m = config_err(&bound(&text, "prod", "a"));
-        assert!(m.contains("a/B__C and a__b/C both render"), "{m}");
+        assert!(matches!(
+            check_of(&bound(&text, "prod", "a")),
+            ConfigCheck::NameTaken { other, owner, .. } if other == "a/B__C" && owner == "a__b/C"
+        ));
     }
 
     #[test]
@@ -3281,8 +3617,11 @@ environments = ["prod"]
             r#"["prod"]"#,
             "",
         );
-        let m = config_err(&bound(&text, "prod", "my_app"));
-        assert!(m.starts_with("environment prod: target portfolio: "), "{m}");
+        let field = field_of(&bound(&text, "prod", "my_app"));
+        assert!(
+            field.starts_with("environments.prod.targets.portfolio."),
+            "{field}"
+        );
     }
 
     /// A source-only product whose one key renders the same Fly name as a delivered key of
@@ -3309,20 +3648,28 @@ environments = ["prod"]
 
     #[test]
     fn delivered_products_rendering_one_name_collide() {
-        let m = config_err(&shared_name_fleet(false));
-        assert!(m.contains("both render Fly name FLEET__MY_APP__K"), "{m}");
+        assert!(matches!(
+            check_of(&shared_name_fleet(false)),
+            ConfigCheck::NameTaken { name, .. } if name == "FLEET__MY_APP__K"
+        ));
     }
 
     #[test]
     fn a_source_only_product_without_keys_is_refused_at_its_line() {
-        let m = config_err(&format!(
-            "{}\n[products.shared]\nsource_only = true\n",
-            ok()
-        ));
+        let text = format!("{}\n[products.shared]\nsource_only = true\n", ok());
         assert!(
-            m.contains("source_only = true needs at least one key")
-                && m.contains("TOML parse error at line"),
-            "{m}"
+            matches!(
+                cause(&text),
+                Cause::ConfigInvalid {
+                    at: Some(_),
+                    rule: FieldRule::Check {
+                        check: ConfigCheck::SourceOnlyWithoutKeys { .. }
+                    },
+                    ..
+                }
+            ),
+            "{:?}",
+            cause(&text)
         );
     }
 
@@ -3333,8 +3680,15 @@ environments = ["prod"]
              [products.shared.keys.FLY_API_TOKEN]\nkind = \"secret\"\nenvironments = [\"prod\"]\n",
             ok()
         );
-        let m = config_err(&text);
-        assert!(m.contains("invalid type: string"), "{m}");
+        assert_eq!(
+            invalid(&text),
+            (
+                "products.shared.source_only".to_string(),
+                FieldRule::Type {
+                    expected: "true or false"
+                }
+            )
+        );
     }
 
     // ---- shared keys (FR-45) ----------------------------------------------------------
@@ -3367,13 +3721,11 @@ environments = ["prod"]
 
     #[test]
     fn a_shared_key_refuses_an_undeclared_source() {
-        let e = config_err(&shared(
-            "kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]",
+        let text = shared("kind = \"secret\"\nfrom = \"api/DB_URL\"\nenvironments = [\"prod\"]");
+        assert!(matches!(
+            check_of(&text),
+            ConfigCheck::Undeclared { kind: Declared::Key, name, .. } if name == "api/DB_URL"
         ));
-        assert!(
-            e.contains("worker/DATABASE_URL: from = \"api/DB_URL\": names no declared key"),
-            "{e}"
-        );
     }
 
     #[test]
@@ -3386,12 +3738,15 @@ environments = ["prod"]
 
     #[test]
     fn a_shared_key_refuses_a_source_of_another_kind() {
-        let e = config_err(&shared(
-            "kind = \"config\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"prod\"]",
-        ));
-        assert!(
-            e.contains("api/DATABASE_URL is a secret key, worker/DATABASE_URL a config key"),
-            "{e}"
+        let text =
+            shared("kind = \"config\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"prod\"]");
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::FromKind {
+                source: "api/DATABASE_URL".into(),
+                source_kind: "secret",
+                kind: "config"
+            }
         );
     }
 
@@ -3405,8 +3760,13 @@ environments = ["prod"]
             "prod",
             "jobs",
         );
-        let e = config_err(&text);
-        assert!(e.contains("worker/DATABASE_URL is itself shared from api/DATABASE_URL (no chains); write from = \"api/DATABASE_URL\""), "{e}");
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::FromChain {
+                source: "worker/DATABASE_URL".into(),
+                its_from: "api/DATABASE_URL".into()
+            }
+        );
     }
 
     #[test]
@@ -3415,16 +3775,14 @@ environments = ["prod"]
             "{}\n[products.a.keys.K]\nkind = \"secret\"\nfrom = \"b/K\"\nenvironments = [\"prod\"]\n\n[products.b.keys.K]\nkind = \"secret\"\nfrom = \"a/K\"\nenvironments = [\"prod\"]\n",
             ok()
         );
-        let e = config_err(&text);
-        assert!(e.contains("(cycle)"), "{e}");
+        assert!(matches!(check_of(&text), ConfigCheck::FromCycle { .. }));
     }
 
     #[test]
     fn a_shared_key_refuses_its_own_name() {
-        let e = config_err(&shared(
-            "kind = \"secret\"\nfrom = \"worker/DATABASE_URL\"\nenvironments = [\"prod\"]",
-        ));
-        assert!(e.contains("cannot share its own value (cycle)"), "{e}");
+        let text =
+            shared("kind = \"secret\"\nfrom = \"worker/DATABASE_URL\"\nenvironments = [\"prod\"]");
+        assert_eq!(check_of(&text), ConfigCheck::FromSelf);
     }
 
     #[test]
@@ -3433,40 +3791,44 @@ environments = ["prod"]
             "{}\n[products.api.keys.DATABASE_URL]\nkind = \"secret\"\nenvironments = [\"prod\"]\n\n[products.worker.keys.DATABASE_URL]\nkind = \"secret\"\nfrom = \"api/DATABASE_URL\"\nenvironments = [\"staging\", \"prod\"]\n",
             ok()
         );
-        let e = config_err(&text);
-        assert!(e.contains("api/DATABASE_URL is not declared for environment \"staging\", which worker/DATABASE_URL uses"), "{e}");
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::FromEnvironment {
+                source: "api/DATABASE_URL".into(),
+                env: "staging".into()
+            }
+        );
     }
 
     #[test]
     fn a_shared_key_refuses_an_op_reference() {
-        let e = config_err(&shared(
+        let text = shared(
             "kind = \"secret\"\nfrom = \"op://vprd/other/api/DATABASE_URL\"\nenvironments = [\"prod\"]",
-        ));
-        assert!(
-            e.contains("cross-environment references are not supported"),
-            "{e}"
         );
+        assert_eq!(check_of(&text), ConfigCheck::FromCrossEnvironment);
     }
 
     #[test]
     fn a_shared_key_refuses_a_cross_environment_reference() {
-        let e = config_err(&shared(
+        let text = shared(
             "kind = \"secret\"\nfrom = \"staging/api/DATABASE_URL\"\nenvironments = [\"prod\"]",
-        ));
-        assert!(
-            e.contains("cross-environment references are not supported"),
-            "{e}"
         );
+        assert_eq!(check_of(&text), ConfigCheck::FromCrossEnvironment);
     }
 
     #[test]
     fn a_shared_key_refuses_its_own_immutable() {
-        let e = config_err(&shared(
+        let text = shared(
             "kind = \"secret\"\nfrom = \"api/DATABASE_URL\"\nimmutable = true\nenvironments = [\"prod\"]",
-        ));
-        assert!(
-            e.contains("immutable follows the source of a shared key (api/DATABASE_URL)"),
-            "{e}"
+        );
+        assert_eq!(
+            invalid(&text),
+            (
+                "products.worker.keys.DATABASE_URL.immutable".to_string(),
+                FieldRule::ConflictsWith {
+                    field: dotted(&["products", "worker", "keys", "DATABASE_URL", "from"])
+                }
+            )
         );
     }
 
@@ -3484,13 +3846,14 @@ environments = ["prod"]
     /// and loads.
     #[test]
     fn the_suggested_regex_replacement_loads() {
-        let m = config_err(&with_prod_key(
+        let FieldRule::RemovedForm { replacement, .. } = rule_of(&with_prod_key(
             "p",
             "K1",
             "rules = { ensure_prefix = \"p-\", pattern = \"[a-z]+\" }\n",
-        ));
-        let (_, rule) = m.split_once("use regex = ").unwrap();
-        let rule = rule.trim_end().strip_suffix(" instead").unwrap();
+        )) else {
+            panic!("expected the removed form");
+        };
+        let rule = replacement.strip_prefix("regex = ").unwrap();
         let text = with_prod_key(
             "p",
             "K1",
@@ -3536,9 +3899,10 @@ environments = ["prod"]
             false,
             "[products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\", \"prod\"]\npersonal = true\n",
         );
-        assert!(config_err(&text).contains(
-            "personal = true is for local environments only, and prod has a deployment target"
-        ));
+        assert_eq!(
+            check_of(&text),
+            ConfigCheck::PersonalOnTarget { env: "prod".into() }
+        );
     }
 
     #[test]
@@ -3561,7 +3925,13 @@ environments = ["prod"]
              [products.shared.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\npersonal = true\n\
              [products.api.keys.OPENAI_API_KEY]\nkind = \"secret\"\nenvironments = [\"dev\"]\nfrom = \"shared/OPENAI_API_KEY\"\n",
         );
-        assert!(config_err(&text).contains("a team key cannot read a personal value"));
+        assert!(matches!(
+            check_of(&text),
+            ConfigCheck::PersonalMix {
+                personal: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3584,7 +3954,10 @@ environments = ["prod"]
 
     #[test]
     fn an_undefined_environment_is_unknown_env() {
-        assert!(matches!(fixture().environment("qa"), Err(Error::Config(m)) if m.contains("qa")));
+        assert_eq!(
+            fixture().environment("qa").unwrap_err().code_str(),
+            "unknown_env"
+        );
     }
 
     // ---- discovery and name validators ------------------------------------------------
@@ -3658,5 +4031,222 @@ environments = ["prod"]
         let ok = ["vprd", "a1.b_c-d", "9x"].iter().all(|s| is_id(s));
         let bad = ["", "-a", ".a", "a b", "a/b"].iter().any(|s| is_id(s));
         assert_eq!((ok, bad), (true, false));
+    }
+
+    // ---- audit 03: the field and rule come from the validator --------------------------
+
+    /// 03.01: a role outside the pattern names the roles field, not the key's table.
+    #[test]
+    fn a_bad_role_names_the_roles_field() {
+        let text = with_prod_key("p", "K1", "roles = [\"Serve\"]\n");
+        assert_eq!(field_of(&text), "products.p.keys.K1.roles");
+    }
+
+    /// 03.01: a reserved directory variable is refused as reserved, not as a pattern it
+    /// already matches.
+    #[test]
+    fn a_reserved_secrets_dir_env_is_reserved() {
+        let text = replaced(
+            &with_file("openai/api-key"),
+            "secrets_dir_env = \"APP_SECRETS_DIR\"",
+            "secrets_dir_env = \"PATH\"",
+        );
+        assert!(matches!(rule_of(&text), FieldRule::Reserved { .. }));
+    }
+
+    /// 03.01: a bad boundary ID names the ID field, not the boundary's table.
+    #[test]
+    fn a_bad_boundary_vault_id_names_the_vault_id() {
+        assert_eq!(
+            field_of(&web("\"vweb\"", "\"-x\"")),
+            "environments.prod.boundaries.web.vault_id"
+        );
+    }
+
+    /// 03.01: a rendered name the target cannot hold names the template field to change.
+    #[test]
+    fn a_bad_rendered_name_names_the_template_field() {
+        let text = mutate("FLEET__{PRODUCT}__{KEY}", "fleet__{PRODUCT}__{KEY}");
+        assert!(
+            field_of(&text).ends_with(".fly.secret_name"),
+            "{}",
+            field_of(&text)
+        );
+    }
+
+    /// 03.01: the Do of a rendered name never repeats a regular expression.
+    #[test]
+    fn a_bad_rendered_name_fix_has_no_regex() {
+        let text = mutate("FLEET__{PRODUCT}__{KEY}", "fleet__{PRODUCT}__{KEY}");
+        assert!(
+            do_of(&text).is_some_and(|d| !d.contains('^')),
+            "{:?}",
+            do_of(&text)
+        );
+    }
+
+    /// 03.03: a prefix_by_mode mode an environment does not set is refused at load.
+    #[test]
+    fn a_mode_missing_in_an_environment_is_refused_at_load() {
+        let text = mutate("modes.allumata.payments = \"test\"\n", "");
+        assert_eq!(
+            invalid(&text),
+            (
+                "environments.staging.modes.allumata.payments".to_string(),
+                FieldRule::Missing
+            )
+        );
+    }
+
+    /// 03.03: a mode value neither mapped nor skipped is refused at load.
+    #[test]
+    fn an_unmapped_mode_value_is_refused_at_load() {
+        let text = mutate(
+            "modes.allumata.payments = \"test\"",
+            "modes.allumata.payments = \"sandbox\"",
+        );
+        assert!(matches!(rule_of(&text), FieldRule::ModeUnmapped { .. }));
+    }
+
+    /// 03.03: the unmapped mode lists the values the environment may set.
+    #[test]
+    fn an_unmapped_mode_lists_the_allowed_values() {
+        let text = mutate(
+            "modes.allumata.payments = \"test\"",
+            "modes.allumata.payments = \"sandbox\"",
+        );
+        assert!(matches!(
+            rule_of(&text),
+            FieldRule::ModeUnmapped { allowed, .. } if allowed == ["live", "test", "off", "external"]
+        ));
+    }
+
+    /// 03.12: a configuration file that cannot be read is unreadable, not "not found".
+    #[test]
+    fn an_unreadable_file_is_config_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap_err().code_str(),
+            "config_unreadable"
+        );
+    }
+
+    /// 03.12: a path given with --config is named as given.
+    #[test]
+    fn an_unreadable_flag_path_names_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let given = GivenBy::Flag {
+            flag: "--config".into(),
+        };
+        assert!(matches!(
+            load_given(dir.path().join("nope.toml"), given)
+                .unwrap_err()
+                .cause(),
+            Some((
+                Cause::ConfigUnreadable {
+                    given_by: GivenBy::Flag { .. },
+                    ..
+                },
+                _
+            ))
+        ));
+    }
+
+    /// 03.13: a removed form names no requirement ID.
+    #[test]
+    fn a_removed_form_names_no_requirement_id() {
+        assert!(
+            !config_err(&format!("[profile]\nkind = \"fleet\"\n{WEB}")).contains("FR-"),
+            "{}",
+            config_err(&format!("[profile]\nkind = \"fleet\"\n{WEB}"))
+        );
+    }
+
+    /// 03.15: a duplicate key is refused as a duplicate.
+    #[test]
+    fn a_duplicate_key_is_a_duplicate() {
+        let text = mutate("kind = \"secret\"", "kind = \"secret\"\nkind = \"secret\"");
+        assert_eq!(rule_of(&text), FieldRule::DuplicateKey);
+    }
+
+    /// 03.15: a string where a list belongs says to write a list.
+    #[test]
+    fn a_string_where_a_list_belongs_says_list() {
+        let text = mutate(r#"environments = ["prod"]"#, r#"environments = "prod""#);
+        assert_eq!(
+            rule_of(&text),
+            FieldRule::Type {
+                expected: "a list, for example [\"prod\"]"
+            }
+        );
+    }
+
+    /// 03.02: a boundary missing from a manifest names the manifest, so its step is the
+    /// manifest's route and never `opv bootstrap`.
+    #[test]
+    fn a_manifests_missing_boundary_names_the_manifest() {
+        let e = parse_at(
+            &key(WEB, "api", "K", r#"["prod"]"#, ""),
+            Source::ManifestIn {
+                title: "opv · web",
+                vault: "vlt",
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            e.cause(),
+            Some((
+                Cause::BoundaryMissing {
+                    source: ConfigSource::Manifest { .. },
+                    ..
+                },
+                _
+            ))
+        ));
+    }
+
+    /// 03.02: a fleet read from a manifest reports a later missing boundary against it.
+    #[test]
+    fn a_manifest_fleets_boundary_lookup_names_the_manifest() {
+        let f = parse_at(
+            WEB,
+            Source::ManifestIn {
+                title: "opv · web",
+                vault: "vlt",
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            f.boundary("prod", "api").unwrap_err().cause(),
+            Some((
+                Cause::BoundaryMissing {
+                    source: ConfigSource::Manifest { .. },
+                    ..
+                },
+                _
+            ))
+        ));
+    }
+
+    /// 03.02: an undeclared environment substitutes only a unique close name (X2).
+    #[test]
+    fn an_undeclared_environment_offers_the_unique_close_name() {
+        assert!(matches!(
+            fixture().environment("prd").unwrap_err().cause(),
+            Some((Cause::NotDeclared { closest: Some(c), .. }, _)) if c.as_str() == "prod"
+        ));
+    }
+
+    /// 03.04: environments shared by two targets are placed at the second target's section.
+    #[test]
+    fn a_shared_target_across_environments_is_placed() {
+        let text = mutate(
+            r#"fly.app = "mcproductlabs-portfolio-staging""#,
+            r#"fly.app = "mcproductlabs-portfolio-production""#,
+        );
+        assert!(matches!(
+            cause(&text),
+            Cause::ConfigInvalid { at: Some(_), .. }
+        ));
     }
 }

@@ -463,7 +463,7 @@ fn invalid_manifest_names_the_manifest_not_the_file() {
     let mut r = req(dir.path());
     r.project = Some("bad".into());
     let e = locate(&r, &op).unwrap().load(&op).unwrap_err();
-    assert!(e.text().contains("manifest \"opv · bad\""), "{e:?}");
+    assert!(e.to_string().contains("manifest opv · bad"), "{e:?}");
 }
 
 #[test]

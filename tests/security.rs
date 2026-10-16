@@ -1727,16 +1727,6 @@ kind = "secret"
 environments = ["prod"]
 rules = { prefix_by_mode = { mode = "payments", values = { test = "sk_test_" } } }
 
-[products.allumata.keys.MODE_UNSET]
-kind = "secret"
-environments = ["prod"]
-rules = { prefix_by_mode = { mode = "billing", values = { on = "b_" } } }
-
-[products.allumata.keys.MODE_UNMAPPED]
-kind = "secret"
-environments = ["prod"]
-rules = { prefix_by_mode = { mode = "region", values = { eu = "eu_" } } }
-
 [products.allumata.keys.REGEX]
 kind = "secret"
 environments = ["prod"]
@@ -1883,18 +1873,6 @@ fn reason_cases() -> Vec<(&'static str, String, &'static str, &'static str)> {
             format!("{m}mode"),
             "prefix_by_mode",
             "wrong prefix for mode test",
-        ),
-        (
-            "MODE_UNSET",
-            format!("{m}mode"),
-            "prefix_by_mode",
-            "mode billing is not set in this environment",
-        ),
-        (
-            "MODE_UNMAPPED",
-            format!("{m}mode"),
-            "prefix_by_mode",
-            "no prefix is configured for mode weird",
         ),
         (
             "REGEX",

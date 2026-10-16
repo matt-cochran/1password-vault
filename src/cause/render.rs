@@ -219,11 +219,12 @@ fn doctor_scoped(
 }
 
 /// Flags of `sync` that `plan` takes too, with whether each takes a value.
-const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 4] = [
+const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 5] = [
     ("--target", true),
     ("--product", true),
     ("--rotate", true),
     ("--json", false),
+    ("--config", true),
 ];
 
 /// The read form of a command, so a substituted name never lands in a write (§4.2): `sync`
@@ -635,6 +636,7 @@ fn rule_words(field: &str, rule: &FieldRule) -> (String, String) {
             format!("{field} becomes {rendered}, the same name as {other}"),
             format!("rename {field} or {other}"),
         ),
+        FieldRule::Check { check } => (check.problem(field), check.fix(field)),
     }
 }
 
@@ -1510,7 +1512,7 @@ impl Cause {
                         },
                         format!("{fix} {place}"),
                     )),
-                    Next::Rerun,
+                    rerun_as_read(inv),
                 )
             }
             BoundaryMissing { source, .. } | StateVaultMissing { source, .. } => plan(
@@ -2679,3 +2681,12 @@ pub fn document(
 #[cfg(test)]
 #[path = "render_tests.rs"]
 mod tests;
+
+/// The invocation re-run after a configuration fix, as its read when it writes (H10: a broken
+/// configuration after `sync` names `plan`, never the write); a read re-runs as typed.
+fn rerun_as_read(inv: &Invocation) -> Next {
+    match read_form(inv_cmd(inv)) {
+        Some(c) if c != inv_cmd(inv) => Next::Check(c),
+        _ => Next::Rerun,
+    }
+}

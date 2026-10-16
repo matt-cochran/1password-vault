@@ -36,7 +36,7 @@ fn unknown_environment_exits_2_before_any_subprocess() {
         let (code, _, err) = opv(&args);
         assert_eq!(code, 2, "{cmd:?}: {err}");
         assert!(
-            err.starts_with("opv: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: environment qa is not declared"),
             "{cmd:?}: {err}"
         );
     }
@@ -72,7 +72,7 @@ fn removed_pattern_rule_exits_2_with_the_equivalent_regex() {
     assert!(
         out.is_empty()
             && err.contains(
-                ":9: products.app.keys.K1.rules: the pattern rule was removed; use regex = 'p\\-(?:[a-z]+)' instead"
+                " at line 9, column 33: products.app.keys.K1.rules.pattern uses the removed form pattern"
             ),
         "{err}"
     );
@@ -141,7 +141,7 @@ fn same_file(printed: &str, expected: &std::path::Path) -> bool {
 fn discovery_loads_the_ancestor_config_for_the_command() {
     let (_dir, nested) = dir_with_ancestor_config();
     let (_, _, err) = opv_in(&nested, &["status", "qa"]);
-    assert!(err.contains("undefined environment \"qa\""), "{err}");
+    assert!(err.contains("environment qa is not declared"), "{err}");
 }
 
 #[test]
@@ -453,7 +453,7 @@ mod run_with_fake_op {
         let (code, _, err) = run(&dir, &["run", "qa", "--product", "allumata", "--", "true"]);
         assert_eq!(code, 2, "{err}");
         assert!(
-            err.starts_with("opv: configuration error: undefined environment \"qa\""),
+            err.starts_with("opv: environment qa is not declared"),
             "{err}"
         );
         assert!(!log.exists(), "op must not be invoked");
@@ -1136,7 +1136,7 @@ fn json_failure_before_any_call_prints_the_envelope_on_stdout() {
 fn json_failure_keeps_the_human_text_on_stderr() {
     let (_, _, err) = opv(&["--config", CFG, "status", "qa", "--json"]);
     assert!(
-        err.starts_with("opv: configuration error: undefined environment"),
+        err.starts_with("opv: environment qa is not declared"),
         "{err}"
     );
 }

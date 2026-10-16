@@ -879,7 +879,8 @@ mod tests {
 
     fn rules_line(extra: &str) -> String {
         let f = fleet_with(&format!(
-            "[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ {extra} }}\n"
+            "[products.extra.keys.K]\nkind = \"secret\"\nenvironments = [\"prod\"]\nrules = {{ {extra} }}\n\
+             [environments.prod.modes.extra]\npayments = \"off\"\n"
         ));
         let out = explain(&f, "extra/K", Some("prod")).unwrap();
         out.lines()

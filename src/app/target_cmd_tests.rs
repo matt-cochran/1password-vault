@@ -369,7 +369,7 @@ fn a_required_provider_option_missing_is_refused_naming_it() {
 #[test]
 fn a_refusal_offers_a_next_step() {
     let a = add_to(FLEET, add_args("qa", "site"));
-    assert!(a.res.as_ref().unwrap_err().next_step().is_some());
+    assert!(a.res.as_ref().unwrap_err().cause().is_some());
 }
 
 // --- the state vault (FR-58): created once, then reused ------------------------------

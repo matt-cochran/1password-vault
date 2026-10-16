@@ -97,6 +97,11 @@ pub trait ConfigStore {
                 vault: VaultId::new(""),
                 project: title.strip_prefix("opv · ").unwrap_or(title).to_string(),
             },
+            config::Source::ManifestIn { title, vault } => ConfigSource::Manifest {
+                title: title.to_string(),
+                vault: VaultId::new(vault),
+                project: title.strip_prefix("opv · ").unwrap_or(title).to_string(),
+            },
         }
     }
     /// Validate `text` as this configuration, with errors naming it (H10, FR-44).

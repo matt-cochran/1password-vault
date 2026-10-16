@@ -7,7 +7,6 @@
 use super::*;
 use crate::app::testutil::text_of;
 use crate::config;
-use crate::error::Code;
 
 /// One environment with a Fly target and one product: enough to print a workflow.
 const FLY_FLEET: &str = "\
@@ -194,8 +193,9 @@ fn unknown_target_prints_nothing() {
 
 #[test]
 fn unknown_environment_is_a_usage_error() {
+    // Exit 2 either way; the catalog names it unknown_env (audit 03.02).
     let (err, _) = refused("missing", "portfolio");
-    assert_eq!(err.code(), Code::Usage);
+    assert_eq!(err.exit_code(), 2);
 }
 
 #[test]
