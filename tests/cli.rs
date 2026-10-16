@@ -726,7 +726,10 @@ fn init_rejects_config_flag_and_bad_profile() {
     a.extend(INIT);
     let (code, _, err) = opv_in(dir.path(), &a);
     assert_eq!(code, 2, "{err}");
-    assert!(err.contains("--config is not used"), "{err}");
+    assert!(
+        err.contains("opv init and --config cannot be used together"),
+        "{err}"
+    );
     let mut a = INIT.to_vec();
     a.extend(["--profile", "both"]);
     let (code, _, err) = opv_in(dir.path(), &a);

@@ -6,6 +6,10 @@
 //! [`status`] and `opv doctor` can tell a current copy from an older or hand-edited one
 //! without reading any value. An existing copy whose marker hash matches its content was
 //! written by opv (any version) and is safe to overwrite; anything else is kept.
+//!
+//! Copies are written only on install: by `install.sh`, the npm postinstall and `opv skill
+//! install` (design `docs/design/error-catalog.md` §12.4). No other command writes $HOME;
+//! [`update_commands`] names the install that brings an outdated copy up to date.
 
 use std::fs;
 use std::io;
@@ -203,37 +207,14 @@ pub fn install(
     Ok(installed)
 }
 
-/// After an upgrade through any channel, rewrite every existing, unedited user-level copy
-/// under `root` that is not already `version`, and return the paths written. A missing copy
-/// is never created, an edited copy is never touched, and a failed write is ignored: this
-/// is best effort on a run that must still succeed.
-///
-/// The caller passes [`user_root`] in production; the parameter keeps the behaviour
-/// testable against a temporary directory.
-pub fn refresh_user_copies(root: &Path, version: &str) -> Vec<PathBuf> {
-    let text = render(version);
-    let mut updated = Vec::new();
-    for target in ALL {
-        let path = target.path(root);
-        let Ok(existing) = fs::read_to_string(&path) else {
-            continue;
-        };
-        // Unedited and out of date: safe to overwrite. Edited copies (no matching marker)
-        // and copies already at this version are left alone.
-        if installed_version(&existing).is_some_and(|found| found != version)
-            && crate::config_edit::write_atomic(&path, &text, || Ok(())).is_ok()
-        {
-            updated.push(path);
-        }
-    }
-    updated
-}
-
 /// One installed copy of the skill.
 #[derive(Debug, serde::Serialize)]
 pub struct Copy {
     /// `user` or `project`.
     pub scope: String,
+    /// The root the copy was found under (the home, or the project's top level).
+    #[serde(skip)]
+    pub root: PathBuf,
     pub target: Target,
     pub path: PathBuf,
     /// The version in the marker, when the file has one.
@@ -256,6 +237,7 @@ pub fn status(roots: &[(&str, PathBuf)], version: &str) -> Vec<Copy> {
             let (found, edited) = inspect(&text);
             copies.push(Copy {
                 scope: (*scope).to_string(),
+                root: root.clone(),
                 target,
                 path,
                 current: !edited && found.as_deref() == Some(version),
@@ -267,6 +249,45 @@ pub fn status(roots: &[(&str, PathBuf)], version: &str) -> Vec<Copy> {
     copies
 }
 
+impl Copy {
+    /// Unedited and not this binary's version: `opv skill install` replaces it.
+    pub fn outdated(&self) -> bool {
+        !self.edited && !self.current
+    }
+}
+
+/// The install that updates each scope holding an outdated copy, one per root in the order
+/// found: `opv skill install --user` for the home, `opv skill install --project <root>` for
+/// a project (never `--user` for a project copy), with `--target` when only one of the
+/// root's copies is outdated. Empty when every copy is current or edited.
+pub fn update_commands(copies: &[Copy]) -> Vec<String> {
+    let mut roots: Vec<(&str, &Path, Vec<Target>)> = Vec::new();
+    for c in copies.iter().filter(|c| c.outdated()) {
+        match roots.iter_mut().find(|(_, r, _)| *r == c.root.as_path()) {
+            Some((_, _, targets)) => targets.push(c.target),
+            None => roots.push((&c.scope, &c.root, vec![c.target])),
+        }
+    }
+    roots
+        .into_iter()
+        .map(|(scope, root, targets)| {
+            let mut cmd = if scope == "user" {
+                "opv skill install --user".to_string()
+            } else {
+                format!(
+                    "opv skill install --project {}",
+                    crate::error::shell_word(&root.display().to_string())
+                )
+            };
+            if let [one] = targets.as_slice() {
+                cmd.push_str(" --target ");
+                cmd.push_str(one.as_str());
+            }
+            cmd
+        })
+        .collect()
+}
+
 /// The `opv skill install --json` document: `written` and `kept` (with `reason`), and the
 /// next step. Names and paths only.
 pub fn install_document(installed: &Installed) -> Result<String, Error> {
@@ -276,11 +297,21 @@ pub fn install_document(installed: &Installed) -> Result<String, Error> {
     Ok(doc.to_string())
 }
 
-/// The `opv skill status --json` document: one entry per installed copy.
+/// The `opv skill status --json` document: one entry per installed copy, the installs that
+/// update outdated copies (`update`), and the next step: the first of those, `opv skill
+/// install` when nothing is installed, else none.
 pub fn status_document(copies: &[Copy]) -> Result<String, Error> {
+    let update = update_commands(copies);
+    let next = match update.first() {
+        Some(first) => Some(first.clone()),
+        None if copies.is_empty() => Some("opv skill install".to_string()),
+        None => None,
+    };
     let doc = serde_json::json!({
         "schema_version": crate::json::SCHEMA_VERSION,
         "copies": copies,
+        "update": update,
+        "next": next,
     });
     Ok(doc.to_string())
 }

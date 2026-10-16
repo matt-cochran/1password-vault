@@ -176,7 +176,7 @@ fn init_refuses_opv_config() {
         .unwrap();
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
-        err.contains("OPV_CONFIG is set; unset it for init"),
+        err.contains("opv init and OPV_CONFIG cannot be used together"),
         "{err}"
     );
 }

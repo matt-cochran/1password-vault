@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::parser::ValueSource;
@@ -68,7 +68,9 @@ Exit codes:
   7 authentication, 8 findings (status, plan, check),
   9 outcome unknown (a change may or may not have been applied) or provider
   unavailable; safe to re-run,
-  130/143 interrupted (Ctrl-C / SIGTERM); safe to re-run.
+  70 internal error (an opv bug; please report it),
+  128 + signal when interrupted (130 Ctrl-C, 143 SIGTERM, 129 SIGHUP, 131 SIGQUIT);
+  safe to re-run.
   `run` exits with the command's own exit code.
 
 Environment:
@@ -539,8 +541,9 @@ struct Cli {
     config: Option<PathBuf>,
     /// Stop after this many seconds in total.
     ///
-    /// Every call to op or the target's CLI must finish inside this budget, a rollout
-    /// write included (each write is also killed after 15 minutes); a read that fails is
+    /// Every call to op or the target's CLI must finish inside this budget. Each call also
+    /// has its own limit: a read attempt is killed after 60 seconds, a write after 2
+    /// minutes, and a write that waits for a rollout after 15 minutes. A read that fails is
     /// retried only while time remains.
     #[arg(
         long,
@@ -898,7 +901,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Approve, in your own terminal, the structural plan an assistant prepared (#133).
+    /// Approve, in your own terminal, the structural plan an assistant prepared.
     ///
     /// Shows every vault, item and empty field the plan creates and asks you to type the
     /// plan id back. The approval is single use, lasts 15 minutes, and applies to this
@@ -1730,14 +1733,19 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return usage_error(e),
     };
-    // FR-52: after an upgrade through any channel, bring existing unedited user copies of
-    // the agent skill up to this binary's version. Best effort and stderr only, so an
-    // `--json` command's stdout stays exactly one document (A1).
-    if !skill_refresh_skipped(&cli.cmd)
-        && let Some(root) = opv::app::skill::user_root()
-    {
-        refresh_agent_skill(&root, env!("CARGO_PKG_VERSION"), &mut io::stderr());
-    }
+    // The agent skill is written only on install (install.sh, the npm postinstall and `opv
+    // skill install`); no other command writes $HOME. `opv doctor` and `opv skill status`
+    // report a copy older than this binary (design §12.4).
+    //
+    // The invocation every catalog error renders its steps against, built once from the
+    // parsed command line (design §6.1), and how the failure is shown: `--verbose` passes
+    // the tool's whole scrubbed reply, and the reply box is drawn in UTF-8 only when the
+    // terminal's locale is (§7.3).
+    let render = Render {
+        inv: opv::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>()),
+        verbose: cli.verbose,
+        utf8: locale_is_utf8(),
+    };
     let target_options = target_fields(&matches);
     let rerun = rerun_command(&cli.cmd);
     let help = help_command();
@@ -1752,11 +1760,7 @@ fn main() -> ExitCode {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {
                 let step = e.step(&rerun, &help);
-                let _ = write!(
-                    opv::output::stderr(),
-                    "{}",
-                    opv::error::report_with(&e, &step, None)
-                );
+                let _ = write!(opv::output::stderr(), "{}", render.text(&e, &step, None));
                 ExitCode::from(exit_byte(e.exit_code()))
             }
         };
@@ -1821,7 +1825,9 @@ fn main() -> ExitCode {
     let step = res.as_ref().err().map(|e| e.step(&rerun, &help));
     if let Some(raw) = json {
         let framed = match (&res, &step) {
-            (Err(e), Some(step)) => opv::json::finish(&body, Err((e, step)), raw),
+            (Err(e), Some(step)) => {
+                render.document(e, opv::json::finish(&body, Err((e, step)), raw))
+            }
             _ => opv::json::finish(&body, Ok(()), raw),
         };
         let _ = opv::output::OutputGuard::new(&mut stdout).write_all(&framed);
@@ -1841,11 +1847,71 @@ fn main() -> ExitCode {
             let _ = write!(
                 opv::output::stderr(),
                 "{}",
-                opv::error::report_with(&e, &step, excerpt.as_ref())
+                render.text(&e, &step, excerpt.as_ref())
             );
             ExitCode::from(exit_byte(e.exit_code()))
         }
     }
+}
+
+/// How a failure is shown: the invocation its steps are rendered against, and what the
+/// person asked for (`--verbose`) or the terminal supports (UTF-8). Built once in [`main`].
+struct Render {
+    inv: opv::cause::Invocation,
+    verbose: bool,
+    utf8: bool,
+}
+
+impl Render {
+    /// The failure's text for stderr: a catalog cause through the one renderer with this
+    /// run's invocation, `--verbose` and UTF-8 support; a Legacy error as before.
+    fn text(
+        &self,
+        e: &Error,
+        step: &opv::error::Step,
+        excerpt: Option<&opv::scrub::Excerpt>,
+    ) -> String {
+        match e.cause() {
+            Some((cause, upstream)) => {
+                opv::cause::render::render_text(cause, upstream, &self.inv, self.verbose, self.utf8)
+            }
+            None => opv::error::report_with(e, step, excerpt),
+        }
+    }
+
+    /// The framed `--json` failure document with a catalog cause's `error` object rendered
+    /// against this run's invocation and `--verbose` (the full scrubbed upstream reply);
+    /// any other document is returned as framed.
+    fn document(&self, e: &Error, framed: Vec<u8>) -> Vec<u8> {
+        let Some((cause, upstream)) = e.cause() else {
+            return framed;
+        };
+        let Ok(serde_json::Value::Object(mut doc)) = serde_json::from_slice(&framed) else {
+            return framed;
+        };
+        let error = opv::cause::render::document(cause, upstream, &self.inv, self.verbose);
+        doc.insert("next".into(), error["next"].clone());
+        doc.insert("do".into(), error["do"].clone());
+        doc.insert("error".into(), error);
+        let mut text = serde_json::Value::Object(doc).to_string();
+        text.push('\n');
+        text.into_bytes()
+    }
+}
+
+/// Whether the terminal's locale is UTF-8: the first set of `LC_ALL`, `LC_CTYPE` and
+/// `LANG` names it (Windows terminals are). Otherwise the reply box falls back to ASCII.
+fn locale_is_utf8() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .is_some_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("utf-8") || v.contains("utf8")
+        })
 }
 
 /// The command tree as parsed and shown (H9): every subcommand uses [`SUB_TEMPLATE`], hides
@@ -1897,6 +1963,19 @@ fn usage_error(e: clap::Error) -> ExitCode {
         e.exit();
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `opv sync <env> --dry-run`: the dry run of a sync is its plan (09.21), named with every
+    // flag plan keeps; clap's own tip ("use -- --dry-run") does not apply to sync.
+    if e.kind() == ErrorKind::UnknownArgument
+        && args.iter().any(|a| a == "--dry-run")
+        && let Some(plan) = sync_as_plan(&args)
+    {
+        return usage_cause(
+            opv::cause::Cause::Usage {
+                problem: opv::cause::UsageProblem::UseInstead { command: plan },
+            },
+            args.iter().any(|a| a == "--json"),
+        );
+    }
     // FR-60: a removed form names its replacement exactly.
     let removed = removed_init_target(&args);
     let help = match &removed {
@@ -1935,7 +2014,8 @@ fn usage_error(e: clap::Error) -> ExitCode {
             "do": null,
             "error": opv::error::error_object(
                 code.as_str(),
-                "usage",
+                // Exit 2's category, as every other usage error reports it (02.20).
+                "config",
                 &message,
                 Vec::new(),
                 code.retry(),
@@ -1946,6 +2026,30 @@ fn usage_error(e: clap::Error) -> ExitCode {
         let _ = writeln!(opv::output::stdout(), "{doc}");
     }
     ExitCode::from(exit_byte(e.exit_code()))
+}
+
+/// A usage error opv diagnoses itself before the command runs: the cause through the one
+/// renderer (stderr), and with `--json` its document on stdout.
+fn usage_cause(cause: opv::cause::Cause, json: bool) -> ExitCode {
+    let inv = opv::cause::Invocation::from_cli(&std::env::args().collect::<Vec<_>>());
+    let _ = write!(
+        opv::output::stderr(),
+        "{}",
+        opv::cause::render::render_text(&cause, None, &inv, false, locale_is_utf8())
+    );
+    if json {
+        let error = opv::cause::render::document(&cause, None, &inv, false);
+        let doc = serde_json::json!({
+            "schema_version": opv::json::SCHEMA_VERSION,
+            "ok": false,
+            "exit_code": cause.exit_code(),
+            "next": error["next"].clone(),
+            "do": error["do"].clone(),
+            "error": error,
+        });
+        let _ = writeln!(opv::output::stdout(), "{doc}");
+    }
+    ExitCode::from(exit_byte(cause.exit_code()))
 }
 
 /// `opv init` given a target option removed in 0.7.0 (`--target`, `--target-name`, a
@@ -2007,8 +2111,8 @@ fn removed_init_target(args: &[String]) -> Option<(String, String)> {
         _ => "opv target add --help".to_string(),
     };
     Some((
-        "opv init writes no target since 0.7.0 (FR-56, FR-60): --target, --target-name and \
-         the provider options were removed; add the target with opv target add"
+        "opv init writes no target since 0.7.0: --target, --target-name and the provider \
+         options were removed; add the target with opv target add"
             .to_string(),
         next,
     ))
@@ -2058,15 +2162,88 @@ fn rerun_command(cmd: &Cmd) -> String {
                 None => "opv login".to_string(),
             };
         }
+        // An approval is single use and is spent before the sync starts: the step reads
+        // what remains in the same scope, never `--approved <used id>` again (02.14).
+        Cmd::Sync(a) if a.approved.is_some() => {
+            if let Some(plan) = sync_as_plan(&std::env::args().skip(1).collect::<Vec<_>>()) {
+                return opv::cause::render::cmd_text(&plan);
+            }
+        }
         _ => {}
     }
     typed_command()
 }
 
-/// `opv run ... --json -- cmd`: clap takes an unknown opv flag before `--` as the start
-/// of the child command. A COMMAND whose first word starts with `-` and did not come right
-/// after `--` is refused (M8): opv's flags go before `--`.
+/// The read form of a typed `opv sync …`: `opv plan` with its environment and every flag
+/// `plan` takes (`--product`, `--target`, `--rotate`, `--json` and the global options),
+/// in the order given. Flags only a sync takes (`--deploy`, `--prune`, `--confirm`,
+/// `--approved`, `--expect-plan`, …) and words opv does not know (`--dry-run`) are
+/// dropped. `None` when `args` is not a sync of a named environment.
+fn sync_as_plan(args: &[String]) -> Option<opv::cause::Cmd> {
+    const KEEP_VALUE: [&str; 6] = [
+        "--product",
+        "--target",
+        "--rotate",
+        "--config",
+        "--timeout",
+        "--color",
+    ];
+    const KEEP: [&str; 2] = ["--json", "--verbose"];
+    let at = args.iter().position(|a| a == "sync")?;
+    let root = cli_command();
+    let sync = root.find_subcommand("sync")?;
+    let takes_value = |long: &str| {
+        sync.get_arguments()
+            .any(|a| a.get_long() == Some(long) && a.get_action().takes_values())
+    };
+    let mut kept = Vec::new();
+    let mut env = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        i += 1;
+        if i - 1 == at {
+            continue;
+        }
+        if a == "--" {
+            break;
+        }
+        if !a.starts_with('-') {
+            env |= i - 1 > at;
+            kept.push(a.clone());
+            continue;
+        }
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, _)) => (f, true),
+            None => (a.as_str(), false),
+        };
+        let keep = KEEP_VALUE.contains(&flag) || KEEP.contains(&flag);
+        if keep {
+            kept.push(a.clone());
+        }
+        let value_follows =
+            !inline && (KEEP_VALUE.contains(&flag) || takes_value(flag.trim_start_matches("--")));
+        if value_follows && let Some(v) = args.get(i) {
+            if keep {
+                kept.push(v.clone());
+            }
+            i += 1;
+        }
+    }
+    env.then(|| opv::cause::Cmd {
+        command: vec!["plan".into()],
+        args: kept,
+    })
+}
+
+/// `opv run ... --verbos -- cmd`: clap takes a word it does not know as an option of
+/// `run` as the start of the child command. A COMMAND whose first word starts with `-` and
+/// did not come right after `--` is refused before anything runs (M8): the word is not an
+/// option of `opv run` (02.09: it was before `--`, so its place is not the problem), or it
+/// is `--json`, which `run` takes only with `--preview`. The child's words are never
+/// repeated (SR-3); the step is `opv run --help`.
 fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
+    use opv::cause::{Cause, UsageProblem};
     let first = command.first().filter(|w| w.starts_with('-'))?;
     let after_dashes = argv
         .iter()
@@ -2075,34 +2252,18 @@ fn misplaced_run_flag(command: &[String], argv: &[String]) -> Option<Error> {
     if after_dashes == Some(first) {
         return None;
     }
-    let child: Vec<String> = match command.iter().position(|w| w == "--") {
-        Some(i) => command[i + 1..].to_vec(),
-        None => command[1..].to_vec(),
-    };
-    let mut words: Vec<String> = argv
-        .iter()
-        .take_while(|a| *a != first)
-        .map(|a| shell_word(a))
-        .collect();
-    if let Some(w) = words.first_mut() {
-        *w = "opv".to_string();
-    }
-    if !child.is_empty() {
-        words.push("--".to_string());
-        words.extend(child.iter().map(|a| shell_word(a)));
-    }
-    let hint = if first == "--json" {
-        "run's --json needs --preview; opv's options go before --"
+    let problem = if first == "--json" {
+        UsageProblem::NeedsFlag {
+            flag: "--json".into(),
+            needs: "--preview".into(),
+        }
     } else {
-        "opv's options go before --"
+        UsageProblem::UnknownFlag {
+            flag: first.clone(),
+            closest: None,
+        }
     };
-    Some(
-        Error::Config(
-            format!("{first} is not an option of opv run; {hint}; nothing was run").into(),
-        )
-        .with_code(opv::error::Code::Usage)
-        .with_next(words.join(" ")),
-    )
+    Some(Cause::Usage { problem }.into())
 }
 
 /// The command line as the user typed it, each word quoted for this shell.
@@ -2159,7 +2320,13 @@ fn recheck_command(cmd: &Cmd, config: Option<&std::path::Path>) -> String {
         }
         _ => "status".to_string(),
     };
-    format!("{c} {tail}")
+    // A `--json` run's re-check is read as a document too (09.22).
+    let json = if cmd.json_mode().is_some() {
+        " --json"
+    } else {
+        ""
+    };
+    format!("{c} {tail}{json}")
 }
 
 use opv::error::shell_word;
@@ -2355,10 +2522,15 @@ fn run(
     // #139: the remote steps need no configuration, account or 1Password: the sender's
     // values come from `op run`, the receiver's from its stdin.
     if let Cmd::RemoteSend { plan } = &cli.cmd {
-        let plan: opv::app::remote_delivery::Plan = serde_json::from_str(plan).map_err(|_| {
-            Error::Config("remote-send: the plan is not valid".into())
-                .with_code(opv::error::Code::Usage)
-        })?;
+        // The plan is built by the person's own `opv run --remote`, never typed: one that
+        // does not parse is opv's fault, and the step never names the hidden command (X25).
+        let plan: opv::app::remote_delivery::Plan =
+            serde_json::from_str(plan).map_err(|_| -> Error {
+                opv::cause::Cause::Bug {
+                    site: "remote-send received a plan it cannot read",
+                }
+                .into()
+            })?;
         return opv::app::remote_delivery::send(&plan);
     }
     if let Cmd::RemoteReceive = &cli.cmd {
@@ -2372,8 +2544,7 @@ fn run(
     }
     if let Cmd::Schema = &cli.cmd {
         let doc = opv::schema::describe(&cli_command(), env!("CARGO_PKG_VERSION"));
-        writeln!(out, "{doc}")
-            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))?;
+        writeln!(out, "{doc}").map_err(write_err)?;
         return Ok(0);
     }
     if let Cmd::Help { topic } = &cli.cmd {
@@ -2464,8 +2635,7 @@ fn run(
     {
         use opv::app::{setup, setup_recipe, setup_runtime};
         setup_runtime::Console::require_terminal("setup", &typed_command())?;
-        let start = std::env::current_dir()
-            .map_err(|_| Error::Config("Cannot locate the current directory.".into()))?;
+        let start = std::env::current_dir().map_err(cwd_err)?;
         let recipe = recipe
             .clone()
             .or_else(|| setup_recipe::discover(&start))
@@ -2524,9 +2694,7 @@ fn run(
         }
         #[cfg(feature = "ui")]
         Cmd::Ui => {
-            let exe = std::env::current_exe().map_err(|e| {
-                Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
-            })?;
+            let exe = std::env::current_exe().map_err(exe_err)?;
             let source = opv::ui::run::Exe {
                 exe,
                 config: cli.config.clone(),
@@ -2544,10 +2712,10 @@ fn run(
             let here = std::env::current_dir().unwrap_or_default();
             let path = match file.clone().or_else(|| cli.config.clone()) {
                 Some(p) => p,
-                None => config_store::walk_up(&here, "secrets.toml").ok_or_else(|| {
-                    Error::Config("no secrets.toml here or in a parent directory".into())
-                        .with_next("opv init <env> --file")
-                })?,
+                None => match config_store::walk_up(&here, "secrets.toml") {
+                    Some(p) => p,
+                    None => return Err(bootstrap_without_file(&cli, config_source, &r, &here)),
+                },
             };
             let project = match project {
                 Some(p) => p.clone(),
@@ -2577,7 +2745,12 @@ fn run(
                 .map(|f| {
                     f.split_once('=')
                         .map(|(k, p)| (k.to_string(), p.to_string()))
-                        .ok_or_else(|| Error::Config("--file takes KEY=path".into()))
+                        .ok_or_else(|| -> Error {
+                            opv::cause::Cause::Bug {
+                                site: "local-delivery received a --file without KEY=path",
+                            }
+                            .into()
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let d = opv::app::local_delivery::Delivery {
@@ -2613,10 +2786,7 @@ fn run(
             sync: None,
             ..
         } => {
-            opv::app::setup_runtime::Console::require_terminal(
-                "approve",
-                &format!("opv approve {plan_id}"),
-            )?;
+            opv::app::setup_runtime::Console::require_terminal("approve", &typed_command())?;
             let here = std::env::current_dir().unwrap_or_default();
             let scope = opv::app::structure::scope(&here, &r)?;
             r.use_account(Some(scope.account.clone()));
@@ -2714,21 +2884,17 @@ fn run(
         if !create {
             return target_credentials::show(&fleet, env, target, &r, out).map(|()| 0);
         }
+        // Refused before the terminal gate and before anything is minted: `--create`
+        // records the new item's reference in a secrets.toml, which a manifest project
+        // does not have, so no fix makes this command succeed there (02.01).
+        let path = match &found {
+            config_store::Found::File { store, .. } => store.path.clone(),
+            config_store::Found::Manifest(m) => return Err(credentials_need_a_file(&m.title)),
+        };
         opv::app::setup_runtime::Console::require_terminal(
             "target credentials --create",
             &typed_command(),
         )?;
-        let path = match &found {
-            config_store::Found::File { store, .. } => store.path.clone(),
-            config_store::Found::Manifest(_) => {
-                return Err(opv::error::Error::Policy(
-                    "this project's configuration lives in a 1Password manifest, so opv cannot \
-                     record deploy_credentials in a file; add it with opv config edit"
-                        .into(),
-                )
-                .with_code(opv::error::Code::PolicyRefused));
-            }
-        };
         let project =
             opv::app::personal::project_name(&r, &std::env::current_dir().unwrap_or_default());
         return target_credentials::run(
@@ -2804,12 +2970,13 @@ fn run(
     {
         if *preview {
             if !command.is_empty() {
-                return Err(Error::Config(
-                    "--preview takes no command: it reads no value and runs nothing; drop the \
-                     words after --"
-                        .into(),
-                )
-                .with_code(opv::error::Code::Usage));
+                return Err(opv::cause::Cause::Usage {
+                    problem: opv::cause::UsageProblem::ConflictsWith {
+                        a: "--preview".into(),
+                        b: "-- <command>".into(),
+                    },
+                }
+                .into());
             }
             opv::app::delivery_preview::preview_for(
                 &loaded?,
@@ -2826,23 +2993,18 @@ fn run(
         let fleet = loaded?;
         if let Some(profile) = remote {
             if !command.is_empty() {
-                return Err(Error::Config(
-                    "--remote takes no command: the profile pins the command that runs on the \
-                     remote host; drop the words after --"
-                        .into(),
-                )
-                .with_code(opv::error::Code::Usage));
+                return Err(opv::cause::Cause::Usage {
+                    problem: opv::cause::UsageProblem::ConflictsWith {
+                        a: "--remote".into(),
+                        b: "-- <command>".into(),
+                    },
+                }
+                .into());
             }
             // #139: values leave this machine only when a person runs it in their terminal;
             // no MCP tool or flag runs a remote delivery.
             opv::app::setup_runtime::Console::require_terminal("run --remote", &typed_command())?;
-            let mut retry = format!("opv run {env} --confirm {env}");
-            if let Some(p) = product {
-                retry.push_str(&format!(" --product {}", shell_word(p)));
-            }
-            if let Some(r) = role {
-                retry.push_str(&format!(" --role {}", shell_word(r)));
-            }
+            let mut retry = confirm_retry(env, product.as_deref(), role.as_deref());
             retry.push_str(&format!(" --remote {}", shell_word(profile)));
             run_cmd::require_confirmation(&fleet, env, confirm.as_deref(), &retry)?;
             return run_cmd::run_remote(
@@ -2854,18 +3016,11 @@ fn run(
                 runner,
             );
         }
-        let mut retry = format!("opv run {env} --confirm {env}");
-        if let Some(p) = product {
-            retry.push_str(&format!(" --product {}", shell_word(p)));
-        }
-        if let Some(r) = role {
-            retry.push_str(&format!(" --role {}", shell_word(r)));
-        }
-        retry.push_str(" --");
-        for w in command {
-            retry.push(' ');
-            retry.push_str(&shell_word(w));
-        }
+        // The child's words are never repeated (SR-3, 02.10): they may hold a credential.
+        let retry = format!(
+            "{} -- <command>",
+            confirm_retry(env, product.as_deref(), role.as_deref())
+        );
         run_cmd::require_confirmation(&fleet, env, confirm.as_deref(), &retry)?;
         return run_cmd::run_for(
             &fleet,
@@ -2877,6 +3032,20 @@ fn run(
         );
     }
     run_other(cmd, loaded, source.as_deref(), runner, out).map(|()| 0)
+}
+
+/// `opv run <env> --confirm <env>` with the run's `--product` and `--role`: the person's
+/// confirmed run. The caller adds `--remote <profile>` or `-- <command>`, never the
+/// child's own words.
+fn confirm_retry(env: &str, product: Option<&str>, role: Option<&str>) -> String {
+    let mut retry = format!("opv run {} --confirm {}", shell_word(env), shell_word(env));
+    if let Some(p) = product {
+        retry.push_str(&format!(" --product {}", shell_word(p)));
+    }
+    if let Some(r) = role {
+        retry.push_str(&format!(" --role {}", shell_word(r)));
+    }
+    retry
 }
 
 /// `opv skill install` / `opv skill status`: the agent skill embedded in this binary
@@ -2892,7 +3061,7 @@ fn run_skill(cmd: &SkillCmd, out: &mut dyn Write) -> Result<(), Error> {
             force,
             json,
         } => {
-            let root = skill_root(*user, project.as_deref())?;
+            let root = skill_root(*user, project.as_deref(), *target, *force)?;
             let installed = skill::install(&root, &target.targets(), version, *force)?;
             if *json {
                 writeln!(out, "{}", skill::install_document(&installed)?).map_err(write_err)?;
@@ -2924,9 +3093,15 @@ fn run_skill(cmd: &SkillCmd, out: &mut dyn Write) -> Result<(), Error> {
     Ok(())
 }
 
-/// The text lines of `opv skill status`: one per copy, then the update hint when an
-/// unedited copy is older than this binary (FR-52).
+/// The text lines of `opv skill status`: one per copy, then, for each scope with an
+/// unedited copy older than this binary, the install that updates that scope (FR-52,
+/// 02.11: a project copy is updated with `--project <root>`, never `--user`). The skill is
+/// written only on install, so an outdated copy stays outdated until then (design §12.4).
 fn write_skill_status(copies: &[opv::app::skill::Copy], out: &mut dyn Write) -> Result<(), Error> {
+    if copies.is_empty() {
+        writeln!(out, "no agent skill installed\nNext: opv skill install").map_err(write_err)?;
+        return Ok(());
+    }
     for copy in copies {
         let state = if copy.edited {
             "edited"
@@ -2945,57 +3120,29 @@ fn write_skill_status(copies: &[opv::app::skill::Copy], out: &mut dyn Write) -> 
         )
         .map_err(write_err)?;
     }
-    if copies.iter().any(|c| !c.edited && !c.current) {
-        writeln!(out, "run opv skill install --user to update").map_err(write_err)?;
+    for update in opv::app::skill::update_commands(copies) {
+        writeln!(out, "run {update} to update").map_err(write_err)?;
     }
     Ok(())
 }
 
-/// Rewrite existing, unedited user-level copies of the agent skill to `version` and report
-/// each updated path on `stderr`; never on stdout and never a failure (FR-52, A1).
-fn refresh_agent_skill(root: &Path, version: &str, stderr: &mut dyn Write) {
-    for path in opv::app::skill::refresh_user_copies(root, version) {
-        let _ = writeln!(
-            stderr,
-            "opv: updated the agent skill at {} to {version}",
-            path.display()
-        );
-    }
-}
-
-/// Whether the once-per-run agent-skill refresh must be skipped: the user opted out, the
-/// environment is CI, the command is `opv skill …` itself, or this is a test build.
-fn skill_refresh_skipped(cmd: &Cmd) -> bool {
-    if matches!(
-        cmd,
-        Cmd::Skill(_) | Cmd::LocalDelivery { .. } | Cmd::RemoteSend { .. } | Cmd::RemoteReceive
-    ) {
-        return true;
-    }
-    if std::env::var("OPV_NO_SKILL").is_ok_and(|v| v == "1") {
-        return true;
-    }
-    if std::env::var("CI").is_ok_and(|v| !v.is_empty()) {
-        return true;
-    }
-    running_under_test()
-}
-
-/// Cargo and nextest leave markers in the run environment. Without this, a spawned test
-/// binary would rewrite the developer's real skill copies on the machine running the tests.
-fn running_under_test() -> bool {
-    ["NEXTEST", "RUST_TEST_THREADS", "CARGO_MANIFEST_DIR"]
-        .iter()
-        .any(|key| std::env::var_os(key).is_some())
-}
-
 /// The root `opv skill install` writes under: the home for `--user`, the given project
 /// directory, or this checkout's git top level.
-fn skill_root(user: bool, project: Option<&std::path::Path>) -> Result<PathBuf, Error> {
+///
+/// With no home directory (a container, a systemd unit or a CI job) the step is the same
+/// install into the current directory, named by its absolute path so it runs as typed
+/// (02.02: `--project .` was never treated as runnable), with `--target` and `--force` kept.
+/// No catalog cause names a missing home directory yet, so this stays Legacy.
+fn skill_root(
+    user: bool,
+    project: Option<&std::path::Path>,
+    target: SkillTarget,
+    force: bool,
+) -> Result<PathBuf, Error> {
     if user {
         return opv::app::skill::user_root().ok_or_else(|| {
-            Error::Config("cannot find the home directory (HOME or USERPROFILE)".into())
-                .with_next("opv skill install --project .")
+            let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            home_missing(&here, target, force)
         });
     }
     Ok(project
@@ -3003,9 +3150,40 @@ fn skill_root(user: bool, project: Option<&std::path::Path>) -> Result<PathBuf, 
         .unwrap_or_else(opv::app::skill::project_root))
 }
 
-/// A failed write to the output stream (the same wording the library uses).
+/// `opv skill install --user` with neither HOME nor USERPROFILE set (02.02).
+fn home_missing(here: &std::path::Path, target: SkillTarget, force: bool) -> Error {
+    let mut next = format!(
+        "opv skill install --project {}",
+        shell_word(&here.display().to_string())
+    );
+    match target {
+        SkillTarget::Claude => next.push_str(" --target claude"),
+        SkillTarget::Codex => next.push_str(" --target codex"),
+        SkillTarget::All => {}
+    }
+    if force {
+        next.push_str(" --force");
+    }
+    Error::Config("cannot find the home directory (HOME or USERPROFILE)".into())
+        .with_do("set HOME to your home directory, or install into this project")
+        .with_next(next)
+}
+
+/// A failed write to the output stream (the same wording the library uses), for every
+/// write in this file (02.29: one phrase). opv's own local input and output have no
+/// catalog cause yet, so these three stay Legacy, each built in one place.
 fn write_err(e: io::Error) -> Error {
     Error::Dependency(format!("cannot write output ({})", e.kind()).into())
+}
+
+/// The current directory cannot be read (deleted under the shell, or no permission).
+fn cwd_err(e: io::Error) -> Error {
+    Error::Config(format!("cannot read the current directory ({})", e.kind()).into())
+}
+
+/// The path of this opv binary cannot be found.
+fn exe_err(e: io::Error) -> Error {
+    Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
 }
 
 /// The configuration: `--config` / `OPV_CONFIG`, else the nearest `secrets.toml` from the
@@ -3022,9 +3200,7 @@ fn find_config(
             Some(config::load(path))
         }
         None => match std::env::current_dir() {
-            Err(e) => Some(Err(Error::Config(
-                format!("cannot read the current directory: {e}").into(),
-            ))),
+            Err(e) => Some(Err(cwd_err(e))),
             Ok(start) => config::discover(&start).map(|found| {
                 let _ = writeln!(io::stderr(), "using {}", found.display());
                 config::load(&found)
@@ -3056,8 +3232,7 @@ fn request(
     config_source: ConfigSource,
     manifest_only: bool,
 ) -> Result<config_store::Request, Error> {
-    let start = std::env::current_dir()
-        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    let start = std::env::current_dir().map_err(cwd_err)?;
     let given = match config_source {
         ConfigSource::Env => config_store::Given::Env,
         _ => config_store::Given::Flag,
@@ -3074,8 +3249,7 @@ fn request(
 /// `config import` and `config check`: they compare a file with the manifest, so the
 /// manifest is found without the `secrets.toml` walk-up (and without --config).
 fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Result<(), Error> {
-    let dir = std::env::current_dir()
-        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    let dir = std::env::current_dir().map_err(cwd_err)?;
     match cli.cmd {
         Cmd::Config(ConfigCmd::Import {
             file,
@@ -3085,16 +3259,9 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
         }) => {
             let file = match file {
                 Some(f) => f,
-                None => config::discover(&dir).ok_or_else(|| {
-                    Error::Config(
-                        format!(
-                            "no secrets.toml found in {} or any parent directory",
-                            dir.display()
-                        )
-                        .into(),
-                    )
-                    .with_next("opv config import --file <path> --vault <vault>")
-                })?,
+                // The command must change (it needs --file), so the step is its help, never
+                // the same command again (02.12).
+                None => config::discover(&dir).ok_or_else(|| import_needs_file(&dir))?,
             };
             let args = config_cmd::ImportArgs {
                 file,
@@ -3106,7 +3273,7 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
         }
         Cmd::Config(ConfigCmd::Check { file }) => {
             let req = config_store::Request {
-                start: dir,
+                start: dir.clone(),
                 config: None,
                 project: config_store::project_env(),
                 manifest_only: true,
@@ -3114,7 +3281,7 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
             };
             // The file is right here; what is missing is the manifest to compare it with (M9).
             let found = config_store::locate(&req, r).map_err(|e| match e.code() {
-                opv::error::Code::ConfigNotFound => manifest_missing_for_check(&file),
+                opv::error::Code::ConfigNotFound => manifest_missing_for_check(&dir),
                 _ => e,
             })?;
             config_cmd::check(&found, &file, r, out)
@@ -3123,22 +3290,70 @@ fn run_config_manifest(cli: Cli, r: &ProcessRunner, out: &mut dyn Write) -> Resu
     }
 }
 
-/// `config check --file F` with no manifest for this checkout (M9).
-fn manifest_missing_for_check(file: &std::path::Path) -> Error {
-    let f = shell_word(&file.display().to_string());
-    Error::Config(
-        format!(
-            "no 1Password manifest for this checkout to compare {} with",
-            file.display()
-        )
+/// `opv config import` without `--file` and with no secrets.toml here or above (02.12).
+fn import_needs_file(dir: &std::path::Path) -> Error {
+    opv::cause::Cause::Usage {
+        problem: opv::cause::UsageProblem::NeedsFlag {
+            flag: format!(
+                "opv config import (no secrets.toml in {} or any folder above it)",
+                dir.display()
+            ),
+            needs: "--file <path>".into(),
+        },
+    }
+    .into()
+}
+
+/// `config check --file F` with no manifest for this checkout (M9): the project it looked
+/// for (OPV_PROJECT, else the folder's name) and the account it looked in.
+fn manifest_missing_for_check(dir: &std::path::Path) -> Error {
+    let project = config_store::project_env()
+        .or_else(|| config_store::default_project(None, None, dir).ok())
+        .unwrap_or_else(|| dir.display().to_string());
+    opv::cause::Cause::ManifestNotFound {
+        project,
+        account: config_store::account_env().map(opv::cause::AccountId::new),
+    }
+    .into()
+}
+
+/// `opv target credentials --create` on a manifest project (02.01): it records the new
+/// item's reference in a secrets.toml, so it does not apply to a manifest; nothing was
+/// minted. The step is the manifest's own editor, never the same command again.
+fn credentials_need_a_file(manifest: &str) -> Error {
+    opv::cause::Cause::ConfigSourceMismatch {
+        command: opv::cause::CommandId("target credentials --create".into()),
+        manifest: manifest.to_string(),
+    }
+    .into()
+}
+
+/// `opv bootstrap` with no secrets.toml here or above (02.15): when this project's
+/// configuration is a 1Password manifest, bootstrap (which completes a secrets.toml) does
+/// not apply to it; otherwise there is no configuration at all. Never `opv init --file`,
+/// which would start a second configuration beside a manifest.
+fn bootstrap_without_file(
+    cli: &Cli,
+    config_source: ConfigSource,
+    r: &dyn CommandRunner,
+    here: &std::path::Path,
+) -> Error {
+    let found = request(cli, config_source, true).and_then(|req| config_store::locate(&req, r));
+    // The lookup's own failure is not this command's error.
+    let _ = opv::runner::take_failure_excerpt();
+    let _ = opv::runner::take_observed();
+    match found {
+        Ok(config_store::Found::Manifest(m)) => opv::cause::Cause::ConfigSourceMismatch {
+            command: opv::cause::CommandId("bootstrap".into()),
+            manifest: m.title,
+        }
         .into(),
-    )
-    .with_code(opv::error::Code::ManifestNotFound)
-    .with_do(format!(
-        "save it as this project's manifest (opv config import --file {f} --vault <vault>), \
-         or name the project with OPV_PROJECT=<name>"
-    ))
-    .with_next("opv projects")
+        _ => opv::cause::Cause::ConfigNotFound {
+            searched_from: here.to_path_buf(),
+            env: None,
+        }
+        .into(),
+    }
 }
 
 fn run_other(
@@ -3237,7 +3452,7 @@ fn run_other(
         } => {
             opv::app::setup_runtime::Console::require_terminal(
                 "access --create",
-                &std::env::args().collect::<Vec<_>>().join(" "),
+                &typed_command(),
             )?;
             let dir = std::env::current_dir().unwrap_or_default();
             let project = match project.as_deref() {
@@ -3343,10 +3558,7 @@ fn run_other(
             prune,
             rotate,
         } => {
-            opv::app::setup_runtime::Console::require_terminal(
-                "approve",
-                &format!("opv approve {plan_id} --sync {env}"),
-            )?;
+            opv::app::setup_runtime::Console::require_terminal("approve", &typed_command())?;
             let here = std::env::current_dir().unwrap_or_default();
             let (project, account) = opv::app::structure::binding(&here, r)?;
             let scope = opv::app::approve::SyncScope {
@@ -3454,10 +3666,8 @@ fn run_other(
 /// `opv help [TOPIC...]`: `states` prints the state vocabulary (H5); a command path prints
 /// that command's full help; nothing prints the top-level help.
 fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
-    let write = |out: &mut dyn Write, text: &str| {
-        writeln!(out, "{}", text.trim_end())
-            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))
-    };
+    let write =
+        |out: &mut dyn Write, text: &str| writeln!(out, "{}", text.trim_end()).map_err(write_err);
     if topic.len() == 1 && topic[0] == "states" {
         return write(out, STATES_HELP);
     }
@@ -3465,18 +3675,29 @@ fn help(topic: &[String], out: &mut dyn Write) -> Result<(), Error> {
     // Built first, so a subcommand's usage line reads `opv <command>`.
     cmd.build();
     let mut current = &mut cmd;
-    for t in topic {
-        let names: Vec<String> = current
-            .get_subcommands()
-            .map(|c| c.get_name().to_string())
-            .collect();
+    for (depth, t) in topic.iter().enumerate() {
+        // The topics a person can ask for here: visible commands only, and `states` at
+        // the top level only (02.22).
+        let mut names: Vec<String> = Vec::new();
+        if depth == 0 {
+            names.push("states".into());
+        }
+        names.extend(
+            current
+                .get_subcommands()
+                .filter(|c| !c.is_hide_set())
+                .map(|c| c.get_name().to_string()),
+        );
         match current.find_subcommand_mut(t) {
-            Some(sub) => current = sub,
-            None => {
-                return Err(Error::Config(
-                    format!("no help topic {t:?}; topics: states, {}", names.join(", ")).into(),
-                )
-                .with_next("opv --help"));
+            Some(sub) if !sub.is_hide_set() => current = sub,
+            _ => {
+                return Err(opv::cause::Cause::NotDeclared {
+                    kind: opv::cause::NameKind::HelpTopic,
+                    given: t.clone(),
+                    candidates: names,
+                    closest: None,
+                }
+                .into());
             }
         }
     }
@@ -3492,55 +3713,14 @@ fn run_init(
     out: &mut dyn Write,
 ) -> Result<(), Error> {
     let json = matches!(cli.cmd, Cmd::Init { json: true, .. });
+    // init writes ./secrets.toml (with --file, or when one exists here) or a manifest, and
+    // never the configuration --config names: `--add-env` adds an environment to that one.
+    // The step is init's help, which says so, never a rebuilt command that drops flags
+    // (02.13).
     if cli.config.is_some() {
-        let Cmd::Init {
-            env,
-            vault,
-            item,
-            product,
-            force,
-            ..
-        } = &cli.cmd
-        else {
-            unreachable!("called for init only")
-        };
-        let how = if config_source == ConfigSource::Env {
-            "OPV_CONFIG is set; unset it for init"
-        } else {
-            "--config is not used"
-        };
-        // The same init without --config (and with OPV_CONFIG unset for this one command).
-        let mut again = format!("opv init {}", shell_word(env));
-        if let Some(v) = vault {
-            again.push_str(&format!(" --vault {}", shell_word(v)));
-        }
-        if let Some(i) = item {
-            again.push_str(&format!(" --item {}", shell_word(i)));
-        }
-        if let Some(p) = product {
-            again.push_str(&format!(" --product {}", shell_word(p)));
-        }
-        if *force {
-            again.push_str(" --force");
-        }
-        if json {
-            again.push_str(" --json");
-        }
-        if config_source == ConfigSource::Env {
-            again = format!("env -u OPV_CONFIG {again}");
-        }
-        return Err(Error::Config(
-            format!(
-                "init writes secrets.toml in the current directory; {how} (to add an \
-                 environment to that file, pass --add-env)"
-            )
-            .into(),
-        )
-        .with_code(opv::error::Code::Usage)
-        .with_next(again));
+        return Err(init_takes_no_config(config_source));
     }
-    let dir = std::env::current_dir()
-        .map_err(|e| Error::Config(format!("cannot read the current directory: {e}").into()))?;
+    let dir = std::env::current_dir().map_err(cwd_err)?;
     let (file, project, account) = match &cli.cmd {
         Cmd::Init {
             file,
@@ -3580,7 +3760,7 @@ fn run_init(
                 "using 1Password account {a}; recorded in {} (commit it)",
                 path.display()
             )
-            .map_err(|e| Error::Dependency(format!("cannot write output ({})", e.kind()).into()))?;
+            .map_err(write_err)?;
         }
     }
     let scoped = signin::EnvRunner::with_account(r, chosen);
@@ -3592,6 +3772,22 @@ fn run_init(
     } else {
         init::run_manifest(&args, project.as_deref(), &dir, &scoped, out, json)
     }
+}
+
+/// `opv init` given `--config` or `OPV_CONFIG` (02.13).
+fn init_takes_no_config(config_source: ConfigSource) -> Error {
+    let given = if config_source == ConfigSource::Env {
+        "OPV_CONFIG"
+    } else {
+        "--config"
+    };
+    opv::cause::Cause::Usage {
+        problem: opv::cause::UsageProblem::ConflictsWith {
+            a: "opv init".into(),
+            b: given.into(),
+        },
+    }
+    .into()
 }
 
 /// The `opv init … --from <file> --apply` that carries out a `--from` plan (#90).
@@ -3666,9 +3862,7 @@ fn run_edit(
             out,
         ),
         cmd @ Cmd::Init { json, .. } => {
-            let dir = std::env::current_dir().map_err(|e| {
-                Error::Config(format!("cannot read the current directory: {e}").into())
-            })?;
+            let dir = std::env::current_dir().map_err(cwd_err)?;
             init::add_env_as(&init_args(cmd, r, &dir)?, store, r, out, json)
         }
         Cmd::Target(TargetCmd::Add {
@@ -3771,14 +3965,25 @@ fn sign_in_here() -> Result<bool, Error> {
     let account =
         opv::runner::signed_out_account().or_else(|| config_store::selected_account(&here));
     eprintln!(
-        "Your 1Password session has ended (op sessions expire after 30 minutes idle). Sign in \
-         to go on; your password goes only to 1Password's prompt."
+        "You are not signed in to 1Password (a session also ends after 30 minutes idle). Sign \
+         in to go on; your password goes only to 1Password's prompt."
     );
     let command = std::env::args().nth(1).unwrap_or_else(|| "opv".into());
     let mut runtime = Runtime::with_account(account.as_deref()).for_command(&command);
     runtime.sign_in(account.as_deref(), false)?;
     opv::runner::use_op_session(runtime.into_session());
     Ok(true)
+}
+
+/// `--project` of `opv mcp serve` / `opv mcp install` is not a directory opv can enter.
+fn project_dir_err() -> Error {
+    opv::cause::Cause::Usage {
+        problem: opv::cause::UsageProblem::ValueFormat {
+            flag: "--project".into(),
+            format: "an existing directory opv can enter",
+        },
+    }
+    .into()
 }
 
 /// Clamp an exit code to the 1..=255 range a process can report; failures never become 0.
@@ -3793,13 +3998,16 @@ fn exit_byte(code: i32) -> u8 {
 #[cfg(feature = "mcp")]
 fn mcp_serve(project: &std::path::Path) -> Result<i32, Error> {
     use rmcp::{ServiceExt, transport::stdio};
-    let fail = |what: &str| Error::Config(format!("opv mcp serve: {what}").into());
+    // The MCP transport's own failures are not configuration errors (02.27): the client
+    // broke the protocol, so the step re-registers the server.
+    let fail = |what: &str| {
+        Error::Dependency(format!("opv mcp serve: {what}").into()).with_next("opv mcp install")
+    };
     let project = project
         .canonicalize()
         .ok()
-        .filter(|p| p.is_dir())
-        .ok_or_else(|| fail("--project must be an existing directory"))?;
-    std::env::set_current_dir(&project).map_err(|_| fail("cannot enter the project directory"))?;
+        .filter(|p| p.is_dir() && std::env::set_current_dir(p).is_ok())
+        .ok_or_else(project_dir_err)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -3843,9 +4051,13 @@ fn mcp_install(
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
-        return Err(Error::Config(
-            "--name must be letters, digits, '-' or '_'".into(),
-        ));
+        return Err(opv::cause::Cause::Usage {
+            problem: opv::cause::UsageProblem::ValueFormat {
+                flag: "--name".into(),
+                format: "letters, digits, '-' or '_'",
+            },
+        }
+        .into());
     }
     let here = std::env::current_dir().unwrap_or_default();
     let project = match project {
@@ -3856,12 +4068,10 @@ fn mcp_install(
         .canonicalize()
         .ok()
         .filter(|p| p.is_dir())
-        .ok_or_else(|| Error::Config("--project must be an existing directory".into()))?;
+        .ok_or_else(project_dir_err)?;
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
-        .map_err(|e| {
-            Error::Dependency(format!("cannot find this opv binary ({})", e.kind()).into())
-        })?;
+        .map_err(exe_err)?;
     // npm's bundled copy lives under node_modules and moves on every upgrade: register the
     // shared install that npm's postinstall and install.sh keep current instead.
     let exe = if exe.components().any(|c| c.as_os_str() == "node_modules") {
@@ -3903,19 +4113,17 @@ fn mcp_install(
             "registered": done,
             "next": "restart the assistant, then ask it to call opv_ready",
         });
-        return writeln!(out, "{doc}")
-            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()));
+        return writeln!(out, "{doc}").map_err(write_err);
     }
     for d in &done {
-        writeln!(out, "{} {} ({})", d.action, d.path.display(), d.client)
-            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;
+        writeln!(out, "{} {} ({})", d.action, d.path.display(), d.client).map_err(write_err)?;
     }
     writeln!(
         out,
         "opv's MCP server runs as: {command} {}\nRestart the assistant to load it; it never sees a secret value. Start it without op session, service-account or Connect credentials.",
         args.join(" ")
     )
-    .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
+    .map_err(write_err)
 }
 
 /// `opv approve`'s review on the person's own terminal (checked before it runs).
@@ -3931,14 +4139,13 @@ struct TerminalReview;
 
 impl opv::app::approve::Review for TerminalReview {
     fn show(&mut self, line: &str) -> Result<(), Error> {
-        writeln!(opv::output::stdout(), "{line}")
-            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))
+        writeln!(opv::output::stdout(), "{line}").map_err(write_err)
     }
     fn ask(&mut self, question: &str) -> Result<String, Error> {
         let mut out = opv::output::stdout();
         write!(out, "{question} ")
             .and_then(|()| out.flush())
-            .map_err(|e| Error::Dependency(format!("cannot write ({})", e.kind()).into()))?;
+            .map_err(write_err)?;
         let mut answer = String::new();
         io::stdin().read_line(&mut answer).map_err(|e| {
             Error::Dependency(format!("cannot read the answer ({})", e.kind()).into())
@@ -4089,12 +4296,26 @@ mod tests {
         assert!(String::from_utf8(out).unwrap().contains("Usage: opv open"));
     }
 
+    /// 02.22: an unknown help topic is a name that is not declared, not a configuration
+    /// error.
     #[test]
-    fn help_with_an_unknown_topic_is_a_config_error() {
-        assert!(matches!(
-            help(&["nope".to_string()], &mut Vec::new()),
-            Err(Error::Config(_))
-        ));
+    fn help_with_an_unknown_topic_is_an_unknown_name() {
+        let e = help(&["nope".to_string()], &mut Vec::new()).unwrap_err();
+        assert_eq!(e.code_str(), "usage");
+    }
+
+    /// 02.22: hidden internal commands are never offered as help topics.
+    #[test]
+    fn help_topics_never_list_a_hidden_command() {
+        let e = help(&["nope".to_string()], &mut Vec::new()).unwrap_err();
+        assert!(!e.to_string().contains("remote-send"), "{e}");
+    }
+
+    /// 02.22: `states` is a topic only at the top level.
+    #[test]
+    fn nested_help_topics_do_not_offer_states() {
+        let e = help(&["config".into(), "nope".into()], &mut Vec::new()).unwrap_err();
+        assert!(!e.to_string().contains("states"), "{e}");
     }
 
     #[test]
@@ -4253,23 +4474,225 @@ mod tests {
         );
     }
 
-    /// M9: config check names the missing manifest, not a missing file.
+    /// M9: config check names the missing manifest, not a missing file. (The wording now
+    /// comes from the catalog cause, so the test pins the code.)
     #[test]
     fn config_check_without_a_manifest_names_the_manifest() {
-        let e = manifest_missing_for_check(std::path::Path::new("secrets.toml"));
-        assert!(
-            e.to_string()
-                .contains("no 1Password manifest for this checkout"),
-            "{e}"
+        let e = manifest_missing_for_check(std::path::Path::new("/work/app"));
+        assert_eq!(e.code_str(), "manifest_not_found");
+    }
+
+    /// M8: `--json` before `--` without `--preview` is refused, never run as the child
+    /// command. (It used to repeat the child's words in its Next; 02.10/SR-3.)
+    #[test]
+    fn run_refuses_json_before_the_dashes_without_preview() {
+        let argv = words("opv run dev --product api --json -- true");
+        let e = misplaced_run_flag(&words("--json -- true"), &argv).unwrap();
+        assert_eq!(e.to_string(), "--json needs --preview");
+    }
+
+    /// 02.09: a misspelt flag placed before `--` is named as unknown, not blamed on its
+    /// place.
+    #[test]
+    fn run_names_a_misspelt_flag_as_unknown() {
+        let argv = words("opv run dev --verbos -- true");
+        let e = misplaced_run_flag(&words("--verbos -- true"), &argv).unwrap();
+        assert_eq!(e.to_string(), "unknown option --verbos");
+    }
+
+    /// 02.01 (S1): `target credentials --create` on a manifest project never names
+    /// itself as the step.
+    #[test]
+    fn credentials_create_on_a_manifest_points_at_the_manifest_editor() {
+        let e = credentials_need_a_file("opv · app");
+        assert_eq!(e.step("", "").next, "opv config edit");
+    }
+
+    /// 02.01 (S1): no fix makes the same command succeed on a manifest, so it is never
+    /// retried.
+    #[test]
+    fn credentials_create_on_a_manifest_is_never_retried() {
+        let e = credentials_need_a_file("opv · app");
+        let (cause, _) = e.cause().unwrap();
+        assert_eq!(cause.retry(), opv::cause::RetryClass::Never);
+    }
+
+    /// 02.02 (S1): with no home directory the step installs into this project by its
+    /// absolute path, so it runs as typed instead of repeating the refused command.
+    #[test]
+    fn skill_install_without_a_home_names_the_project_by_its_path() {
+        let e = home_missing(std::path::Path::new("/work/app"), SkillTarget::All, false);
+        assert_eq!(
+            e.step("opv skill install --user", "").next,
+            "opv skill install --project /work/app"
         );
     }
 
-    /// M8: a mistyped opv flag before `--` is refused, never run as the child command.
+    /// 02.10: a confirm refusal for `opv run` never repeats the child's words.
     #[test]
-    fn run_refuses_an_opv_flag_before_the_dashes() {
-        let argv = words("opv run dev --product api --json -- true");
-        let e = misplaced_run_flag(&words("--json -- true"), &argv).unwrap();
-        assert_eq!(e.next_step(), Some("opv run dev --product api -- true"));
+    fn confirm_retry_never_holds_the_child_command() {
+        assert_eq!(
+            confirm_retry("prod", Some("api"), None),
+            "opv run prod --confirm prod --product api"
+        );
+    }
+
+    /// 02.12: `config import` with no file to find needs `--file`: a usage refusal, never
+    /// the same command again.
+    #[test]
+    fn config_import_without_a_file_is_a_usage_refusal() {
+        assert_eq!(
+            import_needs_file(std::path::Path::new("/work/app")).code_str(),
+            "usage"
+        );
+    }
+
+    /// 02.13: init refuses --config without claiming it writes secrets.toml.
+    #[test]
+    fn init_with_config_names_the_conflict() {
+        assert_eq!(
+            init_takes_no_config(ConfigSource::Flag).to_string(),
+            "opv init and --config cannot be used together"
+        );
+    }
+
+    /// 02.14: after an approved sync, the step reads the plan of the same scope; the used
+    /// approval is never repeated.
+    #[test]
+    fn approved_sync_rerun_is_its_plan() {
+        let plan = sync_as_plan(&words(
+            "sync prod --deploy --prune --approved 3f9c0a1b --target web --product api",
+        ))
+        .unwrap();
+        assert_eq!(
+            opv::cause::render::cmd_text(&plan),
+            "opv plan prod --target web --product api"
+        );
+    }
+
+    /// 09.21: `sync --dry-run` is its plan, global options kept.
+    #[test]
+    fn sync_dry_run_is_its_plan() {
+        let plan = sync_as_plan(&words("--config ops/s.toml sync prod --dry-run --json")).unwrap();
+        assert_eq!(
+            opv::cause::render::cmd_text(&plan),
+            "opv plan --config ops/s.toml prod --json"
+        );
+    }
+
+    /// 02.15: bootstrap with no secrets.toml and no manifest reports a missing
+    /// configuration, never a guess that starts a second one.
+    #[test]
+    fn bootstrap_without_any_configuration_is_config_not_found() {
+        let r = opv::runner::fake::FakeRunner::new(Vec::new());
+        for _ in 0..40 {
+            r.push_io_error(io::ErrorKind::NotFound);
+        }
+        let cli = Cli::try_parse_from(["opv", "bootstrap"]).unwrap();
+        let e = bootstrap_without_file(
+            &cli,
+            ConfigSource::Discovered,
+            &r,
+            std::path::Path::new("/work"),
+        );
+        assert_eq!(e.code_str(), "config_not_found");
+    }
+
+    /// 02.08: the --timeout help names the real per-call limits.
+    #[test]
+    fn timeout_help_says_a_write_is_killed_after_two_minutes() {
+        let cmd = Cli::command();
+        let help = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "timeout")
+            .and_then(|a| a.get_long_help())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(help.contains("a write after 2 minutes"), "{help}");
+    }
+
+    /// 09.22: a `--json` run's re-check keeps `--json`.
+    #[test]
+    fn config_error_next_keeps_json() {
+        let cli = Cli::try_parse_from(["opv", "status", "prod", "--json"]).unwrap();
+        assert_eq!(recheck_command(&cli.cmd, None), "opv status prod --json");
+    }
+
+    /// 02.16: init and target add say they also create 1Password vaults or items.
+    #[test]
+    fn schema_says_init_also_writes_1password() {
+        let doc = opv::schema::describe(&cli_command(), "test");
+        let init = doc["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "init")
+            .unwrap()
+            .clone();
+        assert_eq!(init["also_writes_1password"], true);
+    }
+
+    /// A failure whose upstream reply has eight lines (more than the box shows).
+    fn eight_line_failure() -> Error {
+        use opv::cause::{Cause, ExitClass, System, Upstream};
+        Error::with_evidence(
+            Cause::Bug { site: "test" },
+            Upstream {
+                source: System::OnePassword,
+                tool: "1Password CLI".into(),
+                version: None,
+                exit: ExitClass::Code { code: 1 },
+                said: (1..=8).map(|i| format!("line {i}")).collect(),
+                removed_advice: false,
+                untrusted: true,
+            },
+        )
+    }
+
+    fn render_with(verbose: bool, utf8: bool) -> Render {
+        Render {
+            inv: opv::cause::Invocation::from_cli(&words("opv status prod")),
+            verbose,
+            utf8,
+        }
+    }
+
+    fn rendered(verbose: bool, utf8: bool) -> String {
+        let step = opv::error::Step {
+            action: None,
+            next: "opv status prod".into(),
+        };
+        render_with(verbose, utf8).text(&eight_line_failure(), &step, None)
+    }
+
+    /// --verbose shows the tool's whole scrubbed reply (design §7.3, owner decision).
+    #[test]
+    fn verbose_failure_text_shows_the_whole_upstream_reply() {
+        assert!(rendered(true, true).contains("line 8"));
+    }
+
+    #[test]
+    fn failure_text_without_verbose_keeps_the_reply_short() {
+        assert!(!rendered(false, true).contains("line 8"));
+    }
+
+    #[test]
+    fn failure_text_in_a_non_utf8_locale_draws_an_ascii_box() {
+        assert!(!rendered(false, false).contains('╭'));
+    }
+
+    #[test]
+    fn verbose_failure_document_carries_the_whole_upstream_reply() {
+        let framed =
+            br#"{"schema_version":1,"ok":false,"exit_code":70,"next":null,"do":null,"error":{}}"#;
+        let out = render_with(true, true).document(&eight_line_failure(), framed.to_vec());
+        let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            doc["error"]["evidence"]["upstream"]["said"]
+                .as_array()
+                .map(Vec::len),
+            Some(8)
+        );
     }
 
     #[test]
@@ -4418,43 +4841,12 @@ mod tests {
         assert!(texts.iter().all(|t| !t.contains("expect-no-change")));
     }
 
-    /// An upgrade refreshes an existing unedited user copy and names it on the given
-    /// (stderr) stream, never on stdout.
-    #[test]
-    fn refresh_agent_skill_announces_an_update_on_the_given_stream() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = opv::app::skill::Target::Claude.path(dir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, opv::app::skill::render("0.0.1")).unwrap();
-
-        let mut err = Vec::new();
-        refresh_agent_skill(dir.path(), "9.9.9", &mut err);
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            format!(
-                "opv: updated the agent skill at {} to 9.9.9\n",
-                path.display()
-            )
-        );
-    }
-
-    #[test]
-    fn refresh_agent_skill_says_nothing_when_all_copies_are_current() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = opv::app::skill::Target::Claude.path(dir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, opv::app::skill::render("9.9.9")).unwrap();
-
-        let mut err = Vec::new();
-        refresh_agent_skill(dir.path(), "9.9.9", &mut err);
-        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
-    }
-
     /// FR-52: `opv skill status` points at the command that refreshes an older copy.
     #[test]
     fn skill_status_names_the_update_command_for_an_older_copy() {
         let copies = vec![opv::app::skill::Copy {
             scope: "user".into(),
+            root: PathBuf::from("/home/x"),
             target: opv::app::skill::Target::Claude,
             path: PathBuf::from("/home/x/.claude/skills/opv/SKILL.md"),
             version: Some("0.1.0".into()),
@@ -4466,7 +4858,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("run opv skill install --user to update")
+                .contains("run opv skill install --user --target claude to update")
         );
     }
 
@@ -4474,6 +4866,7 @@ mod tests {
     fn skill_status_has_no_update_hint_when_every_copy_is_current() {
         let copies = vec![opv::app::skill::Copy {
             scope: "user".into(),
+            root: PathBuf::from("/home/x"),
             target: opv::app::skill::Target::Claude,
             path: PathBuf::from("/home/x/.claude/skills/opv/SKILL.md"),
             version: Some("9.9.9".into()),
@@ -4482,10 +4875,18 @@ mod tests {
         }];
         let mut out = Vec::new();
         write_skill_status(&copies, &mut out).unwrap();
+        assert!(!String::from_utf8(out).unwrap().contains("to update"));
+    }
+
+    /// 05.35: with no copy installed, status says so and names the install.
+    #[test]
+    fn skill_status_with_no_copy_names_the_install() {
+        let mut out = Vec::new();
+        write_skill_status(&[], &mut out).unwrap();
         assert!(
-            !String::from_utf8(out)
+            String::from_utf8(out)
                 .unwrap()
-                .contains("run opv skill install --user to update")
+                .contains("Next: opv skill install")
         );
     }
 }
