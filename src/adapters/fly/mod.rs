@@ -933,6 +933,7 @@ mod tests {
             "Error: You must be authenticated to view this.",
         );
         let principal = crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new("vlt-deploy"),
             item: crate::cause::ItemId::new("itm-deploy"),
             env: crate::cause::EnvName::new("prod"),
             target: crate::cause::TargetName::new("web"),

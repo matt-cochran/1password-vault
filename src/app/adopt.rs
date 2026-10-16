@@ -12,9 +12,7 @@ use std::path::PathBuf;
 
 use super::write_err;
 use crate::adapters::{onepassword, onepassword_tidy};
-use crate::cause::{
-    Cause, Cmd, CommandId, FieldName, Guard, ItemId, NameKind, UsageProblem, VaultId,
-};
+use crate::cause::{Cause, Cmd, FieldName, Guard, ItemId, NameKind, UsageProblem, VaultId};
 use crate::domain::adopt::{Action, AdoptPlan};
 use crate::domain::convention::{self, KEPT_SECTION, Op, TidyPlan};
 use crate::domain::{Boundary, Fleet, Kind, SecretValue, key_label};
@@ -291,12 +289,15 @@ fn write(
 
 /// The adoption plan's own read, `adopt <env> --from <source>` (without `--apply`): after
 /// a write it shows what is in 1Password now and what remains (05.10).
-fn plan_command(env_name: &str, source: &Source) -> CommandId {
+fn plan_command(env_name: &str, source: &Source) -> Cmd {
     let from = match source {
         Source::Dotenv(p) => p.display().to_string(),
         Source::Target(name) => format!("target:{name}"),
     };
-    CommandId(format!("adopt {env_name} --from {from}"))
+    Cmd {
+        command: vec!["adopt".into()],
+        args: vec![env_name.to_string(), "--from".into(), from],
+    }
 }
 
 /// Write `writes` (product, key, value) into their boundary items, one verified edit per
@@ -306,7 +307,7 @@ pub(crate) fn write_values(
     fleet: &Fleet,
     env: &crate::domain::Environment,
     writes: &[(String, String, SecretValue)],
-    by: &CommandId,
+    by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
     let mut by_boundary: BTreeMap<&str, Vec<&(String, String, SecretValue)>> = BTreeMap::new();
@@ -330,7 +331,7 @@ fn write_item(
     env: &crate::domain::Environment,
     b: &Boundary,
     writes: &[&(String, String, SecretValue)],
-    by: &CommandId,
+    by: &Cmd,
     r: &dyn CommandRunner,
 ) -> Result<(), Error> {
     let item = onepassword::read_whole_fresh(r, env, b)?;

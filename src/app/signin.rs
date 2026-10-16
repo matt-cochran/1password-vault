@@ -228,6 +228,7 @@ impl<'a> EnvRunner<'a> {
         })?;
         let login = provider.deploy_login()?;
         let principal = crate::cause::Principal::DeployCredentials {
+            vault: crate::cause::VaultId::new(reference.vault.clone()),
             item: crate::cause::ItemId::new(reference.item.clone()),
             env: crate::cause::EnvName::new(env_name),
             target: crate::cause::TargetName::new(target_name.clone()),

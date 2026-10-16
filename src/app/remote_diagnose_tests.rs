@@ -249,6 +249,7 @@ fn a_rejected_shell_token_names_the_token() {
 #[test]
 fn a_rejected_deploy_credential_names_the_credential() {
     let principal = Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
         item: ItemId::new("item-deploy"),
         env: EnvName::new("prod"),
         target: TargetName::new("web"),

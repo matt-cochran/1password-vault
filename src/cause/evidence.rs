@@ -57,8 +57,13 @@ fn acting_as(p: &Principal) -> Option<String> {
         Principal::ServicePrincipal { client_id } => Some(format!("service principal {client_id}")),
         Principal::AppIdentity { name } => Some(format!("app identity {name}")),
         Principal::StoreIdentity { name } => Some(format!("store identity {name}")),
-        Principal::DeployCredentials { item, env, target } => Some(format!(
-            "deploy credentials {item} of target {target} in environment {env}"
+        Principal::DeployCredentials {
+            vault,
+            item,
+            env,
+            target,
+        } => Some(format!(
+            "deploy credentials {item} (vault {vault}) of target {target} in environment {env}"
         )),
         Principal::ShellToken { var } => Some(format!("the token in {var}")),
     }

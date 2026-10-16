@@ -114,12 +114,15 @@ fn signed_out(seen: Observed, ctx: &DiagnoseContext) -> Cause {
             problem: CredentialProblem::Rejected { needs: Vec::new() },
             seen,
         },
-        Principal::DeployCredentials { item, env, target } => Cause::CredentialRejected {
+        Principal::DeployCredentials {
+            vault,
+            item,
+            env,
+            target,
+        } => Cause::CredentialRejected {
             system: System::Kubernetes,
             credential: CredentialRef::DeployCredentials {
-                // The strategy has no vault reference for the credentials; the call site's
-                // `DiagnoseContext` does not carry one.
-                vault: crate::cause::VaultId::new(""),
+                vault,
                 item,
                 env,
                 target,

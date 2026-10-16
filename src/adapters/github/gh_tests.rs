@@ -299,6 +299,7 @@ fn set_with_rejected_deploy_token(environment: Option<&str>) -> Error {
     let repos = repos();
     let v = SecretValue::new("token-value".into());
     let principal = crate::cause::Principal::DeployCredentials {
+        vault: crate::cause::VaultId::new("vlt-deploy"),
         item: crate::cause::ItemId::new("gh-deploy"),
         env: crate::cause::EnvName::new("prod"),
         target: crate::cause::TargetName::new("ci"),

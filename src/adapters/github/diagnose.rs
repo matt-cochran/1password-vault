@@ -18,7 +18,7 @@
 
 use crate::cause::{
     Cause, CredentialProblem, CredentialRef, DiagnoseContext, ExitClass, Observed, Principal,
-    ResourceKind, ResourceName, ResourceRef, SessionState, System, Unanswered, VarName, VaultId,
+    ResourceKind, ResourceName, ResourceRef, SessionState, System, Unanswered, VarName,
 };
 
 /// The shell variable gh reads first, named when its refusal text cannot be read.
@@ -147,10 +147,13 @@ fn unknown_outcome(seen: &Observed, ctx: &DiagnoseContext) -> Cause {
 fn credential_rejected(seen: Observed, ctx: &DiagnoseContext) -> Cause {
     let credential = match seen.principal() {
         Principal::ShellToken { var } => CredentialRef::ShellToken { var: var.clone() },
-        Principal::DeployCredentials { item, env, target } => CredentialRef::DeployCredentials {
-            // The runner's principal does not carry the item's vault; the renderer names the
-            // item, environment and target that identify the credential.
-            vault: VaultId::new(""),
+        Principal::DeployCredentials {
+            vault,
+            item,
+            env,
+            target,
+        } => CredentialRef::DeployCredentials {
+            vault: vault.clone(),
             item: item.clone(),
             env: env.clone(),
             target: target.clone(),

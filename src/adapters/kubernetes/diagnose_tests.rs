@@ -459,6 +459,7 @@ fn a_rejected_deploy_credential_names_the_credential() {
                 ExitClass::Code { code: 1 },
                 &["get", "secret"],
                 Principal::DeployCredentials {
+                    vault: crate::cause::VaultId::new("vlt-deploy"),
                     item: ItemId::new("itm-deploy"),
                     env: EnvName::new("env-prod"),
                     target: TargetName::new("tgt-web"),

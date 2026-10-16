@@ -39,7 +39,7 @@ const SIM: &str = env!("CARGO_BIN_EXE_opv-sim");
 const ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
 
 /// The most entries `KNOWN_LEGACY.txt` may hold. Lower it as lanes migrate; never raise it.
-const KNOWN_LEGACY_CEILING: usize = 69;
+const KNOWN_LEGACY_CEILING: usize = 62;
 
 /// The commands of the matrix: a slug and the arguments after `opv` (text mode; the `--json`
 /// run appends `--json`). Read-only commands and dry runs only.

@@ -4,10 +4,10 @@ use crate::adapters::onepassword::{Failed, WipeOnDrop, serialize_exact};
 use crate::adapters::onepassword_diagnose::Facts;
 pub use crate::adapters::onepassword_diagnose::SessionCheck;
 use crate::cause::{
-    AccountId, Cause, Closest, CommandId, ConfigSource, CreateKind, DiagnoseContext, EnvName,
-    FieldName, FieldRule, GivenBy, InputKind, IoKind, ItemId, NoTerminal, NotEditable, ProductName,
-    Refind, ResourceKind, ResourceName, ResourceRef, StoreObject, System, Unusable, ValueRow,
-    ValueState, VaultId,
+    AccountId, Cause, Closest, ConfigSource, CreateKind, DiagnoseContext, EnvName, FieldName,
+    FieldRule, GivenBy, InputKind, IoKind, ItemId, NoTerminal, NotEditable, ProductName, Refind,
+    ResourceKind, ResourceName, ResourceRef, StoreObject, System, Unusable, ValueRow, ValueState,
+    VaultId,
 };
 use crate::config;
 use crate::domain::{Kind, SecretValue};
@@ -624,7 +624,7 @@ fn config_compatible(path: &Path, expected: &str, recipe_path: &Path) -> Result<
                 given_by: GivenBy::Discovered,
             },
             reason: NotEditable::Generated {
-                path: recipe_path.to_path_buf(),
+                generator: Some(recipe_path.to_path_buf()),
             },
         }
         .into());
@@ -1280,7 +1280,10 @@ fn verify_saved(
             item: ItemId::new(id),
             // The tidy's read-back counts the lost fields; it does not name them yet.
             fields: vec![FieldName::new(super::plural(lost, "field", "fields"))],
-            by: CommandId("setup".into()),
+            by: crate::cause::Cmd {
+                command: vec!["setup".into()],
+                args: Vec::new(),
+            },
         }
         .into());
     }

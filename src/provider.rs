@@ -114,6 +114,12 @@ pub trait Provider: Sync {
     fn mint_cleanup_hint(&self) -> Option<&'static str> {
         None
     }
+    /// The provider's own listing that finds a credential [`Provider::mint_deploy_credential`]
+    /// made for `target` (A22), for `Cause::SecretNotStored`'s Next; `None` when there is none.
+    fn mint_refind(&self, target: &dyn TargetConfig) -> Option<crate::cause::VendorCmd> {
+        let _ = target;
+        None
+    }
     /// Store kinds this provider declares for `[stores.<name>]` tables (FR-39): the key that
     /// names the kind, e.g. `azure_key_vault = "kv-myapp-prod"`.
     fn store_kinds(&self) -> &'static [&'static str] {

@@ -359,6 +359,12 @@ fn signed_in_check(inv: &Invocation) -> Next {
     }
 }
 
+/// `c` without `--json`, to compare a step with the invocation.
+fn without_json(mut c: Cmd) -> Cmd {
+    c.args.retain(|a| a != "--json");
+    c
+}
+
 /// Whether the situation refuses `next`, with the command as shown. A handoff is a
 /// person's own step, and a re-run is the person's own command, already run without a
 /// terminal: the lack of one here refuses neither.
@@ -433,31 +439,44 @@ fn with_global_config(next: Next, inv: &Invocation) -> Next {
     if !matches!(inv.origin, Origin::Cli) {
         return next;
     }
-    let mut given = Vec::new();
-    let mut words = inv.args.iter();
-    while let Some(a) = words.next() {
-        if a == "--config" {
-            if let Some(v) = words.next() {
-                given = vec![a.clone(), v.clone()];
-            }
-        } else if a.starts_with("--config=") {
-            given = vec![a.clone()];
-        }
-    }
-    if given.is_empty() {
+    let config = flag_given(inv, "--config");
+    // D3 (A14): `--project` is a per-command flag; it rides along only between commands
+    // that take it with the same meaning (a project name).
+    let project = if takes_project(&inv.command) {
+        flag_given(inv, "--project")
+    } else {
+        Vec::new()
+    };
+    if config.is_empty() && project.is_empty() {
         return next;
     }
     let add = |mut c: Cmd| {
-        let end = c
-            .args
-            .iter()
-            .position(|a| a == "--")
-            .unwrap_or(c.args.len());
-        let has = c.args[..end]
-            .iter()
-            .any(|a| a == "--config" || a.starts_with("--config="));
-        if !has && !c.command.is_empty() {
-            c.args.splice(end..end, given.iter().cloned());
+        if c.command.is_empty() {
+            return c;
+        }
+        let for_this = [
+            ("--config", &config),
+            (
+                "--project",
+                if takes_project(&c.command) {
+                    &project
+                } else {
+                    &Vec::new()
+                },
+            ),
+        ];
+        for (flag, given) in for_this {
+            let end = c
+                .args
+                .iter()
+                .position(|a| a == "--")
+                .unwrap_or(c.args.len());
+            let has = c.args[..end]
+                .iter()
+                .any(|a| a == flag || a.starts_with(&format!("{flag}=")));
+            if !has && !given.is_empty() {
+                c.args.splice(end..end, given.iter().cloned());
+            }
         }
         c
     };
@@ -467,6 +486,37 @@ fn with_global_config(next: Next, inv: &Invocation) -> Next {
         Next::Handoff(c) => Next::Handoff(add(c)),
         other => other,
     }
+}
+
+/// The last `flag <value>` (or `flag=value`) of the invocation, as its words.
+fn flag_given(inv: &Invocation, flag: &str) -> Vec<String> {
+    let mut given = Vec::new();
+    let mut words = inv.args.iter();
+    while let Some(a) = words.next() {
+        if a == flag {
+            if let Some(v) = words.next() {
+                given = vec![a.clone(), v.clone()];
+            }
+        } else if a.starts_with(&format!("{flag}=")) {
+            given = vec![a.clone()];
+        }
+    }
+    given
+}
+
+/// The commands whose `--project` names the project (D3); `skill install` and `mcp serve`
+/// take a path under the same name, so they are not among them.
+fn takes_project(command: &[String]) -> bool {
+    let path: Vec<&str> = command.iter().map(String::as_str).collect();
+    matches!(
+        path.as_slice(),
+        ["access"]
+            | ["bootstrap"]
+            | ["explain"]
+            | ["init"]
+            | ["target", "add"]
+            | ["config", "import"]
+    )
 }
 
 /// `c` with the child placeholder (`-- <command>`) when the invocation had a child
@@ -620,8 +670,15 @@ fn principal_words(p: &Principal) -> String {
         Principal::ServicePrincipal { client_id } => format!("service principal {client_id}"),
         Principal::AppIdentity { name } => format!("app identity {name}"),
         Principal::StoreIdentity { name } => format!("store identity {name}"),
-        Principal::DeployCredentials { item, env, target } => {
-            format!("deploy credentials {item} of target {target} in environment {env}")
+        Principal::DeployCredentials {
+            vault,
+            item,
+            env,
+            target,
+        } => {
+            format!(
+                "deploy credentials {item} (vault {vault}) of target {target} in environment {env}"
+            )
         }
         Principal::ShellToken { var } => format!("the token in {var}"),
     }
@@ -933,6 +990,7 @@ fn local_op(op: LocalOp) -> &'static str {
         LocalOp::CurrentExe => "find its own program file",
         LocalOp::HomeDir => "find your home folder",
         LocalOp::Stdout => "write to standard output",
+        LocalOp::RandomSource => "read the operating system's random source",
     }
 }
 
@@ -1027,6 +1085,55 @@ fn plan(action: Option<(Action, String)>, next: Next) -> Plan {
     }
 }
 
+/// The Do and Next of a refused `opv generate`, per reason (F2, R64).
+fn generate_refused(
+    product: &ProductName,
+    key: &KeyName,
+    env: &EnvName,
+    reason: &GenerateRefusal,
+) -> Plan {
+    let fill = |words: String| {
+        Some((
+            Action::FillValue {
+                product: product.clone(),
+                key: key.clone(),
+                env: env.clone(),
+            },
+            words,
+        ))
+    };
+    let pk = format!("{product}/{key}");
+    let open = Next::Check(cmd(&["open"], &[pk.as_str(), "--env", env.as_str()]));
+    match reason {
+        GenerateRefusal::ProviderIssued | GenerateRefusal::NoByteCount => plan(
+            fill(format!(
+                "get {pk} for environment {env} from the provider that issues it, and type it in 1Password"
+            )),
+            open,
+        ),
+        GenerateRefusal::Personal => plan(
+            fill(format!("each person types their own {pk} in 1Password")),
+            open,
+        ),
+        GenerateRefusal::Shared { from } => plan(
+            inspect(format!("generate {from}, the key {pk} reads from")),
+            Next::Run(cmd(&["generate"], &[env.as_str(), from.as_str()])),
+        ),
+        GenerateRefusal::ByteCountOutOfRange => plan(
+            inspect(format!(
+                "give {pk} one of base64_bytes or hex_bytes, between 16 and 1024"
+            )),
+            Next::Run(cmd(&["config", "edit"], &[])),
+        ),
+        GenerateRefusal::HasValue => plan(
+            inspect(format!(
+                "leave {pk} as it is, or rotate it with a reviewed sync"
+            )),
+            Next::Check(cmd(&["plan"], &[env.as_str(), "--rotate", pk.as_str()])),
+        ),
+    }
+}
+
 fn inspect(text: impl Into<String>) -> Option<(Action, String)> {
     Some((Action::Inspect, text.into()))
 }
@@ -1099,11 +1206,17 @@ impl Cause {
                 list_of(shared_with)
             ),
             ConfigNotEditable { source, reason } => match reason {
-                NotEditable::Generated { path } => format!(
-                    "opv does not edit {}: it is generated from {}",
-                    source_words(source),
-                    path.display()
-                ),
+                NotEditable::Generated { generator } => match generator {
+                    Some(g) => format!(
+                        "opv does not edit {}: it is generated from {}",
+                        source_words(source),
+                        g.display()
+                    ),
+                    None => format!(
+                        "opv does not edit {}: it is generated",
+                        source_words(source)
+                    ),
+                },
                 NotEditable::UnsupportedLayout { section } => format!(
                     "opv cannot edit section [{section}] of {}: its layout is not one opv writes",
                     source_words(source)
@@ -1215,6 +1328,10 @@ impl Cause {
                 UsageProblem::UseInstead { command } => {
                     format!("this is done with {} instead", cmd_text(command))
                 }
+                UsageProblem::FileExists { path } => format!(
+                    "{} already exists, and opv replaces it only with --force",
+                    path.display()
+                ),
             },
             AlreadyDeclared { kind, name } => {
                 format!("{} {name} is already declared", name_kind(*kind))
@@ -1431,10 +1548,11 @@ impl Cause {
                     product,
                     key,
                     env,
-                    why,
-                } => {
-                    format!("opv does not generate {product}/{key} for environment {env}: {why}")
-                }
+                    reason,
+                } => format!(
+                    "opv does not generate {product}/{key} for environment {env}: {}",
+                    reason.words()
+                ),
                 self::Guard::RemoteProfileRefuses {
                     profile,
                     asked,
@@ -1496,7 +1614,14 @@ impl Cause {
                 approval_scope: _,
                 then,
             } => {
-                let mut s = then.message();
+                let mut s = match then.as_ref() {
+                    // F3: next to what was already written, "opv wrote nothing" is false.
+                    ChangedBeforeWrite { object } if !done.is_empty() => format!(
+                        "{} changed while opv was working, so opv stopped before writing the rest",
+                        store_object(object)
+                    ),
+                    other => other.message(),
+                };
                 if !done.is_empty() {
                     s.push_str(&format!("; already written: {}", list(done)));
                 }
@@ -1529,8 +1654,8 @@ impl Cause {
                 fields,
                 by,
             } => format!(
-                "after opv {}, fields {} of item {item} in vault {vault} were missing when read back",
-                by.0,
+                "after {}, fields {} of item {item} in vault {vault} were missing when read back",
+                cmd_text(by),
                 list_of(fields)
             ),
             ToolMissing { tool, .. } => format!("{tool} is not installed, or not on PATH"),
@@ -1648,10 +1773,18 @@ impl Cause {
                     format!("approval {plan} is already used")
                 }
             }
+            // F3: the plan id was made by a read; it may never have been approved.
             PlanChanged { old, new, scope: _ } => {
-                format!("the plan changed since it was approved: {old} is now {new}")
+                format!("the plan changed since it was made: {old} is now {new}")
             }
-            PlanUnknown { plan, scope: _ } => format!("no plan {plan} is known"),
+            // F3: the kind of plan the id was given as.
+            PlanUnknown { plan, scope } => match scope {
+                Some(PlanScope::Structural) => format!("no structure plan {plan} is known"),
+                Some(PlanScope::Sync { env, .. }) => {
+                    format!("no sync plan {plan} is known for environment {env}")
+                }
+                None => format!("no plan {plan} is known"),
+            },
             RamDirUnavailable { remote, why, .. } => match remote {
                 Some(p) => format!(
                     "no in-memory folder for the settings file on the host of remote profile {p}: {}",
@@ -1739,6 +1872,48 @@ impl Cause {
                 "another process connected to opv's private pipe for {}'s CLI and was refused; nothing was sent to it",
                 system.label()
             ),
+            ConfigProposalInvalid {
+                source,
+                field,
+                rule,
+            } => {
+                let (what, _) = rule_words(&field.to_string(), rule);
+                format!(
+                    "the change opv proposed for {} would be invalid, so nothing was written: {what}",
+                    source_words(source)
+                )
+            }
+            InputUnreadable { path, kind, io } => format!(
+                "opv could not read the {} {}: {}",
+                input_kind(*kind),
+                path.display(),
+                io_words(*io)
+            ),
+            ItemUnusable {
+                vault,
+                title,
+                problem,
+            } => {
+                let place = match vault {
+                    Some(v) => format!("item {title} in vault {v}"),
+                    None => format!("item {title}"),
+                };
+                match problem {
+                    ItemProblem::WrongCategory => {
+                        format!("the {place} is not a Secure Note, so opv leaves it unchanged")
+                    }
+                    ItemProblem::DuplicateTitle => {
+                        format!("more than one object in 1Password is titled {title}")
+                    }
+                }
+            }
+            SecretNotStored {
+                system, kind, name, ..
+            } => format!(
+                "{} made the {} {name}, but its secret was never stored, so nobody holds it",
+                system.label(),
+                create_kind(*kind)
+            ),
             Bug { site } => format!("opv hit an internal error ({site})"),
         }
     }
@@ -1811,6 +1986,24 @@ impl Cause {
             p.refused = true;
             if matches!(p.next, Next::Rerun) {
                 p.next = signed_in_check(inv);
+            }
+        } else if let Cause::NotSignedIn { system, .. } = self
+            && (sit.ci || !sit.terminal)
+            && matches!(p.next, Next::Rerun)
+            && vendor_sign_in(*system).is_none()
+            && *system != System::OnePassword
+        {
+            // E1: a sign-in with no command of its own (a kube context's credential refresh)
+            // cannot happen in this run, so the same read again would loop. Under CI the Do is
+            // the job's own credential; Next is the read that shows whether the sign-in took.
+            if sit.ci {
+                p.do_text = Some(sign_in_advice(*system, RefusedBecause::Ci));
+                p.refused = true;
+            }
+            let check = signed_in_check(inv);
+            if !matches!(&check, Next::Run(c) if without_json(c.clone()) == without_json(inv_cmd(inv)))
+            {
+                p.next = check;
             }
         }
         if let Some((why, shown)) = refusal(&p.next, inv, sit) {
@@ -1901,10 +2094,16 @@ impl Cause {
                     .map(Next::Check)
             }
         };
-        match candidate {
-            Some(n) if refusal(&n, inv, sit).is_none() => with_global_config(n, inv),
-            _ => Next::None(NoNext::NothingToRun),
-        }
+        // F1, X11: a refused step never leaves Next empty. The read of the same scope first,
+        // then the command's help, then opv's own help (a read nothing refuses).
+        let help = help_of(inv);
+        let top = Next::Check(cmd(&["help"], &[]));
+        candidate
+            .into_iter()
+            .chain([help, top])
+            .map(|n| with_global_config(n, inv))
+            .find(|n| refusal(n, inv, sit).is_none())
+            .unwrap_or(Next::None(NoNext::NothingToRun))
     }
 
     fn plan_raw(&self, inv: &Invocation) -> Plan {
@@ -2017,10 +2216,13 @@ impl Cause {
             }
             ConfigNotEditable { source, reason } => plan(
                 inspect(match reason {
-                    NotEditable::Generated { path } => format!(
-                        "change {} instead, and generate the configuration again",
-                        path.display()
-                    ),
+                    NotEditable::Generated { generator } => match generator {
+                        Some(g) => format!(
+                            "change {} instead, and generate the configuration again",
+                            g.display()
+                        ),
+                        None => "change its generator's input instead, and generate the configuration again".to_string(),
+                    },
                     NotEditable::UnsupportedLayout { section } => {
                         format!(
                             "edit section [{section}] of {} by hand",
@@ -2108,17 +2310,26 @@ impl Cause {
                 given,
                 candidates: _,
                 closest,
-            } => plan(
-                None,
-                match closest
+            } => {
+                let path: Vec<&str> = inv.command.iter().map(String::as_str).collect();
+                let substitute = closest
                     .as_ref()
-                    .and_then(|c| substituted(inv, given, c.as_str()))
-                    .and_then(read_form)
-                {
-                    Some(c) => run_or_handoff(c),
-                    None => name_listing(*kind, inv),
-                },
-            ),
+                    .and_then(|c| substituted(inv, given, c.as_str()));
+                let next = match (kind, path.as_slice(), substitute) {
+                    // F2 (R21): `opv add` into an undeclared environment declares it first.
+                    (NameKind::Environment, ["add"], _) => {
+                        Next::Run(cmd(&["env", "add"], &[given.as_str()]))
+                    }
+                    // F4: setup is a person's guided command; the near name is theirs to run.
+                    (_, ["setup"], Some(c)) => Next::Handoff(c),
+                    (_, _, Some(c)) => match read_form(c) {
+                        Some(c) => run_or_handoff(c),
+                        None => name_listing(*kind, inv),
+                    },
+                    (_, _, None) => name_listing(*kind, inv),
+                };
+                plan(None, next)
+            }
             KeyNotDeclared { key, env, .. } => plan(
                 inspect(format!(
                     "declare {key} for environment {env} (opv add), or use a key it declares"
@@ -2184,6 +2395,10 @@ impl Cause {
                         None => help_of(inv),
                     },
                     UsageProblem::UseInstead { command } => run_or_handoff(command.clone()),
+                    // F4: replacing a file is the person's call.
+                    UsageProblem::FileExists { .. } => {
+                        Next::Handoff(with_child(with_flag(inv_cmd(inv), "--force"), inv))
+                    }
                     UsageProblem::UnknownFlag { closest: None, .. }
                     | UsageProblem::MisplacedBeforeDashDash { .. }
                     | UsageProblem::ConflictsWith { .. }
@@ -2607,32 +2822,28 @@ impl Cause {
                     inspect(format!("keep the credential in 1Password, not in {option}")),
                     help_of(inv),
                 ),
-                self::Guard::ProviderHidesValues { system } => plan(
-                    inspect(format!(
-                        "compare the values at {} yourself if you need to",
-                        system.label()
-                    )),
-                    Next::None(NoNext::NothingToRun),
+                // F2 (R46): the values come from the person, never from the provider.
+                self::Guard::ProviderHidesValues { system: _ } => plan(
+                    inspect(
+                        "put the values in a private dotenv file (chmod 600) or type them in 1Password",
+                    ),
+                    match (inv.command.as_slice(), inv_env(inv)) {
+                        ([c], Some(env)) if c == "adopt" => {
+                            Next::Check(cmd(&["adopt"], &[env, "--help"]))
+                        }
+                        _ => help_of(inv),
+                    },
                 ),
                 self::Guard::ImmutableWithoutRotate { key } => plan(
                     inspect(format!("rotate {key} if it must change")),
                     help_of(inv),
                 ),
                 self::Guard::GenerateRefused {
-                    product, key, env, ..
-                } => plan(
-                    Some((
-                        Action::FillValue {
-                            product: product.clone(),
-                            key: key.clone(),
-                            env: env.clone(),
-                        },
-                        format!(
-                            "fill in {product}/{key} for environment {env} in 1Password yourself"
-                        ),
-                    )),
-                    Next::None(NoNext::NothingToRun),
-                ),
+                    product,
+                    key,
+                    env,
+                    reason,
+                } => generate_refused(product, key, env, reason),
                 self::Guard::RemoteProfileRefuses {
                     profile, allowed, ..
                 } => plan(
@@ -2762,9 +2973,18 @@ impl Cause {
                         list(done)
                     )),
                 };
-                let next = match approval_scope {
-                    Some(scope) => scope_read(scope),
-                    None => plan_read(inv),
+                let path: Vec<&str> = inv.command.iter().map(String::as_str).collect();
+                let next = match (approval_scope, path.as_slice()) {
+                    (Some(scope), _) => scope_read(scope),
+                    // A22: what `target credentials` made is read back with its show form.
+                    (None, ["target", "credentials"]) => {
+                        let mut c = without_consent(inv_cmd(inv));
+                        c.args.retain(|a| a != "--create");
+                        Next::Check(c)
+                    }
+                    // F4: setup's remaining steps are read by doctor, not a structure plan.
+                    (None, ["setup"]) => Next::Run(cmd(&["doctor"], &[])),
+                    (None, _) => plan_read(inv),
                 };
                 plan(action, next)
             }
@@ -2801,10 +3021,7 @@ impl Cause {
                     "restore {} from the history of item {item} in 1Password",
                     list_of(fields)
                 )),
-                Next::Run(Cmd {
-                    command: by.0.split_whitespace().map(str::to_string).collect(),
-                    args: vec![],
-                }),
+                Next::Run(by.clone()),
             ),
             ToolMissing {
                 tool,
@@ -3152,6 +3369,9 @@ impl Cause {
                     LocalOp::Read | LocalOp::Write | LocalOp::CreateDir => {
                         format!("check free space and permissions of {}", path.display())
                     }
+                    LocalOp::RandomSource => {
+                        "check that this system's random source (getrandom, /dev/urandom) is available".to_string()
+                    }
                 }),
                 Next::Rerun,
             ),
@@ -3176,6 +3396,60 @@ impl Cause {
                     "check the processes running as you, and treat this machine as untrusted until you know which one connected",
                 ),
                 Next::Rerun,
+            ),
+            ConfigProposalInvalid {
+                source: _,
+                field,
+                rule,
+            } => {
+                let (_, fix) = rule_words(&field.to_string(), rule);
+                plan(inspect(fix), help_of(inv))
+            }
+            InputUnreadable { path, kind, io: _ } => plan(
+                inspect(format!(
+                    "check that the {} {} exists and you can read it",
+                    input_kind(*kind),
+                    path.display()
+                )),
+                help_of(inv),
+            ),
+            ItemUnusable { title, problem, .. } => plan(
+                inspect(match problem {
+                    ItemProblem::WrongCategory => format!(
+                        "rename or move the item {title} in 1Password, or name another title"
+                    ),
+                    ItemProblem::DuplicateTitle => {
+                        format!("rename the duplicate {title} in 1Password, or name another title")
+                    }
+                }),
+                Next::Rerun,
+            ),
+            SecretNotStored {
+                system,
+                kind,
+                name,
+                env,
+                target,
+                refind,
+            } => plan(
+                Some((
+                    Action::Revoke {
+                        kind: *kind,
+                        name: name.clone(),
+                    },
+                    format!(
+                        "revoke the {} {name} at {}: its secret is lost, and making another one leaves this one behind",
+                        create_kind(*kind),
+                        system.label()
+                    ),
+                )),
+                match refind {
+                    Some(v) => Next::Vendor(v.clone()),
+                    None => Next::Check(cmd(
+                        &["target", "credentials"],
+                        &[env.as_str(), "--target", target.as_str()],
+                    )),
+                },
             ),
             Bug { site: _ } => plan(
                 inspect(format!("report this as an opv bug: {ISSUES_URL}")),
