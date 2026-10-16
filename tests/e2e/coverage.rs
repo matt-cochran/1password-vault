@@ -1262,7 +1262,15 @@ fn snapshot_path(name: &str) -> PathBuf {
     scenario_snapshots().join(format!("{name}.snap"))
 }
 
+/// Scenarios whose messages are platform advice by design (how to install op, where an
+/// in-memory folder lives): their committed snapshot is the Linux one, so other hosts skip
+/// the comparison. The variant still counts as reached from the committed snapshot.
+const LINUX_WORDED: [&str; 2] = ["ram_dir_unavailable", "tool_missing"];
+
 fn snapshot_test(name: &str, build: fn() -> Case, text_only: bool) {
+    if !cfg!(target_os = "linux") && LINUX_WORDED.contains(&name) {
+        return;
+    }
     let got = record(name, build, text_only);
     let path = snapshot_path(name);
     if updating() {
