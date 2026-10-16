@@ -6,7 +6,6 @@
 ## text stderr
 using <SCENARIO>/project/secrets.toml
 1Password (dev): another edit landed while opv was tidying it (version 1 instead of 2); opv did not retry. Check the item's history in 1Password.
-tidied 1Password (dev): moved web/API_KEY from outside every section (hidden in the 1Password app)
 opv: item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 was changed by someone else during opv's write
 Do: check the history of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 and keep the right version
 Next: opv status dev
@@ -18,7 +17,6 @@ Next: opv status dev
 ## json stderr
 using <SCENARIO>/project/secrets.toml
 1Password (dev): another edit landed while opv was tidying it (version 1 instead of 2); opv did not retry. Check the item's history in 1Password.
-tidied 1Password (dev): moved web/API_KEY from outside every section (hidden in the 1Password app)
 opv: item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 was changed by someone else during opv's write
 Do: check the history of item iE2EWEBDEV0000000000000001 in vault vE2EWEBDEV0000000000000001 and keep the right version
 Next: opv status dev
