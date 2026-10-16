@@ -131,6 +131,23 @@ fn substituted(inv: &Invocation, given: &str, with: &str) -> Option<Cmd> {
     hit.then_some(c)
 }
 
+/// The invocation with the value of its `--confirm` (either form) set to `env`; only that
+/// value changes, whatever else names the mistyped environment.
+fn with_confirmation(inv: &Invocation, env: &str) -> Cmd {
+    let mut c = inv_cmd(inv);
+    let mut words = c.args.iter_mut();
+    while let Some(a) = words.next() {
+        if a == "--confirm" {
+            if let Some(v) = words.next() {
+                *v = env.to_string();
+            }
+        } else if a.starts_with("--confirm=") {
+            *a = format!("--confirm={env}");
+        }
+    }
+    c
+}
+
 /// The environment the invocation names: its first argument when that is not a flag.
 fn inv_env(inv: &Invocation) -> Option<&str> {
     inv.args
@@ -2083,7 +2100,7 @@ impl Cause {
                 )
             }
             InputUnreadable { path, kind, io } => format!(
-                "opv could not read the {} {}: {}",
+                "opv could not read {} {}: {}",
                 input_kind(*kind),
                 path.display(),
                 io_words(*io)
@@ -2452,8 +2469,15 @@ impl Cause {
                     },
                 )
             }
-            ConfigNotEditable { source, reason } => plan(
-                inspect(match reason {
+            ConfigNotEditable { source, reason } => {
+                let next = match reason {
+                    // The fix is in the generator's input, outside opv; its configuration is
+                    // generated again from there (retry never: no opv command makes progress).
+                    NotEditable::Generated { .. } => Next::None(NoNext::NothingToRun),
+                    _ => Next::Run(cmd(&["config", "edit"], &[])),
+                };
+                plan(
+                    inspect(match reason {
                     NotEditable::Generated { generator } => match generator {
                         Some(g) => format!(
                             "change {} instead, and generate the configuration again",
@@ -2471,8 +2495,9 @@ impl Cause {
                         "give environment {env} a boundary vault of its own instead of {boundary}"
                     ),
                 }),
-                Next::Run(cmd(&["config", "edit"], &[])),
-            ),
+                    next,
+                )
+            }
             // A14: the person picks the direction, but no step is person-only.
             CopiesDiffer { file, manifest } => plan(
                 Some((
@@ -3502,14 +3527,18 @@ impl Cause {
                     Next::Handoff(c),
                 )
             }
-            // A18 (01.12): only the person knows which environment they meant.
-            ConfirmMismatch { given: _, env } => plan(
-                Some((
-                    Action::Confirm { env: env.clone() },
-                    "check which environment you meant".to_string(),
-                )),
-                Next::Check(cmd(&["plan"], &[env.as_str()])),
-            ),
+            // A18 (01.12): only the person knows which environment they meant; the command
+            // is handed back with the confirmation the environment needs.
+            ConfirmMismatch { given: _, env } => {
+                let c = with_confirmation(inv, env.as_str());
+                plan(
+                    Some((
+                        Action::Confirm { env: env.clone() },
+                        "check which environment you meant".to_string(),
+                    )),
+                    Next::Handoff(c),
+                )
+            }
             ValuesNeeded { env, rows } | KeysBlocking { env, rows } => match rows.first() {
                 Some(first) => {
                     let name = format!("{}/{}", first.product, first.key);
@@ -3742,10 +3771,14 @@ impl Cause {
                 profile: _,
                 host,
                 during: _,
-            } => plan(
-                inspect(format!("check the connection to {host}")),
-                Next::Rerun,
-            ),
+            } => {
+                let next = if inv.has_child {
+                    Next::Rerun
+                } else {
+                    run_or_handoff(inv_cmd(inv))
+                };
+                plan(inspect(format!("check the connection to {host}")), next)
+            }
             RemoteVersionMismatch { profile, .. } => plan(
                 Some((
                     Action::Install { tool: "opv".into() },
@@ -3860,11 +3893,13 @@ impl Cause {
                 rule,
             } => {
                 let (_, fix) = rule_words(&field.to_string(), rule);
-                plan(inspect(fix), help_of(inv))
+                // Retry never: the same proposal meets the same configuration, so Next names
+                // no command; the Do is the change that lets the command run again.
+                plan(inspect(fix), Next::None(NoNext::NothingToRun))
             }
             InputUnreadable { path, kind, io: _ } => plan(
                 inspect(format!(
-                    "check that the {} {} exists and you can read it",
+                    "check that {} {} exists and you can read it",
                     input_kind(*kind),
                     path.display()
                 )),
