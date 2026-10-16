@@ -38,11 +38,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "Bug",
         "an internal error: reachable only through a bug in opv",
     ),
-    // Declared, mapped to a code and given a fixture, but nothing outside src/cause builds it.
-    (
-        "StoreNotReady",
-        "never constructed outside src/cause (a dead variant)",
-    ),
     // The receiver speaks protocol 1 (src/app/remote_delivery.rs PROTOCOL); another
     // protocol's handshake would be invented output: there is no recording of one.
     (
@@ -561,6 +556,8 @@ mod cases {
                 .var("OPV_PROJECT", "no-such-app"),
             &["config", "describe"],
         )
+        // L7: MCP honours OPV_PROJECT as the CLI does.
+        .mcp("opv_configuration", json!({}))
     }
 
     pub fn manifest_ambiguous() -> Case {
@@ -816,6 +813,33 @@ mod cases {
     pub fn plan_unknown() -> Case {
         case(
             Scenario::new(),
+            &["structure", "apply", "sp-0000000000000000"],
+        )
+        .mcp(
+            "opv_structure_apply",
+            json!({"plan_id": "sp-0000000000000000"}),
+        )
+    }
+
+    /// L8: under a person's op session token in the environment (which the MCP server
+    /// refuses to write with), an id that names no plan is still `plan_unknown` first, over
+    /// MCP as on the command line.
+    pub fn plan_unknown_under_an_op_session() -> Case {
+        case(
+            Scenario::new().var("OP_SESSION_e2e", "e2e-test-marker-not-a-session"),
+            &["structure", "apply", "sp-0000000000000000"],
+        )
+        .mcp(
+            "opv_structure_apply",
+            json!({"plan_id": "sp-0000000000000000"}),
+        )
+    }
+
+    /// L8: under a service-account token, the structure is a person's own: the same refusal,
+    /// naming the same command, over MCP as on the command line.
+    pub fn own_session_under_a_service_account() -> Case {
+        case(
+            Scenario::new().var("OP_SERVICE_ACCOUNT_TOKEN", "e2e-test-marker-not-a-token"),
             &["structure", "apply", "sp-0000000000000000"],
         )
         .mcp(
@@ -1414,6 +1438,8 @@ scenarios! {
         approval_used => ApprovalUsed,
         plan_changed => PlanChanged,
         plan_unknown => PlanUnknown,
+        plan_unknown_under_an_op_session => PlanUnknown,
+        own_session_under_a_service_account => NeedsOwnSession,
         local_file_too_open => LocalFileTooOpen,
         private_dir_failed => PrivateDirFailed,
         title_lookup => TitleLookup,
@@ -1465,12 +1491,15 @@ scenarios! {
         approval_used,
         plan_changed,
         plan_unknown,
+        plan_unknown_under_an_op_session,
+        own_session_under_a_service_account,
         local_file_too_open,
         private_dir_failed,
         tool_missing,
         tool_unusable,
         owner_setup_required,
         signed_out_access,
+        manifest_not_found,
     ],
 }
 

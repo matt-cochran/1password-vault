@@ -239,9 +239,12 @@ fn ssh_present() -> &'static str {
 fn prerequisites(runner: &dyn CommandRunner) -> Value {
     let (op, signed_in) = match onepassword::diagnose(runner, &Host::detect) {
         Ok(Session::SignedIn(_)) => ("yes", "yes"),
-        Ok(Session::NotSignedIn | Session::NoAccount | Session::CredentialFailed(_)) => {
-            ("yes", "no")
-        }
+        Ok(
+            Session::NotSignedIn
+            | Session::NoAccount
+            | Session::AccountAbsent(_)
+            | Session::CredentialFailed(_),
+        ) => ("yes", "no"),
         Ok(Session::Unknown) => ("unknown", "unknown"),
         Err(e) if e.code_str() == "dependency_missing" => ("no", "unknown"),
         Err(_) => ("unknown", "unknown"),

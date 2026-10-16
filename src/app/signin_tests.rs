@@ -364,3 +364,13 @@ fn a_rejected_deploy_credential_names_the_vault_of_its_item() {
         }, _)) if vault.as_str() == "deploy-prd"
     ));
 }
+
+/// L2: a target write made through the environment's runner counts as started, so a
+/// budget spent after it never says "before any write".
+#[test]
+fn a_target_write_through_the_environment_runner_counts_as_started() {
+    let r = FakeRunner::new([fly_empty()]);
+    let er = EnvRunner::new(&r, None);
+    let _ = er.write(&crate::runner::Call::new("flyctl", &["secrets", "import"]));
+    assert!(er.writes_started());
+}

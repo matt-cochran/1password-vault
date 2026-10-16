@@ -236,12 +236,14 @@ fn doctor_scoped(
 }
 
 /// Flags of `sync` that `plan` takes too, with whether each takes a value.
-const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 5] = [
+const SYNC_FLAGS_PLAN_KEEPS: [(&str, bool); 7] = [
     ("--target", true),
     ("--product", true),
     ("--rotate", true),
     ("--json", false),
     ("--config", true),
+    ("--timeout", true),
+    ("--verbose", false),
 ];
 
 /// The read form of a command, so a substituted name never lands in a write (§4.2): `sync`
@@ -1087,15 +1089,6 @@ fn local_op(op: LocalOp) -> &'static str {
         }
         LocalOp::RandomSource => "read the operating system's random source",
     }
-}
-
-/// A condition's reason code as shown: a CamelCase word only (names only, X19); anything
-/// else is upstream free text and is never echoed.
-fn reason_code(reason: &str) -> &str {
-    let word = !reason.is_empty()
-        && reason.len() <= 64
-        && reason.chars().all(|c| c.is_ascii_alphanumeric());
-    if word { reason } else { "unrecognised" }
 }
 
 /// A value 1Password shows only in edit mode: an empty field (found live, 0.9.x). The
@@ -2062,11 +2055,6 @@ impl Cause {
                     )
                 }
             }
-            StoreNotReady { store, reason } => format!(
-                "{} is not ready (reason: {})",
-                resource_words(store),
-                reason_code(reason)
-            ),
             HandoffPipeContested { system } => format!(
                 "another process connected to opv's private pipe for {}'s CLI and was refused; nothing was sent to it",
                 system.label()
@@ -3568,6 +3556,24 @@ impl Cause {
             }
             InputInvalid {
                 path,
+                kind: InputKind::Dotenv,
+                at,
+                field,
+                rule,
+            } => {
+                // A `.env` holds secret values only a person may open, so the Do is a
+                // person's edit of that file.
+                let (_, fix) = rule_words(field, rule);
+                plan(
+                    Some((
+                        Action::EditInput { path: path.clone() },
+                        format!("edit {}{}: {fix}", path.display(), at_words(at)),
+                    )),
+                    Next::Rerun,
+                )
+            }
+            InputInvalid {
+                path,
                 kind: _,
                 at,
                 field,
@@ -3831,22 +3837,6 @@ impl Cause {
                     }
                 }),
                 Next::Rerun,
-            ),
-            StoreNotReady { store, reason } => plan(
-                Some((
-                    Action::OwnerSetup {
-                        object: store.clone(),
-                    },
-                    format!(
-                        "ask a cluster admin to make {} ready (its reason: {})",
-                        resource_words(store),
-                        reason_code(reason)
-                    ),
-                )),
-                vendor(
-                    "kubectl",
-                    &["get", "clustersecretstore", store.name.as_str()],
-                ),
             ),
             HandoffPipeContested { .. } => plan(
                 inspect(

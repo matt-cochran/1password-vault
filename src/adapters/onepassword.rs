@@ -127,7 +127,7 @@ impl fmt::Display for IdentityType {
 
 /// The 1Password session state, found without reading any item (FR-26, FR-13): `op whoami`
 /// and, when it fails, `op account list` (both free under rate limits, D0).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Session {
     /// `op whoami` succeeded.
     SignedIn(IdentityType),
@@ -139,6 +139,10 @@ pub enum Session {
     CredentialFailed(OpCredential),
     /// `op whoami` failed and `op account list` is empty: no account on this machine.
     NoAccount,
+    /// `op whoami` failed because op has no account matching the one selected (`no account
+    /// found for filter`, recorded case 02): the account is added, never signed in to. The
+    /// cause is the 1Password strategy's own (L9).
+    AccountAbsent(Box<Cause>),
     /// `op whoami` could not run to completion (spawn error or timeout); nothing known.
     Unknown,
 }
@@ -168,6 +172,17 @@ pub fn diagnose(r: &dyn CommandRunner, host: &dyn Fn() -> Host) -> Result<Sessio
     }
     if h.ci {
         return Ok(Session::NotSignedIn);
+    }
+    // L9: an account op does not know is the strategy's to name (case 02), not a sign-in.
+    if let Some(f) = crate::runner::take_failure() {
+        let cause = super::onepassword_diagnose::diagnose(
+            f.seen.clone(),
+            f.stderr(),
+            &crate::cause::DiagnoseContext::default(),
+        );
+        if matches!(cause, Cause::AccountNotOnMachine { .. }) {
+            return Ok(Session::AccountAbsent(Box::new(cause)));
+        }
     }
     Ok(
         match r.probe(
@@ -496,6 +511,7 @@ fn session_cause(
                 SessionState::SignedOut
             },
         }),
+        Session::AccountAbsent(cause) => Some(*cause),
         Session::NoAccount => Some(Cause::AccountNotOnMachine {
             account: ctx.account.clone().map_or_else(
                 || AccountRef::Shorthand(NO_ACCOUNT_YET.to_string()),
@@ -622,7 +638,7 @@ fn unsettled(
     cause: Cause,
 ) -> Result<(Cause, bool), Error> {
     let session = diagnose(r, host)?;
-    if let Some(c) = session_cause(session, &host(), ctx, Some(seen)) {
+    if let Some(c) = session_cause(session.clone(), &host(), ctx, Some(seen)) {
         return Ok((c, false));
     }
     if session == Session::Unknown {
@@ -743,7 +759,7 @@ pub(crate) fn failed_edit(
     let checked = crate::runner::diagnosing(|| -> Result<Cause, Error> {
         let session = diagnose(r, host)?;
         Ok(
-            match session_cause(session, &host(), ctx, Some(&failed.seen)) {
+            match session_cause(session.clone(), &host(), ctx, Some(&failed.seen)) {
                 Some(c) => c,
                 // The session could not be checked, so the refusal is not known to be
                 // definite: the edit may or may not have been applied (NR-2).
@@ -2236,6 +2252,20 @@ mod tests {
             diagnose(&r, &|| h).unwrap();
             assert_eq!(argvs(&r), vec!["op whoami --format json"], "{env:?}");
         }
+    }
+
+    /// L9: `op whoami` for an account op does not know (recorded case 02) is that
+    /// account to add, never a sign-in.
+    #[test]
+    fn whoami_without_the_selected_account_is_an_account_to_add() {
+        let r = FakeRunner::default();
+        r.push_with_stderr(
+            Output::failure(1),
+            include_str!("../../tests/fixtures/op/failures/02-account-not-on-machine.stderr"),
+        );
+        let h = Host::from_env(&FakeEnv::new("linux"));
+        let e = session_error(diagnose(&r, &|| h).unwrap(), &h, None, None).unwrap();
+        assert_eq!(e.code_str(), "account_not_registered");
     }
 
     #[test]

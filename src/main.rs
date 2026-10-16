@@ -1937,6 +1937,11 @@ fn usage_error(e: clap::Error) -> ExitCode {
         e.exit();
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // L6: `opv run ... --json` without `--preview` is the usage problem `--json needs
+    // --preview`, not clap's `MissingRequiredArgument` list.
+    if let Some(cause) = json_without_preview(&e, &args) {
+        return usage_cause(cause, true);
+    }
     // `opv sync <env> --dry-run`: the dry run of a sync is its plan (09.21), named with every
     // flag plan keeps; clap's own tip ("use -- --dry-run") does not apply to sync.
     if e.kind() == ErrorKind::UnknownArgument
@@ -1977,12 +1982,7 @@ fn usage_error(e: clap::Error) -> ExitCode {
     // Any other command line clap refuses: clap's own first line (it names the argument it
     // could not place), and the help of the deepest subcommand named (M10).
     let text = e.render().to_string();
-    let message = text
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches("error: ")
-        .to_string();
+    let message = clap_message(&text);
     usage_cause(
         opv::cause::Cause::Usage {
             problem: opv::cause::UsageProblem::Rejected {
@@ -1992,6 +1992,63 @@ fn usage_error(e: clap::Error) -> ExitCode {
         },
         json,
     )
+}
+
+/// L6: `opv run ... --json` without `--preview`, which clap reports as
+/// `MissingRequiredArgument`. The words before `--` name `run` and `--json` and no
+/// `--preview`; the cause is the same `--json needs --preview` `misplaced_run_flag` builds.
+fn json_without_preview(e: &clap::Error, args: &[String]) -> Option<opv::cause::Cause> {
+    use clap::error::ErrorKind;
+    use opv::cause::{Cause, UsageProblem};
+    if e.kind() != ErrorKind::MissingRequiredArgument {
+        return None;
+    }
+    let before_dashes = args.iter().take_while(|a| a.as_str() != "--");
+    let mut run = false;
+    let mut json = false;
+    for word in before_dashes {
+        match word.as_str() {
+            "run" => run = true,
+            "--json" => json = true,
+            "--preview" => return None,
+            _ => {}
+        }
+    }
+    if !run || !json {
+        return None;
+    }
+    Some(Cause::Usage {
+        problem: UsageProblem::NeedsFlag {
+            flag: "--json".into(),
+            needs: "--preview".into(),
+        },
+    })
+}
+
+/// L6: clap's rendered error text as the `Rejected` message. The `error: ` prefix goes;
+/// when the first line ends with `:`, the indented non-empty lines after it are joined
+/// with `, ` and appended after a space, so a list never renders empty. Stops at the
+/// first blank line (before clap's `Usage:` block).
+fn clap_message(rendered: &str) -> String {
+    let mut lines = rendered.lines();
+    let first = lines
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("error: ")
+        .to_string();
+    if !first.ends_with(':') {
+        return first;
+    }
+    let items: Vec<&str> = lines
+        .take_while(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if items.is_empty() {
+        first
+    } else {
+        format!("{first} {}", items.join(", "))
+    }
 }
 
 /// The command `args` meant, when clap's error names a fix that parses (09.03, 09.83): the
@@ -4603,6 +4660,47 @@ mod tests {
         let argv = words("opv run dev --product api --json -- true");
         let e = misplaced_run_flag(&words("--json -- true"), &argv).unwrap();
         assert_eq!(e.to_string(), "--json needs --preview");
+    }
+
+    /// L6: `opv run dev --json` without `--preview` is the usage problem `--json needs
+    /// --preview`, not clap's "required arguments were not provided" with an empty list.
+    #[test]
+    fn run_json_without_preview_names_json_needing_preview() {
+        let e = Cli::try_parse_from(["opv", "run", "dev", "--json"])
+            .err()
+            .unwrap();
+        let cause = json_without_preview(&e, &words("run dev --json")).unwrap();
+        assert_eq!(Error::from(cause).to_string(), "--json needs --preview");
+    }
+
+    /// L6: the same diagnosis holds when a child command follows the dashes.
+    #[test]
+    fn run_json_without_preview_before_a_child_names_json_needing_preview() {
+        let e = Cli::try_parse_from(["opv", "run", "dev", "--json", "--", "true"])
+            .err()
+            .unwrap();
+        let cause = json_without_preview(&e, &words("run dev --json -- true")).unwrap();
+        assert_eq!(Error::from(cause).to_string(), "--json needs --preview");
+    }
+
+    /// L6: a clap list message keeps its items rather than ending on the colon.
+    #[test]
+    fn clap_message_keeps_the_items_of_a_list() {
+        assert_eq!(
+            clap_message(
+                "error: the following required arguments were not provided:\n  --preview\n\nUsage: opv run\n"
+            ),
+            "the following required arguments were not provided: --preview"
+        );
+    }
+
+    /// L6: a one-line clap message is unchanged but for the `error: ` prefix.
+    #[test]
+    fn clap_message_of_a_one_line_error_drops_the_prefix() {
+        assert_eq!(
+            clap_message("error: unexpected argument 'x' found\n"),
+            "unexpected argument 'x' found"
+        );
     }
 
     /// 02.09: a misspelt flag placed before `--` is named as unknown, not blamed on its

@@ -829,6 +829,22 @@ fn status_without_env_reports_an_unreadable_environment_and_goes_on() {
     );
 }
 
+/// L10: an unreadable target's error names the environment the overview knows, so its
+/// `Next:` can be scoped to it.
+#[test]
+fn status_without_env_names_the_environment_an_unreadable_target_belongs_to() {
+    let r = FakeRunner::new([complete_item(), fly_empty(), staging_item()]);
+    (0..crate::runner::READ_ATTEMPTS)
+        .for_each(|_| r.push_with_stderr(Output::failure(1), "unrecognised reply"));
+    let (res, _) = overview_out(&fleet(), &r);
+    let e = res.unwrap_err();
+    let env = match e.cause() {
+        Some((crate::cause::Cause::Unrecognized { env, .. }, _)) => env.clone(),
+        other => panic!("expected Unrecognized, got {other:?}"),
+    };
+    assert_eq!(env.map(|n| n.to_string()), Some("staging".to_string()));
+}
+
 // ---- P4: provider-neutral wording ---------------------------------------------------
 
 #[test]

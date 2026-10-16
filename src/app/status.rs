@@ -462,6 +462,9 @@ pub fn overview_of(fleet: &Fleet, product: Option<&str>, r: &dyn CommandRunner) 
                 });
             }
             Err(e) => {
+                // The overview knows the environment's name even when the adapter that
+                // classified the failure did not (L10).
+                let e = e.in_env(name);
                 let first = e.to_string().lines().next().unwrap_or_default().to_string();
                 // The error's own step (design §6.1), never one rebuilt here.
                 let next = super::own_step(&e).1;

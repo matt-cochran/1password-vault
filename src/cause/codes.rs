@@ -358,6 +358,12 @@ fn variants(c: &Cause) -> Vec<Cause> {
         Guard { .. } => vec![Guard {
             guard: super::Guard::Declined,
         }],
+        // L5: a dotenv file is a person's to fix; a setup recipe is not.
+        InputInvalid { .. } => vec![varied(c, |v| {
+            if let InputInvalid { kind, .. } = v {
+                *kind = InputKind::SetupRecipe;
+            }
+        })],
         CreateOutcomeUnknown { .. } => vec![varied(c, |v| {
             if let CreateOutcomeUnknown { refind, .. } = v {
                 *refind = Refind::ByTitle;
@@ -791,10 +797,6 @@ fn one_of_each() -> Vec<Cause> {
             op: LocalOp::Write,
             path: PathBuf::from("/work/secrets.toml"),
             io: IoKind::PermissionDenied,
-        },
-        StoreNotReady {
-            store: res(ResourceKind::ExternalStore, "store-op"),
-            reason: "InvalidProviderConfig".into(),
         },
         HandoffPipeContested {
             system: System::Azure,

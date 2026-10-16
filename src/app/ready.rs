@@ -869,7 +869,13 @@ pub fn run(
         super::environment(fleet, e)?;
     }
     // #157: nobody signed in is one finding of its own, never every target's missing grant.
-    crate::adapters::onepassword::require_session(r, &crate::host::Host::detect, "opv ready")?;
+    // L9: an account op does not know is not a failure here: the account report below names
+    // it (`selected_account_absent`) with its step, `opv login --add`.
+    match crate::adapters::onepassword::require_session(r, &crate::host::Host::detect, "opv ready")
+    {
+        Err(e) if e.code_str() == "account_not_registered" => {}
+        other => other?,
+    }
     let account = super::account::gather(r, None);
     // FR-55: the environments' own order, then their keys; never a fixed list.
     let mut ordered: Vec<(&String, &crate::domain::Environment)> = fleet

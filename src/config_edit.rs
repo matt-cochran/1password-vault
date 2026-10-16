@@ -353,11 +353,11 @@ pub(crate) fn write_atomic(
         .file_name()
         .map_or_else(|| "secrets.toml".into(), |n| n.to_string_lossy());
     let tmp: PathBuf = dir.join(format!(".{name}.opv.{}.tmp", std::process::id()));
-    // A3: opv's own write failed: `LocalIo`, naming the path (never the content).
-    let fail = |_what: &str, p: &Path, e: io::Error| -> Error {
+    // A3: opv's own write failed: `LocalIo`, naming the destination path (never the content).
+    let fail = |e: io::Error| -> Error {
         crate::cause::Cause::LocalIo {
             op: crate::cause::LocalOp::Write,
-            path: p.to_path_buf(),
+            path: target.to_path_buf(),
             io: crate::cause::IoKind::from(e.kind()),
         }
         .into()
@@ -367,16 +367,16 @@ pub(crate) fn write_atomic(
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .map_err(|e| fail("create", &tmp, e))?;
+            .map_err(fail)?;
         f.write_all(text.as_bytes())
             .and_then(|()| f.sync_all())
-            .map_err(|e| fail("write", &tmp, e))?;
+            .map_err(fail)?;
         drop(f);
         if let Ok(meta) = fs::metadata(target) {
-            fs::set_permissions(&tmp, meta.permissions()).map_err(|e| fail("write", &tmp, e))?;
+            fs::set_permissions(&tmp, meta.permissions()).map_err(fail)?;
         }
         before_rename()?;
-        fs::rename(&tmp, target).map_err(|e| fail("write", target, e))
+        fs::rename(&tmp, target).map_err(fail)
     })();
     if res.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -394,6 +394,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let e = write_atomic(&dir.path().join("no/such/secrets.toml"), "", || Ok(())).unwrap_err();
         assert_eq!(e.code_str(), "local_io_failed");
+    }
+
+    #[test]
+    fn a_write_failure_names_the_destination_not_opvs_temp_file() {
+        // A3: the LocalIo path is the file the person asked for, not opv's temporary file.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("no/such/secrets.toml");
+        let e = write_atomic(&dest, "", || Ok(())).unwrap_err();
+        let Some((Cause::LocalIo { path, .. }, _)) = e.cause() else {
+            panic!("expected LocalIo, got {e:?}");
+        };
+        assert_eq!(path, &dest);
     }
 
     const FILE: &str = "# top comment\n[environments.prod]  # the live one\nvault_id = \"v\"\nitem_id = \"i\"\n\n# api keys\n[products.api.keys.A]\nkind = \"secret\"\nenvironments = [\"prod\"]  # only prod\n";

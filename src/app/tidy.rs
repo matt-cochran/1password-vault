@@ -186,7 +186,7 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
             match onepassword::diagnose(r, &Host::detect) {
                 Ok(Session::NotSignedIn) => return Err(not_signed_in(what)),
                 // #157: no account on this machine is added first (`opv login --add`).
-                Ok(s @ Session::NoAccount) => {
+                Ok(s @ (Session::NoAccount | Session::AccountAbsent(_))) => {
                     if let Some(e) =
                         onepassword::session_error(s, &Host::detect(), Some(what), None)
                     {
@@ -510,7 +510,7 @@ fn read_item_as(
     }
     match tidy(r, fleet, env_name, env, b, &date, stamp, plan) {
         Ok(Some(t)) => {
-            if !t.changes.is_empty() {
+            if !t.changes.is_empty() && t.failure.is_none() {
                 r.note(&format!(
                     "tidied 1Password ({env_name}): {}",
                     convention::summary(&t.changes)
