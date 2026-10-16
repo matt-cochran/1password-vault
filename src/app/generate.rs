@@ -17,8 +17,12 @@ use std::io::Write;
 use base64::Engine as _;
 
 use super::write_err;
+use crate::cause::{
+    Cause, CommandId, EnvName, Guard, IoKind, KeyName, NameKind, ProductName, Unusable,
+    UsageProblem,
+};
 use crate::domain::{KeySpec, SecretValue, key_label};
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::runner::CommandRunner;
 
 /// How a key's value is generated: its encoding and byte count.
@@ -38,32 +42,43 @@ impl Recipe {
     }
 }
 
-/// The recipe a key's rules give, or why opv will not generate it.
-pub fn recipe(label: &str, spec: &KeySpec) -> Result<Recipe, Error> {
-    let r = &spec.rules;
-    let refuse = |why: &str| {
-        Error::Policy(format!("{label}: {why}; opv generates only self-made secrets").into())
-            .with_code(Code::PolicyRefused)
-            .with_do("ask the person to create the value at its provider and type it in 1Password")
-            .with_next(format!("opv open {label}"))
-    };
-    if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
-        return Err(refuse("its prefix rule says the provider issues it"));
+/// Why opv does not generate `product/key` in `env`, as the catalog's guard (R64). Each
+/// reason is said apart (05.11): a provider-issued key, a personal one, a shared one, a
+/// byte count out of range, a field that already holds a value.
+fn refused(product: &str, key: &str, env: &str, why: &'static str) -> Error {
+    Cause::Guard {
+        guard: Guard::GenerateRefused {
+            product: ProductName::new(product),
+            key: KeyName::new(key),
+            env: EnvName::new(env),
+            why,
+        },
     }
-    if spec.personal || spec.from.is_some() {
-        return Err(refuse("it is a personal or shared key"));
+    .into()
+}
+
+/// The recipe a key's rules give, or why opv will not generate `product/key` in `env`.
+pub fn recipe(product: &str, key: &str, env: &str, spec: &KeySpec) -> Result<Recipe, Error> {
+    let r = &spec.rules;
+    let refuse = |why: &'static str| Err(refused(product, key, env, why));
+    if r.prefix.is_some() || r.ensure_prefix.is_some() || r.prefix_by_mode.is_some() {
+        return refuse("its prefix rule says the provider issues it");
+    }
+    if spec.personal {
+        return refuse("it is a personal key, so each person has their own value");
+    }
+    if spec.from.is_some() {
+        return refuse("it is a shared key, so its value comes from the key it reads from");
     }
     match (r.base64_bytes, r.hex_bytes) {
         (Some(n), None) if (16..=1024).contains(&n) => Ok(Recipe::Base64(n)),
         (None, Some(n)) if (16..=1024).contains(&n) => Ok(Recipe::Hex(n)),
         (Some(_) | None, Some(_) | None) if r.base64_bytes.is_some() || r.hex_bytes.is_some() => {
-            Err(refuse(
-                "its byte count must be 16 to 1024, from one of base64_bytes or hex_bytes",
-            ))
+            refuse("its rules must give one of base64_bytes or hex_bytes, between 16 and 1024")
         }
-        _ => Err(refuse(
+        _ => refuse(
             "its rules give no byte length (base64_bytes or hex_bytes), so the provider issues it",
-        )),
+        ),
     }
 }
 
@@ -73,8 +88,12 @@ pub fn make(recipe: Recipe) -> Result<SecretValue, Error> {
         Recipe::Base64(n) | Recipe::Hex(n) => n,
     };
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; n]);
-    getrandom::fill(&mut bytes).map_err(|_| {
-        Error::Dependency("the operating system's random source failed; nothing was written".into())
+    getrandom::fill(&mut bytes).map_err(|_| -> Error {
+        Cause::ToolUnusable {
+            tool: "the operating system's random source".into(),
+            why: Unusable::SpawnFailed { io: IoKind::Other },
+        }
+        .into()
     })?;
     let text = match recipe {
         Recipe::Base64(_) => base64::engine::general_purpose::STANDARD.encode(&*bytes),
@@ -103,23 +122,23 @@ pub fn run(
             .iter()
             .any(|f| f.section == *product && f.label == *key && !f.value.expose().is_empty());
         if filled {
-            return Err(Error::Policy(
-                format!(
-                    "{} already has a value in 1Password; opv generate never replaces one \
-                     (rotation is a reviewed step); nothing was written",
-                    key_label(product, key)
-                )
-                .into(),
-            )
-            .with_code(Code::PolicyRefused)
-            .with_next(format!("opv explain {}", key_label(product, key))));
+            return Err(refused(
+                product,
+                key,
+                env_name,
+                "its field already holds a value, and opv generate never replaces one \
+                 (rotation is a reviewed step)",
+            ));
         }
     }
     let writes: Vec<(String, String, SecretValue)> = chosen
         .iter()
         .map(|(p, k, rcp)| make(*rcp).map(|v| (p.clone(), k.clone(), v)))
         .collect::<Result<_, _>>()?;
-    super::adopt::write_values(fleet, env, &writes, r)?;
+    // A read-back failure names this command (05.10): run again, a value that landed is
+    // refused as already there, never replaced.
+    let by = CommandId(format!("generate {env_name} {}", keys.join(" ")));
+    super::adopt::write_values(fleet, env, &writes, &by, r)?;
     for (p, k, rcp) in &chosen {
         writeln!(
             out,
@@ -129,7 +148,11 @@ pub fn run(
         )
         .map_err(write_err)?;
     }
-    writeln!(out, "Next: opv status {env_name}").map_err(write_err)
+    let next = crate::cause::Cmd {
+        command: vec!["status".into()],
+        args: vec![env_name.to_string()],
+    };
+    writeln!(out, "Next: {}", crate::cause::render::cmd_text(&next)).map_err(write_err)
 }
 
 /// The recipe chosen for each `product/KEY` in `env_name`, after every name and declaration
@@ -143,26 +166,39 @@ pub fn plan(
     fleet.environment(env_name)?;
     let mut chosen: Vec<(String, String, Recipe)> = Vec::new();
     for k in keys {
-        let (product, key) = k.split_once('/').ok_or_else(|| {
-            Error::Config(format!("{k:?} must be <product>/<KEY>").into()).with_code(Code::Usage)
+        let (product, key) = k.split_once('/').ok_or_else(|| -> Error {
+            Cause::Usage {
+                problem: UsageProblem::ValueFormat {
+                    flag: k.clone(),
+                    format: "<product>/<KEY>",
+                },
+            }
+            .into()
         })?;
-        let spec = fleet
-            .products
-            .get(product)
-            .and_then(|p| p.keys.get(key))
-            .ok_or_else(|| {
-                Error::Config(format!("{k} is not declared").into()).with_code(Code::UndeclaredKey)
-            })?;
-        if !spec.environments.iter().any(|e| e == env_name) {
-            return Err(
-                Error::Config(format!("{k} is not declared for {env_name}").into())
-                    .with_code(Code::UndeclaredKey),
-            );
-        }
+        // Declared at all, then declared for this environment: each names the keys that
+        // are (05.39), so a typo gets the same command with the right name.
+        let spec = fleet.products.get(product).and_then(|p| p.keys.get(key));
+        let Some(spec) = spec.filter(|s| s.environments.iter().any(|e| e == env_name)) else {
+            let declared: Vec<String> = fleet
+                .products
+                .iter()
+                .flat_map(|(p, prod)| {
+                    prod.keys
+                        .iter()
+                        .filter(|(_, s)| s.environments.iter().any(|e| e == env_name))
+                        .map(move |(k, _)| key_label(p, k))
+                })
+                .collect();
+            return Err(super::not_declared(
+                NameKind::Key,
+                k,
+                declared.iter().map(String::as_str),
+            ));
+        };
         chosen.push((
             product.into(),
             key.into(),
-            recipe(&key_label(product, key), spec)?,
+            recipe(product, key, env_name, spec)?,
         ));
     }
     Ok(chosen)

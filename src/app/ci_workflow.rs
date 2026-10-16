@@ -18,7 +18,7 @@ use super::write_err;
 use crate::cause::Cmd;
 use crate::cause::render::cmd_text;
 use crate::domain::Fleet;
-use crate::error::{Code, Error};
+use crate::error::Error;
 use crate::provider::Provider;
 
 /// Print the workflow for target `target` of `env`, or refuse before writing anything.
@@ -30,12 +30,9 @@ pub fn run(
     deploy: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    // Both an unknown environment and an unknown target are usage errors (exit 2), and the
-    // target is resolved before a byte is written.
-    let (e, t) = super::target(fleet, env, target).map_err(|e| match e.code() {
-        Code::UnknownEnv => e.with_code(Code::Usage),
-        _ => e,
-    })?;
+    // An unknown environment or target is `NotDeclared` (exit 2, C14), resolved before a
+    // byte is written.
+    let (e, t) = super::target(fleet, env, target)?;
     let recorded = e
         .targets
         .get(target)
