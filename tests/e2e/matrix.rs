@@ -264,7 +264,7 @@ impl Scenario {
             .env_clear()
             .env(
                 "PATH",
-                format!("{}:/usr/bin:/bin", self.path("bin").display()),
+                format!("{}:{}", self.path("bin").display(), system_bin().display()),
             )
             .env("HOME", self.path("home"))
             .env("OPV_NO_SKILL", "1")
@@ -345,6 +345,44 @@ impl Scenario {
             .replace_all(&s, r#"{"name":"core dumps","host":true}"#)
             .into_owned()
     }
+}
+
+/// The tools the simulator stands in for: never taken from the host.
+const SIMULATED: &[&str] = &["op", "flyctl", "fly", "kubectl", "gh", "ssh", "az"];
+
+/// `/usr/bin` and `/bin` without the simulated tools (one directory of links, made once per
+/// build): a tool the scenario leaves out is then missing, as a `tool_missing` fault means,
+/// never the host's own copy (a runner image ships `gh` and `ssh` in `/usr/bin`).
+fn system_bin() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-system-bin");
+        if dir.is_dir() {
+            return dir;
+        }
+        // Built aside and renamed into place, so a test process never sees half of it.
+        let tmp = dir.with_extension(std::process::id().to_string());
+        std::fs::create_dir_all(&tmp).expect("system bin");
+        for sys in ["/usr/bin", "/bin"] {
+            let Ok(entries) = std::fs::read_dir(sys) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name();
+                if SIMULATED.iter().any(|t| name == *t) {
+                    continue;
+                }
+                let link = tmp.join(&name);
+                if std::fs::symlink_metadata(&link).is_err() {
+                    let _ = std::os::unix::fs::symlink(e.path(), &link);
+                }
+            }
+        }
+        if std::fs::rename(&tmp, &dir).is_err() {
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+        dir
+    })
 }
 
 /// A retry's jittered delay.
@@ -787,9 +825,15 @@ impl Rule {
                 let safe = e.get("retry").and_then(Value::as_str) == Some("safe");
                 // Design §11 `no_loop`: a person-only Do before the same command changes
                 // what it meets (a sign-in), so that re-run is no loop.
-                let person_first = e.get("human_required").and_then(Value::as_bool) == Some(true)
-                    && e.get("do").is_some_and(|d| !d.is_null());
-                if same && !safe && !person_first {
+                let has_do = e.get("do").is_some_and(|d| !d.is_null());
+                let person_first =
+                    e.get("human_required").and_then(Value::as_bool) == Some(true) && has_do;
+                // Retry after_fix: the Do is the fix (installing a missing tool, R56, is the
+                // agent's own), so the re-run after it meets something else, as the catalog's
+                // `no_loop` holds for any cause whose re-run follows a Do.
+                let fixed_first =
+                    e.get("retry").and_then(Value::as_str) == Some("after_fix") && has_do;
+                if same && !safe && !person_first && !fixed_first {
                     Err(format!(
                         "next {next:?} reruns the failing command without a safe retry"
                     ))

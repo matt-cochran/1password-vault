@@ -1,20 +1,20 @@
 # access__op_whoami__tool_missing: opv access | fault tool_missing on op whoami
 
-## text exit: 7
+## text exit: 3
 ## text stdout
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-opv: you are not signed in to 1Password
-Do: sign in to 1Password
-Next: opv login -- opv access
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv access
 
-## json exit: 7
+## json exit: 3
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":7,"next":"opv login -- opv access --json","do":"sign in to 1Password","error":{"code":"op_not_signed_in","category":"auth","message":"you are not signed in to 1Password","subject":{"state":{"state":"signed_out"},"system":"one_password","account":null},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"sign in to 1Password","next":"opv login -- opv access --json","next_kind":"handoff"}}
+{"schema_version":2,"ok":false,"exit_code":3,"next":"opv access --json","do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","error":{"code":"dependency_missing","category":"dependency","message":"op is not installed, or not on PATH","subject":{"ci":false,"tool":"op","platform":"<platform>","shell":"posix"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","next":"opv access --json","next_kind":"rerun"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-opv: you are not signed in to 1Password
-Do: sign in to 1Password
-Next: opv login -- opv access --json
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv access --json

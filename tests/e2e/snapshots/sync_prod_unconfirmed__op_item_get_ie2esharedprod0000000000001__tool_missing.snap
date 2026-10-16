@@ -1,28 +1,20 @@
 # sync_prod_unconfirmed__op_item_get_ie2esharedprod0000000000001__tool_missing: opv sync prod | fault tool_missing on op item get iE2ESHAREDPROD0000000000001
 
-## text exit: 4
+## text exit: 3
 ## text stdout
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-op item get failed; signed in with access to vault vE2ESHAREDPROD0000000000001, so retrying
-retrying op item get (2/3) in <delay>
-retrying op item get (3/3) in <delay>
-opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 127, you are signed in to 1Password and vault vE2ESHAREDPROD0000000000001 opens)
-  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json (exit 127)
-Do: read the reply of op shown above; opv does not recognise it
-Next: opv doctor --env prod
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv sync prod
 
-## json exit: 4
+## json exit: 3
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor --env prod","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 127, you are signed in to 1Password and vault vE2ESHAREDPROD0000000000001 opens)","subject":{"target":null,"system":"one_password","established":["op exited 127","you are signed in to 1Password and vault vE2ESHAREDPROD0000000000001 opens"],"env":"prod"},"evidence":{"checked":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor --env prod","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":3,"next":"opv sync prod --json","do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","error":{"code":"dependency_missing","category":"dependency","message":"op is not installed, or not on PATH","subject":{"ci":false,"tool":"op","platform":"<platform>","shell":"posix"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","next":"opv sync prod --json","next_kind":"rerun"}}
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-op item get failed; signed in with access to vault vE2ESHAREDPROD0000000000001, so retrying
-retrying op item get (2/3) in <delay>
-retrying op item get (3/3) in <delay>
-opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 127, you are signed in to 1Password and vault vE2ESHAREDPROD0000000000001 opens)
-  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json (exit 127)
-Do: read the reply of op shown above; opv does not recognise it
-Next: opv doctor --env prod
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv sync prod --json

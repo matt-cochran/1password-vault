@@ -1,20 +1,18 @@
 # vault_locate__op_account_list__tool_missing: opv vault locate vE2ESHAREDDEV00000000000001 | fault tool_missing on op account list
 
-## text exit: 4
+## text exit: 3
 ## text stdout
 
 ## text stderr
-opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 127)
-  checked: op account list --format json (exit 127)
-Do: read the reply of op shown above; opv does not recognise it
-Next: opv doctor
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv vault locate vE2ESHAREDDEV00000000000001
 
-## json exit: 4
+## json exit: 3
 ## json stdout
-{"schema_version":2,"ok":false,"exit_code":4,"next":"opv doctor","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 127)","subject":{"target":null,"system":"one_password","established":["op exited 127"],"env":null},"evidence":{"checked":"op account list --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor","next_kind":"run"}}
+{"schema_version":2,"ok":false,"exit_code":3,"next":"opv vault locate vE2ESHAREDDEV00000000000001 --json","do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","error":{"code":"dependency_missing","category":"dependency","message":"op is not installed, or not on PATH","subject":{"ci":false,"tool":"op","platform":"<platform>","shell":"posix"},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)","next":"opv vault locate vE2ESHAREDDEV00000000000001 --json","next_kind":"rerun"}}
 
 ## json stderr
-opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 127)
-  checked: op account list --format json (exit 127)
-Do: read the reply of op shown above; opv does not recognise it
-Next: opv doctor
+opv: op is not installed, or not on PATH
+Do: install op from https://developer.1password.com/docs/cli/get-started/ (apt, dnf or the zip for this Linux distribution)
+Next: opv vault locate vE2ESHAREDDEV00000000000001 --json

@@ -9,7 +9,7 @@ prod/fly: summary: written 4 · unchanged 0 · held 0 · deployed no · pending 
 
 ## text stderr
 using <SCENARIO>/project/secrets.toml
-delivery evidence for prod/fly was not recorded (1Password did not answer after 3 attempts: it timed out); the target holds what this sync wrote, but opv delivery verify cannot vouch for it until a sync records it
+delivery evidence for prod/fly was not recorded (1Password did not answer after 1 attempt: it timed out); the target holds what this sync wrote, but opv delivery verify cannot vouch for it until a sync records it
 opv: opv stopped at its 3-second time limit, after writes had started; already written: prod/fly
 Do: review what remains (already written: prod/fly)
 Next: opv plan prod --target fly --target gh
@@ -20,7 +20,7 @@ Next: opv plan prod --target fly --target gh
 
 ## json stderr
 using <SCENARIO>/project/secrets.toml
-delivery evidence for prod/fly was not recorded (1Password did not answer after 3 attempts: it timed out); the target holds what this sync wrote, but opv delivery verify cannot vouch for it until a sync records it
+delivery evidence for prod/fly was not recorded (1Password did not answer after 1 attempt: it timed out); the target holds what this sync wrote, but opv delivery verify cannot vouch for it until a sync records it
 opv: opv stopped at its 3-second time limit, after writes had started; already written: prod/fly
 Do: review what remains (already written: prod/fly)
 Next: opv plan prod --target fly --target gh
