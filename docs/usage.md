@@ -36,7 +36,7 @@ Every command and flag, what each prints, the JSON contract and the exit codes. 
 | `opv status [<env>] [--product <p>] [--all] [--json] [--target <name>]` | 1Password and every target side by side, names only | nothing |
 | `opv plan <env> [--product <p>] [--rotate <product/KEY>] [--json] [--target <name>]` | what a sync would do on every target, and its one plan id | nothing |
 | `opv sync <env> [--deploy] [--prune] [--rotate <product/KEY>] [--expect-plan <id>] [--confirm <env>] [--product <p>] [--json] [--target <name>]` | write to every target; deploy only with `--deploy` | the targets |
-| `opv run <env> [--product <p>] [--role <r>] [--confirm <env>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value; an environment with `confirm_env = true` needs `--confirm <env>` | nothing |
+| `opv run <env> [--product <p>] [--role <r>] [--confirm <env>] -- <cmd>` | run a command with the keys as environment variables ([local development](local-development.md)); `--preview [--json]` reports what it would deliver without reading a value; `--remote <profile>` runs the profile's pinned command on its pinned SSH host instead; an environment with `confirm_env = true` needs `--confirm <env>` | nothing |
 | `opv explain <[product/]KEY> [--env <env>] [--json]` | what the configuration says about one key | nothing |
 | `opv open <[product/]KEY> [--env <env>] [--print] [--json]` | open the key's item in 1Password, where its value is typed | nothing |
 | `opv init <env> [--vault <title>] [--item <title>] [--product <p>]` | configuration (boundaries and products) from an existing item; no target ([configuration](configuration.md#start-from-an-existing-item-opv-init)) | the manifest or `secrets.toml` |
@@ -412,6 +412,10 @@ All refusals are fail-closed, before anything is read from 1Password: a product 
 ### Delivery preview: `--preview`
 
 `opv run <env> [--product <p>] [--role <r>] --preview [--json]` prints what this run would deliver without reading a value and without running `op run` or `op read`; a command after `--` is refused. For each key it would deliver: product, key, `source` (`<product>/<KEY>`, or the `from` source), `destination` (`env:<NAME>` or `file:<relative path>` under `secrets_dir_env`) and its `roles`. Then the environment mode (`inherit` / `declared_only`), the secrets directory variable, file-delivery platform support with its reason, and the prerequisites `op` present (`yes`/`no`/`unknown`) and signed in (`yes`/`no`/`unknown`; a discovery that cannot be determined is `unknown`, never `no`). Keys excluded by role are listed under `withheld_by_role`, names only. `--json` prints one document (`schema_version` 1); the text form prints one line per key plus the summary lines.
+
+### Remote development: `--remote`
+
+`opv run <env> [--product <p>] [--role <r>] --remote <profile>` delivers the same selection to a reviewed profile (`[products.<p>.remotes.<profile>]`) over pinned SSH and runs the profile's pinned command there; it takes no command after `--`. It needs an interactive terminal (refused under CI or with a service-account or Connect credential: `terminal_required`). An unknown profile is `usage`; an environment or role the profile does not allow is `policy_refused`; both before anything is read. The exit code is the remote app's, or 255 when SSH itself failed (connection, authentication or the pinned host key). Closing the terminal, Ctrl-C or a dropped connection stops the remote app and removes its secrets directory. `--preview --remote <profile>` adds `transport: remote` and the profile's pinned connection and command (identifiers only) to the preview. Design and limits: [remote delivery](design/remote-delivery.md).
 
 ## Doctor
 

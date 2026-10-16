@@ -59,6 +59,7 @@ pub(crate) mod preflight;
 #[path = "product_flag_tests.rs"]
 mod product_flag_tests;
 pub mod ready;
+pub mod remote_delivery;
 pub mod repair;
 pub mod run;
 pub mod setup;

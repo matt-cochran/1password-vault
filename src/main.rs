@@ -706,12 +706,16 @@ enum Cmd {
         /// With --preview: print one JSON document.
         #[arg(long, requires = "preview")]
         json: bool,
+        /// Run on a reviewed remote profile ([products.<p>.remotes.<name>]): the values go
+        /// over pinned SSH and the profile's pinned command runs there. Takes no command.
+        #[arg(long, value_name = "PROFILE")]
+        remote: Option<String>,
         /// The environment's name again; required when it sets confirm_env = true.
         #[arg(long, value_name = "ENV", hide_short_help = true)]
         confirm: Option<String>,
         /// Command and arguments, after `--`.
         #[arg(
-            required_unless_present = "preview",
+            required_unless_present_any = ["preview", "remote"],
             trailing_var_arg = true,
             allow_hyphen_values = true
         )]
@@ -860,6 +864,15 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
     },
+    /// Internal: the remote delivery step `opv run --remote` starts under `op run` (#139).
+    #[command(name = "remote-send", hide = true)]
+    RemoteSend {
+        #[arg(long)]
+        plan: String,
+    },
+    /// Internal: the receiver on the remote host; reads its payload from stdin (#139).
+    #[command(name = "remote-receive", hide = true)]
+    RemoteReceive,
     /// Internal: the local delivery step `opv run` starts under `op run` (#136, #137).
     #[command(name = "local-delivery", hide = true)]
     LocalDelivery {
@@ -2021,6 +2034,10 @@ fn rerun_command(cmd: &Cmd) -> String {
             }
             return c;
         }
+        // Internal steps under `op run` or SSH: the person never typed them (#157 sweep).
+        Cmd::LocalDelivery { .. } | Cmd::RemoteSend { .. } | Cmd::RemoteReceive => {
+            return "opv doctor".to_string();
+        }
         Cmd::Login { env, .. } => {
             return match env {
                 Some(e) => format!("opv login {}", shell_word(e)),
@@ -2320,6 +2337,18 @@ fn run(
     if let Cmd::Completions { shell } = &cli.cmd {
         completions::write(*shell, &mut command_line(), out);
         return Ok(0);
+    }
+    // #139: the remote steps need no configuration, account or 1Password: the sender's
+    // values come from `op run`, the receiver's from its stdin.
+    if let Cmd::RemoteSend { plan } = &cli.cmd {
+        let plan: opv::app::remote_delivery::Plan = serde_json::from_str(plan).map_err(|_| {
+            Error::Config("remote-send: the plan is not valid".into())
+                .with_code(opv::error::Code::Usage)
+        })?;
+        return opv::app::remote_delivery::send(&plan);
+    }
+    if let Cmd::RemoteReceive = &cli.cmd {
+        return opv::app::remote_delivery::receive(Box::new(io::stdin()));
     }
     if let Cmd::Run { command, .. } = &cli.cmd {
         let argv: Vec<String> = std::env::args().collect();
@@ -2754,6 +2783,7 @@ fn run(
         role,
         preview,
         json,
+        remote,
         confirm,
         command,
     } = &cmd
@@ -2772,6 +2802,7 @@ fn run(
                 env,
                 product.as_deref(),
                 role.as_deref(),
+                remote.as_deref(),
                 *json,
                 runner,
                 out,
@@ -2779,6 +2810,36 @@ fn run(
             return Ok(0);
         }
         let fleet = loaded?;
+        if let Some(profile) = remote {
+            if !command.is_empty() {
+                return Err(Error::Config(
+                    "--remote takes no command: the profile pins the command that runs on the \
+                     remote host; drop the words after --"
+                        .into(),
+                )
+                .with_code(opv::error::Code::Usage));
+            }
+            // #139: values leave this machine only when a person runs it in their terminal;
+            // no MCP tool or flag runs a remote delivery.
+            opv::app::setup_runtime::Console::require_terminal("run --remote", &typed_command())?;
+            let mut retry = format!("opv run {env} --confirm {env}");
+            if let Some(p) = product {
+                retry.push_str(&format!(" --product {}", shell_word(p)));
+            }
+            if let Some(r) = role {
+                retry.push_str(&format!(" --role {}", shell_word(r)));
+            }
+            retry.push_str(&format!(" --remote {}", shell_word(profile)));
+            run_cmd::require_confirmation(&fleet, env, confirm.as_deref(), &retry)?;
+            return run_cmd::run_remote(
+                &fleet,
+                env,
+                product.as_deref(),
+                role.as_deref(),
+                profile,
+                runner,
+            );
+        }
         let mut retry = format!("opv run {env} --confirm {env}");
         if let Some(p) = product {
             retry.push_str(&format!(" --product {}", shell_word(p)));
@@ -2891,7 +2952,10 @@ fn refresh_agent_skill(root: &Path, version: &str, stderr: &mut dyn Write) {
 /// Whether the once-per-run agent-skill refresh must be skipped: the user opted out, the
 /// environment is CI, the command is `opv skill …` itself, or this is a test build.
 fn skill_refresh_skipped(cmd: &Cmd) -> bool {
-    if matches!(cmd, Cmd::Skill(_)) {
+    if matches!(
+        cmd,
+        Cmd::Skill(_) | Cmd::LocalDelivery { .. } | Cmd::RemoteSend { .. } | Cmd::RemoteReceive
+    ) {
         return true;
     }
     if std::env::var("OPV_NO_SKILL").is_ok_and(|v| v == "1") {
@@ -3091,6 +3155,8 @@ fn run_other(
         | Cmd::Env(_)
         | Cmd::Structure(_)
         | Cmd::LocalDelivery { .. }
+        | Cmd::RemoteSend { .. }
+        | Cmd::RemoteReceive
         | Cmd::Schema
         | Cmd::Help { .. } => {
             unreachable!("handled by run")

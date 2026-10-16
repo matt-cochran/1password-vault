@@ -907,6 +907,8 @@ fn validate(raw: RawConfig, doc: &Doc<'_>) -> Result<Fleet, Error> {
             validate_key(&format!("{product}/{key}"), key, spec, &environments)?;
         }
         validate_local(product, p).map_err(|m| doc.at_path(&["products", product], m))?;
+        validate_remotes(product, p, &environments)
+            .map_err(|m| doc.at_path(&["products", product, "remotes"], m))?;
     }
 
     let mut products = raw.products;
@@ -1162,6 +1164,146 @@ fn check_ids(name: &str, owner: &str, vault_id: &str, item_id: &str) -> Result<(
             is_id,
             "^[A-Za-z0-9][A-Za-z0-9._-]*$",
         )?;
+    }
+    Ok(())
+}
+
+/// The SSH host key types a pinned `host_key` may name (#139), as `known_hosts` spells them.
+const HOST_KEY_TYPES: &[&str] = &[
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-rsa",
+];
+
+/// A remote path pinned in a profile (#139): absolute, no `..` component, and only
+/// characters that need no quoting in any shell (`[A-Za-z0-9._/+-]`).
+pub(crate) fn is_remote_path(s: &str) -> bool {
+    s.starts_with('/')
+        && s.len() <= 255
+        && s.split('/').all(|c| c != "..")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '+' | '-'))
+}
+
+/// `[products.<p>.remotes.<name>]` (#139): every pinned field is checked at load, so a
+/// profile that could reach the shell, an unknown environment or an undeclared role never
+/// loads.
+fn validate_remotes(
+    product: &str,
+    p: &crate::domain::Product,
+    environments: &BTreeMap<String, crate::domain::Environment>,
+) -> Result<(), String> {
+    let declared = crate::app::delivery_preview::declared_roles(p);
+    for (name, r) in &p.remotes {
+        let at = format!("product {product:?}: remote {name:?}");
+        let name_ok = name.len() <= 32
+            && name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !name_ok {
+            return Err(format!(
+                "{at}: the name must match ^[a-z][a-z0-9-]{{0,31}}$"
+            ));
+        }
+        let host_ok = !r.host.is_empty()
+            && r.host.len() <= 253
+            && !r.host.starts_with('-')
+            && r.host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+        if !host_ok {
+            return Err(format!(
+                "{at}: host {:?} must be a host name or address (letters, digits, '.', '-', \
+                 ':'), not starting with '-'",
+                r.host
+            ));
+        }
+        if r.port == 0 {
+            return Err(format!("{at}: port must be 1-65535"));
+        }
+        let user_ok = r.user.len() <= 32
+            && r.user
+                .starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+            && r.user.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')
+            });
+        if !user_ok {
+            return Err(format!(
+                "{at}: user {:?} must match ^[a-z_][a-z0-9_.-]{{0,31}}$",
+                r.user
+            ));
+        }
+        let key_ok = match r.host_key.split(' ').collect::<Vec<_>>().as_slice() {
+            [ty, b64] => {
+                HOST_KEY_TYPES.contains(ty)
+                    && (16..=4096).contains(&b64.len())
+                    && b64
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+            }
+            _ => false,
+        };
+        if !key_ok {
+            return Err(format!(
+                "{at}: host_key must be the host's public key as \"<type> <base64>\" (types: \
+                 {}), for example the output of ssh-keyscan without the host name",
+                HOST_KEY_TYPES.join(", ")
+            ));
+        }
+        if r.environments.is_empty() {
+            return Err(format!(
+                "{at}: environments must name at least one environment whose values may go \
+                 to this host"
+            ));
+        }
+        if let Some(e) = r
+            .environments
+            .iter()
+            .find(|e| !environments.contains_key(*e))
+        {
+            return Err(format!("{at}: environment {e:?} is not defined"));
+        }
+        if let Some(roles) = &r.roles {
+            if roles.is_empty() {
+                return Err(format!(
+                    "{at}: roles = [] allows nothing; list the roles that may run there, or \
+                     remove roles"
+                ));
+            }
+            if let Some(x) = roles.iter().find(|x| !declared.contains(&x.as_str())) {
+                return Err(format!(
+                    "{at}: role {x:?} is not a role any of the product's keys declares"
+                ));
+            }
+        }
+        for (field, v) in [("opv", &r.opv), ("workdir", &r.workdir)] {
+            if !is_remote_path(v) {
+                return Err(format!(
+                    "{at}: {field} {v:?} must be an absolute path without '..', using only \
+                     letters, digits and . _ / + -"
+                ));
+            }
+        }
+        if r.command.is_empty() {
+            return Err(format!("{at}: command must name the program to run"));
+        }
+        if r.command
+            .iter()
+            .any(|a| a.len() > 4096 || crate::app::remote_delivery::has_control(a))
+        {
+            return Err(format!(
+                "{at}: command arguments must be at most 4096 characters, with no control \
+                 characters other than newline and tab"
+            ));
+        }
+        if let Some(f) = &r.identity_file
+            && (f.is_empty() || f.chars().any(char::is_control))
+        {
+            return Err(format!("{at}: identity_file must be a file path"));
+        }
     }
     Ok(())
 }

@@ -1027,6 +1027,15 @@ Design: `docs/design/local-delivery.md`.
 - A key with `file` is written, not exported: into a fresh 0700 directory under a user-owned, RAM-backed `$XDG_RUNTIME_DIR`, files 0400, created exclusively and never through a link, named by `secrets_dir_env`. The directory is removed on exit and on signal, and swept by the next run when its process is gone. Where no such directory exists the run is refused (`ram_dir_unavailable`), never written to disk.
 - Products without `local`, and every target, behave as before.
 
+## FR-63 — Remote Development Delivery (#139)
+
+Design: `docs/design/remote-delivery.md`.
+
+- `[products.<p>.remotes.<name>]` pins a remote profile: host, port, user, the host's public key, allowed environments and roles, the remote opv path, working directory and command. Every field is validated at load; nothing about the host, transport or command is chosen at run time.
+- `opv run <env> --product <p> [--role <r>] --remote <name>` needs a person's interactive terminal, checks the profile's environment and role scope before any read, and delivers the local run's selection through `op run` → `opv remote-send` → pinned SSH (`-F none`, strict pinned host key, batch mode, no forwarding or multiplexing) → `opv remote-receive`. No MCP tool runs it; `opv_delivery_preview` previews it with identifiers only.
+- Values travel only in SSH's stdin as one framed payload; the receiver validates it whole before writing or starting anything (no partial delivery). File keys go to a fresh RAM-backed 0700 directory on the remote host, never disk; the remote app's environment is declared-only and never holds an `OP_*` variable.
+- A disconnect, 45 seconds without a heartbeat, or a signal stops the remote app's process group and removes its directory.
+
 # 4. Security Requirements
 
 ## SR-1 — No Secret Logging

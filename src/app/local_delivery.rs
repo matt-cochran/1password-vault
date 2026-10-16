@@ -62,7 +62,7 @@ pub struct Delivery {
     pub command: Vec<String>,
 }
 
-fn is_basic(name: &str) -> bool {
+pub(crate) fn is_basic(name: &str) -> bool {
     BASICS.contains(&name) || name.starts_with("LC_")
 }
 
@@ -116,7 +116,7 @@ pub fn runtime_dir_support() -> Result<std::path::PathBuf, String> {
     Ok(runtime)
 }
 
-fn ram_dir_error() -> Error {
+pub(crate) fn ram_dir_error() -> Error {
     Error::Policy(
         "file delivery needs a private RAM-backed directory: a user-owned $XDG_RUNTIME_DIR on \
          tmpfs (Linux, WSL). It is not available here, and opv never writes these values to \
@@ -129,7 +129,7 @@ fn ram_dir_error() -> Error {
 
 /// Write `value` to `dir/<rel>`: each directory component created inside `dir` (0700),
 /// the file created exclusively with mode 0400, never through a link.
-fn write_file(dir: &Path, rel: &str, value: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_file(dir: &Path, rel: &str, value: &[u8]) -> std::io::Result<()> {
     let mut at = dir.to_path_buf();
     let parts: Vec<&str> = rel.split('/').collect();
     for part in &parts[..parts.len() - 1] {
