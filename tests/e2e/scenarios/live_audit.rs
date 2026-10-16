@@ -1152,9 +1152,15 @@ fn live_09_mcp_ready_with_an_unknown_selected_account_steps_to_login_add() {
     let doc = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
         .mcp("opv_ready", json!({}));
+    // Where the 1Password app holds the accounts (macOS), the account is added there.
+    let want = if cfg!(target_os = "macos") {
+        "opv login"
+    } else {
+        "opv login --add"
+    };
     assert_eq!(
         ready_step(&doc, "selected_account_absent").as_deref(),
-        Some("opv login --add"),
+        Some(want),
         "{doc}"
     );
 }
@@ -1164,9 +1170,15 @@ fn live_09_mcp_ready_prod_with_an_unknown_selected_account_steps_to_login_add() 
     let doc = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
         .mcp("opv_ready", json!({"environment": "prod"}));
+    // Where the 1Password app holds the accounts (macOS), the account is added there.
+    let want = if cfg!(target_os = "macos") {
+        "opv login"
+    } else {
+        "opv login --add"
+    };
     assert_eq!(
         ready_step(&doc, "selected_account_absent").as_deref(),
-        Some("opv login --add"),
+        Some(want),
         "{doc}"
     );
 }
