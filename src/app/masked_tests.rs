@@ -2,6 +2,14 @@
 
 use super::*;
 
+#[test]
+fn a_prompt_without_a_terminal_is_terminal_required() {
+    assert_eq!(
+        no_terminal().cause().map(|(c, _)| c.code()),
+        Some("terminal_required")
+    );
+}
+
 fn typed(keys: Vec<Key>) -> Masked {
     let mut m = Masked::default();
     for k in keys {

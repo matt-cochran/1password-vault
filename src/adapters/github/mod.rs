@@ -87,24 +87,20 @@ pub struct Scope<'a> {
     pub environment: Option<&'a str>,
 }
 
-/// The `Error::Target` for a GitHub environment missing from one repository (FR-46): opv
-/// never creates environments, so the next step is the owner's `gh api` call.
+/// A GitHub environment missing from one repository (FR-46, R41): its protection rules are
+/// the owner's decision, so the catalog's Do is the owner's setup, never an agent's step.
+/// (`opv sync` never creates one; `opv access --create --github-env` does, 06.46.)
 pub(crate) fn missing_environment_error(repo: &str, environment: &str) -> Error {
-    Error::Target(
-        format!(
-            "GitHub environment {environment:?} is missing from repository {repo}; nothing \
-             was changed\n  opv never creates GitHub environments because their protection \
-             rules are the owner's decision"
-        )
-        .into(),
-    )
-    .with_code(crate::error::Code::OwnerSetupRequired)
-    // A person decides, so the command is theirs to run, never an agent's `Next:`.
-    .with_do(format!(
-        "the repository owner creates the environment and sets its protection rules \
-         (repository Settings > Environments, or {PROGRAM} api -X PUT \
-         repos/{repo}/environments/{environment})"
-    ))
+    use crate::cause::{Cause, ResourceKind, ResourceName, ResourceRef, System};
+    Cause::OwnerSetupRequired {
+        system: System::GitHub,
+        object: ResourceRef {
+            kind: ResourceKind::GitHubEnvironment,
+            name: ResourceName::new(environment),
+            scope: Some(repo.to_string()),
+        },
+    }
+    .into()
 }
 
 /// GitHub as both staged ports (FR-28, FR-46). Each method is the [`gh`] function of the
@@ -163,3 +159,7 @@ impl StagedRuntime for Github<'_> {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

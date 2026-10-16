@@ -487,7 +487,12 @@ fn listing_in_missing_environment() -> Result<Vec<StoreEntry>, Error> {
 #[test]
 fn listing_in_a_missing_environment_names_it() {
     let e = listing_in_missing_environment().unwrap_err();
-    assert!(e.mentions("GitHub environment \"nope\" is missing"), "{e}");
+    // R41: the catalog names the environment and its repository.
+    assert!(
+        e.to_string()
+            .contains("GitHub environment nope in example-org/example-repo"),
+        "{e}"
+    );
 }
 
 #[test]

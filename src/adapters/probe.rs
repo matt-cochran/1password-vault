@@ -4,32 +4,50 @@
 
 use std::io;
 
+use crate::cause::{Cause, Unusable};
 use crate::error::Error;
 use crate::host::{Host, Tool};
 use crate::runner::{Call, CommandRunner, Output, PROBE_TIMEOUT};
 
-/// Run `program args` as a probe; a spawn failure is `Error::Dependency` naming it.
-pub(crate) fn spawn(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Output, Error> {
-    let call = Call::new(program, args);
-    r.probe(&call, PROBE_TIMEOUT).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => Error::Dependency(format!("{program} not found on PATH").into()),
-        kind => Error::Dependency(format!("failed to run {program} ({kind})").into()),
-    })
-}
-
-/// [`spawn`] whose "not found" names the install command for this platform (FR-26).
+/// Run `tool args` as a probe. A tool that cannot start is a catalog cause (04.14): not on
+/// PATH is `ToolMissing` with this host's install line (R56); not executable or failing to
+/// start is `ToolUnusable` (R57), never a Rust `ErrorKind` name; a probe that did not answer
+/// in time is its system's diagnosis of the observed call (R51).
 pub(crate) fn spawn_tool(
     r: &dyn CommandRunner,
     tool: Tool,
     host: &dyn Fn() -> Host,
     args: &[&str],
 ) -> Result<Output, Error> {
-    spawn(r, tool.program, args).map_err(|e| match e {
-        Error::Dependency(m) if m.ends_with("not found on PATH") => {
-            Error::Dependency(format!("{m}\n  {}", host().install_hint(tool)).into())
+    let call = Call::new(tool.program, args);
+    r.probe(&call, PROBE_TIMEOUT)
+        .map_err(|e| spawn_failure(&tool, e.kind(), host))
+}
+
+/// The cause of a probe of `tool` that failed to run with `kind`.
+fn spawn_failure(tool: &Tool, kind: io::ErrorKind, host: &dyn Fn() -> Host) -> Error {
+    let unusable = |why| {
+        Cause::ToolUnusable {
+            tool: tool.program.to_string(),
+            why,
         }
-        e => e,
-    })
+        .into()
+    };
+    match kind {
+        io::ErrorKind::NotFound => {
+            let h = host();
+            Cause::ToolMissing {
+                tool: tool.program.to_string(),
+                platform: h.platform,
+                shell: h.shell,
+                ci: h.ci,
+            }
+            .into()
+        }
+        io::ErrorKind::PermissionDenied => unusable(Unusable::NotExecutable),
+        io::ErrorKind::TimedOut => tool.outage(tool.program),
+        kind => unusable(Unusable::SpawnFailed { io: kind.into() }),
+    }
 }
 
 /// `2.40.0` / `v0.4.112` → (major, minor, patch). Missing parts count as 0; anything else
@@ -60,3 +78,7 @@ pub(crate) fn version_in(stdout: &[u8]) -> Option<String> {
         })
         .map(str::to_owned)
 }
+
+#[cfg(test)]
+#[path = "probe_tests.rs"]
+mod tests;

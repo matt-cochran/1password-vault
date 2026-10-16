@@ -118,8 +118,25 @@ fn open_at<'a>(
 /// A deploy sign-in error (FR-40) with its stable code: a credential the target rejected is
 /// `deploy_credentials_failed` (exit 7); a missing CLI or field, a refused private
 /// directory or an unknown outcome keeps its own code and exit.
-fn deploy_failed(e: Error) -> Error {
+///
+/// A cataloged rejection of the deploy credentials (diagnosed under their principal, X22)
+/// names the item by its full reference: the runner's principal does not carry the vault,
+/// this sign-in does (06.30).
+fn deploy_failed(e: Error, reference: &ItemRef) -> Error {
+    use crate::cause::{Cause, CredentialRef, VaultId};
     match e {
+        Error::Catalog(cause, upstream) => {
+            let mut cause = *cause;
+            if let Cause::CredentialRejected {
+                credential: CredentialRef::DeployCredentials { vault, .. },
+                ..
+            } = &mut cause
+                && vault.as_str().is_empty()
+            {
+                *vault = VaultId::new(reference.vault.clone());
+            }
+            Error::Catalog(Box::new(cause), upstream)
+        }
         e @ Error::Auth(_) => e.with_code(crate::error::Code::DeployCredentialsFailed),
         e => e,
     }
@@ -152,20 +169,28 @@ impl<'a> EnvRunner<'a> {
         reference: &ItemRef,
         fields: &[CredentialField],
     ) -> Result<Self, Error> {
-        self.sign_in_with(login, reference, fields, None)?;
+        self.sign_in_with(login, reference, fields, None, None)?;
         Ok(self)
     }
 
+    /// `principal`: the deploy credentials of a named target, under which the provider's
+    /// sign-in calls are observed, so a rejection addresses that credential and never the
+    /// person's own vendor login (X22, 06.01).
     fn sign_in_with(
         &mut self,
         mut login: Box<dyn DeployLogin>,
         reference: &ItemRef,
         fields: &[CredentialField],
         env_name: Option<&str>,
+        principal: Option<crate::cause::Principal>,
     ) -> Result<(), Error> {
         let values = onepassword::read_deploy_credentials(&*self, reference, fields, env_name)
-            .map_err(deploy_failed)?;
-        login.sign_in(values, &*self).map_err(deploy_failed)?;
+            .map_err(|e| deploy_failed(e, reference))?;
+        let signed = match principal {
+            Some(p) => crate::runner::under_deploy(p, || login.sign_in(values, &*self)),
+            None => login.sign_in(values, &*self),
+        };
+        signed.map_err(|e| deploy_failed(e, reference))?;
         self.login = Some(login);
         Ok(())
     }
@@ -194,16 +219,27 @@ impl<'a> EnvRunner<'a> {
         };
         // A Key Vault behind a Kubernetes runtime signs `az` in (FR-39, FR-40).
         let provider = crate::provider::deploy_provider(t.config.as_ref());
-        let fields = provider
-            .deploy_credential_fields()
-            .map_err(|why| Error::Config(format!("environment {env_name}: {why}").into()))?;
+        // The configuration accepts deploy_credentials only on a provider that has fields
+        // for them (config.rs), so a refusal here is an opv bug, not the person's file.
+        let fields = provider.deploy_credential_fields().map_err(|_| {
+            Error::from(crate::cause::Cause::Bug {
+                site: "deploy_credentials accepted for a provider without them",
+            })
+        })?;
         let login = provider.deploy_login()?;
-        self.sign_in_with(login, reference, fields, Some(env_name))?;
-        self.deploy = Some(crate::cause::Principal::DeployCredentials {
+        let principal = crate::cause::Principal::DeployCredentials {
             item: crate::cause::ItemId::new(reference.item.clone()),
             env: crate::cause::EnvName::new(env_name),
             target: crate::cause::TargetName::new(target_name.clone()),
-        });
+        };
+        self.sign_in_with(
+            login,
+            reference,
+            fields,
+            Some(env_name),
+            Some(principal.clone()),
+        )?;
+        self.deploy = Some(principal);
         Ok(())
     }
 

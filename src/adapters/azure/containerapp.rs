@@ -1869,12 +1869,13 @@ mod tests {
     }
 
     #[test]
-    fn unanswered_read_names_the_azure_status_page() {
+    fn unanswered_read_names_azure() {
         let (t, m) = (target(), managed());
         let r = FakeRunner::default();
         r.push_unknowns("timeout", crate::runner::READ_ATTEMPTS);
         let e = adapter(&r, &t, &m).bindings().unwrap_err();
-        assert!(e.mentions(az::AZ_CLI.status_page), "{e}");
+        // The catalog's Unavailable names the system; its Do points at its status page.
+        assert!(e.to_string().contains("Azure did not answer"), "{e}");
     }
 
     /// I2: after this run's first write an unanswered read is exit 9 and never claims
@@ -1895,10 +1896,11 @@ mod tests {
         let r = FakeRunner::default();
         r.target_writes.set(true);
         r.budget.set(Duration::ZERO);
-        assert!(matches!(
-            adapter(&r, &t, &m).bindings(),
-            Err(Error::Unknown(_))
-        ));
+        // 02.06: opv's own budget ran out: budget_spent (exit 9), never a target refusal.
+        assert_eq!(
+            adapter(&r, &t, &m).bindings().unwrap_err().code_str(),
+            "budget_spent"
+        );
     }
 
     /// I3: an unbound name's `opv-` secret leaves the app in the same update, even while the

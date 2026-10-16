@@ -326,3 +326,49 @@ fn plan_of_a_manifest_configuration_names_the_manifest_not_the_file() {
     crate::app::sync::plan_with(&fl, "prod", &r, &mut out, false).unwrap();
     assert!(text_of(&out).contains("the target or the manifest changed"));
 }
+
+// 06.30: a rejected deploy credential names its item by the full reference, vault included.
+#[test]
+fn a_rejected_deploy_credential_names_the_vault_of_its_item() {
+    use crate::cause::{
+        CallId, Cause, CredentialProblem, CredentialRef, EnvName, ExitClass, ItemId, Observed,
+        Principal, System, TargetName, VaultId,
+    };
+    let principal = Principal::DeployCredentials {
+        item: ItemId::new("fly"),
+        env: EnvName::new("prod"),
+        target: TargetName::new("web"),
+    };
+    let seen = Observed::from_failed_call(
+        CallId {
+            system: System::Fly,
+            program: "flyctl".into(),
+            words: vec!["auth".into(), "whoami".into()],
+        },
+        ExitClass::Code { code: 1 },
+        principal,
+    );
+    let rejected: Error = Cause::CredentialRejected {
+        system: System::Fly,
+        credential: CredentialRef::DeployCredentials {
+            vault: VaultId::new(""),
+            item: ItemId::new("fly"),
+            env: EnvName::new("prod"),
+            target: TargetName::new("web"),
+        },
+        problem: CredentialProblem::Rejected { needs: Vec::new() },
+        seen,
+    }
+    .into();
+    let reference = ItemRef {
+        vault: "deploy-prd".into(),
+        item: "fly".into(),
+    };
+    assert!(matches!(
+        deploy_failed(rejected, &reference).cause(),
+        Some((Cause::CredentialRejected {
+            credential: CredentialRef::DeployCredentials { vault, .. },
+            ..
+        }, _)) if vault.as_str() == "deploy-prd"
+    ));
+}

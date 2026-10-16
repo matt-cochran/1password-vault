@@ -1021,7 +1021,8 @@ mod tests {
         r.push_io_error(std::io::ErrorKind::NotFound);
         let host = Host::detect();
         let checks = doctor(&target(), &r, &|| host);
-        assert!(matches!(&checks[0].outcome, Err(Error::Dependency(m)) if m.contains("install")));
+        // R56: the catalog's ToolMissing, whose Do is the install line.
+        assert!(matches!(&checks[0].outcome, Err(e) if e.code_str() == "dependency_missing"));
     }
 
     #[test]

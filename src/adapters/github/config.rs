@@ -662,33 +662,7 @@ secret_name = "STATIC""#,
         assert!(r.calls.borrow().is_empty());
     }
 
-    #[test]
-    fn missing_environment_error_names_repository_and_environment() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(e.mentions("org/r") && e.mentions("staging"), "{e}");
-    }
-
-    #[test]
-    fn missing_environment_error_leaves_the_create_command_to_a_person() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(
-            e.action()
-                .is_some_and(|a| a.contains("gh api -X PUT repos/org/r/environments/staging")),
-            "{e:?}"
-        );
-    }
-
-    #[test]
-    fn missing_environment_error_needs_a_human() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(e.code().human_required());
-    }
-
-    #[test]
-    fn missing_environment_error_says_opv_never_creates_environments() {
-        let e = crate::adapters::github::missing_environment_error("org/r", "staging");
-        assert!(e.mentions("opv never creates GitHub environments"), "{e}");
-    }
+    // missing_environment_error's own tests: src/adapters/github/mod_tests.rs.
 
     // doctor -----------------------------------------------------------------------------
 
@@ -706,7 +680,15 @@ secret_name = "STATIC""#,
         let r = FakeRunner::default();
         r.push_io_error(io::ErrorKind::NotFound);
         let e = gh_version(&r, &host).unwrap_err();
-        assert!(e.mentions("install: brew install gh"), "{e}");
+        // R56: the catalog's ToolMissing carries the install line as its Do.
+        let inv = crate::cause::Invocation::default();
+        let action = e.cause().and_then(|(c, _)| c.do_text(&inv));
+        assert!(
+            action
+                .as_deref()
+                .is_some_and(|a| a.contains("brew install gh")),
+            "{action:?}"
+        );
     }
 
     #[test]

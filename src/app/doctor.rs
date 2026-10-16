@@ -1270,16 +1270,16 @@ mod tests {
         r.responses.borrow_mut().push_back(Ok(good().remove(3)));
         let (res, out) = doctor(Ok(fleet()), &r);
         let e = res.unwrap_err();
-        assert!(matches!(e, Error::Dependency(_)), "{e}");
+        assert_eq!(e.code_str(), "dependency_missing", "{e}");
         let lines = checks(&out);
         assert_eq!(lines.len(), CHECK_LINES, "{out}");
         assert!(lines[3].starts_with("ok"), "{out}");
         assert!(lines[1].starts_with("FAIL"), "{out}");
         // #12: one failure per cause; op auth is skipped, not failed a second time.
         assert!(lines[2].starts_with("skip  op auth"), "{out}");
-        // FR-26: the install command for the detected OS, under the failing check.
+        // FR-26: the install command for the detected OS, as the catalog's Do (R56).
         assert!(
-            out.contains("op not found on PATH\n  install op from https://developer.1password.com"),
+            out.contains("Do: install op from https://developer.1password.com"),
             "{out}"
         );
     }
@@ -1337,7 +1337,10 @@ mod tests {
         r.push_io_error(io::ErrorKind::NotFound);
         r.push_io_error(io::ErrorKind::NotFound);
         let (res, out) = doctor(Ok(fleet()), &r);
-        assert!(matches!(res, Err(Error::Dependency(_))), "{res:?}");
+        assert!(
+            matches!(&res, Err(e) if e.code_str() == "dependency_missing"),
+            "{res:?}"
+        );
         assert!(out.lines().nth(3).unwrap().starts_with("FAIL"), "{out}");
     }
 

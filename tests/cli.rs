@@ -1069,7 +1069,8 @@ fn guided_commands_refuse_headless_execution_before_vendor_calls() {
         let (code, stdout, stderr) = opv(&[command]);
         assert_eq!(code, 6);
         assert!(stdout.is_empty());
-        assert!(stderr.contains("interactive terminal"));
+        // R60: the catalog's NeedsTerminal, handed to the person's own terminal.
+        assert!(stderr.contains("needs a person at a terminal"), "{stderr}");
     }
 }
 

@@ -746,15 +746,20 @@ fn concealed_config_blocks_before_any_gh_write() {
 }
 
 #[test]
-fn missing_environment_offers_the_create_command() {
+fn missing_environment_asks_an_admin_to_create_it() {
     let sim = missing_staging_on_a();
     let err = sync_on(&sim, &fleet_ci_two(), &SyncOpts::default())
         .0
         .unwrap_err();
+    // R41: the catalog's owner setup names the environment and the repository.
+    let action = err
+        .cause()
+        .and_then(|(c, _)| c.do_text(&crate::cause::Invocation::default()));
     assert!(
-        err.action()
-            .is_some_and(|a| a.contains("gh api -X PUT repos/example-org/a/environments/staging")),
-        "{err:?}"
+        action
+            .as_deref()
+            .is_some_and(|a| a.contains("create GitHub environment staging in example-org/a")),
+        "{action:?}"
     );
 }
 
