@@ -169,7 +169,6 @@ cells! {
     check_dev__op_vault_list__applied_but_reply_lost => "check_dev", "op", "vault list", "applied_but_reply_lost";
     check_dev__op_vault_list__credential_rejected => "check_dev", "op", "vault list", "credential_rejected";
     check_dev__op_vault_list__malformed_output => "check_dev", "op", "vault list", "malformed_output";
-    check_dev__op_vault_list__not_found => "check_dev", "op", "vault list", "not_found";
     check_dev__op_vault_list__other_account_session => "check_dev", "op", "vault list", "other_account_session";
     check_dev__op_vault_list__signed_out => "check_dev", "op", "vault list", "signed_out";
     check_dev__op_vault_list__timeout => "check_dev", "op", "vault list", "timeout";
@@ -234,7 +233,6 @@ cells! {
     plan_prod__gh_variable_list__timeout => "plan_prod", "gh", "variable list", "timeout";
     plan_prod__kubectl_get_secret__applied_but_reply_lost => "plan_prod", "kubectl", "get secret", "applied_but_reply_lost";
     plan_prod__kubectl_get_secret__forbidden => "plan_prod", "kubectl", "get secret", "forbidden";
-    plan_prod__kubectl_get_secret__malformed_output => "plan_prod", "kubectl", "get secret", "malformed_output";
     plan_prod__kubectl_get_secret__signed_out => "plan_prod", "kubectl", "get secret", "signed_out";
     plan_prod__kubectl_get_secret__timeout => "plan_prod", "kubectl", "get secret", "timeout";
     plan_prod__kubectl_get_secret__tool_missing => "plan_prod", "kubectl", "get secret", "tool_missing";
@@ -295,7 +293,6 @@ cells! {
     ready_dev__op_vault_list__applied_but_reply_lost => "ready_dev", "op", "vault list", "applied_but_reply_lost";
     ready_dev__op_vault_list__credential_rejected => "ready_dev", "op", "vault list", "credential_rejected";
     ready_dev__op_vault_list__malformed_output => "ready_dev", "op", "vault list", "malformed_output";
-    ready_dev__op_vault_list__not_found => "ready_dev", "op", "vault list", "not_found";
     ready_dev__op_vault_list__other_account_session => "ready_dev", "op", "vault list", "other_account_session";
     ready_dev__op_vault_list__signed_out => "ready_dev", "op", "vault list", "signed_out";
     ready_dev__op_vault_list__timeout => "ready_dev", "op", "vault list", "timeout";
@@ -341,7 +338,6 @@ cells! {
     status_prod__kubectl_get_deployment_e2e_app__unreachable => "status_prod", "kubectl", "get deployment e2e-app", "unreachable";
     status_prod__kubectl_get_secret__applied_but_reply_lost => "status_prod", "kubectl", "get secret", "applied_but_reply_lost";
     status_prod__kubectl_get_secret__forbidden => "status_prod", "kubectl", "get secret", "forbidden";
-    status_prod__kubectl_get_secret__malformed_output => "status_prod", "kubectl", "get secret", "malformed_output";
     status_prod__kubectl_get_secret__signed_out => "status_prod", "kubectl", "get secret", "signed_out";
     status_prod__kubectl_get_secret__timeout => "status_prod", "kubectl", "get secret", "timeout";
     status_prod__kubectl_get_secret__tool_missing => "status_prod", "kubectl", "get secret", "tool_missing";
@@ -399,7 +395,6 @@ cells! {
     sync_prod_unconfirmed__kubectl_auth_can_i_list_replicasets__unreachable => "sync_prod_unconfirmed", "kubectl", "auth can-i list replicasets", "unreachable";
     sync_prod_unconfirmed__kubectl_get_secret__applied_but_reply_lost => "sync_prod_unconfirmed", "kubectl", "get secret", "applied_but_reply_lost";
     sync_prod_unconfirmed__kubectl_get_secret__forbidden => "sync_prod_unconfirmed", "kubectl", "get secret", "forbidden";
-    sync_prod_unconfirmed__kubectl_get_secret__malformed_output => "sync_prod_unconfirmed", "kubectl", "get secret", "malformed_output";
     sync_prod_unconfirmed__kubectl_get_secret__signed_out => "sync_prod_unconfirmed", "kubectl", "get secret", "signed_out";
     sync_prod_unconfirmed__kubectl_get_secret__timeout => "sync_prod_unconfirmed", "kubectl", "get secret", "timeout";
     sync_prod_unconfirmed__kubectl_get_secret__unreachable => "sync_prod_unconfirmed", "kubectl", "get secret", "unreachable";

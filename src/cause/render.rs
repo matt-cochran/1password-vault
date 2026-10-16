@@ -3421,8 +3421,9 @@ impl Cause {
                     )
                 } else {
                     format!(
-                        "check item {item} in 1Password: another edit may have removed {} after opv wrote them",
-                        list_of(fields)
+                        "check item {item} in 1Password: another edit may have removed {} after opv wrote {}",
+                        list_of(fields),
+                        if fields.len() == 1 { "it" } else { "them" }
                     )
                 };
                 plan(inspect(text), Next::Run(by.clone()))
