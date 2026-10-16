@@ -37,8 +37,12 @@ use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::time::Instant;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -455,6 +459,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 }
 
 /// Why the receiver stopped the app before it ended on its own.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
     /// stdin ended: the local side is gone.
@@ -465,6 +470,7 @@ pub enum Stop {
     Signal,
 }
 
+#[cfg(unix)]
 impl Stop {
     fn reason(self) -> &'static str {
         match self {
@@ -520,6 +526,7 @@ fn os_from_bytes(b: &[u8]) -> std::ffi::OsString {
     String::from_utf8_lossy(b).into_owned().into()
 }
 
+#[cfg(unix)]
 fn receive_refused(r: Refusal) -> Error {
     Error::Policy(
         format!(
