@@ -3568,6 +3568,24 @@ impl Cause {
             }
             InputInvalid {
                 path,
+                kind: InputKind::Dotenv,
+                at,
+                field,
+                rule,
+            } => {
+                // A `.env` holds secret values only a person may open, so the Do is a
+                // person's edit of that file.
+                let (_, fix) = rule_words(field, rule);
+                plan(
+                    Some((
+                        Action::EditInput { path: path.clone() },
+                        format!("edit {}{}: {fix}", path.display(), at_words(at)),
+                    )),
+                    Next::Rerun,
+                )
+            }
+            InputInvalid {
+                path,
                 kind: _,
                 at,
                 field,
