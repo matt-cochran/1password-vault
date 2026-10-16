@@ -186,7 +186,7 @@ pub(crate) fn require_person(r: &dyn CommandRunner, what: &str) -> Result<(), Er
             match onepassword::diagnose(r, &Host::detect) {
                 Ok(Session::NotSignedIn) => return Err(not_signed_in(what)),
                 // #157: no account on this machine is added first (`opv login --add`).
-                Ok(s @ Session::NoAccount) => {
+                Ok(s @ (Session::NoAccount | Session::AccountAbsent(_))) => {
                     if let Some(e) =
                         onepassword::session_error(s, &Host::detect(), Some(what), None)
                     {

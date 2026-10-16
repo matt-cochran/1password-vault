@@ -1146,7 +1146,6 @@ fn ready_step(doc: &Value, code: &str) -> Option<String> {
 }
 
 #[test]
-#[ignore = "opv ready (CLI and, since MCP uses the project's account, MCP) reads op's `no account found for filter` from `op whoami` as op_not_signed_in (adapters::onepassword::diagnose), not as an account to add"]
 fn live_09_mcp_ready_with_an_unknown_selected_account_steps_to_login_add() {
     let doc = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
@@ -1159,7 +1158,6 @@ fn live_09_mcp_ready_with_an_unknown_selected_account_steps_to_login_add() {
 }
 
 #[test]
-#[ignore = "opv ready (CLI and, since MCP uses the project's account, MCP) reads op's `no account found for filter` from `op whoami` as op_not_signed_in (adapters::onepassword::diagnose), not as an account to add"]
 fn live_09_mcp_ready_prod_with_an_unknown_selected_account_steps_to_login_add() {
     let doc = Scenario::new()
         .account(UNKNOWN_ACCOUNT)
