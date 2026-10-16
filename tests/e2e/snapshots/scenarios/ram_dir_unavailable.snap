@@ -5,5 +5,5 @@
 
 ## text stderr
 opv: no in-memory folder for the settings file on this machine: none is configured
-Do: configure an in-memory folder on this machine
+Do: start a login session with a runtime folder (XDG_RUNTIME_DIR) on this machine; on WSL, enable systemd in /etc/wsl.conf
 Next: opv run dev --product web --preview

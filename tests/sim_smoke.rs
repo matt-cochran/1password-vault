@@ -135,6 +135,109 @@ fn an_applied_write_whose_reply_is_lost_stays_in_the_world() {
     );
 }
 
+/// R2-1 (snapshot review): `op vault list` names no vault, so no `not_found` reply is
+/// recorded for it (opv-sim exit 86), never a `vault get` reply about a vault named `list`.
+#[test]
+fn a_not_found_on_op_vault_list_has_no_recording() {
+    let sim =
+        Sim::new("[[fault]]\nprogram = \"op\"\ncall = \"vault list\"\nkind = \"not_found\"\n");
+    let out = sim.run("op", &["vault", "list", "--format", "json"], b"");
+    assert_eq!(out.status.code(), Some(86));
+}
+
+/// R2-5 (snapshot review): a `not_found` on a listing in a GitHub environment is that
+/// environment missing, so the repository's environments read no longer lists it.
+#[test]
+fn a_not_found_on_a_github_environment_listing_removes_the_environment() {
+    let sim =
+        Sim::new("[[fault]]\nprogram = \"gh\"\ncall = \"secret list\"\nkind = \"not_found\"\n");
+    let mut world = sim.world();
+    world["github"] = serde_json::json!({"repos": {"o/r": {"secrets": {}, "variables": {},
+        "environments": {"production": {"secrets": {}, "variables": {}}}}}});
+    std::fs::write(
+        sim.world_dir().join("world.json"),
+        serde_json::to_vec(&world).unwrap(),
+    )
+    .unwrap();
+    sim.run(
+        "gh",
+        &[
+            "secret",
+            "list",
+            "-R",
+            "o/r",
+            "-e",
+            "production",
+            "--json",
+            "name,updatedAt",
+        ],
+        b"",
+    );
+    assert_eq!(
+        sim.world()["github"]["repos"]["o/r"]["environments"],
+        serde_json::json!({})
+    );
+}
+
+/// An environment marked `listed_after_not_found` keeps its place after the 404, so a
+/// scenario can reach the reply opv does not recognise.
+#[test]
+fn a_not_found_leaves_an_environment_marked_listed_after_not_found() {
+    let sim =
+        Sim::new("[[fault]]\nprogram = \"gh\"\ncall = \"secret list\"\nkind = \"not_found\"\n");
+    let mut world = sim.world();
+    world["github"] = serde_json::json!({"repos": {"o/r": {"secrets": {}, "variables": {},
+        "environments": {"production": {"secrets": {}, "variables": {},
+        "listed_after_not_found": true}}}}});
+    std::fs::write(
+        sim.world_dir().join("world.json"),
+        serde_json::to_vec(&world).unwrap(),
+    )
+    .unwrap();
+    sim.run(
+        "gh",
+        &[
+            "secret",
+            "list",
+            "-R",
+            "o/r",
+            "-e",
+            "production",
+            "--json",
+            "name,updatedAt",
+        ],
+        b"",
+    );
+    assert!(sim.world()["github"]["repos"]["o/r"]["environments"]["production"].is_object());
+}
+
+/// A second `not_found` in an environment already removed answers the same recorded 404.
+#[test]
+fn a_second_not_found_in_a_removed_environment_answers_the_recorded_404() {
+    let sim =
+        Sim::new("[[fault]]\nprogram = \"gh\"\ncall = \"secret list\"\nkind = \"not_found\"\n");
+    let mut world = sim.world();
+    world["github"] = serde_json::json!({"repos": {"o/r": {"secrets": {}, "variables": {},
+        "environments": {"production": {"secrets": {}, "variables": {}}}}}});
+    std::fs::write(
+        sim.world_dir().join("world.json"),
+        serde_json::to_vec(&world).unwrap(),
+    )
+    .unwrap();
+    let list = [
+        "secret",
+        "list",
+        "-R",
+        "o/r",
+        "-e",
+        "production",
+        "--json",
+        "name,updatedAt",
+    ];
+    sim.run("gh", &list, b"");
+    assert_eq!(sim.run("gh", &list, b"").status.code(), Some(1));
+}
+
 #[test]
 fn an_unsupported_command_fails_loudly() {
     let out = Sim::new("").run("op", &["document", "get", "x"], b"");

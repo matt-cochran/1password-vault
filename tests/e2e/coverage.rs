@@ -886,6 +886,20 @@ mod cases {
 
     // §4.6 outcomes, §4.7 tools, §4.10 delivery
 
+    pub fn unrecognized() -> Case {
+        // The recorded 404 of a listing in a GitHub environment, while the repository's
+        // environments read still lists that environment: opv cannot tell why (X13).
+        case(
+            Scenario::new()
+                .faults("[[fault]]\nprogram = \"gh\"\ncall = \"secret list\"\nkind = \"not_found\"\n")
+                .world(|w| {
+                    w["github"]["repos"]["e2e-org/e2e-app"]["environments"]["production"]
+                        ["listed_after_not_found"] = Value::Bool(true);
+                }),
+            &["plan", "prod", "--target", "gh"],
+        )
+    }
+
     pub fn partial() -> Case {
         // fly and gh are written, then the Kubernetes deployment is not found.
         case(Scenario::new(), &["sync", "prod", "--confirm", "prod"])
@@ -1459,6 +1473,7 @@ scenarios! {
         title_lookup => TitleLookup,
         input_invalid => InputInvalid,
         input_unreadable => InputUnreadable,
+        unrecognized => Unrecognized,
         partial => Partial,
         tool_missing => ToolMissing,
         delivery_unverified => DeliveryUnverified,
@@ -1875,7 +1890,7 @@ fn no_candidate_is_both_a_cell_and_skipped() {
 #[test]
 fn every_skipped_candidate_states_why() {
     let why = re(
-        r"^(no `[a-z_]+` reply recorded for `[a-z]+ [^`]+` under tests/fixtures/[a-z]+/failures \(opv-sim exit 86\)|`[a-z]+ [^`]+` is not modelled by opv-sim \(exit 87\)|`[a-z]+ [^`]+` fails without the fault, so it has no output for `malformed_output` to damage \(opv-sim exit 88\)|a missing `[a-z]+` is missing for every call: opv fails at its first one, `[a-z]+ [^`]+`, so this run is the one of `[a-z0-9_]+`)$",
+        r"^(no `[a-z_]+` reply recorded for `[a-z]+ [^`]+` under tests/fixtures/[a-z]+/failures \(opv-sim exit 86\)|`[a-z]+ [^`]+` is not modelled by opv-sim \(exit 87\)|`[a-z]+ [^`]+` fails or answers nothing without the fault, so it has no output for `malformed_output` to damage \(opv-sim exit 88\)|a missing `[a-z]+` is missing for every call: opv fails at its first one, `[a-z]+ [^`]+`, so this run is the one of `[a-z0-9_]+`)$",
     );
     let vague: Vec<String> = skips()
         .into_iter()

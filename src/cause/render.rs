@@ -3413,13 +3413,21 @@ impl Cause {
                 item,
                 fields,
                 by,
-            } => plan(
-                inspect(format!(
-                    "restore {} from the history of item {item} in 1Password",
-                    list_of(fields)
-                )),
-                Next::Run(by.clone()),
-            ),
+            } => {
+                let text = if by.command == ["tidy"] {
+                    format!(
+                        "restore {} from the history of item {item} in 1Password",
+                        list_of(fields)
+                    )
+                } else {
+                    format!(
+                        "check item {item} in 1Password: another edit may have removed {} after opv wrote {}",
+                        list_of(fields),
+                        if fields.len() == 1 { "it" } else { "them" }
+                    )
+                };
+                plan(inspect(text), Next::Run(by.clone()))
+            }
             ToolMissing {
                 tool,
                 platform,
@@ -3698,12 +3706,18 @@ impl Cause {
                     None => "this machine".to_string(),
                 };
                 let text = match why {
-                    RamDir::Unset => format!("configure an in-memory folder on {host}"),
+                    RamDir::Unset => format!(
+                        "start a login session with a runtime folder (XDG_RUNTIME_DIR) on {host}; on WSL, enable systemd in /etc/wsl.conf"
+                    ),
                     RamDir::NotAbsolute => {
-                        format!("make the in-memory folder on {host} an absolute path")
+                        format!("set XDG_RUNTIME_DIR on {host} to an absolute path")
                     }
-                    RamDir::NotOwned => format!("use an in-memory folder on {host} that you own"),
-                    RamDir::NotTmpfs => format!("use a tmpfs folder on {host}"),
+                    RamDir::NotOwned => {
+                        format!("set XDG_RUNTIME_DIR on {host} to a runtime folder you own")
+                    }
+                    RamDir::NotTmpfs => {
+                        format!("set XDG_RUNTIME_DIR on {host} to a tmpfs folder")
+                    }
                     RamDir::NoneOnPlatform { os } => {
                         format!("deliver the settings without a file on {os} ({host})")
                     }
@@ -3809,6 +3823,11 @@ impl Cause {
                     Some(p) => format!(
                         "check the command and workdir of remote profile {p} (opv config edit)"
                     ),
+                    // The Next re-run shows the child as `<command>` (§6.1), so the Do says
+                    // what goes there: the program that failed to start, with its arguments.
+                    None if inv.has_child && matches!(inv.origin, Origin::Cli) => format!(
+                        "check that {program} is on PATH; <command> is {program} and its arguments"
+                    ),
                     None => format!("check that {program} is on PATH"),
                 }),
                 Next::Rerun,
@@ -3897,7 +3916,7 @@ impl Cause {
                     input_kind(*kind),
                     path.display()
                 )),
-                help_of(inv),
+                Next::Rerun,
             ),
             ItemUnusable { title, problem, .. } => plan(
                 inspect(match problem {

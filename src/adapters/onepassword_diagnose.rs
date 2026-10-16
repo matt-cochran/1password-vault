@@ -190,7 +190,10 @@ pub fn diagnose_with(seen: Observed, stderr: &str, ctx: &DiagnoseContext, facts:
         }
         Some(Reading::SignedOut) => not_signed_in(&seen, ctx, facts),
         Some(Reading::ItemNotFound) => item_not_found(seen, stderr, ctx),
-        Some(Reading::NotAVaultHere) => vault_not_here(seen, stderr, ctx),
+        Some(Reading::NotAVaultHere) => match vault_of(&seen, ctx) {
+            Some(vault) => vault_not_here(seen, ctx, vault),
+            None => unrecognized(seen, ctx, facts),
+        },
         Some(Reading::AllAndAccount) | None => unrecognized(seen, ctx, facts),
     }
 }
@@ -394,8 +397,7 @@ fn item_not_found(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause 
 /// the vault belongs to another account on the machine or to none: with an account
 /// selected, it is in another account, whose owner [`locate_owner`] looks up (#153a);
 /// otherwise it is not found.
-fn vault_not_here(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
-    let vault = vault_of(&seen, stderr, ctx);
+fn vault_not_here(seen: Observed, ctx: &DiagnoseContext, vault: VaultId) -> Cause {
     let selected = ctx
         .account
         .clone()
@@ -431,21 +433,18 @@ fn vault_not_here(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause 
     }
 }
 
-/// The vault a call was about: the call site's, else `--vault`, else the vault argument of
-/// `vault get` / `vault user list`, else the name op quoted.
-fn vault_of(seen: &Observed, stderr: &str, ctx: &DiagnoseContext) -> VaultId {
+/// The vault a call names: the call site's, else `--vault`, else the vault argument of
+/// `vault get` / `vault user list`.
+fn vault_of(seen: &Observed, ctx: &DiagnoseContext) -> Option<VaultId> {
     let from_ctx = ctx
         .resource
         .as_ref()
         .filter(|r| r.kind == ResourceKind::Vault)
         .map(|r| r.name.to_string());
-    VaultId::new(
-        from_ctx
-            .or_else(|| flag_value(seen, "--vault"))
-            .or_else(|| word_after(seen, "vault", &["get", "user", "list", "group"]))
-            .or_else(|| quoted(stderr, 0))
-            .unwrap_or_default(),
-    )
+    from_ctx
+        .or_else(|| flag_value(seen, "--vault"))
+        .or_else(|| word_after(seen, "vault", &["get", "user", "list", "group"]))
+        .map(VaultId::new)
 }
 
 /// Nothing recorded matched (§5): the reply is shown in full, with what opv did establish.

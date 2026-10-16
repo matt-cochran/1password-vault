@@ -3603,6 +3603,17 @@ fn an_unreadable_input_says_the_once() {
     assert!(!c.message().contains("the the"));
 }
 
+/// R2-3 (snapshot review): an unreadable input is fixed by hand, not by a command, so Next reruns.
+#[test]
+fn an_unreadable_input_reruns_the_command() {
+    let c = Cause::InputUnreadable {
+        path: PathBuf::from("missing.env"),
+        kind: InputKind::Dotenv,
+        io: IoKind::NotFound,
+    };
+    assert_eq!(c.step(&inv()).1, Next::Rerun);
+}
+
 /// L1: a built plan step keeps the global `--timeout` flag with its value.
 #[test]
 fn l1_a_built_step_keeps_the_timeout_flag_with_its_value() {
@@ -3721,4 +3732,83 @@ fn l10_in_env_reaches_a_partial_then() {
         other => panic!("not Partial: {other:?}"),
     };
     assert_eq!(env, Some(EnvName::new("prod")));
+}
+
+/// R2-2 (snapshot review): a local child that did not start re-runs as `-- <command>`, so
+/// the Do says which command goes there.
+#[test]
+fn a_child_that_did_not_start_names_the_command_to_give() {
+    let c = Cause::ChildStartFailed {
+        program: "/nonexistent/cmd".into(),
+        workdir: None,
+        io: IoKind::NotFound,
+        remote: None,
+    };
+    let run = Invocation {
+        command: vec!["run".into()],
+        args: vec!["dev".into(), "--product".into(), "web".into()],
+        has_child: true,
+        ..inv()
+    };
+    assert_eq!(
+        c.do_text(&run).as_deref(),
+        Some(
+            "check that /nonexistent/cmd is on PATH; <command> is /nonexistent/cmd and its arguments"
+        )
+    );
+}
+
+/// R2-7: a file delivery that has no runtime folder names the folder to configure.
+#[test]
+fn a_file_delivery_without_a_runtime_folder_names_xdg_runtime_dir() {
+    let c = Cause::RamDirUnavailable {
+        remote: None,
+        why: RamDir::Unset,
+        purpose: RamPurpose::FileDelivery,
+        env: None,
+        product: None,
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .contains("XDG_RUNTIME_DIR")
+    );
+}
+
+/// R2-8: a value missing after adopt points at the item, not the item's history.
+#[test]
+fn a_value_missing_after_adopt_checks_the_item() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["adopt".into()],
+            args: vec!["dev".into()],
+        },
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .starts_with("check item ")
+    );
+}
+
+/// R2-8: a value missing after tidy is restored from the item's history.
+#[test]
+fn a_value_missing_after_tidy_is_restored_from_history() {
+    let c = Cause::ReadBackMissing {
+        vault: VaultId::new("vlt-atqr"),
+        item: ItemId::new("itm-1"),
+        fields: vec![FieldName::new("web/KEY")],
+        by: Cmd {
+            command: vec!["tidy".into()],
+            args: vec!["dev".into()],
+        },
+    };
+    assert!(
+        c.do_text(&inv())
+            .unwrap_or_default()
+            .starts_with("restore ")
+    );
 }
