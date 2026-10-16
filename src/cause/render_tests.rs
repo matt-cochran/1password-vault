@@ -726,6 +726,7 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
                 source: file_source(),
                 field: DottedPath(vec!["products".into(), "prod-api".into()]),
                 rule: FieldRule::Missing,
+                from_proposal: false,
             },
             vec!["cfg/secrets.toml", "nothing was written"],
         ),
@@ -3042,6 +3043,7 @@ fn f2_an_invalid_proposal_says_nothing_was_written() {
         source: file_source(),
         field: DottedPath(vec!["products".into(), "web".into()]),
         rule: FieldRule::Missing,
+        from_proposal: false,
     };
     assert!(c.message().contains("nothing was written"));
 }
@@ -3588,8 +3590,35 @@ fn an_invalid_proposal_names_no_command_as_next() {
         source: file_source(),
         field: DottedPath(vec!["products".into(), "web".into()]),
         rule: FieldRule::Missing,
+        from_proposal: false,
     };
     assert_eq!(c.step(&inv()).1, Next::None(NoNext::NothingToRun));
+}
+
+/// R2-4 (snapshot review): a boundary that `init --add-env` proposed, not one in the file,
+/// is fixed by declaring the product's keys for the environment, never by removing it.
+#[test]
+fn an_unused_boundary_in_the_proposal_names_only_declaring_the_product_keys() {
+    let c = Cause::ConfigProposalInvalid {
+        source: file_source(),
+        field: DottedPath(vec![
+            "environments".into(),
+            "staging".into(),
+            "boundaries".into(),
+            "web".into(),
+        ]),
+        rule: FieldRule::Check {
+            check: ConfigCheck::BoundaryUnused {
+                env: "staging".into(),
+                products: vec!["web".into()],
+            },
+        },
+        from_proposal: true,
+    };
+    assert_eq!(
+        c.do_text(&inv()).as_deref(),
+        Some("declare product web's keys for staging: add \"staging\" to their environments")
+    );
 }
 
 /// D (snapshot review): an unreadable input names its kind once ("the .env file").

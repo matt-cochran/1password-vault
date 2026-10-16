@@ -1288,10 +1288,17 @@ fn check_boundaries(fleet: &Fleet, doc: &Doc<'_>) -> Result<(), Error> {
             .keys()
             .find(|b| !needed.contains_key(b.as_str()))
         {
+            let products = fleet
+                .products
+                .keys()
+                .filter(|p| fleet.boundary_of(p) == b.as_str())
+                .cloned()
+                .collect();
             return Err(doc.invalid(
                 &["environments", env_name, "boundaries", b],
                 check(ConfigCheck::BoundaryUnused {
                     env: env_name.clone(),
+                    products,
                 }),
             ));
         }
@@ -3447,7 +3454,10 @@ environments = ["prod"]
             (
                 "environments.prod.boundaries.old".to_string(),
                 FieldRule::Check {
-                    check: ConfigCheck::BoundaryUnused { env: "prod".into() }
+                    check: ConfigCheck::BoundaryUnused {
+                        env: "prod".into(),
+                        products: vec![]
+                    }
                 }
             )
         );

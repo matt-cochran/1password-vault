@@ -66,6 +66,18 @@ impl Sim {
         serde_json::from_slice(&std::fs::read(self.world_dir().join("world.json")).unwrap())
             .unwrap()
     }
+
+    /// Replace the world's `op` section with `op`.
+    fn with_op(self, op: serde_json::Value) -> Self {
+        let mut world = self.world();
+        world["op"] = op;
+        std::fs::write(
+            self.world_dir().join("world.json"),
+            serde_json::to_vec(&world).unwrap(),
+        )
+        .unwrap();
+        self
+    }
 }
 
 fn recording(case: &str) -> String {
@@ -81,11 +93,146 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// The success recording `case` (`op/success/<case>.stdout`) parsed.
+fn success(case: &str) -> serde_json::Value {
+    serde_json::from_str(&recording(&format!("op/success/{case}.stdout"))).unwrap()
+}
+
+/// The field names of a JSON object, in order.
+fn keys(v: &serde_json::Value) -> Vec<String> {
+    v.as_object().unwrap().keys().cloned().collect()
+}
+
+/// A world whose account, vault, item and vault user hold the recordings' own marker values,
+/// so the simulator's reply can be compared with a recording byte for byte.
+fn recorded_world() -> serde_json::Value {
+    serde_json::json!({
+        "default_account": "<ACCOUNT_2>",
+        "accounts": [
+            {"id": "<ACCOUNT_1>", "shorthand": "<SHORTHAND_1>", "url": "<ADDRESS_1>",
+             "email": "<EMAIL_1>", "user": "<USER_1>", "user_type": "HUMAN", "signed_in": false},
+            {"id": "<ACCOUNT_2>", "shorthand": "<SHORTHAND_2>", "url": "<ADDRESS_1>",
+             "email": "<EMAIL_2>", "user": "<USER_2>", "user_type": "HUMAN", "signed_in": true}
+        ],
+        "vaults": [{"id": "<ID_3>", "name": "<NAME_3>", "account": "<ACCOUNT_2>",
+                    "content_version": 2, "created_at": "<TIME_5>", "updated_at": "<TIME_6>",
+                    "description": "<DESCRIPTION_1>", "attribute_version": 1,
+                    "type": "USER_CREATED",
+                    "users": [{"id": "<USER_2>", "name": "<NAME_8>", "email": "<EMAIL_2>",
+                               "type": "MEMBER", "state": "ACTIVE",
+                               "permissions": ["allow_viewing", "allow_editing",
+                                               "allow_managing"]}]}],
+        "items": [{"id": "<ID_8>", "title": "<TITLE_1>", "tags": ["<TAG_1>"], "version": 1,
+                   "vault": {"id": "<ID_3>", "name": "<NAME_3>"}, "category": "SECURE_NOTE",
+                   "created_at": "<TIME_6>", "updated_at": "<TIME_6>",
+                   "additional_information": "<INFO_1>",
+                   "fields": [{"id": "notesPlain", "type": "STRING", "purpose": "NOTES",
+                               "label": "notesPlain", "value": "test-marker-recorded"}]}]
+    })
+}
+
 #[test]
 fn op_whoami_answers_for_the_signed_in_account() {
     let out = Sim::new("").run("op", &["whoami", "--format", "json"], b"");
     let who: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(who["account_uuid"], ACCOUNT);
+}
+
+#[test]
+fn op_vault_list_reply_has_exactly_the_recorded_field_set() {
+    let out = Sim::new("").run("op", &["vault", "list", "--format", "json"], b"");
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(keys(&reply[0]), keys(&success("s02-vault-list")[0]));
+}
+
+#[test]
+fn op_vault_list_reply_has_one_row_per_world_vault() {
+    let out = Sim::new("").run("op", &["vault", "list", "--format", "json"], b"");
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reply.as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn op_vault_list_reply_counts_the_world_items_in_each_vault() {
+    let out = Sim::new("").run("op", &["vault", "list", "--format", "json"], b"");
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reply[0]["items"], 1);
+}
+
+#[test]
+fn op_vault_get_reply_has_the_world_vault_id() {
+    let out = Sim::new("").run("op", &["vault", "get", VAULT, "--format", "json"], b"");
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reply["id"], VAULT);
+}
+
+#[test]
+fn op_vault_get_of_the_recorded_vault_is_the_recording_byte_for_byte() {
+    let sim = Sim::new("").with_op(recorded_world());
+    let out = sim.run("op", &["vault", "get", "<ID_3>", "--format", "json"], b"");
+    assert_eq!(
+        text(&out.stdout),
+        recording("op/success/s03-vault-get.stdout")
+    );
+}
+
+#[test]
+fn op_vault_user_list_of_the_recorded_vault_is_the_recording_byte_for_byte() {
+    let sim = Sim::new("").with_op(recorded_world());
+    let out = sim.run(
+        "op",
+        &["vault", "user", "list", "<ID_3>", "--format", "json"],
+        b"",
+    );
+    assert_eq!(
+        text(&out.stdout),
+        recording("op/success/s04-vault-user-list.stdout")
+    );
+}
+
+#[test]
+fn op_item_list_of_the_recorded_vault_is_the_recording_byte_for_byte() {
+    let sim = Sim::new("").with_op(recorded_world());
+    let out = sim.run(
+        "op",
+        &["item", "list", "--vault", "<ID_3>", "--format", "json"],
+        b"",
+    );
+    assert_eq!(
+        text(&out.stdout),
+        recording("op/success/s05-item-list.stdout")
+    );
+}
+
+#[test]
+fn op_item_list_reply_has_exactly_the_recorded_field_set() {
+    let out = Sim::new("").run(
+        "op",
+        &["item", "list", "--vault", VAULT, "--format", "json"],
+        b"",
+    );
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(keys(&reply[0]), keys(&success("s05-item-list")[0]));
+}
+
+#[test]
+fn op_account_list_of_the_recorded_accounts_is_the_recording_byte_for_byte() {
+    let sim = Sim::new("").with_op(recorded_world());
+    let out = sim.run("op", &["account", "list", "--format", "json"], b"");
+    assert_eq!(
+        text(&out.stdout),
+        recording("op/success/s01-account-list.stdout")
+    );
+}
+
+#[test]
+fn op_whoami_of_the_recorded_account_is_the_default_recording_byte_for_byte() {
+    let sim = Sim::new("").with_op(recorded_world());
+    let out = sim.run("op", &["whoami", "--format", "json"], b"");
+    assert_eq!(
+        text(&out.stdout),
+        recording("op/success/s07-whoami-default.stdout")
+    );
 }
 
 #[test]

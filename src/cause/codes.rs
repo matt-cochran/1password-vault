@@ -805,6 +805,7 @@ fn one_of_each() -> Vec<Cause> {
             source: file_source(),
             field: DottedPath(vec!["products".into(), "prod-api".into()]),
             rule: FieldRule::Missing,
+            from_proposal: false,
         },
         InputUnreadable {
             path: PathBuf::from("/work/in.env"),

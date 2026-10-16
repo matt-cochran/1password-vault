@@ -2088,6 +2088,7 @@ impl Cause {
                 source,
                 field,
                 rule,
+                ..
             } => {
                 let (what, _) = rule_words(&field.to_string(), rule);
                 format!(
@@ -3904,8 +3905,14 @@ impl Cause {
                 source: _,
                 field,
                 rule,
+                from_proposal,
             } => {
-                let (_, fix) = rule_words(&field.to_string(), rule);
+                let field = field.to_string();
+                let fix = match rule {
+                    FieldRule::Check { check } if *from_proposal => check.proposal_fix(&field),
+                    _ => None,
+                }
+                .unwrap_or_else(|| rule_words(&field, rule).1);
                 // Retry never: the same proposal meets the same configuration, so Next names
                 // no command; the Do is the change that lets the command run again.
                 plan(inspect(fix), Next::None(NoNext::NothingToRun))

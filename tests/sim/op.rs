@@ -1,19 +1,31 @@
 //! The simulated `op` (1Password CLI 2.x): "1Password in a file". It answers from
 //! `world.op`, applies edits to it, and enforces sessions, accounts and vault membership.
-//! Failure replies come from `tests/fixtures/op/failures/` (op 2.40.0). `whoami --format json`
-//! is recording 10; `item get` prints the world's stored item, a document of the recorded shape
-//! of `tests/fixtures/op_item.json`.
+//! Failure replies come from `tests/fixtures/op/failures/` (op 2.40.0); `item get` prints the
+//! world's stored item, a document of the recorded shape of `tests/fixtures/op_item.json`.
 //!
-//! **Awaiting owner recording** (needs a 1Password session; the owner runs
-//! `tests/fixtures/op/success/RECORD.md`): the JSON success shapes of `account list`,
-//! `vault list`, `vault get`, `vault user list`, `vault create`, `item list`, `item create` and
-//! `item edit`. Until then these print the world's rows in the fields opv reads, one compact
-//! line, and are not taken from a recording.
+//! **Success replies from the owner's recordings** (`tests/fixtures/op/success/`, op 2.40.0):
+//! `account list` (s01), `vault list` (s02), `vault get` (s03), `vault user list` (s04),
+//! `item list` (s05) and `whoami` (s06 with `--account` or `OP_ACCOUNT`, s07 without). Each
+//! reply is the recording with its marker values (`<ACCOUNT_2>`, `<ID_n>`, `<NAME_n>`,
+//! `<TITLE_n>`, …) and op's fixed values (`MEMBER`, `SECURE_NOTE`, …) replaced by the world's,
+//! field by field, so it keeps op's field set, order, nesting and layout ([`op_layout`]). A
+//! list repeats the recording's first element once per world entry. A field the world does not
+//! hold keeps its recorded value (the times, a vault's `description` and `content_version`,
+//! an item's `additional_information`, the IDs of vault users); a vault's `items` counts the
+//! world's items in it, and an item's `last_edited_by` is the acting user unless the world
+//! names one. A world account's `url` is printed as stored, so it holds op's form with
+//! `https://` (recording 10). Not recorded, so kept as before: an item with no tags prints
+//! `"tags": null`, and an empty list prints `[]`.
+//!
+//! **Awaiting owner recording** (`RECORD.md` §3, optional writes in a throwaway vault): the
+//! JSON success shapes of `vault create`, `item create` and `item edit`. Until then these print
+//! the world's rows in the fields opv reads, one compact line, and are not taken from a
+//! recording.
 //!
 //! ```json
 //! "op": {
 //!   "default_account": "AAAA…",             // op's own default when no --account / OP_ACCOUNT
-//!   "accounts": [{"id": "AAAA…", "shorthand": "my", "url": "my.1password.com",
+//!   "accounts": [{"id": "AAAA…", "shorthand": "my", "url": "https://my.1password.com",
 //!                 "email": "a@example.com", "user": "UUUU…", "user_type": "HUMAN",
 //!                 "signed_in": true}],
 //!   "service_account_tokens": ["ops_…"],    // OP_SERVICE_ACCOUNT_TOKEN values op accepts
@@ -37,6 +49,7 @@ use crate::world::World;
 
 const BOOLEAN: &[&str] = &["--reveal", "--raw", "--version", "--force"];
 const DIR: &str = "op/failures";
+const SUCCESS: &str = "op/success";
 
 pub fn call_words(args: &[String]) -> Vec<String> {
     words(args, BOOLEAN)
@@ -129,14 +142,8 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
         return recorded(&format!("{DIR}/01-version"), &[]);
     }
     if w.first().is_some_and(|s| s == "account") && w.get(1).is_some_and(|s| s == "list") {
-        let rows: Vec<Value> = accounts(world)
-            .iter()
-            .map(|a| {
-                json!({"url": a["url"], "email": a["email"], "user_uuid": a["user"],
-                       "account_uuid": a["id"], "shorthand": a["shorthand"]})
-            })
-            .collect();
-        return Reply::json(&Value::Array(rows));
+        let rows: Vec<Value> = accounts(world).iter().map(account_row).collect();
+        return from_recording("s01-account-list", |doc| per_entry(&doc, &rows));
     }
     // The acting identity: a service account token, else the named or default account.
     let account = if let Ok(token) = std::env::var("OP_SERVICE_ACCOUNT_TOKEN") {
@@ -180,19 +187,26 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
     let acct = id_of(&account);
     let ws: Vec<&str> = w.iter().map(String::as_str).collect();
     match ws.as_slice() {
-        ["whoami"] => whoami(&account),
-        ["vault", "list"] => Reply::json(&Value::Array(
-            vaults_of(world, &acct)
+        ["whoami"] => whoami(&account, named_account(args).is_some()),
+        ["vault", "list"] => {
+            let rows: Vec<Value> = vaults_of(world, &acct)
                 .iter()
-                .map(|v| json!({"id": v["id"], "name": v["name"]}))
-                .collect(),
-        )),
+                .map(|v| vault_row(world, v))
+                .collect();
+            from_recording("s02-vault-list", |doc| per_entry(&doc, &rows))
+        }
         ["vault", "get", v] => match vault(world, &acct, v) {
-            Ok(v) => Reply::json(&json!({"id": v["id"], "name": v["name"]})),
+            Ok(v) => {
+                let row = vault_row(world, &v);
+                from_recording("s03-vault-get", |doc| filled(&doc, &row))
+            }
             Err(r) => r,
         },
         ["vault", "user", "list", v] => match vault(world, &acct, v) {
-            Ok(v) => Reply::json(&v.get("users").cloned().unwrap_or_else(|| json!([]))),
+            Ok(v) => {
+                let users = v["users"].as_array().cloned().unwrap_or_default();
+                from_recording("s04-vault-user-list", |doc| per_entry(&doc, &users))
+            }
             // A vault of another account: recording 15 has 14's text.
             Err(r) => r,
         },
@@ -203,7 +217,7 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
                 .push(json!({"id": id, "name": name, "account": acct, "users": []}));
             Reply::json(&json!({"id": id, "name": name}))
         }
-        ["item", "list"] => item_list(world, &acct, args),
+        ["item", "list"] => item_list(world, &account, args),
         ["item", "get", item] => match find_item(world, &acct, item, flag(args, "--vault")) {
             Ok(i) => Reply::json(&i),
             Err(r) => r,
@@ -214,26 +228,123 @@ pub fn run(world: &mut World, args: &[String]) -> Reply {
     }
 }
 
-/// `op whoami --format json`: the shape of recording 10 with this account's identifiers.
-fn whoami(a: &Value) -> Reply {
-    let s = |k: &str| a[k].as_str().unwrap_or_default().to_string();
-    let url = s("url");
-    let address = url.strip_prefix("https://").unwrap_or(&url).to_string();
-    let mut reply = recorded(
-        &format!("{DIR}/10-whoami-a"),
-        &[
-            ("<ADDRESS>", address),
-            ("<EMAIL_2>", s("email")),
-            ("<USER_2>", s("user")),
-            ("<ACCOUNT_2>", s("id")),
-            ("<SHORTHAND_2>", s("shorthand")),
-        ],
-    );
-    if let Some(t) = a["user_type"].as_str() {
-        let text = String::from_utf8_lossy(&reply.stdout).replace("\"HUMAN\"", &format!("\"{t}\""));
-        reply.stdout = text.into_bytes();
+/// A world account in op's field names (`op account list`, `op whoami`).
+fn account_row(a: &Value) -> Value {
+    let mut row = json!({"url": a["url"], "email": a["email"], "user_uuid": a["user"],
+                         "account_uuid": a["id"], "shorthand": a["shorthand"]});
+    if let Some(t) = a.get("user_type") {
+        row["user_type"] = t.clone();
     }
+    row
+}
+
+/// `op whoami --format json`: recording s06 when the call names its account, else s07, with
+/// this account's identifiers and user type.
+fn whoami(a: &Value, named: bool) -> Reply {
+    let case = if named {
+        "s06-whoami-a"
+    } else {
+        "s07-whoami-default"
+    };
+    from_recording(case, |doc| filled(&doc, &account_row(a)))
+}
+
+/// A world vault as op lists it: its own fields, and `items` counting the world's items in it.
+fn vault_row(world: &World, v: &Value) -> Value {
+    let mut row = v.clone();
+    let count = items(world)
+        .iter()
+        .filter(|i| i["vault"]["id"] == v["id"])
+        .count();
+    row["items"] = json!(count);
+    row
+}
+
+/// The success recording `case` (under `op/success/`) rebuilt by `build` from its parsed JSON
+/// and printed in op's layout, with the recording's exit code and stderr.
+fn from_recording(case: &str, build: impl FnOnce(Value) -> Value) -> Reply {
+    let mut reply = recorded(&format!("{SUCCESS}/{case}"), &[]);
+    if reply.code != 0 {
+        return reply;
+    }
+    let Ok(doc) = serde_json::from_slice::<Value>(&reply.stdout) else {
+        return Reply::no_recording(&format!("{case}: its stdout is not JSON"), SUCCESS);
+    };
+    reply.stdout = op_layout(&build(doc)).into_bytes();
     reply
+}
+
+/// The recorded list `doc` with its first element repeated once per world entry, each
+/// [`filled`] from that entry.
+fn per_entry(doc: &Value, entries: &[Value]) -> Value {
+    let template = doc.get(0).cloned().unwrap_or(Value::Null);
+    Value::Array(entries.iter().map(|e| filled(&template, e)).collect())
+}
+
+/// The recorded element `template` with each of its fields the world `entry` holds replaced
+/// by the entry's value (nested objects field by field). Fields only the entry holds are left
+/// out, so the field set and order stay the recording's.
+fn filled(template: &Value, entry: &Value) -> Value {
+    let mut out = template.clone();
+    if let (Some(fields), Some(world)) = (out.as_object_mut(), entry.as_object()) {
+        for (key, value) in fields.iter_mut() {
+            match world.get(key) {
+                Some(w) if value.is_object() && w.is_object() => *value = filled(value, w),
+                Some(w) => *value = w.clone(),
+                None => {}
+            }
+        }
+    }
+    out
+}
+
+/// op's JSON layout, as its success recordings print it: two-space indent, `": "` after a
+/// key, an array of plain values on one line joined by `", "`, a trailing newline.
+fn op_layout(v: &Value) -> String {
+    fn write(out: &mut String, v: &Value, indent: usize) {
+        let pad = |out: &mut String, n: usize| out.push_str(&" ".repeat(n));
+        match v {
+            Value::Object(m) if !m.is_empty() => {
+                out.push_str("{\n");
+                for (i, (k, x)) in m.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    pad(out, indent + 2);
+                    out.push_str(&Value::String(k.clone()).to_string());
+                    out.push_str(": ");
+                    write(out, x, indent + 2);
+                }
+                out.push('\n');
+                pad(out, indent);
+                out.push('}');
+            }
+            Value::Array(a) if a.iter().any(|x| x.is_object() || x.is_array()) => {
+                out.push_str("[\n");
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    pad(out, indent + 2);
+                    write(out, x, indent + 2);
+                }
+                out.push('\n');
+                pad(out, indent);
+                out.push(']');
+            }
+            Value::Array(a) => {
+                let parts: Vec<String> = a.iter().map(Value::to_string).collect();
+                out.push('[');
+                out.push_str(&parts.join(", "));
+                out.push(']');
+            }
+            _ => out.push_str(&v.to_string()),
+        }
+    }
+    let mut out = String::new();
+    write(&mut out, v, 0);
+    out.push('\n');
+    out
 }
 
 /// The vaults of account `acct` (a vault with no `account` belongs to the default one).
@@ -311,7 +422,12 @@ fn find_item(
         })
 }
 
-fn item_list(world: &World, acct: &str, args: &[String]) -> Reply {
+/// `op item list`: recording s05 per item, its tags as the world holds them (`null` when it
+/// holds none, as before: an untagged item is not recorded) and `last_edited_by` the acting
+/// user unless the world names one. Field values are never in it: the recording has no
+/// `fields`, and [`filled`] adds none.
+fn item_list(world: &World, account: &Value, args: &[String]) -> Reply {
+    let acct = &id_of(account);
     let in_vault = match flag(args, "--vault") {
         Some(v) => match vault(world, acct, v) {
             Ok(v) => Some(v["id"].clone()),
@@ -338,12 +454,17 @@ fn item_list(world: &World, acct: &str, args: &[String]) -> Reply {
                 })
             })
         })
-        .map(|i| {
-            json!({"id": i["id"], "title": i["title"], "tags": i["tags"], "version": i["version"],
-                   "vault": i["vault"], "category": i["category"]})
+        .map(|mut i| {
+            if i.get("tags").is_none() {
+                i["tags"] = Value::Null;
+            }
+            if i.get("last_edited_by").is_none() {
+                i["last_edited_by"] = account["user"].clone();
+            }
+            i
         })
         .collect();
-    Reply::json(&Value::Array(rows))
+    from_recording("s05-item-list", |doc| per_entry(&doc, &rows))
 }
 
 fn read_stdin_json() -> Option<Value> {
