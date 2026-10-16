@@ -147,8 +147,8 @@ fn unescape(key: &str) -> String {
 }
 
 /// An exclusive `flock` on a file in the scenario directory, released on drop (and by the
-/// kernel when the process dies).
-struct Lock(File);
+/// kernel when the process dies). Off Unix there is no `flock`: the handle is only held.
+struct Lock(#[cfg_attr(not(unix), allow(dead_code))] File);
 
 impl Lock {
     fn take(path: &Path) -> Result<Self, String> {
