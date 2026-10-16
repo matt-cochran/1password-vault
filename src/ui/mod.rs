@@ -6,6 +6,7 @@
 pub mod adopt_review;
 pub mod app;
 pub mod config_forms;
+pub mod docs;
 pub mod forms;
 pub mod model;
 pub mod render;

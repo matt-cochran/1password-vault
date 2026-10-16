@@ -17,12 +17,17 @@ fn row(action: &str) -> ReviewRow {
 
 // ---- rows_from ----
 
+/// An adopt document as the UI reads it.
+fn adopt(v: serde_json::Value) -> crate::ui::docs::AdoptDoc {
+    serde_json::from_value(v).unwrap()
+}
+
 #[test]
 fn rows_from_builds_one_row_per_document_row() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": ["A"], "product": "api", "key": "TOKEN", "action": "import" },
         { "found": ["B"], "product": null, "key": null, "action": "match" },
-    ] });
+    ] }));
     assert_eq!(
         rows_from(&doc, &|_, _| String::new(), &|_, _| false).len(),
         2
@@ -31,43 +36,43 @@ fn rows_from_builds_one_row_per_document_row() {
 
 #[test]
 fn rows_from_uses_the_label_closure_for_a_keyed_row() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": [], "product": "api", "key": "TOKEN", "action": "import" },
-    ] });
+    ] }));
     let label = |p: &str, k: &str| format!("{p}/{k}");
     assert_eq!(rows_from(&doc, &label, &|_, _| false)[0].label, "api/TOKEN");
 }
 
 #[test]
 fn rows_from_joins_found_names_for_a_keyless_row() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": ["A", "B"], "product": null, "key": null, "action": "match" },
-    ] });
+    ] }));
     let label = |_: &str, _: &str| panic!("label must not be called for a keyless row");
     assert_eq!(rows_from(&doc, &label, &|_, _| false)[0].label, "A, B");
 }
 
 #[test]
 fn rows_from_reads_immutable_from_the_closure() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": [], "product": "api", "key": "TOKEN", "action": "differs" },
-    ] });
+    ] }));
     assert!(rows_from(&doc, &|_, _| String::new(), &|_, _| true)[0].immutable);
 }
 
 #[test]
 fn rows_from_treats_a_keyless_row_as_mutable() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": ["A"], "product": null, "key": null, "action": "match" },
-    ] });
+    ] }));
     assert!(!rows_from(&doc, &|_, _| String::new(), &|_, _| true)[0].immutable);
 }
 
 #[test]
 fn rows_from_keeps_the_found_names() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": ["A", "B"], "product": "api", "key": "TOKEN", "action": "import" },
-    ] });
+    ] }));
     assert_eq!(
         rows_from(&doc, &|_, _| String::new(), &|_, _| false)[0].found,
         ["A", "B"]
@@ -76,9 +81,9 @@ fn rows_from_keeps_the_found_names() {
 
 #[test]
 fn rows_from_takes_the_default_decision_from_the_action() {
-    let doc = json!({ "rows": [
+    let doc = adopt(json!({ "rows": [
         { "found": [], "product": "api", "key": "TOKEN", "action": "import" },
-    ] });
+    ] }));
     assert_eq!(
         rows_from(&doc, &|_, _| String::new(), &|_, _| false)[0].decision,
         Some(Decision::Take)
@@ -87,19 +92,7 @@ fn rows_from_takes_the_default_decision_from_the_action() {
 
 #[test]
 fn rows_from_returns_no_rows_for_a_missing_rows_field() {
-    assert!(rows_from(&json!({}), &|_, _| String::new(), &|_, _| false).is_empty());
-}
-
-#[test]
-fn rows_from_returns_no_rows_for_a_non_array_rows_field() {
-    assert!(
-        rows_from(
-            &json!({ "rows": "nope" }),
-            &|_, _| String::new(),
-            &|_, _| false
-        )
-        .is_empty()
-    );
+    assert!(rows_from(&adopt(json!({})), &|_, _| String::new(), &|_, _| false).is_empty());
 }
 
 // ---- default_decision ----

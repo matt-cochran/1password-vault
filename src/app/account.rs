@@ -122,7 +122,7 @@ pub fn session_var_names() -> Vec<String> {
 }
 
 /// The selected account: its ID, how it was chosen and where that choice came from.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Selected {
     pub account_id: String,
     /// `flag`, `env`, `pointer`, `manifest` or `only`.
@@ -132,7 +132,7 @@ pub struct Selected {
 }
 
 /// One account this CLI knows, as the document lists it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccountRow {
     pub account_id: String,
     pub user_id: String,
@@ -145,7 +145,7 @@ pub struct AccountRow {
 }
 
 /// One state a person or agent must act on, with one runnable next step.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     pub code: String,
     pub human_required: bool,
@@ -154,7 +154,7 @@ pub struct Finding {
 }
 
 /// The FR-49 document (`opv account list --json`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub discovery: String,
     pub platform: String,

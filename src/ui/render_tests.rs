@@ -100,7 +100,7 @@ fn the_sync_confirmation_names_the_command_it_runs() {
     let mut a = app();
     a.confirm_sync(
         "ci",
-        &serde_json::json!({"stage": ["API_TOKEN"], "prune": [], "totals": {"findings": 0}, "plan_id": "abc123"}),
+        &typed(serde_json::json!({"rows": [], "stage": ["API_TOKEN"], "prune": [], "totals": {"findings": 0}, "plan_id": "abc123"})),
     );
     assert!(frame(&a, 120, 36).contains("runs: opv sync ci --expect-plan abc123"));
 }
@@ -139,9 +139,9 @@ fn the_adoption_review_shows_each_key_and_decision() {
     a.open_adopt(
         "local",
         "dev.env",
-        &serde_json::json!({"rows": [
+        &typed(serde_json::json!({"rows": [
             {"found": ["API_TOKEN"], "product": "api", "key": "API_TOKEN", "action": "differs"}
-        ]}),
+        ]})),
     );
     assert!(frame(&a, 140, 30).contains("keep 1Password"));
 }
@@ -157,26 +157,102 @@ fn the_declare_a_key_form_draws_its_fields() {
 fn the_history_screen_shows_the_latest_write() {
     let mut a = app();
     a.screen = Screen::History("ci".into());
-    a.history = Some(serde_json::json!({
+    a.history = Some(Ok(typed(serde_json::json!({
+        "name": "app", "target": "github",
         "latest": {"written": "2026-10-12T09:00:00Z", "plan": "7f3c9a1e", "opv_version": "0.6.0"},
         "rows": [{"product": "api", "key": "API_TOKEN", "version": "v3", "state": "stamped",
                   "written": "2026-10-12T09:00:00Z"}]
-    }));
+    }))));
     assert!(frame(&a, 140, 30).contains("last write 2026-10-12T09:00:00Z by plan 7f3c9a1e"));
+}
+
+/// `history --json` of an environment with two targets (FR-56).
+fn two_target_history() -> crate::ui::docs::HistoryDoc {
+    typed(serde_json::json!({
+        "environment": "ci",
+        "targets": [
+            {"name": "api", "target": "fly", "latest": null,
+             "rows": [{"product": "api", "key": "API_TOKEN", "version": "v3",
+                       "state": "recorded", "written": null}]},
+            {"name": "web", "target": "github", "latest": null, "rows": []}
+        ]
+    }))
+}
+
+#[test]
+fn the_history_screen_names_each_target() {
+    // 07.04: several targets are one block each, never "no secret is declared here".
+    let mut a = app();
+    a.screen = Screen::History("ci".into());
+    a.history = Some(Ok(two_target_history()));
+    assert!(frame(&a, 140, 30).contains("target web"));
+}
+
+#[test]
+fn the_history_screen_shows_each_targets_rows() {
+    let mut a = app();
+    a.screen = Screen::History("ci".into());
+    a.history = Some(Ok(two_target_history()));
+    assert!(frame(&a, 140, 30).contains("as opv left it"));
+}
+
+#[test]
+fn a_failed_history_shows_its_next_step() {
+    let mut a = app();
+    a.screen = Screen::History("ci".into());
+    a.history = Some(Err(signed_out()));
+    assert!(frame(&a, 140, 30).contains("Next: opv login"));
 }
 
 #[test]
 fn the_access_screen_shows_the_owners_command() {
     let mut a = app();
     a.screen = Screen::Access;
-    a.access = Some(serde_json::json!({
-        "environments": [{"environment": "ci", "vault_id": "v", "deployed": true, "visible": true,
-                          "people": 2, "guests": 0, "service_accounts": []}],
-        "findings": [{"code": "no_ci_reader", "environment": "ci",
+    a.access = Some(Ok(access_doc()));
+    assert!(frame(&a, 160, 30).contains("Owner runs: op service-account create"));
+}
+
+/// `access --json` as `opv access` writes it (FR-59): a missing CI reader grant.
+fn access_doc() -> crate::ui::docs::AccessDoc {
+    typed(serde_json::json!({"environments": [{
+        "environment": "ci",
+        "report": {
+            "checks": [{"grant": {"principal": {"kind": "ci_reader", "environment": "ci"},
+                                  "service_account": "p-ci-ci", "vault_id": "v",
+                                  "permission": "read"},
+                        "state": "missing"}],
+            "extra": [], "checked": 1, "unclassified": 0
+        },
+        "commands": ["op service-account create \"p-ci-ci\" --vault v:read_items --expires-in 90d"],
+        "findings": [{"code": "no_ci_reader",
                       "message": "ci deploys but has no read-only service account for CI",
-                      "next": "op service-account create \"p-ci-ci\" --vault v:read_items --expires-in 90d"}]
-    }));
-    assert!(frame(&a, 160, 30).contains("owner runs: op service-account create"));
+                      "next": null}]
+    }]}))
+}
+
+#[test]
+fn the_access_screen_shows_each_grants_state() {
+    // 07.03: the report's checks, not counts the document never had.
+    let mut a = app();
+    a.screen = Screen::Access;
+    a.access = Some(Ok(access_doc()));
+    assert!(frame(&a, 160, 30).contains("CI reader (p-ci-ci): read on vault v: missing"));
+}
+
+#[test]
+fn the_access_screen_shows_the_findings() {
+    let mut a = app();
+    a.screen = Screen::Access;
+    a.access = Some(Ok(access_doc()));
+    assert!(frame(&a, 160, 30).contains("! no_ci_reader"));
+}
+
+#[test]
+fn the_access_screen_counts_what_it_checked() {
+    let mut a = app();
+    a.screen = Screen::Access;
+    a.access = Some(Ok(access_doc()));
+    assert!(frame(&a, 160, 30).contains("checked: 1, could not classify: 0"));
 }
 
 #[test]
@@ -245,7 +321,7 @@ fn a_blocked_sync_names_no_command_to_run() {
     let mut a = app();
     a.confirm_sync(
         "ci",
-        &serde_json::json!({"stage": ["API_TOKEN"], "prune": [], "totals": {"findings": 1}, "plan_id": null}),
+        &typed(serde_json::json!({"rows": [], "stage": ["API_TOKEN"], "prune": [], "totals": {"findings": 1}, "plan_id": null})),
     );
     assert!(!frame(&a, 120, 36).contains("runs:"));
 }
@@ -254,7 +330,10 @@ fn a_blocked_sync_names_no_command_to_run() {
 fn an_empty_account_list_says_so() {
     let mut a = app();
     a.screen = Screen::Accounts;
-    a.accounts = Some(serde_json::json!({"ok": true, "accounts": []}));
+    a.accounts = Some(Ok(typed(serde_json::json!({
+        "discovery": "op_account_list", "platform": "linux", "cli_accounts_only": false,
+        "selected": null, "accounts": [], "findings": [], "next": null
+    }))));
     assert!(frame(&a, 140, 40).contains("No 1Password account is listed"));
 }
 
@@ -262,7 +341,51 @@ fn an_empty_account_list_says_so() {
 fn an_account_list_that_failed_says_why() {
     let mut a = app();
     a.screen = Screen::Accounts;
-    a.accounts =
-        Some(serde_json::json!({"ok": false, "error": {"message": "op is not installed"}}));
+    a.accounts = Some(Err(crate::ui::docs::Failure::Error(
+        crate::ui::docs::ErrorDoc {
+            message: "op is not installed".into(),
+            ..Default::default()
+        },
+    )));
     assert!(frame(&a, 140, 40).contains("could not list the accounts: op is not installed"));
+}
+
+/// A document as the UI reads it.
+fn typed<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+    serde_json::from_value(v).unwrap()
+}
+
+/// The failure of a command run while op is signed out.
+fn signed_out() -> crate::ui::docs::Failure {
+    crate::ui::docs::Failure::Error(crate::ui::docs::ErrorDoc {
+        code: "op_not_signed_in".into(),
+        message: "1Password CLI is not signed in".into(),
+        next: Some("opv login".into()),
+        ..Default::default()
+    })
+}
+
+/// `opv ui` over a failed `opv ready`.
+fn ready_failed() -> App {
+    App::new(Snapshot::gather(&crate::ui::model::tests::Replacing {
+        command: "ready",
+        stdout: crate::ui::model::tests::READY_FAILED,
+    }))
+}
+
+#[test]
+fn a_failed_ready_never_says_nothing_needs_attention() {
+    // 07.02: the failure envelope is not an empty receipt.
+    assert!(!frame(&ready_failed(), 140, 40).contains("Nothing needs attention"));
+}
+
+#[test]
+fn a_failed_ready_shows_its_next_step() {
+    assert!(frame(&ready_failed(), 140, 40).contains("Next: opv login"));
+}
+
+#[test]
+fn a_deployed_environment_is_not_shown_as_local() {
+    // 07.01: the sidebar names the target's provider.
+    assert!(frame(&app(), 140, 40).contains("CI (GitHub) · GitHub"));
 }

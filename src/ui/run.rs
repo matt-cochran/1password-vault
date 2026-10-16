@@ -8,16 +8,16 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use super::app::{App, Effect, Key};
+use super::docs::{AccessDoc, AccountsDoc, AdoptDoc, HistoryDoc, RowsDoc, Source, fetch};
+use super::model::Snapshot;
+use crate::cause::{Cause, NoTerminal};
+use crate::error::Error;
+use crate::runner::signals;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use serde_json::Value;
-
-use super::app::{App, Effect, Key};
-use super::model::{Snapshot, Source};
-use crate::error::Error;
-use crate::runner::signals;
 
 /// This opv binary, run as a child with `--json` documents on stdout.
 pub struct Exe {
@@ -38,15 +38,15 @@ impl Exe {
 }
 
 impl Source for Exe {
-    fn json(&self, args: &[&str]) -> Result<Value, String> {
+    fn stdout(&self, args: &[&str]) -> Result<Vec<u8>, String> {
         let out = self
             .command(args)
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-            .map_err(|e| e.kind().to_string())?;
-        serde_json::from_slice(&out.stdout).map_err(|_| "no JSON document".to_string())
+            .map_err(|e| format!("could not run opv ({})", e.kind()))?;
+        Ok(out.stdout)
     }
 }
 
@@ -98,14 +98,17 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
             "{why}; here is the same information as text (opv ready):"
         )
         .map_err(crate::app::write_err)?;
-        let status = source.command(&["ready"]).status().map_err(|e| {
-            Error::Dependency(format!("cannot run opv ready ({})", e.kind()).into())
-        })?;
-        return if status.success() {
-            Ok(())
-        } else {
-            Err(Error::findings(1, "opv ready"))
-        };
+        let status = source
+            .command(&["ready"])
+            .status()
+            .map_err(|e| start_failed(e.kind()))?;
+        if status.success() {
+            return Ok(());
+        }
+        // ready printed its own error and steps; they stay the last word, with its exit
+        // code (07.05).
+        out.flush().map_err(crate::app::write_err)?;
+        std::process::exit(exit_code(status));
     }
     eprintln!("opv ui: reading the configuration and readiness…");
     let mut app = App::new(Snapshot::gather(&source));
@@ -134,39 +137,33 @@ pub fn run(source: Exe, out: &mut dyn Write) -> Result<(), Error> {
                 Effect::AdoptPlan { env, from } => {
                     busy(&mut term, &mut app, &format!("reading {from}…"))?;
                     app.status.clear();
-                    match source.json(&["adopt", &env, "--from", &from, "--json"]) {
-                        Ok(doc) if doc["rows"].is_array() => app.open_adopt(&env, &from, &doc),
-                        Ok(doc) => {
-                            app.status = format!(
-                                "opv adopt {env} --from {from}: {}",
-                                doc["error"]["message"]
-                                    .as_str()
-                                    .unwrap_or("could not read the file")
-                            )
+                    match fetch::<AdoptDoc>(&source, &["adopt", &env, "--from", &from, "--json"]) {
+                        Ok(doc) => app.open_adopt(&env, &from, &doc),
+                        Err(failure) => {
+                            app.status = format!("opv adopt {env} --from {from}: {failure}")
                         }
-                        Err(why) => app.status = format!("opv adopt {env}: {why}"),
                     }
                 }
                 Effect::LoadHistory(env) => {
-                    app.history = source.json(&["history", &env, "--json"]).ok();
+                    app.history = Some(fetch::<HistoryDoc>(&source, &["history", &env, "--json"]));
                 }
                 Effect::LoadAccess => {
-                    app.access = source.json(&["access", "--json"]).ok();
+                    app.access = Some(fetch::<AccessDoc>(&source, &["access", "--json"]));
                 }
                 Effect::LoadAccounts => {
                     busy(&mut term, &mut app, "reading accounts…")?;
                     app.status.clear();
-                    match source.json(&["account", "list", "--json"]) {
-                        Ok(doc) => app.accounts = Some(doc),
-                        Err(why) => app.status = format!("opv account list: {why}"),
-                    }
+                    app.accounts = Some(fetch::<AccountsDoc>(
+                        &source,
+                        &["account", "list", "--json"],
+                    ));
                 }
                 Effect::Plan { env } => {
                     busy(&mut term, &mut app, &format!("planning a sync of {env}…"))?;
                     app.status.clear();
-                    match source.json(&["plan", &env, "--json"]) {
+                    match fetch::<RowsDoc>(&source, &["plan", &env, "--json"]) {
                         Ok(plan) => app.confirm_sync(&env, &plan),
-                        Err(why) => app.status = format!("opv plan {env}: {why}"),
+                        Err(failure) => app.status = format!("opv plan {env}: {failure}"),
                     }
                 }
                 Effect::Run(args) => {
@@ -224,8 +221,39 @@ fn busy(term: &mut Term, app: &mut App, what: &str) -> Result<(), Error> {
     paint(term, app)
 }
 
-fn io_err(e: &dyn std::fmt::Display) -> Error {
-    Error::Dependency(format!("terminal: {e}").into())
+/// The terminal stopped working under opv ui (raw mode, drawing or reading a key failed):
+/// there is no terminal to draw on.
+fn io_err(_: &dyn std::fmt::Display) -> Error {
+    Cause::NeedsTerminal {
+        why: NoTerminal::NoTty,
+    }
+    .into()
+}
+
+/// This opv binary could not be started as a child (C11).
+fn start_failed(io: io::ErrorKind) -> Error {
+    Cause::ChildStartFailed {
+        program: "opv".into(),
+        workdir: None,
+        io: io.into(),
+        remote: None,
+    }
+    .into()
+}
+
+/// The exit code a child ended with, passed on unchanged; a signal as `128 + signal`.
+pub(crate) fn exit_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Put the terminal back as the shell expects it (best effort) when opv ends on a signal or
