@@ -101,16 +101,34 @@ fn products_in_scope(
 }
 
 /// The 1Password account this session reaches (`op whoami`'s account UUID; the same for a
-/// person and a service account of that account), or `unknown`.
-fn account_id(r: &dyn CommandRunner) -> String {
+/// person and a service account of that account). A receipt is bound to it, so an account
+/// that cannot be told is an error: never a receipt minted or judged under a guess.
+fn account_id(r: &dyn CommandRunner) -> Result<String, Error> {
     let call = crate::runner::Call::new(onepassword::OP, &["whoami", "--format", "json"]);
-    let Ok(crate::runner::Outcome::Done(out)) = r.read(&call, &[]) else {
-        return "unknown".into();
+    let unknown = |why: &str| {
+        Error::Source(
+            format!(
+                "could not tell which 1Password account this session reaches (op whoami \
+                 {why}); no delivery receipt was minted or checked"
+            )
+            .into(),
+        )
+        .with_next("opv doctor")
+    };
+    let out = match r.read(&call, &[]) {
+        Ok(crate::runner::Outcome::Done(out)) => out,
+        Ok(crate::runner::Outcome::Refused(o)) => {
+            return Err(unknown(&crate::runner::status_text(o.status)));
+        }
+        Ok(crate::runner::Outcome::Unknown { .. }) => {
+            return Err(crate::host::OP_CLI.unanswered(r, "op whoami"));
+        }
+        Err(e) => return Err(unknown(&format!("could not run: {}", e.kind()))),
     };
     serde_json::from_slice::<Value>(&out.stdout)
         .ok()
         .and_then(|v| v["account_uuid"].as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".into())
+        .ok_or_else(|| unknown("named no account"))
 }
 
 /// The scope a receipt is bound to.
@@ -291,7 +309,7 @@ pub fn record(
     r: &dyn CommandRunner,
 ) -> Result<Recorded, Error> {
     let env = fleet.environment(env_name)?;
-    let account = account_id(r);
+    let account = account_id(r)?;
     let values = values_by_field(fleet, env_name, r)?;
     let version_of = |name: &str| {
         listed
@@ -496,6 +514,9 @@ pub fn verify(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
+    // A misspelt product would otherwise match nothing and pass (exit 0) having checked
+    // nothing.
+    super::check_product(fleet, only, "delivery verify", Some(env_name))?;
     let names = super::resolve_targets(fleet, env_name, targets, "delivery verify")?;
     let from_file: Vec<Receipt> = match receipt_file {
         Some(p) => read_receipt_file(p)?,
@@ -507,6 +528,20 @@ pub fn verify(
             continue;
         }
         checks.extend(verify_target(fleet, env_name, target, only, &from_file, r)?);
+    }
+    if checks.is_empty() {
+        let what = match only {
+            Some(p) => format!("product {p}"),
+            None => "any product".to_string(),
+        };
+        return Err(Error::Config(
+            format!(
+                "nothing to verify: no target of {env_name} delivers a secret of {what}; \
+                 nothing was checked"
+            )
+            .into(),
+        )
+        .with_next(format!("opv status {}", crate::error::shell_word(env_name))));
     }
     report(out, env_name, &checks, json)?;
     if checks.iter().all(|c| c.verification.state == "verified") {
@@ -544,7 +579,7 @@ fn verify_target(
         crate::ports::Ports::Pinned { store, .. } => store.list()?,
     };
     let values = values_by_field(fleet, env_name, r)?;
-    let account = account_id(r);
+    let account = account_id(r)?;
     let mut checks = Vec::new();
     for product in products_in_scope(fleet, env_name, target, only)? {
         let expected = bindings(fleet, env_name, target, &product)?;
@@ -644,6 +679,41 @@ fn read_receipt_file(path: &Path) -> Result<Vec<Receipt>, Error> {
 
 /// Write the receipts minted by a sync to `path` (`{"schema", "deliveries": [...]}`):
 /// names, ids and times only.
+/// `--receipt <file>` can be written: its directory exists and takes a new file, and the
+/// path is not a directory. Checked before a sync stages anything, so a bad path never
+/// fails a run half way. Leaves nothing behind.
+pub fn check_receipt_path(path: &Path) -> Result<(), Error> {
+    let bad = |why: String| {
+        Error::Config(format!("--receipt {}: {why}; nothing was changed", path.display()).into())
+    };
+    if path.is_dir() {
+        return Err(bad("is a directory".into()));
+    }
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    if !dir.is_dir() {
+        return Err(bad(format!("directory {} does not exist", dir.display())));
+    }
+    let probe = dir.join(format!(".opv-receipt-check-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => Err(bad(format!(
+            "cannot write in {} ({})",
+            dir.display(),
+            e.kind()
+        ))),
+    }
+}
+
 pub fn write_receipt_file(path: &Path, minted: &[Receipt]) -> Result<(), Error> {
     let doc = json!({"schema": SCHEMA, "deliveries": minted});
     let text = serde_json::to_string_pretty(&doc)

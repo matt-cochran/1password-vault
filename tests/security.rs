@@ -62,7 +62,7 @@ case "$1" in
   whoami)
     e="${FAKE_OP_WHOAMI_EXIT:-$FAKE_OP_EXIT}"
     [ -n "$e" ] && exit "$e"
-    printf '{"email":"S7MARKERVALUEwho@example.invalid","user_type":"SERVICE_ACCOUNT"}\n'; exit 0 ;;
+    printf '{"email":"S7MARKERVALUEwho@example.invalid","user_type":"SERVICE_ACCOUNT","account_uuid":"AFAKE00000000000000000001"}\n'; exit 0 ;;
   account)
     if [ -n "$FAKE_OP_NO_ACCOUNTS" ]; then printf '[]\n'
     else printf '[{"url":"S7MARKERVALUE.example.invalid","email":"S7MARKERVALUE@example.invalid"}]\n'; fi
