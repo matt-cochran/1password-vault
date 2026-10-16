@@ -38,11 +38,6 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "Bug",
         "an internal error: reachable only through a bug in opv",
     ),
-    // Declared, mapped to a code and given a fixture, but nothing outside src/cause builds it.
-    (
-        "StoreNotReady",
-        "never constructed outside src/cause (a dead variant)",
-    ),
     // The receiver speaks protocol 1 (src/app/remote_delivery.rs PROTOCOL); another
     // protocol's handshake would be invented output: there is no recording of one.
     (

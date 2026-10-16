@@ -716,13 +716,6 @@ fn fixtures() -> Vec<(Cause, Vec<&'static str>)> {
             vec!["/work/secrets.toml"],
         ),
         (
-            StoreNotReady {
-                store: res(ResourceKind::ExternalStore, "store-op"),
-                reason: "InvalidProviderConfig".into(),
-            },
-            vec!["store-op", "InvalidProviderConfig"],
-        ),
-        (
             HandoffPipeContested {
                 system: System::Azure,
             },
@@ -888,20 +881,19 @@ fn ordinal(c: &Cause) -> usize {
         KeyNotDeclared { .. } => 61,
         KeysBlocking { .. } => 62,
         LocalIo { .. } => 63,
-        StoreNotReady { .. } => 64,
-        HandoffPipeContested { .. } => 65,
-        ConfigProposalInvalid { .. } => 66,
-        InputUnreadable { .. } => 67,
-        ItemUnusable { .. } => 68,
-        SecretNotStored { .. } => 69,
-        AccountRequired { .. } => 70,
-        SourceOnly { .. } => 71,
-        TitleLookup { .. } => 72,
-        PersonalNotSetUp { .. } => 73,
+        HandoffPipeContested { .. } => 64,
+        ConfigProposalInvalid { .. } => 65,
+        InputUnreadable { .. } => 66,
+        ItemUnusable { .. } => 67,
+        SecretNotStored { .. } => 68,
+        AccountRequired { .. } => 69,
+        SourceOnly { .. } => 70,
+        TitleLookup { .. } => 71,
+        PersonalNotSetUp { .. } => 72,
     }
 }
 
-const VARIANTS: usize = 74;
+const VARIANTS: usize = 73;
 
 fn causes() -> Vec<Cause> {
     fixtures().into_iter().map(|(c, _)| c).collect()
@@ -2149,16 +2141,6 @@ fn a6_an_undeclared_key_names_its_environment() {
         c.message(),
         "key API_KEY is not declared for environment prod"
     );
-}
-
-/// A7: a store's reason is shown only as a code word, never as free text.
-#[test]
-fn a7_a_store_reason_that_is_not_a_code_is_never_echoed() {
-    let c = Cause::StoreNotReady {
-        store: res(ResourceKind::ExternalStore, "op-store"),
-        reason: "token=abc is wrong".into(),
-    };
-    assert!(!c.message().contains("abc"), "{}", c.message());
 }
 
 /// A7: a deployment that changed before the write is a target object.

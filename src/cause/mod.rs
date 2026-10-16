@@ -755,12 +755,6 @@ pub enum Cause {
         path: PathBuf,
         io: IoKind,
     },
-    /// An external store (a ClusterSecretStore) is not ready; `reason` is the condition's
-    /// reason code (a CamelCase word), never its message.
-    StoreNotReady {
-        store: ResourceRef,
-        reason: String,
-    },
     /// Another process connected to opv's private hand-off pipe for a vendor CLI: opv
     /// refused it and sent nothing.
     HandoffPipeContested {
@@ -1390,7 +1384,6 @@ impl Cause {
             ChildStartFailed { .. } => "child_start_failed",
             DeliveryUnverified { .. } => "delivery_unverified",
             LocalIo { .. } => "local_io_failed",
-            StoreNotReady { .. } => "owner_setup_required",
             HandoffPipeContested { .. } => "handoff_refused",
             ConfigProposalInvalid { .. } => "config_invalid",
             InputUnreadable { .. } => "input_unreadable",
@@ -1458,7 +1451,6 @@ impl Cause {
                 }
             }
             OwnerSetupRequired { .. }
-            | StoreNotReady { .. }
             | TargetRefused { .. }
             | RemoteUnreachable { .. }
             | RemoteDisconnected { .. } => 5,
