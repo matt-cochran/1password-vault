@@ -42,7 +42,7 @@ use super::store::referenced_names;
 use super::{Effect, KubeTarget, Kubectl, LABEL_KEY, LABEL_MANAGED, VALUE_KEY, store_name};
 use crate::domain::SecretValue;
 use crate::domain::plan::StoreEntry;
-use crate::error::Error;
+use crate::error::{Code, Error};
 use crate::ports::{PinnedStore, Store};
 use crate::provider::{Check, PreflightMode, Verdict};
 use crate::runner::Outcome;
@@ -433,9 +433,9 @@ pub(crate) fn diagnose_failed(
             return Error::Target(
                 format!(
                     "{head}\n  cause: {} has no version {version} of {env_name} (deleted or purged \
-                 after opv wrote it)\n  next: run opv sync {} --deploy again; it writes and pins a \
-                 fresh version",
-                    bridge.describe, t.env
+                 after opv wrote it); re-running writes and pins a fresh version\n  next: \
+                 re-run the same command",
+                    bridge.describe
                 )
                 .into(),
             );
@@ -525,6 +525,8 @@ pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
             }
         }
         Outcome::Refused(out) => {
+            // Asked before the probes below: the refusal's own words decide.
+            let not_found = crate::runner::last_failure_not_found();
             let group = ["get", "--raw", "/apis/external-secrets.io"];
             let probe = || k.call(Effect::Read, what, &group, None, &[1]);
             match crate::runner::diagnosing(probe)? {
@@ -535,8 +537,26 @@ pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
                     &crate::runner::status_text(out.status),
                     "api-resources --api-group=external-secrets.io",
                 ) {
-                    // Context and cluster are fine: the API group is simply absent.
-                    Error::Target(_) => Err(not_served(false)),
+                    // Context and cluster are fine and the API server said the API is not
+                    // there (404), or its discovery list has no such group: the operator is
+                    // not installed.
+                    Error::Target(_) if not_found || group_absent(k) => Err(not_served(false)),
+                    // Any other refusal (403 first among them) proves nothing about the
+                    // operator: this identity may not read API discovery.
+                    Error::Target(_) => Err(Error::Target(
+                        format!(
+                            "{what} was refused ({}) and not as missing, so the External \
+                             Secrets Operator may well be installed; nothing was changed",
+                            crate::runner::status_text(out.status)
+                        )
+                        .into(),
+                    )
+                    .with_code(Code::PermissionDenied)
+                    .with_do(format!(
+                        "ask a cluster admin to let this identity read API discovery \
+                         (the system:discovery role), or check the cause with `{}`",
+                        k.command("get --raw /apis/external-secrets.io/v1")
+                    ))),
                     other => Err(other),
                 },
             }
@@ -548,6 +568,29 @@ pub(crate) fn operator_served(k: &Kubectl<'_>) -> Result<(), Error> {
             "api-resources --api-group=external-secrets.io",
         )),
     }
+}
+
+/// True when API discovery (`get --raw /apis`, readable by every signed-in identity)
+/// answers and lists no external-secrets.io group: the operator is definitely absent. An
+/// unreadable list proves nothing, so it is false.
+fn group_absent(k: &Kubectl<'_>) -> bool {
+    let what = "kubectl get --raw /apis";
+    let listed = crate::runner::diagnosing(|| {
+        k.call(Effect::Read, what, &["get", "--raw", "/apis"], None, &[1])
+    });
+    let Ok(Outcome::Done(out)) = listed else {
+        return false;
+    };
+    let Ok(doc) = super::parse_json(&out, what) else {
+        return false;
+    };
+    doc.get("groups")
+        .and_then(Value::as_array)
+        .is_some_and(|groups| {
+            !groups
+                .iter()
+                .any(|g| g.get("name").and_then(Value::as_str) == Some("external-secrets.io"))
+        })
 }
 
 fn not_served(old: bool) -> Error {
@@ -664,7 +707,21 @@ pub(crate) fn preflight(
             grant(k, "get,list,create,delete")
         );
         match mode {
-            PreflightMode::Mutate => return Err(Error::Auth(msg.into())),
+            PreflightMode::Mutate => {
+                return Err(Error::Target(
+                    format!(
+                        "your kubectl identity cannot create ExternalSecrets in namespace {}; \
+                         nothing was changed",
+                        k.target.namespace
+                    )
+                    .into(),
+                )
+                .with_code(Code::PermissionDenied)
+                .with_do(format!(
+                    "ask a namespace admin to grant it: {}",
+                    grant(k, "get,list,create,delete")
+                )));
+            }
             PreflightMode::Read => checks.push(Check {
                 name: "external secrets access".into(),
                 outcome: Ok(Verdict::Warn(msg)),
@@ -1066,6 +1123,12 @@ mod tests {
 
     /// The diagnosis when the store says `exists` and kubectl answers `outputs`.
     fn diagnosis(exists: Option<bool>, outputs: Vec<Output>) -> String {
+        let e = diagnosis_error(exists, outputs);
+        crate::error::report(&e, "opv doctor", None)
+    }
+
+    /// The diagnosis error itself.
+    fn diagnosis_error(exists: Option<bool>, outputs: Vec<Output>) -> Error {
         let r = FakeRunner::new(outputs);
         let t = super::super::testutil::target();
         let bridge = Bridge {
@@ -1075,14 +1138,13 @@ mod tests {
             locator: "kv-opv-fixture".into(),
         };
         let k = Kubectl::new(&r, &t);
-        let e = diagnose_failed(
+        diagnose_failed(
             &k,
             &bridge,
             "opv-db-url-46687ce78b",
             "DB_URL",
             "46687ce78b76487cb0c1da470360b638",
-        );
-        crate::error::report(&e, "opv doctor", None)
+        )
     }
 
     fn store_with(f: impl FnOnce(&mut Value)) -> Output {
@@ -1100,8 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_version_names_sync_deploy_as_the_next_step() {
-        assert!(diagnosis(Some(false), vec![]).contains("Next: opv sync dev --deploy\n"));
+    fn missing_version_reruns_the_command_with_all_its_flags() {
+        let rerun = "opv sync dev --deploy --confirm dev --target app --product api";
+        let e = diagnosis_error(Some(false), vec![]);
+        assert_eq!(e.step(rerun, "opv sync --help").next, rerun);
     }
 
     #[test]
