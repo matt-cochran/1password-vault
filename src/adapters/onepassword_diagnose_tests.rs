@@ -6,7 +6,7 @@
 //! recorded command from `cases.tsv`. Test code builds the sealed [`Observed`] the runner
 //! would hand to the strategy.
 
-use super::{Facts, SessionCheck, VaultSearch, diagnose_with, session_for};
+use super::{Facts, SessionCheck, VaultSearch, diagnose_with, placed, search_vault, session_for};
 use crate::cause::{
     AccountId, AccountRef, AccountSource, CallId, Cause, CreateKind, CredentialProblem,
     CredentialRef, DiagnoseContext, ExitClass, Observed, Principal, Refind, SessionState, System,
@@ -70,13 +70,6 @@ fn op_account_set() -> Facts {
 fn live(account: &str) -> Facts {
     Facts {
         live: Some(AccountId::new(account)),
-        ..Facts::default()
-    }
-}
-
-fn searched(search: VaultSearch) -> Facts {
-    Facts {
-        vault_search: search,
         ..Facts::default()
     }
 }
@@ -217,15 +210,15 @@ fn recording_07_signed_out_item_get_is_not_signed_in() {
 }
 
 #[test]
-fn recording_08_vault_no_account_holds_is_resource_not_found() {
+fn recording_08_vault_not_in_the_selected_account_is_ids_not_in_account() {
     let cause = diagnosed(
         "08-vault-not-found",
         &format!("vault get ZZZZZZZZZZZZZZZZZZZZZZZZZZ --account {A} --format json"),
         person(),
         &in_account(A),
-        &searched(VaultSearch::Nowhere),
+        &Facts::default(),
     );
-    assert_eq!(cause.code(), "resource_not_found");
+    assert_eq!(cause.code(), "ids_not_in_account");
 }
 
 #[test]
@@ -378,19 +371,70 @@ fn vault_in_other_account_names_the_vault_of_vault_user_list() {
 }
 
 #[test]
-fn vault_in_other_account_names_the_owner_once_located() {
-    assert!(matches!(
-        case_14(&searched(VaultSearch::FoundIn(AccountId::new(B)))),
-        Cause::InOtherAccount { owning: Some(owner), .. } if owner.as_str() == B
-    ));
-}
-
-#[test]
 fn vault_in_other_account_has_no_owner_before_it_is_located() {
     assert!(matches!(
         case_14(&Facts::default()),
         Cause::InOtherAccount { owning: None, .. }
     ));
+}
+
+// --- #153a: the owner of a vault in another account ------------------------------------------
+
+fn located(search: VaultSearch) -> Cause {
+    placed(case_14(&Facts::default()), &search)
+}
+
+#[test]
+fn vault_in_other_account_names_the_account_that_holds_it() {
+    assert!(matches!(
+        located(VaultSearch::FoundIn(AccountId::new(B))),
+        Cause::InOtherAccount { owning: Some(owner), .. } if owner.as_str() == B
+    ));
+}
+
+#[test]
+fn vault_in_other_account_found_leaves_no_account_unasked() {
+    assert!(matches!(
+        located(VaultSearch::FoundIn(AccountId::new(B))),
+        Cause::InOtherAccount { unasked, .. } if unasked.is_empty()
+    ));
+}
+
+#[test]
+fn vault_no_askable_account_holds_has_no_owner() {
+    assert!(matches!(
+        located(VaultSearch::Nowhere {
+            unasked: vec![AccountId::new(B)]
+        }),
+        Cause::InOtherAccount { owning: None, .. }
+    ));
+}
+
+#[test]
+fn vault_no_askable_account_holds_names_the_accounts_not_asked() {
+    assert!(matches!(
+        located(VaultSearch::Nowhere {
+            unasked: vec![AccountId::new(B)]
+        }),
+        Cause::InOtherAccount { unasked, .. } if unasked == [AccountId::new(B)]
+    ));
+}
+
+#[test]
+fn vault_in_other_account_stays_ids_not_in_account_once_located() {
+    assert_eq!(
+        located(VaultSearch::FoundIn(AccountId::new(B))).code(),
+        "ids_not_in_account"
+    );
+}
+
+#[test]
+fn a_search_op_cannot_list_accounts_for_is_not_searched() {
+    let r = FakeRunner::new([Output::failure(1)]);
+    assert_eq!(
+        search_vault(&r, &VaultId::new("<VAULT_B>"), &AccountId::new(A)),
+        VaultSearch::NotSearched
+    );
 }
 
 #[test]

@@ -13,6 +13,7 @@
 
 use serde::Deserialize;
 
+use super::onepassword_manifest as manifest;
 use crate::cause::{
     AccountId, AccountRef, AccountSource, Cause, CredentialProblem, CredentialRef, DiagnoseContext,
     ExitClass, ItemId, NamedBy, NotFoundState, Observed, Principal, ResourceKind, ResourceName,
@@ -35,8 +36,6 @@ pub struct Facts {
     /// A live session for this account, when [`session_for`] found one for another account
     /// than the one asked for (#160).
     pub live: Option<AccountId>,
-    /// What a search for the vault across the machine's accounts found (`opv vault locate`).
-    pub vault_search: VaultSearch,
     /// `op item get` on the call's item succeeded, so a later write refusal is the missing
     /// Write grant rather than "not available" (audit finding 04.01).
     pub item_readable: bool,
@@ -45,16 +44,87 @@ pub struct Facts {
     pub vault_readable: bool,
 }
 
-/// The outcome of looking for a vault in every account on the machine.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The outcome of looking for a vault in the machine's other accounts ([`search_vault`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultSearch {
-    /// No search was made.
-    #[default]
+    /// No search could be made: op did not list the machine's accounts.
     NotSearched,
     /// The vault belongs to this account.
     FoundIn(AccountId),
-    /// No account on the machine holds it.
-    Nowhere,
+    /// No account that could be asked holds it; `unasked` could not be asked.
+    Nowhere { unasked: Vec<AccountId> },
+}
+
+/// Look for `vault` in the machine's accounts other than `selected` (#153a): `op account
+/// list`, then per account the read-only probe `opv vault locate` makes
+/// ([`manifest::holds_vault`]), which never prompts or signs in. The first account that
+/// holds it is the owner.
+pub fn search_vault(r: &dyn CommandRunner, vault: &VaultId, selected: &AccountId) -> VaultSearch {
+    let manifest::Discovery::Listed(accounts) = manifest::discover(r) else {
+        return VaultSearch::NotSearched;
+    };
+    let mut unasked = Vec::new();
+    for a in accounts
+        .iter()
+        .filter(|a| !a.account_uuid.eq_ignore_ascii_case(selected.as_str()))
+    {
+        match manifest::holds_vault(r, &a.account_uuid, vault.as_str()) {
+            manifest::Holds::Found => return VaultSearch::FoundIn(AccountId::new(&a.account_uuid)),
+            manifest::Holds::NotFound => {}
+            manifest::Holds::Unknown => unasked.push(AccountId::new(&a.account_uuid)),
+        }
+    }
+    VaultSearch::Nowhere { unasked }
+}
+
+/// A diagnosed [`Cause::InOtherAccount`] with its owner looked up in the machine's other
+/// accounts (#153a, design §12.4): the account that holds the vault, else the accounts that
+/// could not be asked. Any other cause is returned as it is. The search is part of the
+/// failure's diagnosis: the failed call's reply must already be taken, and the probes leave
+/// nothing of their own behind.
+pub fn locate_owner(r: &dyn CommandRunner, cause: Cause) -> Cause {
+    let search = match &cause {
+        Cause::InOtherAccount {
+            vault,
+            selected,
+            owning: None,
+            unasked,
+            ..
+        } if unasked.is_empty() => crate::runner::diagnosing(|| search_vault(r, vault, selected)),
+        _ => return cause,
+    };
+    placed(cause, &search)
+}
+
+/// What `search` says about a vault op reported as not in the selected account (`cause`,
+/// an unsearched [`Cause::InOtherAccount`]): in the account found, else in none that could
+/// be asked, naming those that could not.
+pub fn placed(cause: Cause, search: &VaultSearch) -> Cause {
+    let Cause::InOtherAccount {
+        vault,
+        item,
+        selected,
+        env,
+        seen,
+        ..
+    } = cause
+    else {
+        return cause;
+    };
+    let (owning, unasked) = match search {
+        VaultSearch::FoundIn(owner) => (Some(owner.clone()), Vec::new()),
+        VaultSearch::Nowhere { unasked } => (None, unasked.clone()),
+        VaultSearch::NotSearched => (None, Vec::new()),
+    };
+    Cause::InOtherAccount {
+        vault,
+        item,
+        selected,
+        owning,
+        unasked,
+        env,
+        seen,
+    }
 }
 
 impl Facts {
@@ -106,7 +176,7 @@ pub fn diagnose_with(seen: Observed, stderr: &str, ctx: &DiagnoseContext, facts:
         }
         Some(Reading::SignedOut) => not_signed_in(&seen, ctx, facts),
         Some(Reading::ItemNotFound) => item_not_found(seen, stderr, ctx),
-        Some(Reading::NotAVaultHere) => vault_not_here(seen, stderr, ctx, facts),
+        Some(Reading::NotAVaultHere) => vault_not_here(seen, stderr, ctx),
         Some(Reading::AllAndAccount) | None => unrecognized(seen, ctx, facts),
     }
 }
@@ -292,40 +362,35 @@ fn item_not_found(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause 
 }
 
 /// `"<vault>" isn't a vault in this account.` (cases 08, 14–15). op says the same whether
-/// the vault belongs to another account on the machine or to none, so the cause follows
-/// what opv established: a vault no account holds is not found; otherwise, with an account
-/// selected, it is in another account (its owner named once `opv vault locate` found it).
-fn vault_not_here(seen: Observed, stderr: &str, ctx: &DiagnoseContext, facts: &Facts) -> Cause {
+/// the vault belongs to another account on the machine or to none: with an account
+/// selected, it is in another account, whose owner [`locate_owner`] looks up (#153a);
+/// otherwise it is not found.
+fn vault_not_here(seen: Observed, stderr: &str, ctx: &DiagnoseContext) -> Cause {
     let vault = vault_of(&seen, stderr, ctx);
     let selected = ctx
         .account
         .clone()
         .or_else(|| flag_value(&seen, "--account").map(AccountId::new));
-    let owning = match &facts.vault_search {
-        VaultSearch::FoundIn(owner) => Some(owner.clone()),
-        VaultSearch::NotSearched | VaultSearch::Nowhere => None,
-    };
-    match (selected, &facts.vault_search) {
-        (Some(selected), VaultSearch::FoundIn(_) | VaultSearch::NotSearched) => {
-            Cause::InOtherAccount {
-                vault,
-                item: ctx
-                    .resource
-                    .as_ref()
-                    .filter(|r| r.kind == ResourceKind::Item)
-                    .map(|r| ItemId::new(r.name.as_str())),
-                selected,
-                owning,
-                env: ctx.env.clone(),
-                seen,
-            }
-        }
-        _ => Cause::NotFound {
+    match selected {
+        Some(selected) => Cause::InOtherAccount {
+            vault,
+            item: ctx
+                .resource
+                .as_ref()
+                .filter(|r| r.kind == ResourceKind::Item)
+                .map(|r| ItemId::new(r.name.as_str())),
+            selected,
+            owning: None,
+            unasked: Vec::new(),
+            env: ctx.env.clone(),
+            seen,
+        },
+        None => Cause::NotFound {
             system: System::OnePassword,
             resource: ResourceRef {
                 kind: ResourceKind::Vault,
                 name: ResourceName::new(vault.as_str()),
-                scope: ctx.account.as_ref().map(|a| a.to_string()),
+                scope: None,
             },
             named_by: ctx.named_by.clone().unwrap_or(NamedBy::Flag {
                 flag: "--vault".to_string(),

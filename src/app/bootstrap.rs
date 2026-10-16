@@ -279,7 +279,11 @@ fn vault_visible(
     };
     // A runner that observes nothing (a test fake) leaves the answer to the session check.
     let Some(error) = op_failure(|seen, said| {
-        op_diagnose::diagnose_with(seen, said, &ctx, &Facts::from_process_env())
+        // #153a: a vault in another account names that account.
+        op_diagnose::locate_owner(
+            &r,
+            op_diagnose::diagnose_with(seen, said, &ctx, &Facts::from_process_env()),
+        )
     }) else {
         return Ok(Seen::NotVisible(None));
     };
