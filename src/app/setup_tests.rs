@@ -186,6 +186,60 @@ fn failed_authentication_is_repaired_then_vault_access_is_verified() {
     assert_eq!(backend.logins, vec![true, false]);
 }
 
+/// Setup whose vault list still fails after the sign-in (#157).
+fn vaults_unlisted_after_sign_in() -> Error {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut backend = Fake::new(vec![
+        ok("2.40.0"),
+        Output::failure(1),
+        Output::failure(1),
+        ok(r#"[{"url":"my.1password.com"}]"#),
+        Output::failure(1),
+    ]);
+    let mut ui = Ui::new(vec![], &[]);
+    run(&path, None, None, None, &mut backend, &mut ui).unwrap_err()
+}
+
+#[test]
+fn vaults_unlisted_after_sign_in_step_to_doctor() {
+    assert_eq!(
+        vaults_unlisted_after_sign_in().next_step(),
+        Some("opv doctor")
+    );
+}
+
+#[test]
+fn vaults_unlisted_after_sign_in_name_the_account_not_a_vault() {
+    assert!(
+        vaults_unlisted_after_sign_in()
+            .text()
+            .contains("the signed-in 1Password account could not list its vaults")
+    );
+}
+
+#[test]
+fn a_missing_vault_names_the_account_it_was_looked_for_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = recipe(dir.path());
+    let mut backend = Fake::new(vec![ok("2.40.0"), ok(r#"[{"id":"x","name":"Other"}]"#)]);
+    let mut ui = Ui::new(vec![], &[]);
+    let error = run(
+        &path,
+        None,
+        Some("ACCOUNT0000000000000000001"),
+        None,
+        &mut backend,
+        &mut ui,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .text()
+            .contains("missing from 1Password account ACCOUNT0000000000000000001")
+    );
+}
+
 #[test]
 fn wrong_kind_has_specific_repair_and_preserves_existing_item() {
     let dir = tempfile::tempdir().unwrap();

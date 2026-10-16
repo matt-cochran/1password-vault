@@ -147,9 +147,28 @@ pub fn prepare(
             backend.sign_in(account, true)?;
         }
         backend.sign_in(account, false)?;
-        vaults = successful(backend, &["vault", "list", "--format", "json"], None)?;
+        vaults = backend.call(&["vault", "list", "--format", "json"], None)?;
+        if vaults.status != 0 {
+            // #157: no vault is selected yet; name the account that was signed in to.
+            return Err(source_error(&format!(
+                "Signed in, but {} could not list its vaults. Check that the sign-in finished \
+                 and that your connection works, then rerun setup. Existing credentials are \
+                 preserved.",
+                account_name(backend, account)
+            ))
+            .with_next("opv doctor"));
+        }
     }
     Ok(vaults)
+}
+
+/// How setup names the account it uses: by its label when one was chosen, else the
+/// signed-in account.
+fn account_name(backend: &dyn Backend, account: Option<&str>) -> String {
+    match account {
+        Some(a) => format!("1Password account {}", backend.account_label(a)),
+        None => "the signed-in 1Password account".to_string(),
+    }
 }
 
 fn field_indices(doc: &mut Value, definitions: &[Field]) -> Result<Vec<usize>, Error> {
@@ -363,7 +382,7 @@ pub fn run(
     }
     ui.show(&format!("\n{}\nWe will save your existing settings in 1Password and prepare local commands.\nNo infrastructure will be applied or deployed.\n", recipe.title))?;
     let vaults = prepare(account, backend, ui)?;
-    let vault = match_name(list(&vaults)?, &recipe.vault, "vault")?.ok_or_else(|| settings_error(&format!("You are signed in, but vault {:?} is missing. Create that vault in the 1Password app or select the account that contains it, then rerun setup.", recipe.vault)))?;
+    let vault = match_name(list(&vaults)?, &recipe.vault, "vault")?.ok_or_else(|| settings_error(&format!("You are signed in, but vault {:?} is missing from {}. Create that vault in the 1Password app or select the account that contains it, then rerun setup.", recipe.vault, account_name(backend, account))))?;
     ui.show(&format!("Signed in. Using vault {}.", recipe.vault))?;
     let items = successful(
         backend,
