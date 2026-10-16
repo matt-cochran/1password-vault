@@ -383,30 +383,7 @@ fn after_targets(e: Error, env_name: &str, targets: &[(Ctx<'_>, Ports<'_>)], don
     if !rest.is_empty() {
         note.push_str(&format!("; not started: {}", rest.join(", ")));
     }
-    // A cataloged cause carries no free text to add to: the targets already synced are
-    // its `Partial` (design §4.6, FR-56).
-    if let Error::Catalog(c, up) = e {
-        return partial(*c, up, synced);
-    }
     with_note(e, &note)
-}
-
-/// `then`, after this run's writes `done`, as `Cause::Partial` (design §4.6; NR-10).
-fn partial(
-    then: crate::cause::Cause,
-    upstream: Option<Box<crate::cause::Upstream>>,
-    done: Vec<String>,
-) -> Error {
-    let cause = crate::cause::Cause::Partial {
-        done,
-        approval_used: None,
-        approval_scope: None,
-        then: Box::new(then),
-    };
-    match upstream {
-        Some(up) => Error::with_evidence(cause, *up),
-        None => cause.into(),
-    }
 }
 
 /// The command that finishes the run's job (FR-56): [`Report::next`] of all targets
@@ -2106,7 +2083,18 @@ fn after_writes_in(c: &Ctx<'_>, e: Error, done: &[String]) -> Error {
 fn after_writes(e: Error, done: &[String]) -> Error {
     match e {
         // A cataloged cause names the completed writes as its `Partial` (design §4.6).
-        Error::Catalog(c, up) if !done.is_empty() => partial(*c, up, done.to_vec()),
+        Error::Catalog(c, up) if !done.is_empty() => {
+            let cause = Cause::Partial {
+                done: done.to_vec(),
+                approval_used: None,
+                approval_scope: None,
+                then: c,
+            };
+            match up {
+                Some(up) => Error::with_evidence(cause, *up),
+                None => cause.into(),
+            }
+        }
         e @ Error::Auth(_) if !done.is_empty() => e.map_text(|m| {
             format!(
                 "{m}\n  {} write(s) had completed: {}; re-running the same command is safe",

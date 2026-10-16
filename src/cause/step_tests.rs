@@ -188,3 +188,16 @@ fn cmd_to_argv_is_opv_then_path_then_args() {
     };
     assert_eq!(command.to_argv(), words("opv target add prod"));
 }
+
+#[test]
+fn a_rebuilt_step_leaves_out_the_colour_flag() {
+    let inv = Invocation::from_cli(&[
+        "opv".to_string(),
+        "doctor".to_string(),
+        "--color".to_string(),
+        "always".to_string(),
+        "--config".to_string(),
+        "x.toml".to_string(),
+    ]);
+    assert_eq!(inv.args, vec!["--config".to_string(), "x.toml".to_string()]);
+}

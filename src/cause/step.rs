@@ -27,7 +27,7 @@ impl Invocation {
         Self {
             origin: Origin::Cli,
             command,
-            args,
+            args: without_presentation(args),
             has_child: end + 1 < argv.len(),
         }
     }
@@ -138,3 +138,26 @@ fn is_command_path(path: &[String]) -> bool {
 #[cfg(test)]
 #[path = "step_tests.rs"]
 mod tests;
+
+/// `args` without presentation-only flags (`--color <when>`, `--color=<when>`): a rebuilt
+/// step means the same operation however the person's terminal was coloured, so a step
+/// reads identically with and without colour.
+fn without_presentation(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_value = false;
+    for a in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if a == "--color" {
+            skip_value = true;
+            continue;
+        }
+        if a.starts_with("--color=") {
+            continue;
+        }
+        out.push(a);
+    }
+    out
+}

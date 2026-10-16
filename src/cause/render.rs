@@ -1908,10 +1908,19 @@ impl Cause {
             ),
             OwnerSetupRequired { system, object } => {
                 let text = match object.kind {
-                    ResourceKind::GitHubEnvironment => format!(
-                        "ask a repository admin to create {}",
-                        resource_words(object)
-                    ),
+                    ResourceKind::GitHubEnvironment => match &object.scope {
+                        // The typed owner action (design §4.4): the admin's exact call.
+                        Some(repo) => format!(
+                            "ask a repository admin to create {} (gh api -X PUT \
+                             repos/{repo}/environments/{})",
+                            resource_words(object),
+                            object.name
+                        ),
+                        None => format!(
+                            "ask a repository admin to create {}",
+                            resource_words(object)
+                        ),
+                    },
                     ResourceKind::ExternalStore => format!(
                         "ask a cluster admin to make {} ready",
                         resource_words(object)

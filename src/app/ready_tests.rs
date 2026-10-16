@@ -1195,7 +1195,7 @@ fn a_target_error_doctor_checks_points_at_doctor_for_that_target() {
 /// The GitHub "environment missing" error: a `Do:` for the owner and no step of its own.
 fn owner_setup_receipt() -> Receipt {
     let report = account_report();
-    let error = crate::adapters::github::missing_environment_error("o/r", "staging");
+    let error = crate::adapters::github::gh::missing_environment_error("o/r", "staging");
     let envs = vec![env_err("staging", Some("GitHub"), error)];
     receipt(&inputs(&report, envs), "0.10.0")
 }
