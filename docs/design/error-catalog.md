@@ -1,6 +1,6 @@
 # The error catalog: every failure is a typed cause, rendered once
 
-Status: design for review (0.10.0). Nothing here is implemented yet. Issues in scope: #157 and #159 (wrong causes), and the output audit's 300 findings. It replaces how opv builds and renders every error, and how it scrubs every output. The output-audit evidence behind it is summarised in §1; the full inventory (86 situations, 26 step rules, 300 findings mapped) is kept with the review record.
+Status: implemented in 0.10.0 (branch feat/error-catalog); owner decisions in §12.4. Issues in scope: #157 and #159 (wrong causes), and the output audit's 300 findings. It replaces how opv builds and renders every error, and how it scrubs every output. The output-audit evidence behind it is summarised in §1; the full inventory (86 situations, 26 step rules, 300 findings mapped) is kept with the review record.
 
 ## 1. Problem
 
