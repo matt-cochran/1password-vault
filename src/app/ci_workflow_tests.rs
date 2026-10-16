@@ -225,3 +225,54 @@ fn an_environment_that_needs_confirmation_is_confirmed_in_the_sync() {
         text_of(&out).contains("run: opv sync prod --target portfolio --confirm prod --receipt")
     );
 }
+
+// --- whether the printed job can sign in to the target (06.24, 06.48) -----------------
+
+/// The printed workflow for `fleet`'s `prod`/`portfolio`.
+fn workflow_of(fleet: &str) -> String {
+    let fleet = config::parse(fleet).unwrap();
+    let mut out = Vec::new();
+    run(&fleet, "prod", "portfolio", None, false, &mut out).unwrap();
+    text_of(&out)
+}
+
+/// `fleet` with the target's deploy credentials recorded.
+fn with_deploy_credentials(fleet: &str) -> String {
+    fleet.replacen(
+        "state_vault_id = \"s1\"\n",
+        "state_vault_id = \"s1\"\ndeploy_credentials = \"op://deploy/portfolio\"\n",
+        1,
+    )
+}
+
+#[test]
+fn identity_header_says_which_token_it_means() {
+    assert!(fly_workflow(None, false).contains(
+        "# secrets.OP_SERVICE_ACCOUNT_TOKEN is created once, by a person in their own \
+         terminal, with:\n"
+    ));
+}
+
+#[test]
+fn a_fly_target_without_deploy_credentials_names_the_mint_command() {
+    assert!(
+        workflow_of(FLY_FLEET)
+            .contains("#   opv target credentials prod --target portfolio --create\n"),
+        "{}",
+        workflow_of(FLY_FLEET)
+    );
+}
+
+#[test]
+fn a_github_target_without_deploy_credentials_names_config_edit() {
+    assert!(
+        workflow_of(GITHUB_FLEET).contains("a person adds them first with:\n#   opv config edit\n"),
+        "{}",
+        workflow_of(GITHUB_FLEET)
+    );
+}
+
+#[test]
+fn a_target_with_deploy_credentials_gets_no_sign_in_note() {
+    assert!(!workflow_of(&with_deploy_credentials(FLY_FLEET)).contains("not recorded yet"));
+}

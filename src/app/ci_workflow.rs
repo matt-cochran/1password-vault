@@ -6,14 +6,20 @@
 //! secret besides the 1Password service-account token it reads as
 //! `secrets.OP_SERVICE_ACCOUNT_TOKEN`. The deploy identity the token belongs to is created
 //! by a person with `opv access ... --create --github ...`, named in the header comment.
+//! When the job cannot sign in to the target as printed (no deploy credentials recorded, or
+//! a provider that takes none and has no CI setup step), the header says so and names the
+//! command that fixes it (06.24): a workflow is never printed as ready when it is not.
 //!
 //! An unknown environment or target is a usage error and nothing is printed.
 
 use std::io::Write;
 
 use super::write_err;
+use crate::cause::Cmd;
+use crate::cause::render::cmd_text;
 use crate::domain::Fleet;
 use crate::error::{Code, Error};
+use crate::provider::Provider;
 
 /// Print the workflow for target `target` of `env`, or refuse before writing anything.
 pub fn run(
@@ -30,16 +36,19 @@ pub fn run(
         Code::UnknownEnv => e.with_code(Code::Usage),
         _ => e,
     })?;
-    let yaml = workflow(
-        &Job {
-            env,
-            target,
-            github_env,
-            deploy,
-            confirm: e.confirm_env,
-        },
-        t.provider().ci_setup_step(),
-    );
+    let recorded = e
+        .targets
+        .get(target)
+        .is_some_and(|t| t.deploy_credentials.is_some());
+    let job = Job {
+        env,
+        target,
+        github_env,
+        deploy,
+        confirm: e.confirm_env,
+    };
+    let mut yaml = sign_in_note(&job, t.provider(), recorded).unwrap_or_default();
+    yaml.push_str(&workflow(&job, t.provider().ci_setup_step()));
     out.write_all(yaml.as_bytes()).map_err(write_err)
 }
 
@@ -53,6 +62,49 @@ struct Job<'a> {
     confirm: bool,
 }
 
+/// The header lines that say the job cannot sign in to the target as printed, and what a
+/// person runs first (06.24); `None` when it can: the target's deploy credentials are
+/// recorded, or its provider's CI setup step signs the job in.
+fn sign_in_note(job: &Job<'_>, provider: &dyn Provider, recorded: bool) -> Option<String> {
+    let (env, target, label) = (job.env, job.target, provider.label());
+    if recorded {
+        return None;
+    }
+    if provider.deploy_credential_fields().is_err() {
+        if provider.ci_setup_step().is_some() {
+            return None;
+        }
+        return Some(format!(
+            "# {label} targets take no deploy credentials, so this job cannot sign in to \
+             {label} as printed:\n\
+             #   add the step that signs it in before \"Sync secrets to {target}\"\n"
+        ));
+    }
+    // Only a provider that can mint one says how to revoke it (`mint_cleanup_hint`).
+    let first = if provider.mint_cleanup_hint().is_some() {
+        Cmd {
+            command: vec!["target".into(), "credentials".into()],
+            args: vec![
+                env.to_string(),
+                "--target".into(),
+                target.to_string(),
+                "--create".into(),
+            ],
+        }
+    } else {
+        Cmd {
+            command: vec!["config".into(), "edit".into()],
+            args: Vec::new(),
+        }
+    };
+    Some(format!(
+        "# this job signs in to {label} with target {target}'s deploy credentials, which are not \
+         recorded yet; a person adds them first with:\n\
+         #   {}\n",
+        cmd_text(&first)
+    ))
+}
+
 /// The whole workflow as text. `setup` is the target provider's CI setup step, indented as
 /// a `steps:` entry, or `None` when the provider needs none.
 fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
@@ -64,7 +116,8 @@ fn workflow(job: &Job<'_>, setup: Option<&str>) -> String {
         .map(|g| format!(" --github-env {g}"))
         .unwrap_or_default();
     s.push_str(&format!(
-        "# the token comes from (run once by a person in their own terminal):\n\
+        "# secrets.OP_SERVICE_ACCOUNT_TOKEN is created once, by a person in their own terminal, \
+         with:\n\
          #   opv access {env} --target {target} --create --github <owner/repo>{github_env_flag}\n"
     ));
     s.push_str(&format!("name: {id}\n\n"));

@@ -81,7 +81,15 @@ const PHRASES: &[(Reading, &[&str])] = &[
         Reading::LoginOverridden,
         &["environment variable is being used for authentication"],
     ),
-    (Reading::BadCredentials, &["Bad credentials (HTTP 401)"]),
+    (
+        Reading::BadCredentials,
+        &[
+            "Bad credentials (HTTP 401)",
+            // `gh secret list|set` with a rejected token (spike Q9,
+            // `tests/fixtures/github/stderr-bad_token.txt`).
+            "HTTP 401: Bad credentials",
+        ],
+    ),
 ];
 
 /// The first recorded phrase that appears in `stderr`.

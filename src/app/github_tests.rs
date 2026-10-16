@@ -746,16 +746,12 @@ fn concealed_config_blocks_before_any_gh_write() {
 }
 
 #[test]
-fn missing_environment_offers_the_create_command() {
+fn missing_environment_is_owner_setup_required() {
     let sim = missing_staging_on_a();
     let err = sync_on(&sim, &fleet_ci_two(), &SyncOpts::default())
         .0
         .unwrap_err();
-    assert!(
-        err.action()
-            .is_some_and(|a| a.contains("gh api -X PUT repos/example-org/a/environments/staging")),
-        "{err:?}"
-    );
+    assert_eq!(err.code_str(), "owner_setup_required");
 }
 
 #[test]
