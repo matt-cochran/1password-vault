@@ -1,0 +1,42 @@
+# access__op_vault_user_list_ve2estatek8s00000000000001__not_found: opv access | fault not_found on op vault user list vE2ESTATEK8S00000000000001
+
+## text exit: 0
+## text stdout
+dev:
+  ci reader dev:
+    vE2ESHAREDDEV00000000000001: read: missing
+    vE2EWEBDEV0000000000000001: read: missing
+  checked: 2, unclassified: 0
+Owner runs: op service-account create "project-dev-ci" --vault vE2ESHAREDDEV00000000000001:read_items --vault vE2EWEBDEV0000000000000001:read_items --expires-in 90d
+prod:
+  deploy prod/fly:
+    vE2ESHAREDPROD0000000000001: read: missing
+    vE2ESTATEFLY00000000000001: read-write: missing
+    vE2EWEBPROD000000000000001: read: missing
+  deploy prod/gh:
+    vE2ESHAREDPROD0000000000001: read: missing
+    vE2ESTATEGH000000000000001: read-write: missing
+    vE2EWEBPROD000000000000001: read: missing
+  deploy prod/k8s:
+    vE2ESHAREDPROD0000000000001: read: missing
+    vE2ESTATEK8S00000000000001: read-write: not visible
+    vE2EWEBPROD000000000000001: read: missing
+  ci reader prod:
+    vE2ESHAREDPROD0000000000001: read: missing
+    vE2EWEBPROD000000000000001: read: missing
+  access_not_visible: cannot see who can read vault vE2ESTATEK8S00000000000001 (environment prod): viewing its access list needs the Manage permission on it, so ask a manager of the vault to run opv access prod
+  checked: 10, unclassified: 1
+Owner runs: op service-account create "project-prod-fly-deploy" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2ESTATEFLY00000000000001:read_items,write_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d
+Owner runs: op service-account create "project-prod-gh-deploy" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2ESTATEGH000000000000001:read_items,write_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d
+Owner runs: op service-account create "project-prod-k8s-deploy" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2ESTATEK8S00000000000001:read_items,write_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d
+Owner runs: op service-account create "project-prod-ci" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":1,"ok":true,"environments":[{"environment":"dev","report":{"checks":[{"grant":{"principal":{"kind":"ci_reader","environment":"dev"},"service_account":"project-dev-ci","vault_id":"vE2ESHAREDDEV00000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"ci_reader","environment":"dev"},"service_account":"project-dev-ci","vault_id":"vE2EWEBDEV0000000000000001","permission":"read"},"state":"missing"}],"extra":[],"checked":2,"unclassified":0},"commands":["op service-account create \"project-dev-ci\" --vault vE2ESHAREDDEV00000000000001:read_items --vault vE2EWEBDEV0000000000000001:read_items --expires-in 90d"],"findings":[]},{"environment":"prod","report":{"checks":[{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"fly"},"service_account":"project-prod-fly-deploy","vault_id":"vE2ESHAREDPROD0000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"fly"},"service_account":"project-prod-fly-deploy","vault_id":"vE2ESTATEFLY00000000000001","permission":"read_write"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"fly"},"service_account":"project-prod-fly-deploy","vault_id":"vE2EWEBPROD000000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"gh"},"service_account":"project-prod-gh-deploy","vault_id":"vE2ESHAREDPROD0000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"gh"},"service_account":"project-prod-gh-deploy","vault_id":"vE2ESTATEGH000000000000001","permission":"read_write"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"gh"},"service_account":"project-prod-gh-deploy","vault_id":"vE2EWEBPROD000000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"k8s"},"service_account":"project-prod-k8s-deploy","vault_id":"vE2ESHAREDPROD0000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"k8s"},"service_account":"project-prod-k8s-deploy","vault_id":"vE2ESTATEK8S00000000000001","permission":"read_write"},"state":"not_visible"},{"grant":{"principal":{"kind":"deploy","environment":"prod","target":"k8s"},"service_account":"project-prod-k8s-deploy","vault_id":"vE2EWEBPROD000000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"ci_reader","environment":"prod"},"service_account":"project-prod-ci","vault_id":"vE2ESHAREDPROD0000000000001","permission":"read"},"state":"missing"},{"grant":{"principal":{"kind":"ci_reader","environment":"prod"},"service_account":"project-prod-ci","vault_id":"vE2EWEBPROD000000000000001","permission":"read"},"state":"missing"}],"extra":[],"checked":10,"unclassified":1},"commands":["op service-account create \"project-prod-fly-deploy\" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2ESTATEFLY00000000000001:read_items,write_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d","op service-account create \"project-prod-gh-deploy\" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2ESTATEGH000000000000001:read_items,write_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d","op service-account create \"project-prod-k8s-deploy\" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2ESTATEK8S00000000000001:read_items,write_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d","op service-account create \"project-prod-ci\" --vault vE2ESHAREDPROD0000000000001:read_items --vault vE2EWEBPROD000000000000001:read_items --expires-in 90d"],"findings":[{"code":"access_not_visible","message":"cannot see who can read vault vE2ESTATEK8S00000000000001 (environment prod): viewing its access list needs the Manage permission on it, so ask a manager of the vault to run opv access prod","next":null}]}],"next":null,"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml

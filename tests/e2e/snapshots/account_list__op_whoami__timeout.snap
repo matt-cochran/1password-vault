@@ -1,0 +1,20 @@
+# account_list__op_whoami__timeout: opv account list | fault timeout on op whoami
+
+## text exit: 0
+## text stdout
+SELECTED  ACCOUNT                                        ADDRESS            SOURCE  SIGNED IN
+*         dev@example.com (AE2EDEVACCOUNT000000000001)   e2e.1password.com  cli     no
+          ops@example.test (AE2EOPSACCOUNT000000000002)  e2e.1password.com  cli     no
+selected by <SCENARIO>/project/.opv
+Only accounts added to this 1Password CLI are listed; an account that is only in the 1Password app appears after opv login --add.
+selected_signed_out: op has no session for the selected 1Password account AE2EDEVACCOUNT000000000001 here; if you use the 1Password app, unlock it and approve its prompt, else sign in
+shared_sign_in_address: 2 accounts share the sign-in address e2e.1password.com: e2e-dev = dev@example.com (AE2EDEVACCOUNT000000000001); e2e-ops = ops@example.test (AE2EOPSACCOUNT000000000002). Naming e2e.1password.com picks one of them; name an account by its account ID with opv, or by its shorthand with op (op signin --account <shorthand>)
+Next: opv login --account AE2EDEVACCOUNT000000000001
+
+## text stderr
+
+## json exit: 0
+## json stdout
+{"schema_version":1,"ok":true,"discovery":"ok","platform":"<platform>","cli_accounts_only":true,"selected":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer","source":"<SCENARIO>/project/.opv"},"accounts":[{"account_id":"AE2EDEVACCOUNT000000000001","user_id":"UE2EDEVUSER000000000000001","email":"dev@example.com","address":"e2e.1password.com","shorthand":"e2e-dev","source":"cli","signed_in":false,"selected":true},{"account_id":"AE2EOPSACCOUNT000000000002","user_id":"UE2EOPSUSER000000000000002","email":"ops@example.test","address":"e2e.1password.com","shorthand":"e2e-ops","source":"cli","signed_in":false,"selected":false}],"findings":[{"code":"selected_signed_out","human_required":true,"message":"op has no session for the selected 1Password account AE2EDEVACCOUNT000000000001 here; if you use the 1Password app, unlock it and approve its prompt, else sign in","next":"opv login --account AE2EDEVACCOUNT000000000001"},{"code":"shared_sign_in_address","human_required":false,"message":"2 accounts share the sign-in address e2e.1password.com: e2e-dev = dev@example.com (AE2EDEVACCOUNT000000000001); e2e-ops = ops@example.test (AE2EOPSACCOUNT000000000002). Naming e2e.1password.com picks one of them; name an account by its account ID with opv, or by its shorthand with op (op signin --account <shorthand>)","next":null}],"next":"opv login --account AE2EDEVACCOUNT000000000001","do":null}
+
+## json stderr

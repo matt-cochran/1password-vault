@@ -1,0 +1,1089 @@
+//! The fault matrix (design §13.3, §13.4): every command in [`COMMANDS`] × every call it
+//! makes against `tests/e2e/app` × every fault `opv-sim` has a recording for at that call.
+//! Each cell runs the real `opv` twice (text and `--json`) with `OPV_NO_SKILL=1`, a scratch
+//! `HOME`, a temp copy of the project and the simulator first on `PATH`, then checks the
+//! catalog's rules on the result, one test per rule, named `<cell>::<rule>`.
+//!
+//! The cells are generated, not written by hand:
+//!
+//! ```text
+//! # 1. discover the calls, run every candidate, write cells.rs, SKIPPED.md and COVERAGE.md
+//! UPDATE_SNAPSHOTS=1 cargo nextest run --features fake --test e2e_matrix the_committed_cells
+//! # 2. write each cell's snapshot (tests/e2e/snapshots/<cell>.snap)
+//! UPDATE_SNAPSHOTS=1 cargo nextest run --features fake --test e2e_matrix
+//! ```
+//!
+//! A candidate the simulator answers with exit 86 (no recording) or 87 (not modelled) is not
+//! a cell: it is listed in `snapshots/SKIPPED.md`, so the gaps in the recordings stay
+//! visible. A rule a not-yet-migrated path breaks is listed in `snapshots/KNOWN_LEGACY.txt`
+//! (`<cell> <rule>`); that list only shrinks ([`KNOWN_LEGACY_CEILING`]), and an entry whose
+//! rule now holds fails until it is removed.
+#![cfg(all(unix, feature = "fake"))]
+
+#[path = "../sim/args.rs"]
+#[allow(dead_code)]
+mod sim_args;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime};
+
+use serde_json::Value;
+
+const ROOT: &str = env!("CARGO_MANIFEST_DIR");
+const OPV: &str = env!("CARGO_BIN_EXE_opv");
+const SIM: &str = env!("CARGO_BIN_EXE_opv-sim");
+const ACCOUNT: &str = "AE2EDEVACCOUNT000000000001";
+
+/// The most entries `KNOWN_LEGACY.txt` may hold. Lower it as lanes migrate; never raise it.
+const KNOWN_LEGACY_CEILING: usize = 69;
+
+/// The commands of the matrix: a slug and the arguments after `opv` (text mode; the `--json`
+/// run appends `--json`). Read-only commands and dry runs only.
+const COMMANDS: &[(&str, &[&str])] = &[
+    ("check_dev", &["check", "dev"]),
+    ("check_prod", &["check", "prod"]),
+    ("status_prod", &["status", "prod"]),
+    ("plan_prod", &["plan", "prod"]),
+    ("doctor_dev", &["doctor", "--env", "dev"]),
+    ("ready_dev", &["ready", "dev"]),
+    ("access", &["access"]),
+    ("explain_key", &["explain", "web/API_KEY", "--env", "prod"]),
+    (
+        "explain_target",
+        &["explain", "--target", "fly", "--env", "prod"],
+    ),
+    (
+        "run_preview",
+        &[
+            "run",
+            "--preview",
+            "dev",
+            "--product",
+            "web",
+            "--role",
+            "serve",
+        ],
+    ),
+    (
+        "vault_locate",
+        &["vault", "locate", "vE2ESHAREDDEV00000000000001"],
+    ),
+    ("account_list", &["account", "list"]),
+    ("config_describe", &["config", "describe"]),
+    // `sync` has no dry run: on a confirm_env environment without --confirm it reads, then
+    // refuses before writing.
+    ("sync_prod_unconfirmed", &["sync", "prod"]),
+    ("bootstrap_dry_run", &["bootstrap", "--dry-run"]),
+];
+
+/// The fault kinds `opv-sim` knows for every tool (tests/sim/faults.rs).
+const KINDS: &[&str] = &[
+    "signed_out",
+    "other_account_session",
+    "account_not_on_machine",
+    "credential_rejected",
+    "forbidden",
+    "not_found",
+    "unreachable",
+    "rate_limited",
+    "server_error",
+    "timeout",
+    "malformed_output",
+    "applied_but_reply_lost",
+    "tool_missing",
+];
+
+/// The ssh-only kinds.
+const SSH_KINDS: &[&str] = &[
+    "host_key_mismatch",
+    "host_key_unknown",
+    "connection_refused",
+    "connect_timeout",
+    "drop_mid_run",
+    "server_unresponsive",
+    "remote_command_missing",
+];
+
+/// The switches each simulated tool takes without a value (tests/sim/<tool>.rs `BOOLEAN`):
+/// the call words are computed exactly as the simulator computes them.
+fn boolean_flags(program: &str) -> &'static [&'static str] {
+    match program {
+        "op" => &["--reveal", "--raw", "--version", "--force"],
+        "flyctl" | "fly" => &["--stage", "--json", "--detach"],
+        "gh" => &["--silent", "-i", "--version", "--app"],
+        "kubectl" => &[
+            "--server-side",
+            "--ignore-not-found",
+            "--client",
+            "--show-labels",
+            "--all",
+            "--overwrite",
+        ],
+        _ => &[],
+    }
+}
+
+const NO_RECORDING: i32 = 86;
+const UNSUPPORTED: i32 = 87;
+
+fn snapshots() -> PathBuf {
+    Path::new(ROOT).join("tests/e2e/snapshots")
+}
+
+fn updating() -> bool {
+    std::env::var("UPDATE_SNAPSHOTS").is_ok_and(|v| v == "1")
+}
+
+// --- one cell -------------------------------------------------------------------------------
+
+/// One cell: a command, one of its calls, one fault on that call (every occurrence).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Cell {
+    command: String,
+    program: String,
+    call: String,
+    kind: String,
+}
+
+impl Cell {
+    fn args(&self) -> &'static [&'static str] {
+        COMMANDS
+            .iter()
+            .find(|(slug, _)| *slug == self.command)
+            .map(|(_, a)| *a)
+            .unwrap_or_else(|| panic!("unknown command {}", self.command))
+    }
+
+    fn name(&self) -> String {
+        slug(&format!(
+            "{}__{}_{}__{}",
+            self.command, self.program, self.call, self.kind
+        ))
+    }
+
+    fn faults(&self) -> String {
+        let mut f = format!(
+            "[[fault]]\nprogram = \"{}\"\ncall = \"{}\"\nkind = \"{}\"\n",
+            self.program, self.call, self.kind
+        );
+        if self.kind == "timeout" {
+            f.push_str("seconds = 1\n");
+        }
+        f
+    }
+}
+
+fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out
+}
+
+/// A scenario directory: the world (with `faults.toml`), a `bin` of wrappers around the
+/// simulator that log each call's argv and exit, a scratch `HOME` and a project copy.
+struct Scenario {
+    root: tempfile::TempDir,
+}
+
+impl Scenario {
+    fn new(faults: &str) -> Self {
+        let root = tempfile::tempdir().expect("temp dir");
+        let p = root.path();
+        let world = p.join("world");
+        let project = p.join("project");
+        for d in [&world, &project, &p.join("home"), &p.join("bin")] {
+            std::fs::create_dir_all(d).expect("scenario dir");
+        }
+        let app = Path::new(ROOT).join("tests/e2e/app");
+        std::fs::copy(app.join("world.json"), world.join("world.json")).expect("world");
+        std::fs::write(world.join("faults.toml"), faults).expect("faults");
+        std::fs::copy(app.join("secrets.toml"), project.join("secrets.toml")).expect("config");
+        // The project's own account, so no `.opv` above the temp directory is read.
+        std::fs::write(project.join(".opv"), format!("account = \"{ACCOUNT}\"\n")).expect(".opv");
+        let raw = p.join("sim-bin");
+        let ok = Command::new(SIM)
+            .arg("install")
+            .arg(&raw)
+            .env("OPV_SIM_WORLD", &world)
+            .status()
+            .expect("opv-sim install")
+            .success();
+        assert!(ok, "opv-sim install failed");
+        for entry in std::fs::read_dir(&raw).expect("sim bin") {
+            let name = entry.expect("entry").file_name();
+            let name = name.to_string_lossy();
+            // The child keeps its stderr (fd 3); bash's own job report of a killed child
+            // ("line 4: <pid> Killed …", with a PID and the builder's path) goes nowhere.
+            let script = format!(
+                "#!/bin/bash\n\
+                 printf '%s\\x1f' '{name}' \"$@\" >> \"$OPV_SIM_WORLD/argv.log\"\n\
+                 printf '\\x1e' >> \"$OPV_SIM_WORLD/argv.log\"\n\
+                 exec 3>&2\n\
+                 {{ ( exec -a '{name}' '{SIM}' \"$@\" 2>&3 ); }} 2>/dev/null\n\
+                 rc=$?\n\
+                 echo \"$rc\" >> \"$OPV_SIM_WORLD/exits.log\"\n\
+                 if [ \"$rc\" -gt 128 ] && [ \"$rc\" -lt 160 ]; then kill -$((rc - 128)) $$; fi\n\
+                 exit $rc\n"
+            );
+            let path = p.join("bin").join(&*name);
+            std::fs::write(&path, script).expect("wrapper");
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        Self { root }
+    }
+
+    fn path(&self, sub: &str) -> PathBuf {
+        self.root.path().join(sub)
+    }
+
+    /// Run `opv args` in the project; `None` exit when it had to be killed.
+    fn opv(&self, args: &[String]) -> Run {
+        let mut child = Command::new(OPV)
+            .args(args)
+            .current_dir(self.path("project"))
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.path("bin").display()),
+            )
+            .env("HOME", self.path("home"))
+            .env("OPV_NO_SKILL", "1")
+            .env("OPV_SIM_WORLD", self.path("world"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run opv");
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            if child.try_wait().expect("wait").is_some() || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let out = child.wait_with_output().expect("output");
+        Run {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
+    /// Every simulated call so far, as `(program, words)`.
+    fn calls(&self) -> Vec<(String, Vec<String>)> {
+        let log = std::fs::read_to_string(self.path("world/argv.log")).unwrap_or_default();
+        log.split('\x1e')
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                let mut parts: Vec<String> = r.split('\x1f').map(str::to_string).collect();
+                parts.pop(); // after the last separator
+                let name = parts.remove(0);
+                let program = if name == "fly" { "flyctl".into() } else { name };
+                let words = if program == "ssh" {
+                    parts
+                        .iter()
+                        .filter(|a| !a.starts_with('-'))
+                        .cloned()
+                        .collect()
+                } else {
+                    sim_args::words(&parts, boolean_flags(&program))
+                };
+                (program, words)
+            })
+            .collect()
+    }
+
+    fn sim_exits(&self) -> Vec<i32> {
+        std::fs::read_to_string(self.path("world/exits.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+
+    fn normalize(&self, s: &str) -> String {
+        let s = s.replace(&self.root.path().display().to_string(), "<SCENARIO>");
+        let s = delay_re().replace_all(&s, "in <delay>");
+        let s = receipt_re().replace_all(&s, "rcpt-<id>");
+        // The host's platform (WSL or plain Linux, read from the kernel) is not the
+        // scenario's: a snapshot must match on every builder.
+        let s = platform_re().replace_all(&s, r#""platform":"<platform>""#);
+        let s = s.replace(" (op in WSL does not see the Windows app's accounts)", "");
+        // Doctor's core-dump check reads the host's `fs.suid_dumpable`.
+        let s = core_dump_text_re().replace_all(&s, "<host core-dump check>\n");
+        core_dump_json_re()
+            .replace_all(&s, r#"{"name":"core dumps","host":true}"#)
+            .into_owned()
+    }
+}
+
+/// A retry's jittered delay.
+fn delay_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"in \d+(\.\d+)? ?(ms|s)\b").expect("regex"))
+}
+
+/// Doctor's host core-dump check in text: its line and any `as root:` fix line.
+fn core_dump_text_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?m)^(ok|warn|FAIL) +core dumps: [^\n]*\n(  [a-z ]+: [^\n]*\n)*")
+            .expect("regex")
+    })
+}
+
+/// Doctor's host core-dump check in a JSON document.
+fn core_dump_json_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#"\{"name":"core dumps"[^}]*\}"#).expect("regex"))
+}
+
+/// The detected platform in a JSON document.
+fn platform_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#""platform":"(linux|wsl)""#).expect("regex"))
+}
+
+/// A readiness receipt's id (fresh each run).
+fn receipt_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"rcpt-[0-9a-f]+").expect("regex"))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct Run {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+/// What one cell produced, normalized for the snapshot.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct Outcome {
+    text: Run,
+    json: Run,
+    /// The simulator's exit codes, both runs.
+    sim_exits: Vec<i32>,
+    /// The `next` of the `--json` document, and the exit of `opv <next> --help`.
+    next_help: Option<(String, Option<i32>)>,
+}
+
+impl Outcome {
+    fn skipped(&self) -> Option<&'static str> {
+        if self.sim_exits.contains(&NO_RECORDING) {
+            Some("no recording (exit 86)")
+        } else if self.sim_exits.contains(&UNSUPPORTED) {
+            Some("not modelled (exit 87)")
+        } else {
+            None
+        }
+    }
+
+    fn document(&self) -> Option<Value> {
+        let mut docs = serde_json::Deserializer::from_str(&self.json.stdout).into_iter::<Value>();
+        let first = docs.next()?.ok()?;
+        docs.next().is_none().then_some(first)
+    }
+
+    fn snapshot(&self, cell: &Cell) -> String {
+        let mut s = format!(
+            "# {}: opv {} | fault {} on {} {}\n",
+            cell.name(),
+            cell.args().join(" "),
+            cell.kind,
+            cell.program,
+            cell.call
+        );
+        for (mode, r) in [("text", &self.text), ("json", &self.json)] {
+            s.push_str(&format!(
+                "\n## {mode} exit: {}\n## {mode} stdout\n{}\n## {mode} stderr\n{}",
+                r.code.map_or("killed".into(), |c| c.to_string()),
+                r.stdout,
+                r.stderr
+            ));
+        }
+        s
+    }
+}
+
+fn run_cell(cell: &Cell) -> Outcome {
+    let sc = Scenario::new(&cell.faults());
+    let base: Vec<String> = cell.args().iter().map(|a| a.to_string()).collect();
+    let text = sc.opv(&base);
+    let mut json_args = base.clone();
+    json_args.push("--json".into());
+    let json = sc.opv(&json_args);
+    let mut out = Outcome {
+        text: Run {
+            code: text.code,
+            stdout: sc.normalize(&text.stdout),
+            stderr: sc.normalize(&text.stderr),
+        },
+        json: Run {
+            code: json.code,
+            stdout: sc.normalize(&json.stdout),
+            stderr: sc.normalize(&json.stderr),
+        },
+        sim_exits: sc.sim_exits(),
+        next_help: None,
+    };
+    if let Some(next) = out.document().as_ref().and_then(next_of) {
+        let code = match shell_words(&next) {
+            Some(mut w) if w.first().is_some_and(|p| p == "opv") => {
+                w.remove(0);
+                let at = w.iter().position(|a| a == "--").unwrap_or(w.len());
+                w.insert(at, "--help".into());
+                sc.opv(&w).code
+            }
+            // Another program's command (op, kubectl, …): clap has nothing to say.
+            Some(_) => Some(0),
+            None => Some(-1),
+        };
+        out.next_help = Some((next, code));
+    }
+    out
+}
+
+// --- the cache shared by the rule tests of one cell -----------------------------------------
+
+/// The fingerprint of everything a cell's result depends on.
+fn inputs_key() -> String {
+    static KEY: OnceLock<String> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in [
+            PathBuf::from(OPV),
+            PathBuf::from(SIM),
+            Path::new(ROOT).join("tests/e2e/app/world.json"),
+            Path::new(ROOT).join("tests/e2e/app/secrets.toml"),
+            Path::new(ROOT).join("tests/e2e/matrix.rs"),
+        ] {
+            let m = std::fs::metadata(&p).expect("input");
+            (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)).hash(&mut h);
+        }
+        format!("{:016x}", h.finish())
+    })
+    .clone()
+}
+
+fn cache_dir() -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("e2e-matrix")
+        .join(inputs_key());
+    std::fs::create_dir_all(&dir).expect("cache dir");
+    dir
+}
+
+fn cached(cell: &Cell) -> Option<Outcome> {
+    let bytes = std::fs::read(cache_dir().join(format!("{}.json", cell.name()))).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Claim `cell` and compute it; `None` when another test holds it.
+fn compute(cell: &Cell) -> Option<Outcome> {
+    let dir = cache_dir();
+    let lock = dir.join(format!("{}.lock", cell.name()));
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .is_err()
+    {
+        let stale = std::fs::metadata(&lock)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(600));
+        if stale {
+            let _ = std::fs::remove_file(&lock);
+        }
+        return None;
+    }
+    let o = cached(cell).unwrap_or_else(|| run_cell(cell));
+    let tmp = dir.join(format!("{}.{}.tmp", cell.name(), std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec(&o).expect("encode")).expect("cache");
+    std::fs::rename(&tmp, dir.join(format!("{}.json", cell.name()))).expect("cache");
+    let _ = std::fs::remove_file(&lock);
+    Some(o)
+}
+
+/// The cell's outcome, computed once per build of the inputs and shared between the rule
+/// tests (each may run in its own process). A test waiting on a cell another test is
+/// computing computes a cell nobody has claimed yet, so the waiters share the matrix's work.
+fn outcome(cell: &Cell) -> Outcome {
+    loop {
+        if let Some(o) = cached(cell).or_else(|| compute(cell)) {
+            return o;
+        }
+        let idle = committed_cells()
+            .iter()
+            .filter(|c| cached(c).is_none())
+            .find_map(compute)
+            .is_none();
+        if idle {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
+// --- the rules ------------------------------------------------------------------------------
+
+/// The `next` of a document: the error's, else the top level's.
+fn next_of(doc: &Value) -> Option<String> {
+    doc.pointer("/error/next")
+        .or_else(|| doc.get("next"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// A command line split as a POSIX shell would (quotes only); `None` when unbalanced.
+fn shell_words(s: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut has = false;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => cur.extend(chars.next()),
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                has = true;
+            }
+            (None, '\\') => {
+                cur.extend(chars.next());
+                has = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if has || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if has || !cur.is_empty() {
+        out.push(cur);
+    }
+    Some(out)
+}
+
+/// Every code a [`Cause`] can report: the strings of `Cause::code` in `src/cause/mod.rs`.
+fn catalog_codes() -> &'static BTreeSet<String> {
+    static CODES: OnceLock<BTreeSet<String>> = OnceLock::new();
+    CODES.get_or_init(|| {
+        let src = std::fs::read_to_string(Path::new(ROOT).join("src/cause/mod.rs"))
+            .expect("src/cause/mod.rs");
+        let start = src.find("pub fn code(&self)").expect("Cause::code");
+        let end = start
+            + src[start..]
+                .find("pub fn exit_code")
+                .expect("Cause::exit_code");
+        regex::Regex::new(r#""([a-z_]+)""#)
+            .expect("regex")
+            .captures_iter(&src[start..end])
+            .map(|c| c[1].to_string())
+            .collect()
+    })
+}
+
+fn canaries() -> &'static Vec<String> {
+    static C: OnceLock<Vec<String>> = OnceLock::new();
+    C.get_or_init(|| {
+        let world = std::fs::read_to_string(Path::new(ROOT).join("tests/e2e/app/world.json"))
+            .expect("world.json");
+        regex::Regex::new(r"(test-marker-e2e-[a-z0-9-]+|[A-Za-z0-9]+_e2e_marker_[a-z_]+)")
+            .expect("regex")
+            .find_iter(&world)
+            .map(|m| m.as_str().to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    })
+}
+
+/// Terminal control a message must never carry: ESC (CSI, OSC), C1 CSI/OSC, bidi controls.
+fn control_char(c: char) -> bool {
+    matches!(c, '\x1b' | '\u{9b}' | '\u{9d}' | '\u{7}')
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rule {
+    JsonIsOneDocument,
+    CodeIsInTheCatalog,
+    NextParses,
+    NextDoesNotLoop,
+    HumanRequiredMatchesTheStep,
+    NoCanaryValue,
+    NoEscapeSequence,
+}
+
+const RULES: &[Rule] = &[
+    Rule::JsonIsOneDocument,
+    Rule::CodeIsInTheCatalog,
+    Rule::NextParses,
+    Rule::NextDoesNotLoop,
+    Rule::HumanRequiredMatchesTheStep,
+    Rule::NoCanaryValue,
+    Rule::NoEscapeSequence,
+];
+
+impl Rule {
+    fn name(self) -> &'static str {
+        match self {
+            Rule::JsonIsOneDocument => "json_is_one_document",
+            Rule::CodeIsInTheCatalog => "code_is_in_the_catalog",
+            Rule::NextParses => "next_parses",
+            Rule::NextDoesNotLoop => "next_does_not_loop",
+            Rule::HumanRequiredMatchesTheStep => "human_required_matches_the_step",
+            Rule::NoCanaryValue => "no_canary_value",
+            Rule::NoEscapeSequence => "no_escape_sequence",
+        }
+    }
+
+    /// `Err` with the reason when the rule is broken.
+    fn check(self, cell: &Cell, o: &Outcome) -> Result<(), String> {
+        let doc = o.document();
+        let error = doc
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .filter(|e| e.is_object());
+        match self {
+            Rule::JsonIsOneDocument => doc
+                .map(|_| ())
+                .ok_or_else(|| format!("--json stdout is not one document: {:?}", o.json.stdout)),
+            Rule::CodeIsInTheCatalog => {
+                let Some(e) = error else { return Ok(()) };
+                let code = e.get("code").and_then(Value::as_str).unwrap_or("<none>");
+                if catalog_codes().contains(code) {
+                    Ok(())
+                } else {
+                    Err(format!("error.code {code:?} is not a catalog code"))
+                }
+            }
+            Rule::NextParses => match &o.next_help {
+                Some((_, Some(0))) | None => Ok(()),
+                Some((next, code)) => Err(format!("`{next}` with --help exited {code:?}")),
+            },
+            Rule::NextDoesNotLoop => {
+                let Some(e) = error else { return Ok(()) };
+                let Some(next) = doc.as_ref().and_then(next_of) else {
+                    return Ok(());
+                };
+                let strip = |w: Vec<String>| -> Vec<String> {
+                    w.into_iter().filter(|a| a != "--json").collect()
+                };
+                let failing: Vec<String> = std::iter::once("opv".to_string())
+                    .chain(cell.args().iter().map(|a| a.to_string()))
+                    .collect();
+                let same = shell_words(&next).map(strip) == Some(strip(failing));
+                let safe = e.get("retry").and_then(Value::as_str) == Some("safe");
+                if same && !safe {
+                    Err(format!(
+                        "next {next:?} reruns the failing command without a safe retry"
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Rule::HumanRequiredMatchesTheStep => {
+                let Some(e) = error else { return Ok(()) };
+                let human = e.get("human_required").and_then(Value::as_bool) == Some(true);
+                let handoff = e.get("next_kind").and_then(Value::as_str) == Some("handoff");
+                let has_do = e.get("do").is_some_and(|d| !d.is_null());
+                if handoff && !human {
+                    Err("next_kind is handoff but human_required is false".into())
+                } else if human && !handoff && !has_do {
+                    Err("human_required with neither a handoff nor a person's Do".into())
+                } else {
+                    Ok(())
+                }
+            }
+            Rule::NoCanaryValue => {
+                let all = [
+                    &o.text.stdout,
+                    &o.text.stderr,
+                    &o.json.stdout,
+                    &o.json.stderr,
+                ];
+                match canaries()
+                    .iter()
+                    .find(|c| all.iter().any(|s| s.contains(c.as_str())))
+                {
+                    Some(c) => Err(format!("canary value {c} printed")),
+                    None => Ok(()),
+                }
+            }
+            Rule::NoEscapeSequence => {
+                let all = [
+                    &o.text.stdout,
+                    &o.text.stderr,
+                    &o.json.stdout,
+                    &o.json.stderr,
+                ];
+                match all
+                    .iter()
+                    .flat_map(|s| s.chars())
+                    .find(|c| control_char(*c))
+                {
+                    Some(c) => Err(format!("control character U+{:04X} printed", c as u32)),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
+}
+
+fn known_legacy() -> &'static BTreeSet<String> {
+    static L: OnceLock<BTreeSet<String>> = OnceLock::new();
+    L.get_or_init(|| {
+        std::fs::read_to_string(snapshots().join("KNOWN_LEGACY.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+/// The test of one rule on one cell: it holds, or it is a listed legacy failure that still
+/// fails (an entry whose rule now holds must be removed).
+fn rule_test(cell: &Cell, rule: Rule) {
+    let o = outcome(cell);
+    let result = rule.check(cell, &o);
+    let listed = known_legacy().contains(&format!("{} {}", cell.name(), rule.name()));
+    assert_eq!(
+        result.is_err(),
+        listed,
+        "{} {}: {}",
+        cell.name(),
+        rule.name(),
+        match &result {
+            Err(why) => format!("broken and not in KNOWN_LEGACY.txt: {why}"),
+            Ok(()) => "holds now: remove it from KNOWN_LEGACY.txt".into(),
+        }
+    );
+}
+
+fn snapshot_test(cell: &Cell) {
+    let o = outcome(cell);
+    let path = snapshots().join(format!("{}.snap", cell.name()));
+    let got = o.snapshot(cell);
+    if updating() {
+        std::fs::write(&path, &got).expect("write snapshot");
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        got,
+        want,
+        "{} differs from its snapshot; review and rerun with UPDATE_SNAPSHOTS=1",
+        path.display()
+    );
+}
+
+macro_rules! cells {
+    ($($name:ident => $command:literal, $program:literal, $call:literal, $kind:literal;)*) => {
+        /// Every committed cell.
+        fn committed_cells() -> Vec<Cell> {
+            vec![$(Cell {
+                command: $command.into(),
+                program: $program.into(),
+                call: $call.into(),
+                kind: $kind.into(),
+            },)*]
+        }
+        $(
+            #[allow(non_snake_case)]
+            mod $name {
+                use super::*;
+                fn cell() -> Cell {
+                    Cell {
+                        command: $command.into(),
+                        program: $program.into(),
+                        call: $call.into(),
+                        kind: $kind.into(),
+                    }
+                }
+                #[test]
+                fn json_is_one_document() {
+                    rule_test(&cell(), Rule::JsonIsOneDocument);
+                }
+                #[test]
+                fn code_is_in_the_catalog() {
+                    rule_test(&cell(), Rule::CodeIsInTheCatalog);
+                }
+                #[test]
+                fn next_parses() {
+                    rule_test(&cell(), Rule::NextParses);
+                }
+                #[test]
+                fn next_does_not_loop() {
+                    rule_test(&cell(), Rule::NextDoesNotLoop);
+                }
+                #[test]
+                fn human_required_matches_the_step() {
+                    rule_test(&cell(), Rule::HumanRequiredMatchesTheStep);
+                }
+                #[test]
+                fn no_canary_value() {
+                    rule_test(&cell(), Rule::NoCanaryValue);
+                }
+                #[test]
+                fn no_escape_sequence() {
+                    rule_test(&cell(), Rule::NoEscapeSequence);
+                }
+                #[test]
+                fn snapshot() {
+                    snapshot_test(&cell());
+                }
+            }
+        )*
+    };
+}
+
+include!("snapshots/cells.rs");
+
+// --- generation and the gates ---------------------------------------------------------------
+
+/// The calls each command makes against the unfaulted world, as `(program, words)`, first
+/// seen first.
+fn discover() -> BTreeMap<&'static str, Vec<(String, Vec<String>)>> {
+    COMMANDS
+        .iter()
+        .map(|(slug, args)| {
+            let sc = Scenario::new("");
+            let mut a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            a.push("--json".into());
+            sc.opv(&a);
+            let mut seen = Vec::new();
+            for c in sc.calls() {
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
+            (*slug, seen)
+        })
+        .collect()
+}
+
+/// Every candidate cell, and the calls no fault can target (no subcommand words: a fault
+/// without `call` would hit every call of the tool).
+fn candidates() -> (Vec<Cell>, Vec<String>) {
+    let mut cells = Vec::new();
+    let mut untargetable = Vec::new();
+    for (command, calls) in discover() {
+        for (program, words) in calls {
+            if words.is_empty() {
+                untargetable.push(format!("{command}: {program} (no subcommand words)"));
+                continue;
+            }
+            let kinds = KINDS
+                .iter()
+                .chain(if program == "ssh" { SSH_KINDS } else { &[] });
+            for kind in kinds {
+                cells.push(Cell {
+                    command: command.to_string(),
+                    program: program.clone(),
+                    call: words.join(" "),
+                    kind: kind.to_string(),
+                });
+            }
+        }
+    }
+    cells.sort();
+    cells.dedup();
+    (cells, untargetable)
+}
+
+/// The skipped candidates committed in SKIPPED.md, by cell name.
+fn committed_skips() -> BTreeSet<String> {
+    std::fs::read_to_string(snapshots().join("SKIPPED.md"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("| `"))
+        .filter_map(|l| l.split('`').next())
+        .map(str::to_string)
+        .collect()
+}
+
+fn in_parallel<T: Send, R: Send>(items: Vec<T>, f: impl Fn(&T) -> R + Sync) -> Vec<(T, R)> {
+    let n = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let queue = std::sync::Mutex::new(items.into_iter().collect::<Vec<_>>());
+    let out = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..n {
+            s.spawn(|| {
+                loop {
+                    let Some(item) = queue.lock().expect("queue").pop() else {
+                        break;
+                    };
+                    let r = f(&item);
+                    out.lock().expect("out").push((item, r));
+                }
+            });
+        }
+    });
+    out.into_inner().expect("out")
+}
+
+/// §13.3: the committed cells and skips are exactly the candidates discovery finds today.
+/// With `UPDATE_SNAPSHOTS=1` it runs every candidate and rewrites `cells.rs`, `SKIPPED.md`
+/// and `COVERAGE.md` (and, with `MATRIX_SEED_LEGACY=1`, `KNOWN_LEGACY.txt`).
+#[test]
+fn the_committed_cells_are_the_discovered_candidates() {
+    let (cands, untargetable) = candidates();
+    if updating() {
+        generate(cands, untargetable);
+        return;
+    }
+    let want: BTreeSet<String> = cands.iter().map(Cell::name).collect();
+    let have: BTreeSet<String> = committed_cells()
+        .iter()
+        .map(Cell::name)
+        .chain(committed_skips())
+        .collect();
+    assert_eq!(
+        want, have,
+        "the calls changed: regenerate with UPDATE_SNAPSHOTS=1 (module docs)"
+    );
+}
+
+fn generate(cands: Vec<Cell>, untargetable: Vec<String>) {
+    let mut results = in_parallel(cands, outcome);
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut cells_rs = String::from(
+        "// @generated by `UPDATE_SNAPSHOTS=1 cargo nextest run --features fake --test e2e_matrix \
+         the_committed_cells`: the live cells of the fault matrix (tests/e2e/matrix.rs).\n\
+         cells! {\n",
+    );
+    let mut skipped = String::from(
+        "# Fault matrix: skipped candidates\n\n\
+         Generated by `tests/e2e/matrix.rs`. Each row is a command × call × fault the \
+         simulator cannot answer yet: no recording under `tests/fixtures/<tool>/failures/` \
+         (exit 86) or a call it does not model (exit 87). Recording the reply turns the row \
+         into a live cell.\n\n| cell | command | call | fault | why |\n|---|---|---|---|---|\n",
+    );
+    let mut legacy = String::from(
+        "# Rules a not-yet-migrated path breaks: `<cell> <rule>`. This list only shrinks\n\
+         # (KNOWN_LEGACY_CEILING in tests/e2e/matrix.rs); remove an entry once its rule holds.\n",
+    );
+    let mut legacy_n = 0;
+    let mut codes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut live = 0;
+    for (cell, o) in &results {
+        if let Some(why) = o.skipped() {
+            skipped.push_str(&format!(
+                "| `{}` | opv {} | {} {} | {} | {why} |\n",
+                cell.name(),
+                cell.args().join(" "),
+                cell.program,
+                cell.call,
+                cell.kind
+            ));
+            continue;
+        }
+        live += 1;
+        cells_rs.push_str(&format!(
+            "    {} => {:?}, {:?}, {:?}, {:?};\n",
+            cell.name(),
+            cell.command,
+            cell.program,
+            cell.call,
+            cell.kind
+        ));
+        if let Some(code) = o.document().and_then(|d| {
+            d.pointer("/error/code")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }) {
+            *codes.entry(code).or_default() += 1;
+        }
+        for rule in RULES {
+            if rule.check(cell, o).is_err() {
+                legacy_n += 1;
+                legacy.push_str(&format!("{} {}\n", cell.name(), rule.name()));
+            }
+        }
+    }
+    cells_rs.push_str("}\n");
+    if !untargetable.is_empty() {
+        skipped.push_str("\n## Calls no fault can target\n\n");
+        for u in &untargetable {
+            skipped.push_str(&format!("- {u}\n"));
+        }
+    }
+    let mut coverage = format!(
+        "# Fault matrix: coverage (§13.4)\n\nGenerated by `tests/e2e/matrix.rs`. {live} live \
+         cells; {} skipped.\n\n## Error codes reached\n\n| code | cells | catalog |\n|---|---|---|\n",
+        results.len() - live
+    );
+    for (code, n) in &codes {
+        let cat = if catalog_codes().contains(code) {
+            "yes"
+        } else {
+            "legacy"
+        };
+        coverage.push_str(&format!("| `{code}` | {n} | {cat} |\n"));
+    }
+    coverage.push_str("\n## Catalog codes no cell reaches yet\n\n");
+    for code in catalog_codes() {
+        if !codes.contains_key(code) {
+            coverage.push_str(&format!("- `{code}`\n"));
+        }
+    }
+    let dir = snapshots();
+    std::fs::create_dir_all(&dir).expect("snapshots dir");
+    std::fs::write(dir.join("cells.rs"), cells_rs).expect("cells.rs");
+    std::fs::write(dir.join("SKIPPED.md"), skipped).expect("SKIPPED.md");
+    std::fs::write(dir.join("COVERAGE.md"), coverage).expect("COVERAGE.md");
+    if std::env::var("MATRIX_SEED_LEGACY").is_ok_and(|v| v == "1") {
+        std::fs::write(dir.join("KNOWN_LEGACY.txt"), legacy).expect("KNOWN_LEGACY.txt");
+    }
+    eprintln!("matrix: {live} live cells, {legacy_n} legacy rule failures");
+}
+
+/// The legacy list only shrinks.
+#[test]
+fn known_legacy_never_grows() {
+    assert!(
+        known_legacy().len() <= KNOWN_LEGACY_CEILING,
+        "KNOWN_LEGACY.txt has {} entries, over the ceiling {KNOWN_LEGACY_CEILING}",
+        known_legacy().len()
+    );
+}
+
+/// Every snapshot file belongs to a committed cell (a removed cell takes its snapshot).
+#[test]
+fn every_snapshot_belongs_to_a_cell() {
+    let cells: BTreeSet<String> = committed_cells().iter().map(Cell::name).collect();
+    let orphans: Vec<String> = std::fs::read_dir(snapshots())
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .filter_map(|n| n.strip_suffix(".snap").map(str::to_string))
+                .filter(|n| !cells.contains(n))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(orphans.is_empty(), "snapshots without a cell: {orphans:?}");
+}

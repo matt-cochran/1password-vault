@@ -1,0 +1,28 @@
+# status_prod__op_item_get_ie2esharedprod0000000000001__timeout: opv status prod | fault timeout on op item get iE2ESHAREDPROD0000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+op item get failed; signed in with access to vault vE2ESHAREDPROD0000000000001, so retrying
+retrying op item get (2/3) in <delay>
+retrying op item get (3/3) in <delay>
+opv: item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json (exit 124)
+Do: check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)
+Next: op item list --vault vE2ESHAREDPROD0000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"op item list --vault vE2ESHAREDPROD0000000000001","do":"check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)","error":{"code":"item_not_found","category":"source","message":"item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password","subject":{"state":"missing","system":"one_password","resource":{"kind":"item","name":"iE2ESHAREDPROD0000000000001","scope":"vE2ESHAREDPROD0000000000001"},"named_by":{"by":"config_field","path":["environments","prod","boundaries","shared","item_id"]}},"evidence":{"checked":"op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)","next":"op item list --vault vE2ESHAREDPROD0000000000001","next_kind":"vendor"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+op item get failed; signed in with access to vault vE2ESHAREDPROD0000000000001, so retrying
+retrying op item get (2/3) in <delay>
+retrying op item get (3/3) in <delay>
+opv: item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 was not found at 1Password
+  checked: op item get iE2ESHAREDPROD0000000000001 --vault vE2ESHAREDPROD0000000000001 --format json (exit 124)
+Do: check environments.prod.boundaries.shared.item_id, which names item iE2ESHAREDPROD0000000000001 in vE2ESHAREDPROD0000000000001 (opv config edit)
+Next: op item list --vault vE2ESHAREDPROD0000000000001

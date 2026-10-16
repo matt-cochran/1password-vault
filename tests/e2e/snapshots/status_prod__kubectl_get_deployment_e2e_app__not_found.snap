@@ -1,0 +1,28 @@
+# status_prod__kubectl_get_deployment_e2e_app__not_found: opv status prod | fault not_found on kubectl get deployment e2e-app
+
+## text exit: 5
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: deployment e2e-app in namespace e2e-prod (context e2e-cluster) was not found at Kubernetes
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (NotFound): deployments.apps "e2e-app" not found
+--- (scrubbed) ---
+Do: check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (context e2e-cluster) (opv config edit)
+Next: kubectl get deployments --namespace 'namespace e2e-prod (context e2e-cluster)'
+
+## json exit: 5
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":5,"next":"kubectl get deployments --namespace 'namespace e2e-prod (context e2e-cluster)'","do":"check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (context e2e-cluster) (opv config edit)","error":{"code":"resource_not_found","category":"target","message":"deployment e2e-app in namespace e2e-prod (context e2e-cluster) was not found at Kubernetes","subject":{"state":"missing","system":"kubernetes","resource":{"kind":"deployment","name":"e2e-app","scope":"namespace e2e-prod (context e2e-cluster)"},"named_by":{"by":"config_field","path":["kubernetes","deployment"]}},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["Error from server (NotFound): deployments.apps \"e2e-app\" not found"],"removed_advice":false,"untrusted":true}},"retry":"after_fix","human_required":false,"do":"check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (context e2e-cluster) (opv config edit)","next":"kubectl get deployments --namespace 'namespace e2e-prod (context e2e-cluster)'","next_kind":"vendor"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: deployment e2e-app in namespace e2e-prod (context e2e-cluster) was not found at Kubernetes
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (NotFound): deployments.apps "e2e-app" not found
+--- (scrubbed) ---
+Do: check kubernetes.deployment, which names deployment e2e-app in namespace e2e-prod (context e2e-cluster) (opv config edit)
+Next: kubectl get deployments --namespace 'namespace e2e-prod (context e2e-cluster)'

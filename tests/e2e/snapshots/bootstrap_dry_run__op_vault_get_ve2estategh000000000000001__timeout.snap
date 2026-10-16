@@ -1,0 +1,20 @@
+# bootstrap_dry_run__op_vault_get_ve2estategh000000000000001__timeout: opv bootstrap --dry-run | fault timeout on op vault get vE2ESTATEGH000000000000001
+
+## text exit: 4
+## text stdout
+
+## text stderr
+opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)
+  checked: op vault get vE2ESTATEGH000000000000001 --format json (exit 124)
+Do: read the reply of op shown above; opv does not recognise it
+Next: opv doctor --env prod
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"next":"opv doctor --env prod","do":"read the reply of op shown above; opv does not recognise it","error":{"code":"unrecognized_failure","category":"source","message":"op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)","subject":{"target":null,"system":"one_password","established":["op exited 124"],"env":"prod"},"evidence":{"checked":"op vault get vE2ESTATEGH000000000000001 --format json","account":null,"upstream":null},"retry":"after_fix","human_required":false,"do":"read the reply of op shown above; opv does not recognise it","next":"opv doctor --env prod","next_kind":"run"}}
+
+## json stderr
+opv: op failed at 1Password in a way opv does not recognise (opv checked: op exited 124)
+  checked: op vault get vE2ESTATEGH000000000000001 --format json (exit 124)
+Do: read the reply of op shown above; opv does not recognise it
+Next: opv doctor --env prod

@@ -1,0 +1,20 @@
+# access__op_whoami__timeout: opv access | fault timeout on op whoami
+
+## text exit: 7
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: you are not signed in to 1Password
+Do: sign in to 1Password
+Next: opv login -- opv access
+
+## json exit: 7
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":7,"next":"opv login -- opv access --json","do":"sign in to 1Password","error":{"code":"op_not_signed_in","category":"auth","message":"you are not signed in to 1Password","subject":{"state":{"state":"signed_out"},"system":"one_password","account":null},"evidence":{"checked":null,"account":null,"upstream":null},"retry":"after_fix","human_required":true,"do":"sign in to 1Password","next":"opv login -- opv access --json","next_kind":"handoff"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: you are not signed in to 1Password
+Do: sign in to 1Password
+Next: opv login -- opv access --json

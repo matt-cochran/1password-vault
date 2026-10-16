@@ -1,0 +1,39 @@
+# doctor_dev__op_item_get_ie2eshareddev00000000000001__not_found: opv doctor --env dev | fault not_found on op item get iE2ESHAREDDEV00000000000001
+
+## text exit: 4
+## text stdout
+ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
+ok    op: version 2.40.0
+ok    op auth: signed in (USER)
+FAIL  item: item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 was not found at 1Password
+  do: check environments.dev.boundaries.shared.item_id, which names item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 (opv config edit)
+  fix: op item list --vault vE2ESHAREDDEV00000000000001
+skip  target: environment dev has no target (run-only)
+ok    op local run: native op; opv run can start local commands
+ok    opv: not found on PATH
+ok    agent skill: not installed (optional: opv skill install)
+<host core-dump check>
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 was not found at 1Password
+  checked: op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --format json (exit 1)
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/16 00:05:18 "iE2ESHAREDDEV00000000000001" isn't an item in the "vE2ESHAREDDEV00000000000001" vault. Specify the item with its UUID, name, or domain
+--- (scrubbed) ---
+Do: check environments.dev.boundaries.shared.item_id, which names item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 (opv config edit)
+Next: op item list --vault vE2ESHAREDDEV00000000000001
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 was not found at 1Password","next":"op item list --vault vE2ESHAREDDEV00000000000001","do":"check environments.dev.boundaries.shared.item_id, which names item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 (opv config edit)"},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"op item list --vault vE2ESHAREDDEV00000000000001","do":"check environments.dev.boundaries.shared.item_id, which names item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 (opv config edit)","error":{"code":"item_not_found","category":"source","message":"item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 was not found at 1Password","subject":{"state":"missing","system":"one_password","resource":{"kind":"item","name":"iE2ESHAREDDEV00000000000001","scope":"vE2ESHAREDDEV00000000000001"},"named_by":{"by":"config_field","path":["environments","dev","boundaries","shared","item_id"]}},"evidence":{"checked":"op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --format json","account":null,"upstream":{"source":"one_password","tool":"1Password CLI","version":null,"exit":{"kind":"code","code":1},"said":["[ERROR] 2026/10/16 00:05:18 \"iE2ESHAREDDEV00000000000001\" isn't an item in the \"vE2ESHAREDDEV00000000000001\" vault. Specify the item with its UUID, name, or domain"],"removed_advice":false,"untrusted":true}},"retry":"after_fix","human_required":false,"do":"check environments.dev.boundaries.shared.item_id, which names item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 (opv config edit)","next":"op item list --vault vE2ESHAREDDEV00000000000001","next_kind":"vendor"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 was not found at 1Password
+  checked: op item get iE2ESHAREDDEV00000000000001 --vault vE2ESHAREDDEV00000000000001 --format json (exit 1)
+--- 1Password CLI replied, exit 1 ---
+| [ERROR] 2026/10/16 00:05:18 "iE2ESHAREDDEV00000000000001" isn't an item in the "vE2ESHAREDDEV00000000000001" vault. Specify the item with its UUID, name, or domain
+--- (scrubbed) ---
+Do: check environments.dev.boundaries.shared.item_id, which names item iE2ESHAREDDEV00000000000001 in vE2ESHAREDDEV00000000000001 (opv config edit)
+Next: op item list --vault vE2ESHAREDDEV00000000000001

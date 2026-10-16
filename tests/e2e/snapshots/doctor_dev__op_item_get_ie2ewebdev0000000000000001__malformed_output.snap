@@ -1,0 +1,29 @@
+# doctor_dev__op_item_get_ie2ewebdev0000000000000001__malformed_output: opv doctor --env dev | fault malformed_output on op item get iE2EWEBDEV0000000000000001
+
+## text exit: 4
+## text stdout
+ok    config: valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml
+ok    op: version 2.40.0
+ok    op auth: signed in (USER)
+FAIL  item: source error: opv could not read 1Password's item JSON (Eof error at line 1, column 605)
+skip  target: environment dev has no target (run-only)
+ok    op local run: native op; opv run can start local commands
+ok    opv: not found on PATH
+ok    agent skill: not installed (optional: opv skill install)
+<host core-dump check>
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: opv could not read 1Password's item JSON (Eof error at line 1, column 605)
+Do: fix the item failure above
+Next: opv doctor --env dev
+
+## json exit: 4
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":4,"config_source":"<SCENARIO>/project/secrets.toml","checks":[{"name":"config","target":null,"status":"ok","detail":"valid (1 environment, 2 products); source: <SCENARIO>/project/secrets.toml","next":null,"do":null},{"name":"op","target":null,"status":"ok","detail":"version 2.40.0","next":null,"do":null},{"name":"op auth","target":null,"status":"ok","detail":"signed in (USER)","next":null,"do":null},{"name":"item","target":null,"status":"fail","detail":"source error: opv could not read 1Password's item JSON (Eof error at line 1, column 605)","next":null,"do":null},{"name":"target","target":null,"status":"skip","detail":"environment dev has no target (run-only)","next":null,"do":null},{"name":"op local run","target":null,"status":"ok","detail":"native op; opv run can start local commands","next":null,"do":null},{"name":"opv","target":null,"status":"ok","detail":"not found on PATH","next":null,"do":null},{"name":"agent skill","target":null,"status":"ok","detail":"not installed (optional: opv skill install)","next":null,"do":null},{"name":"core dumps","host":true}],"next":"opv doctor --env dev","do":"fix the item failure above","error":{"code":"source_error","category":"source","message":"opv could not read 1Password's item JSON (Eof error at line 1, column 605)","detail":[],"retry":"after_fix","human_required":false,"do":"fix the item failure above","next":"opv doctor --env dev"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+opv: source error: opv could not read 1Password's item JSON (Eof error at line 1, column 605)
+Do: fix the item failure above
+Next: opv doctor --env dev

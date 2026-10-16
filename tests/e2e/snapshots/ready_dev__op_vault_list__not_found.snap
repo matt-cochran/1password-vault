@@ -1,0 +1,21 @@
+# ready_dev__op_vault_list__not_found: opv ready dev | fault not_found on op vault list
+
+## text exit: 0
+## text stdout
+ready: 1 blocking · 2 findings · receipt rcpt-<id>
+PRODUCT  Local development
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [agent] resource_not_found dev → opv vault locate list
+      Do: check the name given with --vault, which names vault list
+Next (agent): opv vault locate list
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":1,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"resource_not_found","scope":{"environment":"dev"},"blocking":true,"actor":"agent","effect":"none","prerequisite":"opv vault locate list","verify":"opv ready --json","do":"check the name given with --vault, which names vault list"}],"next":{"actor":"agent","command":"opv vault locate list"},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml

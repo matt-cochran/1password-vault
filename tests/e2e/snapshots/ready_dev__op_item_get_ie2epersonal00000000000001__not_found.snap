@@ -1,0 +1,22 @@
+# ready_dev__op_item_get_ie2epersonal00000000000001__not_found: opv ready dev | fault not_found on op item get iE2EPERSONAL00000000000001
+
+## text exit: 0
+## text stdout
+ready: 1 blocking · 2 findings · receipt rcpt-<id>
+PRODUCT  Local development
+shared   2/2
+web      7/8 · 1 finding
+Needs attention:
+  [owner] shared_sign_in_address AE2EDEVACCOUNT000000000001 → opv account list
+  [owner] personal_key_missing dev web/PERSONAL_LLM_KEY → opv open web/PERSONAL_LLM_KEY --env dev
+Next (owner): opv open web/PERSONAL_LLM_KEY --env dev
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+
+## json exit: 0
+## json stdout
+{"schema_version":1,"ok":true,"receipt_id":"rcpt-<id>","opv_version":"0.10.0","config":{"source":"<SCENARIO>/project/secrets.toml"},"account":{"account_id":"AE2EDEVACCOUNT000000000001","by":"pointer"},"matrix":[{"environment":"dev","title":"Local development","product":"shared","target":null,"target_name":null,"keys":2,"saved":2,"findings":0,"delivered":true},{"environment":"dev","title":"Local development","product":"web","target":null,"target_name":null,"keys":8,"saved":7,"findings":1,"delivered":true}],"targets":[],"findings":[{"code":"shared_sign_in_address","scope":{"account":"AE2EDEVACCOUNT000000000001"},"blocking":false,"actor":"owner","effect":"none","prerequisite":"opv account list","verify":"opv account list --json"},{"code":"personal_key_missing","scope":{"environment":"dev","product":"web","key":"PERSONAL_LLM_KEY"},"blocking":true,"actor":"owner","effect":"writes_1password","prerequisite":"opv open web/PERSONAL_LLM_KEY --env dev","verify":"opv status dev --product web"}],"next":{"actor":"owner","command":"opv open web/PERSONAL_LLM_KEY --env dev"},"do":null}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml

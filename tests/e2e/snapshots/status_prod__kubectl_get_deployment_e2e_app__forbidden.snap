@@ -1,0 +1,32 @@
+# status_prod__kubectl_get_deployment_e2e_app__forbidden: opv status prod | fault forbidden on kubectl get deployment e2e-app
+
+## text exit: 5
+## text stdout
+
+## text stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: you may not get deployments in namespace namespace e2e-prod (context e2e-cluster) (Kubernetes)
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (Forbidden): deployments.apps "e2e-app" is forbidden: User "system:serviceaccount:e2e-prod:opv" cannot get resource "deployments" in API group "apps" in the namespace "e2e-prod"
+--- (scrubbed) ---
+Do: ask a cluster admin to let you get deployments in namespace e2e-prod
+Next: opv doctor --env prod
+
+## json exit: 5
+## json stdout
+{"schema_version":1,"ok":false,"exit_code":5,"next":"opv doctor --env prod","do":"ask a cluster admin to let you get deployments in namespace e2e-prod","error":{"code":"permission_denied","category":"target","message":"you may not get deployments in namespace namespace e2e-prod (context e2e-cluster) (Kubernetes)","subject":{"target":null,"system":"kubernetes","resource":{"kind":"deployment","name":"e2e-app","scope":"namespace e2e-prod (context e2e-cluster)"},"right":{"verb":{"verb":"get","resource":"deployments"}},"grant":{"model":"k8s_rbac","verb":"get","resource":"deployments","namespace":"e2e-prod"},"env":"prod"},"evidence":{"checked":"kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json","account":null,"upstream":{"source":"kubernetes","tool":"kubectl","version":null,"exit":{"kind":"code","code":1},"said":["Error from server (Forbidden): deployments.apps \"e2e-app\" is forbidden: User \"system:serviceaccount:e2e-prod:opv\" cannot get resource \"deployments\" in API group \"apps\" in the namespace \"e2e-prod\""],"removed_advice":false,"untrusted":true}},"retry":"after_fix","human_required":true,"do":"ask a cluster admin to let you get deployments in namespace e2e-prod","next":"opv doctor --env prod","next_kind":"run"}}
+
+## json stderr
+using <SCENARIO>/project/secrets.toml
+retrying kubectl (2/3) in <delay>
+retrying kubectl (3/3) in <delay>
+opv: you may not get deployments in namespace namespace e2e-prod (context e2e-cluster) (Kubernetes)
+  checked: kubectl --context e2e-cluster --namespace e2e-prod --request-timeout get deployment e2e-app -o json (exit 1)
+--- kubectl replied, exit 1 ---
+| Error from server (Forbidden): deployments.apps "e2e-app" is forbidden: User "system:serviceaccount:e2e-prod:opv" cannot get resource "deployments" in API group "apps" in the namespace "e2e-prod"
+--- (scrubbed) ---
+Do: ask a cluster admin to let you get deployments in namespace e2e-prod
+Next: opv doctor --env prod
