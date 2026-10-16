@@ -215,7 +215,7 @@ fn signed_out_finding(account_id: &str) -> Finding {
 /// #142: several accounts on one sign-in address (`my.1password.com` for every individual
 /// and family account): naming the address picks one of them, often not the intended
 /// one. Each is named by shorthand and email so the person can name the right one.
-fn shared_address_findings(listed: &[Account], selected: Option<&str>) -> Vec<Finding> {
+fn shared_address_findings(listed: &[Account]) -> Vec<Finding> {
     let mut by_host: std::collections::BTreeMap<String, Vec<&Account>> = Default::default();
     for a in listed {
         by_host
@@ -249,7 +249,7 @@ fn shared_address_findings(listed: &[Account], selected: Option<&str>) -> Vec<Fi
                     accounts.len(),
                     named.join("; ")
                 ),
-                next: selected.map(|id| format!("opv login --account {id}")),
+                next: None,
             }
         })
         .collect()
@@ -264,7 +264,8 @@ fn session_var_findings(
     listed: &[Account],
     selected: Option<&str>,
 ) -> Vec<Finding> {
-    let next = selected.map(|id| format!("opv login --account {id}"));
+    // A sign-in leaves the variable in place, so these carry no step: the message says
+    // `unset <var>` (#157).
     vars.iter()
         .filter_map(|var| {
             // The bare `OP_SESSION` (an `op signin` without an account) names no account:
@@ -287,7 +288,7 @@ fn session_var_findings(
                         if a.email.is_empty() { "-" } else { &a.email },
                         a.account_uuid
                     ),
-                    next: next.clone(),
+                    next: None,
                 }),
                 None => Some(Finding {
                     code: "stale_session_variable".into(),
@@ -296,7 +297,7 @@ fn session_var_findings(
                         "{var} in this shell names no account this 1Password CLI knows (an old \
                          eval of op signin?); remove it from this shell (unset {var})"
                     ),
-                    next: next.clone(),
+                    next: None,
                 }),
             }
         })
@@ -382,8 +383,8 @@ pub fn report(inputs: &Inputs<'_>) -> Report {
 
     let chosen = selected.as_ref().map(|s| s.account_id.as_str());
     findings.extend(session_var_findings(&inputs.session_vars, listed, chosen));
-    findings.extend(shared_address_findings(listed, chosen));
-    let next = findings.first().and_then(|f| f.next.clone());
+    findings.extend(shared_address_findings(listed));
+    let next = findings.iter().find_map(|f| f.next.clone());
     Report {
         discovery: discovery_str(&inputs.discovery).into(),
         platform: platform_str(inputs.platform).into(),
@@ -505,7 +506,7 @@ pub fn use_account(
             let path = crate::config_store::record_account(start, &account_id)?;
             Ok(UseOutcome { account_id, path })
         }
-        [] => Err(Error::Config(
+        [] => Err(Error::Auth(
             format!("no 1Password account listed by this CLI matches {who:?}").into(),
         )
         .with_code(Code::AccountNotRegistered)

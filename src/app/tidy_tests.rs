@@ -1513,10 +1513,10 @@ fn opv_tidy_writes_one_edit_for_a_person() {
 }
 
 #[test]
-fn opv_tidy_refuses_a_service_account() {
+fn opv_tidy_refuses_a_service_account_until_a_person_runs_it() {
     let op = FakeOp::new(messy_item(), "SERVICE_ACCOUNT");
     let (res, _) = repair(&op, false);
-    assert_eq!(res.unwrap_err().code(), Code::PolicyRefused);
+    assert_eq!(res.unwrap_err().code(), Code::TerminalRequired);
 }
 
 #[test]
@@ -1624,4 +1624,37 @@ fn a_write_by_a_signed_in_person_is_allowed() {
     let op = crate::adapters::fake_op::FakeOp::default();
     op.signed_in.set(true);
     assert!(require_person(&op, "opv target add").is_ok());
+}
+
+// --- #157: each refusal names a step that works where it ran ---
+
+fn service_account() -> crate::runner::fake::FakeRunner {
+    crate::runner::fake::FakeRunner::new([crate::runner::Output::success(
+        r#"{"user_type":"SERVICE_ACCOUNT"}"#,
+    )])
+}
+
+#[test]
+fn a_write_by_a_service_account_needs_a_persons_terminal() {
+    let e = require_person(&service_account(), "opv target add").unwrap_err();
+    assert_eq!(e.code(), crate::error::Code::TerminalRequired);
+}
+
+#[test]
+fn a_write_by_a_service_account_never_steps_to_login() {
+    let e = require_person(&service_account(), "opv target add").unwrap_err();
+    assert_eq!(e.next_step(), None);
+}
+
+#[test]
+fn a_write_with_no_account_on_this_machine_steps_to_login_add() {
+    use crate::runner::Output;
+    let r = crate::runner::fake::FakeRunner::new([
+        Output::failure(1),
+        Output::success("[]"),
+        Output::failure(1),
+        Output::success("[]"),
+    ]);
+    let e = require_person(&r, "opv target add").unwrap_err();
+    assert_eq!(e.next_step(), Some("opv login --add"));
 }

@@ -203,8 +203,14 @@ fn targets(doc: &DocumentMut, env: &str) -> Vec<(String, Option<String>)> {
 }
 
 /// Whether `vault_id` is a vault the signed-in account can see: `op vault get`, exit status
-/// only (its output names the vault and is dropped unread). `None`: cannot tell.
-fn vault_visible(r: &dyn CommandRunner, vault_id: &str) -> Option<bool> {
+/// only (its output names the vault and is dropped unread). `None`: cannot tell. `account`
+/// is the environment's own 1Password account (FR-40), when it records one.
+fn vault_visible(r: &dyn CommandRunner, account: Option<&str>, vault_id: &str) -> Option<bool> {
+    // A service-account or Connect credential belongs to one account: it decides.
+    let account = account
+        .filter(|_| Host::detect().op_credential.is_none())
+        .map(str::to_string);
+    let r = super::signin::EnvRunner::with_account(r, account);
     r.probe(
         &Call::new("op", &["vault", "get", vault_id, "--format", "json"]),
         PROBE_TIMEOUT,
@@ -234,13 +240,26 @@ pub(crate) fn plan_with(
     rebind: &BTreeSet<String>,
     strict: bool,
 ) -> Result<Vec<EnvPlan>, Error> {
-    let visible = |v: &str| -> Result<Option<bool>, Error> {
-        match vault_visible(r, v) {
+    // #157: a vault `op vault get` cannot open is outside the account only when someone is
+    // signed in, so the session is checked (once) before the first such answer is believed.
+    let session_checked = std::cell::Cell::new(false);
+    let visible = |account: Option<&str>, v: &str| -> Result<Option<bool>, Error> {
+        match vault_visible(r, account, v) {
             None if strict => Err(Error::Unknown(
                 format!("1Password did not say whether vault {v} is visible; nothing was planned")
                     .into(),
             )
             .with_code(crate::error::Code::ProviderUnavailable)),
+            Some(false) if !session_checked.replace(true) => {
+                // The failed probe's stderr must not attach to what is reported (NR-31).
+                let _ = crate::runner::take_failure_excerpt();
+                crate::adapters::onepassword::require_session(
+                    r,
+                    &Host::detect,
+                    &format!("op vault get {v} failed"),
+                )?;
+                Ok(Some(false))
+            }
             seen => Ok(seen),
         }
     };
@@ -251,11 +270,15 @@ pub(crate) fn plan_with(
     }
     let mut plans = Vec::new();
     for env in envs {
+        let account = env_table(&doc, &env)
+            .and_then(|t| str_at(t, "account"))
+            .map(str::to_string);
+        let account = account.as_deref();
         let boundaries = needed_boundaries(&doc, &env)
             .into_iter()
             .map(|(b, products)| {
                 let step = match recorded_boundary(&doc, &env, &b) {
-                    Some((v, i)) if !rebind.contains(&env) => match visible(&v)? {
+                    Some((v, i)) if !rebind.contains(&env) => match visible(account, &v)? {
                         Some(false) => BoundaryStep::IdsNotInAccount { vault_id: v },
                         _ => BoundaryStep::Ok {
                             vault_id: v,
@@ -278,7 +301,7 @@ pub(crate) fn plan_with(
             .into_iter()
             .map(|(t, id)| {
                 let step = match id {
-                    Some(v) => match visible(&v)? {
+                    Some(v) => match visible(account, &v)? {
                         Some(false) => StateStep::IdsNotInAccount { vault_id: v },
                         _ => StateStep::Ok { vault_id: v },
                     },
